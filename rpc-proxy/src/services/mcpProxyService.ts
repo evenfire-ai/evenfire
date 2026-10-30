@@ -5,7 +5,6 @@ import { ResolvedServerConnection } from '../types.js'
 import {
   type DirectRunBindingRequest,
   type UserAllowedServers,
-  fetchArtifactReadHostConnectionFromControlApi,
   fetchHostConnectionFromControlApi,
   fetchUserAllowedServersFromControlApi,
 } from './controlApiRestService.js'
@@ -94,7 +93,6 @@ export async function resolveHostConnectionForUser(
     accessScope?: 'team' | 'user'
     teamId?: string | null
     requestId?: string
-    messageResolution?: boolean
     directRunBinding?: DirectRunBindingRequest
     authorizedActionV2?: AuthorizedActionV2
   }
@@ -115,7 +113,6 @@ export async function resolveHostConnectionForUser(
         })()
     : await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
         directRunBinding: edgeContext?.directRunBinding,
-        ...(edgeContext?.messageResolution ? { messageResolution: true } : {}),
       })
   if (isHostAccessDenied(host)) return host
   if (!host) return null
@@ -145,35 +142,4 @@ export async function resolveHostConnectionForUser(
     ...host,
     headers,
   }
-}
-
-/** Resolve the Host only after the Control API's shared artifact-read budget. */
-export async function resolveArtifactReadHostConnectionForUser(
-  userId: string,
-  hostRef: string,
-  rpcAccessToken: string,
-  edgeContext?: {
-    accessScope?: 'team' | 'user'
-    teamId?: string | null
-    requestId?: string
-  }
-): Promise<ResolvedServerConnection | HostAccessDenial | null> {
-  const host = await fetchArtifactReadHostConnectionFromControlApi(userId, hostRef, rpcAccessToken)
-  if (isHostAccessDenied(host)) return host
-
-  const headers: Record<string, string> = {
-    ...host.headers,
-    'x-clerum-edge-caller': 'rpc-proxy',
-    'x-clerum-edge-host-ref': hostRef,
-    'x-clerum-edge-user-id': userId,
-    'x-service-token': 'rpc-proxy',
-  }
-  delete headers.authorization
-  // Spec 48 artifact reads remain legacy-only and carry no V2 authority.
-  if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
-  headers['x-clerum-edge-access-scope'] =
-    edgeContext?.accessScope ?? (edgeContext?.teamId ? 'team' : 'user')
-  if (edgeContext?.requestId) headers['x-clerum-edge-request-id'] = edgeContext.requestId
-
-  return { ...host, headers }
 }

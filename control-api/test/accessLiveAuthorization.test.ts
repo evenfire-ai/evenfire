@@ -100,6 +100,7 @@ type FakeDbOptions = Readonly<{
   sessionLive?: boolean
   hostGrantRows?: Record<string, unknown>[]
   providerUid?: string
+  unresolvedContextReference?: boolean
 }>
 
 function fakeTransaction(options: FakeDbOptions = {}) {
@@ -133,6 +134,10 @@ function fakeTransaction(options: FakeDbOptions = {}) {
         })),
         rowCount: 4,
       }
+    }
+    if (text.includes('AS unresolved_host_context')) {
+      const rows = options.unresolvedContextReference ? [{ unresolved_host_context: 1 }] : []
+      return { rows, rowCount: rows.length }
     }
     if (text.includes('FROM operational_resource_relationships relationship')) {
       return { rows: [], rowCount: 0 }
@@ -266,6 +271,51 @@ describe('live user-access resolution', () => {
         String(sql).includes('FROM operational_catalog_source_state')
       )
     ).toBe(false)
+  })
+
+  it('fails a Host closed when its configured Context does not resolve', async () => {
+    const unresolved = fakeTransaction({ unresolvedContextReference: true })
+
+    await expect(
+      resolveLiveAuthorization(hostRequest(), { transaction: unresolved.transaction })
+    ).resolves.toEqual({
+      status: 'unavailable',
+      dependencyClass: 'operational_resource_store',
+      retryable: true,
+    })
+    expect(
+      unresolved.query.mock.calls.some(([sql]) =>
+        String(sql).includes('AS unresolved_host_context')
+      )
+    ).toBe(true)
+    expect(
+      unresolved.query.mock.calls.some(([sql]) =>
+        String(sql).includes('relationship.relationship_instance_id')
+      )
+    ).toBe(false)
+
+    const resolved = fakeTransaction()
+    const gateway = {
+      getResourceExact: vi.fn().mockResolvedValue({
+        metadata: {
+          name: 'host-a',
+          namespace: 'mcp-host',
+          uid: 'uid-host-a',
+          resourceVersion: '91',
+          generation: 1,
+        },
+        spec: { enabled: true },
+      }),
+    }
+    await expect(
+      resolveLiveAuthorization(hostRequest(), {
+        transaction: resolved.transaction,
+        gateway,
+      })
+    ).resolves.toEqual(expect.objectContaining({ status: 'allowed' }))
+    expect(
+      resolved.query.mock.calls.some(([sql]) => String(sql).includes('AS unresolved_host_context'))
+    ).toBe(true)
   })
 
   it('requires an explicit path when direct and team runtime behavior is unknown', async () => {

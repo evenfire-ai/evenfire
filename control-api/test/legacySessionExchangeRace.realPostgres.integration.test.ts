@@ -43,13 +43,9 @@ vi.mock('../src/db.js', async importOriginal => {
   }
   const withTransaction = <T>(
     work: (db: DbTransactionClient) => Promise<T>,
-    txPoolOrOptions?: Pool | DbTransactionOptions,
-    explicitOptions: DbTransactionOptions = {}
+    _txPool?: Pool,
+    options: DbTransactionOptions = {}
   ): Promise<T> => {
-    const options: DbTransactionOptions =
-      txPoolOrOptions && typeof (txPoolOrOptions as Pool).connect !== 'function'
-        ? (txPoolOrOptions as DbTransactionOptions)
-        : explicitOptions
     return actual.withTransaction(work, producerDatabase.pool!, options)
   }
   return { ...actual, pool, withTransaction }

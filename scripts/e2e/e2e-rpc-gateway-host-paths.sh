@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # ======================================================================
-# J4 — rpc-proxy Host sub-paths through control-api-rpc-gateway
+# J4 — rpc-proxy Host parent path through control-api-rpc-gateway
 # ======================================================================
 # A user message and an artifact list go through rpc-proxy, which resolves
-# the Host through control-api-rpc-gateway:
-#   POST /api/v1/rpc/access/users/:userId/mcp-hosts/:hostRef/message-resolution
-#   GET  /api/v1/rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read
+# the Host through control-api-rpc-gateway on the parent path:
+#   POST /api/v1/rpc/access/users/:userId/mcp-hosts/:hostRef
+#     (a message with threadId carries a direct-run binding)
+#   GET  /api/v1/rpc/access/users/:userId/mcp-hosts/:hostRef
+#     (an artifact list has no binding)
 # The gateway ends in a default `return 403`, so a missing location turns
-# both journeys into an opaque denial. Signals per journey:
+# both journeys into an opaque denial. The access-log check is anchored at
+# the Host ref, so a sub-path such as /message-resolution does not match.
+# Signals per journey:
 #   1. rpc-proxy answers HTTP 200;
-#   2. the gateway access log has the sub-path with status 200 and no 403;
+#   2. the gateway access log has the parent path with status 200 and no 403;
 #   3. for the message, the user turn is persisted in the Host's state.db.
 #
 # Meant as a T2 healthcheck:
@@ -217,7 +221,7 @@ fi
 # The gateway log window starts here, before the first journey request.
 LOG_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-header "Journey: message through message-resolution"
+header "Journey: message through the parent Host path"
 attempts=0
 message_sent=false
 while :; do
@@ -255,7 +259,7 @@ if [ "$message_sent" = true ]; then
   fi
 fi
 
-header "Journey: artifact list through artifact-read"
+header "Journey: artifact list through the parent Host path"
 within_deadline "artifact read"
 if ! mint_rpc_token; then
   fail "rpc/token re-mint → HTTP ${HTTP_STATUS}; artifact list not attempted"
@@ -279,21 +283,23 @@ fi
 # Here-strings, not `printf | grep -q`: under pipefail grep -q exits on the
 # first match, printf can then die of SIGPIPE, and the pipeline reports no match.
 check_gateway_line() {
-  local method=$1 suffix=$2 pattern
-  pattern="\"${method} /api/v1/rpc/access/users/[^/ ]+/mcp-hosts/${HOST_REF}/${suffix} HTTP/[0-9.]+\" "
+  local method=$1 pattern
+  # The space before HTTP anchors the path at the Host ref. A sub-path
+  # (/message-resolution, /artifact-read) does not match.
+  pattern="\"${method} /api/v1/rpc/access/users/[^/ ]+/mcp-hosts/${HOST_REF} HTTP/[0-9.]+\" "
   if grep -Eq "${pattern}200 " <<<"$gateway_log"; then
-    ok "gateway logged ${method} .../${suffix} → 200"
+    ok "gateway logged ${method} .../mcp-hosts/${HOST_REF} → 200"
   else
-    fail "gateway has no ${method} .../${suffix} line with 200 since ${LOG_SINCE}"
+    fail "gateway has no ${method} .../mcp-hosts/${HOST_REF} line with 200 since ${LOG_SINCE}"
   fi
   if grep -Eq "${pattern}403 " <<<"$gateway_log"; then
-    fail "gateway denied ${method} .../${suffix} with 403 (missing or wrong location)"
+    fail "gateway denied ${method} .../mcp-hosts/${HOST_REF} with 403 (missing or wrong location)"
   else
-    ok "gateway logged no 403 for ${method} .../${suffix}"
+    ok "gateway logged no 403 for ${method} .../mcp-hosts/${HOST_REF}"
   fi
 }
-check_gateway_line POST message-resolution
-check_gateway_line GET artifact-read
+check_gateway_line POST
+check_gateway_line GET
 
 header "Persisted user turn"
 within_deadline "state.db read"
@@ -310,8 +316,10 @@ else
     if kctl exec "$pod" -n "$MCP_HOST_NS" -- sh -c 'command -v sqlite3' >/dev/null 2>&1; then
       count="$(kctl exec "$pod" -n "$MCP_HOST_NS" -- sqlite3 -readonly "$db_path" "$sql" || true)"
     else
+      # Resolve the Host's own better-sqlite3 from the container working directory
+      # (/app/mcp-host/node_modules in the chatllm image), not a fixed path.
       count="$(kctl exec "$pod" -n "$MCP_HOST_NS" -- env "DB=${db_path}" "SQL=${sql}" node -e \
-        'const D=require("/app/node_modules/better-sqlite3");const db=new D(process.env.DB,{readonly:true});db.pragma("busy_timeout=5000");const row=db.prepare(process.env.SQL).get();console.log(row?Object.values(row)[0]:0);' || true)"
+        'const D=require("better-sqlite3");const db=new D(process.env.DB,{readonly:true});db.pragma("busy_timeout=5000");const row=db.prepare(process.env.SQL).get();console.log(row?Object.values(row)[0]:0);' || true)"
     fi
     count="$(printf '%s' "$count" | tr -d '[:space:]')"
     if [ "$count" = "1" ]; then

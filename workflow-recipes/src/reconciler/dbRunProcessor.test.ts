@@ -939,10 +939,19 @@ describe('createDbRunProcessor', () => {
     const failed = await proc.checkStuckRuns()
     expect(failed).toBe(0)
 
+    // N7 witness: the sweep really issued its SELECT and committed, so the
+    // absent prelock and FAIL are not the result of a helper that never ran.
+    expect(
+      client.calls.some(c => /FROM workflow_runs[\s\S]*FOR UPDATE SKIP LOCKED/i.test(c.sql))
+    ).toBe(true)
+    expect(client.calls.map(c => c.sql)).toContain('COMMIT')
     const anyFail = client.calls.find(c =>
       /UPDATE workflow_runs[\s\S]*SET phase = 'Failed'/i.test(c.sql)
     )
     expect(anyFail).toBeUndefined()
+    expect(
+      client.calls.find(c => /authorization_prelock_workflow_approval_revisions/.test(c.sql))
+    ).toBeUndefined()
   })
 
   // ─── 7) checkStuckRuns flips to Failed when started_at + max_duration elapsed
@@ -980,6 +989,73 @@ describe('createDbRunProcessor', () => {
       /UPDATE workflow_runs[\s\S]*SET phase = 'Failed'/i.test(c.sql)
     )
     expect(failUpdate?.params).toEqual(['run-stuck-1', 'wrc-1'])
+    // A row without an approval id makes no prelock call; FIND and FAIL both ran.
+    expect(
+      client.calls.some(c => /FROM workflow_runs[\s\S]*FOR UPDATE SKIP LOCKED/i.test(c.sql))
+    ).toBe(true)
+    expect(
+      client.calls.find(c => /authorization_prelock_workflow_approval_revisions/.test(c.sql))
+    ).toBeUndefined()
+  })
+
+  // The stuck-run sweep holds its batch's approval subjects before the first
+  // FAIL, because each provider-bound failure makes the run trigger INSERT one
+  // delivery and bump that delivery's subject.
+  it('checkStuckRuns prelocks the distinct non-null approval ids before failing the batch', async () => {
+    const stuckRows = [
+      { run_id: 'run-stuck-user', approval_request_id: 'approval-1' },
+      { run_id: 'run-stuck-team', approval_request_id: 'approval-2' },
+      { run_id: 'run-stuck-shared', approval_request_id: 'approval-1' },
+      { run_id: 'run-stuck-plain', approval_request_id: null },
+    ]
+    const client = makeClient(async sql => {
+      if (/^BEGIN$/i.test(sql) || /^COMMIT$/i.test(sql)) return { rows: [], rowCount: 0 }
+      if (/FROM workflow_runs[\s\S]*FOR UPDATE SKIP LOCKED/i.test(sql)) {
+        return { rows: stuckRows, rowCount: stuckRows.length }
+      }
+      if (/UPDATE workflow_runs[\s\S]*SET phase = 'Failed'/i.test(sql)) {
+        return { rows: [], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const pool = {
+      connect: vi.fn(async () => client as unknown as PoolClient),
+    } as unknown as Pool
+    const onRunTerminal = vi.fn()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool,
+      runPollMs: 30_000,
+      createChildRecipe: vi.fn(),
+      logger: silentLogger(),
+      onRunTerminal,
+    })
+
+    expect(await proc.checkStuckRuns()).toBe(4)
+
+    const findIndex = client.calls.findIndex(c =>
+      /FROM workflow_runs[\s\S]*FOR UPDATE SKIP LOCKED/i.test(c.sql)
+    )
+    const prelockIndex = client.calls.findIndex(c =>
+      /authorization_prelock_workflow_approval_revisions\(\$1::uuid\[\]\)/.test(c.sql)
+    )
+    const failIndexes = client.calls
+      .map((call, index) => ({ call, index }))
+      .filter(({ call }) => /UPDATE workflow_runs[\s\S]*SET phase = 'Failed'/i.test(call.sql))
+      .map(({ index }) => index)
+    expect(findIndex).toBeGreaterThan(-1)
+    expect(prelockIndex).toBeGreaterThan(findIndex)
+    expect(failIndexes).toHaveLength(4)
+    expect(Math.min(...failIndexes)).toBeGreaterThan(prelockIndex)
+    // Distinct, non-null, first-appearance order.
+    expect(client.calls[prelockIndex]!.params).toEqual([['approval-1', 'approval-2']])
+    expect(failIndexes.map(index => client.calls[index]!.params?.[0])).toEqual([
+      'run-stuck-user',
+      'run-stuck-team',
+      'run-stuck-shared',
+      'run-stuck-plain',
+    ])
+    expect(onRunTerminal).toHaveBeenCalledTimes(4)
   })
 
   // ─── 8) LISTEN reconnect: on session error, a new LISTEN session is

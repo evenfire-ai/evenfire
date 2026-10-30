@@ -195,6 +195,8 @@ async function archiveOneBatch(
     const children = selected.rows as ArchivedChild[]
     const ids = children.map(r => r.run_id)
 
+    await client.query('SELECT authorization_prelock_workflow_run_revisions($1::uuid[])', [ids])
+
     // Copy runs → workflow_runs_audit. Field mapping documented at module top.
     await client.query(
       `INSERT INTO workflow_runs_audit (

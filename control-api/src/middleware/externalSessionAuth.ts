@@ -1,5 +1,4 @@
 import { NextFunction, Request, Response } from 'express'
-import { pool } from '../db.js'
 import { sendPublicApiError } from '../http/publicApiError.js'
 import { rootLogger } from '../observability/logger.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
@@ -16,10 +15,9 @@ import type {
   ExternalSessionIdentityAuthentication,
   ExternalSessionPurpose,
 } from '../services/auth/externalSessionAuthentication.js'
-import { legacyExternalSessionAuthGeneration } from '../services/auth/legacyV1Generation.js'
 import {
+  externalSessionDatabaseFailure,
   isExternalSessionBackendUnavailableError,
-  runExternalSessionDatabaseOperation,
 } from '../services/auth/sessionDatabaseFailure.js'
 
 /** Retry-After sent when an external-session database operation is unavailable. */
@@ -65,44 +63,17 @@ export type ExternalAuthedRequest = Request & {
   }
 }
 
-/**
- * The session JWT is only a signed locator. The user row remains authoritative
- * for lifecycle and generation, so retirement takes effect before the token's
- * nominal expiry. A missing row and an inactive row intentionally share the
- * same denial to avoid user enumeration.
- */
-export async function isCurrentExternalSession(claims: AuthClaims): Promise<boolean> {
-  const authGeneration = legacyExternalSessionAuthGeneration(claims)
-  if (authGeneration === null) return false
-  const result = await runExternalSessionDatabaseOperation(() =>
-    pool.query(
-      `SELECT lifecycle_state, lifecycle_version
-         FROM users
-        WHERE id = $1
-        LIMIT 1`,
-      [claims.userId]
-    )
-  )
-  const row = result.rows[0] as
-    | { lifecycle_state?: unknown; lifecycle_version?: unknown }
-    | undefined
-  if (row?.lifecycle_state !== 'active') return false
-  return Number(row.lifecycle_version) === authGeneration
-}
-
-export async function assertCurrentExternalSession(claims: AuthClaims): Promise<void> {
-  if (!(await isCurrentExternalSession(claims))) {
-    throw new Error('external session is inactive or stale')
-  }
-}
-
 function extractUserSessionToken(req: Request): string {
   return String(req.header('x-user-session-token') || '').trim()
 }
 
 function extractRouteSessionToken(req: Request): string {
   const body = (req.body ?? {}) as { token?: unknown; sessionToken?: unknown }
-  return String(req.header('x-user-session-token') || body.token || body.sessionToken || '').trim()
+  const selected = req.header('x-user-session-token') || body.token || body.sessionToken || ''
+  // A non-string body value is an invalid token, never a value to coerce:
+  // String() on a hostile object throws before this request reaches its 401
+  // boundary, and an async rejection is not caught by Express 4.
+  return typeof selected === 'string' ? selected.trim() : ''
 }
 
 function sendSessionAuthenticationError(
@@ -323,6 +294,7 @@ function externalTeamParamMatcher(paramName: string, publicErrors: boolean) {
     try {
       const membership = await getLiveTeamMembership(claims.userId, requestedTeamId, {
         budget: req.accessExecutionBudget,
+        onDatabaseFailure: externalSessionDatabaseFailure,
       })
       if (!membership) {
         if (publicErrors) {
@@ -334,7 +306,14 @@ function externalTeamParamMatcher(paramName: string, publicErrors: boolean) {
       }
       req.externalTeamAuth = membership
       next()
-    } catch {
+    } catch (error) {
+      // Only the database-outage provenance is an outage. Anything else (an
+      // exhausted access budget, a programmer or policy failure) keeps the
+      // global handler's sanitized 500 path, as the auth routes do.
+      if (!isExternalSessionBackendUnavailableError(error)) {
+        next(error)
+        return
+      }
       if (publicErrors) {
         sendPublicApiError(
           req,

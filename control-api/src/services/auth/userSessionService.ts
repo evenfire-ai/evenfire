@@ -326,12 +326,16 @@ export async function validateUserSessionClaims(
         mode: 'read_write',
         onDatabaseFailure: options.onDatabaseFailure,
       })
-    : withTransaction(work, { onDatabaseFailure: options.onDatabaseFailure })
+    : withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
 }
 
 export async function renewUserSession(
   claims: UserSessionV2Claims,
-  options: { db?: SessionDatabase; budget?: AccessExecutionBudget } = {}
+  options: {
+    db?: SessionDatabase
+    budget?: AccessExecutionBudget
+    onDatabaseFailure?: (error: unknown) => unknown
+  } = {}
 ): Promise<IssuedUserSession | UserSessionValidation> {
   const work = async (db: SessionDatabase) => {
     const row = await loadSessionForUpdate(db, claims.sid)
@@ -407,11 +411,18 @@ export async function renewUserSession(
     }
   }
   if (options.db) {
-    return work(options.budget ? budgetedSessionDatabase(options.db, options.budget) : options.db)
+    return work(
+      options.budget
+        ? budgetedSessionDatabase(options.db, options.budget, options.onDatabaseFailure)
+        : sessionDatabaseWithFailureProvenance(options.db, options.onDatabaseFailure)
+    )
   }
   return options.budget
-    ? withAccessDatabaseTransaction(options.budget, work, { mode: 'read_write' })
-    : withTransaction(work)
+    ? withAccessDatabaseTransaction(options.budget, work, {
+        mode: 'read_write',
+        onDatabaseFailure: options.onDatabaseFailure,
+      })
+    : withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
 }
 
 export async function revokeUserSession(
@@ -419,7 +430,8 @@ export async function revokeUserSession(
   sid: string,
   reason: string,
   db?: SessionDatabase,
-  actorContext?: ExternalSessionAuthorityContext
+  actorContext?: ExternalSessionAuthorityContext,
+  options: { onDatabaseFailure?: (error: unknown) => unknown } = {}
 ): Promise<boolean> {
   const work = async (transaction: SessionDatabase): Promise<boolean> => {
     if (actorContext && !(await isCurrentRevocationActor(transaction, userId, actorContext))) {
@@ -448,7 +460,9 @@ export async function revokeUserSession(
     )
     return (result.rowCount ?? 0) > 0
   }
-  return db ? work(db) : withTransaction(work)
+  return db
+    ? work(sessionDatabaseWithFailureProvenance(db, options.onDatabaseFailure))
+    : withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
 }
 
 export async function revokeAllUserSessions(
@@ -456,7 +470,8 @@ export async function revokeAllUserSessions(
   reason: string,
   db?: SessionDatabase,
   actorContext?: ExternalSessionAuthorityContext,
-  expectedLifecycleVersion?: string | number
+  expectedLifecycleVersion?: string | number,
+  options: { onDatabaseFailure?: (error: unknown) => unknown } = {}
 ): Promise<number> {
   const work = async (transaction: SessionDatabase) => {
     const userLock = expectedLifecycleVersion === undefined ? 'FOR UPDATE' : 'FOR NO KEY UPDATE'
@@ -529,7 +544,9 @@ export async function revokeAllUserSessions(
     return result.rowCount ?? 0
   }
 
-  return db ? work(db) : withTransaction(work)
+  return db
+    ? work(sessionDatabaseWithFailureProvenance(db, options.onDatabaseFailure))
+    : withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
 }
 
 async function isCurrentRevocationActor(
@@ -736,7 +753,8 @@ export async function revokeLegacyUserSession(
   token: string,
   claims: AuthClaims,
   reason: string,
-  db?: SessionDatabase
+  db?: SessionDatabase,
+  options: { onDatabaseFailure?: (error: unknown) => unknown } = {}
 ): Promise<boolean> {
   const work = async (transaction: SessionDatabase): Promise<boolean> => {
     const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
@@ -755,5 +773,7 @@ export async function revokeLegacyUserSession(
     )
     return (result.rowCount ?? 0) > 0
   }
-  return db ? work(db) : withTransaction(work)
+  return db
+    ? work(sessionDatabaseWithFailureProvenance(db, options.onDatabaseFailure))
+    : withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
 }

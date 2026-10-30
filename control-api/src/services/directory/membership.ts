@@ -13,6 +13,7 @@ import {
   type InvitationTeamRow,
   type InvitationUserRow,
   type InvitationWithTeams,
+  activateDraftInvitation,
   cleanupStaleDraftInvitations,
   ensureInvitationUser,
   getInvitationRecordById,
@@ -100,7 +101,10 @@ async function loadInvitationTeamsByInvitationIds(
   return byInvitationId
 }
 
-async function invitationListResponse(rows: InvitationRow[], managerUserId?: string) {
+async function invitationListResponse(
+  rows: Array<InvitationRow & { assignment_count?: unknown }>,
+  managerUserId?: string
+) {
   const teamsByInvitationId = await loadInvitationTeamsByInvitationIds(
     pool,
     rows.map(row => row.id),
@@ -114,6 +118,7 @@ async function invitationListResponse(rows: InvitationRow[], managerUserId?: str
             team_id: _hiddenPrimaryTeamId,
             team_name: _hiddenPrimaryTeamName,
             role: _hiddenPrimaryRole,
+            assignment_count: _internalAssignmentCount,
             ...safeManagerFields
           } = safeInvitation
           return safeManagerFields
@@ -487,15 +492,7 @@ async function deliverAndActivateInvitation(
     }
   )
 
-  const activated = await pool.query(
-    `UPDATE invitations
-        SET status = 'pending'
-      WHERE id = $1
-        AND status = 'draft'
-      RETURNING id, team_id, invitee_name, email, role, token, status, purpose, created_at, expires_at, accepted_at, accepted_user_id`,
-    [inserted.invitation.id]
-  )
-  const pending = activated.rows[0] as InvitationRow | undefined
+  const pending = await activateDraftInvitation(pool, inserted.invitation.id)
   if (!pending) {
     throw new Error('Failed to activate invitation after registration')
   }
@@ -582,16 +579,7 @@ async function deliverAndActivateManagedInvitation(
       return { error: 'forbidden' as const }
     }
 
-    const activated = await db.query(
-      `UPDATE invitations
-          SET status = 'pending'
-        WHERE id = $1
-          AND status = 'draft'
-      RETURNING id, team_id, invitee_name, email, role, token, status, purpose, created_at,
-                expires_at, accepted_at, accepted_user_id`,
-      [invitation.id]
-    )
-    const pending = activated.rows[0] as InvitationRow | undefined
+    const pending = await activateDraftInvitation(db, invitation.id)
     if (!pending) throw new Error('Failed to activate authorized invitation')
     await finishInvitationDeliveryCommand(db, commandId, 'delivered')
     return invitationForTeamsResponse({ ...pending, team_name: invitation.team_name }, teams)
@@ -1552,9 +1540,6 @@ export async function updateManagedMemberRoleForUser(
   role: TeamRole,
   authority?: ExternalSessionAuthorityContext
 ) {
-  if (managerUserId.trim() === targetUserId.trim()) {
-    return { error: 'invalid_target' as const }
-  }
   const normalizedRole = normalizeTeamRoleInput(role)
   if (!normalizedRole) {
     return { error: 'invalid_role' as const }
@@ -1630,9 +1615,6 @@ export async function deleteManagedMemberForUser(
   teamId: string,
   authority?: ExternalSessionAuthorityContext
 ) {
-  if (managerUserId.trim() === targetUserId.trim()) {
-    return { error: 'invalid_target' as const }
-  }
   return withTransaction(async db => {
     if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
       return { error: 'forbidden' as const }

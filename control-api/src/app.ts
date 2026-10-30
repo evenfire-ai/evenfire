@@ -30,7 +30,6 @@ import { createInternalLlmProviderAttemptRoutes } from './routes/internal/llmPro
 import { createInternalOAuthRouter } from './routes/internal/oauth.js'
 import { createInternalPluginWorkloadSdkRouter } from './routes/internal/pluginWorkloadSdk.js'
 import { createInternalPr2ReadinessEvidenceRouter } from './routes/internal/pr2ReadinessEvidence.js'
-import { createInternalRpcProxyLegacySessionAdmissionRouter } from './routes/internal/rpcProxyLegacySessionAdmission.js'
 import { createInternalSandboxUiRouter } from './routes/internal/sandboxUi.js'
 import { createInternalApprovalPromptHistoryRouter } from './routes/internal/tracing/approvalPromptHistory.routes.js'
 import { createInternalUsageEventsRouter } from './routes/internal/usageEvents.js'
@@ -66,8 +65,7 @@ import {
 } from './services/tracing/wrcInfrastructureBindingResolver.js'
 
 const TRACING_INTERNAL_PATH_PREFIX = '/api/v1/internal/tracing/'
-const RPC_HOST_ACCESS_OWN_BODY_PARSER_PATH =
-  /^\/api\/v1\/rpc\/access\/users\/[^/]+\/mcp-hosts\/[^/]+(?:\/message-resolution)?\/?$/i
+const RPC_HOST_ACCESS_PATH = /^\/api\/v1\/rpc\/access\/users\/[^/]+\/mcp-hosts\/[^/]+\/?$/i
 // Upload v2 part bodies are raw octet streams. They must reach the streaming
 // proxy untouched; parsing them as JSON would either reject the first binary
 // byte or buffer the whole part in the control plane.
@@ -108,7 +106,7 @@ export function createApp(gateway: K8sGateway) {
       tracingInFlightLimiter(req, res, next)
       return
     }
-    if (req.method === 'POST' && RPC_HOST_ACCESS_OWN_BODY_PARSER_PATH.test(req.path)) {
+    if (req.method === 'POST' && RPC_HOST_ACCESS_PATH.test(req.path)) {
       next()
       return
     }
@@ -296,7 +294,6 @@ export function createApp(gateway: K8sGateway) {
   // the router so the `/internal/sandbox-ui/...` path does not collide with
   // the `/external` and `/rpc` prefix gates above.
   api.use(createInternalSandboxUiRouter(gateway))
-  api.use(createInternalRpcProxyLegacySessionAdmissionRouter())
   // OAuth helpers (rpc-proxy → control-api). Route-level requireInternalService
   // gates the boundary; the public-facing cookie-authed endpoints live in
   // rpc-proxy and forward here with the user identity asserted in the body.

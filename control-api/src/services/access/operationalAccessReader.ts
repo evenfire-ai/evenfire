@@ -877,6 +877,29 @@ export async function loadOperationalResourceGraph(input: {
     return { status: 'not_found', sourceStateRevision }
   }
 
+  // A Host whose configured Context reference does not resolve to exactly one
+  // canonical Context is incomplete in the catalog, so it must fail closed here
+  // as well instead of validating only the edges that still resolve.
+  if (input.resourceType === 'host') {
+    const unresolvedContexts = await budgetedQuery(
+      input.db,
+      input.budget,
+      `SELECT 1 AS unresolved_host_context
+         FROM operational_resource_relationships relationship
+        WHERE relationship.environment_id = $1
+          AND relationship.source_type = 'host'
+          AND relationship.source_id = $2
+          AND relationship.relationship_type = 'uses_context'
+          AND relationship.target_type = 'context'
+          AND ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')} IS NULL
+        LIMIT 1`,
+      [input.environmentId, input.logicalId]
+    )
+    if (unresolvedContexts.rows.length > 0) {
+      return { status: 'unavailable', safeCode: 'operational_source_unavailable' }
+    }
+  }
+
   const relationshipResult = await budgetedQuery(
     input.db,
     input.budget,

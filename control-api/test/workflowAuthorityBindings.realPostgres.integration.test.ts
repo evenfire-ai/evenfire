@@ -1,16 +1,24 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { Pool } from 'pg'
+import { Pool, type PoolClient } from 'pg'
 import type { CanonicalActionTarget } from '@clerum/action-context-contracts'
 import { initDb, pool, withTransaction } from '../src/db.js'
+import type { DbClient } from '../src/db.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
-import { createUserSession, revokeUserSession } from '../src/services/auth/userSessionService.js'
+import {
+  createUserSession,
+  revokeAllUserSessions,
+  revokeUserSession,
+} from '../src/services/auth/userSessionService.js'
 import { adminDeleteTeam } from '../src/services/directory/teams.js'
-import { recordDecision } from '../src/services/userApprovalRequestService.js'
+import {
+  WorkflowApprovalAuthorityStaleError,
+  recordDecision,
+} from '../src/services/userApprovalRequestService.js'
 import {
   computeWorkflowRunPayloadHash,
   createApprovedRun,
@@ -19,6 +27,7 @@ import {
 import { deriveApprovalConsumeAuthority } from '../src/services/workflows/workflowActionTransition.js'
 import {
   type WorkflowAuthorityBinding,
+  WorkflowAuthorityError,
   captureWorkflowTriggerAuthorityFence,
   persistWorkflowAuthorityBinding,
   requireCurrentWorkflowApprovalAuthority,
@@ -238,7 +247,10 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     return workflowAuthorityBindingFromClaims(claims)
   }
 
-  async function currentTriggerAuthority(recipeName: string): Promise<WorkflowAuthorityBinding> {
+  async function currentTriggerAuthority(
+    recipeName: string,
+    effectiveTeamId?: string
+  ): Promise<WorkflowAuthorityBinding> {
     const environmentId = canonicalEnvironmentId()
     await databasePool.query(
       `INSERT INTO operational_catalog_source_state(
@@ -267,13 +279,36 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       resourceType: 'workflow_recipe',
       resourceLogicalId: `sandbox-recipes/${recipeName}`,
       target,
+      ...(effectiveTeamId ? { effectiveTeamId } : {}),
     })
+  }
+
+  /**
+   * Records the database role the transaction actually runs as, before its
+   * first statement reaches the production validator. A missing or wrong role
+   * leaves the witness list empty or holding `postgres`, so a case that lost
+   * its `SET ROLE` cannot pass on the admin connection.
+   */
+  function recordingRoleDb(db: DbClient, observedRoles: string[]): DbClient {
+    let recorded = false
+    return {
+      query: async (text, values) => {
+        if (!recorded) {
+          recorded = true
+          const current = await db.query('SELECT current_user AS "currentUser"')
+          const row = current.rows[0] as { currentUser?: unknown } | undefined
+          observedRoles.push(String(row?.currentUser ?? ''))
+        }
+        return db.query(text, values)
+      },
+    }
   }
 
   function triggerReauthorizer(
     initial: WorkflowAuthorityBinding,
     budget: AccessExecutionBudget,
-    afterPhaseOne?: () => Promise<void>
+    afterPhaseOne?: () => Promise<void>,
+    observedRoles?: string[]
   ) {
     let phaseOneFence: Awaited<ReturnType<typeof captureWorkflowTriggerAuthorityFence>> | null =
       null
@@ -290,7 +325,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       validateCurrentInTransaction: (db: Parameters<typeof createRun>[1]) => {
         if (!phaseOneFence) throw new Error('test phase-one trigger fence missing')
         return requireCurrentWorkflowTriggerAuthority({
-          db: db!,
+          db: observedRoles ? recordingRoleDb(db!, observedRoles) : db!,
           authority: initial,
           expectedFence: phaseOneFence,
         })
@@ -304,10 +339,13 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     hooks: {
       afterPhaseOne?: () => Promise<void>
       beforeFinalFence?: () => Promise<void>
-    } = {}
+      afterSessionLock?: () => Promise<void>
+    } = {},
+    observedRoles?: string[]
   ) {
     let phaseOne = true
     let finalFencePending = true
+    let sessionLockPending = true
     return {
       authorizeBeforeLock: async () => {
         const current = await withTransaction(transaction =>
@@ -323,22 +361,38 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       },
       validateCurrentInTransaction: (
         db: Parameters<typeof requireCurrentWorkflowApprovalAuthority>[0]['db']
-      ) =>
-        requireCurrentWorkflowApprovalAuthority({
-          db: hooks.beforeFinalFence
-            ? {
-                query: async (sql, values) => {
-                  if (finalFencePending && /^SELECT sid\s+FROM external_user_sessions/s.test(sql)) {
-                    finalFencePending = false
-                    await hooks.beforeFinalFence?.()
-                  }
-                  return db.query(sql, values)
-                },
-              }
-            : db,
+      ) => {
+        const observed = observedRoles ? recordingRoleDb(db!, observedRoles) : db!
+        return requireCurrentWorkflowApprovalAuthority({
+          db:
+            hooks.beforeFinalFence || hooks.afterSessionLock
+              ? {
+                  query: async (sql, values) => {
+                    if (
+                      hooks.beforeFinalFence &&
+                      finalFencePending &&
+                      /^SELECT sid\s+FROM external_user_sessions/s.test(sql)
+                    ) {
+                      finalFencePending = false
+                      await hooks.beforeFinalFence?.()
+                    }
+                    const result = await observed.query(sql, values)
+                    if (
+                      hooks.afterSessionLock &&
+                      sessionLockPending &&
+                      /^SELECT sid\s+FROM external_user_sessions/s.test(sql)
+                    ) {
+                      sessionLockPending = false
+                      await hooks.afterSessionLock?.()
+                    }
+                    return result
+                  },
+                }
+              : observed,
           authority: initial,
           budget,
-        }),
+        })
+      },
     }
   }
 
@@ -1111,7 +1165,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
               },
             })
           )
-        ).rejects.toMatchObject({ status: 409, code: 'access_path_stale' })
+        ).rejects.toBeInstanceOf(WorkflowApprovalAuthorityStaleError)
       } finally {
         authorityBudget.close()
       }
@@ -1136,6 +1190,284 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         expect.objectContaining({ status: 'pending', decision_authority_binding_id: null }),
       ])
     )
+  })
+
+  it('runs the V2 trigger and approval fences as control_api_runtime', async () => {
+    const suffix = randomBytes(5).toString('hex')
+    const triggerRecipe = `runtime-fence-trigger-${suffix}`
+    const approveRecipe = `runtime-fence-approve-${suffix}`
+    const denyRecipe = `runtime-fence-deny-${suffix}`
+    const teamId = randomUUID()
+
+    // Seed with the admin pool. `beforeAll` dropped the runtime roles before
+    // `initDb` recreated `control_api_runtime` and applied the shipped grants,
+    // so the fences below run with exactly the privileges the deployment has.
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'Runtime Fence Team')`, [
+      teamId,
+    ])
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [teamId, userId]
+    )
+    await databasePool.query(
+      `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, 'sandbox-recipes', $2)`,
+      [teamId, triggerRecipe]
+    )
+    const teamAuthority = await currentTriggerAuthority(triggerRecipe, teamId)
+    const approveRequestId = await createDecisionApproval(approveRecipe)
+    const denyRequestId = await createDecisionApproval(denyRecipe)
+
+    const observedRoles = { trigger: [] as string[], decision: [] as string[] }
+    const runtimePool = new Pool({ connectionString })
+    runtimePool.on('connect', client => {
+      void client.query('SET ROLE control_api_runtime')
+    })
+    corePoolConnectSpy.mockImplementation((() => runtimePool.connect()) as typeof pool.connect)
+    const triggerBudget = AccessExecutionBudget.create('action')
+    const approveBudget = AccessExecutionBudget.create('action')
+    const denyBudget = AccessExecutionBudget.create('action')
+    try {
+      const created = await createRun({
+        recipe_namespace: 'sandbox-recipes',
+        recipe_name: triggerRecipe,
+        actor_type: 'user',
+        team_id: teamId,
+        usage_team_id: teamId,
+        actor_id: userId,
+        idempotency_key: `runtime-fence-run-${suffix}`,
+        trigger_source: 'onDemand',
+        ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+        authority: teamAuthority,
+        ...triggerReauthorizer(teamAuthority, triggerBudget, undefined, observedRoles.trigger),
+      })
+      expect(created.created).toBe(true)
+      const runRows = await databasePool.query<{ initiating_authority_binding_id: string | null }>(
+        `SELECT initiating_authority_binding_id
+           FROM workflow_runs
+          WHERE run_id = $1`,
+        [created.row.run_id]
+      )
+      expect(runRows.rows).toHaveLength(1)
+      expect(runRows.rows[0]?.initiating_authority_binding_id).not.toBeNull()
+
+      // Capture the decision authorities only after every seed that bumps the
+      // actor's revision: both approval inserts and the run insert above each
+      // advance it, so an authority captured earlier is correctly stale.
+      const approveAuthority = await liveDecisionAuthority({
+        approvalRequestId: approveRequestId,
+        decision: 'approve',
+      })
+
+      await expect(
+        recordDecision(
+          approveRequestId,
+          'approve',
+          { userId },
+          undefined,
+          undefined,
+          undefined,
+          approveAuthority,
+          decisionReauthorizer(approveAuthority, approveBudget, {}, observedRoles.decision)
+        )
+      ).resolves.toMatchObject({ ok: true })
+      const approvedRows = await databasePool.query<{
+        status: string
+        decision_authority_binding_id: string | null
+        consume_authority_binding_id: string | null
+      }>(
+        `SELECT status, decision_authority_binding_id, consume_authority_binding_id
+           FROM workflow_approval_requests
+          WHERE id = $1`,
+        [approveRequestId]
+      )
+      // The seeded run intent materialises the run on approve, and that consume
+      // step only runs from `approved` (`userApprovalRequestService.ts:1422`,
+      // `WHERE status = 'approved'`), so `consumed` plus both bindings is the
+      // committed-approve witness.
+      expect(approvedRows.rows).toEqual([
+        expect.objectContaining({
+          status: 'consumed',
+          decision_authority_binding_id: expect.any(String),
+          consume_authority_binding_id: expect.any(String),
+        }),
+      ])
+
+      // The approve decision bumped the actor's revision again, so the deny
+      // authority is captured after it.
+      const denyAuthority = await liveDecisionAuthority({
+        approvalRequestId: denyRequestId,
+        decision: 'deny',
+      })
+      let denyHookRan = false
+
+      await expect(
+        recordDecision(
+          denyRequestId,
+          'deny',
+          { userId },
+          undefined,
+          undefined,
+          undefined,
+          denyAuthority,
+          decisionReauthorizer(denyAuthority, denyBudget, {
+            beforeFinalFence: async () => {
+              await databasePool.query(
+                `DELETE FROM user_workflow_triggers
+                  WHERE user_id = $1 AND recipe_namespace = 'sandbox-recipes'
+                    AND recipe_name = (SELECT recipe_name FROM workflow_approval_requests WHERE id = $2)`,
+                [userId, denyRequestId]
+              )
+              denyHookRan = true
+            },
+          })
+        )
+      ).rejects.toBeInstanceOf(WorkflowApprovalAuthorityStaleError)
+      // The hook's delete is the only staleness source for this denial, so the
+      // rejection is witnessed rather than assumed.
+      expect(denyHookRan).toBe(true)
+      const deniedRows = await databasePool.query<{
+        status: string
+        decision_authority_binding_id: string | null
+      }>(
+        `SELECT status, decision_authority_binding_id
+           FROM workflow_approval_requests
+          WHERE id = $1`,
+        [denyRequestId]
+      )
+      expect(deniedRows.rows).toEqual([{ status: 'pending', decision_authority_binding_id: null }])
+    } finally {
+      triggerBudget.close()
+      approveBudget.close()
+      denyBudget.close()
+      corePoolConnectSpy.mockImplementation((() => databasePool.connect()) as typeof pool.connect)
+      await endPoolAndWaitForClients(runtimePool)
+    }
+    expect(observedRoles.trigger).toEqual(['control_api_runtime'])
+    expect(observedRoles.decision).toEqual(['control_api_runtime'])
+  })
+
+  it('serialises a V2 approval decision behind revokeAllUserSessions without deadlock', async () => {
+    const suffix = randomBytes(5).toString('hex')
+
+    function postgresErrorCode(value: unknown): string | null {
+      if (!value || typeof value !== 'object') return null
+      const code = (value as { code?: unknown }).code
+      return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : null
+    }
+
+    /**
+     * The revocation signals once it reached the user row: blocked on the
+     * decision's share lock, or already past its own `UPDATE users`. Both mean
+     * the race is live; waiting for an acquisition that cannot happen would
+     * deadlock the test itself.
+     */
+    async function awaitRevocationUserLock(pid: number): Promise<'blocked' | 'past-users'> {
+      for (let attempt = 0; attempt < 1000; attempt += 1) {
+        const observed = await databasePool.query<{
+          query: string | null
+          wait_event_type: string | null
+        }>(`SELECT query, wait_event_type FROM pg_stat_activity WHERE pid = $1`, [pid])
+        const row = observed.rows[0]
+        if (!row) return 'past-users'
+        if (row.wait_event_type === 'Lock') return 'blocked'
+        if ((row.query ?? '').includes('external_user_session_security_epochs')) {
+          return 'past-users'
+        }
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+      throw new Error('user session revocation never reached its user lock')
+    }
+
+    const runtimePool = new Pool({ connectionString })
+    runtimePool.on('connect', client => {
+      void client.query('SET ROLE control_api_runtime')
+    })
+    corePoolConnectSpy.mockImplementation((() => runtimePool.connect()) as typeof pool.connect)
+    const budgets: AccessExecutionBudget[] = []
+    try {
+      for (let iteration = 0; iteration < 20; iteration += 1) {
+        const approvalRequestId = await createDecisionApproval(
+          `decision-order-${suffix}-${iteration}`
+        )
+        const decisionAuthority = await liveDecisionAuthority({
+          approvalRequestId,
+          decision: 'deny',
+        })
+        const budget = AccessExecutionBudget.create('action')
+        budgets.push(budget)
+        const observedRoles: string[] = []
+        const revocation: {
+          client: PoolClient | null
+          promise: Promise<number> | null
+          reached: 'blocked' | 'past-users' | null
+        } = { client: null, promise: null, reached: null }
+        let decisionResult: Awaited<ReturnType<typeof recordDecision>> | null = null
+        let decisionError: unknown = null
+        try {
+          decisionResult = await recordDecision(
+            approvalRequestId,
+            'deny',
+            { userId },
+            undefined,
+            undefined,
+            undefined,
+            decisionAuthority,
+            decisionReauthorizer(
+              decisionAuthority,
+              budget,
+              {
+                afterSessionLock: async () => {
+                  // The decision holds the session row here. Starting the
+                  // revocation now reproduces the session-then-user order that
+                  // deadlocked against `users`-then-sessions.
+                  const client = await runtimePool.connect()
+                  revocation.client = client
+                  const holder = await client.query<{ pid: number }>(
+                    'SELECT pg_backend_pid() AS pid'
+                  )
+                  await client.query('BEGIN')
+                  revocation.promise = revokeAllUserSessions(userId, 'runtime-fence-lock-order', {
+                    query: (text, values) => client.query(text, values),
+                  })
+                  revocation.reached = await awaitRevocationUserLock(holder.rows[0]!.pid)
+                },
+              },
+              observedRoles
+            )
+          )
+        } catch (error) {
+          decisionError = error
+        }
+        let revocationError: unknown = null
+        if (revocation.client) {
+          try {
+            await revocation.promise
+          } catch (error) {
+            revocationError = error
+          }
+          await revocation.client.query('COMMIT')
+          revocation.client.release()
+        }
+
+        const committed = decisionResult?.ok === true
+        const invalidSession =
+          decisionError instanceof WorkflowAuthorityError &&
+          decisionError.status === 401 &&
+          decisionError.code === 'invalid_session'
+        expect(decisionError === null || invalidSession).toBe(true)
+        expect(committed !== invalidSession).toBe(true)
+        expect(postgresErrorCode(decisionError)).not.toBe('40P01')
+        expect(postgresErrorCode(revocationError)).not.toBe('40P01')
+        expect(observedRoles).toEqual(['control_api_runtime'])
+        expect(revocation.reached).not.toBeNull()
+      }
+    } finally {
+      budgets.forEach(budget => budget.close())
+      corePoolConnectSpy.mockImplementation((() => databasePool.connect()) as typeof pool.connect)
+      await endPoolAndWaitForClients(runtimePool)
+    }
   })
 
   it('uses final database time when approval expiry races authorization', async () => {

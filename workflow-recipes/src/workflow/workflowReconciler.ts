@@ -4453,6 +4453,25 @@ export class WorkflowReconciler {
         const client = await this.deps.pgPool.connect()
         try {
           await client.query('BEGIN')
+          // Take the global lock order before the first triggered write: the
+          // approval rows this transaction cancels, then the recipe's policy
+          // subjects (parent teams, then users, then the grant rows) and their
+          // revisions through the SECURITY DEFINER prelock. Without it the
+          // user-grant DELETE takes users before the team-grant DELETEs take
+          // teams, the approval UPDATE takes targets in scan order, and a
+          // concurrent run INSERT of the same team and user deadlocks (40P01).
+          await client.query(
+            `SELECT id FROM workflow_approval_requests
+              WHERE recipe_namespace = $1 AND recipe_name = $2
+                AND status IN ('pending', 'approved')
+              ORDER BY id
+                FOR UPDATE`,
+            [recipeNamespace, recipeName]
+          )
+          await client.query(
+            'SELECT authorization_prelock_workflow_recipe_policy_revisions($1, $2)',
+            [recipeNamespace, recipeName]
+          )
           await client.query(
             `DELETE FROM user_workflow_triggers
               WHERE recipe_namespace = $1 AND recipe_name = $2`,

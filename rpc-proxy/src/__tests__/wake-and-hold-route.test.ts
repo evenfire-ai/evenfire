@@ -55,31 +55,14 @@ const controlApiMock = vi.hoisted(() => ({
       this.name = 'ControlApiHostAccessRejectedError'
     }
   },
-  ControlApiHostRpcAdmissionError: class extends Error {
-    constructor(
-      readonly status: 429 | 503,
-      readonly body: { error: string; retryAfterSeconds?: number },
-      readonly headers: Record<string, string>
-    ) {
-      super(`Control API Host-RPC admission returned ${status}`)
-      this.name = 'ControlApiHostRpcAdmissionError'
-    }
-  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
-  requestHostRpcAdmission: async () => undefined,
   requestHostWakeFromControlApi: vi.fn(),
 }))
 
 vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
-vi.mock('../services/controlApiRestService.js', async importOriginal => {
-  const actual = await importOriginal<typeof import('../services/controlApiRestService.js')>()
-  return {
-    ...controlApiMock,
-    ControlApiHostMessageAdmissionError: actual.ControlApiHostMessageAdmissionError,
-  }
-})
+vi.mock('../services/controlApiRestService.js', () => controlApiMock)
 
 // Issue #791 §11.4: a wake-eligible finite operation carries host:wake:write in
 // addition to its operation scope (Desktop adds it; the route scope guard is
@@ -160,9 +143,6 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
 
     expect(response.body).toEqual({ success: true, taskId: 't-1' })
     expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
-    expect(serviceMock.resolveHostConnectionForUser.mock.calls[0]?.[3]).toMatchObject({
-      messageResolution: true,
-    })
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledWith('chatllm', 'token')
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)

@@ -12,6 +12,7 @@ import {
 describe('Profile logout client boundary', () => {
   beforeEach(() => {
     window.localStorage.clear()
+    clearUnconfirmedLogout()
     vi.stubGlobal('fetch', vi.fn())
   })
 
@@ -26,12 +27,53 @@ describe('Profile logout client boundary', () => {
     vi.mocked(fetch).mockImplementationOnce(response)
     window.localStorage.setItem('external_session_token', 'legacy-token')
 
-    await expect(logoutProfileUI()).resolves.toEqual({ revocationConfirmed: false })
+    await expect(logoutProfileUI()).resolves.toEqual({
+      revocationConfirmed: false,
+      fencePersisted: true,
+    })
 
     expect(window.localStorage.getItem('external_session_token')).toBeNull()
     await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
     expect(fetch).toHaveBeenCalledOnce()
   })
+
+  it.each([
+    ['transport failure', () => Promise.reject(new TypeError('network unavailable'))],
+    ['503 response', () => Promise.resolve(new Response('', { status: 503 }))],
+  ])(
+    'fences only this page when browser storage rejects the logout fence after a %s',
+    async (_caseName, response) => {
+      const storage = {
+        length: 0,
+        getItem: vi.fn(() => null),
+        setItem: vi.fn(() => {
+          throw new DOMException('Quota exceeded', 'QuotaExceededError')
+        }),
+        removeItem: vi.fn(),
+        clear: vi.fn(),
+        key: vi.fn(() => null),
+      }
+      vi.stubGlobal('localStorage', storage)
+      vi.mocked(fetch).mockImplementationOnce(response)
+
+      await expect(logoutProfileUI()).resolves.toEqual({
+        revocationConfirmed: false,
+        fencePersisted: false,
+      })
+
+      // Liveness: the API boundary wrote through the stubbed browser storage.
+      expect(window.localStorage).toBe(storage)
+      expect(storage.setItem).toHaveBeenCalledWith('profile_logout_unconfirmed', 'true')
+      expect(fetch).toHaveBeenCalledOnce()
+      expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain('/api/v1/auth/logout')
+      expect(vi.mocked(fetch).mock.calls[0]?.[1]?.method).toBe('POST')
+      expect(vi.mocked(fetch).mock.calls[0]?.[1]?.credentials).toBe('include')
+
+      // The in-memory fence still abandons the credential for this page lifetime.
+      await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
+      expect(fetch).toHaveBeenCalledOnce()
+    }
+  )
 
   it('restores session requests only after a successful new login', async () => {
     vi.mocked(fetch)
@@ -66,7 +108,10 @@ describe('Profile logout client boundary', () => {
         })
       )
 
-    await expect(logoutProfileUI()).resolves.toEqual({ revocationConfirmed: false })
+    await expect(logoutProfileUI()).resolves.toEqual({
+      revocationConfirmed: false,
+      fencePersisted: true,
+    })
     expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
     await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
     expect(fetch).toHaveBeenCalledOnce()

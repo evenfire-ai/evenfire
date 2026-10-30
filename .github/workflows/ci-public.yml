@@ -217,6 +217,13 @@ jobs:
         working-directory: rpc-proxy
         run: npm ci
 
+      - name: Test Playwright MCP cluster probe (hermetic)
+        if: matrix.service == 'host-context-controller'
+        run: >-
+          node scripts/tests/run-node-test-files.mjs
+          scripts/e2e/playwright-mcp-cluster-probe.test.mjs
+          scripts/e2e/test/playwright-mcp-cluster-runtime.test.mjs
+
       # The mcp-host images ship these faces, and the tests that set Arabic,
       # Hebrew and Han text in a PDF fail in CI instead of skipping without them.
       - name: Install the mcp-host image fonts
@@ -485,18 +492,6 @@ jobs:
           path: r61-b1-producers/latest-dev
           persist-credentials: false
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: 9b8634f2f827ca5c35886869fada550da1ff02d5
-          path: r61-b1-producers/historical-pr2
-          persist-credentials: false
-
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: 84368da042476ebec41292e4cc551889207ba45c
-          path: r61-b1-producers/earlier-pr2
-          persist-credentials: false
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .nvmrc
@@ -539,38 +534,6 @@ jobs:
         working-directory: r61-b1-producers/observed-dev/control-api
         run: npm run build
 
-      - name: Install earlier PR2 producer dependency
-        working-directory: r61-b1-producers/earlier-pr2/packages/workflow-runtime-core
-        run: npm ci
-
-      - name: Build earlier PR2 producer dependency
-        working-directory: r61-b1-producers/earlier-pr2/packages/workflow-runtime-core
-        run: npm run build
-
-      - name: Install earlier PR2 Control API dependencies
-        working-directory: r61-b1-producers/earlier-pr2/control-api
-        run: npm ci
-
-      - name: Build earlier PR2 migration runner
-        working-directory: r61-b1-producers/earlier-pr2/control-api
-        run: npm run build
-
-      - name: Install published PR2 producer dependencies
-        working-directory: r61-b1-producers/historical-pr2/packages/workflow-runtime-core
-        run: npm ci
-
-      - name: Build published PR2 producer dependency
-        working-directory: r61-b1-producers/historical-pr2/packages/workflow-runtime-core
-        run: npm run build
-
-      - name: Install published PR2 Control API dependencies
-        working-directory: r61-b1-producers/historical-pr2/control-api
-        run: npm ci
-
-      - name: Build published PR2 migration runner
-        working-directory: r61-b1-producers/historical-pr2/control-api
-        run: npm run build
-
       - name: Install latest DEV producer dependencies
         working-directory: r61-b1-producers/latest-dev/packages/workflow-runtime-core
         run: npm ci
@@ -606,8 +569,6 @@ jobs:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
           CONTROL_API_REAL_PG_REQUIRED: '1'
           TASK106_R61_B1_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/observed-dev
-          TASK106_R61_B1_PR2_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/historical-pr2
-          TASK106_R61_B1_EARLIER_PR2_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/earlier-pr2
           TASK106_R61_B1_LATEST_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/latest-dev
           FORCE_COLOR: '0'
           NO_COLOR: '1'
@@ -652,57 +613,8 @@ jobs:
             echo 'real-Postgres control-api lane reported skipped tests' >&2
             exit 1
           fi
-          # Critical suites must stay inside the real-Postgres filter. A rename or
-          # move that drops one from `*realPostgres*` would otherwise still pass
-          # the aggregate counts above.
-          for suite in \
-            accessCatalogCoordinator.realPostgres.integration \
-            accessCatalogFamilies.realPostgres.integration \
-            accessCatalogPerformance.realPostgres.integration \
-            accessCatalogShadow.realPostgres.integration \
-            accessDatabaseCancellation.realPostgres.integration \
-            catalogDistinctPagination.realPostgres.integration \
-            catalogProducers.realPostgres.integration \
-            catalogRevisionComponents.realPostgres.integration \
-            db.codexSubscriptionConnection.realPostgres.integration \
-            externalSessionSingleTouch.realPostgres.integration \
-            finalAuthorityLifecycle.realPostgres.integration \
-            gfsRevisionLockOrder.realPostgres.integration \
-            invitationAcceptedOnboarding.realPostgres.integration \
-            legacyPasswordEpochBackfill.realPostgres.integration \
-            legacySessionExchangeRace.realPostgres.integration \
-            migrationExecutionPolicy.realPostgres.integration \
-            migrationPreviousImageCompatibility.realPostgres.integration \
-            pr1MigrationLocks.realPostgres.integration \
-            routes.externalTeamsFinalAuthority.realPostgres.integration \
-            routes.externalTeamsLegacyAdminRevocation.realPostgres.integration \
-            services.codexSubscriptionOAuth.realPostgres.integration \
-            services.codexSubscriptionCatalog.realPostgres.integration \
-            services.llmProviderAttemptAuthorization.realPostgres.integration \
-            services.llmProviderAttemptStore.realPostgres.integration \
-            services.llmProviderAttemptRedemption.realPostgres.integration \
-            services.llmProviderAttemptFinalization.realPostgres.integration \
-            pr2ReadinessEvidence.realPostgres.integration \
-            userAccessRuntimeContract.realPostgres.integration \
-            userSessionDatabaseClock.realPostgres.integration \
-            workflowAuthorityBindings.realPostgres.integration \
-            pluginWorkloadSdkCodexDualLedger.realPostgres.integration \
-            pluginWorkloadSdkGrokDualLedger.realPostgres.integration \
-            services.grokSubscriptionConnection.realPostgres.integration \
-            services.grokProviderAttemptRedemption.realPostgres.integration \
-            services.grokProviderAttemptRedemption.refresh.realPostgres.integration \
-            services.codexSubscriptionLifecycle.realPostgres.integration \
-            db.llmProviderAttemptConnectionIntegrity.realPostgres.integration \
-            services.llmCatalogSync.realPostgres.integration
-          do
-            grep -Fq "$suite" "$normalized_log" || {
-              echo "real-Postgres control-api lane omitted critical suite ${suite}" >&2
-              exit 1
-            }
-          done
-          # Pinned suites (Codex/Grok subscription, provider attempts, and the
-          # external GFS rate-limit suites) must stay inside the real-Postgres
-          # filter and run. The check reads the JSON report, not the console:
+          # Pinned suites must stay inside the real-Postgres filter and run.
+          # The check reads the JSON report, not the console:
           # a file whose tests are all skipped is still printed by name.
           node ../scripts/ci/assert-pinned-vitest-suites.mjs "$report" \
             db.codexSubscriptionConnection.realPostgres.integration.test.ts \
@@ -734,7 +646,33 @@ jobs:
             entityChangeFeed.realPostgres.integration.test.ts \
             routes.mcp-host.renewal.realPostgres.integration.test.ts \
             routes.mcpOauth.brokerBinding.realPostgres.integration.test.ts \
-            db.realPostgresMigration.integration.test.ts
+            db.realPostgresMigration.integration.test.ts \
+            accessCatalogCoordinator.realPostgres.integration.test.ts \
+            accessCatalogFamilies.realPostgres.integration.test.ts \
+            accessCatalogPerformance.realPostgres.integration.test.ts \
+            accessCatalogShadow.realPostgres.integration.test.ts \
+            accessDatabaseCancellation.realPostgres.integration.test.ts \
+            catalogDistinctPagination.realPostgres.integration.test.ts \
+            catalogProducers.realPostgres.integration.test.ts \
+            catalogRevisionComponents.realPostgres.integration.test.ts \
+            externalSessionSingleTouch.realPostgres.integration.test.ts \
+            finalAuthorityLifecycle.realPostgres.integration.test.ts \
+            gfsRevisionLockOrder.realPostgres.integration.test.ts \
+            invitationAcceptedOnboarding.realPostgres.integration.test.ts \
+            legacyPasswordEpochBackfill.realPostgres.integration.test.ts \
+            legacySessionExchangeRace.realPostgres.integration.test.ts \
+            migrationExecutionPolicy.realPostgres.integration.test.ts \
+            migrationPreviousImageCompatibility.realPostgres.integration.test.ts \
+            pr1MigrationLocks.realPostgres.integration.test.ts \
+            pr2ReadinessEvidence.realPostgres.integration.test.ts \
+            routes.externalTeamsFinalAuthority.realPostgres.integration.test.ts \
+            routes.externalTeamsLegacyAdminRevocation.realPostgres.integration.test.ts \
+            userAccessRuntimeContract.realPostgres.integration.test.ts \
+            workflowAuthorityBindings.realPostgres.integration.test.ts \
+            userSessionDatabaseClock.realPostgres.integration.test.ts \
+            archiveRevisionLockOrder.realPostgres.integration.test.ts \
+            revisionWritersLockOrder.realPostgres.integration.test.ts \
+            workflowRunReadAndApprovalV1Compatibility.realPostgres.integration.test.ts
 
       - name: Install gfs-controller dependencies
         working-directory: gfs-controller
@@ -799,6 +737,12 @@ jobs:
       - name: Build (next build — typecheck + lint + compile)
         working-directory: control-ui
         run: npm run build
+      - name: Build Control UI image builder stage
+        # The next build above runs in the full checkout, where an import that
+        # leaves the image's Docker context (for example into control-api/)
+        # still resolves. Build & Publish builds the image only after a merge
+        # to dev, so build the same context here to fail the PR instead.
+        run: timeout 900s docker build --target builder -f control-ui/Dockerfile .
 
   e2e-vitest-node-unit:
     name: E2E Vitest node-unit (tests/e2e)
@@ -1033,6 +977,12 @@ jobs:
 
       - name: Test single-writer validator fails loud on an absent local deploy
         run: bash scripts/tests/test-postgres-single-writer-strategy.sh
+
+      - name: Test control-api migration bounds and Job ownership contract
+        run: bash scripts/tests/test-control-api-migration-bounds.sh
+
+      - name: Test GCP deploy scripts (migration and runtime access contracts)
+        run: bash scripts/tests/test-gcp-scripts.sh
 
       - name: Test post-reset convergence isolates DB-dependent controllers
         run: bash scripts/tests/test-converge-control-db-after-reset.sh

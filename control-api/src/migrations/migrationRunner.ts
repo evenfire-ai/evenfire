@@ -3,38 +3,16 @@ import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { hasPostSchemaOnlineIndexes, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
-  '0130_user_access_foundation',
-  '0131_invitation_delivery_commands',
-  '0132_catalog_utf8_ordering',
-  '0133_composable_catalog_revisions',
-  '0134_legacy_password_security_epoch_backfill',
+  '0131_user_access_foundation',
+  '0132_invitation_delivery_commands',
+  '0133_catalog_utf8_ordering',
+  '0134_composable_catalog_revisions',
+  '0135_legacy_password_security_epoch_backfill',
 ] as const)
 
-export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
-  '0107_llm_provider_attempts_sdk_link',
-  '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
-  '0109_grok_subscription_connections',
-  '0110_grok_subscription_oauth_states',
-  '0111_grok_catalog_models',
-  '0112_llm_provider_attempts_grok_broker',
-  '0113_grok_subscription_terminal_connection_key',
-  '0114_llm_provider_attempts_connection_integrity',
-  '0115_llm_allowed_models_image_input',
-  '0116_mcp_secret_rollback_permits',
-  '0117_control_admin_invitation_replace_inviter',
-  '0118_control_admin_replace_inviter_accept_guard',
-  '0119_dynamic_clients_table',
-  '0120_dynamic_clients_runtime_access',
-  '0121_oauth_install_identity',
-  '0122_durable_entity_change_feed',
-  '0123_entity_change_checkpoint_cursor_convergence',
-  '0124_entity_change_definer_search_path',
-  '0125_admin_subscription_rate_limit_namespace',
-  '0126_bug192_password_admission',
-  '0127_password_evaluation_retention',
-  '0128_password_work_ownership',
-  '0129_workflow_schedules_concurrency_policy',
-] as const)
+// Every migration up to and including dev's last migration runs in initDb's
+// single dev batch; this runner owns only the PR1 and PR2 versions that follow it.
+const LAST_DEV_MIGRATION_VERSION = '0130_password_login_success_admission'
 
 export const PR2_MIGRATION_VERSIONS = Object.freeze([
   '0137_workflow_authority_bindings',
@@ -47,10 +25,7 @@ export const PR2_MIGRATION_VERSIONS = Object.freeze([
   '0145_workflow_authorization_pause',
 ])
 
-const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)
-
-const CLASSIFIED_POST_0106_MIGRATION_VERSIONS = Object.freeze([
-  ...DEV_POST_0106_MIGRATION_VERSIONS,
+export const RUNNER_MIGRATION_VERSIONS = Object.freeze([
   ...PR1_MIGRATION_VERSIONS,
   ...PR2_MIGRATION_VERSIONS,
 ] as const)
@@ -111,22 +86,19 @@ export async function applyPendingPr1Migrations({
       aliasOwners.set(alias, migration.version)
     }
   }
-  const expected = new Set<string>([...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS])
+  const expected = new Set<string>(RUNNER_MIGRATION_VERSIONS)
   const unclassified = migrations.filter(
-    migration =>
-      migration.version > '0106_oauth_grants_owner_generalization' &&
-      !expected.has(migration.version) &&
-      !NON_PR1_POST_0106_MIGRATION_VERSIONS.has(migration.version)
+    migration => migration.version > LAST_DEV_MIGRATION_VERSION && !expected.has(migration.version)
   )
   if (unclassified.length > 0) {
     throw new Error(
-      `Unclassified post-0106 migrations: ${unclassified.map(item => item.version).join(', ')}`
+      `Unclassified post-dev migrations: ${unclassified.map(item => item.version).join(', ')}`
     )
   }
 
-  for (const version of CLASSIFIED_POST_0106_MIGRATION_VERSIONS) {
+  for (const version of RUNNER_MIGRATION_VERSIONS) {
     const migration = byVersion.get(version)
-    if (!migration) throw new Error(`Missing registered post-0106 migration: ${version}`)
+    if (!migration) throw new Error(`Missing registered PR1 migration: ${version}`)
     if (appliedVersions.has(version)) continue
     const acceptedLegacyVersion = migration.legacyVersions?.find(alias =>
       appliedVersions.has(alias)
@@ -137,12 +109,7 @@ export async function applyPendingPr1Migrations({
       continue
     }
 
-    const isExpectedMigration = expected.has(version)
-    if (isExpectedMigration && !hasPostSchemaOnlineIndexes(version)) {
-      await preparePr1Migration(db, version)
-    }
-
-    if (isExpectedMigration && hasPostSchemaOnlineIndexes(version)) {
+    if (hasPostSchemaOnlineIndexes(version)) {
       await runBoundedTransaction(db, async () => migration.apply(db))
       await preparePr1Migration(db, version, 'after-schema')
       await runBoundedTransaction(db, async () => {
@@ -152,6 +119,7 @@ export async function applyPendingPr1Migrations({
       continue
     }
 
+    await preparePr1Migration(db, version)
     await runBoundedTransaction(db, async () => {
       await migration.apply(db)
       await recordMigration(db, version)

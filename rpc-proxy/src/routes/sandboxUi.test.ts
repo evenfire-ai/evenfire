@@ -74,12 +74,6 @@ const USER_SCOPED_CLAIMS = {
 }
 
 const fetchSpy = vi.fn()
-const legacyAdmissionMock = vi.hoisted(() => ({ admit: vi.fn() }))
-
-vi.mock('../services/controlApiRestService.js', async importOriginal => ({
-  ...(await importOriginal<typeof import('../services/controlApiRestService.js')>()),
-  admitLegacySessionCreation: legacyAdmissionMock.admit,
-}))
 
 function makeApp() {
   const app = express()
@@ -100,7 +94,6 @@ beforeEach(() => {
   authTokenMock.verifyRpcToken.mockReset()
   authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS })
   fetchSpy.mockReset()
-  legacyAdmissionMock.admit.mockReset().mockResolvedValue({ allowed: true })
   vi.stubGlobal('fetch', fetchSpy)
   _clearSandboxUiRegistryCache()
 })
@@ -161,52 +154,14 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/session', () => {
       .set('Authorization', 'Bearer t')
       .expect(403)
     expect(res.body.error).toBe('recipe_acl_denied')
-    expect(legacyAdmissionMock.admit).toHaveBeenCalledWith('t')
+    // Liveness witness: the session open reaches the registry.
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining('/internal/sandbox-ui/registry/sandbox-recipes/r1'),
+      expect.anything()
+    )
   })
 
-  it('denies an exhausted subject before registry/readiness work', async () => {
-    legacyAdmissionMock.admit.mockResolvedValue({
-      allowed: false,
-      status: 429,
-      retryAfterSeconds: 9,
-      headers: {
-        'X-RateLimit-Limit': '60',
-        'X-RateLimit-Remaining': '0',
-        'X-RateLimit-Reset': '1800000000',
-      },
-    })
-
-    const res = await request(makeApp())
-      .post('/api/v1/sandbox-ui/sandbox-recipes/r1/session')
-      .set('Authorization', 'Bearer t')
-      .expect(429)
-
-    expect(res.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 9 })
-    expect(res.headers['retry-after']).toBe('9')
-    expect(res.headers['x-ratelimit-limit']).toBe('60')
-    expect(legacyAdmissionMock.admit).toHaveBeenCalledWith('t')
-    expect(fetchSpy).not.toHaveBeenCalled()
-  })
-
-  it('fails closed on admission-store unavailability before registry work', async () => {
-    legacyAdmissionMock.admit.mockResolvedValue({
-      allowed: false,
-      status: 503,
-      retryAfterSeconds: 2,
-      headers: {},
-    })
-
-    const res = await request(makeApp())
-      .post('/api/v1/sandbox-ui/sandbox-recipes/r1/session')
-      .set('Authorization', 'Bearer t')
-      .expect(503)
-
-    expect(res.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
-    expect(res.headers['retry-after']).toBe('2')
-    expect(fetchSpy).not.toHaveBeenCalled()
-  })
-
-  it('rejects malformed recipe path components before subject admission', async () => {
+  it('rejects malformed recipe path components before registry work', async () => {
     const app = makeApp()
     const res = await request(app)
       .post('/api/v1/sandbox-ui/sandbox-recipes/%2A/session')
@@ -218,7 +173,6 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/session', () => {
       .post('/api/v1/sandbox-ui/sandbox.recipes/r1/session')
       .set('Authorization', 'Bearer t')
       .expect(400)
-    expect(legacyAdmissionMock.admit).not.toHaveBeenCalled()
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 

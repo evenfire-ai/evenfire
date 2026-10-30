@@ -108,6 +108,22 @@ async function waitForBlockedBy(pool: Pool, blockerPid: number): Promise<void> {
   throw new Error('expected final team mutation authority to block on user lock')
 }
 
+// Waiters on one row queue behind each other, so only the first reports the
+// lock holder in pg_blocking_pids; count every backend waiting on any lock.
+async function waitForLockWaiters(pool: Pool, expected: number): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const result = await pool.query<{ waiting: number }>(
+      `SELECT COUNT(*)::int AS waiting
+         FROM pg_stat_activity activity
+        WHERE activity.datname = current_database()
+          AND cardinality(pg_blocking_pids(activity.pid)) > 0`
+    )
+    if ((result.rows[0]?.waiting ?? 0) >= expected) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`expected ${expected} retirement requests to wait on the principal lock`)
+}
+
 async function retireAdmin(
   db: Pick<Pool | PoolClient, 'query'>,
   userId: string,
@@ -458,6 +474,58 @@ describeRealPostgres('external team mutations final source authority on real Pos
     })
   })
 
+  it('allows a legacy admin to change their own team role', async () => {
+    await resetPrincipal('legacy-self-role')
+    await request(app())
+      .patch(`/external/teams/${teamId}/members/${adminUserId}/role`)
+      .set('x-user-session-token', token)
+      .send({ role: 'inviter' })
+      .expect(200)
+    const result = await databasePool.query<{ role: string }>(
+      `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2`,
+      [teamId, adminUserId]
+    )
+    expect(result.rows[0]?.role).toBe('inviter')
+  })
+
+  it('allows a legacy admin to leave their own team', async () => {
+    await resetPrincipal('legacy-self-delete')
+    await request(app())
+      .delete(`/external/teams/${teamId}/members/${adminUserId}`)
+      .set('x-user-session-token', token)
+      .expect(200)
+    const result = await databasePool.query<{ status: string }>(
+      `SELECT status FROM team_members WHERE team_id = $1 AND user_id = $2`,
+      [teamId, adminUserId]
+    )
+    expect(result.rows[0]?.status).toBe('deleted')
+  })
+
+  it('rejects a padded own id without deleting the membership', async () => {
+    await resetPrincipal('legacy-self-delete-padded')
+    const response = await request(app())
+      .delete(`/external/teams/${teamId}/members/%20${adminUserId}`)
+      .set('x-user-session-token', token)
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid_target' })
+    const result = await databasePool.query<{ status: string }>(
+      `SELECT status FROM team_members WHERE team_id = $1 AND user_id = $2`,
+      [teamId, adminUserId]
+    )
+    expect(result.rows[0]?.status).toBe('active')
+  })
+
+  it('activates a managed invitation after delivery', async () => {
+    await resetPrincipal('managed-invitation-activation')
+    await prepareInvitation()
+    const result = await databasePool.query<{ status: string }>(
+      `SELECT status FROM invitations WHERE id = $1`,
+      [invitationId]
+    )
+    expect(invitationDelivery.registerAndSendInvitation).toHaveBeenCalledTimes(1)
+    expect(result.rows[0]?.status).toBe('pending')
+  })
+
   it('denies managed invitation activation when source-session invalidation wins during delivery', async () => {
     await resetPrincipal('managed-invitation-post-delivery-revoke')
 
@@ -631,38 +699,40 @@ describeRealPostgres('external team mutations final source authority on real Pos
       ),
     ])
 
-    let admitted = 0
-    let releaseRequests!: () => void
-    const bothAuthenticated = new Promise<void>(resolve => {
-      releaseRequests = resolve
-    })
-    rateLimit.checkAndIncrement.mockImplementation(async () => {
-      admitted += 1
-      if (admitted === 2) releaseRequests()
-      await bothAuthenticated
-      return {
-        allowed: true,
-        count: 1,
-        remaining: 9,
-        resetMs: Date.now() + 60_000,
-        windowStartMs: Date.now(),
-      }
-    })
+    // Hold both principal rows so each request authenticates (session validation
+    // does not lock users) and then waits on the retirement's principal-pair lock.
+    // Two waiting backends prove both requests are past authentication before
+    // either retirement runs.
+    const gate = await databasePool.connect()
+    let firstResponse: request.Response
+    let secondResponse: request.Response
+    try {
+      await gate.query('BEGIN')
+      await gate.query(`SELECT id FROM users WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`, [
+        [firstUserId, secondUserId],
+      ])
+      const pending = Promise.all([
+        request(app())
+          .delete(`/external/members/${secondUserId}`)
+          .set('x-user-session-token', firstSession.token)
+          .set('Idempotency-Key', `reciprocal-${firstUserId}-${secondUserId}`)
+          .send({ reason: 'reciprocal retirement serialization' })
+          .then(response => response),
+        request(app())
+          .delete(`/external/members/${firstUserId}`)
+          .set('x-user-session-token', secondSession.token)
+          .set('Idempotency-Key', `reciprocal-${secondUserId}-${firstUserId}`)
+          .send({ reason: 'reciprocal retirement serialization' })
+          .then(response => response),
+      ])
+      await waitForLockWaiters(databasePool, 2)
+      await gate.query('COMMIT')
+      ;[firstResponse, secondResponse] = await pending
+    } finally {
+      await gate.query('ROLLBACK').catch(() => undefined)
+      gate.release()
+    }
 
-    const [firstResponse, secondResponse] = await Promise.all([
-      request(app())
-        .delete(`/external/members/${secondUserId}`)
-        .set('x-user-session-token', firstSession.token)
-        .set('Idempotency-Key', `reciprocal-${firstUserId}-${secondUserId}`)
-        .send({ reason: 'reciprocal retirement serialization' }),
-      request(app())
-        .delete(`/external/members/${firstUserId}`)
-        .set('x-user-session-token', secondSession.token)
-        .set('Idempotency-Key', `reciprocal-${secondUserId}-${firstUserId}`)
-        .send({ reason: 'reciprocal retirement serialization' }),
-    ])
-
-    expect(admitted).toBe(2)
     expect([firstResponse.status, secondResponse.status].sort((a, b) => a - b)).toEqual([200, 403])
     const remaining = await databasePool.query<{ id: string }>(
       `SELECT id::text AS id FROM users WHERE id = ANY($1::uuid[]) ORDER BY id`,

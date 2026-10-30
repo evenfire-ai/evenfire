@@ -6,10 +6,8 @@ import { actionAuthorityCheckpointRequest } from '../../rpc-proxy/src/actionAuth
 import { config as rpcProxyConfig } from '../../rpc-proxy/src/config.js'
 import { bindRouteActionV2 } from '../../rpc-proxy/src/routeActionBindingV2.js'
 import { config } from '../src/config.js'
-import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
-import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 import {
   issueUserDelegationV2,
   verifyUserDelegationV2,
@@ -225,11 +223,6 @@ function checkpointFor(route: ProducerRoute) {
 function app() {
   const server = express()
   server.use(express.json())
-  server.use(
-    createRpcAccessUsersRouter({ listResource: vi.fn(async () => []) } as never, {
-      bindingService: { bind: vi.fn(async () => ({ status: 'created' })) },
-    })
-  )
   server.use(createInternalActionAuthorityCheckpointRouter({} as never))
   return server
 }
@@ -306,116 +299,5 @@ describe('Spec 65 v2 Host-RPC admission checkpoint', () => {
       if (originalLimit === undefined) delete admissionConfig.hostRpcAdmissionRlPerMin
       else admissionConfig.hostRpcAdmissionRlPerMin = originalLimit
     }
-  })
-
-  it('legacy adapter validates signed identity and charges one subject bucket without selectors', async () => {
-    const token = signRpcAccessToken({
-      sub: SUBJECT,
-      typ: 'user',
-      accessScope: 'team',
-      teamId: 'team-a',
-      scopes: ['host:status:read'],
-      hostRefs: [HOST_REF, `${rpcProxyConfig.hostNamespace}/other`],
-      jti: 'host-rpc-admission-test-token',
-    })
-    const server = app()
-    await request(server)
-      .post(
-        `/rpc/access/users/${SUBJECT}/mcp-hosts/${encodeURIComponent(HOST_REF)}/host-rpc-admission`
-      )
-      .set('x-rpc-access-token', token)
-      .expect(204)
-    await request(server)
-      .post(
-        `/rpc/access/users/${SUBJECT}/mcp-hosts/${encodeURIComponent(`${rpcProxyConfig.hostNamespace}/other`)}/host-rpc-admission`
-      )
-      .set('x-rpc-access-token', token)
-      .expect(204)
-    expect(admission.checkAndIncrement).toHaveBeenCalledTimes(2)
-    expect(admission.checkAndIncrement).toHaveBeenNthCalledWith(
-      1,
-      `host-rpc-admission:${SUBJECT}`,
-      config.hostRpcAdmissionRlPerMin
-    )
-    expect(admission.checkAndIncrement).toHaveBeenNthCalledWith(
-      2,
-      `host-rpc-admission:${SUBJECT}`,
-      config.hostRpcAdmissionRlPerMin
-    )
-  })
-
-  it('admits a wake-only signed token without requiring unrelated Host scopes', async () => {
-    const token = signRpcAccessToken({
-      sub: SUBJECT,
-      typ: 'user',
-      accessScope: 'team',
-      teamId: 'team-a',
-      scopes: ['host:wake:write'],
-      hostRefs: [HOST_REF],
-      jti: 'host-rpc-admission-wake-only-token',
-    })
-    await request(app())
-      .post(
-        '/rpc/access/users/' +
-          SUBJECT +
-          '/mcp-hosts/' +
-          encodeURIComponent(HOST_REF) +
-          '/host-rpc-admission'
-      )
-      .set('x-rpc-access-token', token)
-      .expect(204)
-    expect(admission.checkAndIncrement).toHaveBeenCalledOnce()
-    expect(admission.checkAndIncrement).toHaveBeenCalledWith(
-      'host-rpc-admission:' + SUBJECT,
-      config.hostRpcAdmissionRlPerMin
-    )
-  })
-
-  it('invalid legacy scope, subject/Host claim, and body consume no admission unit', async () => {
-    const token = signRpcAccessToken({
-      sub: SUBJECT,
-      typ: 'user',
-      accessScope: 'team',
-      teamId: 'team-a',
-      scopes: ['host:status:read'],
-      hostRefs: [HOST_REF],
-      jti: 'host-rpc-admission-negative-test-token',
-    })
-    const server = app()
-    await request(server)
-      .post(
-        `/rpc/access/users/${SUBJECT}/mcp-hosts/${encodeURIComponent(HOST_REF)}/host-rpc-admission`
-      )
-      .set(
-        'x-rpc-access-token',
-        signRpcAccessToken({
-          sub: SUBJECT,
-          typ: 'user',
-          accessScope: 'team',
-          teamId: 'team-a',
-          scopes: ['mcp:servers:list'],
-          hostRefs: [HOST_REF],
-          jti: 'host-rpc-admission-wrong-scope-token',
-        })
-      )
-      .expect(403)
-    await request(server)
-      .post(
-        `/rpc/access/users/10000000-0000-4000-8000-000000000009/mcp-hosts/${encodeURIComponent(HOST_REF)}/host-rpc-admission`
-      )
-      .set('x-rpc-access-token', token)
-      .expect(403)
-    await request(server)
-      .post(`/rpc/access/users/${SUBJECT}/mcp-hosts/other/host-rpc-admission`)
-      .set('x-rpc-access-token', token)
-      .expect(403)
-    await request(server)
-      .post(
-        `/rpc/access/users/${SUBJECT}/mcp-hosts/${encodeURIComponent(HOST_REF)}/host-rpc-admission`
-      )
-      .set('x-rpc-access-token', token)
-      .send({ operation: 'client-selected' })
-      .expect(400)
-    expect(admission.checkAndIncrement).not.toHaveBeenCalled()
   })
 })

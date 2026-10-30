@@ -2,10 +2,9 @@
 administrative_events	append
 agent_run_events	append
 authorization_catalog_environment	read
-authorization_catalog_writer_components	read
-authorization_resource_revisions	upsert
-authorization_team_revisions	upsert
-authorization_user_revisions	upsert
+authorization_resource_revisions	read
+authorization_team_revisions	read
+authorization_user_revisions	read
 entity_change_feed	none
 entity_change_outbox	none
 entity_change_watermark	none
@@ -24,7 +23,7 @@ control_admin_revoked_tokens	legacy_dml
 control_admin_users	legacy_dml
 external_user_session_security_epochs	legacy_dml
 external_user_sessions	legacy_dml
-external_v1_session_revocations	legacy_dml
+external_v1_session_revocations	append
 gfs_audit	legacy_dml
 gfs_blob_manifests	none
 gfs_desktop_operator_links	link_lifecycle
@@ -63,6 +62,7 @@ operational_relationships_staging	legacy_dml
 operational_resource_index	legacy_dml
 operational_resource_index_staging	legacy_dml
 operational_resource_relationships	legacy_dml
+password_admission_rollout_state	none
 password_identifier_state	legacy_dml
 password_verification_pace	legacy_dml
 password_verification_work	insert_delete

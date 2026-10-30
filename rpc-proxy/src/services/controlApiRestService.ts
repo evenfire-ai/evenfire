@@ -3,10 +3,6 @@ import { type AuthorizedActionV2, actionAuthorityCheckpointRequest } from '../ac
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
-  type ControlApiHostOperation,
-  ControlApiHostVersionMismatchError,
-} from './controlApiVersionError.js'
-import {
   type HostAccessDenial,
   type HostAccessDenialCode,
   hostAccessDenialCodeForReason,
@@ -68,190 +64,6 @@ export class ControlApiHostAccessRejectedError extends Error {
     this.name = 'ControlApiHostAccessRejectedError'
     this.denialCode = denialCode
   }
-}
-
-export class ControlApiArtifactReadRateLimitedError extends Error {
-  constructor(readonly retryAfterSeconds: number) {
-    super(`Control API rate limited artifact reads for ${retryAfterSeconds} seconds`)
-    this.name = 'ControlApiArtifactReadRateLimitedError'
-  }
-}
-
-export class ControlApiHostMessageAdmissionError extends Error {
-  constructor(
-    readonly status: 429 | 503,
-    readonly body: { error: string; retryAfterSeconds?: number },
-    readonly headers: Record<string, string>
-  ) {
-    super(`Control API Host-message admission returned ${status}`)
-    this.name = 'ControlApiHostMessageAdmissionError'
-  }
-}
-
-export type LegacySessionAdmissionResult =
-  | { allowed: true }
-  | {
-      allowed: false
-      status: 429 | 503
-      retryAfterSeconds: number
-      headers: Record<string, string>
-    }
-
-const LEGACY_SESSION_ADMISSION_FALLBACK_RETRY_AFTER_SECONDS = 2
-
-function boundedRetryAfter(value: string | null): number | null {
-  if (!value || !/^(?:0|[1-9]\d{0,2})$/.test(value)) return null
-  const seconds = Number(value)
-  return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 60 ? seconds : null
-}
-
-function boundedRateHeader(value: string | null, maxDigits = 12): string | null {
-  if (!value || value.length > maxDigits || !/^(?:0|[1-9]\d*)$/.test(value)) return null
-  return value
-}
-
-/**
- * Claims the shared durable verified-subject budget before legacy session
- * routes touch HCC or the Sandbox registry. Network/protocol failures fail
- * closed with a sanitized bounded retry response.
- */
-export async function admitLegacySessionCreation(
-  rpcAccessToken: string
-): Promise<LegacySessionAdmissionResult> {
-  let response: Response
-  try {
-    response = await fetch(`${controlApiBaseUrl()}/internal/rpc-proxy/legacy-session-admission`, {
-      method: 'POST',
-      headers: controlApiHeaders(rpcAccessToken),
-      signal: upstreamAbortSignal(),
-    })
-  } catch {
-    return {
-      allowed: false,
-      status: 503,
-      retryAfterSeconds: LEGACY_SESSION_ADMISSION_FALLBACK_RETRY_AFTER_SECONDS,
-      headers: {},
-    }
-  }
-
-  if (response.status === 204 && response.ok) return { allowed: true }
-  if (response.status !== 429 && response.status !== 503) {
-    return {
-      allowed: false,
-      status: 503,
-      retryAfterSeconds: LEGACY_SESSION_ADMISSION_FALLBACK_RETRY_AFTER_SECONDS,
-      headers: {},
-    }
-  }
-
-  const retryAfterSeconds =
-    boundedRetryAfter(response.headers.get('retry-after')) ??
-    LEGACY_SESSION_ADMISSION_FALLBACK_RETRY_AFTER_SECONDS
-  if (response.status === 503) {
-    return { allowed: false, status: 503, retryAfterSeconds, headers: {} }
-  }
-
-  const headers: Record<string, string> = {}
-  const limit = boundedRateHeader(response.headers.get('x-ratelimit-limit'))
-  const remaining = boundedRateHeader(response.headers.get('x-ratelimit-remaining'))
-  const reset = boundedRateHeader(response.headers.get('x-ratelimit-reset'))
-  if (limit !== null) headers['X-RateLimit-Limit'] = limit
-  if (remaining !== null) headers['X-RateLimit-Remaining'] = remaining
-  if (reset !== null) headers['X-RateLimit-Reset'] = reset
-
-  return { allowed: false, status: 429, retryAfterSeconds, headers }
-}
-
-export class ControlApiHostRpcAdmissionError extends Error {
-  constructor(
-    readonly status: 429 | 503,
-    readonly body: { error: string; retryAfterSeconds?: number },
-    readonly headers: Record<string, string>
-  ) {
-    super(`Control API Host-RPC admission returned ${status}`)
-    this.name = 'ControlApiHostRpcAdmissionError'
-  }
-}
-
-/** Charge one legacy non-message Host-RPC request through Control API authority. */
-export async function requestHostRpcAdmission(
-  userId: string,
-  hostRef: string,
-  rpcAccessToken: string,
-  options: { fetchImpl?: typeof fetch } = {}
-): Promise<void> {
-  const response = await (options.fetchImpl ?? fetch)(
-    `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}/host-rpc-admission`,
-    {
-      method: 'POST',
-      headers: controlApiHeaders(rpcAccessToken),
-      signal: upstreamAbortSignal(),
-    }
-  )
-  if (response.status === 204) return
-  if (response.status === 401 || response.status === 403) {
-    await drainBody(response)
-    throw new ControlApiHostAccessRejectedError(response.status)
-  }
-  if (response.status === 503) {
-    const body = (await response.json().catch(() => null)) as { error?: unknown } | null
-    if (body?.error === 'host_rpc_admission_unavailable') {
-      throw new ControlApiHostRpcAdmissionError(
-        503,
-        { error: 'host_rpc_admission_unavailable' },
-        {}
-      )
-    }
-    throw new ControlApiHostRpcAdmissionError(503, { error: 'host_rpc_admission_unavailable' }, {})
-  }
-  if (response.status === 429) {
-    const body = (await response.json().catch(() => null)) as {
-      error?: unknown
-      retryAfterSeconds?: unknown
-    } | null
-    const names = [
-      'retry-after',
-      'x-ratelimit-limit',
-      'x-ratelimit-remaining',
-      'x-ratelimit-reset',
-    ] as const
-    const headers = Object.fromEntries(names.map(name => [name, response.headers.get(name)]))
-    const parseCanonicalInteger = (value: string | null): number | null => {
-      if (value === null || !/^(0|[1-9]\d*)$/.test(value)) return null
-      const parsed = Number(value)
-      return Number.isSafeInteger(parsed) ? parsed : null
-    }
-    const retryAfter = parseCanonicalInteger(headers['retry-after'])
-    const limit = parseCanonicalInteger(headers['x-ratelimit-limit'])
-    const remaining = parseCanonicalInteger(headers['x-ratelimit-remaining'])
-    const reset = parseCanonicalInteger(headers['x-ratelimit-reset'])
-    if (
-      body?.error === 'Too Many Requests' &&
-      Number.isSafeInteger(body.retryAfterSeconds) &&
-      Number(body.retryAfterSeconds) > 0 &&
-      retryAfter !== null &&
-      retryAfter === Number(body.retryAfterSeconds) &&
-      limit !== null &&
-      limit > 0 &&
-      remaining === 0 &&
-      reset !== null &&
-      reset > 0
-    ) {
-      throw new ControlApiHostRpcAdmissionError(
-        429,
-        { error: 'Too Many Requests', retryAfterSeconds: Number(body.retryAfterSeconds) },
-        {
-          'Retry-After': String(headers['retry-after']),
-          'X-RateLimit-Limit': String(headers['x-ratelimit-limit']),
-          'X-RateLimit-Remaining': String(headers['x-ratelimit-remaining']),
-          'X-RateLimit-Reset': String(headers['x-ratelimit-reset']),
-        }
-      )
-    }
-    throw new ControlApiHostRpcAdmissionError(503, { error: 'host_rpc_admission_unavailable' }, {})
-  }
-  await drainBody(response)
-  throw new ControlApiHostRpcAdmissionError(503, { error: 'host_rpc_admission_unavailable' }, {})
 }
 
 // Typed rejection for the connectors read-model, mirroring the host rail above.
@@ -411,127 +223,29 @@ export async function fetchHostConnectionFromControlApi(
   rpcAccessToken: string,
   options: {
     directRunBinding?: DirectRunBindingRequest
-    messageResolution?: boolean
     fetchImpl?: typeof fetch
-  } = {}
-): Promise<ResolvedServerConnection | HostAccessDenial> {
-  return fetchHostConnectionForPath(userId, hostRef, rpcAccessToken, options)
-}
-
-/**
- * Resolves a Host connection after Control API has enforced the durable,
- * cross-replica artifact-read budget for this verified user and canonical Host.
- */
-export async function fetchArtifactReadHostConnectionFromControlApi(
-  userId: string,
-  hostRef: string,
-  rpcAccessToken: string,
-  options: { fetchImpl?: typeof fetch } = {}
-): Promise<ResolvedServerConnection | HostAccessDenial> {
-  return fetchHostConnectionForPath(userId, hostRef, rpcAccessToken, {
-    ...options,
-    artifactRead: true,
-  })
-}
-
-async function fetchHostConnectionForPath(
-  userId: string,
-  hostRef: string,
-  rpcAccessToken: string,
-  options: {
-    directRunBinding?: DirectRunBindingRequest
-    fetchImpl?: typeof fetch
-    artifactRead?: boolean
-    messageResolution?: boolean
   } = {}
 ): Promise<ResolvedServerConnection | HostAccessDenial> {
   const directRunBinding = options.directRunBinding
-  const hostAccessPath = `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`
-  const messageResolution = options.messageResolution === true
-  const operation: ControlApiHostOperation = options.artifactRead
-    ? 'host-artifact-read'
-    : messageResolution
-      ? 'host-message-resolution'
-      : 'host-access'
   const response = await (options.fetchImpl ?? fetch)(
-    options.artifactRead
-      ? `${hostAccessPath}/artifact-read`
-      : messageResolution
-        ? `${hostAccessPath}/message-resolution`
-        : hostAccessPath,
+    `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`,
     {
-      method: messageResolution || directRunBinding ? 'POST' : 'GET',
+      method: directRunBinding ? 'POST' : 'GET',
       headers: {
         ...controlApiHeaders(rpcAccessToken),
-        ...(messageResolution || directRunBinding ? { 'content-type': 'application/json' } : {}),
+        ...(directRunBinding ? { 'content-type': 'application/json' } : {}),
       },
-      ...(messageResolution || directRunBinding
-        ? { body: JSON.stringify(directRunBinding ?? {}) }
-        : {}),
+      ...(directRunBinding ? { body: JSON.stringify(directRunBinding) } : {}),
       signal: upstreamAbortSignal(),
     }
   )
 
-  if (messageResolution && (response.status === 429 || response.status === 503)) {
-    const body = (await response.json().catch(() => null)) as {
-      error?: unknown
-      retryAfterSeconds?: unknown
-    } | null
-    if (response.status === 503 && body?.error === 'host_message_admission_unavailable') {
-      throw new ControlApiHostMessageAdmissionError(
-        503,
-        { error: 'host_message_admission_unavailable' },
-        {}
-      )
-    }
-    const headerNames = [
-      'retry-after',
-      'x-ratelimit-limit',
-      'x-ratelimit-remaining',
-      'x-ratelimit-reset',
-    ] as const
-    const headers = Object.fromEntries(
-      headerNames.map(name => [name, response.headers.get(name)])
-    ) as Record<string, string | null>
-    if (
-      response.status === 429 &&
-      body?.error === 'Too Many Requests' &&
-      typeof body.retryAfterSeconds === 'number' &&
-      Number.isSafeInteger(body.retryAfterSeconds) &&
-      body.retryAfterSeconds > 0 &&
-      headerNames.every(name => headers[name] !== null)
-    ) {
-      throw new ControlApiHostMessageAdmissionError(
-        429,
-        { error: 'Too Many Requests', retryAfterSeconds: body.retryAfterSeconds },
-        headers as Record<string, string>
-      )
-    }
-    throw new Error('Control API Host-message admission response was invalid')
-  }
-
-  if (options.artifactRead && response.status === 429) {
-    const retryAfterHeader = Number(response.headers.get('retry-after'))
-    let retryAfterBody = Number.NaN
-    try {
-      const body = (await response.json()) as { retryAfterSeconds?: unknown }
-      if (typeof body.retryAfterSeconds === 'number') retryAfterBody = body.retryAfterSeconds
-    } catch {
-      /* use the header below when the canonical JSON body is unavailable */
-    }
-    const retryAfterSeconds =
-      Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader : retryAfterBody
-    if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds <= 0) {
-      throw new Error('Control API artifact-read limit returned 429 without Retry-After')
-    }
-    throw new ControlApiArtifactReadRateLimitedError(retryAfterSeconds)
-  }
-  if (response.status === 404) {
-    await drainBody(response)
-    throw new ControlApiHostVersionMismatchError(operation)
-  }
   if (!directRunBinding && response.status === 403) {
     return hostAccessDenied(await readHostAccessDenialCode(response))
+  }
+  if (!directRunBinding && response.status === 404) {
+    await drainBody(response)
+    return hostAccessDenied('host_access_denied')
   }
   if (response.status === 403) {
     throw new ControlApiHostAccessRejectedError(403, await readHostAccessDenialCode(response))

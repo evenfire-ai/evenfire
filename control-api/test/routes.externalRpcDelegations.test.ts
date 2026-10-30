@@ -16,7 +16,6 @@ const mocks = vi.hoisted(() => ({
   resolvePolicy: vi.fn(),
   authorize: vi.fn(),
 }))
-const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 const tokenIssuer = vi.hoisted(() => ({ issueUserDelegationV2: vi.fn() }))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
@@ -39,7 +38,6 @@ vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => ({
 vi.mock('../src/services/access/actionAuthorizer.js', () => ({
   authorizeActionV2: mocks.authorize,
 }))
-vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
 vi.mock('../src/utils/auth/userDelegationV2Token.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/utils/auth/userDelegationV2Token.js')>()
   tokenIssuer.issueUserDelegationV2.mockImplementation(actual.issueUserDelegationV2)
@@ -119,14 +117,6 @@ describe('POST /external/rpc/delegations', () => {
       enforceMinimumClient: false,
       advertisedCatalogFamilies: [],
     })
-    rateLimiter.checkAndIncrement.mockResolvedValue({
-      backendAvailable: true,
-      allowed: true,
-      remaining: 9,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      count: 1,
-    })
     const behavior = {
       capabilities: ['chat.message.invoke'],
       budget: knownBehavior(null),
@@ -190,20 +180,6 @@ describe('POST /external/rpc/delegations', () => {
       behaviorBindingHash,
     })
     expect(claims?.targets['chat.message.invoke']).toEqual(prepared.target)
-    expect(rateLimiter.checkAndIncrement).toHaveBeenCalledTimes(2)
-    expect(rateLimiter.checkAndIncrement).toHaveBeenNthCalledWith(
-      1,
-      expect.stringMatching(/^external_rpc_token:ip:(?:::ffff:)?127\.0\.0\.1$/),
-      10
-    )
-    expect(rateLimiter.checkAndIncrement).toHaveBeenNthCalledWith(
-      2,
-      `external_rpc_token:user:${userId}`,
-      10
-    )
-    expect(rateLimiter.checkAndIncrement.mock.invocationCallOrder[1]).toBeLessThan(
-      mocks.authorize.mock.invocationCallOrder[0]!
-    )
     expect(mocks.authorize.mock.invocationCallOrder[0]).toBeLessThan(
       tokenIssuer.issueUserDelegationV2.mock.invocationCallOrder[0]!
     )
@@ -669,81 +645,6 @@ describe('POST /external/rpc/delegations', () => {
       })
     }
   )
-
-  it('blocks public delegation work when the pre-auth limiter denies', async () => {
-    rateLimiter.checkAndIncrement.mockResolvedValueOnce({
-      backendAvailable: true,
-      allowed: false,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      count: 11,
-    })
-
-    const response = await request(app())
-      .post('/external/rpc/delegations')
-      .set('x-user-session-token', 'session-v2')
-      .set('x-evenfire-access-path-id', accessPathId)
-      .set('x-evenfire-authorization-revision', authorizationRevision)
-      .send({
-        version: 2,
-        operationId: 'chat.message.invoke',
-        resource: { type: 'host', logicalId: 'default/chatllm' },
-        target: {
-          hostRef: 'default/chatllm',
-          channelType: 'rpc',
-          channelId: 'chat-1',
-        },
-      })
-
-    expect(response.status).toBe(429)
-    expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
-    expect(rateLimiter.checkAndIncrement).toHaveBeenCalledTimes(1)
-    expect(mocks.authorize).not.toHaveBeenCalled()
-    expect(tokenIssuer.issueUserDelegationV2).not.toHaveBeenCalled()
-  })
-
-  it('blocks public delegation work when the authenticated limiter denies', async () => {
-    rateLimiter.checkAndIncrement
-      .mockResolvedValueOnce({
-        backendAvailable: true,
-        allowed: true,
-        remaining: 9,
-        resetMs: Date.now() + 60_000,
-        windowStartMs: Date.now(),
-        count: 1,
-      })
-      .mockResolvedValueOnce({
-        backendAvailable: true,
-        allowed: false,
-        remaining: 0,
-        resetMs: Date.now() + 60_000,
-        windowStartMs: Date.now(),
-        count: 11,
-      })
-
-    const response = await request(app())
-      .post('/external/rpc/delegations')
-      .set('x-user-session-token', 'session-v2')
-      .set('x-evenfire-access-path-id', accessPathId)
-      .set('x-evenfire-authorization-revision', authorizationRevision)
-      .send({
-        version: 2,
-        operationId: 'chat.message.invoke',
-        resource: { type: 'host', logicalId: 'default/chatllm' },
-        target: {
-          hostRef: 'default/chatllm',
-          channelType: 'rpc',
-          channelId: 'chat-1',
-        },
-      })
-
-    expect(response.status).toBe(429)
-    expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
-    expect(rateLimiter.checkAndIncrement).toHaveBeenCalledTimes(2)
-    expect(mocks.authorize).not.toHaveBeenCalled()
-    expect(tokenIssuer.issueUserDelegationV2).not.toHaveBeenCalled()
-  })
 
   it('rejects client-supplied resource authority fields before authorization', async () => {
     const response = await request(app())

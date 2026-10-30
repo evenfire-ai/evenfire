@@ -65,12 +65,13 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       '0128_password_work_ownership',
     ]
     const incomingDev = '0129_workflow_schedules_concurrency_policy'
+    const lastDev = '0130_password_login_success_admission'
     const task106 = [
-      '0130_user_access_foundation',
-      '0131_invitation_delivery_commands',
-      '0132_catalog_utf8_ordering',
-      '0133_composable_catalog_revisions',
-      '0134_legacy_password_security_epoch_backfill',
+      '0131_user_access_foundation',
+      '0132_invitation_delivery_commands',
+      '0133_catalog_utf8_ordering',
+      '0134_composable_catalog_revisions',
+      '0135_legacy_password_security_epoch_backfill',
       '0137_workflow_authority_bindings',
       '0138_gfs_upload_authority_bindings',
       '0139_pr2_readiness_evidence',
@@ -85,7 +86,8 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       versions.slice(versions.indexOf(parentDev[0]!), versions.indexOf(parentDev[0]!) + 3)
     ).toEqual(parentDev)
     expect(versions[versions.indexOf(parentDev.at(-1)!) + 1]).toBe(incomingDev)
-    expect(versions.indexOf(incomingDev)).toBeLessThan(versions.indexOf(task106[0]!))
+    expect(versions[versions.indexOf(incomingDev) + 1]).toBe(lastDev)
+    expect(versions[versions.indexOf(lastDev) + 1]).toBe(task106[0])
     expect(
       versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 13)
     ).toEqual(task106)
@@ -114,11 +116,13 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       candidate => candidate.version !== migration?.version
     ).map(candidate => ({ version: candidate.version }))
     appliedVersions.push({ version: '0125_bug192_password_admission' })
-    const query = vi.fn(async (sql: string) =>
-      sql.includes('SELECT version FROM schema_migrations')
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('password_admission_rollout_is_ready'))
+        return { rows: [{ ready: true }], rowCount: 1 }
+      return sql.includes('SELECT version FROM schema_migrations')
         ? { rows: appliedVersions, rowCount: appliedVersions.length }
         : { rows: [], rowCount: 0 }
-    )
+    })
     const release = vi.fn()
     await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
     expect(query.mock.calls.map(([sql]) => sql)).not.toContainEqual(
@@ -148,11 +152,13 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
         candidate => candidate.version !== migration?.version
       ).map(candidate => ({ version: candidate.version }))
       appliedVersions.push({ version: legacyVersion })
-      const query = vi.fn(async (sql: string) =>
-        sql.includes('SELECT version FROM schema_migrations')
+      const query = vi.fn(async (sql: string) => {
+        if (sql.includes('password_admission_rollout_is_ready'))
+          return { rows: [{ ready: true }], rowCount: 1 }
+        return sql.includes('SELECT version FROM schema_migrations')
           ? { rows: appliedVersions, rowCount: appliedVersions.length }
           : { rows: [], rowCount: 0 }
-      )
+      })
       const release = vi.fn()
 
       await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
@@ -180,11 +186,13 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       candidate => candidate.version !== migration?.version
     ).map(candidate => ({ version: candidate.version }))
     appliedVersions.push({ version: '0120_entity_change_checkpoint_cursor_convergence' })
-    const query = vi.fn(async (sql: string) =>
-      sql.includes('SELECT version FROM schema_migrations')
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('password_admission_rollout_is_ready'))
+        return { rows: [{ ready: true }], rowCount: 1 }
+      return sql.includes('SELECT version FROM schema_migrations')
         ? { rows: appliedVersions, rowCount: appliedVersions.length }
         : { rows: [], rowCount: 0 }
-    )
+    })
     const release = vi.fn()
 
     await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
@@ -197,6 +205,84 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       expect.stringContaining('INSERT INTO schema_migrations(version)'),
       ['0123_entity_change_checkpoint_cursor_convergence']
     )
+    expect(release).toHaveBeenCalledOnce()
+  })
+
+  it('commits a durable admission fence before draining the prior verifier owner', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0130_password_login_success_admission'
+    )
+    if (!migration) throw new Error('success admission migration missing')
+    const appliedVersions = CONTROL_API_MIGRATIONS.filter(
+      candidate => candidate.version !== migration.version
+    ).map(candidate => ({ version: candidate.version }))
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("to_regclass('public.password_identifier_state')")) {
+        return {
+          rows: [
+            {
+              identifier_state: 'password_identifier_state',
+              work_owner: 'password_verification_work',
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('SELECT phase FROM password_admission_rollout_state')) {
+        return { rows: [{ phase: 'draining' }], rowCount: 1 }
+      }
+      if (sql.includes('count(*)::integer AS active_count')) {
+        return { rows: [{ active_count: 0 }], rowCount: 1 }
+      }
+      if (sql.includes('password_admission_rollout_is_ready')) {
+        return { rows: [{ ready: true }], rowCount: 1 }
+      }
+      if (sql.includes('SELECT version FROM schema_migrations')) {
+        return { rows: appliedVersions, rowCount: appliedVersions.length }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const release = vi.fn()
+
+    await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+
+    const statements = query.mock.calls.map(([sql]) => sql)
+    const fenceIndex = statements.findIndex(sql =>
+      sql.includes('UPDATE password_admission_rollout_state')
+    )
+    const firstCommit = statements.findIndex(sql => sql === 'COMMIT')
+    const drainRead = statements.findIndex(sql => sql.includes('count(*)::integer AS active_count'))
+    const schemaBegin = statements.findIndex((sql, index) => index > firstCommit && sql === 'BEGIN')
+    const migrationGuc = statements.findIndex(sql =>
+      sql.includes("SET LOCAL app.password_admission_rollout_migration = 'v2'")
+    )
+
+    const fenceLockWait = statements.indexOf("SET LOCAL lock_timeout = '60s'")
+    const fenceStatementWait = statements.indexOf("SET LOCAL statement_timeout = '60s'")
+    const passwordReceipt = query.mock.calls.findIndex(
+      ([sql, values]: unknown[]) =>
+        String(sql).includes('INSERT INTO schema_migrations(version)') &&
+        Array.isArray(values) &&
+        values[0] === migration.version
+    )
+    const schemaCommit = statements.findIndex(
+      (sql, index) => index > schemaBegin && sql === 'COMMIT'
+    )
+
+    expect(fenceIndex).toBeGreaterThan(-1)
+    // Dev's 60-second fence wait is not cut short by the migration session's
+    // ordinary statement bound.
+    expect(fenceLockWait).toBeGreaterThan(-1)
+    expect(fenceStatementWait).toBeGreaterThan(fenceLockWait)
+    expect(fenceIndex).toBeGreaterThan(fenceStatementWait)
+    expect(firstCommit).toBeGreaterThan(fenceIndex)
+    expect(drainRead).toBeGreaterThan(firstCommit)
+    expect(schemaBegin).toBeGreaterThan(drainRead)
+    expect(migrationGuc).toBeGreaterThan(schemaBegin)
+    // 0130 is applied in the dev batch, under the rollout GUC, before its COMMIT.
+    expect(passwordReceipt).toBeGreaterThan(migrationGuc)
+    expect(schemaCommit).toBeGreaterThan(passwordReceipt)
     expect(release).toHaveBeenCalledOnce()
   })
 

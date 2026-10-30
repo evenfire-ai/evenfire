@@ -20,7 +20,6 @@ const serviceMock = vi.hoisted(() => ({
   listAllowedServersForUser: vi.fn(),
   resolveServerConnectionForUser: vi.fn(),
   resolveHostConnectionForUser: vi.fn(),
-  resolveArtifactReadHostConnectionForUser: vi.fn(),
   validateRpcRequest: vi.fn(),
   forwardRpcToServer: vi.fn(),
   forwardHostMessageToHost: vi.fn(),
@@ -49,19 +48,8 @@ const controlApiMock = vi.hoisted(() => ({
       this.name = 'ControlApiHostAccessRejectedError'
     }
   },
-  ControlApiHostRpcAdmissionError: class extends Error {
-    constructor(
-      readonly status: 429 | 503,
-      readonly body: { error: string; retryAfterSeconds?: number },
-      readonly headers: Record<string, string>
-    ) {
-      super(`Control API Host-RPC admission returned ${status}`)
-      this.name = 'ControlApiHostRpcAdmissionError'
-    }
-  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
-  requestHostRpcAdmission: async () => undefined,
   requestHostWakeFromControlApi: vi.fn(),
 }))
 
@@ -127,7 +115,6 @@ const originalUpstreamTimeoutMs = config.upstreamTimeoutMs
 beforeEach(() => {
   vi.clearAllMocks()
   serviceMock.resolveHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
-  serviceMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
   controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
     kind: 'active',
     wakeGeneration: null,

@@ -8,9 +8,7 @@ import {
   requireRpcAuth,
 } from '../middleware/auth.js'
 import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
-import { ControlApiHostVersionMismatchError } from '../services/controlApiVersionError.js'
 import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
-import { admitLegacyHostRpcRequest } from '../services/hostRpcAdmission.js'
 import {
   UpstreamHostError,
   forwardHostStatus,
@@ -81,8 +79,6 @@ export function createRpcHostStatusStreamRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef } = getHostRpcPreflight(req)
-
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -220,10 +216,6 @@ export function createRpcHostStatusStreamRouter(): Router {
           cleanup('client-disconnect')
         })
       } catch (error) {
-        if (!res.headersSent && error instanceof ControlApiHostVersionMismatchError) {
-          next(error)
-          return
-        }
         console.warn(
           `[RPC_PROXY] host status stream setup failed host=${String(req.params.hostRef || '').trim()} error=${
             error instanceof Error ? error.message : String(error)

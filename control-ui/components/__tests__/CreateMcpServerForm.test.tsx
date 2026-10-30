@@ -11,6 +11,9 @@ import { CreateMcpServerForm } from '../CreateMcpServerForm'
 import { ToastProvider } from '../Toast'
 
 // vi.mock is hoisted before imports; factory runs lazily so references to `api` are safe.
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}))
 vi.mock('../../lib/api', async importOriginal => {
   const actual = await importOriginal<typeof import('../../lib/api')>()
   const { buildContextResource } = await import('../../test/fixtures/contextResource')
@@ -24,6 +27,9 @@ vi.mock('../../lib/api', async importOriginal => {
     ...actual,
     apiSend: vi.fn().mockResolvedValue({}),
     createMcpServer: vi.fn().mockResolvedValue({ metadata: { name: 'test-server' } }),
+    listMcpSecrets: vi.fn().mockResolvedValue({
+      items: [{ name: 'shared-credentials', uid: 'shared-uid', keys: ['api-key'] }],
+    }),
     createMcpSecret: vi.fn().mockResolvedValue({
       name: 'test-credentials',
       namespace: 'mcp-server',
@@ -960,5 +966,66 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     // Rollback must NOT fire on success
     expect(api.deleteMcpSecret).not.toHaveBeenCalled()
     expect(screen.getByText('Connector created successfully.')).toBeInTheDocument()
+  })
+})
+
+describe('CreateMcpServerForm — reusable Secrets', () => {
+  async function prepareExisting() {
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+    await fillIdentity()
+    continueToSecrets()
+    fireEvent.click(screen.getByRole('radio', { name: /Use an existing Secret/ }))
+    await waitFor(() => expect(screen.getByLabelText(/^Existing Secret/)).toBeEnabled())
+    fireEvent.click(screen.getByLabelText(/^Existing Secret/))
+    fireEvent.click(await screen.findByRole('option', { name: 'shared-credentials' }))
+  }
+  it('creates a connector referencing stored keys without requesting or writing values', async () => {
+    await prepareExisting()
+    expect(screen.queryByPlaceholderText('sk-...')).not.toBeInTheDocument()
+    expect(screen.getByLabelText(/^Environment variable 1/)).toHaveValue('API_KEY')
+    fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
+    await waitFor(() => expect(api.createMcpServer).toHaveBeenCalledOnce())
+    expect(api.createMcpServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        spec: expect.objectContaining({
+          envSecret: {
+            name: 'shared-credentials',
+            keys: [{ secretKey: 'api-key', envVar: 'API_KEY' }],
+          },
+        }),
+      })
+    )
+    expect(api.listMcpSecrets).toHaveBeenCalledTimes(2)
+    expect(api.createMcpSecret).not.toHaveBeenCalled()
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+  })
+  it('keeps a shared Secret when connector creation fails', async () => {
+    vi.mocked(api.createMcpServer).mockRejectedValueOnce(new Error('connector rejected'))
+    await prepareExisting()
+    fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('connector rejected')
+    expect(api.createMcpSecret).not.toHaveBeenCalled()
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+  })
+  it('checks the selected Secret identity before creating an access scope or connector', async () => {
+    await prepareExisting()
+    vi.mocked(api.listMcpSecrets).mockResolvedValueOnce({
+      items: [{ name: 'shared-credentials', uid: 'replaced-uid', keys: ['api-key'] }],
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be verified')
+    expect(api.apiSend).not.toHaveBeenCalled()
+    expect(api.createMcpServer).not.toHaveBeenCalled()
+    expect(api.createMcpSecret).not.toHaveBeenCalled()
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Create connector' })).toBeDisabled()
+  })
+  it('blocks invalid and colliding environment destinations', async () => {
+    await prepareExisting()
+    fireEvent.change(screen.getByLabelText(/^Environment variable 1/), {
+      target: { value: 'NODE_OPTIONS' },
+    })
+    expect(screen.getByRole('button', { name: 'Create connector' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('runtime')
   })
 })

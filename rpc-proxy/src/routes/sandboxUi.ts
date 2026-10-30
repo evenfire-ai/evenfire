@@ -15,7 +15,6 @@ import {
   trustedEdgeActionContextHeader,
 } from '../routeActionBindingV2.js'
 import { startActiveViewLease } from '../services/activeViewLease.js'
-import { admitLegacySessionCreation } from '../services/controlApiRestService.js'
 import { normalizeViewPath } from '../services/sandboxUiPath.js'
 import { listSandboxUiApps, lookupSandboxUiRegistry } from '../services/sandboxUiRegistry.js'
 import {
@@ -391,20 +390,6 @@ export function createSandboxUiSessionRouter(): Router {
       }
       const userId = req.auth!.sub
       const teamId = teamIdForSandboxUiRegistry(req)
-
-      const admission = await admitLegacySessionCreation(extractAuthToken(req))
-      if (!admission.allowed) {
-        res.setHeader('Retry-After', String(admission.retryAfterSeconds))
-        res.setHeader('Cache-Control', 'no-store')
-        for (const [name, value] of Object.entries(admission.headers)) {
-          res.setHeader(name, value)
-        }
-        res.status(admission.status).json({
-          error: admission.status === 429 ? 'Too Many Requests' : 'rate_limit_unavailable',
-          retryAfterSeconds: admission.retryAfterSeconds,
-        })
-        return
-      }
 
       const result = await lookupSandboxUiRegistry(recipeNs, recipeName, userId, teamId)
       switch (result.kind) {

@@ -44,18 +44,15 @@ grep -q 'applyPendingPr1Migrations' "$DB_FILE" || \
 grep -q 'CREATE INDEX CONCURRENTLY' "$INDEX_PLAN_FILE" || \
   fail "existing-table indexes are not prepared concurrently"
 
-index_migrations='0130_user_access_foundation|0132_catalog_utf8_ordering'
-index_count="$(grep -Ec "^    migrationVersion: '($index_migrations)'" "$INDEX_PLAN_FILE")"
-[ "$index_count" = "25" ] || fail "expected 25 PR1 online indexes, found $index_count"
+index_count="$(grep -c "^    migrationVersion: '013[13]_" "$INDEX_PLAN_FILE")"
+[ "$index_count" = "25" ] || fail "expected 25 online indexes, found $index_count"
 
 grep -q 'activeDeadlineSeconds' "$DEPLOY_FILE" || \
   fail "migration Job has no active deadline"
-grep -q -- '--cascade=foreground' "$DEPLOY_FILE" || \
+grep -q 'DeleteOptions.*propagationPolicy":"Foreground' "$DEPLOY_FILE" || \
   fail "migration timeout does not use foreground deletion"
 grep -q 'wait --for=delete' "$DEPLOY_FILE" && grep -q 'job-name=' "$DEPLOY_FILE" || \
   fail "migration timeout does not prove pod termination"
-grep -q 'verify_active_job_identity' "$DEPLOY_FILE" || \
-  fail "existing active migration Job identity is not verified"
 
 fixture_root="$(mktemp -d)"
 trap 'rm -rf "$fixture_root"' EXIT
@@ -70,6 +67,8 @@ set -euo pipefail
 mode="${TEST_MODE:?}"
 capture="${TEST_JOB_CAPTURE:?}"
 log_file="${TEST_KUBECTL_LOG:?}"
+fixture_uid="11111111-1111-1111-1111-111111111111"
+args="$*"
 printf '%s\n' "$*" >>"$log_file"
 if [[ "${1:-}" == --context=* ]]; then shift; fi
 
@@ -114,7 +113,15 @@ if [[ "${1:-}" == "get" && "${2:-}" == "pvc" ]]; then exit 0; fi
 if [[ "${1:-}" == "apply" || "${1:-}" == "rollout" ]]; then cat >/dev/null || true; exit 0; fi
 if [[ "${1:-}" == "get" && "${2:-}" == "secret" ]]; then exit 0; fi
 if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
-  if [[ "$mode" == active-* || "$mode" == queued-* || "$mode" == terminal-* ]]; then
+  if [[ "$mode" == "create-replaced-before-wait" && -f "$capture.replaced" && "$args" == *"-o json"* ]]; then
+    ruby -rjson -e '
+      job = JSON.parse(STDIN.read)
+      job["metadata"]["annotations"]["clerum.io/migration-configuration-sha256"] = "replaced"
+      puts JSON.generate(job)
+    ' <"$capture"
+    exit 0
+  fi
+  if [[ "$mode" == active-* || "$mode" == queued-* || "$mode" == terminal-* || "$mode" == attach-* ]]; then
     if [[ "$mode" == "active-status-error" && "$*" == *"-o json"* ]]; then exit 2; fi
     if [[ "$*" == *"-o json"* ]]; then cat "$capture"; exit 0; fi
     exit 0
@@ -132,6 +139,14 @@ if [[ "${1:-}" == "create" ]]; then
     exit 1
   fi
   cat >"$capture"
+  if [[ "$mode" == "create-replaced-before-wait" ]]; then
+    : >"$capture.replaced"
+  fi
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    printf '%s\n' "$fixture_uid"
+  else
+    printf 'job.batch/control-api-db-migrate created\n'
+  fi
   exit 0
 fi
 if [[ "${1:-}" == "logs" ]]; then
@@ -150,8 +165,24 @@ if [[ "${1:-}" == "delete" && "${2:-}" == "job" ]]; then
   if [[ "$mode" == "timeout-delete-fails" ]]; then exit 1; fi
   exit 0
 fi
+if [[ "${1:-}" == "delete" && "${2:-}" == "--raw" ]]; then
+  body_path="${!#}"
+  body="$(cat "$body_path")"
+  printf '%s' "$body" >"$capture.delete-body"
+  if [[ "$mode" == "timeout-delete-fails" ]]; then exit 1; fi
+  if [[ "$mode" == "owner-replaced" && \
+    "$body" == *'"preconditions":{"uid":"'"$fixture_uid"'"}'* ]]; then
+    printf 'Error from server (Conflict): Precondition failed: UID in precondition: %s, UID in object meta: 22222222-2222-2222-2222-222222222222\n' \
+      "$fixture_uid" >&2
+    exit 1
+  fi
+  exit 0
+fi
 if [[ "${1:-}" == "wait" ]]; then
-  if [[ "$*" == *"--for=condition=complete"* && "$mode" == timeout-* ]]; then exit 1; fi
+  if [[ "$*" == *"--for=condition=complete"* ]] && \
+    [[ "$mode" == timeout-* || "$mode" == attach-wait-fails || "$mode" == owner-replaced ]]; then
+    exit 1
+  fi
   if [[ "$*" == *"--for=delete"* && "$mode" == timeout-cleanup-fails ]]; then exit 1; fi
   if [[ "$*" == *"--for=delete"* && "$mode" == timeout-job-wait-fails && "$*" == *"job/"* ]]; then exit 1; fi
   if [[ "$*" == *"--for=delete"* && "$mode" == timeout-shared-deadline && "$*" == *"job/"* ]]; then sleep 2; fi
@@ -173,7 +204,10 @@ STUB
 chmod +x "$fixture_root/kubectl"
 
 run_fixture() {
-  TEST_MODE="$1" TEST_JOB_CAPTURE="$capture" TEST_KUBECTL_LOG="$log_file" \
+  # The script suffixes the Job name with GITHUB_RUN_ID or MIGRATION_JOB_SUFFIX;
+  # clear both so the fixtures see the same Job name locally and in CI.
+  env -u GITHUB_RUN_ID -u MIGRATION_JOB_SUFFIX \
+    TEST_MODE="$1" TEST_JOB_CAPTURE="$capture" TEST_KUBECTL_LOG="$log_file" \
     PATH="$fixture_root:$PATH" CONTEXT=d34-context ALLOWED_CONTEXTS=d34-context \
     bash "$DEPLOY_FILE" --overlay "$overlay" 2>&1
 }
@@ -209,6 +243,20 @@ grep -q 'wait --for=condition=complete.*job/control-api-db-migrate' "$log_file" 
 if grep -Eq 'delete job control-api-db-migrate|create -f -' "$log_file"; then
   fail "matching queued migration Job was deleted or recreated"
 fi
+
+# An attached observer must never delete a Job it did not create: the owner's
+# active deadline bounds the wait, and this caller only reports the failure.
+: >"$log_file"
+attach_output="$(expect_fixture_failure 'attached migration Job wait' \
+  run_fixture attach-wait-fails)"
+[[ "$attach_output" == *'was not created by this caller; leaving it to its active deadline'* ]] || \
+  fail "attached migration Job wait did not report observer ownership"
+grep -q 'wait --for=condition=complete' "$log_file" || \
+  fail "attached migration Job was not awaited (witness)"
+if grep -Eq '(^| )delete (job|--raw)' "$log_file"; then
+  fail "attached migration Job was deleted by an observer"
+fi
+
 cp "$capture" "$fixture_root/mismatched.json"
 ruby -rjson -e '
   job = JSON.parse(File.read(ARGV.fetch(0)))
@@ -372,11 +420,45 @@ if run_fixture create-race-mismatch >/dev/null; then
 fi
 mv "$fixture_root/race-matched.json" "$capture"
 
+# A caller that created the Job must not wait on an object another caller
+# replaced between the create and the wait.
+: >"$log_file"
+replaced_before_wait_output="$(expect_fixture_failure 'migration Job replaced before wait' \
+  run_fixture create-replaced-before-wait)"
+[[ "$replaced_before_wait_output" == *'identity does not match immediately before wait'* ]] || \
+  fail "migration Job replaced before wait was not rejected"
+grep -q 'create -f -' "$log_file" || \
+  fail "replaced-before-wait fixture did not create the Job (witness)"
+if grep -q -- '--for=condition=complete' "$log_file"; then
+  fail "migration Job replaced before wait was still awaited"
+fi
+rm -f "$capture.replaced"
+
+# The owner cleans up by UID: a precondition failure means another caller owns
+# the Job name now, so this caller must not delete it.
+: >"$log_file"
+owner_replaced_output="$(expect_fixture_failure 'migration Job replaced before cleanup' \
+  run_fixture owner-replaced)"
+[[ "$owner_replaced_output" == *'was replaced or removed by another caller; not deleting it'* ]] || \
+  fail "replaced migration Job cleanup did not fail closed"
+grep -q 'delete --raw /apis/batch/v1/namespaces/control-plane/jobs/control-api-db-migrate -f ' "$log_file" || \
+  fail "owner cleanup did not issue a raw Job deletion (witness)"
+replaced_body="$(cat "$capture.delete-body")"
+[[ "$replaced_body" == *'"propagationPolicy":"Foreground"'* ]] || \
+  fail "owner cleanup DELETE body did not request foreground propagation"
+[[ "$replaced_body" == *'"preconditions":{"uid":"11111111-1111-1111-1111-111111111111"}'* ]] || \
+  fail "owner cleanup DELETE body did not carry the created UID"
+
 : >"$log_file"
 timeout_output="$(expect_fixture_failure 'migration client timeout' \
   run_fixture timeout-cleanup-succeeds)"
-grep -q 'delete job control-api-db-migrate.*--cascade=foreground.*--wait=false' "$log_file" || \
-  fail "client timeout did not issue foreground Job deletion"
+grep -q 'delete --raw /apis/batch/v1/namespaces/control-plane/jobs/control-api-db-migrate -f ' "$log_file" || \
+  fail "client timeout did not issue a raw Job deletion"
+timeout_body="$(cat "$capture.delete-body")"
+[[ "$timeout_body" == *'"propagationPolicy":"Foreground"'* ]] || \
+  fail "client timeout DELETE body did not request foreground propagation"
+[[ "$timeout_body" == *'"preconditions":{"uid":"11111111-1111-1111-1111-111111111111"}'* ]] || \
+  fail "client timeout DELETE body did not carry the created UID"
 grep -Eq 'wait --for=delete --timeout=(59|60)s job/control-api-db-migrate' "$log_file" || \
   fail "client timeout did not bound Job termination proof"
 grep -Eq 'wait --for=delete --timeout=(59|60)s pod -l job-name=control-api-db-migrate' "$log_file" || \

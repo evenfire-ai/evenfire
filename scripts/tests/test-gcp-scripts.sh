@@ -314,7 +314,11 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   manifest="$(cat)"
   printf '%s' "$manifest" >"$JOB_CAPTURE"
   printf '%s\n' "$manifest" >>"$LOG_FILE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -343,7 +347,8 @@ STUB
     GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
     CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" >/dev/null 2>&1; then
-    if grep -q 'control-api-db-migrate-123456' "$log_file"; then
+    if grep -q 'control-api-db-migrate-123456' "$log_file" && \
+       grep -q '"activeDeadlineSeconds":300' "$log_file"; then
       pass "db migration job appends CI suffix to avoid name collisions"
     else
       fail "db migration job did not include CI suffix"
@@ -351,6 +356,20 @@ STUB
     fi
   else
     fail "db migration script failed in CI suffix test"
+  fi
+
+  # The policy fixes the Job deadline (300s); a wait budget below the policy
+  # client wait would let the Job outlive the caller, so it is refused.
+  local short_wait_output
+  short_wait_output="$(TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
+    CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
+    bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" --timeout 180s \
+    2>&1 || true)"
+  if [[ "$short_wait_output" == *'timeout must be at least 360s'* ]]; then
+    pass "db migration Job cannot outlive the configured wait budget"
+  else
+    fail "db migration accepted a wait budget shorter than the policy client wait"
+    printf '%s\n' "$short_wait_output"
   fi
 
   rm -rf "$tmp"
@@ -623,7 +642,11 @@ fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   cat >"$JOB_CAPTURE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -770,7 +793,11 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   job_manifest="$(cat)"
   printf '%s' "$job_manifest" >"$JOB_CAPTURE"
   printf 'JOB_MANIFEST %s\n' "$job_manifest" >>"$LOG_FILE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -828,7 +855,8 @@ STUB
      grep -q "relation.relkind IN ('r', 'p', 'v', 'm')" "$log_file" && \
      grep -q 'JOB_MANIFEST.*DATABASE_URL' "$log_file" && \
      grep -q 'JOB_MANIFEST.*control-api-config' "$log_file" && \
-     grep -q 'JOB_MANIFEST.*CONTROL_API_PG_CONNECTION_STRING.*"value":""' "$log_file" && \
+     grep -q 'JOB_MANIFEST.*{"name":"CONTROL_API_PG_CONNECTION_STRING"}' "$log_file" && \
+     ! grep -q 'JOB_MANIFEST.*{"name":"CONTROL_API_PG_CONNECTION_STRING","value"' "$log_file" && \
      grep -q 'JOB_MANIFEST.*CONTROL_API_MIGRATION_PG_HOST' "$log_file" && \
      grep -q 'JOB_MANIFEST.*control-postgres.*POSTGRES_PASSWORD' "$log_file" && \
      grep -q -- '--context=fake-context get secret control-postgres -n control-plane' "$log_file" && \
@@ -950,7 +978,11 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
     echo "unexpected pvc create" >&2
     exit 98
   fi
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -1095,7 +1127,11 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
     exit 0
   fi
   printf 'JOB_CREATE\n%s\n' "$manifest" >>"$LOG_FILE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -1471,16 +1507,20 @@ assert_runtime_role_provisioning_script() {
 }
 
 assert_db_migration_context_fails_closed() {
-  local missing_context denied_context
+  local missing_context denied_context invalid_timeout
   missing_context="$(bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/minikube 2>&1 || true)"
   denied_context="$(CONTEXT=denied ALLOWED_CONTEXTS=allowed \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/minikube 2>&1 || true)"
+  invalid_timeout="$(CONTEXT=allowed ALLOWED_CONTEXTS=allowed \
+    bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/minikube \
+      --timeout 0s 2>&1 || true)"
 
   if [[ "$missing_context" == *'set CONTEXT to the target kube-context'* ]] && \
-     [[ "$denied_context" == *'CONTEXT=denied is not in ALLOWED_CONTEXTS'* ]]; then
-    pass "db migration context authority fails closed"
+     [[ "$denied_context" == *'CONTEXT=denied is not in ALLOWED_CONTEXTS'* ]] && \
+     [[ "$invalid_timeout" == *'timeout must be at least 360s'* ]]; then
+    pass "db migration context and deadline authority fail closed"
   else
-    fail "db migration context authority did not fail closed"
+    fail "db migration context or deadline validation did not fail closed"
   fi
 }
 
@@ -1545,6 +1585,7 @@ assert_control_api_runtime_access_contract_is_exact() {
      grep -qx $'gfs_desktop_operator_links\tlink_lifecycle' "$profile_file" && \
      grep -qx $'desktop_user_retirement_operations\tlink_lifecycle' "$profile_file" && \
      grep -qx $'password_identifier_state\tlegacy_dml' "$profile_file" && \
+     grep -qx $'password_admission_rollout_state\tnone' "$profile_file" && \
      grep -qx $'password_verification_pace\tlegacy_dml' "$profile_file" && \
      grep -qx $'password_verification_work\tinsert_delete' "$profile_file" && \
      [[ "$sequence_count" == "9" && "$sequence_duplicate_count" == "0" && "$sequence_invalid_count" == "0" ]] && \

@@ -713,6 +713,8 @@ export type PasswordAdmissionDenialReason =
   | 'source_rate'
   | 'identifier_attempts'
   | 'identifier_cooldown'
+  | 'identifier_migration_hold'
+  | 'identifier_operation_busy'
   | 'global_pace'
   | 'verification_busy'
   | 'authority_failure'

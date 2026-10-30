@@ -812,10 +812,9 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
       })
     }
     if (profile === 'high-cardinality') {
-      for (const requiredIndex of [
-        'operational_relationship_source_idx',
-        'operational_resource_index_pkey',
-      ]) {
+      // The relationship primary key covers source lookups; P-12 removed the
+      // duplicate source index.
+      for (const requiredIndex of ['operational_resource_index_pkey']) {
         expect(profileIndexes.has(requiredIndex), requiredIndex).toBe(true)
       }
     }

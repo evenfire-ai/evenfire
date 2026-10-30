@@ -12,7 +12,7 @@ export function hostMessageAdmissionBucketKey(verifiedSubject: string): string {
 
 export type HostMessageAdmission = StrictFixedWindowAdmission
 
-/** Shared authority for legacy messages and the later v2 chat.message.invoke checkpoint. */
+/** Admission authority for V2 `chat.message.invoke` messages. */
 export async function admitHostMessage(
   verifiedSubject: string,
   check: typeof checkAndIncrement = checkAndIncrement

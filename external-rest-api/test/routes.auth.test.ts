@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { randomUUID } from 'node:crypto'
 import request from 'supertest'
 import { externalRestPublicErrorHandler } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
@@ -10,6 +11,7 @@ const authServiceMock = vi.hoisted(() => ({
   loginWithPassword: vi.fn(),
   requestPasswordReset: vi.fn(),
   logoutUserSession: vi.fn(),
+  renewUserSession: vi.fn(),
 }))
 
 vi.mock('../src/services/authService.js', () => authServiceMock)
@@ -28,6 +30,7 @@ describe('routes/auth password-login', () => {
     authServiceMock.loginWithPassword.mockReset()
     authServiceMock.requestPasswordReset.mockReset()
     authServiceMock.logoutUserSession.mockReset()
+    authServiceMock.renewUserSession.mockReset()
   })
 
   it.each([
@@ -76,6 +79,37 @@ describe('routes/auth password-login', () => {
 
     expect(res.status).toBe(401)
     expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('answers a Google identity refused by control-api like a retired account', async () => {
+    authServiceMock.loginWithGoogle.mockReset()
+    authServiceMock.loginWithGoogle.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'validly-shaped-test-token' })
+
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('keeps any other Google login 401 on the sanitized public envelope', async () => {
+    authServiceMock.loginWithGoogle.mockReset()
+    authServiceMock.loginWithGoogle.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 401, { error: 'session_revoked' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'validly-shaped-test-token' })
+
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(401)
+    expect(res.body).not.toEqual({ error: 'Unauthorized' })
+    expect(res.body.error).toEqual(expect.objectContaining({ code: expect.any(String) }))
   })
 
   it('keeps password setup state opaque on password-login', async () => {
@@ -165,7 +199,7 @@ describe('routes/auth password-login', () => {
     )
   })
 
-  it('delegates Google verification behind the Control API limiter with trusted client IP', async () => {
+  it('delegates Google verification with the trusted client IP', async () => {
     authServiceMock.loginWithGoogle.mockResolvedValueOnce({
       token: 'google-session-test-token',
       me: { id: 'user-1', email: 'user@example.test' },
@@ -181,6 +215,27 @@ describe('routes/auth password-login', () => {
       { idToken: 'opaque-test-token' },
       '198.51.100.52'
     )
+  })
+
+  it('forwards more than ten session renewals without a local rate limit', async () => {
+    const session = randomUUID()
+    authServiceMock.renewUserSession.mockResolvedValue({
+      token: session,
+      expiresInSeconds: 3600,
+    })
+    const app = buildApp()
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const response = await request(app)
+        .post('/api/v1/auth/session/renew')
+        .set('authorization', `Bearer ${session}`)
+        .set('x-forwarded-for', '198.51.100.89')
+        .expect(200)
+      expect(response.body.expiresInSeconds).toBe(3600)
+      expect(response.headers['x-ratelimit-limit']).toBeUndefined()
+    }
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledTimes(12)
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(session, '198.51.100.89')
   })
 
   it('documents the password-reset limiter headers and client-IP contract', async () => {

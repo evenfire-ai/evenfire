@@ -14,6 +14,7 @@ export async function getLiveTeamMembership(
   options: {
     db?: Pick<DbClient, 'query'>
     budget?: AccessExecutionBudget
+    onDatabaseFailure?: (error: unknown) => unknown
   } = {}
 ): Promise<LiveTeamMembership | null> {
   const db = options.db ?? pool
@@ -24,9 +25,20 @@ export async function getLiveTeamMembership(
         AND tm.status = 'active'
       LIMIT 1`
   const values = [userId, teamId]
-  const result = options.budget
-    ? await runAccessDatabaseQuery(db, options.budget, text, values)
-    : await db.query(text, values)
+  let result
+  if (options.budget) {
+    result = await runAccessDatabaseQuery(db, options.budget, text, values, {
+      onDatabaseFailure: options.onDatabaseFailure,
+    })
+  } else if (options.onDatabaseFailure) {
+    try {
+      result = await db.query(text, values)
+    } catch (error) {
+      throw options.onDatabaseFailure(error)
+    }
+  } else {
+    result = await db.query(text, values)
+  }
   const row = result.rows[0] as { team_id: string; role: TeamRole } | undefined
   return row ? { teamId: row.team_id, role: row.role } : null
 }

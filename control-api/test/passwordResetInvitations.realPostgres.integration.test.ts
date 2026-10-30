@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import {
   createInvitationForTeams,
+  createPasswordSetupInvitationForUser,
   createSilentInvitationForTeams,
 } from '../src/services/directory/membership.js'
 import {
@@ -127,6 +128,40 @@ realPg('password reset issuance ownership on PostgreSQL 16', () => {
       { purpose: 'password_reset', teamNames: [] }
     )
     expect(sender).toHaveBeenCalledTimes(1)
+  })
+
+  it('resends password setup as a seven-day member invitation without changing the accepted row', async () => {
+    const user = await principal()
+    const acceptedExpiry = new Date(Date.now() + 9 * 24 * 60 * 60 * 1000)
+    const accepted = await local.query(
+      `INSERT INTO invitations
+         (email, invitee_name, role, token, status, purpose, accepted_at, accepted_user_id, expires_at)
+       VALUES ($1, 'Captured display name', 'member', $2, 'accepted', 'member_invitation', NOW(), $3, $4)
+       RETURNING id, expires_at`,
+      [user.email, randomBytes(12).toString('hex'), user.id, acceptedExpiry]
+    )
+    const acceptedRow = accepted.rows[0] as { id: string; expires_at: Date }
+
+    await expect(createPasswordSetupInvitationForUser(user.id)).resolves.toMatchObject({
+      sent: true,
+      email: user.email,
+    })
+
+    const invitationRows = await rows(user.email)
+    const resent = invitationRows.find(row => row.id !== acceptedRow.id)
+    expect(resent).toMatchObject({ purpose: 'member_invitation', status: 'pending' })
+    expect(resent.expires_at.getTime() - resent.created_at.getTime()).toBe(168 * 60 * 60 * 1000)
+    expect(invitationRows.find(row => row.id === acceptedRow.id)?.expires_at.getTime()).toBe(
+      acceptedRow.expires_at.getTime()
+    )
+    expect(sender).toHaveBeenCalledWith(
+      user.email,
+      resent.token,
+      null,
+      resent.created_at.toISOString(),
+      resent.expires_at.toISOString(),
+      { purpose: 'member_invitation', teamNames: [] }
+    )
   })
 
   it('uses the same real lock/insert in silent mode without dispatch', async () => {

@@ -72,7 +72,10 @@ const mockRateLimitPoolQuery = vi.fn(async (sql: unknown, params?: unknown[]) =>
 // pool only lends the long-lived advisory-lock client. A limiter statement on
 // the core pool is a wiring regression, so the core query rejects loudly.
 const mockCorePoolQuery = vi.fn(async (sql: unknown) => {
-  if (String(sql).includes('DELETE FROM password_identifier_state'))
+  if (
+    String(sql).includes('SET LOCAL synchronous_commit = on') ||
+    String(sql).includes('DELETE FROM password_identifier_state')
+  )
     return { rows: [], rowCount: 0 }
   throw new Error(`core pool must not serve the rate limiter: ${String(sql).slice(0, 40)}`)
 })
@@ -86,7 +89,15 @@ vi.mock('../src/db.js', () => ({
     query: (...args: unknown[]) =>
       mockRateLimitPoolQuery(args[0], args[1] as unknown[] | undefined),
   },
-  withTransaction: vi.fn(),
+  withTransaction: vi.fn(
+    (work: (db: { query: (sql: unknown) => Promise<unknown> }) => Promise<unknown>) =>
+      work({
+        query: sql =>
+          String(sql).includes('set_config')
+            ? Promise.resolve({ rows: [{ set_config: 'v2' }] })
+            : mockCorePoolQuery(sql),
+      })
+  ),
 }))
 
 describe('rateLimiterService', () => {
@@ -107,7 +118,7 @@ describe('rateLimiterService', () => {
     expect(
       mockRateLimitPoolQuery.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])
     ).toEqual(['INSERT', 'DELETE'])
-    expect(mockCorePoolQuery).toHaveBeenCalledExactlyOnceWith(
+    expect(mockCorePoolQuery).toHaveBeenCalledWith(
       expect.stringContaining('DELETE FROM password_identifier_state')
     )
   })

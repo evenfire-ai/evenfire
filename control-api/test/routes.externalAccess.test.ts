@@ -195,7 +195,8 @@ describe('external user-access contracts', () => {
     expect(response.body.error.code).toBe('invalid_session')
   })
 
-  it('stops a limited capability read before resolving the capability manifest', async () => {
+  it('serves capabilities without a per-user PG budget (dev users-family parity)', async () => {
+    // A denying PG limiter would surface as 429 if the capability read still charged one.
     rateLimiter.checkAndIncrement.mockResolvedValue({
       allowed: false,
       remaining: 0,
@@ -209,14 +210,10 @@ describe('external user-access contracts', () => {
       .get('/external/access/capabilities')
       .set('x-user-session-token', 'v1-session')
 
-    expect(response.status).toBe(429)
-    expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
-    expect(response.headers['retry-after']).toBeDefined()
-    expect(rateLimiter.checkAndIncrement).toHaveBeenCalledWith(
-      'external_access_capabilities:user:10000000-0000-4000-8000-000000000001',
-      10
-    )
-    expect(mocks.resolvePolicy).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(response.body.currentSessionContract).toBe('v1')
+    expect(mocks.resolvePolicy).toHaveBeenCalled()
+    expect(rateLimiter.checkAndIncrement).not.toHaveBeenCalled()
   })
 
   it('admits the mounted default twelve-family catalog at its complete producer cost', async () => {

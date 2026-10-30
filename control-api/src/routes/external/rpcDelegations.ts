@@ -7,11 +7,7 @@ import {
   type ExternalAuthedRequest,
   requireExternalSessionRateLimitContext,
 } from '../../middleware/externalSessionAuth.js'
-import {
-  externalUserRateLimitOptions,
-  requireAuthenticatedExternalUserRateLimitContext,
-} from '../../middleware/externalUserRateLimitPolicy.js'
-import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { requireAuthenticatedExternalUserRateLimitContext } from '../../middleware/externalUserRateLimitPolicy.js'
 import { authorizeActionV2 } from '../../services/access/actionAuthorizer.js'
 import {
   type RequestedActionContextV2,
@@ -150,7 +146,6 @@ export function createExternalRpcDelegationsRouter(gateway: K8sGateway): Router 
 
   router.post(
     '/external/rpc/delegations',
-    rateLimitMiddleware(externalUserRateLimitOptions(EXTERNAL_RPC_ADMISSION_CLASS, 'pre_auth')),
     attachAccessExecutionBudget,
     requireExternalSessionRateLimitContext({
       purpose: 'protected',
@@ -158,9 +153,6 @@ export function createExternalRpcDelegationsRouter(gateway: K8sGateway): Router 
       client: req => ({ version: req.header('x-evenfire-client-version') || undefined }),
     }),
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(
-      externalUserRateLimitOptions(EXTERNAL_RPC_ADMISSION_CLASS, 'authenticated')
-    ),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const policy = await resolveEffectiveUserAccessPolicy({

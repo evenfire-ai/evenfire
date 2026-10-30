@@ -19,6 +19,10 @@ import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscr
 import {
   applyPasswordAdmissionSchema,
   applyPasswordEvaluationRetentionSchema,
+  applyPasswordSuccessAdmissionSchema,
+  assertPasswordAdmissionRolloutReady,
+  passwordVerificationOwnerCount,
+  preparePasswordAdmissionRolloutFence,
 } from './services/auth/passwordAdmissionSchema.js'
 import { applyPasswordWorkOwnershipSchema } from './services/auth/passwordWorkOwnershipSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
@@ -130,6 +134,7 @@ type DbConnector = {
 
 const INIT_DB_LOCK_KEY_SQL = "hashtext('control-api-init-db-v1')::bigint"
 const migrationLogger = rootLogger.child({ module: 'database-migration' })
+const PASSWORD_SUCCESS_ADMISSION_MIGRATION = '0130_password_login_success_admission'
 
 type DbMigration = {
   version: string
@@ -6578,23 +6583,27 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyWorkflowScheduleConcurrencyPolicyMigration,
   },
   {
-    version: '0130_user_access_foundation',
+    version: '0130_password_login_success_admission',
+    apply: applyPasswordSuccessAdmissionSchema,
+  },
+  {
+    version: '0131_user_access_foundation',
     apply: applyUserAccessFoundationSchema,
   },
   {
-    version: '0131_invitation_delivery_commands',
+    version: '0132_invitation_delivery_commands',
     apply: applyInvitationDeliveryCommandFoundation,
   },
   {
-    version: '0132_catalog_utf8_ordering',
+    version: '0133_catalog_utf8_ordering',
     apply: applyCatalogUtf8OrderingSchema,
   },
   {
-    version: '0133_composable_catalog_revisions',
+    version: '0134_composable_catalog_revisions',
     apply: applyComposableCatalogRevisionSchema,
   },
   {
-    version: '0134_legacy_password_security_epoch_backfill',
+    version: '0135_legacy_password_security_epoch_backfill',
     apply: backfillLegacyPasswordSecurityEpochs,
   },
   {
@@ -6994,7 +7003,7 @@ async function applyPendingLegacyMigrations(db: DbClient): Promise<Set<string>> 
   const appliedVersions = await loadAppliedMigrationVersions(db)
 
   for (const migration of CONTROL_API_MIGRATIONS) {
-    if (migration.version > '0106_oauth_grants_owner_generalization') break
+    if (migration.version > PASSWORD_SUCCESS_ADMISSION_MIGRATION) break
     if (appliedVersions.has(migration.version)) continue
     if (migration.legacyVersions?.some(version => appliedVersions.has(version))) {
       await recordMigration(db, migration.version)
@@ -7006,6 +7015,89 @@ async function applyPendingLegacyMigrations(db: DbClient): Promise<Set<string>> 
     appliedVersions.add(migration.version)
   }
   return appliedVersions
+}
+
+async function preparePasswordAdmissionMigrationFence(
+  db: DbClient,
+  appliedVersions: Set<string>
+): Promise<boolean> {
+  if (appliedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)) return false
+
+  const result = await db.query(`
+    SELECT to_regclass('public.password_identifier_state') AS identifier_state,
+           to_regclass('public.password_verification_work') AS work_owner,
+           to_regclass('public.users') AS users
+  `)
+  const tables = result.rows[0] as
+    | { identifier_state: string | null; work_owner: string | null; users: string | null }
+    | undefined
+  if (!tables?.identifier_state) {
+    if (appliedVersions.size > 0 || tables?.users) {
+      throw new Error(
+        'password admission upgrade is blocked: pre-existing application schema or migration history has no identifier admission state to establish a legacy fence; ' +
+          'deploy the owner-aware release that applies migrations 0126_bug192_password_admission, 0127_password_evaluation_retention, and 0128_password_work_ownership, complete its Recreate rollout, and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission'
+      )
+    }
+    return false
+  }
+  if (!tables.work_owner) {
+    throw new Error(
+      'password admission upgrade is blocked: existing identifier state has no durable verifier owner; ' +
+        'deploy the release that applies migration 0128_password_work_ownership, complete its Recreate rollout, and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission'
+    )
+  }
+
+  const requiredAdmissionMigrations = [
+    '0126_bug192_password_admission',
+    '0127_password_evaluation_retention',
+    '0128_password_work_ownership',
+  ]
+  const requiredAdmissionMigrationReceipts = requiredAdmissionMigrations.flatMap(version => {
+    const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
+    return migration ? [version, ...(migration.legacyVersions ?? [])] : [version]
+  })
+  const receiptResult = await db.query(
+    `SELECT version FROM schema_migrations
+      WHERE version = ANY($1::text[])
+      /* password-admission-required-receipts */`,
+    [requiredAdmissionMigrationReceipts]
+  )
+  const recordedAdmissionMigrations = new Set(
+    receiptResult.rows.map(row => String((row as { version: string }).version))
+  )
+  const missingAdmissionMigrations = requiredAdmissionMigrations.filter(version => {
+    const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
+    return (
+      !migration ||
+      (!recordedAdmissionMigrations.has(version) &&
+        !migration.legacyVersions?.some(legacyVersion =>
+          recordedAdmissionMigrations.has(legacyVersion)
+        ))
+    )
+  })
+  if (missingAdmissionMigrations.length > 0) {
+    throw new Error(
+      'password admission upgrade is blocked: existing admission tables lack required migration receipts ' +
+        `${missingAdmissionMigrations.join(', ')}; complete the owner-aware Recreate rollout and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission`
+    )
+  }
+
+  // Dev waits up to 60 s for in-flight legacy verifiers here. The migration
+  // session's ordinary statement bound would cut that wait short, so this
+  // transaction alone raises it to the same 60 s.
+  await db.query("SET LOCAL lock_timeout = '60s'")
+  await db.query("SET LOCAL statement_timeout = '60s'")
+  await preparePasswordAdmissionRolloutFence(db)
+  return true
+}
+
+async function waitForPasswordVerifierDrain(db: DbClient): Promise<void> {
+  for (;;) {
+    if ((await passwordVerificationOwnerCount(db)) === 0) return
+    // The surrounding Kubernetes migration Job provides the established finite
+    // rollout deadline. Never clear or age-reclaim a durable owner here.
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
 }
 
 export async function initDb(db: DbConnector = pool): Promise<void> {
@@ -7021,9 +7113,38 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
     await client.query(`SELECT pg_advisory_lock(${INIT_DB_LOCK_KEY_SQL})`)
     locked = true
 
+    // Ensure the rollout fence is durably committed before the schema transaction
+    // can alter the old verifier's admission state. The session advisory lock is
+    // held across both phases and the owner drain, but no database transaction is.
     await client.query('BEGIN')
     inTransaction = true
+    await client.query('SET LOCAL synchronous_commit = on')
+    await ensureSchemaMigrationsTable(client)
+    const initialAppliedVersions = await loadAppliedMigrationVersions(client)
+    const drainLegacyVerifiers = await preparePasswordAdmissionMigrationFence(
+      client,
+      initialAppliedVersions
+    )
+    await client.query('COMMIT')
+    inTransaction = false
+
+    if (drainLegacyVerifiers) await waitForPasswordVerifierDrain(client)
+
+    await client.query('BEGIN')
+    inTransaction = true
+    await client.query('SET LOCAL synchronous_commit = on')
+    await client.query("SET LOCAL app.password_admission_rollout_migration = 'v2'")
     const appliedVersions = await applyPendingLegacyMigrations(client)
+    // The explicit readiness probe is meaningful after the migration row is
+    // visible in PostgreSQL. Lightweight migration fakes do not persist rows;
+    // startup still performs this probe through assertDbReady().
+    const completedVersions = await loadAppliedMigrationVersions(client)
+    if (
+      !initialAppliedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION) &&
+      completedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)
+    ) {
+      await assertPasswordAdmissionRolloutReady(client)
+    }
     await client.query('COMMIT')
     inTransaction = false
 
@@ -7068,21 +7189,18 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   if (missing.length) {
     throw new Error(`Control API database is not ready: missing migrations ${missing.join(', ')}`)
   }
+  if (applied.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)) {
+    await assertPasswordAdmissionRolloutReady(db)
+  }
 }
 
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
-  txPoolOrOptions: Pool | DbTransactionOptions = pool,
-  explicitOptions: DbTransactionOptions = {}
+  // Injectable only so the carrier's client lifecycle can be unit-tested against
+  // a fake Pool; production always uses the module-level core pool.
+  txPool: Pool = pool,
+  options: DbTransactionOptions = {}
 ): Promise<T> {
-  // Tests may inject a Pool to exercise client lifecycle behavior. Session
-  // persistence callers may provide a failure mapper so database errors retain
-  // typed provenance; cancellable callers use the same bounded pool with signal.
-  const isPool = typeof (txPoolOrOptions as Pool).connect === 'function'
-  const txPool = isPool ? (txPoolOrOptions as Pool) : pool
-  const options: DbTransactionOptions = isPool
-    ? explicitOptions
-    : (txPoolOrOptions as DbTransactionOptions)
   const signal = options.signal
   const mapDatabaseFailure = (error: unknown): unknown =>
     options.onDatabaseFailure ? options.onDatabaseFailure(error) : error

@@ -38,6 +38,15 @@ function isRetiredAccountLoginDenial(error: unknown): error is ControlApiError {
   return 'error' in error.body && error.body.error === 'membership_not_found'
 }
 
+// control-api answers 401 Unauthorized when it refuses the Google identity itself
+// (no email, or an unverified email).
+function isRejectedGoogleIdentity(error: unknown): error is ControlApiError {
+  if (!isControlApiStatus(error, 401) || !error.body || typeof error.body !== 'object') {
+    return false
+  }
+  return 'error' in error.body && error.body.error === 'Unauthorized'
+}
+
 type LoginResponse = {
   token: string
   me: unknown
@@ -96,6 +105,10 @@ export function createAuthRouter(): Router {
           return
         }
         res.status(403).json({ error: 'membership_not_found' })
+        return
+      }
+      if (isRejectedGoogleIdentity(error)) {
+        res.status(401).json({ error: 'Unauthorized' })
         return
       }
       next(error)

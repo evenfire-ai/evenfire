@@ -15,6 +15,8 @@ describe('AuthGate', () => {
       checkAuth: vi.fn(),
       login: vi.fn(),
       logout: vi.fn(),
+      signOutIncomplete: false,
+      retrySignOut: vi.fn(),
     })
     const view = render(
       <AuthGate>

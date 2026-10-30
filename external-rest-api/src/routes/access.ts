@@ -8,6 +8,7 @@ import {
   sendSanitizedControlApiPublicError,
 } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
+import { createRateLimiter } from '../middleware/rateLimit.js'
 
 const ACCESS_PUBLIC_STATUSES = new Set([400, 401, 403, 404, 409, 429, 503])
 const ACCESS_CATALOG_QUERY_FIELDS = ['families', 'limit', 'cursor'] as const
@@ -41,6 +42,14 @@ function forwardAccessError(error: unknown, res: Response, next: NextFunction): 
 export function createAccessRouter(): Router {
   const router = Router()
   router.use('/me/access', requireAuth)
+  const catalogRateLimit = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: 10,
+    keyFn: req => {
+      const userId = (req as AuthedRequest).auth?.userId
+      return userId ? `access-catalog:${userId}` : 'access-catalog:unknown'
+    },
+  })
 
   router.get('/me/access/capabilities', async (req: AuthedRequest, res, next) => {
     try {
@@ -53,7 +62,7 @@ export function createAccessRouter(): Router {
     }
   })
 
-  router.get('/me/access/catalog', async (req: AuthedRequest, res, next) => {
+  router.get('/me/access/catalog', catalogRateLimit, async (req: AuthedRequest, res, next) => {
     const query = accessCatalogQuery(req)
     if (!query) {
       sendPublicApiError(req, res, 400, 'invalid_request', 'The catalog query is not valid.')

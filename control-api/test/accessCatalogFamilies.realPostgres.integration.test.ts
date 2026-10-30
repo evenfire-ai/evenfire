@@ -336,6 +336,11 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       [teamId, config.sandboxNamespace]
     )
     await databasePool.query(
+      `INSERT INTO workflow_recipe_allowed_teams(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, 'catalog-recipe')`,
+      [teamId, config.sandboxNamespace]
+    )
+    await databasePool.query(
       `INSERT INTO workflow_runs(
          run_id, recipe_namespace, recipe_name, phase, actor_type, actor_id,
          team_id, trigger_source
@@ -1305,6 +1310,451 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       ])
       kubernetesApi.delete(siblingContext.plural, siblingContext.namespace, contextName)
       await indexer.reconcileSource(contextSource)
+    }
+  })
+
+  it('publishes only the relationships the caller reaches through its own paths', async () => {
+    const suffix = randomBytes(5).toString('hex')
+    const foreignTeamId = randomUUID()
+    const foreignContextName = `i7-foreign-context-${suffix}`
+    const foreignHostName = `i7-foreign-host-${suffix}`
+    const unownedHostName = `i7-unowned-host-${suffix}`
+    const foreignContextId = `${config.contextsNamespace}/${foreignContextName}`
+    const mcpLogicalId = `${config.mcpServersNamespace}/catalog-mcp`
+    const contextLogicalId = `${config.contextsNamespace}/catalog-context`
+    const sharedFilesystemLogicalId = `${config.sharedFilesystemsNamespace}/catalog-files`
+    const contextSource = operationalSourceSpecs.find(value => value.family === 'context')!
+    const hostSource = operationalSourceSpecs.find(value => value.family === 'host')!
+    const foreignContext = fixture({
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      name: foreignContextName,
+      uid: randomUUID(),
+      spec: {
+        mcpServers: ['catalog-mcp'],
+        sharedFileSystems: [{ name: 'catalog-files', mountPath: '/workspace/foreign' }],
+      },
+    })
+    const foreignHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: foreignHostName,
+      uid: randomUUID(),
+      spec: { contextRef: foreignContextName },
+    })
+    const unownedHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: unownedHostName,
+      uid: randomUUID(),
+      spec: { contextRef: 'catalog-context' },
+    })
+
+    const relationshipInstanceId = async (input: {
+      sourceType: string
+      sourceId: string
+      relationshipType: string
+      targetType: string
+      targetId: string
+      mountPath?: string
+    }): Promise<string> => {
+      const result = await databasePool.query<{
+        relationship_instance_id: string
+        behavior_attributes: Record<string, unknown>
+      }>(
+        `SELECT relationship_instance_id, behavior_attributes
+           FROM operational_resource_relationships
+          WHERE environment_id = $1 AND source_type = $2 AND source_id = $3
+            AND relationship_type = $4 AND target_type = $5 AND target_id = $6
+          ORDER BY relationship_instance_id`,
+        [
+          environmentId,
+          input.sourceType,
+          input.sourceId,
+          input.relationshipType,
+          input.targetType,
+          input.targetId,
+        ]
+      )
+      const matches = input.mountPath
+        ? result.rows.filter(row => row.behavior_attributes.mountPath === input.mountPath)
+        : result.rows
+      expect(matches).toHaveLength(1)
+      return matches[0]!.relationship_instance_id
+    }
+    const catalogItem = async (family: CatalogFamily, logicalId: string) => {
+      const catalog = await buildAccessCatalog(
+        { session, families: [family], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(catalog.complete).toBe(true)
+      const item = catalog.items.find(value => value.resource.logicalId === logicalId)
+      expect(item).toBeDefined()
+      return item!
+    }
+    const instanceIds = (relationships: readonly { instanceId?: string }[]) =>
+      relationships.flatMap(relationship =>
+        relationship.instanceId ? [relationship.instanceId] : []
+      )
+
+    kubernetesApi.put(foreignContext.plural, foreignContext.namespace, foreignContext.object)
+    kubernetesApi.put(foreignHost.plural, foreignHost.namespace, foreignHost.object)
+    kubernetesApi.put(unownedHost.plural, unownedHost.namespace, unownedHost.object)
+    await indexer.reconcileSource(contextSource)
+    await indexer.reconcileSource(hostSource)
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'I7 Foreign Team')`, [
+      foreignTeamId,
+    ])
+    await databasePool.query(`INSERT INTO team_contexts(team_id, context_id) VALUES ($1, $2)`, [
+      foreignTeamId,
+      foreignContextName,
+    ])
+    await databasePool.query(`INSERT INTO team_agents(team_id, agent_name) VALUES ($1, $2)`, [
+      foreignTeamId,
+      foreignHostName,
+    ])
+
+    try {
+      const ownMcpEdge = await relationshipInstanceId({
+        sourceType: 'context',
+        sourceId: contextLogicalId,
+        relationshipType: 'includes_mcp_server',
+        targetType: 'mcp_server',
+        targetId: mcpLogicalId,
+      })
+      const ownHostEdge = await relationshipInstanceId({
+        sourceType: 'host',
+        sourceId: `${config.hostsNamespace}/catalog-host`,
+        relationshipType: 'uses_context',
+        targetType: 'context',
+        targetId: contextLogicalId,
+      })
+      const ownMountA = await relationshipInstanceId({
+        sourceType: 'context',
+        sourceId: contextLogicalId,
+        relationshipType: 'mounts_shared_filesystem',
+        targetType: 'shared_filesystem',
+        targetId: sharedFilesystemLogicalId,
+        mountPath: '/workspace/a',
+      })
+      const ownMountB = await relationshipInstanceId({
+        sourceType: 'context',
+        sourceId: contextLogicalId,
+        relationshipType: 'mounts_shared_filesystem',
+        targetType: 'shared_filesystem',
+        targetId: sharedFilesystemLogicalId,
+        mountPath: '/workspace/b',
+      })
+      const foreignMcpEdge = await relationshipInstanceId({
+        sourceType: 'context',
+        sourceId: foreignContextId,
+        relationshipType: 'includes_mcp_server',
+        targetType: 'mcp_server',
+        targetId: mcpLogicalId,
+      })
+      const foreignHostEdge = await relationshipInstanceId({
+        sourceType: 'host',
+        sourceId: `${config.hostsNamespace}/${foreignHostName}`,
+        relationshipType: 'uses_context',
+        targetType: 'context',
+        targetId: foreignContextId,
+      })
+      const foreignMountEdge = await relationshipInstanceId({
+        sourceType: 'context',
+        sourceId: foreignContextId,
+        relationshipType: 'mounts_shared_filesystem',
+        targetType: 'shared_filesystem',
+        targetId: sharedFilesystemLogicalId,
+        mountPath: '/workspace/foreign',
+      })
+      const unownedHostEdge = await relationshipInstanceId({
+        sourceType: 'host',
+        sourceId: `${config.hostsNamespace}/${unownedHostName}`,
+        relationshipType: 'uses_context',
+        targetType: 'context',
+        targetId: contextLogicalId,
+      })
+      expect(
+        new Set([ownMcpEdge, ownHostEdge, ownMountA, ownMountB, foreignMcpEdge, foreignHostEdge])
+          .size
+      ).toBe(6)
+
+      const mcpItem = await catalogItem('mcp_server', mcpLogicalId)
+      const mcpInstances = instanceIds(mcpItem.relationships)
+      expect(mcpInstances).toContain(ownMcpEdge)
+      expect(mcpInstances).toContain(ownHostEdge)
+      expect(mcpInstances).not.toContain(foreignMcpEdge)
+      expect(mcpInstances).not.toContain(foreignHostEdge)
+      expect(mcpInstances).not.toContain(unownedHostEdge)
+      expect(mcpItem.relationships.map(value => value.targetResourceId)).not.toContain(
+        `context:${foreignContextId}`
+      )
+
+      const sharedFilesystemItem = await catalogItem('shared_filesystem', sharedFilesystemLogicalId)
+      const sharedFilesystemInstances = instanceIds(sharedFilesystemItem.relationships)
+      expect(sharedFilesystemInstances).toContain(ownMountA)
+      expect(sharedFilesystemInstances).toContain(ownMountB)
+      expect(sharedFilesystemInstances).not.toContain(foreignMountEdge)
+
+      const contextItem = await catalogItem('context', contextLogicalId)
+      const contextInstances = instanceIds(contextItem.relationships)
+      expect(contextInstances).toContain(ownMcpEdge)
+      expect(contextInstances).toContain(ownMountA)
+      expect(contextInstances).not.toContain(unownedHostEdge)
+
+      for (const [item, capability] of [
+        [mcpItem, 'mcp_server.read'],
+        [sharedFilesystemItem, 'shared_filesystem.read'],
+      ] as const) {
+        expect(item.accessPaths.length).toBeGreaterThan(0)
+        for (const path of item.accessPaths) {
+          await expect(
+            resolveLiveAuthorization(
+              {
+                session,
+                requiredCapability: capability,
+                resource: canonicalResourceIdentity(item.resource),
+                requestedAccessPathId: path.accessPathId,
+              },
+              { transaction: transaction(databasePool), gateway }
+            )
+          ).resolves.toEqual(
+            expect.objectContaining({
+              status: 'allowed',
+              selectedPath: expect.objectContaining({ id: path.accessPathId }),
+            })
+          )
+        }
+      }
+
+      // A path's runtime/filesystemScope descriptors carry HMAC fingerprints
+      // rather than raw relationship ids, so the expected set is read from the
+      // bindings the same catalog paths authorize with, through the public live
+      // resolver. The property is unchanged: an item cannot publish an edge
+      // that is not on one of its own paths.
+      const publishedRelationshipFamilies: readonly (readonly [CatalogFamily, AccessCapability])[] =
+        [
+          ['host', 'host.read'],
+          ['context', 'context.read'],
+          ['mcp_server', 'mcp_server.read'],
+          ['workflow_recipe', 'workflow.read'],
+          ['shared_filesystem', 'shared_filesystem.read'],
+          ['sandbox_app', 'sandbox_app.read'],
+        ]
+      const unexplainedRelationships: string[] = []
+      const familiesWithPublishedRelationships = new Set<CatalogFamily>()
+      let checkedRelationships = 0
+      let checkedPaths = 0
+      for (const [family, readCapability] of publishedRelationshipFamilies) {
+        const catalog = await buildAccessCatalog(
+          { session, families: [family], limit: 100 },
+          { transaction: transaction(databasePool) }
+        )
+        expect(catalog.complete).toBe(true)
+        for (const item of catalog.items) {
+          const pathInstances = new Set<string>()
+          for (const path of item.accessPaths) {
+            const authorization = await resolveLiveAuthorization(
+              {
+                session,
+                requiredCapability: readCapability,
+                resource: canonicalResourceIdentity(item.resource),
+                requestedAccessPathId: path.accessPathId,
+              },
+              { transaction: transaction(databasePool), gateway }
+            )
+            expect(authorization).toEqual(
+              expect.objectContaining({
+                status: 'allowed',
+                selectedPath: expect.objectContaining({ id: path.accessPathId }),
+              })
+            )
+            if (authorization.status !== 'allowed') {
+              throw new Error(
+                `catalog path ${family}:${item.resource.logicalId}:${path.accessPathId} did not authorize`
+              )
+            }
+            checkedPaths += 1
+            for (const binding of authorization.operationalBindings) {
+              for (const relationship of binding.relationships) {
+                pathInstances.add(relationship.instanceId)
+              }
+            }
+          }
+          for (const relationship of item.relationships) {
+            if (!relationship.instanceId) continue
+            checkedRelationships += 1
+            familiesWithPublishedRelationships.add(family)
+            if (!pathInstances.has(relationship.instanceId)) {
+              unexplainedRelationships.push(
+                `${family}:${item.resource.logicalId}:${relationship.instanceId}`
+              )
+            }
+          }
+        }
+      }
+      expect(checkedRelationships).toBeGreaterThan(0)
+      expect(checkedPaths).toBeGreaterThan(0)
+      expect([...familiesWithPublishedRelationships].sort()).toEqual(
+        publishedRelationshipFamilies.map(([family]) => family).sort()
+      )
+      expect(unexplainedRelationships).toEqual([])
+
+      await databasePool.query(
+        `INSERT INTO team_members(team_id, user_id, role, status)
+         VALUES ($1, $2, 'member', 'active')`,
+        [foreignTeamId, userId]
+      )
+      try {
+        const joinedMcpItem = await catalogItem('mcp_server', mcpLogicalId)
+        const joinedInstances = instanceIds(joinedMcpItem.relationships)
+        expect(joinedInstances).toContain(foreignMcpEdge)
+        expect(joinedInstances).toContain(foreignHostEdge)
+        expect(joinedMcpItem.relationships.map(value => value.targetResourceId)).toContain(
+          `context:${foreignContextId}`
+        )
+      } finally {
+        await databasePool.query(`DELETE FROM team_members WHERE team_id = $1 AND user_id = $2`, [
+          foreignTeamId,
+          userId,
+        ])
+      }
+    } finally {
+      await databasePool.query(`DELETE FROM team_members WHERE team_id = $1 AND user_id = $2`, [
+        foreignTeamId,
+        userId,
+      ])
+      await databasePool.query(`DELETE FROM team_contexts WHERE team_id = $1`, [foreignTeamId])
+      await databasePool.query(`DELETE FROM team_agents WHERE team_id = $1`, [foreignTeamId])
+      await databasePool.query(`DELETE FROM teams WHERE id = $1`, [foreignTeamId])
+      kubernetesApi.delete(unownedHost.plural, unownedHost.namespace, unownedHostName)
+      kubernetesApi.delete(foreignHost.plural, foreignHost.namespace, foreignHostName)
+      kubernetesApi.delete(foreignContext.plural, foreignContext.namespace, foreignContextName)
+      await indexer.reconcileSource(contextSource)
+      await indexer.reconcileSource(hostSource)
+    }
+  })
+
+  it('fails a Host closed when its configured Context does not resolve', async () => {
+    const suffix = randomBytes(5).toString('hex')
+    const unresolvedHostName = `i7-unresolved-host-${suffix}`
+    const missingContextRef = `i7-missing-context-${suffix}`
+    const ambiguousContextName = `i7-amb-context-${suffix}`
+    const ambiguousAliasName = `i7-amb-alias-${suffix}`
+    const ambiguousHostName = `i7-amb-host-${suffix}`
+    const unresolvedHostId = `${config.hostsNamespace}/${unresolvedHostName}`
+    const ambiguousHostId = `${config.hostsNamespace}/${ambiguousHostName}`
+    const contextSource = operationalSourceSpecs.find(value => value.family === 'context')!
+    const hostSource = operationalSourceSpecs.find(value => value.family === 'host')!
+    const unresolvedHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: unresolvedHostName,
+      uid: randomUUID(),
+      spec: { contextRef: missingContextRef },
+    })
+    const ambiguousContext = fixture({
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      name: ambiguousContextName,
+      uid: randomUUID(),
+      spec: { mcpServers: [], sharedFileSystems: [] },
+    })
+    const ambiguousAlias = fixture({
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      name: ambiguousAliasName,
+      uid: randomUUID(),
+      spec: { contextId: ambiguousContextName, mcpServers: [], sharedFileSystems: [] },
+    })
+    const ambiguousHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: ambiguousHostName,
+      uid: randomUUID(),
+      spec: { contextRef: ambiguousContextName },
+    })
+
+    kubernetesApi.put(ambiguousContext.plural, ambiguousContext.namespace, ambiguousContext.object)
+    kubernetesApi.put(ambiguousAlias.plural, ambiguousAlias.namespace, ambiguousAlias.object)
+    kubernetesApi.put(unresolvedHost.plural, unresolvedHost.namespace, unresolvedHost.object)
+    kubernetesApi.put(ambiguousHost.plural, ambiguousHost.namespace, ambiguousHost.object)
+    await indexer.reconcileSource(contextSource)
+    await indexer.reconcileSource(hostSource)
+    await databasePool.query(
+      `INSERT INTO user_agents(user_id, agent_name) VALUES ($1, $2), ($1, $3)`,
+      [userId, unresolvedHostName, ambiguousHostName]
+    )
+
+    try {
+      for (const logicalId of [unresolvedHostId, ambiguousHostId]) {
+        await expect(
+          resolveLiveAuthorization(
+            {
+              session,
+              requiredCapability: 'host.read',
+              resource: canonicalResourceIdentity({
+                environmentId,
+                type: 'host',
+                logicalId,
+              }),
+            },
+            { transaction: transaction(databasePool), gateway }
+          )
+        ).resolves.toEqual({
+          status: 'unavailable',
+          dependencyClass: 'operational_resource_store',
+          retryable: true,
+        })
+      }
+
+      const hostCatalog = await buildAccessCatalog(
+        { session, families: ['host'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(hostCatalog.complete).toBe(false)
+      expect(hostCatalog.partialErrors).toEqual([
+        { producer: 'host', code: 'operational_source_unavailable', retryable: true },
+      ])
+      expect(hostCatalog.items.map(item => item.resource.logicalId)).not.toContain(unresolvedHostId)
+      expect(hostCatalog.items.map(item => item.resource.logicalId)).not.toContain(ambiguousHostId)
+      const resolvableHost = hostCatalog.items.find(
+        item => item.resource.logicalId === `${config.hostsNamespace}/catalog-host`
+      )
+      expect(resolvableHost).toBeDefined()
+      for (const path of resolvableHost!.accessPaths) {
+        await expect(
+          resolveLiveAuthorization(
+            {
+              session,
+              requiredCapability: 'host.read',
+              resource: canonicalResourceIdentity(resolvableHost!.resource),
+              requestedAccessPathId: path.accessPathId,
+            },
+            { transaction: transaction(databasePool), gateway }
+          )
+        ).resolves.toEqual(
+          expect.objectContaining({
+            status: 'allowed',
+            selectedPath: expect.objectContaining({ id: path.accessPathId }),
+          })
+        )
+      }
+    } finally {
+      await databasePool.query(
+        `DELETE FROM user_agents WHERE user_id = $1 AND agent_name = ANY($2::text[])`,
+        [userId, [unresolvedHostName, ambiguousHostName]]
+      )
+      kubernetesApi.delete(unresolvedHost.plural, unresolvedHost.namespace, unresolvedHostName)
+      kubernetesApi.delete(ambiguousHost.plural, ambiguousHost.namespace, ambiguousHostName)
+      kubernetesApi.delete(ambiguousAlias.plural, ambiguousAlias.namespace, ambiguousAliasName)
+      kubernetesApi.delete(
+        ambiguousContext.plural,
+        ambiguousContext.namespace,
+        ambiguousContextName
+      )
+      await indexer.reconcileSource(contextSource)
+      await indexer.reconcileSource(hostSource)
     }
   })
 

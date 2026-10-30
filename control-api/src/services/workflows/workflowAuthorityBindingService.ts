@@ -206,9 +206,13 @@ export async function requireWorkflowActionAuthority(input: {
 
 /**
  * Reuses the canonical action authorizer on the caller's repeatable-read write
- * transaction, then fences every database-owned revision component it read.
- * It performs no connection acquisition or external destination lookup while
- * the caller holds the approval row lock.
+ * transaction, then takes the user row before the session row and locks the
+ * session. `users` comes first so a decision serialises behind
+ * `revokeAllUserSessions`, which locks the same two tables in that order.
+ * Revision subjects are fenced by the caller: the approve path holds the
+ * approval prelock, and either decision's own `UPDATE` bumps the target under
+ * repeatable read. It performs no connection acquisition or external
+ * destination lookup while the caller holds the approval row lock.
  */
 export async function requireCurrentWorkflowApprovalAuthority(input: {
   db: DbClient
@@ -276,6 +280,20 @@ export async function requireCurrentWorkflowApprovalAuthority(input: {
     throw new WorkflowAuthorityError(409, 'access_path_stale')
   }
   try {
+    // The runtime's `legacy_dml` grant on `users` covers this row lock, and it
+    // is the same order `revokeAllUserSessions` uses, so a revocation that
+    // already owns the user row runs to completion before this decision takes
+    // its first lock.
+    const user = await input.db.query(
+      `SELECT id
+         FROM users
+        WHERE id = $1
+        FOR SHARE`,
+      [binding.userId]
+    )
+    if ((user.rowCount ?? 0) !== 1) {
+      throw new WorkflowAuthorityError(401, 'invalid_session')
+    }
     const session = await input.db.query(
       `SELECT sid
          FROM external_user_sessions
@@ -285,37 +303,6 @@ export async function requireCurrentWorkflowApprovalAuthority(input: {
     )
     if ((session.rowCount ?? 0) !== 1) {
       throw new WorkflowAuthorityError(401, 'invalid_session')
-    }
-    const userRevision = await input.db.query(
-      `SELECT user_id
-         FROM authorization_user_revisions
-        WHERE user_id = $1
-        FOR UPDATE`,
-      [binding.userId]
-    )
-    if ((userRevision.rowCount ?? 0) !== 1) {
-      throw new WorkflowAuthorityError(409, 'access_path_stale')
-    }
-    const memberships = await input.db.query(
-      `SELECT team_id
-         FROM team_members
-        WHERE user_id = $1 AND status = 'active'
-        ORDER BY team_id`,
-      [binding.userId]
-    )
-    const teamIds = memberships.rows.map(row => String((row as { team_id: unknown }).team_id))
-    if (teamIds.length > 0) {
-      const teamRevisions = await input.db.query(
-        `SELECT team_id
-           FROM authorization_team_revisions
-          WHERE team_id = ANY($1::uuid[])
-          ORDER BY team_id
-          FOR UPDATE`,
-        [teamIds]
-      )
-      if ((teamRevisions.rowCount ?? 0) !== teamIds.length) {
-        throw new WorkflowAuthorityError(409, 'access_path_stale')
-      }
     }
   } catch (error) {
     if (
@@ -380,6 +367,9 @@ async function readWorkflowTriggerAuthorityFence(input: {
   const { binding } = input.authority
   const { recipeNamespace, recipeName } = workflowTriggerIdentity(input.authority)
   const lock = input.lock ? ' FOR SHARE' : ''
+  // Only the membership rows are locked. The team revision counter they join
+  // is a derived value, and `FOR SHARE` without `OF` would lock that table too.
+  const membershipLock = input.lock ? ' FOR SHARE OF tm' : ''
   const session = await input.db.query(
     `SELECT u.lifecycle_state, s.session_version, s.current_jti, s.revoked_at,
             s.idle_expires_at, s.absolute_expires_at
@@ -410,13 +400,13 @@ async function readWorkflowTriggerAuthorityFence(input: {
        FROM team_members tm
        JOIN authorization_team_revisions atr ON atr.team_id = tm.team_id
       WHERE tm.user_id = $1 AND tm.status = 'active'
-      ORDER BY tm.team_id${lock}`,
+      ORDER BY tm.team_id${membershipLock}`,
     [binding.userId]
   )
   const resourceRevision = await input.db.query(
     `SELECT revision
        FROM authorization_resource_revisions
-      WHERE environment_id = $1 AND resource_type = 'workflow_recipe' AND resource_id = $2${lock}`,
+      WHERE environment_id = $1 AND resource_type = 'workflow_recipe' AND resource_id = $2`,
     [binding.resource.environmentId, binding.resource.logicalId]
   )
   if ((resourceRevision.rowCount ?? 0) !== 1) {
@@ -490,7 +480,8 @@ async function readWorkflowTriggerAuthorityFence(input: {
   // contender stale solely because the idempotency winner committed. Session,
   // membership, grant, resource, relationship, and source-state remain fenced
   // here; target, behavior, and expiry are retained by the validated
-  // delegation and phase-one authority verification.
+  // delegation and phase-one authority verification. Revision counters are read
+  // unlocked because every writer of theirs blocks on the raw rows above.
   const snapshot = JSON.parse(
     JSON.stringify({
       session: session.rows,

@@ -30,12 +30,15 @@ const runtimeRoles = [
 
 const PR1_VERSIONS = new Set<string>(PR1_MIGRATION_VERSIONS)
 const ACCESS_FOUNDATION_MARKER = 'CREATE TABLE IF NOT EXISTS external_user_sessions'
-const COMPOSABLE_CATALOG_VERSION = '0133_composable_catalog_revisions'
+const COMPOSABLE_CATALOG_VERSION = '0134_composable_catalog_revisions'
 const ROW_REVISION_TRIGGER_TABLES = [
   'users',
   'teams',
   'workflow_runs',
   'workflow_approval_requests',
+  'workflow_recipe_allowed_teams',
+  'workflow_approval_medium_accounts',
+  'workflow_runs_audit',
   'notification_deliveries',
   'gfs_grants',
   'gfs_shares',
@@ -134,7 +137,7 @@ async function migrate(pool: Pool, observer: Pool): Promise<MigrationRun> {
         query: async (text: string, values?: unknown[]) => {
           if (!accessFoundationSeen && text.includes(ACCESS_FOUNDATION_MARKER)) {
             accessFoundationSeen = true
-            // The 0130 transaction has not created anything yet, so the
+            // The 0131 transaction has not created anything yet, so the
             // committed catalog holds exactly the tables that predate PR1.
             run.preExistingTables = await committedTables(observer)
           }
@@ -216,7 +219,7 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
 
   it('holds no AccessExclusive or Share lock on a pre-existing table in any PR1 transaction', () => {
     // Liveness: every PR1 version committed under observation, the pre-PR1
-    // table set was captured, and the snapshots see the trigger locks 0133 takes.
+    // table set was captured, and the snapshots see the trigger locks 0134 takes.
     for (const version of PR1_MIGRATION_VERSIONS) {
       expect(
         fresh.commits.some(commit => commit.versions.includes(version)),
@@ -233,11 +236,11 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
     expect(blockingLocks(fresh)).toEqual([])
   })
 
-  it('lets readers through and holds writers while 0133 is open', () => {
+  it('lets readers through and holds writers while 0134 is open', () => {
     expect(fresh.composableCatalogProbes).toEqual({
       readUsers: { ok: true, sqlstate: null },
       readWorkflowRuns: { ok: true, sqlstate: null },
-      // Witness that the probe ran inside the open 0133 transaction.
+      // Witness that the probe ran inside the open 0134 transaction.
       writeUsers: { ok: false, sqlstate: '55P03' },
     })
   })

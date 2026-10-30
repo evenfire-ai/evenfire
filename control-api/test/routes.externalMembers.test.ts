@@ -185,47 +185,36 @@ describe('external members routes', () => {
     expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
   })
 
-  it('rate limits member reads before directory access', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 31,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-    })
-
-    const response = await request(makeApp()).get('/external/members')
-
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_member_read:user:manager-1',
-      30
-    )
-    expect(directoryMock.listManagedMembersForUser).not.toHaveBeenCalled()
+  it('lists managed members without an added user quota', async () => {
+    directoryMock.listManagedMembersForUser.mockResolvedValue([])
+    await request(makeApp()).get('/external/members').expect(200)
+    expect(directoryMock.listManagedMembersForUser).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
-  it('rate limits member mutations before invitation creation', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 11,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
+  it('rejects managed self-role changes and self-removal before directory work', async () => {
+    await request(makeApp())
+      .patch('/external/members/manager-1/teams/team-1/role')
+      .send({ role: 'member' })
+      .expect(400, { error: 'invalid_target' })
+    expect(directoryMock.updateManagedMemberRoleForUser).not.toHaveBeenCalled()
+
+    await request(makeApp())
+      .delete('/external/members/manager-1/teams/team-1')
+      .expect(400, { error: 'invalid_target' })
+    expect(directoryMock.deleteManagedMemberForUser).not.toHaveBeenCalled()
+  })
+
+  it('creates invitations without an added user quota', async () => {
+    directoryMock.createManagedInvitationForUser.mockResolvedValue({
+      invitation: { id: 'inv-parity' },
     })
-
-    const response = await request(makeApp())
+    await request(makeApp())
       .post('/external/members/invitations')
-      .send({ email: 'invitee@example.com', teams: [] })
-
-    expect(response.status).toBe(429)
-    expect(response.headers['retry-after']).toBeDefined()
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_member_mutation:user:manager-1',
-      10
-    )
-    expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
+      .send({ email: 'invitee@example.test', teams: [{ teamId: 'team-1', role: 'member' }] })
+      .expect(201)
+    expect(directoryMock.createManagedInvitationForUser).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
   it('requires an explicit reason and Idempotency-Key before retiring a managed user', async () => {

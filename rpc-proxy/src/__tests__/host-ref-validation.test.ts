@@ -12,10 +12,8 @@ import { createRpcHostStatusStreamRouter } from '../routes/rpcHostStatusStream.j
 const authMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))
 const hostMock = vi.hoisted(() => ({
   resolveHostConnectionForUser: vi.fn(),
-  resolveArtifactReadHostConnectionForUser: vi.fn(),
   requestHostWakeFromControlApi: vi.fn(),
 }))
-const admissionMock = vi.hoisted(() => ({ requestHostRpcAdmission: vi.fn() }))
 
 const repositoryRoot = resolve(process.cwd(), '..')
 const tsx = resolve(repositoryRoot, 'rpc-proxy', 'node_modules', '.bin', 'tsx')
@@ -41,12 +39,10 @@ vi.mock('../authToken.js', async importOriginal => ({
 vi.mock('../services/mcpProxyService.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../services/mcpProxyService.js')>()),
   resolveHostConnectionForUser: hostMock.resolveHostConnectionForUser,
-  resolveArtifactReadHostConnectionForUser: hostMock.resolveArtifactReadHostConnectionForUser,
 }))
 vi.mock('../services/controlApiRestService.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../services/controlApiRestService.js')>()),
   requestHostWakeFromControlApi: hostMock.requestHostWakeFromControlApi,
-  requestHostRpcAdmission: admissionMock.requestHostRpcAdmission,
 }))
 
 const legacyClaims = {
@@ -147,9 +143,7 @@ async function callRoute(app: express.Express, route: Route, encodedHostRef: str
 beforeEach(() => {
   vi.clearAllMocks()
   authMock.verifyRpcToken.mockReturnValue(legacyClaims)
-  admissionMock.requestHostRpcAdmission.mockResolvedValue(undefined)
   hostMock.resolveHostConnectionForUser.mockResolvedValue(null)
-  hostMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue(null)
 })
 
 afterEach(() => {
@@ -173,9 +167,7 @@ describe('public Host-ref validation', () => {
       const response = await callRoute(mountedApp(), route, 'invalid_host')
       expect(response.status).toBe(400)
       expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
-      expect(hostMock.resolveArtifactReadHostConnectionForUser).not.toHaveBeenCalled()
       expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
-      expect(admissionMock.requestHostRpcAdmission).not.toHaveBeenCalled()
     }
   )
 
@@ -187,15 +179,13 @@ describe('public Host-ref validation', () => {
         const response = await callRoute(mountedApp(), route, encodedHostRef)
         expect(response.status).toBe(400)
         expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
-        expect(hostMock.resolveArtifactReadHostConnectionForUser).not.toHaveBeenCalled()
         expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
-        expect(admissionMock.requestHostRpcAdmission).not.toHaveBeenCalled()
       }
     }
   )
 
   it.each(w1PayloadRoutes)(
-    'rejects invalid Host at W1 for valid $method $suffix input before admission or effects',
+    'rejects invalid Host at W1 for valid $method $suffix input before any effect',
     async route => {
       const downstreamEffect = vi.fn()
       vi.stubGlobal('fetch', downstreamEffect)
@@ -203,9 +193,7 @@ describe('public Host-ref validation', () => {
 
       expect(response.status).toBe(400)
       expect(response.body).toEqual({ error: 'Invalid hostRef' })
-      expect(admissionMock.requestHostRpcAdmission).not.toHaveBeenCalled()
       expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
-      expect(hostMock.resolveArtifactReadHostConnectionForUser).not.toHaveBeenCalled()
       expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
       expect(downstreamEffect).not.toHaveBeenCalled()
     }
@@ -221,7 +209,6 @@ describe('public Host-ref validation', () => {
 
       expect(response.status).toBe(403)
       expect(response.body).toEqual({ error: 'Forbidden: user cannot access this host' })
-      expect(admissionMock.requestHostRpcAdmission).toHaveBeenCalledTimes(1)
       expect(hostMock.resolveHostConnectionForUser).toHaveBeenCalledWith(
         'user-1',
         'valid-host',
@@ -314,7 +301,6 @@ describe('public Host-ref validation', () => {
     expect(response.status).toBe(400)
     expect(response.body).toEqual({ error: 'Invalid hostRef' })
     expect(checkpoint).not.toHaveBeenCalled()
-    expect(admissionMock.requestHostRpcAdmission).not.toHaveBeenCalled()
     expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
     expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
@@ -331,16 +317,18 @@ describe('public Host-ref validation', () => {
         'legacy-token',
         expect.anything()
       )
-      expect(admissionMock.requestHostRpcAdmission).toHaveBeenCalledTimes(1)
     }
   )
 
   it.each([legacyRoutes[5], legacyRoutes[11]])(
-    'retains 404 for a valid but inaccessible $suffix task Host',
+    'answers 404 for a valid but inaccessible $suffix task Host',
     async route => {
       const response = await callRoute(mountedApp(), route, 'valid-host')
       expect(response.status).toBe(404)
-      expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+      // Liveness witness: the request now reaches Host resolution. The legacy
+      // JWT-hostRefs pre-check that used to answer 404 before any I/O is gone;
+      // an empty resolution is what still produces this route's 404.
+      expect(hostMock.resolveHostConnectionForUser).toHaveBeenCalledOnce()
     }
   )
 

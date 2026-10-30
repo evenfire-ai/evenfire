@@ -171,28 +171,34 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(flow.validateInvitationFlowToken).toHaveBeenCalledTimes(2)
   })
 
-  it('maps a genuine not_pending acceptance to 400 without starting a session', async () => {
-    flow.validateInvitationFlowToken.mockResolvedValue({
-      email: 'a@b.c',
-      invitationUuid: 'database-capability',
-    })
-    directory.acceptInvitationForEmailInTransaction.mockReset()
-    directory.acceptInvitationForEmailInTransaction.mockResolvedValue({ error: 'not_pending' })
+  it.each([
+    ['not_pending', 400, 'not_pending'],
+    ['user_retired', 401, 'Unauthorized'],
+  ])(
+    'maps %s acceptance without starting a session',
+    async (error, expectedStatus, responseError) => {
+      flow.validateInvitationFlowToken.mockResolvedValue({
+        email: 'a@b.c',
+        invitationUuid: 'database-capability',
+      })
+      directory.acceptInvitationForEmailInTransaction.mockReset()
+      directory.acceptInvitationForEmailInTransaction.mockResolvedValue({ error })
 
-    const res = await request(app())
-      .post('/external/invitations/accept')
-      .send({ email: 'a@b.c', token: 'synthetic-not-pending-flow' })
+      const res = await request(app())
+        .post('/external/invitations/accept')
+        .send({ email: 'a@b.c', token: 'synthetic-not-pending-flow' })
 
-    expect(res.status).toBe(400)
-    expect(res.body).toEqual({ error: 'not_pending' })
-    expect(tokenSigner.sign).not.toHaveBeenCalled()
-    expect(database.query).not.toHaveBeenCalled()
-    expect(directory.acceptInvitationForEmailInTransaction).toHaveBeenCalledWith(
-      expect.anything(),
-      'a@b.c',
-      'database-capability'
-    )
-  })
+      expect(res.status).toBe(expectedStatus)
+      expect(res.body).toEqual({ error: responseError })
+      expect(tokenSigner.sign).not.toHaveBeenCalled()
+      expect(database.query).not.toHaveBeenCalled()
+      expect(directory.acceptInvitationForEmailInTransaction).toHaveBeenCalledWith(
+        expect.anything(),
+        'a@b.c',
+        'database-capability'
+      )
+    }
+  )
 
   it('binds the secret capability to the public id and never issues on password setup', async () => {
     flow.validateInvitationFlowToken.mockResolvedValue({
@@ -278,26 +284,11 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(directory.listPendingInvitations).not.toHaveBeenCalledWith('victim@example.com')
   })
 
-  it('stops an authenticated pending-invitation read before the directory handler', async () => {
-    rateLimiter.checkAndIncrement.mockResolvedValue({
-      allowed: false,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      count: 11,
-      backendAvailable: true,
-    })
-
-    const response = await request(app()).get('/external/invitations/pending')
-
-    expect(response.status).toBe(429)
-    expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
-    expect(response.headers['retry-after']).toBeDefined()
-    expect(rateLimiter.checkAndIncrement).toHaveBeenCalledWith(
-      'external_invitation_read:user:caller-user',
-      10
-    )
-    expect(directory.listPendingInvitations).not.toHaveBeenCalled()
+  it('reads owned pending invitations without an added user quota', async () => {
+    directory.listPendingInvitations.mockResolvedValue([])
+    await request(app()).get('/external/invitations/pending').expect(200)
+    expect(directory.listPendingInvitations).toHaveBeenCalledWith('caller@example.com')
+    expect(rateLimiter.checkAndIncrement).not.toHaveBeenCalled()
   })
 
   it('REGRESSION: a generic validation error still maps to 400 invalid_invitation', async () => {

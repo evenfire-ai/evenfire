@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
 import { createExternalAccessRouter } from '../src/routes/external/access.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { signUserSessionV2Token } from '../src/utils/auth/userSessionV2Token.js'
@@ -100,37 +101,65 @@ describe('external access authenticated rate-limit ordering', () => {
     })
   })
 
-  it.each([
-    ['GET', '/external/access/capabilities', 'external_access_capabilities'],
-    ['GET', '/external/access/catalog', 'external_access_catalog'],
-    ['POST', '/external/access/resolve', 'external_access_resolve'],
-  ] as const)(
-    'returns 429 before runtime policy work for a limited %s %s request',
-    async (method, path, bucketType) => {
-      const response = await request(app())
-        [method === 'GET' ? 'get' : 'post'](path)
-        .set('x-user-session-token', sessionToken())
-        .send(method === 'POST' ? {} : undefined)
+  it('limits catalog before runtime policy work using the retained user bucket', async () => {
+    const response = await request(app())
+      .get('/external/access/catalog')
+      .set('x-user-session-token', sessionToken())
+    expect(response.status).toBe(429)
+    expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
+    expect(response.headers['retry-after']).toBeDefined()
+    expect(rateLimiter.checkAndIncrement).toHaveBeenCalledWith(
+      `external_access_catalog:${userId}`,
+      10
+    )
+    expect(mocks.resolvePolicy).not.toHaveBeenCalled()
+    expect(mocks.resolveAuthorization).not.toHaveBeenCalled()
+  })
 
-      expect(response.status).toBe(429)
-      expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
-      expect(response.headers['retry-after']).toBeDefined()
-      const key =
-        bucketType === 'external_access_capabilities'
-          ? `${bucketType}:user:${userId}`
-          : `${bucketType}:${userId}`
-      expect(rateLimiter.checkAndIncrement).toHaveBeenCalledWith(key, 10)
-      expect(mocks.resolvePolicy).not.toHaveBeenCalled()
-      expect(mocks.resolveAuthorization).not.toHaveBeenCalled()
+  it('shares the users edge family across capabilities and resolve without per-user PG charges', async () => {
+    const server = app()
+    const session = sessionToken()
+    const limit = config.approvalRlExternalEdgePerMin
+    expect(limit).toBe(120)
+    for (let index = 0; index < limit; index += 1) {
+      const response =
+        index % 2 === 0
+          ? await request(server)
+              .get('/external/access/capabilities')
+              .set('x-user-session-token', session)
+          : await request(server)
+              .post('/external/access/resolve')
+              .set('x-user-session-token', session)
+              .send({})
+      expect(response.status).toBe(index % 2 === 0 ? 200 : 400)
     }
-  )
+    await request(server)
+      .get('/external/access/capabilities')
+      .set('x-user-session-token', session)
+      .expect(429)
+    expect(rateLimiter.checkAndIncrement).not.toHaveBeenCalled()
+    expect(mocks.resolvePolicy).toHaveBeenCalled()
+  })
 
+  it('rejects an invalid GET /external/access/catalog session before limiting or policy work', async () => {
+    const response = await request(app())
+      .get('/external/access/catalog')
+      .set('x-user-session-token', 'invalid-session')
+
+    expect(response.status).toBe(401)
+    expect(response.body).toMatchObject({ error: { code: 'invalid_session' } })
+    expect(rateLimiter.checkAndIncrement).not.toHaveBeenCalled()
+    expect(mocks.resolvePolicy).not.toHaveBeenCalled()
+  })
+
+  // Capabilities and resolve use the single session boundary shared by every
+  // other protected route: policy and the minimum-client gate are read once,
+  // before identity, and no PG limiter is charged.
   it.each([
     ['GET', '/external/access/capabilities'],
-    ['GET', '/external/access/catalog'],
     ['POST', '/external/access/resolve'],
   ] as const)(
-    'rejects an invalid %s %s session before limiting or policy work',
+    'rejects an invalid %s %s session through the single session boundary',
     async (method, path) => {
       const response = await request(app())
         [method === 'GET' ? 'get' : 'post'](path)
@@ -140,67 +169,61 @@ describe('external access authenticated rate-limit ordering', () => {
       expect(response.status).toBe(401)
       expect(response.body).toMatchObject({ error: { code: 'invalid_session' } })
       expect(rateLimiter.checkAndIncrement).not.toHaveBeenCalled()
-      expect(mocks.resolvePolicy).not.toHaveBeenCalled()
+      expect(mocks.resolvePolicy).toHaveBeenCalledOnce()
     }
   )
 
   it.each([
     ['GET', '/external/access/catalog'],
     ['POST', '/external/access/resolve'],
-  ] as const)(
-    'preserves 409 only after an allowed %s %s bucket reaches final policy validation',
-    async (method, path) => {
-      rateLimiter.checkAndIncrement.mockResolvedValue({
-        allowed: true,
-        remaining: 9,
-        resetMs: Date.now() + 60_000,
-        windowStartMs: Date.now(),
-        count: 1,
-        backendAvailable: true,
-      })
-      mocks.resolvePolicy.mockResolvedValue(
-        effectivePolicy({ serveCatalog: false, actionContextV2: false })
-      )
+  ] as const)('preserves 409 when %s %s reaches final policy validation', async (method, path) => {
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+      backendAvailable: true,
+    })
+    mocks.resolvePolicy.mockResolvedValue(
+      effectivePolicy({ serveCatalog: false, actionContextV2: false })
+    )
 
-      const response = await request(app())
-        [method === 'GET' ? 'get' : 'post'](path)
-        .set('x-user-session-token', sessionToken())
-        .send(method === 'POST' ? {} : undefined)
+    const response = await request(app())
+      [method === 'GET' ? 'get' : 'post'](path)
+      .set('x-user-session-token', sessionToken())
+      .send(method === 'POST' ? {} : undefined)
 
-      expect(response.status).toBe(409)
-      expect(response.body).toMatchObject({ error: { code: 'invalid_request' } })
-      expect(mocks.resolvePolicy).toHaveBeenCalledTimes(2)
-    }
-  )
+    expect(response.status).toBe(409)
+    expect(response.body).toMatchObject({ error: { code: 'invalid_request' } })
+    expect(mocks.resolvePolicy).toHaveBeenCalledTimes(2)
+  })
 
   it.each([
     ['GET', '/external/access/catalog'],
     ['POST', '/external/access/resolve'],
-  ] as const)(
-    'preserves 503 only after an allowed %s %s bucket reaches final policy validation',
-    async (method, path) => {
-      rateLimiter.checkAndIncrement.mockResolvedValue({
-        allowed: true,
-        remaining: 9,
-        resetMs: Date.now() + 60_000,
-        windowStartMs: Date.now(),
-        backendAvailable: true,
-        count: 1,
-      })
-      mocks.resolvePolicy
-        .mockResolvedValueOnce(effectivePolicy())
-        .mockRejectedValueOnce(new Error('readiness unavailable'))
+  ] as const)('preserves 503 when %s %s reaches final policy validation', async (method, path) => {
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      backendAvailable: true,
+      count: 1,
+    })
+    mocks.resolvePolicy
+      .mockResolvedValueOnce(effectivePolicy())
+      .mockRejectedValueOnce(new Error('readiness unavailable'))
 
-      const response = await request(app())
-        [method === 'GET' ? 'get' : 'post'](path)
-        .set('x-user-session-token', sessionToken())
-        .send(method === 'POST' ? {} : undefined)
+    const response = await request(app())
+      [method === 'GET' ? 'get' : 'post'](path)
+      .set('x-user-session-token', sessionToken())
+      .send(method === 'POST' ? {} : undefined)
 
-      expect(response.status).toBe(503)
-      expect(response.body).toMatchObject({ error: { code: 'authority_unavailable' } })
-      expect(mocks.resolvePolicy).toHaveBeenCalledTimes(2)
-    }
-  )
+    expect(response.status).toBe(503)
+    expect(response.body).toMatchObject({ error: { code: 'authority_unavailable' } })
+    expect(mocks.resolvePolicy).toHaveBeenCalledTimes(2)
+  })
 
   it('continues an allowed resolve request after final policy validation', async () => {
     rateLimiter.checkAndIncrement.mockResolvedValue({
@@ -239,11 +262,23 @@ describe('external access authenticated rate-limit ordering', () => {
     expect(mocks.resolveAuthorization).toHaveBeenCalledOnce()
   })
 
-  it.each([
-    ['GET', '/external/access/catalog'],
-    ['POST', '/external/access/resolve'],
-  ] as const)(
-    'rechecks current session authority after an allowed %s %s bucket',
+  it('rejects a session revoked after one validation for POST /external/access/resolve', async () => {
+    mocks.validateV2.mockResolvedValueOnce({ status: 'revoked', reason: 'logout' })
+
+    const response = await request(app())
+      .post('/external/access/resolve')
+      .set('x-user-session-token', sessionToken())
+      .send({})
+
+    expect(response.status).toBe(401)
+    expect(response.body).toMatchObject({ error: { code: 'invalid_session' } })
+    // One live session validation per request (P-7).
+    expect(mocks.validateV2).toHaveBeenCalledOnce()
+    expect(mocks.resolveAuthorization).not.toHaveBeenCalled()
+  })
+
+  it.each([['GET', '/external/access/catalog']] as const)(
+    'rechecks current session authority for %s %s',
     async (method, path) => {
       rateLimiter.checkAndIncrement.mockResolvedValue({
         allowed: true,

@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { verifyGoogleIdToken } from '../src/utils/auth/googleAuth.js'
+import {
+  GoogleIdentityRejectedError,
+  GoogleTokenVerificationError,
+  verifyGoogleIdToken,
+} from '../src/utils/auth/googleAuth.js'
 
 const googleMock = vi.hoisted(() => ({ verifyIdToken: vi.fn() }))
 
@@ -42,8 +46,45 @@ describe('verifyGoogleIdToken', () => {
       }),
     })
 
-    await expect(verifyGoogleIdToken('unverified-token')).rejects.toThrow(
-      'Google token email is not verified'
+    const rejection = verifyGoogleIdToken('unverified-token')
+    await expect(rejection).rejects.toBeInstanceOf(GoogleIdentityRejectedError)
+    await expect(rejection).rejects.toThrow('Google token email is not verified')
+  })
+
+  it('rejects a verified payload without an email', async () => {
+    googleMock.verifyIdToken.mockResolvedValue({
+      getPayload: () => ({ email_verified: true }),
+    })
+
+    await expect(verifyGoogleIdToken('emailless-token')).rejects.toBeInstanceOf(
+      GoogleIdentityRejectedError
     )
+  })
+
+  it('replaces a library verification error with a token-free typed error', async () => {
+    const submittedToken = 'synthetic-id-token'
+    const payloadEmail = 'synthetic-payload@example.invalid'
+    googleMock.verifyIdToken.mockRejectedValue(
+      new Error(`Wrong number of segments in token: ${submittedToken} ${payloadEmail}`)
+    )
+
+    const error = await verifyGoogleIdToken(submittedToken).catch((reason: unknown) => reason)
+
+    expect(error).toBeInstanceOf(GoogleTokenVerificationError)
+    expect(error).not.toBeInstanceOf(GoogleIdentityRejectedError)
+    expect((error as Error).message).toBe('Google ID token verification failed')
+    expect((error as Error).message).not.toContain(submittedToken)
+    expect((error as Error).message).not.toContain(payloadEmail)
+    expect(String((error as Error).stack)).not.toContain(submittedToken)
+    expect(String((error as Error).stack)).not.toContain(payloadEmail)
+    expect((error as Error).cause).toBeUndefined()
+    expect(error).not.toHaveProperty('status')
+    expect(error).not.toHaveProperty('statusCode')
+    expect(error).not.toHaveProperty('code')
+    // Liveness witness: the library verifier was actually consulted.
+    expect(googleMock.verifyIdToken).toHaveBeenCalledWith({
+      idToken: submittedToken,
+      audience: 'google-client-id',
+    })
   })
 })

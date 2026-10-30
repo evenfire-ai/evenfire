@@ -5,7 +5,7 @@ import { canonicalActionTarget, hashActionTarget } from '@clerum/action-context-
 import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
-import { signRpcAccessToken, verifyRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
+import { verifyRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 import { verifyUserDelegationV2 } from '../src/utils/auth/userDelegationV2Token.js'
 
 const admission = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
@@ -365,46 +365,6 @@ describe('Spec 62 v2 Host-message admission and retry receipt', () => {
       .expect(503)
     expect(unavailable.body).toEqual({ error: 'host_message_admission_unavailable' })
     expect(checkpoint.checkpointActionAuthority).not.toHaveBeenCalled()
-  })
-
-  it('uses the same subject counter as both legacy message forms and never leaks a credential', async () => {
-    const server = app()
-    const token = signRpcAccessToken({
-      sub: SUBJECT,
-      typ: 'user',
-      teamId: 'team-a',
-      role: 'member',
-      scopes: ['host:message:invoke'],
-      hostRefs: ['chatllm'],
-      jti: 'legacy-message-admission-test',
-    })
-    for (let index = 1; index <= 30; index += 1) {
-      await request(server)
-        .post(`/rpc/access/users/${SUBJECT}/mcp-hosts/chatllm/message-resolution`)
-        .set('x-rpc-access-token', token)
-        .send({})
-        .expect(200)
-      await request(server)
-        .post('/internal/action-authority/checkpoint')
-        .send(checkpointRequest('chat.message.invoke', index))
-        .expect(200)
-    }
-    expect(admission.checkAndIncrement).toHaveBeenCalledTimes(60)
-    expect(new Set(admission.checkAndIncrement.mock.calls.map(call => call[0]))).toEqual(
-      new Set([`host-message-admission:${SUBJECT}`])
-    )
-    const receipt = await request(server)
-      .post('/internal/action-authority/checkpoint')
-      .send(checkpointRequest('chat.message.invoke', 31))
-      .expect(429)
-    expect(receipt.body).toEqual({
-      error: 'Too Many Requests',
-      retryAfterSeconds: expect.any(Number),
-    })
-    expect(receipt.headers['retry-after']).toBeTruthy()
-    expect(receipt.headers['x-ratelimit-limit']).toBe('60')
-    expect(receipt.headers['x-ratelimit-remaining']).toBe('0')
-    expect(receipt.headers['x-ratelimit-reset']).toBeTruthy()
   })
 
   it('keeps receipts isolated from existing RPC and delegation credential verifiers', async () => {

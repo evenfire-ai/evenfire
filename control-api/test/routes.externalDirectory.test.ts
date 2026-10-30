@@ -64,8 +64,24 @@ describe('external directory authorization', () => {
     mocks.checkAndIncrement.mockResolvedValue(allowedRateLimitResult())
   })
 
-  it('denies an ordinary member without executing the PII search', async () => {
+  it('allows an ordinary member of the team to search', async () => {
     mocks.membership.mockResolvedValue({ teamId: 'team-1', role: 'member' })
+
+    const response = await request(app())
+      .get('/external/directory/search?teamId=team-1&q=person')
+      .set('x-user-session-token', 'session')
+
+    expect(response.status).toBe(200)
+    expect(mocks.membership).toHaveBeenCalledWith(
+      'user-1',
+      'team-1',
+      expect.objectContaining({ budget: expect.anything() })
+    )
+    expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person', undefined)
+  })
+
+  it('refuses a caller without a live team membership', async () => {
+    mocks.membership.mockResolvedValue(null)
 
     const response = await request(app())
       .get('/external/directory/search?teamId=team-1&q=person')
@@ -73,6 +89,11 @@ describe('external directory authorization', () => {
 
     expect(response.status).toBe(403)
     expect(response.body.error.code).toBe('forbidden')
+    expect(mocks.membership).toHaveBeenCalledWith(
+      'user-1',
+      'team-1',
+      expect.objectContaining({ budget: expect.anything() })
+    )
     expect(mocks.searchDirectory).not.toHaveBeenCalled()
   })
 
@@ -87,7 +108,7 @@ describe('external directory authorization', () => {
     expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person', undefined)
   })
 
-  it('uses the authenticated user key and canonical limiter on an allowed search', async () => {
+  it('keeps dev limits: an allowed search charges no per-user PG bucket', async () => {
     mocks.membership.mockResolvedValue({ teamId: 'team-1', role: 'admin' })
 
     const response = await request(app())
@@ -95,45 +116,15 @@ describe('external directory authorization', () => {
       .set('x-user-session-token', 'session')
       .expect(200)
 
-    expect(mocks.checkAndIncrement).toHaveBeenCalledOnce()
-    expect(mocks.checkAndIncrement).toHaveBeenCalledWith('directory-search:user-1', 30)
-    expect(response.headers['x-ratelimit-limit']).toBe('30')
-    expect(response.headers['x-ratelimit-remaining']).toBe('29')
-    expect(response.headers['x-ratelimit-reset']).toBeDefined()
+    // Witness: the search ran with live membership and its budget.
     expect(mocks.membership).toHaveBeenCalledWith(
       'user-1',
       'team-1',
       expect.objectContaining({ budget: expect.anything() })
     )
     expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person', undefined)
-  })
-
-  it('returns the canonical 429 and does not search when the limiter denies', async () => {
-    const resetMs = Date.now() + 60_000
-    mocks.membership.mockResolvedValue({ teamId: 'team-1', role: 'admin' })
-    mocks.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      remaining: 0,
-      resetMs,
-      windowStartMs: resetMs - 60_000,
-      count: 31,
-      backendAvailable: true,
-    })
-
-    const response = await request(app())
-      .get('/external/directory/search?teamId=team-1&q=person')
-      .set('x-user-session-token', 'session')
-      .expect(429)
-
-    expect(mocks.checkAndIncrement).toHaveBeenCalledOnce()
-    expect(mocks.checkAndIncrement).toHaveBeenCalledWith('directory-search:user-1', 30)
-    expect(response.body).toMatchObject({
-      error: { code: 'rate_limited', retryable: true },
-    })
-    expect(Number(response.headers['retry-after'])).toBeGreaterThan(0)
-    expect(response.headers['x-ratelimit-limit']).toBe('30')
-    expect(response.headers['x-ratelimit-remaining']).toBe('0')
-    expect(response.headers['x-ratelimit-reset']).toBe(String(Math.floor(resetMs / 1000)))
-    expect(mocks.searchDirectory).not.toHaveBeenCalled()
+    // dev has no per-user directory-search bucket on this route.
+    expect(mocks.checkAndIncrement).not.toHaveBeenCalled()
+    expect(response.headers['x-ratelimit-limit']).toBeUndefined()
   })
 })

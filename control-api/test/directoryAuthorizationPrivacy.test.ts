@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs'
 import {
   DirectorySearchCursorError,
   acceptInvitationForEmail,
+  createInvitationForTeams,
   createManagedInvitationForUser,
   deleteManagedMemberForUser,
   listManagedMembersForUser,
@@ -49,6 +50,9 @@ async function queryWithDatabaseClock(sql: string, values?: unknown[]) {
 async function queryWithPasswordWorkLease(sql: string, values?: unknown[]) {
   if (sql.includes('SET LOCAL synchronous_commit = on')) {
     return { rows: [], rowCount: 0 }
+  }
+  if (sql.includes("set_config('app.password_admission_protocol', 'v2', true)")) {
+    return { rows: [{ set_config: 'v2' }], rowCount: 1 }
   }
   if (sql.includes('INSERT INTO password_verification_work')) {
     return { rows: [{ singleton: true }], rowCount: 1 }
@@ -159,6 +163,7 @@ describe('directory privacy and atomic authorization', () => {
     expect(result[0]).not.toHaveProperty('team_id')
     expect(result[0]).not.toHaveProperty('team_name')
     expect(result[0]).not.toHaveProperty('role')
+    expect(result[0]).not.toHaveProperty('assignment_count')
     expect(JSON.stringify(result)).not.toContain('synthetic-must-never-serialize')
     expect(result[0]).toMatchObject({ canCancel: false, canResend: false })
   })
@@ -187,6 +192,30 @@ describe('directory privacy and atomic authorization', () => {
     expect(String(mocks.query.mock.calls[0]?.[0])).toContain('user_id = ANY($2::uuid[])')
     expect(String(mocks.query.mock.calls[1]?.[0])).toContain('UPDATE team_members')
     expect(mocks.appendEvents).toHaveBeenCalledTimes(1)
+  })
+
+  it('allows a legacy caller to change their own role through the shared transaction', async () => {
+    mocks.query
+      .mockResolvedValueOnce({ rows: [{ user_id: MANAGER, role: 'admin' }], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ team_id: TEAM_A, user_id: MANAGER, role: 'inviter', status: 'active' }],
+        rowCount: 1,
+      })
+    const result = await updateManagedMemberRoleForUser(MANAGER, MANAGER, TEAM_A, 'inviter')
+    expect(result).toMatchObject({ membership: { role: 'inviter', status: 'active' } })
+    expect(mocks.withTransaction).toHaveBeenCalledOnce()
+  })
+
+  it('allows a legacy caller to delete their own membership through the shared transaction', async () => {
+    mocks.query
+      .mockResolvedValueOnce({ rows: [{ user_id: MANAGER, role: 'admin' }], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ team_id: TEAM_A, user_id: MANAGER, role: 'admin', status: 'deleted' }],
+        rowCount: 1,
+      })
+    const result = await deleteManagedMemberForUser(MANAGER, MANAGER, TEAM_A)
+    expect(result).toMatchObject({ deleted: { status: 'deleted' } })
+    expect(mocks.withTransaction).toHaveBeenCalledOnce()
   })
 
   it('revalidates source authority before final role-mutation membership locks', async () => {
@@ -304,6 +333,7 @@ describe('directory privacy and atomic authorization', () => {
         }
       }
       if (sql.includes("SET status = 'pending'")) {
+        if (!sql.includes("AND status = 'draft'")) return { rows: [], rowCount: 0 }
         return { rows: [{ ...invitation, status: 'pending' }], rowCount: 1 }
       }
       throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
@@ -324,6 +354,40 @@ describe('directory privacy and atomic authorization', () => {
     const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
     expect(sql).not.toContain('UPDATE users')
     expect(sql).not.toContain('INSERT INTO profiles')
+  })
+
+  it('activates a delivered generic invitation from the draft state', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000200',
+      team_id: null,
+      invitee_name: 'Invitee',
+      email: 'invitee@example.test',
+      role: 'member',
+      token: MANAGER,
+      status: 'draft',
+      purpose: 'member_invitation',
+      ...activeInvitationWindow(),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: null,
+    }
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("WHERE status = 'draft'")) return { rows: [], rowCount: 0 }
+      if (sql.includes('WITH inserted AS')) return { rows: [invitation], rowCount: 1 }
+      if (sql.includes('FROM invitation_teams it')) return { rows: [], rowCount: 0 }
+      if (sql.includes("SET status = 'pending'")) {
+        if (!sql.includes("AND status = 'draft'")) return { rows: [], rowCount: 0 }
+        return { rows: [{ ...invitation, status: 'pending' }], rowCount: 1 }
+      }
+      throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+    })
+
+    const result = await createInvitationForTeams({
+      inviteeName: 'Invitee',
+      email: invitation.email,
+    })
+    expect(result).toMatchObject({ id: invitation.id, status: 'pending' })
+    expect(mocks.registerInvitation).toHaveBeenCalledOnce()
   })
 
   it('leaves a delivered draft unusable when manager authority changes before activation', async () => {

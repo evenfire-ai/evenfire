@@ -79,33 +79,7 @@ rpc_config = rpc_gateway.dig('data', 'nginx.conf')
 raise "#{overlay}: rendered RPC gateway nginx.conf missing" unless rpc_config.is_a?(String)
 
 rpc_lines = rpc_config.lines
-admission_line = 'location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+/host-rpc-admission$ {'
-admission_matches = rpc_lines.each_index.select { |index| rpc_lines[index].strip == admission_line }
-raise "#{overlay}: expected one exact Host-RPC admission location, found #{admission_matches.length}" unless
-  admission_matches.length == 1
 
-admission_depth = 0
-admission_block = []
-rpc_lines.drop(admission_matches.first).each do |line|
-  admission_block << line
-  admission_depth += line.count('{') - line.count('}')
-  break if admission_depth.zero?
-end
-admission_location = admission_block.join
-raise "#{overlay}: Host-RPC admission location is not POST-only" unless
-  admission_location.match?(/limit_except\s+POST\s*\{[^}]*deny all;/m)
-raise "#{overlay}: Host-RPC admission location does not proxy to Control API" unless
-  admission_location.include?('proxy_pass http://control_api_upstream;')
-[
-  'proxy_set_header Authorization $http_authorization;',
-  'proxy_set_header X-Service-Token $http_x_service_token;',
-  'proxy_set_header X-Rpc-Access-Token $http_x_rpc_access_token;',
-].each do |header|
-  raise "#{overlay}: Host-RPC admission does not forward #{header}" unless
-    admission_location.include?(header)
-end
-raise "#{overlay}: Host-RPC admission disables request headers" if
-  admission_location.match?(/proxy_pass_request_headers\s+off\s*;/)
 raise "#{overlay}: broad internal route proxy is not permitted in RPC gateway" if
   rpc_config.match?(/location\s+(?:\^~\s+)?\/api\/v1\/internal(?:\/|\s*\{)/)
 raise "#{overlay}: RPC gateway default-deny catch-all was removed" unless

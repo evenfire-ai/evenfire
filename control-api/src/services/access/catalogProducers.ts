@@ -252,9 +252,79 @@ function capabilitiesForFamily(family: CatalogFamily): readonly AccessCapability
   }
 }
 
+type SimpleOperationalFamily = 'host' | 'context' | 'workflow_recipe' | 'sandbox_app'
+
+/**
+ * Selects the relationship rows that are the simple operational item's own
+ * configuration. The published runtime descriptor and the serialized
+ * relationships share this predicate, so an item cannot expose an edge that is
+ * not on one of its own access paths.
+ */
+function ownsSimpleOperationalRelationship(input: {
+  family: SimpleOperationalFamily
+  logicalId: string
+  row: JsonRecord
+}): boolean {
+  if (input.family === 'sandbox_app') {
+    return input.row.target_type === 'sandbox_app' && input.row.target_id === input.logicalId
+  }
+  if (input.family === 'workflow_recipe') return true
+  return (
+    String(input.row.source_type ?? '') === input.family &&
+    String(input.row.source_id ?? '') === input.logicalId
+  )
+}
+
+/**
+ * Selects the relationships a derived access path actually traverses: the
+ * Context edge that carries the item and, for an agent path, the Host edge that
+ * carries that Context. Edge instance ids are unique per source/target pair, so
+ * membership is exact without comparing serialized payloads.
+ */
+function ownsDerivedOperationalRelationship(input: {
+  pathRows: readonly JsonRecord[]
+  row: JsonRecord
+}): boolean {
+  const instance = boundedString(input.row.relationship_instance_id, 'relationship_instance', 256)
+  return input.pathRows.some(pathRow => {
+    if (boundedString(pathRow.edge_instance, 'edge_instance', 256) === instance) return true
+    return nullableString(pathRow.host_edge_instance, 256) === instance
+  })
+}
+
+/**
+ * Only the rows the caller reaches through this item's own paths are published.
+ * The authorization relationships revision below still covers every hydrated
+ * row, because the live reader hashes the unfiltered graph.
+ */
+function serializableRelationshipRows(input: {
+  family: CatalogFamily
+  logicalId: string
+  pathRows: readonly JsonRecord[]
+  relationshipRows: readonly JsonRecord[]
+}): readonly JsonRecord[] {
+  const family = input.family
+  if (family === 'mcp_server' || family === 'shared_filesystem') {
+    return input.relationshipRows.filter(row =>
+      ownsDerivedOperationalRelationship({ pathRows: input.pathRows, row })
+    )
+  }
+  if (
+    family === 'host' ||
+    family === 'context' ||
+    family === 'workflow_recipe' ||
+    family === 'sandbox_app'
+  ) {
+    return input.relationshipRows.filter(row =>
+      ownsSimpleOperationalRelationship({ family, logicalId: input.logicalId, row })
+    )
+  }
+  return input.relationshipRows
+}
+
 function simpleOperationalCandidates(input: {
   context: CatalogRequestContext
-  family: 'host' | 'context' | 'workflow_recipe' | 'sandbox_app'
+  family: SimpleOperationalFamily
   pathRows: readonly JsonRecord[]
   graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
   policySnapshot: RuntimeBehaviorPolicySnapshot
@@ -561,7 +631,14 @@ async function hydrateRows(input: {
               pathRows,
             })
     const paths = canonicalAccessPathSeeds(accessPaths)
-    const relationships = canonicalRelationships(relationshipRows)
+    const relationships = canonicalRelationships(
+      serializableRelationshipRows({
+        family: input.family,
+        logicalId,
+        pathRows,
+        relationshipRows,
+      })
+    )
     representedPaths += paths.length
     representedRelationships += relationships.length
     const validUntil = row.valid_until ? new Date(String(row.valid_until)).toISOString() : null
@@ -591,6 +668,10 @@ async function hydrateRows(input: {
           graphResult?.status === 'current'
             ? graphResult.sourceStateRevision
             : input.sourceRevision,
+        // The operational families hash every hydrated row, not the published
+        // subset: the live reader recomputes this revision over the resource's
+        // whole relationship set, so a filtered revision would make every
+        // catalog access path id stale when a foreign edge exists.
         authorizationRelationshipsRevision:
           input.family === 'host' ||
           input.family === 'context' ||

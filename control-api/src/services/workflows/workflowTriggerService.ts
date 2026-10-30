@@ -139,12 +139,12 @@ function getWorkflowUsageTeamIdForCaller(
 }
 
 function getExternalWorkflowTriggerCallerKey(
-  caller: Extract<WorkflowRouteCaller, { kind: 'user-session' }>,
-  userSessionGrant: WorkflowTriggerGrantResult
+  caller: Extract<WorkflowRouteCaller, { kind: 'user-session' }>
 ): string {
-  return userSessionGrant.granted && userSessionGrant.source === 'team'
-    ? `external-rest-api:user:${caller.claims.userId}:team:${userSessionGrant.teamId}`
-    : `external-rest-api:user:${caller.claims.userId}:direct`
+  if (caller.claims.sessionContract === 'v2') {
+    return `external-rest-api:user:${caller.claims.userId}:direct`
+  }
+  return `external-rest-api:user:${caller.claims.userId}:team:${caller.claims.teamId}`
 }
 
 type WorkflowTriggerResult =
@@ -378,7 +378,7 @@ export async function triggerWorkflow(params: {
       })
     }
 
-    const callerKey = getExternalWorkflowTriggerCallerKey(caller, userSessionGrant)
+    const callerKey = getExternalWorkflowTriggerCallerKey(caller)
     const approval = await createWorkflowTriggerApprovalRequest({
       recipeNamespace: ns,
       recipeName: name,

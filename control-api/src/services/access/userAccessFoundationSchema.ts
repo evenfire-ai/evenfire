@@ -154,11 +154,6 @@ export async function applyUserAccessFoundationSchema(db: DbClient): Promise<voi
         AND source_provider_uid <> '' AND source_resource_version <> ''
       )
     );
-    CREATE INDEX IF NOT EXISTS operational_relationship_source_idx
-      ON operational_resource_relationships (
-        environment_id, source_type, source_id, relationship_type,
-        target_type, target_id, relationship_instance_id
-      );
     CREATE INDEX IF NOT EXISTS operational_relationship_target_idx
       ON operational_resource_relationships (
         environment_id, target_type, target_id, source_type,
@@ -227,37 +222,6 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       environment_id TEXT NOT NULL CHECK (environment_id <> '')
     );
 
-    CREATE TABLE IF NOT EXISTS authorization_catalog_writer_components (
-      writer_table TEXT PRIMARY KEY,
-      component_class TEXT NOT NULL,
-      rationale TEXT NOT NULL,
-      CHECK (writer_table <> '' AND component_class <> '' AND rationale <> '')
-    );
-
-    INSERT INTO authorization_catalog_writer_components(writer_table, component_class, rationale)
-    VALUES
-      ('users', 'user', 'user identity and lifecycle'),
-      ('teams', 'team', 'team identity'),
-      ('team_members', 'user+team', 'membership and live role'),
-      ('user_contexts', 'user', 'direct context access'),
-      ('team_contexts', 'team', 'team context access'),
-      ('user_agents', 'user', 'direct agent access'),
-      ('team_agents', 'team', 'team agent access'),
-      ('user_workflow_triggers', 'user', 'direct workflow access'),
-      ('team_workflow_triggers', 'team', 'team workflow access'),
-      ('workflow_runs', 'user+team', 'visible workflow-run ownership'),
-      ('workflow_approval_requests', 'user+team', 'approval target authority'),
-      ('notification_deliveries', 'user+team', 'notification audience'),
-      ('gfs_resources', 'resource+gfs-subjects', 'resource and current subject visibility'),
-      ('gfs_grants', 'resource+user+team', 'GFS resource and direct-subject authority'),
-      ('gfs_shares', 'resource+user+team', 'GFS resource and shared-subject authority'),
-      ('operational_resource_index', 'resource+source-state', 'promoted source resources'),
-      ('operational_resource_relationships', 'resource+source-state', 'promoted source edges'),
-      ('operational_catalog_source_state', 'source-state', 'atomic source generation promotion')
-    ON CONFLICT (writer_table) DO UPDATE
-      SET component_class = EXCLUDED.component_class,
-          rationale = EXCLUDED.rationale;
-
     CREATE OR REPLACE FUNCTION authorization_bump_subject_revision(
       target_subject_type TEXT,
       target_subject_id TEXT
@@ -287,6 +251,366 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       ELSE
         PERFORM authorization_bump_team_revision(target_subject_id::UUID);
       END IF;
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_prelock_workflow_run_revisions(target_run_ids UUID[])
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE revision RECORD;
+    BEGIN
+      -- Parent locks must precede revisions and the audit INSERT's FK checks,
+      -- matching principal deletion's parent-before-cascade order.
+      PERFORM team.id
+        FROM teams AS team
+       WHERE team.id::TEXT IN (
+         SELECT run.team_id::TEXT FROM workflow_runs AS run
+          WHERE run.run_id = ANY(target_run_ids)
+         UNION
+         -- Keep malformed usage IDs for the existing subject validator below.
+         SELECT lower(run.usage_team_id) FROM workflow_runs AS run
+          WHERE run.run_id = ANY(target_run_ids)
+            AND run.usage_team_id <> 'control-plane-admin-ui'
+       )
+       ORDER BY team.id
+       FOR KEY SHARE;
+
+      PERFORM principal.id
+        FROM users AS principal
+       WHERE principal.id IN (
+         SELECT run.actor_id FROM workflow_runs AS run
+          WHERE run.run_id = ANY(target_run_ids) AND run.actor_type = 'user'
+       )
+       ORDER BY principal.id
+       FOR KEY SHARE;
+
+      -- A batch must hold every team before any user, across both archive
+      -- INSERT and live DELETE triggers. Bumping also creates missing rows.
+      FOR revision IN
+        SELECT DISTINCT subject_type, subject_id
+          FROM workflow_runs AS run
+          CROSS JOIN LATERAL (VALUES
+            ('team', run.team_id::TEXT),
+            ('team', CASE
+              WHEN run.usage_team_id = 'control-plane-admin-ui' THEN NULL
+              ELSE run.usage_team_id
+            END),
+            ('user', CASE WHEN run.actor_type = 'user' THEN run.actor_id::TEXT END)
+          ) AS subjects(subject_type, subject_id)
+         WHERE run.run_id = ANY(target_run_ids)
+           AND subject_id IS NOT NULL AND subject_id <> ''
+         ORDER BY subject_type, subject_id
+      LOOP
+        PERFORM authorization_bump_subject_revision(revision.subject_type, revision.subject_id);
+      END LOOP;
+    END;
+    $$;
+
+    -- Approval batches delete rows whose FK cascade also rewrites every live run
+    -- that references them. Those run rows take their subjects in this
+    -- transaction too, so the subject set covers both the approval targets and
+    -- the referencing runs' attribution, which keeps one global order against
+    -- run writers. The cascade's attribution change no longer bumps a revision
+    -- on its own; the batch holds these subjects anyway. Both phases mirror the
+    -- run prelock.
+    CREATE OR REPLACE FUNCTION authorization_prelock_workflow_approval_revisions(
+      target_request_ids UUID[]
+    )
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE revision RECORD;
+    BEGIN
+      -- Parent locks must precede revisions and the FK checks of the bumped
+      -- rows, matching principal deletion's parent-before-cascade order.
+      PERFORM team.id
+        FROM teams AS team
+       WHERE team.id::TEXT IN (
+         SELECT approval.target_team_id::TEXT
+           FROM workflow_approval_requests AS approval
+          WHERE approval.id = ANY(target_request_ids)
+         UNION
+         SELECT run.team_id::TEXT FROM workflow_runs AS run
+          WHERE run.approval_request_id = ANY(target_request_ids)
+         UNION
+         -- Keep malformed usage IDs for the existing subject validator below.
+         SELECT lower(run.usage_team_id) FROM workflow_runs AS run
+          WHERE run.approval_request_id = ANY(target_request_ids)
+            AND run.usage_team_id <> 'control-plane-admin-ui'
+       )
+       ORDER BY team.id
+       FOR KEY SHARE;
+
+      PERFORM principal.id
+        FROM users AS principal
+       WHERE principal.id IN (
+         SELECT approval.target_user_id
+           FROM workflow_approval_requests AS approval
+          WHERE approval.id = ANY(target_request_ids)
+         UNION
+         SELECT run.actor_id FROM workflow_runs AS run
+          WHERE run.approval_request_id = ANY(target_request_ids) AND run.actor_type = 'user'
+       )
+       ORDER BY principal.id
+       FOR KEY SHARE;
+
+      -- A batch must hold every team before any user, across the approval
+      -- target, the referencing runs, and both the archive INSERT and live
+      -- DELETE triggers. Bumping also creates missing rows.
+      FOR revision IN
+        SELECT DISTINCT batch.subject_type, batch.subject_id
+          FROM (
+            SELECT 'team'::TEXT AS subject_type, approval.target_team_id::TEXT AS subject_id
+              FROM workflow_approval_requests AS approval
+             WHERE approval.id = ANY(target_request_ids)
+            UNION ALL
+            SELECT 'user'::TEXT, approval.target_user_id::TEXT
+              FROM workflow_approval_requests AS approval
+             WHERE approval.id = ANY(target_request_ids)
+            UNION ALL
+            SELECT subjects.subject_type, subjects.subject_id
+              FROM workflow_runs AS run
+              CROSS JOIN LATERAL (VALUES
+                ('team', run.team_id::TEXT),
+                ('team', CASE
+                  WHEN run.usage_team_id = 'control-plane-admin-ui' THEN NULL
+                  ELSE run.usage_team_id
+                END),
+                ('user', CASE WHEN run.actor_type = 'user' THEN run.actor_id::TEXT END)
+              ) AS subjects(subject_type, subject_id)
+             WHERE run.approval_request_id = ANY(target_request_ids)
+          ) AS batch(subject_type, subject_id)
+         WHERE batch.subject_id IS NOT NULL AND batch.subject_id <> ''
+         ORDER BY batch.subject_type, batch.subject_id
+      LOOP
+        PERFORM authorization_bump_subject_revision(revision.subject_type, revision.subject_id);
+      END LOOP;
+    END;
+    $$;
+
+    -- Deciding an approval takes the target's revision before the run INSERT
+    -- takes the run's team, so both call sites hold this subject set first.
+    -- The set mirrors the run INSERT expressions exactly
+    -- (userApprovalRequestService.ts:723,727,1255 and
+    -- workflowRunService.ts:299,300).
+    --
+    -- Premise 1: at decision time the decision_maker column is still NULL
+    -- when this function reads it. Both deciders either pass the approval's own
+    -- target team or omit the team (decisions.routes.ts:130,
+    -- workflowApprovalProviderDecisionService.ts:177,192), so the fallback is
+    -- the same value at decision and INSERT time.
+    -- Premise 2: an approval without a run intent reaches an INSERT only
+    -- through createApprovedRun, which is always mcp-host-control with a null
+    -- team, null usage team and 'autonomous' actor
+    -- (workflowTriggerService.ts:84-104,297-305); its subjects then come from
+    -- the approval alone. Approvals without run intents are still created when
+    -- the request carries no workflowTriggerRunIntent
+    -- (user-approval-requests.routes.ts:651 versus :715-729).
+    CREATE OR REPLACE FUNCTION authorization_prelock_workflow_approval_trigger_revisions(
+      target_request_id UUID
+    )
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE revision RECORD;
+    BEGIN
+      -- Parent locks must precede revisions and the bumped rows' FK checks,
+      -- matching principal deletion's parent-before-cascade order.
+      PERFORM team.id
+        FROM teams AS team
+       WHERE team.id::TEXT IN (
+         SELECT lower(subject.subject_id)
+           FROM workflow_approval_requests AS war
+           LEFT JOIN workflow_approval_trigger_run_intents AS watri
+             ON watri.approval_request_id = war.id
+           CROSS JOIN LATERAL (VALUES
+             ('team', war.target_team_id::TEXT),
+             ('team', COALESCE(
+               watri.team_id::TEXT, war.target_team_id::TEXT, war.decision_maker->>'teamId'
+             )),
+             ('team', NULLIF(COALESCE(
+               watri.usage_team_id, watri.team_id::TEXT,
+               war.target_team_id::TEXT, war.decision_maker->>'teamId'
+             ), 'control-plane-admin-ui'))
+           ) AS subject(subject_type, subject_id)
+          WHERE war.id = target_request_id
+            AND subject.subject_type = 'team'
+            AND subject.subject_id IS NOT NULL AND subject.subject_id <> ''
+       )
+       ORDER BY team.id
+       FOR KEY SHARE;
+
+      PERFORM principal.id
+        FROM users AS principal
+       WHERE principal.id IN (
+         SELECT war.target_user_id
+           FROM workflow_approval_requests AS war
+          WHERE war.id = target_request_id
+         UNION
+         SELECT watri.actor_id
+           FROM workflow_approval_trigger_run_intents AS watri
+          WHERE watri.approval_request_id = target_request_id
+            AND watri.actor_type = 'user'
+       )
+       ORDER BY principal.id
+       FOR KEY SHARE;
+
+      -- Hold every team before any user. Bumping also creates missing rows.
+      FOR revision IN
+        SELECT DISTINCT subject.subject_type, subject.subject_id
+          FROM workflow_approval_requests AS war
+          LEFT JOIN workflow_approval_trigger_run_intents AS watri
+            ON watri.approval_request_id = war.id
+          CROSS JOIN LATERAL (VALUES
+            ('team', war.target_team_id::TEXT),
+            ('team', COALESCE(
+              watri.team_id::TEXT, war.target_team_id::TEXT, war.decision_maker->>'teamId'
+            )),
+            ('team', NULLIF(COALESCE(
+              watri.usage_team_id, watri.team_id::TEXT,
+              war.target_team_id::TEXT, war.decision_maker->>'teamId'
+            ), 'control-plane-admin-ui')),
+            ('user', war.target_user_id::TEXT),
+            ('user', CASE WHEN watri.actor_type = 'user' THEN watri.actor_id::TEXT END)
+          ) AS subject(subject_type, subject_id)
+         WHERE war.id = target_request_id
+           AND subject.subject_id IS NOT NULL AND subject.subject_id <> ''
+         ORDER BY subject.subject_type, subject.subject_id
+      LOOP
+        PERFORM authorization_bump_subject_revision(revision.subject_type, revision.subject_id);
+      END LOOP;
+    END;
+    $$;
+
+    -- Recipe deletion (workflow-recipes workflowReconciler.ts reconcileDelete)
+    -- deletes the recipe's trigger grants and cancels its live approvals in one
+    -- transaction, after its caller locks those approval rows. Its user-grant
+    -- DELETE would take users before the team-grant DELETEs take teams, and its
+    -- multi-row approval UPDATE takes targets in scan order; run INSERTs and the
+    -- other prelocks take teams first. Grant writers lock the grant row before
+    -- its revision (workflowGrants.ts:106-111,238-242;
+    -- workflowGrantManagementService.ts:258-262), so these grant rows are
+    -- locked after their parents and before any revision. A row committed after
+    -- this function's reads is still deleted or cancelled, but its subject is
+    -- taken after the prelocked set (one trailing subject per late row).
+    CREATE OR REPLACE FUNCTION authorization_prelock_workflow_recipe_policy_revisions(
+      target_recipe_namespace TEXT,
+      target_recipe_name TEXT
+    )
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE revision RECORD;
+    BEGIN
+      -- Parent locks must precede grant rows and revisions, matching principal
+      -- deletion's parent-before-cascade order.
+      PERFORM team.id
+        FROM teams AS team
+       WHERE team.id::TEXT IN (
+         SELECT trigger_grant.team_id::TEXT
+           FROM team_workflow_triggers AS trigger_grant
+          WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+            AND trigger_grant.recipe_name = target_recipe_name
+         UNION
+         SELECT approval_target.team_id::TEXT
+           FROM workflow_recipe_allowed_teams AS approval_target
+          WHERE approval_target.recipe_namespace = target_recipe_namespace
+            AND approval_target.recipe_name = target_recipe_name
+         UNION
+         SELECT approval.target_team_id::TEXT
+           FROM workflow_approval_requests AS approval
+          WHERE approval.recipe_namespace = target_recipe_namespace
+            AND approval.recipe_name = target_recipe_name
+            AND approval.status IN ('pending', 'approved')
+       )
+       ORDER BY team.id
+       FOR KEY SHARE;
+
+      PERFORM principal.id
+        FROM users AS principal
+       WHERE principal.id IN (
+         SELECT trigger_grant.user_id
+           FROM user_workflow_triggers AS trigger_grant
+          WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+            AND trigger_grant.recipe_name = target_recipe_name
+         UNION
+         SELECT approval.target_user_id
+           FROM workflow_approval_requests AS approval
+          WHERE approval.recipe_namespace = target_recipe_namespace
+            AND approval.recipe_name = target_recipe_name
+            AND approval.status IN ('pending', 'approved')
+       )
+       ORDER BY principal.id
+       FOR KEY SHARE;
+
+      -- Grant writers take the grant row before its revision, so these rows are
+      -- held now, after their parents. The runtime role cannot lock or read the
+      -- subject columns, so this phase runs as the function owner.
+      PERFORM 1
+        FROM user_workflow_triggers AS trigger_grant
+       WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+         AND trigger_grant.recipe_name = target_recipe_name
+       ORDER BY trigger_grant.user_id
+       FOR UPDATE;
+      PERFORM 1
+        FROM team_workflow_triggers AS trigger_grant
+       WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+         AND trigger_grant.recipe_name = target_recipe_name
+       ORDER BY trigger_grant.team_id
+       FOR UPDATE;
+      PERFORM 1
+        FROM workflow_recipe_allowed_teams AS approval_target
+       WHERE approval_target.recipe_namespace = target_recipe_namespace
+         AND approval_target.recipe_name = target_recipe_name
+       ORDER BY approval_target.team_id
+       FOR UPDATE;
+
+      -- Hold every team before any user, as the other prelocks do. Bumping also
+      -- creates missing rows.
+      FOR revision IN
+        SELECT DISTINCT subject.subject_type, subject.subject_id
+          FROM (
+            SELECT 'team'::TEXT AS subject_type, trigger_grant.team_id::TEXT AS subject_id
+              FROM team_workflow_triggers AS trigger_grant
+             WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+               AND trigger_grant.recipe_name = target_recipe_name
+            UNION ALL
+            SELECT 'team', approval_target.team_id::TEXT
+              FROM workflow_recipe_allowed_teams AS approval_target
+             WHERE approval_target.recipe_namespace = target_recipe_namespace
+               AND approval_target.recipe_name = target_recipe_name
+            UNION ALL
+            SELECT 'user', trigger_grant.user_id::TEXT
+              FROM user_workflow_triggers AS trigger_grant
+             WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+               AND trigger_grant.recipe_name = target_recipe_name
+            UNION ALL
+            SELECT 'team', approval.target_team_id::TEXT
+              FROM workflow_approval_requests AS approval
+             WHERE approval.recipe_namespace = target_recipe_namespace
+               AND approval.recipe_name = target_recipe_name
+               AND approval.status IN ('pending', 'approved')
+            UNION ALL
+            SELECT 'user', approval.target_user_id::TEXT
+              FROM workflow_approval_requests AS approval
+             WHERE approval.recipe_namespace = target_recipe_namespace
+               AND approval.recipe_name = target_recipe_name
+               AND approval.status IN ('pending', 'approved')
+          ) AS subject(subject_type, subject_id)
+         WHERE subject.subject_id IS NOT NULL AND subject.subject_id <> ''
+         ORDER BY subject.subject_type, subject.subject_id
+      LOOP
+        PERFORM authorization_bump_subject_revision(revision.subject_type, revision.subject_id);
+      END LOOP;
     END;
     $$;
 
@@ -330,24 +654,105 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp
     AS $$
-    DECLARE row_value RECORD;
+    DECLARE revision RECORD;
     BEGIN
-      FOR row_value IN
-        SELECT actor_type, actor_id::TEXT, team_id::TEXT, usage_team_id
-          FROM (VALUES (NEW.actor_type, NEW.actor_id, NEW.team_id, NEW.usage_team_id))
-               AS current_row(actor_type, actor_id, team_id, usage_team_id)
-         WHERE TG_OP <> 'DELETE'
-        UNION ALL
-        SELECT actor_type, actor_id::TEXT, team_id::TEXT, usage_team_id
-          FROM (VALUES (OLD.actor_type, OLD.actor_id, OLD.team_id, OLD.usage_team_id))
-               AS prior_row(actor_type, actor_id, team_id, usage_team_id)
-         WHERE TG_OP <> 'INSERT'
+      -- Catalog producers, hydration and the live resolver read only these
+      -- columns (catalogProducerSql.ts:236-274, catalogHydrationSql.ts:491-535,
+      -- databaseAuthorityCandidates.ts:85-113); heartbeats and phase writes
+      -- change none of them. This is the same idiom as the guards below, an
+      -- in-function TG_OP test, because this trigger handles INSERT and DELETE
+      -- too and a WHEN clause cannot compare OLD and NEW there.
+      IF TG_OP = 'UPDATE' AND (
+        OLD.run_id, OLD.recipe_namespace, OLD.recipe_name, OLD.actor_type,
+        OLD.actor_id, OLD.team_id, OLD.usage_team_id
+      ) IS NOT DISTINCT FROM (
+        NEW.run_id, NEW.recipe_namespace, NEW.recipe_name, NEW.actor_type,
+        NEW.actor_id, NEW.team_id, NEW.usage_team_id
+      ) THEN
+        RETURN NEW;
+      END IF;
+      -- Order all affected subjects together, including prior attribution.
+      FOR revision IN
+        SELECT subject_type, subject_id
+          FROM (
+            SELECT actor_type, actor_id::TEXT, team_id::TEXT, usage_team_id
+              FROM (VALUES (NEW.actor_type, NEW.actor_id, NEW.team_id, NEW.usage_team_id))
+                   AS current_row(actor_type, actor_id, team_id, usage_team_id)
+             WHERE TG_OP <> 'DELETE'
+            UNION ALL
+            SELECT actor_type, actor_id::TEXT, team_id::TEXT, usage_team_id
+              FROM (VALUES (OLD.actor_type, OLD.actor_id, OLD.team_id, OLD.usage_team_id))
+                   AS prior_row(actor_type, actor_id, team_id, usage_team_id)
+             WHERE TG_OP <> 'INSERT'
+          ) AS row_value
+          CROSS JOIN LATERAL (VALUES
+            ('team', row_value.team_id),
+            ('team', CASE
+              WHEN row_value.usage_team_id = 'control-plane-admin-ui' THEN NULL
+              ELSE row_value.usage_team_id
+            END),
+            ('user', CASE WHEN row_value.actor_type = 'user' THEN row_value.actor_id END)
+          ) AS subjects(subject_type, subject_id)
+         WHERE subject_id IS NOT NULL AND subject_id <> ''
+         ORDER BY subject_type, subject_id
       LOOP
-        IF row_value.actor_type = 'user' THEN
-          PERFORM authorization_bump_subject_revision('user', row_value.actor_id);
-        END IF;
-        PERFORM authorization_bump_subject_revision('team', row_value.team_id);
-        PERFORM authorization_bump_subject_revision('team', row_value.usage_team_id);
+        PERFORM authorization_bump_subject_revision(revision.subject_type, revision.subject_id);
+      END LOOP;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_workflow_run_audit_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE revision RECORD;
+    BEGIN
+      -- Order current and prior attribution together, as for live runs.
+      FOR revision IN
+        SELECT subject_type, subject_id
+          FROM (
+            SELECT triggerer_actor_type, triggerer_user_id::TEXT,
+                   triggerer_team_id::TEXT, usage_team_id
+              FROM (VALUES (
+                NEW.triggerer_actor_type, NEW.triggerer_user_id,
+                NEW.triggerer_team_id, NEW.usage_team_id
+              )) AS current_row(
+                triggerer_actor_type, triggerer_user_id,
+                triggerer_team_id, usage_team_id
+              )
+             WHERE TG_OP <> 'DELETE'
+            UNION ALL
+            SELECT triggerer_actor_type, triggerer_user_id::TEXT,
+                   triggerer_team_id::TEXT, usage_team_id
+              FROM (VALUES (
+                OLD.triggerer_actor_type, OLD.triggerer_user_id,
+                OLD.triggerer_team_id, OLD.usage_team_id
+              )) AS prior_row(
+                triggerer_actor_type, triggerer_user_id,
+                triggerer_team_id, usage_team_id
+              )
+             WHERE TG_OP <> 'INSERT'
+          ) AS row_value
+          CROSS JOIN LATERAL (VALUES
+            ('team', row_value.triggerer_team_id),
+            ('team', CASE
+               WHEN row_value.usage_team_id = 'control-plane-admin-ui' THEN NULL
+               ELSE row_value.usage_team_id
+             END),
+            ('user', CASE
+               WHEN row_value.triggerer_actor_type = 'user'
+                 THEN row_value.triggerer_user_id
+             END)
+          ) AS revision_subjects(subject_type, subject_id)
+         WHERE subject_id IS NOT NULL AND subject_id <> ''
+         ORDER BY subject_type, subject_id
+      LOOP
+        PERFORM authorization_bump_subject_revision(
+          revision.subject_type, revision.subject_id
+        );
       END LOOP;
       RETURN COALESCE(NEW, OLD);
     END;
@@ -379,6 +784,21 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
+      -- Catalog producers, hydration and the live resolver read only these
+      -- columns (catalogProducerSql.ts:313-336, catalogHydrationSql.ts:599-648,
+      -- databaseAuthorityCandidates.ts:182-198). Delivery claims, acks and
+      -- terminal writes change only status, attempts, next_attempt_at and
+      -- delivered_medium (notificationDeliveryQueueService.ts:315-321,698-704,
+      -- 725-776, notificationDeliveryTerminalService.ts:47-50,74-78,
+      -- notificationAckService.ts:21-30), so they need no revision bump. Same
+      -- in-function TG_OP idiom as the run guard above.
+      IF TG_OP = 'UPDATE' AND (
+        OLD.id, OLD.event_type, OLD.audience, OLD.expires_at
+      ) IS NOT DISTINCT FROM (
+        NEW.id, NEW.event_type, NEW.audience, NEW.expires_at
+      ) THEN
+        RETURN NEW;
+      END IF;
       IF TG_OP <> 'DELETE' THEN
         PERFORM authorization_bump_subject_revision('user', NEW.audience->>'userId');
         PERFORM authorization_bump_subject_revision('team', NEW.audience->>'teamId');
@@ -386,23 +806,6 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       IF TG_OP <> 'INSERT' THEN
         PERFORM authorization_bump_subject_revision('user', OLD.audience->>'userId');
         PERFORM authorization_bump_subject_revision('team', OLD.audience->>'teamId');
-      END IF;
-      RETURN COALESCE(NEW, OLD);
-    END;
-    $$;
-
-    CREATE OR REPLACE FUNCTION authorization_bump_gfs_subject_revision()
-    RETURNS TRIGGER
-    LANGUAGE plpgsql
-    SECURITY DEFINER
-    SET search_path = pg_catalog, public, pg_temp
-    AS $$
-    BEGIN
-      IF TG_OP <> 'DELETE' THEN
-        PERFORM authorization_bump_subject_revision(NEW.subject_type, NEW.subject_id);
-      END IF;
-      IF TG_OP <> 'INSERT' THEN
-        PERFORM authorization_bump_subject_revision(OLD.subject_type, OLD.subject_id);
       END IF;
       RETURN COALESCE(NEW, OLD);
     END;
@@ -447,8 +850,8 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
-        PERFORM authorization_bump_subject_revision(NEW.subject_type, NEW.subject_id);
         PERFORM authorization_bump_gfs_resource_component(NEW.resource_id);
+        PERFORM authorization_bump_subject_revision(NEW.subject_type, NEW.subject_id);
       END IF;
       IF TG_OP = 'DELETE' OR (
         TG_OP = 'UPDATE' AND (
@@ -457,8 +860,8 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
           OR OLD.resource_id IS DISTINCT FROM NEW.resource_id
         )
       ) THEN
-        PERFORM authorization_bump_subject_revision(OLD.subject_type, OLD.subject_id);
         PERFORM authorization_bump_gfs_resource_component(OLD.resource_id);
+        PERFORM authorization_bump_subject_revision(OLD.subject_type, OLD.subject_id);
       END IF;
       RETURN COALESCE(NEW, OLD);
     END;
@@ -494,6 +897,21 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
+      -- Catalog producers, hydration and the live resolver read only this
+      -- resource's identity, name, parent and tombstone
+      -- (catalogProducerSql.ts:340-352, catalogHydrationSql.ts:654-655,692,697-701,
+      -- databaseAuthorityCandidates.ts:142-158). A content save rewrites only
+      -- version, bytes, blob_key, content_sha256 and updated_at
+      -- (gfs-controller/src/db/writeStore.ts:400-405) and a descendant rename
+      -- rewrites path_cache, so neither needs a revision bump. Same in-function
+      -- TG_OP idiom as the run guard above.
+      IF TG_OP = 'UPDATE' AND (
+        OLD.resource_id, OLD.name, OLD.parent_resource_id, OLD.deleted_at
+      ) IS NOT DISTINCT FROM (
+        NEW.resource_id, NEW.name, NEW.parent_resource_id, NEW.deleted_at
+      ) THEN
+        RETURN NEW;
+      END IF;
       IF TG_OP <> 'DELETE' THEN
         PERFORM authorization_bump_gfs_resource_component(NEW.resource_id);
         PERFORM authorization_bump_gfs_resource_subjects(NEW.resource_id);
@@ -521,6 +939,15 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     CREATE OR REPLACE TRIGGER workflow_approval_requests_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON workflow_approval_requests
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_workflow_approval_revision();
+    CREATE OR REPLACE TRIGGER workflow_recipe_allowed_teams_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON workflow_recipe_allowed_teams
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_team_grant_revision();
+    CREATE OR REPLACE TRIGGER workflow_approval_medium_accounts_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON workflow_approval_medium_accounts
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_user_grant_revision();
+    CREATE OR REPLACE TRIGGER workflow_runs_audit_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON workflow_runs_audit
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_workflow_run_audit_revision();
     CREATE OR REPLACE TRIGGER notification_deliveries_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON notification_deliveries
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_notification_revision();
@@ -534,17 +961,35 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       AFTER INSERT OR UPDATE OR DELETE ON gfs_resources
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_resource_revision();
 
-    REVOKE ALL ON TABLE authorization_catalog_writer_components FROM PUBLIC;
     REVOKE ALL ON TABLE authorization_catalog_environment FROM PUBLIC;
-    GRANT SELECT ON TABLE authorization_catalog_writer_components TO control_api_runtime;
     GRANT SELECT ON TABLE authorization_catalog_environment TO control_api_runtime;
     REVOKE ALL ON FUNCTION authorization_bump_subject_revision(TEXT, TEXT) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_prelock_workflow_run_revisions(UUID[]) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_run_revisions(UUID[])
+      TO control_api_runtime;
+    REVOKE ALL ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[]) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[])
+      TO control_api_runtime;
+    -- The stuck-run sweep runs on the Workflow Recipes pool, so that runtime
+    -- role may hold the batch's approval subjects before failing the runs.
+    GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[])
+      TO workflow_recipes_runtime;
+    REVOKE ALL ON FUNCTION authorization_prelock_workflow_approval_trigger_revisions(UUID)
+      FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_trigger_revisions(UUID)
+      TO control_api_runtime;
+    -- Recipe deletion runs on the Workflow Recipes pool, so only that runtime
+    -- role may lock its grant rows and bump its subjects first.
+    REVOKE ALL ON FUNCTION authorization_prelock_workflow_recipe_policy_revisions(TEXT, TEXT)
+      FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_recipe_policy_revisions(TEXT, TEXT)
+      TO workflow_recipes_runtime;
     REVOKE ALL ON FUNCTION authorization_bump_user_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_workflow_run_revision() FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_workflow_run_audit_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_workflow_approval_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_notification_revision() FROM PUBLIC;
-    REVOKE ALL ON FUNCTION authorization_bump_gfs_subject_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_gfs_resource_component(UUID) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_gfs_authority_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_gfs_resource_subjects(UUID) FROM PUBLIC;
@@ -621,10 +1066,12 @@ async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> 
     REVOKE ALL ON FUNCTION authorization_bump_user_revision(UUID) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_revision(UUID) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_resource_revision(TEXT, TEXT, TEXT) FROM PUBLIC;
-    GRANT EXECUTE ON FUNCTION authorization_bump_user_revision(UUID) TO control_api_runtime;
-    GRANT EXECUTE ON FUNCTION authorization_bump_team_revision(UUID) TO control_api_runtime;
-    GRANT EXECUTE ON FUNCTION authorization_bump_resource_revision(TEXT, TEXT, TEXT)
-      TO control_api_runtime;
+    -- Triggers and scoped definer functions call these; runtime calls stay denied.
+    -- Explicit revocation also repairs grants retained by CREATE OR REPLACE.
+    REVOKE ALL ON FUNCTION authorization_bump_user_revision(UUID) FROM control_api_runtime;
+    REVOKE ALL ON FUNCTION authorization_bump_team_revision(UUID) FROM control_api_runtime;
+    REVOKE ALL ON FUNCTION authorization_bump_resource_revision(TEXT, TEXT, TEXT)
+      FROM control_api_runtime;
   `)
 }
 
@@ -636,18 +1083,31 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp
     AS $$
+    DECLARE revision RECORD;
     BEGIN
-      IF TG_OP <> 'DELETE' THEN
-        PERFORM authorization_bump_user_revision(NEW.user_id);
-        PERFORM authorization_bump_team_revision(NEW.team_id);
-      END IF;
-      IF TG_OP <> 'INSERT' AND (
-        TG_OP = 'DELETE' OR OLD.user_id IS DISTINCT FROM NEW.user_id
-        OR OLD.team_id IS DISTINCT FROM NEW.team_id
-      ) THEN
-        PERFORM authorization_bump_user_revision(OLD.user_id);
-        PERFORM authorization_bump_team_revision(OLD.team_id);
-      END IF;
+      FOR revision IN
+        SELECT subject_type, subject_id
+          FROM (
+            SELECT NEW.team_id AS team_id, NEW.user_id AS user_id
+             WHERE TG_OP <> 'DELETE'
+            UNION ALL
+            SELECT OLD.team_id, OLD.user_id
+             WHERE TG_OP <> 'INSERT' AND (
+               TG_OP = 'DELETE' OR OLD.user_id IS DISTINCT FROM NEW.user_id
+               OR OLD.team_id IS DISTINCT FROM NEW.team_id
+             )
+          ) AS row_value
+          CROSS JOIN LATERAL (VALUES
+            ('team', row_value.team_id), ('user', row_value.user_id)
+          ) AS subjects(subject_type, subject_id)
+         ORDER BY subject_type, subject_id
+      LOOP
+        IF revision.subject_type = 'team' THEN
+          PERFORM authorization_bump_team_revision(revision.subject_id);
+        ELSE
+          PERFORM authorization_bump_user_revision(revision.subject_id);
+        END IF;
+      END LOOP;
       RETURN COALESCE(NEW, OLD);
     END;
     $$;
@@ -747,7 +1207,9 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     DECLARE trigger_spec RECORD;
     BEGIN
       FOR trigger_spec IN
-        SELECT * FROM (VALUES
+        -- The audit writer is installed by 0134 after this 0131 bootstrap.
+        -- Keep its repair spec here, but skip it until that function exists.
+        SELECT specs.* FROM (VALUES
           ('team_members', 'team_members_authorization_revision',
             'authorization_bump_team_membership_revision'),
           ('user_contexts', 'user_contexts_authorization_revision',
@@ -762,12 +1224,20 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
             'authorization_bump_team_grant_revision'),
           ('team_workflow_triggers', 'team_workflow_authorization_revision',
             'authorization_bump_team_grant_revision'),
+          ('workflow_recipe_allowed_teams', 'workflow_recipe_allowed_teams_authorization_revision',
+            'authorization_bump_team_grant_revision'),
+          ('workflow_approval_medium_accounts',
+            'workflow_approval_medium_accounts_authorization_revision',
+            'authorization_bump_user_grant_revision'),
+          ('workflow_runs_audit', 'workflow_runs_audit_authorization_revision',
+            'authorization_bump_workflow_run_audit_revision'),
           ('operational_resource_index', 'operational_resource_authorization_revision',
             'authorization_bump_operational_resource_revision'),
           ('operational_resource_relationships',
             'operational_relationship_authorization_revision',
             'authorization_bump_operational_relationship_revision')
         ) AS specs(table_name, trigger_name, function_name)
+        WHERE to_regprocedure(format('public.%I()', specs.function_name)) IS NOT NULL
       LOOP
         IF NOT EXISTS (
           SELECT 1 FROM pg_trigger WHERE tgname = trigger_spec.trigger_name
@@ -835,7 +1305,6 @@ async function applyUserAccessRuntimePrivileges(db: DbClient): Promise<void> {
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
       external_user_sessions,
       external_user_session_security_epochs,
-      external_v1_session_revocations,
       operational_catalog_source_state,
       operational_resource_index,
       operational_resource_relationships,
@@ -843,7 +1312,12 @@ async function applyUserAccessRuntimePrivileges(db: DbClient): Promise<void> {
       operational_relationships_staging
       TO control_api_runtime;
 
-    GRANT SELECT, INSERT, UPDATE ON TABLE
+    -- Append-only ledger: the runtime records a revocation but never rewrites or
+    -- erases one. The user-deletion cascade runs as the table owner.
+    GRANT SELECT, INSERT ON TABLE external_v1_session_revocations TO control_api_runtime;
+
+    -- Revision rows are written only by the SECURITY DEFINER bump functions.
+    GRANT SELECT ON TABLE
       authorization_user_revisions,
       authorization_team_revisions,
       authorization_resource_revisions

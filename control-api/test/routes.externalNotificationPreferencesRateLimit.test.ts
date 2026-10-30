@@ -36,7 +36,7 @@ function makeApp() {
   return app
 }
 
-describe('external notification preference rate limits', () => {
+describe('external notification preference dev parity', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     preferencesMock.getUserNotificationPreferences.mockResolvedValue({ preferredMedium: null })
@@ -51,46 +51,18 @@ describe('external notification preference rate limits', () => {
     })
   })
 
-  it('rate limits preference reads before loading user preferences', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 31,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-    })
-
-    const response = await request(makeApp()).get('/external/me/notification-preferences')
-
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_notification_preference_read:user:user-1',
-      30
-    )
-    expect(preferencesMock.getUserNotificationPreferences).not.toHaveBeenCalled()
+  it('preserves uncharged preference get behavior', async () => {
+    await request(makeApp()).get('/external/me/notification-preferences').expect(200)
+    expect(preferencesMock.getUserNotificationPreferences).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
-  it('rate limits preference mutations before persisting user preferences', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 11,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-    })
-
-    const response = await request(makeApp())
+  it('preserves uncharged preference put behavior', async () => {
+    await request(makeApp())
       .put('/external/me/notification-preferences')
       .send({ preferredMedium: 'email' })
-
-    expect(response.status).toBe(429)
-    expect(response.headers['retry-after']).toBeDefined()
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_notification_preference_mutation:user:user-1',
-      10
-    )
-    expect(preferencesMock.upsertUserNotificationPreferences).not.toHaveBeenCalled()
+      .expect(200)
+    expect(preferencesMock.upsertUserNotificationPreferences).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 })

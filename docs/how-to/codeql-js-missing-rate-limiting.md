@@ -7,14 +7,42 @@ This document records audited dispositions for [CodeQL](https://codeql.github.co
 
 ## Product invariant
 
-Authenticated control-api routes that perform expensive work **must** be rate
-limited. Enforcement uses the Postgres-backed `rateLimitMiddleware`
-(`services/rateLimiterService.ts`) so limits are consistent across replicas.
+Retain the rate limits inherited from dev. An owner-authorized parity decision
+also removes limits that PR #334 added to existing dev routes and assigns new
+routes the limits of their dev equivalents. Some authenticated operations
+therefore have no frequency limit; authentication and execution budgets are
+not substitutes for one. This accepts the corresponding exposure to repeated
+work while preserving the dev client's existing limiter contract.
 
-CodeQL 2.x models `express-rate-limit` (and some framework plugins) but **does
-not** model our custom PG limiter. Routes that only use `rateLimitMiddleware`
-may still alert until an `express-rate-limit` **edge backstop** is added (see
-`control-api/src/routes/external/gfs.ts`).
+The stock CodeQL query models `express-rate-limit` but may not recognize the
+Postgres-backed `rateLimitMiddleware`. The repository's custom query models
+the canonical middleware separately. Cross-service and edge controls can still
+be invisible to an individual finding; review the actual enforcement path.
+
+## PR #334 owner parity decision
+
+The Task 106 plan (§D.6) proposed shared admission for Host messages and
+artifact reads. That proposal is superseded for these PR1 routes: neither the
+legacy Host message routes nor the dev artifact paths had those frequency
+limits. Authentication, live Host authorization, body and transfer bounds,
+wake limits, and the rule against automatically resending a message remain.
+Rolling out a new Control API next to old rpc-proxy pods therefore has no
+rate-limit compatibility gap; dedicated-operation compatibility remains a
+separate concern.
+
+Access capabilities and resolution retain the dev users-family edge limits;
+catalog also retains the aggregate-directory user limit and gains the matching
+External REST catalog limit. Workflow reads and session lifecycle paths do not
+gain PR-only frequency limits. Existing password, directory, workflow-trigger
+and other inherited gates remain in force. The future Spec 76 service/session
+admission proposal is outside this PR1 change; it does not establish a limiter
+on the corresponding pinned dev routes.
+
+Historical explanations that cite a 60/minute Host-message bucket or a
+10/minute RPC-token issuer limit no longer establish protection for these
+paths. Treat the absence of admission as an accepted parity decision, not as a
+false positive caused by an enforcing limiter. This document does not change
+GitHub alert state.
 
 ## Approved patterns
 
@@ -160,5 +188,5 @@ Re-audit when:
 
 - `rateLimitMiddleware` signature or call pattern changes repo-wide
 - A listed route removes its PG limiter
-- CodeQL adds modeling for our PG limiter (then remove redundant backstops)
+- CodeQL changes modeling for our PG limiter or cross-service edge controls
 - New authenticated route is added without an entry in this registry

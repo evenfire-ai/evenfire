@@ -8,9 +8,7 @@ import {
   requireRpcAuth,
 } from '../middleware/auth.js'
 import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
-import { ControlApiHostVersionMismatchError } from '../services/controlApiVersionError.js'
 import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
-import { admitLegacyHostRpcRequest } from '../services/hostRpcAdmission.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
 
 const activeStreamCountsByUser = new Map<string, number>()
@@ -91,8 +89,6 @@ export function createRpcHostActivityStreamRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef } = getHostRpcPreflight(req)
-
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -279,10 +275,6 @@ export function createRpcHostActivityStreamRouter(): Router {
           }
         })()
       } catch (error) {
-        if (!res.headersSent && error instanceof ControlApiHostVersionMismatchError) {
-          next(error)
-          return
-        }
         if (res.destroyed || res.writableEnded) return
         if (!res.headersSent) {
           res.status(500).json({ error: 'Internal Server Error' })

@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { K8sGateway } from '../src/k8s.js'
 import type { RpcAccessClaims } from '../src/profileTypes.js'
-import {
-  HostDirectoryUnavailableError,
-  authorizeRpcHostAccess,
-} from '../src/services/access/rpcHostAccessAuthorizer.js'
+import { authorizeRpcHostAccess } from '../src/services/access/rpcHostAccessAuthorizer.js'
 import { signRpcAccessToken, verifyRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 
 const CLAIMS: RpcAccessClaims = {
@@ -175,7 +172,7 @@ describe('authorizeRpcHostAccess', () => {
     ).resolves.toEqual({ authorized: false, reason })
   })
 
-  it('turns a Kubernetes 404 from the Host listing into an operational failure, never a denial', async () => {
+  it('propagates a Kubernetes 404 from the Host listing', async () => {
     const notFound = Object.assign(new Error('namespaces "mcp-host" not found'), {
       code: 404,
       body: { kind: 'Status', status: 'Failure', reason: 'NotFound' },
@@ -188,8 +185,7 @@ describe('authorizeRpcHostAccess', () => {
     const { directory } = dependencies()
 
     const rejection = authorizeRpcHostAccess(gateway, CLAIMS, 'user-1', 'host-a', directory)
-    await expect(rejection).rejects.toBeInstanceOf(HostDirectoryUnavailableError)
-    await expect(rejection).rejects.toMatchObject({ httpStatus: 500, cause: notFound })
+    await expect(rejection).rejects.toBe(notFound)
 
     // Positive control in the same test: the same dependency path and Host
     // resolution work normally once the listing answers.

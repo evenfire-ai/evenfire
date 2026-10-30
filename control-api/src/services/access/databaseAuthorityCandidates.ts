@@ -50,6 +50,16 @@ function workflowRunResumeBindings(
   )
 }
 
+/**
+ * The exact code points `String.prototype.trim` removes (ECMA-262 WhiteSpace
+ * and LineTerminator), so `btrim(value, ...)` and `parseWorkflowTriggerIntent`
+ * agree on what an absent or present approval requester is. `btrim`'s default
+ * set only removes U+0020.
+ */
+const WORKFLOW_TRIGGER_TRIM_CODE_POINTS =
+  '\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005' +
+  '\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+
 export async function loadDatabaseCandidates(input: {
   db: Pick<DbClient, 'query'>
   budget: AccessExecutionBudget
@@ -135,6 +145,8 @@ export async function loadDatabaseCandidates(input: {
           AND twt.recipe_namespace = wr.recipe_namespace
           AND twt.recipe_name = wr.recipe_name
         WHERE $2::text = 'workflow_run' AND wr.run_id::text = $3
+          AND (wr.actor_type IN ('scheduled', 'autonomous')
+            OR (wr.actor_type = 'user' AND (wr.actor_id = $1 OR wr.actor_id IS NULL)))
        UNION ALL
        SELECT 'direct', 'workflow_artifacts:user:' || wr.run_id || ':' || $3,
               NULL, NULL, NULL, wr.recipe_namespace, wr.recipe_name,
@@ -181,12 +193,19 @@ export async function loadDatabaseCandidates(input: {
          FROM workflow_approval_requests war
          JOIN team_members tm
            ON tm.team_id = war.target_team_id AND tm.user_id = $1 AND tm.status = 'active'
-         JOIN team_workflow_triggers twt
-           ON twt.team_id = tm.team_id
-          AND twt.recipe_namespace = war.recipe_namespace
-          AND twt.recipe_name = war.recipe_name
+         JOIN workflow_recipe_allowed_teams wat
+           ON wat.team_id = tm.team_id
+          AND wat.recipe_namespace = war.recipe_namespace
+          AND wat.recipe_name = war.recipe_name
         WHERE $2::text = 'workflow_approval' AND war.id::text = $3
           AND war.status = 'pending' AND war.expires_at > NOW()
+          AND (
+            jsonb_typeof(war.payload #> '{metadata,workflowTrigger,requesterUserId}')
+              IS DISTINCT FROM 'string'
+            OR btrim(
+                 war.payload #>> '{metadata,workflowTrigger,requesterUserId}', $5::text
+               ) IN ('', $1::text)
+          )
        UNION ALL
        SELECT CASE WHEN g.subject_type = 'user' THEN 'direct' ELSE 'team' END,
               'gfs_grants:' || g.id,
@@ -236,7 +255,13 @@ export async function loadDatabaseCandidates(input: {
      SELECT * FROM candidates
      ORDER BY kind, team_id NULLS FIRST, grant_id
      LIMIT $4`,
-    [snapshot.userId, resource.type, resource.logicalId, input.budget.limits.accessPaths + 1]
+    [
+      snapshot.userId,
+      resource.type,
+      resource.logicalId,
+      input.budget.limits.accessPaths + 1,
+      WORKFLOW_TRIGGER_TRIM_CODE_POINTS,
+    ]
   )
   const rows = result.rows as Record<string, unknown>[]
   let workflowRunSource:

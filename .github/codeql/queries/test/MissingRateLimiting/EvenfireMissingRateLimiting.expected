@@ -1,3 +1,0 @@
-| mcp-host/src/server.ts:31:3:31:33 | runtime ... roxy']) | This route handler performs $@, but is not rate-limited. | mcp-host/src/server.ts:10:5:10:25 | authori ... st(req) | authorization |
-| mcp-host/src/server.ts:32:3:35:3 | (_req,  ... d()\\n  } | This route handler performs $@, but is not rate-limited. | mcp-host/src/server.ts:33:5:33:36 | fs.read ... facts') | a file system access |
-| mcp-host/src/server.ts:38:30:41:1 | (_req,  ... end()\\n} | This route handler performs $@, but is not rate-limited. | mcp-host/src/server.ts:39:3:39:32 | fs.read ... ports') | a file system access |

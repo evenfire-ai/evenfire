@@ -13,7 +13,7 @@ import type { LoginPanelProps } from './types'
 export function LoginPanel({
   description = 'Sign in with your Evenfire account credentials.',
 }: LoginPanelProps) {
-  const { login } = useAuth()
+  const { login, signOutIncomplete, retrySignOut } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -96,6 +96,19 @@ export function LoginPanel({
           </Link>
         </div>
       </div>
+
+      {signOutIncomplete ? (
+        <div className="cu-banner cu-banner--error cu-login-error" role="alert">
+          <p>
+            Sign-out is not complete. The server could not confirm it, and this browser could not
+            save the sign-out, so this session may come back after a reload or stay active in other
+            Profile tabs.
+          </p>
+          <Button variant="secondary" onClick={retrySignOut}>
+            Retry sign-out
+          </Button>
+        </div>
+      ) : null}
 
       {error ? <div className="cu-banner cu-banner--error cu-login-error">{error}</div> : null}
     </main>

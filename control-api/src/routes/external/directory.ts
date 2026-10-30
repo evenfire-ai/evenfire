@@ -5,11 +5,9 @@ import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBud
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
-  requireExternalRoleWithPublicErrors,
   requireExternalTeamParamMatchWithPublicErrors,
   requireValidExternalSessionTokenWithPublicErrors,
 } from '../../middleware/externalSessionAuth.js'
-import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   DIRECTORY_SEARCH_MAX_QUERY_LENGTH,
   DirectorySearchCursorError,
@@ -33,27 +31,6 @@ export function createExternalDirectoryRouter(): Router {
   router.get(
     '/external/directory/search',
     requireExternalTeamParamMatchWithPublicErrors(),
-    requireExternalRoleWithPublicErrors(['admin', 'inviter']),
-    rateLimitMiddleware({
-      bucketType: 'external_directory_search',
-      maxPerMinute: 30,
-      onBackendUnavailable: 'process-memory',
-      getBucketKey: req => {
-        const external = req as ExternalAuthedRequest
-        return `directory-search:${external.externalAuth?.userId || 'unknown'}`
-      },
-      onLimited: (req, res, retryAfterSeconds) => {
-        sendPublicApiError(
-          req,
-          res,
-          429,
-          'rate_limited',
-          'Too many directory searches; retry later.',
-          true,
-          { retryAfterSeconds }
-        )
-      },
-    }),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const teamId = String(req.query.teamId || '').trim()

@@ -14,12 +14,9 @@ import { config } from '../config.js'
 import { createMcpOauthRouter } from '../routes/mcpOauth.js'
 import { createSandboxUiSessionRouter } from '../routes/sandboxUi.js'
 import {
-  admitLegacySessionCreation,
-  fetchArtifactReadHostConnectionFromControlApi,
   fetchHostConnectionFromControlApi,
   fetchUserAllowedServersFromControlApi,
   fetchUserConnectorsFromControlApi,
-  requestHostRpcAdmission,
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
 import { startPr2ReadinessReporter } from '../services/pr2ReadinessReporter.js'
@@ -64,7 +61,7 @@ const CONTROL_API_BASE_URL_MENTIONS: Record<string, number> = {
   'actionAuthorityV2.ts': 1,
   'routes/mcpOauth.ts': 2,
   'routes/sandboxUi.ts': 3,
-  'services/controlApiRestService.ts': 9,
+  'services/controlApiRestService.ts': 7,
   'services/pr2ReadinessReporter.ts': 1,
   'services/sandboxUiRegistry.ts': 4,
 }
@@ -281,10 +278,6 @@ async function emittedRequests(): Promise<{
       readinessHops.push(JSON.parse(String(init?.body)).hop)
       return new Response(null, { status: 201 })
     }
-    if (pathname.endsWith('/internal/rpc-proxy/legacy-session-admission')) {
-      return new Response(null, { status: 204 })
-    }
-    if (pathname.endsWith('/host-rpc-admission')) return new Response(null, { status: 204 })
     // The fake answers the checkpoint by prefix so a path mutation reaches the
     // expected-list assertion instead of failing inside the response parser.
     if (pathname.startsWith(PR2_CHECKPOINT_PATH)) return allowedCheckpointBody()
@@ -320,8 +313,6 @@ async function emittedRequests(): Promise<{
     },
     fetchImpl,
   })
-  await fetchHostConnectionFromControlApi(USER, HOST, 'jwt', { messageResolution: true, fetchImpl })
-  await fetchArtifactReadHostConnectionFromControlApi(USER, HOST, 'jwt', { fetchImpl })
   await requestHostWakeFromControlApi(HOST, 'jwt')
   await lookupSandboxUiRegistry('sandbox-recipes', 'r1', USER, 'team-1')
   await listSandboxUiApps(USER, 'team-1')
@@ -366,8 +357,6 @@ async function emittedRequests(): Promise<{
       else process.env[key] = value
     }
   }
-  await admitLegacySessionCreation('jwt')
-  await requestHostRpcAdmission(USER, HOST, 'jwt', { fetchImpl })
   await requestHostWakeFromControlApi(HOST, 'jwt', { authorizedActionV2: authorized })
 
   const gatewayRequests = fetchMock.mock.calls.map(([url, init]) => ({
@@ -396,18 +385,13 @@ describe('control-api-rpc-gateway parity with the rpc-proxy emitter', () => {
     const { requests, gatewayRequests, readinessHops } = await emittedRequests()
     // Liveness witness: every emitter ran and produced its request. The
     // registry lookup appears twice: once called directly and once from the
-    // sandbox OAuth authorize-url route, which resolves the app first. The 15
-    // original sites are followed by one entry per PR2 URL site.
+    // sandbox OAuth authorize-url route, which resolves the app first. The 13
+    // dev sites are followed by one entry per PR2 URL site.
     expect(requests).toEqual([
       { method: 'GET', path: `/api/v1/rpc/access/users/${USER}/mcp-servers` },
       { method: 'GET', path: `/api/v1/rpc/access/users/${USER}/mcp-connectors` },
       { method: 'GET', path: `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}` },
       { method: 'POST', path: `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}` },
-      {
-        method: 'POST',
-        path: `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/message-resolution`,
-      },
-      { method: 'GET', path: `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/artifact-read` },
       { method: 'POST', path: `/api/v1/rpc/hosts/${HOST}/wake` },
       { method: 'GET', path: '/api/v1/internal/sandbox-ui/registry/sandbox-recipes/r1' },
       { method: 'GET', path: '/api/v1/internal/sandbox-ui/apps' },
@@ -419,11 +403,6 @@ describe('control-api-rpc-gateway parity with the rpc-proxy emitter', () => {
       { method: 'DELETE', path: '/api/v1/internal/sandbox-ui/oauth/grant' },
       { method: 'POST', path: PR2_CHECKPOINT_PATH },
       { method: 'POST', path: PR2_RUNTIME_EVIDENCE_PATH },
-      { method: 'POST', path: '/api/v1/internal/rpc-proxy/legacy-session-admission' },
-      {
-        method: 'POST',
-        path: `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/host-rpc-admission`,
-      },
       { method: 'POST', path: `/api/v1/internal/action-authority/hosts/${HOST}/wake` },
     ])
     // The readiness reporter reports both of its owned hops; the expected
@@ -443,24 +422,31 @@ describe('control-api-rpc-gateway parity with the rpc-proxy emitter', () => {
   it('keeps the default deny for paths and methods rpc-proxy does not emit', () => {
     const locations = gatewayLocations(gatewayNginxConf())
     // Witness that the matcher can deny: these would pass a matcher that
-    // admits everything.
-    expect(gatewayAdmits(locations, 'GET', `/api/v1/rpc/access/users/${USER}/contexts`)).toBe(false)
-    expect(
-      gatewayAdmits(
-        locations,
-        'POST',
-        `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/artifact-read`
-      )
-    ).toBe(false)
-    expect(
-      gatewayAdmits(
-        locations,
-        'GET',
-        `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/message-resolution`
-      )
-    ).toBe(false)
-    expect(
-      gatewayAdmits(locations, 'GET', `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/other`)
-    ).toBe(false)
+    // admits everything. The parent Host path stays admitted (GET and POST)
+    // in the emitter test above. Both methods of the removed sub-paths are
+    // denied, so restoring either location block turns this red. Reintroducing
+    // a messageResolution emission would request /message-resolution, which
+    // selects no location and fails the emitter test.
+    const admits = (method: string, path: string): boolean => {
+      try {
+        return gatewayAdmits(locations, method, path)
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('no gateway location selects ')) {
+          return false
+        }
+        throw error
+      }
+    }
+    expect(admits('GET', `/api/v1/rpc/access/users/${USER}/contexts`)).toBe(false)
+    const removed = `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}`
+    for (const method of ['GET', 'POST']) {
+      expect(admits(method, `${removed}/artifact-read`)).toBe(false)
+      expect(admits(method, `${removed}/message-resolution`)).toBe(false)
+    }
+    expect(gatewayAdmits(locations, 'GET', removed)).toBe(true)
+    expect(gatewayAdmits(locations, 'POST', removed)).toBe(true)
+    // Method gate on the proxying parent location itself.
+    expect(admits('DELETE', removed)).toBe(false)
+    expect(admits('GET', `${removed}/other`)).toBe(false)
   })
 })

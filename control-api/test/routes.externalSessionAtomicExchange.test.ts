@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createExternalAuthRouter } from '../src/routes/external/auth.js'
+import { externalSessionDatabaseFailure } from '../src/services/auth/sessionDatabaseFailure.js'
 
 const sessions = vi.hoisted(() => ({ authenticateExternalUserSession: vi.fn() }))
 const revocations = vi.hoisted(() => ({
@@ -13,7 +14,6 @@ const issuance = vi.hoisted(() => ({
   issueExternalUserSession: vi.fn(),
   selectExternalSessionRepresentation: vi.fn(),
 }))
-const limiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 const database = vi.hoisted(() => ({ query: vi.fn() }))
 
 vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
@@ -25,7 +25,6 @@ vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
   return { ...actual, ...revocations }
 })
 vi.mock('../src/services/auth/externalSessionIssuance.js', () => issuance)
-vi.mock('../src/services/rateLimiterService.js', () => limiter)
 vi.mock('../src/db.js', () => ({ pool: { query: database.query } }))
 
 function app() {
@@ -48,13 +47,6 @@ describe('legacy external-session replacement exchange', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    limiter.checkAndIncrement.mockResolvedValue({
-      allowed: true,
-      remaining: 9,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      count: 1,
-    })
     sessions.authenticateExternalUserSession.mockResolvedValue({
       status: 'authenticated',
       contract: 'v1',
@@ -87,7 +79,7 @@ describe('legacy external-session replacement exchange', () => {
       .post('/external/auth/session-token')
       .set('x-forwarded-for', '203.0.113.44')
       .set('x-user-session-token', 'synthetic-source-token')
-      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new' })
+      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'admin' })
 
     expect(response.status).toBe(401)
     expect(response.body).toMatchObject({ error: { code: 'invalid_session' } })
@@ -109,7 +101,7 @@ describe('legacy external-session replacement exchange', () => {
       .post('/external/auth/session-token')
       .set('x-forwarded-for', '203.0.113.44')
       .set('x-user-session-token', 'synthetic-source-token')
-      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new' })
+      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'admin' })
       .expect(200)
 
     expect(response.body).toEqual({
@@ -128,10 +120,64 @@ describe('legacy external-session replacement exchange', () => {
       .post('/external/auth/session-token')
       .set('x-forwarded-for', '203.0.113.44')
       .set('x-user-session-token', 'synthetic-source-token')
-      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new' })
+      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'admin' })
       .expect(403, { error: 'membership_not_found' })
 
     expect(issuance.issueExternalUserSession).not.toHaveBeenCalled()
+  })
+
+  it('rejects a missing body role with dev invalid payload and accepts a valid role', async () => {
+    issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
+      status: 'issued',
+      token: 'synthetic-replacement-token',
+      role: 'admin',
+    })
+    const payload = { userId: claims.userId, email: claims.email, teamId: 'team-new' }
+
+    const missingRole = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send(payload)
+
+    expect(missingRole.status).toBe(400)
+    expect(missingRole.body).toEqual({ error: 'invalid payload' })
+    expect(issuance.exchangeLegacyExternalUserSession).not.toHaveBeenCalled()
+
+    const control = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'admin' })
+
+    expect(control.status).toBe(200)
+  })
+
+  it('rejects an invalid body role with dev invalid payload and accepts a valid role', async () => {
+    issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
+      status: 'issued',
+      token: 'synthetic-replacement-token',
+      role: 'admin',
+    })
+    const payload = { userId: claims.userId, email: claims.email, teamId: 'team-new' }
+
+    const invalidRole = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'owner' })
+
+    expect(invalidRole.status).toBe(400)
+    expect(invalidRole.body).toEqual({ error: 'invalid payload' })
+    expect(issuance.exchangeLegacyExternalUserSession).not.toHaveBeenCalled()
+
+    const control = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'member' })
+
+    expect(control.status).toBe(200)
   })
 
   it('binds revoke-all to the authenticated actor authority context', async () => {
@@ -160,7 +206,9 @@ describe('legacy external-session replacement exchange', () => {
       claims.userId,
       'user_revoked_all',
       undefined,
-      authorityContext
+      authorityContext,
+      undefined,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
     )
   })
 
@@ -196,7 +244,8 @@ describe('legacy external-session replacement exchange', () => {
       'target-session',
       'user_revoked',
       undefined,
-      authorityContext
+      authorityContext,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
     )
   })
 
@@ -232,7 +281,8 @@ describe('legacy external-session replacement exchange', () => {
       v2Claims.sid,
       'logout',
       undefined,
-      authorityContext
+      authorityContext,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
     )
   })
 })

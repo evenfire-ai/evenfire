@@ -8,6 +8,12 @@ import { GFS_HYDRATION_SQL } from '../src/services/access/catalogHydrationSql.js
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { applyComposableCatalogRevisionSchema } from '../src/services/access/userAccessFoundationSchema.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
+import { acknowledgeDesktopNotificationDelivery } from '../src/services/notificationAckService.js'
+import {
+  markUserBoundNotificationDeliveryFailed,
+  markUserBoundNotificationDeliverySent,
+  markUserBoundNotificationDeliverySkippedNoBot,
+} from '../src/services/notificationDeliveryQueueService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -17,6 +23,29 @@ const runtimeRoles = [
   'trace_maintenance_runtime',
   'workflow_recipes_runtime',
 ] as const
+
+// Catalog writer tables and the revision component each one advances. This
+// was a production table with no reader (P-13); it is now test data.
+const CATALOG_WRITER_COMPONENTS = Object.freeze([
+  ['users', 'user'],
+  ['teams', 'team'],
+  ['team_members', 'user+team'],
+  ['user_contexts', 'user'],
+  ['team_contexts', 'team'],
+  ['user_agents', 'user'],
+  ['team_agents', 'team'],
+  ['user_workflow_triggers', 'user'],
+  ['team_workflow_triggers', 'team'],
+  ['workflow_runs', 'user+team'],
+  ['workflow_approval_requests', 'user+team'],
+  ['notification_deliveries', 'user+team'],
+  ['gfs_resources', 'resource+gfs-subjects'],
+  ['gfs_grants', 'resource+user+team'],
+  ['gfs_shares', 'resource+user+team'],
+  ['operational_resource_index', 'resource+source-state'],
+  ['operational_resource_relationships', 'resource+source-state'],
+  ['operational_catalog_source_state', 'source-state'],
+] as const)
 
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
@@ -60,6 +89,14 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
     const result = await databasePool.query<{ revision: string }>(
       `SELECT revision::text FROM authorization_user_revisions WHERE user_id = $1`,
       [userId]
+    )
+    return Number(result.rows[0]?.revision ?? 1)
+  }
+
+  async function teamRevision(teamId: string): Promise<number> {
+    const result = await databasePool.query<{ revision: string }>(
+      `SELECT revision::text FROM authorization_team_revisions WHERE team_id = $1`,
+      [teamId]
     )
     return Number(result.rows[0]?.revision ?? 1)
   }
@@ -140,20 +177,11 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
   it('maps the complete writer class without a singleton revision trigger', async () => {
     await applyComposableCatalogRevisionSchema(databasePool)
     await applyComposableCatalogRevisionSchema(databasePool)
-    const mappings = await databasePool.query<{
-      writer_table: string
-      component_class: string
-    }>(
-      `SELECT writer_table, component_class
-         FROM authorization_catalog_writer_components
-        ORDER BY catalog_utf8_bytes(writer_table)`
+    expect(CATALOG_WRITER_COMPONENTS).toHaveLength(18)
+    const registry = await databasePool.query<{ relation: string | null }>(
+      `SELECT to_regclass('public.authorization_catalog_writer_components')::text AS relation`
     )
-    expect(mappings.rows).toHaveLength(18)
-    expect(mappings.rows.filter(row => row.writer_table.startsWith('gfs_'))).toEqual([
-      { writer_table: 'gfs_grants', component_class: 'resource+user+team' },
-      { writer_table: 'gfs_resources', component_class: 'resource+gfs-subjects' },
-      { writer_table: 'gfs_shares', component_class: 'resource+user+team' },
-    ])
+    expect(registry.rows).toEqual([{ relation: null }])
 
     const globalTriggers = await databasePool.query<{ count: string }>(
       `SELECT count(*)::text AS count
@@ -169,11 +197,10 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
     )
     const directlyVersioned = new Set(['operational_catalog_source_state'])
     const triggered = new Set(triggerTables.rows.map(row => row.table_name))
-    for (const mapping of mappings.rows) {
-      expect(
-        triggered.has(mapping.writer_table) || directlyVersioned.has(mapping.writer_table),
-        mapping.writer_table
-      ).toBe(true)
+    for (const [writerTable] of CATALOG_WRITER_COMPONENTS) {
+      expect(triggered.has(writerTable) || directlyVersioned.has(writerTable), writerTable).toBe(
+        true
+      )
     }
   })
 
@@ -253,6 +280,209 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
       workflowRun.rows[0]!.run_id,
     ])
     expect(await userRevision(userIds[0])).toBeGreaterThan(revision)
+  })
+
+  it('bumps the team revision for allowed-team changes', async () => {
+    const recipeName = `p10-${randomUUID()}`
+    let revision = await teamRevision(teamIds[0])
+    await databasePool.query(
+      `INSERT INTO workflow_recipe_allowed_teams(recipe_namespace, recipe_name, team_id)
+       VALUES ('sandbox-recipes', $1, $2)`,
+      [recipeName, teamIds[0]]
+    )
+    expect(await teamRevision(teamIds[0])).toBeGreaterThan(revision)
+
+    revision = await teamRevision(teamIds[0])
+    await databasePool.query(
+      `DELETE FROM workflow_recipe_allowed_teams
+       WHERE recipe_namespace = 'sandbox-recipes' AND recipe_name = $1 AND team_id = $2`,
+      [recipeName, teamIds[0]]
+    )
+    expect(await teamRevision(teamIds[0])).toBeGreaterThan(revision)
+  })
+
+  it('bumps the user revision for approval medium-account changes', async () => {
+    let revision = await userRevision(userIds[1])
+    const account = await databasePool.query<{ id: string }>(
+      `INSERT INTO workflow_approval_medium_accounts(
+         user_id, medium, provider_user_id, verified_at
+       ) VALUES ($1, 'slack', $2, NOW())
+       RETURNING id::text`,
+      [userIds[1], `provider-${randomUUID()}`]
+    )
+    expect(await userRevision(userIds[1])).toBeGreaterThan(revision)
+
+    revision = await userRevision(userIds[1])
+    await databasePool.query(`DELETE FROM workflow_approval_medium_accounts WHERE id = $1`, [
+      account.rows[0]!.id,
+    ])
+    expect(await userRevision(userIds[1])).toBeGreaterThan(revision)
+  })
+
+  it('leaves run subject revisions unchanged on heartbeats and bumps them on a subject change', async () => {
+    const team = teamIds[0]
+    const nextTeam = teamIds[1]
+    const user = userIds[0]
+    const run = randomUUID()
+    await databasePool.query(
+      `INSERT INTO workflow_runs(run_id, recipe_namespace, recipe_name, phase, actor_type,
+         actor_id, team_id, usage_team_id, trigger_source)
+       VALUES ($1, 'sandbox-recipes', 'revision-heartbeat', 'Pending', 'user', $2, $3, $4,
+         'onDemand')`,
+      [run, user, team, team]
+    )
+    const beforeUser = await userRevision(user)
+    const beforeTeam = await teamRevision(team)
+    const beforeNextTeam = await teamRevision(nextTeam)
+
+    // The workflow-recipes reconciler SQL, run as its runtime role. None of
+    // these statements changes a column a catalog consumer reads.
+    const client = await databasePool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('SET LOCAL ROLE workflow_recipes_runtime')
+      const progress = await client.query(
+        `UPDATE workflow_runs
+     SET last_reconciled_at = now(),
+         updated_at = now()
+   WHERE run_id = $1
+     AND phase IN ('Pending', 'Running')`,
+        [run]
+      )
+      expect(progress.rowCount).toBe(1)
+      const claim = await client.query(
+        `UPDATE workflow_runs
+     SET phase = 'Running',
+         owner_instance_id = $1,
+         child_recipe_name = $2,
+         child_recipe_namespace = $3,
+         started_at = now(),
+         last_reconciled_at = now(),
+         updated_at = now()
+   WHERE run_id = $4
+     AND phase = 'Pending'
+     AND (owner_instance_id IS NULL OR owner_instance_id = $1)`,
+        ['owner-heartbeat', null, null, run]
+      )
+      expect(claim.rowCount).toBe(1)
+      const terminal = await client.query(
+        `UPDATE workflow_runs
+     SET phase = $1,
+         completed_at = COALESCE($2::timestamptz, now()),
+         last_reconciled_at = now(),
+         updated_at = now()
+   WHERE run_id = $3
+     AND (
+       phase IN ('Pending', 'Running')
+       OR (phase = 'Failed' AND $1 = 'Succeeded')
+     )`,
+        ['Succeeded', null, run]
+      )
+      expect(terminal.rowCount).toBe(1)
+      await client.query('COMMIT')
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+
+    // Write witness: the heartbeat rows really changed.
+    expect(
+      (
+        await databasePool.query(
+          `SELECT phase, last_reconciled_at IS NOT NULL AS reconciled,
+                  started_at IS NOT NULL AS started, completed_at IS NOT NULL AS completed,
+                  owner_instance_id
+             FROM workflow_runs WHERE run_id = $1`,
+          [run]
+        )
+      ).rows
+    ).toEqual([
+      {
+        phase: 'Succeeded',
+        reconciled: true,
+        started: true,
+        completed: true,
+        owner_instance_id: 'owner-heartbeat',
+      },
+    ])
+    // Negative witness: no subject revision moved.
+    expect(await userRevision(user)).toBe(beforeUser)
+    expect(await teamRevision(team)).toBe(beforeTeam)
+    expect(await teamRevision(nextTeam)).toBe(beforeNextTeam)
+
+    // Liveness witness in the same test: a subject change still bumps. The
+    // team moves to nextTeam while the usage team stays on the old team, so the
+    // NEW image bumps nextTeam and the old usage team, and the OLD image bumps
+    // the old team and the old usage team: the old team moves three times.
+    await databasePool.query('UPDATE workflow_runs SET team_id = $2 WHERE run_id = $1', [
+      run,
+      nextTeam,
+    ])
+    expect(await userRevision(user)).toBe(beforeUser + 2)
+    expect(await teamRevision(team)).toBe(beforeTeam + 3)
+    expect(await teamRevision(nextTeam)).toBe(beforeNextTeam + 1)
+  })
+
+  it('bumps ordered audit-run subjects and permits the Admin UI sentinel', async () => {
+    const runId = randomUUID()
+    let userBefore = await userRevision(userIds[0])
+    let teamBefore = await teamRevision(teamIds[1])
+    await databasePool.query(
+      `INSERT INTO workflow_runs_audit(
+         run_id, run_namespace, run_name, recipe_namespace, recipe_name,
+         triggerer_team_id, usage_team_id, triggerer_user_id, triggerer_actor_type,
+         trigger_source, idempotency_key, triggered_at, completed_at,
+         final_phase, step_count, snapshot_sha
+       ) VALUES (
+         $1, 'revision', $2, 'sandbox-recipes', $2,
+         $3, NULL, $4, 'user', 'onDemand', $5, NOW(), NOW(),
+         'Succeeded', 0, 'p15-audit-witness'
+       )`,
+      [runId, `audit-${randomUUID()}`, teamIds[1], userIds[0], `audit-${randomUUID()}`]
+    )
+    expect(await userRevision(userIds[0])).toBeGreaterThan(userBefore)
+    expect(await teamRevision(teamIds[1])).toBeGreaterThan(teamBefore)
+
+    userBefore = await userRevision(userIds[0])
+    teamBefore = await teamRevision(teamIds[1])
+    await databasePool.query(`DELETE FROM workflow_runs_audit WHERE run_id = $1`, [runId])
+    expect(await userRevision(userIds[0])).toBeGreaterThan(userBefore)
+    expect(await teamRevision(teamIds[1])).toBeGreaterThan(teamBefore)
+
+    const sentinelRunId = randomUUID()
+    userBefore = await userRevision(userIds[1])
+    teamBefore = await teamRevision(teamIds[0])
+    await databasePool.query(
+      `INSERT INTO workflow_runs_audit(
+         run_id, run_namespace, run_name, recipe_namespace, recipe_name,
+         triggerer_team_id, usage_team_id, triggerer_user_id, triggerer_actor_type,
+         trigger_source, idempotency_key, triggered_at, completed_at,
+         final_phase, step_count, snapshot_sha
+       ) VALUES (
+         $1, 'revision', $2, 'sandbox-recipes', $2,
+         NULL, 'control-plane-admin-ui', NULL, 'scheduled', 'schedule', $3,
+         NOW(), NOW(), 'Succeeded', 0, 'p15-sentinel-witness'
+       )`,
+      [sentinelRunId, `audit-${randomUUID()}`, `audit-${randomUUID()}`]
+    )
+    expect(await userRevision(userIds[1])).toBe(userBefore)
+    expect(await teamRevision(teamIds[0])).toBe(teamBefore)
+
+    await expect(
+      databasePool.query(
+        `INSERT INTO workflow_runs_audit(
+           run_id, run_namespace, run_name, recipe_namespace, recipe_name,
+           triggerer_team_id, usage_team_id, triggerer_user_id, triggerer_actor_type,
+           trigger_source, idempotency_key, triggered_at, completed_at,
+           final_phase, step_count, snapshot_sha
+         ) VALUES (
+           $1, 'revision', $2, 'sandbox-recipes', $2,
+           NULL, 'not-a-uuid', NULL, 'scheduled', 'schedule', $3,
+           NOW(), NOW(), 'Succeeded', 0, 'p15-invalid-witness'
+         )`,
+        [randomUUID(), `audit-${randomUUID()}`, `audit-${randomUUID()}`]
+      )
+    ).rejects.toMatchObject({ code: 'P0001' })
   })
 
   it('moves GFS resource and subject components for the complete writer class', async () => {
@@ -352,6 +582,210 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
     expect(Number(hydratedAfter.rows[0]?.resource_revision)).toBeGreaterThan(
       Number(hydratedBefore.rows[0]?.resource_revision)
     )
+  })
+
+  it('leaves GFS resource revisions unchanged on content writes and bumps them on a rename', async () => {
+    const resourceId = randomUUID()
+    const drive = `r6-${randomBytes(4).toString('hex')}`
+    await databasePool.query(
+      `INSERT INTO gfs_resources(resource_id, drive, name, kind)
+       VALUES ($1, $2, 'content-resource', 'file')`,
+      [resourceId, drive]
+    )
+    await databasePool.query(
+      `INSERT INTO gfs_grants(drive, resource_id, subject_type, subject_id, permissions)
+       VALUES ($3, $1, 'user', $2, ARRAY['read']::text[])`,
+      [resourceId, userIds[0], drive]
+    )
+    const beforeResource = await resourceRevision(resourceId)
+    const beforeUser = await userRevision(userIds[0])
+
+    const blobKey = `${resourceId.replaceAll('-', '')}/${randomUUID()}`
+    const contentSha = 'a'.repeat(64)
+    // The gfs-controller content save: version, bytes, blob_key, content_sha256.
+    await databasePool.query(
+      `UPDATE gfs_resources
+          SET version = version + 1,
+              bytes = 4096,
+              blob_key = $2,
+              content_sha256 = $3,
+              updated_at = clock_timestamp()
+        WHERE resource_id = $1`,
+      [resourceId, blobKey, contentSha]
+    )
+    // Write witness: the content save really changed the row.
+    expect(
+      (
+        await databasePool.query(
+          `SELECT version, bytes::text AS bytes, blob_key, content_sha256
+             FROM gfs_resources WHERE resource_id = $1`,
+          [resourceId]
+        )
+      ).rows
+    ).toEqual([
+      {
+        version: 1,
+        bytes: '4096',
+        blob_key: blobKey,
+        content_sha256: contentSha,
+      },
+    ])
+    // Negative witness: a content save is not a catalog change, neither for the
+    // resource component nor for its direct grant subjects.
+    expect(await resourceRevision(resourceId)).toBe(beforeResource)
+    expect(await userRevision(userIds[0])).toBe(beforeUser)
+
+    // Liveness witness in the same test: a rename still bumps both.
+    await databasePool.query(
+      `UPDATE gfs_resources SET name = 'content-resource-renamed' WHERE resource_id = $1`,
+      [resourceId]
+    )
+    expect(await resourceRevision(resourceId)).toBe(beforeResource + 1)
+    expect(await userRevision(userIds[0])).toBe(beforeUser + 1)
+  })
+
+  it('leaves notification subject revisions unchanged on delivery state writes and bumps them when a catalog column changes', async () => {
+    const notificationUser = userIds[0]
+    const notificationTeam = teamIds[0]
+    async function delivery(
+      eventType: string,
+      audience: Record<string, string>,
+      payload: Record<string, unknown>
+    ): Promise<string> {
+      const result = await databasePool.query<{ id: string }>(
+        `INSERT INTO notification_deliveries(
+           event_type, dedupe_key, audience, payload, status, next_attempt_at
+         ) VALUES ($1, $2, $3::jsonb, $4::jsonb, 'queued', NOW() - INTERVAL '1 minute')
+         RETURNING id::text`,
+        [
+          eventType,
+          `notification-revision-${randomUUID()}`,
+          JSON.stringify(audience),
+          JSON.stringify(payload),
+        ]
+      )
+      return result.rows[0]!.id
+    }
+
+    // One row per writer (N6): every mark* only writes while its row is still
+    // queued/retrying, so a row reused after `sent` would make the next call a
+    // silent no-op and its negative assertion vacuous.
+    const sentRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    const failedRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    // At least one state write targets a team audience, so the team negative
+    // has a write witness of its own.
+    const skippedRow = await delivery('approval.requested', { teamId: notificationTeam }, {})
+    const claimRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    // No `notificationId` in the payload: the ack then skips
+    // markSdkNotificationDelivered, which writes through the module pool
+    // instead of the test client (notificationAckService.ts:36-39).
+    const desktopRow = await delivery(
+      'plugin_workload_sdk.notification',
+      { userId: notificationUser },
+      { origin: 'plugin_workload_sdk', title: 'no invocation' }
+    )
+    const beforeUser = await userRevision(notificationUser)
+    const beforeTeam = await teamRevision(notificationTeam)
+
+    // The real exported writers, each against the test pool as their `db`.
+    expect(await markUserBoundNotificationDeliverySent(sentRow, databasePool)).toBe(true)
+    expect(await markUserBoundNotificationDeliveryFailed(failedRow, databasePool)).toBe(true)
+    expect(await markUserBoundNotificationDeliverySkippedNoBot(skippedRow, databasePool)).toBe(true)
+    expect(
+      await acknowledgeDesktopNotificationDelivery(notificationUser, desktopRow, databasePool)
+    ).toEqual({ status: 'acked' })
+    // The claims' literal SET clause (notificationDeliveryQueueService.ts:315-321,
+    // :698-704); both claims change only these three columns.
+    await databasePool.query(
+      `UPDATE notification_deliveries nd
+          SET status = 'retrying',
+              attempts = nd.attempts + 1,
+              next_attempt_at = NOW() + INTERVAL '30 seconds'
+        WHERE nd.id = $1`,
+      [claimRow]
+    )
+
+    // Write witness: the state writes really changed the rows.
+    const written = await databasePool.query<{
+      id: string
+      status: string
+      attempts: number
+      delivered_medium: string | null
+    }>(
+      `SELECT id::text, status, attempts, delivered_medium
+         FROM notification_deliveries
+        WHERE id = ANY($1::uuid[])`,
+      [[sentRow, failedRow, skippedRow, claimRow, desktopRow]]
+    )
+    expect(Object.fromEntries(written.rows.map(row => [row.id, row]))).toEqual({
+      [sentRow]: { id: sentRow, status: 'sent', attempts: 0, delivered_medium: null },
+      [failedRow]: { id: failedRow, status: 'retrying', attempts: 0, delivered_medium: null },
+      [skippedRow]: {
+        id: skippedRow,
+        status: 'skipped_no_bot',
+        attempts: 0,
+        delivered_medium: null,
+      },
+      [claimRow]: { id: claimRow, status: 'retrying', attempts: 1, delivered_medium: null },
+      [desktopRow]: { id: desktopRow, status: 'sent', attempts: 0, delivered_medium: 'desktop' },
+    })
+    // Negative witness: none of the delivery state writes is a catalog change.
+    expect(await userRevision(notificationUser)).toBe(beforeUser)
+    expect(await teamRevision(notificationTeam)).toBe(beforeTeam)
+
+    // Liveness in the same test. Each step starts from a fresh row, and each
+    // UPDATE bumps the NEW and the OLD subject of its own row.
+    const expiresRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    let userBefore = await userRevision(notificationUser)
+    await databasePool.query(
+      `UPDATE notification_deliveries
+          SET expires_at = NOW() + INTERVAL '1 hour'
+        WHERE id = $1`,
+      [expiresRow]
+    )
+    // One user audience: NEW user +1 and OLD user +1.
+    expect(await userRevision(notificationUser)).toBe(userBefore + 2)
+
+    const eventTypeRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    userBefore = await userRevision(notificationUser)
+    await databasePool.query(
+      `UPDATE notification_deliveries SET event_type = 'approval.updated' WHERE id = $1`,
+      [eventTypeRow]
+    )
+    // event_type is the hydration display name (catalogHydrationSql.ts:629).
+    expect(await userRevision(notificationUser)).toBe(userBefore + 2)
+
+    const audienceRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    userBefore = await userRevision(notificationUser)
+    let teamBefore = await teamRevision(notificationTeam)
+    await databasePool.query(
+      `UPDATE notification_deliveries SET audience = $2::jsonb WHERE id = $1`,
+      [audienceRow, JSON.stringify({ teamId: notificationTeam })]
+    )
+    // user -> team: OLD user +1, NEW team +1.
+    expect(await userRevision(notificationUser)).toBe(userBefore + 1)
+    expect(await teamRevision(notificationTeam)).toBe(teamBefore + 1)
+    userBefore = await userRevision(notificationUser)
+    teamBefore = await teamRevision(notificationTeam)
+    await databasePool.query(
+      `UPDATE notification_deliveries SET audience = $2::jsonb WHERE id = $1`,
+      [audienceRow, JSON.stringify({ userId: notificationUser })]
+    )
+    // team -> user: OLD team +1, NEW user +1; the round trip is user +2, team +2.
+    expect(await userRevision(notificationUser)).toBe(userBefore + 1)
+    expect(await teamRevision(notificationTeam)).toBe(teamBefore + 1)
+
+    const deleteRow = await delivery('approval.requested', { teamId: notificationTeam }, {})
+    teamBefore = await teamRevision(notificationTeam)
+    await databasePool.query('DELETE FROM notification_deliveries WHERE id = $1', [deleteRow])
+    // DELETE bumps the removed row's subject once.
+    expect(await teamRevision(notificationTeam)).toBe(teamBefore + 1)
+
+    userBefore = await userRevision(notificationUser)
+    await delivery('approval.requested', { userId: notificationUser }, {})
+    // A new delivery has a random id that can sort before a client cursor, so
+    // INSERT keeps bumping once.
+    expect(await userRevision(notificationUser)).toBe(userBefore + 1)
   })
 
   it('preserves concurrent GFS invalidation increments on one resource component', async () => {

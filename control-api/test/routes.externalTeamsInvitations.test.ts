@@ -83,45 +83,20 @@ describe('legacy external team invitation responses', () => {
     expect(JSON.stringify(response.body)).not.toContain('synthetic-must-never-leave-control-api')
   })
 
-  it('rate limits team reads before directory access', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 31,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-    })
-
-    const response = await request(app()).get('/external/teams/team-1/members')
-
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_team_user_read:user:manager-1',
-      30
-    )
-    expect(directory.listMembers).not.toHaveBeenCalled()
+  it('lists team members without an added user quota', async () => {
+    directory.listMembers.mockResolvedValue([])
+    await request(app()).get('/external/teams/team-1/members').expect(200)
+    expect(directory.listMembers).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
-  it('rate limits team mutations before invitation creation', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 11,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-    })
-
-    const response = await request(app())
+  it('creates team invitations without an added user quota', async () => {
+    directory.createManagedInvitationForUser.mockResolvedValue({ invitation: { id: 'inv-parity' } })
+    await request(app())
       .post('/external/teams/team-1/invitations')
-      .send({ email: 'invitee@example.com', role: 'member' })
-
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_team_user_mutation:user:manager-1',
-      10
-    )
-    expect(directory.createManagedInvitationForUser).not.toHaveBeenCalled()
+      .send({ email: 'invitee@example.test', role: 'member' })
+      .expect(200)
+    expect(directory.createManagedInvitationForUser).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 })

@@ -22,16 +22,6 @@ const producers = [
     commit: 'LATEST_DEV_SOURCE_COMMIT',
     checkout: 'latest-dev',
   },
-  {
-    environment: 'TASK106_R61_B1_PR2_SOURCE_DIR',
-    commit: 'HISTORICAL_PR2_SOURCE_COMMIT',
-    checkout: 'historical-pr2',
-  },
-  {
-    environment: 'TASK106_R61_B1_EARLIER_PR2_SOURCE_DIR',
-    commit: 'EARLIER_PR2_SOURCE_COMMIT',
-    checkout: 'earlier-pr2',
-  },
 ].map(producer => ({ ...producer, checkout: `r61-b1-producers/${producer.checkout}` }))
 
 function readJobSteps(workflow) {

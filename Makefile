@@ -482,6 +482,14 @@ minikube-deploy-all-body:
 	@# rpc-proxy-secrets after each full overlay apply so Desktop/rpc-proxy/mcp-host
 	@# stay on the same JWT validation key.
 	@MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" $(MAKE) --no-print-directory minikube-sync-auth-key
+	@# external-rest-api's browser mutation guard compares the request Origin with
+	@# EXTERNAL_REST_API_CORS_ORIGIN, and the base manifest pins localhost:3001. A
+	@# branch profile serves Profile UI on a generated port, so the overlay apply
+	@# above would otherwise leave every profile UI login on a 403 (review C-8,
+	@# OD-8). Re-assert the profile-owned origin after the apply; the script is a
+	@# no-op without a branch profile ports.env. Plain bash, not $(MAKE), so a
+	@# dry run never executes it.
+	@bash scripts/minikube/sync-external-rest-api-cors-origin.sh --context=$(MINIKUBE_PROFILE)
 	@# The pre-overlay helper migrates legacy last-applied ownership without
 	@# removing the provisioning-owned connection-string. When the GFS stack is
 	@# deployed AND control-api is Ready (migration 0048 applied), re-provision
@@ -758,6 +766,10 @@ minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube aut
 .PHONY: minikube-sync-codex-subscription-url
 minikube-sync-codex-subscription-url: ## Resolve branch Control UI URL and sync CONTROL_API_CONTROL_UI_BASE_URL for Codex OAuth
 	@bash scripts/minikube/sync-codex-subscription-control-ui-url.sh --context=$(MINIKUBE_PROFILE)
+
+.PHONY: minikube-sync-external-rest-api-cors-origin
+minikube-sync-external-rest-api-cors-origin: ## Align profiles/external-rest-api EXTERNAL_REST_API_CORS_ORIGIN with a branch profile's Profile UI
+	@bash scripts/minikube/sync-external-rest-api-cors-origin.sh --context=$(MINIKUBE_PROFILE)
 
 # ── Minikube Port Forwards ──────────────────────────────────────────
 .PHONY: minikube-pf-control-ui

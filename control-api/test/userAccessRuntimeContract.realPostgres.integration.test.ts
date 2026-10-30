@@ -200,6 +200,36 @@ describeRealPostgres('user-access runtime role contract on real PostgreSQL', () 
     expect(stored.rows).toEqual([{ resources: '1', revisions: '1' }])
   })
 
+  it('prelocks archive subjects through the scoped runtime function', async () => {
+    await runAsControlApiRuntime(async db => {
+      const teamId = randomUUID()
+      const runId = randomUUID()
+      await db.query(`INSERT INTO teams(id, name) VALUES ($1, 'Archive runtime team')`, [teamId])
+      await db.query(
+        `INSERT INTO workflow_runs(run_id, recipe_namespace, recipe_name, phase,
+           actor_type, actor_id, team_id, usage_team_id, trigger_source)
+         VALUES ($1, 'revision', 'archive-runtime', 'Pending', 'user', $2, $3::uuid, $3::uuid::text, 'onDemand')`,
+        [runId, userId, teamId]
+      )
+      const readRevisions = () =>
+        db.query<{ user_revision: string; team_revision: string }>(
+          `SELECT
+             (SELECT revision::text FROM authorization_user_revisions WHERE user_id = $1)
+               AS user_revision,
+             (SELECT revision::text FROM authorization_team_revisions WHERE team_id = $2)
+               AS team_revision`,
+          [userId, teamId]
+        )
+      const before = (await readRevisions()).rows[0]!
+      await db.query('SELECT authorization_prelock_workflow_run_revisions($1::uuid[])', [
+        [runId, runId],
+      ])
+      const after = (await readRevisions()).rows[0]!
+      expect(Number(after.user_revision)).toBe(Number(before.user_revision) + 1)
+      expect(Number(after.team_revision)).toBe(Number(before.team_revision) + 1)
+    })
+  })
+
   it('reads catalog and resolver authority as the runtime role', async () => {
     const catalog = await buildAccessCatalog(
       { session: authority, families: ['user'], limit: 10 },

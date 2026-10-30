@@ -4,12 +4,12 @@ vi.mock('../src/config.js', () => ({
   config: { databaseUrl: 'postgresql://test' },
 }))
 
-describe('0131 catalog UTF-8 ordering migration', () => {
+describe('0133 catalog UTF-8 ordering migration', () => {
   it('installs the immutable byte function and plans its index class online', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const { PR1_ONLINE_INDEX_PLAN } = await import('../src/migrations/pr1OnlineIndexPlan.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0132_catalog_utf8_ordering'
+      candidate => candidate.version === '0133_catalog_utf8_ordering'
     )
     expect(migration).toBeDefined()
 
@@ -32,7 +32,7 @@ describe('0131 catalog UTF-8 ordering migration', () => {
       'operational_relationship_catalog_utf8_target_idx',
     ]
     const planned = PR1_ONLINE_INDEX_PLAN.filter(
-      entry => entry.migrationVersion === '0132_catalog_utf8_ordering'
+      entry => entry.migrationVersion === '0133_catalog_utf8_ordering'
     )
     expect(planned.map(entry => entry.name).sort()).toEqual([...expectedIndexes].sort())
     for (const entry of planned) expect(entry.createSql).toContain('catalog_utf8_bytes(')

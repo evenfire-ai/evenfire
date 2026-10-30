@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createRpcRouter } from '../routes/rpc.js'
-import { ControlApiHostMessageAdmissionError } from '../services/controlApiRestService.js'
 
 const authTokenMock = vi.hoisted(() => ({
   verifyRpcToken: vi.fn(),
@@ -12,10 +11,6 @@ const serviceMock = vi.hoisted(() => ({
   resolveHostConnectionForUser: vi.fn(),
   forwardHostMessageToHost: vi.fn(),
 }))
-vi.mock('../services/hostRpcAdmission.js', () => ({
-  admitLegacyHostRpcRequest: async () => true,
-}))
-
 vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
 
@@ -149,52 +144,22 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
       'user-uuid-abc',
       'chatllm',
       'token',
-      { teamId: null, messageResolution: true }
+      { teamId: null }
     )
     const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
     expect(forwardedBody.metadata).toEqual({ accessScope: 'user' })
   })
 
-  it('forwards a Control API message-admission 429 without waking or forwarding', async () => {
-    serviceMock.resolveHostConnectionForUser.mockRejectedValue(
-      new ControlApiHostMessageAdmissionError(
-        429,
-        { error: 'Too Many Requests', retryAfterSeconds: 19 },
-        {
-          'retry-after': '19',
-          'x-ratelimit-limit': '60',
-          'x-ratelimit-remaining': '0',
-          'x-ratelimit-reset': '1234567890',
-        }
-      )
-    )
-    const response = await request(makeApp())
-      .post('/rpc/hosts/chatllm/messages')
-      .set('authorization', 'Bearer token')
-      .send({ content: 'hi' })
-      .expect(429)
-    expect(response.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 19 })
-    expect(response.headers['retry-after']).toBe('19')
-    expect(response.headers['x-ratelimit-limit']).toBe('60')
-    expect(response.headers['x-ratelimit-remaining']).toBe('0')
-    expect(response.headers['x-ratelimit-reset']).toBe('1234567890')
-    expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
-  })
+  it('does not forward a message when Host resolution fails', async () => {
+    serviceMock.resolveHostConnectionForUser.mockRejectedValue(new Error('Host resolution failed'))
 
-  it('preserves a strict admission-store 503 without forwarding', async () => {
-    serviceMock.resolveHostConnectionForUser.mockRejectedValue(
-      new ControlApiHostMessageAdmissionError(
-        503,
-        { error: 'host_message_admission_unavailable' },
-        {}
-      )
-    )
-    const response = await request(makeApp())
+    await request(makeApp())
       .post('/rpc/hosts/chatllm/messages')
-      .set('authorization', 'Bearer token')
-      .send({ content: 'hi' })
-      .expect(503)
-    expect(response.body).toEqual({ error: 'host_message_admission_unavailable' })
+      .set('authorization', `Bearer ${crypto.randomUUID()}`)
+      .send({ content: 'hello' })
+      .expect(502)
+
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledOnce()
     expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
   })
 })

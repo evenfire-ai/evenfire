@@ -10,7 +10,7 @@ vi.mock('../src/config.js', () => ({
 async function migrationSql(): Promise<string> {
   const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
   const migration = CONTROL_API_MIGRATIONS.find(
-    candidate => candidate.version === '0130_user_access_foundation'
+    candidate => candidate.version === '0131_user_access_foundation'
   )
   expect(migration).toBeDefined()
 
@@ -22,7 +22,7 @@ async function migrationSql(): Promise<string> {
 async function legacyEpochBackfillSql(): Promise<string> {
   const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
   const migration = CONTROL_API_MIGRATIONS.find(
-    candidate => candidate.version === '0134_legacy_password_security_epoch_backfill'
+    candidate => candidate.version === '0135_legacy_password_security_epoch_backfill'
   )
   expect(migration).toBeDefined()
 
@@ -77,11 +77,11 @@ describe('user-access foundation migration', () => {
     expect(sql).not.toMatch(/CREATE\s+MATERIALIZED\s+VIEW/i)
   })
 
-  it('builds keyset and reverse indexes online, outside the 0130 transaction', async () => {
+  it('builds keyset and reverse indexes online, outside the 0131 transaction', async () => {
     const sql = await migrationSql()
     const { PR1_ONLINE_INDEX_PLAN } = await import('../src/migrations/pr1OnlineIndexPlan.js')
     const planned = PR1_ONLINE_INDEX_PLAN.filter(
-      entry => entry.migrationVersion === '0130_user_access_foundation'
+      entry => entry.migrationVersion === '0131_user_access_foundation'
     )
     const expectedIndexes = [
       'team_members_user_active_idx',
@@ -140,13 +140,12 @@ describe('user-access foundation migration', () => {
     )
 
     const expected = new Map<string, string>([
-      ['authorization_catalog_writer_components', 'read'],
-      ['authorization_resource_revisions', 'upsert'],
-      ['authorization_team_revisions', 'upsert'],
-      ['authorization_user_revisions', 'upsert'],
+      ['authorization_resource_revisions', 'read'],
+      ['authorization_team_revisions', 'read'],
+      ['authorization_user_revisions', 'read'],
       ['external_user_session_security_epochs', 'legacy_dml'],
       ['external_user_sessions', 'legacy_dml'],
-      ['external_v1_session_revocations', 'legacy_dml'],
+      ['external_v1_session_revocations', 'append'],
       ['operational_catalog_source_state', 'legacy_dml'],
       ['operational_relationships_staging', 'legacy_dml'],
       ['operational_resource_index', 'legacy_dml'],

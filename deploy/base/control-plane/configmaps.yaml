@@ -250,49 +250,6 @@ data:
           proxy_set_header X-Forwarded-Proto $scheme;
         }
 
-        # Host artifact reads and message sends resolve the Host through these
-        # sub-paths so control-api charges the matching admission bucket. The
-        # parent location above is anchored at the Host ref, so without these
-        # blocks both fall through to the default deny. rpc-proxy's
-        # gateway parity test fails when an emitted path has no location here.
-        location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+/artifact-read$ {
-          limit_except GET {
-            deny all;
-          }
-          proxy_pass http://control_api_upstream;
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-        }
-
-        # Spec 65: only RPC Proxy may charge the subject-wide Host-RPC bucket.
-        # Keep this exact POST endpoint separate from generic internal routes.
-        location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+/host-rpc-admission$ {
-          limit_except POST {
-            deny all;
-          }
-          proxy_pass http://control_api_upstream;
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-          proxy_set_header Authorization $http_authorization;
-          proxy_set_header X-Service-Token $http_x_service_token;
-          proxy_set_header X-Rpc-Access-Token $http_x_rpc_access_token;
-        }
-
-        location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+/message-resolution$ {
-          limit_except POST {
-            deny all;
-          }
-          proxy_pass http://control_api_upstream;
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-        }
-
         # Stateless Agents — wake trigger for a suspended/draining host.
         # rpc-proxy forwards the caller's rpc access token; control-api
         # authorizes via requireRpcTokenHostMatch before any mutation.
@@ -371,19 +328,6 @@ data:
         # this on /session mint to resolve recipe → upstream Service.
         location ~ ^/api/v1/internal/sandbox-ui/registry/[^/]+/[^/]+$ {
           limit_except GET {
-            deny all;
-          }
-          proxy_pass http://control_api_upstream;
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-        }
-
-        # Temporary Class-B legacy-session admission; rpc-proxy is the sole caller
-        # and control-api additionally verifies the forwarded user access token.
-        location = /api/v1/internal/rpc-proxy/legacy-session-admission {
-          limit_except POST {
             deny all;
           }
           proxy_pass http://control_api_upstream;

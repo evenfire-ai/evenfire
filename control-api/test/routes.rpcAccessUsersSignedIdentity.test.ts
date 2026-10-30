@@ -12,11 +12,9 @@ const directory = vi.hoisted(() => ({
   getTeamAgents: vi.fn(),
 }))
 const db = vi.hoisted(() => ({ query: vi.fn(), connect: vi.fn() }))
-const limiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 
 vi.mock('../src/services/directory/index.js', () => directory)
 vi.mock('../src/db.js', () => ({ pool: db }))
-vi.mock('../src/services/rateLimiterService.js', () => limiter)
 
 type SigningClaims = Parameters<typeof signRpcAccessToken>[0]
 const HOST_REF = 'host-a'
@@ -52,16 +50,6 @@ const BLANK_IDENTITIES = [
 
 beforeEach(() => {
   vi.clearAllMocks()
-  // Identity is the subject of this file; Host-message admission is a separate
-  // concern and must not turn a signed-identity assertion into a 503.
-  limiter.checkAndIncrement.mockResolvedValue({
-    allowed: true,
-    remaining: 59,
-    resetMs: Date.now() + 60_000,
-    windowStartMs: Date.now(),
-    count: 1,
-    backendAvailable: true,
-  })
   // Deliberately grant the host at the external directory boundary, including
   // for an empty user id: invalid identity rejection must come from real auth.
   directory.getUserAgents.mockImplementation(async (userId: string) => ({

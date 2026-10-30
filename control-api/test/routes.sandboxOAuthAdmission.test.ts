@@ -9,10 +9,6 @@ const effects = vi.hoisted(() => ({
   deleteOAuthGrant: vi.fn(),
   getAccessTokenReactive: vi.fn(),
 }))
-const limiter = vi.hoisted(() => ({
-  checkAndIncrement: vi.fn(),
-  counts: new Map<string, number>(),
-}))
 
 vi.mock('../src/oauth/store.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/oauth/store.js')>()),
@@ -21,10 +17,6 @@ vi.mock('../src/oauth/store.js', async importOriginal => ({
 vi.mock('../src/oauth/reactiveTokenHelper.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/oauth/reactiveTokenHelper.js')>()),
   getAccessTokenReactive: effects.getAccessTokenReactive,
-}))
-vi.mock('../src/services/rateLimiterService.js', async importOriginal => ({
-  ...(await importOriginal<typeof import('../src/services/rateLimiterService.js')>()),
-  checkAndIncrement: limiter.checkAndIncrement,
 }))
 
 const RPC_PROXY_TOKEN = 'dev-rpc-proxy-token'
@@ -130,14 +122,7 @@ function internal(requestBuilder: request.Test): request.Test {
     .set('x-service-token', 'rpc-proxy')
 }
 
-function expectCanonicalRateLimitHeaders(response: request.Response): void {
-  expect(response.headers['retry-after']).toBe('30')
-  expect(response.headers['x-ratelimit-limit']).toBe('10')
-  expect(response.headers['x-ratelimit-remaining']).toBe('0')
-  expect(Number(response.headers['x-ratelimit-reset'])).toBeGreaterThan(0)
-}
-
-describe('Sandbox OAuth distributed admission', () => {
+describe('Sandbox OAuth binding validation', () => {
   beforeEach(() => {
     effects.deleteOAuthGrant.mockReset()
     effects.deleteOAuthGrant.mockResolvedValue(undefined)
@@ -147,121 +132,6 @@ describe('Sandbox OAuth distributed admission', () => {
       accessToken: 'provider-access-token',
       expiresAt: null,
     })
-    limiter.counts.clear()
-    limiter.checkAndIncrement.mockReset()
-    limiter.checkAndIncrement.mockImplementation(async (key: string, max: number) => {
-      const count = (limiter.counts.get(key) ?? 0) + 1
-      limiter.counts.set(key, count)
-      return {
-        backendAvailable: true,
-        allowed: count <= max,
-        count,
-        remaining: Math.max(0, max - count),
-        resetMs: Date.now() + 30_000,
-      }
-    })
-  })
-
-  it('denies token request 11 before token vending using one user budget across targets', async () => {
-    const { instance } = app()
-    for (let requestIndex = 0; requestIndex < 10; requestIndex += 1) {
-      const target =
-        requestIndex % 2 === 0 ? body('user-a') : body('user-a', 'calendar', 'google-calendar')
-      await internal(request(instance).post(TOKEN_URL)).send(target).expect(200)
-    }
-
-    const denied = await internal(request(instance).post(TOKEN_URL))
-      .send(body('user-a'))
-      .expect(429)
-    expectCanonicalRateLimitHeaders(denied)
-    expect(effects.getAccessTokenReactive).toHaveBeenCalledTimes(10)
-    expect(limiter.checkAndIncrement).toHaveBeenLastCalledWith(
-      'sandbox-oauth-token-vend:user-a',
-      10
-    )
-
-    await internal(request(instance).post(TOKEN_URL)).send(body('user-b')).expect(200)
-    expect(effects.getAccessTokenReactive).toHaveBeenCalledTimes(11)
-  })
-
-  it('denies authorize-url request 11 before recipe and Secret work with a trusted user bucket', async () => {
-    const { gateway, instance } = app()
-    seedAuthorizeUrlSecret(gateway)
-    const recipeLookups = vi.spyOn(gateway, 'getResource')
-
-    for (let requestIndex = 0; requestIndex < 10; requestIndex += 1) {
-      await internal(request(instance).post(AUTHORIZE_URL))
-        .send(authorizeUrlBody('user-a'))
-        .expect(200)
-    }
-
-    const denied = await internal(request(instance).post(AUTHORIZE_URL))
-      .send(authorizeUrlBody('user-a'))
-      .expect(429)
-    expectCanonicalRateLimitHeaders(denied)
-    expect(recipeLookups).toHaveBeenCalledTimes(10)
-    expect(limiter.checkAndIncrement).toHaveBeenLastCalledWith(
-      'sandbox-oauth-authorize-url:user-a',
-      10
-    )
-
-    await internal(request(instance).post(AUTHORIZE_URL))
-      .send(authorizeUrlBody('user-b'))
-      .expect(200)
-    expect(recipeLookups).toHaveBeenCalledTimes(11)
-  })
-
-  it('keeps authorize-url, token-vend, and disconnect budgets independent', async () => {
-    const { gateway, instance } = app()
-    seedAuthorizeUrlSecret(gateway)
-    for (let requestIndex = 0; requestIndex < 10; requestIndex += 1) {
-      await internal(request(instance).post(AUTHORIZE_URL))
-        .send(authorizeUrlBody('user-a'))
-        .expect(200)
-    }
-
-    await internal(request(instance).post(TOKEN_URL)).send(body('user-a')).expect(200)
-    await internal(request(instance).delete(GRANT_URL)).send(body('user-a')).expect(204)
-
-    expect(limiter.counts.get('sandbox-oauth-authorize-url:user-a')).toBe(10)
-    expect(limiter.counts.get('sandbox-oauth-token-vend:user-a')).toBe(1)
-    expect(limiter.counts.get('sandbox-oauth-grant-disconnect:user-a')).toBe(1)
-  })
-
-  it('denies disconnect request 11 before recipe lookup and deletion', async () => {
-    const { gateway, instance } = app()
-    const recipeLookups = vi.spyOn(gateway, 'getResource')
-    for (let requestIndex = 0; requestIndex < 10; requestIndex += 1) {
-      const target =
-        requestIndex % 2 === 0 ? body('user-a') : body('user-a', 'calendar', 'google-calendar')
-      await internal(request(instance).delete(GRANT_URL)).send(target).expect(204)
-    }
-
-    const denied = await internal(request(instance).delete(GRANT_URL))
-      .send(body('user-a'))
-      .expect(429)
-    expectCanonicalRateLimitHeaders(denied)
-    expect(recipeLookups).toHaveBeenCalledTimes(10)
-    expect(effects.deleteOAuthGrant).toHaveBeenCalledTimes(10)
-    expect(limiter.checkAndIncrement).toHaveBeenLastCalledWith(
-      'sandbox-oauth-grant-disconnect:user-a',
-      10
-    )
-
-    await internal(request(instance).delete(GRANT_URL)).send(body('user-b')).expect(204)
-    expect(effects.deleteOAuthGrant).toHaveBeenCalledTimes(11)
-  })
-
-  it('keeps token-vend and disconnect budgets independent for the same user', async () => {
-    const { instance } = app()
-    for (let requestIndex = 0; requestIndex < 10; requestIndex += 1) {
-      await internal(request(instance).post(TOKEN_URL)).send(body('user-a')).expect(200)
-    }
-
-    await internal(request(instance).delete(GRANT_URL)).send(body('user-a')).expect(204)
-    expect(effects.deleteOAuthGrant).toHaveBeenCalledOnce()
-    expect(limiter.counts.get('sandbox-oauth-token-vend:user-a')).toBe(10)
-    expect(limiter.counts.get('sandbox-oauth-grant-disconnect:user-a')).toBe(1)
   })
 
   it('keeps authentication, body, and exact v2 binding ahead of admission', async () => {
@@ -276,7 +146,6 @@ describe('Sandbox OAuth distributed admission', () => {
       .send(body('user-a'))
       .expect(400)
 
-    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
     expect(effects.getAccessTokenReactive).not.toHaveBeenCalled()
   })
 
@@ -304,11 +173,10 @@ describe('Sandbox OAuth distributed admission', () => {
       .send({ ...authorizeUrlBody('user-a'), background: 'yes' })
       .expect(400)
 
-    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
     expect(recipeLookups).not.toHaveBeenCalled()
   })
 
-  it('preserves valid legacy and exact-target v2 admission', async () => {
+  it('preserves valid legacy and exact-target v2 token vending', async () => {
     const { instance } = app()
     await internal(request(instance).post(TOKEN_URL)).send(body('legacy-user')).expect(200)
     await internal(request(instance).post(TOKEN_URL))
@@ -326,12 +194,11 @@ describe('Sandbox OAuth distributed admission', () => {
       .send(body('v2-user'))
       .expect(204)
 
-    expect(limiter.counts.get('sandbox-oauth-token-vend:legacy-user')).toBe(1)
-    expect(limiter.counts.get('sandbox-oauth-token-vend:v2-user')).toBe(1)
-    expect(limiter.counts.get('sandbox-oauth-grant-disconnect:v2-user')).toBe(1)
+    expect(effects.getAccessTokenReactive).toHaveBeenCalledTimes(2)
+    expect(effects.deleteOAuthGrant).toHaveBeenCalledOnce()
   })
 
-  it('preserves legacy and exact-target v2 authorize-url admission through the same limiter', async () => {
+  it('preserves legacy and exact-target v2 authorize-url resolution', async () => {
     const { gateway, instance } = app()
     seedAuthorizeUrlSecret(gateway)
 
@@ -345,8 +212,5 @@ describe('Sandbox OAuth distributed admission', () => {
       )
       .send(authorizeUrlBody('v2-user'))
       .expect(200)
-
-    expect(limiter.counts.get('sandbox-oauth-authorize-url:legacy-user')).toBe(1)
-    expect(limiter.counts.get('sandbox-oauth-authorize-url:v2-user')).toBe(1)
   })
 })

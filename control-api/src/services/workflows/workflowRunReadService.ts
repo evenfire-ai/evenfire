@@ -69,10 +69,6 @@ function isTeamScopedRun(row: Pick<WorkflowRunRow, 'actor_type'>): boolean {
   return row.actor_type === 'scheduled' || row.actor_type === 'autonomous'
 }
 
-function hasTeamAttribution(row: Pick<WorkflowRunRow, 'team_id' | 'usage_team_id'>): boolean {
-  return Boolean(row.team_id || row.usage_team_id)
-}
-
 function approvalTargetMatchesUserScope(
   row: ApprovalScopedWorkflowRunRow,
   scope: UserRunScope
@@ -91,9 +87,7 @@ function runMatchesUserScope(row: ApprovalScopedWorkflowRunRow, scope: UserRunSc
   const matchesTeam =
     Boolean(scope.teamId) && (row.team_id === scope.teamId || row.usage_team_id === scope.teamId)
   if (row.actor_type === 'user') {
-    const matchesActor =
-      Boolean(row.actor_id) && scope.principalIds.includes(row.actor_id as string)
-    if (matchesActor) return !hasTeamAttribution(row) || matchesTeam
+    if (row.actor_id && scope.principalIds.includes(row.actor_id)) return true
     return !row.actor_id && matchesTeam
   }
   if (isTeamScopedRun(row)) {
@@ -111,8 +105,7 @@ function auditRunMatchesUserScope(row: Record<string, unknown>, scope: UserRunSc
     Boolean(scope.teamId) && (teamId === scope.teamId || usageTeamId === scope.teamId)
 
   if (actorType === 'user') {
-    const matchesActor = Boolean(userId) && scope.principalIds.includes(userId)
-    if (matchesActor) return (!teamId && !usageTeamId) || matchesTeam
+    if (userId && scope.principalIds.includes(userId)) return true
     return !userId && matchesTeam
   }
   if (actorType === 'scheduled' || actorType === 'autonomous') {
@@ -128,8 +121,9 @@ export async function canCallerReadWorkflowRun(
 ): Promise<boolean> {
   const scope = userRunScope(caller)
   if (!scope) return true
-  const directScope = { ...scope, teamId: null }
-  if (runMatchesUserScope(row, directScope)) return true
+  if (row.actor_type === 'user' && row.actor_id && scope.principalIds.includes(row.actor_id)) {
+    return true
+  }
   if (!runMatchesUserScope(row, scope)) return false
   return hasLiveWorkflowTeamGrant(scope, row.recipe_namespace, row.recipe_name, db)
 }
@@ -180,8 +174,9 @@ export async function canCallerReadWorkflowRunWithApprovalTarget(
 
   const scope = userRunScope(caller)
   if (!scope) return true
-  const directScope = { ...scope, teamId: null }
-  if (runMatchesUserScope(row, directScope)) return true
+  if (row.actor_type === 'user' && row.actor_id && scope.principalIds.includes(row.actor_id)) {
+    return true
+  }
   if (
     runMatchesUserScope(row, scope) &&
     (await hasLiveWorkflowTeamGrant(scope, row.recipe_namespace, row.recipe_name))
@@ -366,6 +361,7 @@ export async function listAuditRunsByRecipe(
   const scope = caller ? userRunScope(caller) : null
   const auditResult = await pool.query(
     `SELECT run_id, triggerer_user_id, triggerer_admin_user_id, triggerer_team_id,
+            usage_team_id,
             triggerer_actor_type, triggerer_host_ref,
             triggered_at, started_at, completed_at, final_phase, error_message
      FROM workflow_runs_audit
@@ -374,8 +370,7 @@ export async function listAuditRunsByRecipe(
          scope
            ? `AND (
               (triggerer_actor_type = 'user' AND (
-                (triggerer_user_id::text = ANY($4::text[])
-                 AND triggerer_team_id IS NULL AND usage_team_id IS NULL) OR
+                triggerer_user_id::text = ANY($4::text[]) OR
                 ((triggerer_user_id::text = ANY($4::text[]) OR triggerer_user_id IS NULL) AND
                  (triggerer_team_id::text = $5 OR usage_team_id = $5) AND
                  EXISTS (
@@ -581,8 +576,7 @@ async function listRunsByRecipeForUserScope(
       WHERE wr.recipe_namespace = $1 AND wr.recipe_name = $2
        AND (
          (wr.actor_type = 'user' AND (
-           (wr.actor_id::text = ANY($4::text[])
-            AND wr.team_id IS NULL AND wr.usage_team_id IS NULL) OR
+           wr.actor_id::text = ANY($4::text[]) OR
            ((wr.actor_id::text = ANY($4::text[]) OR wr.actor_id IS NULL)
             AND (wr.team_id::text = $5 OR wr.usage_team_id = $5)
             AND scope_twt.team_id IS NOT NULL)

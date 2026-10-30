@@ -152,18 +152,25 @@ job_exists() {
 }
 
 create_job() {
-  local output status
+  local output diagnostics status diagnostics_file
+  diagnostics_file="$(mktemp)"
   set +e
-  output="$({ JOB_NAME="$JOB_NAME" build_job_manifest | kctl create -f -; } 2>&1)"
+  output="$({ JOB_NAME="$JOB_NAME" build_job_manifest | \
+    kctl create -f - -o jsonpath='{.metadata.uid}'; } 2>"$diagnostics_file")"
   status=$?
   set -e
+  diagnostics="$(cat "$diagnostics_file")"
+  rm -f "$diagnostics_file"
 
   if [ "$status" -eq 0 ]; then
-    [ -n "$output" ] && printf '%s\n' "$output" >&2
+    JOB_UID="$(printf '%s' "$output" | tr -d '[:space:]')"
+    [ -n "$JOB_UID" ] || \
+      die "created migration Job did not report a UID; refusing ownership of its cleanup"
+    JOB_ROLE=owner
     return 0
   fi
 
-  if [[ "$output" == *"AlreadyExists"* ]]; then
+  if [[ "$diagnostics" == *"AlreadyExists"* ]]; then
     if ! verify_active_job_identity; then
       die "concurrently created migration Job identity does not match the requested migration"
     fi
@@ -171,7 +178,9 @@ create_job() {
     return 0
   fi
 
-  [ -n "$output" ] && printf '%s\n' "$output" >&2
+  if [ -n "$diagnostics" ]; then
+    printf '%s\n' "$diagnostics" >&2
+  fi
   return "$status"
 }
 
@@ -290,12 +299,29 @@ verify_active_job_identity() {
 }
 
 terminate_migration_job() {
-  local deadline now remaining
-  deadline="$(( SECONDS + MIGRATION_TERMINATION_PROOF_SECONDS ))"
-  if ! kctl delete job "$JOB_NAME" -n control-plane \
-    --cascade=foreground --wait=false --ignore-not-found >/dev/null; then
+  local deadline now remaining body_file delete_output delete_status
+  [ "$JOB_ROLE" = owner ] || return 1
+  [ -n "$JOB_UID" ] || return 1
+  body_file="$(mktemp)"
+  printf '%s' \
+    '{"apiVersion":"v1","kind":"DeleteOptions","propagationPolicy":"Foreground","preconditions":{"uid":"'"$JOB_UID"'"}}' \
+    >"$body_file"
+  set +e
+  delete_output="$(kctl delete --raw \
+    "/apis/batch/v1/namespaces/control-plane/jobs/$JOB_NAME" -f "$body_file" 2>&1)"
+  delete_status=$?
+  set -e
+  rm -f "$body_file"
+  if [ "$delete_status" -ne 0 ]; then
+    if [[ "$delete_output" == *"Precondition failed"* || "$delete_output" == *"NotFound"* ]]; then
+      die "migration Job was replaced or removed by another caller; not deleting it"
+    fi
+    if [ -n "$delete_output" ]; then
+      printf '%s\n' "$delete_output" >&2
+    fi
     return 1
   fi
+  deadline="$(( SECONDS + MIGRATION_TERMINATION_PROOF_SECONDS ))"
   now="$SECONDS"
   remaining="$(( deadline - now ))"
   [ "$remaining" -gt 0 ] || return 1
@@ -316,6 +342,10 @@ OVERLAY=""
 load_migration_policy
 
 JOB_NAME="${JOB_NAME:-control-api-db-migrate}"
+# Only the caller whose create succeeded owns cleanup. Attaching to a queued,
+# active or concurrently created Job leaves it to its active deadline.
+JOB_ROLE=observer
+JOB_UID=""
 TIMEOUT="${TIMEOUT:-${MIGRATION_CLIENT_WAIT_SECONDS}s}"
 
 while [ $# -gt 0 ]; do
@@ -1532,6 +1562,9 @@ if ! kctl wait --for=condition=complete --timeout="$TIMEOUT" "job/$JOB_NAME" -n 
   printf '%s\n' "$job_logs" | sanitize_diagnostics >&2
   if [[ "$job_logs" == *"Cannot find module '/app/dist/migrate.js'"* ]]; then
     failure_message="control-api image ${CONTROL_API_IMAGE} is missing dist/migrate.js; rebuild/push the current image and ensure deploy-dev resolves the correct sha tag before rerunning the gate"
+  fi
+  if [ "$JOB_ROLE" != "owner" ]; then
+    die "migration Job was not created by this caller; leaving it to its active deadline instead of deleting it"
   fi
   terminate_migration_job || \
     die "migration Job cleanup could not prove Job and pod termination within ${MIGRATION_TERMINATION_PROOF_SECONDS}s"

@@ -185,14 +185,6 @@ function validateSandboxOAuthAdmission(
   }
 }
 
-function sandboxOAuthAdmissionForRequest(req: Request): SandboxOAuthAdmission {
-  const admission = (req as SandboxOAuthAdmissionRequest).sandboxOAuthAdmission
-  if (!admission) {
-    throw new Error('validated Sandbox OAuth admission context is missing')
-  }
-  return admission
-}
-
 function validateSandboxOAuthAuthorizeUrlFields(
   req: Request,
   res: Response,
@@ -209,28 +201,6 @@ function validateSandboxOAuthAuthorizeUrlFields(
   }
   next()
 }
-
-const sandboxOAuthTokenVendRateLimit = rateLimitMiddleware({
-  bucketType: 'sandbox_oauth_token_vend',
-  maxPerMinute: 10,
-  onBackendUnavailable: 'process-memory',
-  getBucketKey: req => `sandbox-oauth-token-vend:${sandboxOAuthAdmissionForRequest(req).userId}`,
-})
-
-const sandboxOAuthAuthorizeUrlRateLimit = rateLimitMiddleware({
-  bucketType: 'sandbox_oauth_authorize_url',
-  maxPerMinute: 10,
-  onBackendUnavailable: 'process-memory',
-  getBucketKey: req => `sandbox-oauth-authorize-url:${sandboxOAuthAdmissionForRequest(req).userId}`,
-})
-
-const sandboxOAuthGrantDisconnectRateLimit = rateLimitMiddleware({
-  bucketType: 'sandbox_oauth_grant_disconnect',
-  maxPerMinute: 10,
-  onBackendUnavailable: 'process-memory',
-  getBucketKey: req =>
-    `sandbox-oauth-grant-disconnect:${sandboxOAuthAdmissionForRequest(req).userId}`,
-})
 
 /**
  * Internal OAuth helper endpoints. rpc-proxy fronts these from the
@@ -731,7 +701,6 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
     requireInternalService('rpc-proxy'),
     validateSandboxOAuthAdmission(SANDBOX_OAUTH_ADMISSION.authorizeUrl.operationId),
     validateSandboxOAuthAuthorizeUrlFields,
-    sandboxOAuthAuthorizeUrlRateLimit,
     async (req, res, next) => {
       try {
         const { recipeNs, recipeName, oauthClientId, userId } = (
@@ -785,7 +754,6 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
     '/internal/sandbox-ui/oauth/token',
     requireInternalService('rpc-proxy'),
     validateSandboxOAuthAdmission(SANDBOX_OAUTH_ADMISSION.tokenVend.operationId),
-    sandboxOAuthTokenVendRateLimit,
     async (req, res, next) => {
       try {
         const { recipeNs, recipeName, oauthClientId, userId } = (
@@ -842,7 +810,6 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
     '/internal/sandbox-ui/oauth/grant',
     requireInternalService('rpc-proxy'),
     validateSandboxOAuthAdmission(SANDBOX_OAUTH_ADMISSION.grantDisconnect.operationId),
-    sandboxOAuthGrantDisconnectRateLimit,
     async (req, res, next) => {
       try {
         const { recipeNs, recipeName, oauthClientId, userId } = (

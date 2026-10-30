@@ -1,10 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { config } from '../config.js'
-import {
-  resolveArtifactReadHostConnectionForUser,
-  resolveHostConnectionForUser,
-  resolveServerConnectionForUser,
-} from './mcpProxyService.js'
+import { resolveHostConnectionForUser, resolveServerConnectionForUser } from './mcpProxyService.js'
 
 describe('v2 checkpoint destination routing', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -99,35 +95,6 @@ describe('v2 checkpoint destination routing', () => {
     })
     expect(connection?.headers['x-clerum-rpc-proxy-edge-token']).toBeUndefined()
     expect(connection?.headers['x-clerum-edge-action-context']).toBeUndefined()
-  })
-
-  it('keeps artifact-read connections on their existing legacy Spec 48 path', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          userId: 'user',
-          hostRef: 'chatllm',
-          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } }
-      )
-    )
-
-    const connection = await resolveArtifactReadHostConnectionForUser(
-      'user',
-      'chatllm',
-      'rpc-access-token'
-    )
-
-    expect(connection).toMatchObject({
-      headers: {
-        'x-clerum-edge-caller': 'rpc-proxy',
-        'x-service-token': 'rpc-proxy',
-      },
-    })
-    expect(connection?.headers['x-clerum-rpc-proxy-edge-token']).toBeUndefined()
-    expect(connection?.headers.authorization).toBeUndefined()
-    expect(fetchSpy).toHaveBeenCalledOnce()
   })
 
   it('routes MCP from the validated checkpoint without the legacy catalog cache', async () => {

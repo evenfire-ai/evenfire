@@ -20,16 +20,6 @@ const serviceMock = vi.hoisted(() => ({
 }))
 
 const controlApiMock = vi.hoisted(() => ({
-  ControlApiHostMessageAdmissionError: class ControlApiHostMessageAdmissionError extends Error {
-    constructor(
-      public readonly status: 429 | 503,
-      public readonly body: { error: string; retryAfterSeconds?: number },
-      public readonly headers: Record<string, string>
-    ) {
-      super(`Control API Host-message admission returned ${status}`)
-      this.name = 'ControlApiHostMessageAdmissionError'
-    }
-  },
   ControlApiHostAccessRejectedError: class ControlApiHostAccessRejectedError extends Error {
     constructor(
       public readonly status: number,
@@ -39,7 +29,6 @@ const controlApiMock = vi.hoisted(() => ({
       this.name = 'ControlApiHostAccessRejectedError'
     }
   },
-  requestHostRpcAdmission: async () => undefined,
   requestHostWakeFromControlApi: vi.fn(),
 }))
 
@@ -258,7 +247,6 @@ describe('routes/rpc', () => {
       'agent2',
       'token',
       {
-        messageResolution: true,
         teamId: 'team-1',
       }
     )
@@ -295,7 +283,6 @@ describe('routes/rpc', () => {
       'agent2',
       'rpc-token',
       {
-        messageResolution: true,
         teamId: 'team-1',
         directRunBinding: {
           runId: expect.any(String),

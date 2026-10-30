@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { CONTROL_API_MIGRATIONS } from '../src/db.js'
 import {
-  DEV_POST_0106_MIGRATION_VERSIONS,
   PR1_MIGRATION_VERSIONS,
   PR2_MIGRATION_VERSIONS,
   applyPendingPr1Migrations,
@@ -48,11 +47,13 @@ const LEGACY_IDENTITIES: Array<readonly [string, string]> = [
   ['0115_llm_allowed_models_image_input', '011b_llm_allowed_models_image_input'],
 ]
 
-const CLASSIFIED_VERSIONS = [
-  ...DEV_POST_0106_MIGRATION_VERSIONS,
-  ...PR1_MIGRATION_VERSIONS,
-  ...PR2_MIGRATION_VERSIONS,
-]
+const CLASSIFIED_VERSIONS = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]
+
+// Dev aliases are reconciled by initDb's dev batch, so the runner cases cover
+// only the PR1 and PR2 canonical versions.
+const RUNNER_LEGACY_IDENTITIES = LEGACY_IDENTITIES.filter(
+  ([canonical]) => canonical !== '0115_llm_allowed_models_image_input'
+)
 
 describe('synchronized migration legacy identities', () => {
   it('declares every repository-proven historical identity on its canonical migration', () => {
@@ -62,7 +63,7 @@ describe('synchronized migration legacy identities', () => {
     }
   })
 
-  it.each([...LEGACY_IDENTITIES])(
+  it.each([...RUNNER_LEGACY_IDENTITIES])(
     'recognizes %s from legacy identity %s without replaying its body',
     async (canonical, legacy) => {
       const body = vi.fn(async () => {

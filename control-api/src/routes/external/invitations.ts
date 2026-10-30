@@ -11,10 +11,7 @@ import {
   rejectBodyUserTeamMismatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
-import {
-  externalUserRateLimitOptions,
-  requireAuthenticatedExternalUserRateLimitContext,
-} from '../../middleware/externalUserRateLimitPolicy.js'
+import { requireAuthenticatedExternalUserRateLimitContext } from '../../middleware/externalUserRateLimitPolicy.js'
 import { sendPasswordAdmissionError } from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
@@ -188,7 +185,6 @@ export function createExternalInvitationsRouter(): Router {
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(externalUserRateLimitOptions('invitation_mutation', 'authenticated')),
     async (req, res, next) => {
       try {
         const userId = String(req.body?.userId || '').trim()
@@ -247,9 +243,7 @@ export function createExternalInvitationsRouter(): Router {
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(
-      externalUserRateLimitOptions('invitation_sensitive_action', 'authenticated')
-    ),
+
     async (req, res, next) => {
       try {
         const userId = String(req.body?.userId || '').trim()
@@ -293,7 +287,6 @@ export function createExternalInvitationsRouter(): Router {
     ...externalInvitationsEdgeRateLimits,
     requireValidExternalSessionToken,
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(externalUserRateLimitOptions('invitation_read', 'authenticated')),
     async (req, res, next) => {
       try {
         const email = String((req as ExternalAuthedRequest).externalAuth?.email || '')
@@ -377,6 +370,9 @@ export function createExternalInvitationsRouter(): Router {
           }
           if (accepted.error === 'expired') {
             return res.status(410).json({ error: 'expired' })
+          }
+          if (accepted.error === 'user_retired') {
+            return res.status(401).json({ error: 'Unauthorized' })
           }
           return res.status(400).json({ error: 'not_pending' })
         }

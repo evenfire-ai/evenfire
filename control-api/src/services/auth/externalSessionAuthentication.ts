@@ -85,8 +85,13 @@ export type ExternalSessionAuthorityContext = Readonly<
  * This does not establish current session authority; protected work must still
  * pass through authenticateExternalUserSession and its live lifecycle checks.
  */
+/**
+ * Signature-only subject for limiters that run before live authentication.
+ * Both session contracts key on the user, so V2 sessions never fall back to a
+ * shared source-IP bucket. No database work happens here.
+ */
 export function externalSessionUserIdForRateLimit(token: string): string | null {
-  return verifyExternalSessionToken(token)?.userId ?? null
+  return verifyUserSessionV2Token(token)?.sub ?? verifyExternalSessionToken(token)?.userId ?? null
 }
 
 function clientMeetsMinimum(
@@ -291,7 +296,9 @@ export async function authenticateExternalUserSession(
 
 export async function renewExternalUserSession(
   token: string,
-  options: Omit<AuthenticationOptions, 'purpose'> = {}
+  options: Omit<AuthenticationOptions, 'purpose'> & {
+    onDatabaseFailure?: (error: unknown) => unknown
+  } = {}
 ): Promise<ExternalSessionRenewal> {
   const policy =
     options.policy ?? (await resolveEffectiveUserAccessPolicy({ budget: options.budget }))
@@ -303,7 +310,10 @@ export async function renewExternalUserSession(
   }
   const claims = verifyUserSessionV2Token(token)
   if (!claims) return { status: 'invalid', reason: 'invalid_representation' }
-  const result = await renewUserSession(claims, { budget: options.budget })
+  const result = await renewUserSession(claims, {
+    budget: options.budget,
+    onDatabaseFailure: options.onDatabaseFailure,
+  })
   if (!('token' in result)) {
     if (result.status === 'valid') {
       return { status: 'invalid', reason: 'session_renewal_failed' }

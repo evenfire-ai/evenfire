@@ -14,7 +14,6 @@ const serviceMock = vi.hoisted(() => ({
   listAllowedServersForUser: vi.fn(),
   resolveServerConnectionForUser: vi.fn(),
   resolveHostConnectionForUser: vi.fn(),
-  resolveArtifactReadHostConnectionForUser: vi.fn(),
   validateRpcRequest: vi.fn(),
   forwardRpcToServer: vi.fn(),
   forwardHostMessageToHost: vi.fn(),
@@ -48,22 +47,11 @@ const controlApiMock = vi.hoisted(() => ({
       this.name = 'ControlApiHostAccessRejectedError'
     }
   },
-  ControlApiHostRpcAdmissionError: class extends Error {
-    constructor(
-      readonly status: 429 | 503,
-      readonly body: { error: string; retryAfterSeconds?: number },
-      readonly headers: Record<string, string>
-    ) {
-      super(`Control API Host-RPC admission returned ${status}`)
-      this.name = 'ControlApiHostRpcAdmissionError'
-    }
-  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
   // Stage 5 wake-and-hold consults the control-api wake endpoint whenever an
   // upstream host looks down. Defaulting to 409 not-stateless preserves the
   // legacy 502 contract for the host-down cases exercised in this file.
-  requestHostRpcAdmission: async () => undefined,
   requestHostWakeFromControlApi: vi.fn().mockResolvedValue({ kind: 'not-stateless' }),
 }))
 
@@ -137,7 +125,6 @@ beforeEach(() => {
   // Default: auth passes, host resolves
   authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS })
   serviceMock.resolveHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
-  serviceMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
 })
 
 afterEach(() => {
@@ -428,11 +415,11 @@ describe('POST /rpc/hosts/:hostRef/approvals/deny', () => {
 // Artifact Routes
 // =====================================================================
 describe('GET /rpc/hosts/:hostRef/artifacts', () => {
-  it('shares the approved artifact-read budget with downloads', async () => {
+  it('forwards more than 30 mixed artifact reads', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(mockFetchResponse(200, '[]'))
     const app = makeApp()
 
-    for (let requestNumber = 0; requestNumber < 30; requestNumber += 1) {
+    for (let requestNumber = 0; requestNumber < 35; requestNumber += 1) {
       const path =
         requestNumber % 2 === 0
           ? '/rpc/hosts/chatllm/artifacts'
@@ -440,21 +427,21 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
       await request(app).get(path).set('authorization', 'Bearer token').expect(200)
     }
 
-    const limited = await request(app)
+    await request(app)
       .get('/rpc/hosts/chatllm/artifacts/final.txt/download')
       .set('authorization', 'Bearer token')
-      .expect(429)
+      .expect(200)
 
-    expect(limited.body).toMatchObject({ error: 'Too Many Requests' })
-    expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0)
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(36)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(36)
   })
 
-  it('keys the shared budget by verified subject and canonical Host, not filename', async () => {
+  it('preserves access for different users, Hosts, and filenames', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(mockFetchResponse(200, '[]'))
     authTokenMock.verifyRpcToken.mockImplementation(token =>
       token === 'other-user-token' ? { ...VALID_CLAIMS, sub: 'other-user' } : { ...VALID_CLAIMS }
     )
-    serviceMock.resolveArtifactReadHostConnectionForUser.mockImplementation(
+    serviceMock.resolveHostConnectionForUser.mockImplementation(
       async (_userId: string, hostRef: string) => ({ ...HOST_CONNECTION, name: hostRef })
     )
     const app = makeApp()
@@ -469,7 +456,7 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
     await request(app)
       .get('/rpc/hosts/chatllm/artifacts/different-filename.txt/download')
       .set('authorization', 'Bearer token')
-      .expect(429)
+      .expect(200)
 
     await request(app)
       .get('/rpc/hosts/otherhost/artifacts')
@@ -530,7 +517,7 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue({
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
       denied: true,
       code: 'host_access_denied',
     })
@@ -542,22 +529,18 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
       .expect(403)
   })
 
-  it('preserves the canonical Control API artifact-read 429', async () => {
+  it('does not forward an artifact read when Host resolution fails', async () => {
     globalThis.fetch = vi.fn()
-    const rateLimited = Object.assign(new Error('artifact read limited'), {
-      name: 'ControlApiArtifactReadRateLimitedError',
-      retryAfterSeconds: 17,
-    })
-    serviceMock.resolveArtifactReadHostConnectionForUser.mockRejectedValue(rateLimited)
+    serviceMock.resolveHostConnectionForUser.mockRejectedValue(
+      new Error('Host resolution unavailable')
+    )
     const app = makeApp()
 
-    const response = await request(app)
+    await request(app)
       .get('/rpc/hosts/chatllm/artifacts')
       .set('authorization', 'Bearer token')
-      .expect(429)
+      .expect(500)
 
-    expect(response.headers['retry-after']).toBe('17')
-    expect(response.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 17 })
     expect(globalThis.fetch).not.toHaveBeenCalled()
   })
 
@@ -676,7 +659,7 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
     await request(app).post('/rpc/hosts/chatllm/tasks/abc/cancel').expect(401)
   })
 
-  it('returns the typed Host authorization denial after live resolution', async () => {
+  it('returns 404 when host is not accessible', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue({
       ...VALID_CLAIMS,
       scopes: ['host:message:invoke'],
@@ -690,10 +673,12 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
     await request(app)
       .post('/rpc/hosts/chatllm/tasks/abc/cancel')
       .set('authorization', 'Bearer token')
-      .expect(403, {
-        error: 'Forbidden: user cannot access this host',
-        code: 'host_access_denied',
-      })
+      .expect(404)
+    // P-1 parity (merge-plan Addendum M-1): both task routes answer dev's 404
+    // on a Host denial instead of the coded 403, so the live witness is that
+    // resolution ran and no upstream call happened.
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledOnce()
+    expect(serviceMock.forwardCancelToHost).not.toHaveBeenCalled()
   })
 
   it('returns 502 when upstream fetch rejects and the host is not stateless', async () => {
@@ -1001,7 +986,7 @@ describe('GET /rpc/hosts/:hostRef/artifacts/:filename/download', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue({
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
       denied: true,
       code: 'host_access_denied',
     })

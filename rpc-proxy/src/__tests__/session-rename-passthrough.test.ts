@@ -21,10 +21,6 @@ const delegationMock = vi.hoisted(() => ({
 const serviceMock = vi.hoisted(() => ({
   resolveHostConnectionForUser: vi.fn(),
 }))
-vi.mock('../services/hostRpcAdmission.js', () => ({
-  admitLegacyHostRpcRequest: async () => true,
-}))
-
 vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../userDelegationV2.js', () => delegationMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)

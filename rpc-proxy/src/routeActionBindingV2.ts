@@ -534,7 +534,6 @@ export function runtimeHostEdgeContext(
   req: AuthedRequest,
   extra: {
     requestId?: string
-    messageResolution?: boolean
     directRunBinding?: {
       runId: string
       sessionId: string
@@ -545,7 +544,6 @@ export function runtimeHostEdgeContext(
   accessScope?: 'team' | 'user'
   teamId?: string | null
   requestId?: string
-  messageResolution?: boolean
   directRunBinding?: {
     runId: string
     sessionId: string

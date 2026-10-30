@@ -16,7 +16,7 @@ describe('external session database failure provenance', () => {
     const connect = vi.spyOn(pool, 'connect').mockRejectedValueOnce(acquireFailure)
 
     await expect(
-      withTransaction(async () => undefined, {
+      withTransaction(async () => undefined, pool, {
         onDatabaseFailure: externalSessionDatabaseFailure,
       })
     ).rejects.toMatchObject({
@@ -38,6 +38,7 @@ describe('external session database failure provenance', () => {
         async () => {
           throw applicationFailure
         },
+        pool,
         { onDatabaseFailure: externalSessionDatabaseFailure }
       )
     ).rejects.toBe(applicationFailure)

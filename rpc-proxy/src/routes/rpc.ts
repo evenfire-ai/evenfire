@@ -1,7 +1,6 @@
 import { Router } from 'express'
 import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
-import { rateLimit } from 'express-rate-limit'
 import {
   ActionAuthorityCheckpointError,
   actionAuthorityCacheKey,
@@ -28,19 +27,16 @@ import { runtimeHostEdgeContext, sendCheckpointError } from '../routeActionBindi
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
   ControlApiConnectorsRejectedError,
-  ControlApiHostMessageAdmissionError,
   type HostWakeApiResponse,
   fetchUserConnectorsFromControlApi,
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
-import { ControlApiHostVersionMismatchError } from '../services/controlApiVersionError.js'
 import {
   type HostAccessDenialCode,
   isHostAccessDenied,
   respondHostAccessDenied,
   withoutReservedHostAccessCode,
 } from '../services/hostAccessDenial.js'
-import { admitLegacyHostRpcRequest } from '../services/hostRpcAdmission.js'
 import {
   type HostRuntimeMessageRequest,
   forwardCancelToHost,
@@ -51,7 +47,6 @@ import {
   forwardRpcToServer,
   forwardTaskResultFromHost,
   listAllowedServersForUser,
-  resolveArtifactReadHostConnectionForUser,
   resolveHostConnectionForUser,
   resolveServerConnectionForUser,
   validateRpcRequest,
@@ -69,16 +64,6 @@ import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 import type { ResolvedServerConnection } from '../types.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
-
-const HOST_ARTIFACT_READ_LIMIT_PER_MIN = 30
-
-type ArtifactReadRequest = AuthedRequest & {
-  artifactReadWakeDeadlineMs?: number
-  artifactReadHost?: Extract<
-    Awaited<ReturnType<typeof resolveArtifactReadHostConnectionForUser>>,
-    { url: string }
-  >
-}
 
 // Keep legacy denial precedence (scope before body parsing), while v2 route
 // binding must see parsed body data before its remote Control API checkpoint.
@@ -183,16 +168,6 @@ function controlApiHostAccessRejection(error: unknown): ControlApiHostAccessReje
     return { status, code: denialCode }
   }
   return null
-}
-
-function controlApiArtifactReadRetryAfterSeconds(error: unknown): number | null {
-  if (!(error instanceof Error) || error.name !== 'ControlApiArtifactReadRateLimitedError') {
-    return null
-  }
-  const retryAfterSeconds = (error as Error & { retryAfterSeconds?: unknown }).retryAfterSeconds
-  return typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds)
-    ? Math.max(1, Math.ceil(retryAfterSeconds))
-    : null
 }
 
 export function respondControlApiHostAccessRejection(
@@ -321,76 +296,6 @@ async function readArtifactResponseBuffer(response: Response): Promise<Buffer> {
 
 export function createRpcRouter(): Router {
   const router = Router()
-
-  // Control API owns the durable, cross-replica artifact budget. This edge
-  // backstop uses the same verified identity + canonical Host key so route
-  // analysis can prove both artifact reads are bounded without replacing the
-  // authoritative PG limiter or consuming Host wake capacity.
-  const artifactReadEdgeRateLimit = rateLimit({
-    windowMs: 60_000,
-    limit: HOST_ARTIFACT_READ_LIMIT_PER_MIN,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    keyGenerator: req => {
-      const artifactRead = req as ArtifactReadRequest
-      const subject = artifactRead.auth?.sub
-      const hostRef = artifactRead.artifactReadHost?.name
-      return `host-artifact-read:${subject ?? '__missing_subject__'}:${hostRef ?? '__missing_host__'}`
-    },
-    handler: (_req, res) => {
-      const raw = res.getHeader('Retry-After')
-      const retryAfterSeconds =
-        typeof raw === 'string' && /^\d+$/.test(raw) ? Math.max(1, Number(raw)) : 60
-      res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
-    },
-  })
-
-  const resolveArtifactReadHost = async (
-    req: ArtifactReadRequest,
-    res: ExpressResponse,
-    next: NextFunction
-  ) => {
-    try {
-      const auth = req.auth!
-      const hostRef = String(req.params.hostRef || '').trim()
-      if (!hostRef) {
-        res.status(400).json({ error: 'hostRef is required' })
-        return
-      }
-      if (!RFC1123_RE.test(hostRef)) {
-        res.status(400).json({ error: 'Invalid host reference' })
-        return
-      }
-      req.artifactReadWakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-      const artifactReadHost = await resolveArtifactReadHostConnectionForUser(
-        auth.sub,
-        hostRef,
-        extractAuthToken(req),
-        { teamId: auth.teamId }
-      )
-      if (isHostAccessDenied(artifactReadHost)) {
-        respondHostAccessDenied(res, artifactReadHost)
-        return
-      }
-      if (!artifactReadHost) {
-        res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-        return
-      }
-      req.artifactReadHost = artifactReadHost
-      next()
-    } catch (error) {
-      const retryAfterSeconds = controlApiArtifactReadRetryAfterSeconds(error)
-      if (retryAfterSeconds !== null) {
-        res.setHeader('Retry-After', String(retryAfterSeconds))
-        res.status(429).json({
-          error: 'Too Many Requests',
-          retryAfterSeconds,
-        })
-        return
-      }
-      guardedNext(res, next, error)
-    }
-  }
 
   router.get(
     '/rpc/servers',
@@ -537,7 +442,7 @@ export function createRpcRouter(): Router {
     chatJsonBody,
     bindHostRpcScope('host:message:invoke'),
     runHostRpcPreflightCheckpoint,
-    async (req: AuthedRequest, res, next) => {
+    async (req: AuthedRequest, res) => {
       // Host runtime write path (REST-oriented):
       // - separate from read-only status stream
       // - explicitly scoped to host:message:invoke
@@ -621,7 +526,6 @@ export function createRpcRouter(): Router {
           hostRef,
           rpcAccessToken,
           runtimeHostEdgeContext(req, {
-            messageResolution: true,
             ...(traceContext.sessionId
               ? {
                   directRunBinding: {
@@ -709,24 +613,9 @@ export function createRpcRouter(): Router {
         // the wake path (which would re-forward an already-delivered message).
         res.status(200).json(upstreamResponse)
       } catch (error) {
-        if (error instanceof ControlApiHostMessageAdmissionError) {
-          if (error.status === 429) {
-            for (const [name, value] of Object.entries(error.headers)) {
-              res.setHeader(name, value)
-            }
-          }
-          res.status(error.status).json(error.body)
-          return
-        }
         const rejection = controlApiHostAccessRejection(error)
         if (rejection) {
           respondControlApiHostAccessRejection(res, rejection)
-          return
-        }
-        if (error instanceof ControlApiHostVersionMismatchError) {
-          // Let the terminal handler name the deployment mismatch as a 503
-          // instead of misreporting it as an unavailable Host (502) or denial.
-          next(error)
           return
         }
         console.warn(
@@ -755,8 +644,6 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef } = getHostRpcPreflight(req)
-
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -853,7 +740,6 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef, approvalRequestId } = getHostRpcPreflight(req)
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -929,7 +815,6 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef, approvalRequestId } = getHostRpcPreflight(req)
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1016,8 +901,6 @@ export function createRpcRouter(): Router {
           limit: rawLimit,
         } = getHostRpcPreflight(req)
 
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
-
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -1096,7 +979,6 @@ export function createRpcRouter(): Router {
           cursor: sessionCursor,
           limit: sessionLimit,
         } = getHostRpcPreflight(req)
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1187,7 +1069,6 @@ export function createRpcRouter(): Router {
           beforeTurn,
           afterTurn,
         } = getHostRpcPreflight(req)
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1275,7 +1156,6 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef, agent, chatId } = getHostRpcPreflight(req)
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1359,7 +1239,6 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef, agent, chatId, validatedTitle } = getHostRpcPreflight(req)
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -1433,7 +1312,6 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef, chatId } = getHostRpcPreflight(req)
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1508,7 +1386,6 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef, body } = getHostRpcPreflight(req)
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1570,13 +1447,11 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/tasks/:taskId/result',
     requireRpcAuth,
     requireHostRpcPreflightScope('host:message:invoke'),
-    async (req: AuthedRequest, res, next) => {
+    async (req: AuthedRequest, res) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef, taskId } = getHostRpcPreflight(req)
-
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef, 404))) return
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
@@ -1585,11 +1460,7 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
-          return
-        }
-        if (!host) {
+        if (isHostAccessDenied(host) || !host) {
           res.status(404).json({ error: 'Host not found or not accessible' })
           return
         }
@@ -1628,10 +1499,6 @@ export function createRpcRouter(): Router {
           respondUpstreamUnavailable(res, error)
         }
       } catch (error) {
-        if (error instanceof ControlApiHostVersionMismatchError) {
-          next(error)
-          return
-        }
         console.warn(`[RPC_PROXY] task result forward failed error=${describeErrorForLog(error)}`)
         respondUpstreamUnavailable(res, error)
       }
@@ -1642,13 +1509,11 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/tasks/:taskId/cancel',
     requireRpcAuth,
     requireHostRpcPreflightScope('host:message:invoke'),
-    async (req: AuthedRequest, res, next) => {
+    async (req: AuthedRequest, res) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef, taskId } = getHostRpcPreflight(req)
-
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef, 404))) return
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
@@ -1657,11 +1522,7 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
-          return
-        }
-        if (!host) {
+        if (isHostAccessDenied(host) || !host) {
           res.status(404).json({ error: 'Host not found or not accessible' })
           return
         }
@@ -1709,10 +1570,6 @@ export function createRpcRouter(): Router {
           respondUpstreamUnavailable(res, error)
         }
       } catch (error) {
-        if (error instanceof ControlApiHostVersionMismatchError) {
-          next(error)
-          return
-        }
         console.warn(`[RPC_PROXY] cancel forward failed error=${describeErrorForLog(error)}`)
         respondUpstreamUnavailable(res, error)
       }
@@ -1724,15 +1581,34 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/artifacts',
     requireRpcAuth,
     requireHostRefCheckpointScope('host:task:read'),
-    resolveArtifactReadHost,
-    artifactReadEdgeRateLimit,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
-        const host = (req as ArtifactReadRequest).artifactReadHost!
-        const wakeDeadlineMs = (req as ArtifactReadRequest).artifactReadWakeDeadlineMs!
+        if (!hostRef) {
+          res.status(400).json({ error: 'hostRef is required' })
+          return
+        }
+        if (!RFC1123_RE.test(hostRef)) {
+          res.status(400).json({ error: 'Invalid host reference' })
+          return
+        }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         // Unlike approve/deny/model this is a read-only list of small JSON: a
@@ -1793,16 +1669,45 @@ export function createRpcRouter(): Router {
       next()
     },
     runHostRefCheckpoint,
-    resolveArtifactReadHost,
-    artifactReadEdgeRateLimit,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
         const filename = String(req.params.filename || '').trim()
-        const host = (req as ArtifactReadRequest).artifactReadHost!
-        const wakeDeadlineMs = (req as ArtifactReadRequest).artifactReadWakeDeadlineMs!
+        if (!hostRef) {
+          res.status(400).json({ error: 'hostRef is required' })
+          return
+        }
+        if (!RFC1123_RE.test(hostRef)) {
+          res.status(400).json({ error: 'Invalid host reference' })
+          return
+        }
+        if (
+          !filename ||
+          filename.includes('..') ||
+          filename.includes('/') ||
+          filename.includes('\\') ||
+          filename.includes('\0')
+        ) {
+          res.status(400).json({ error: 'Invalid filename' })
+          return
+        }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         // The success path only commits (`res.send`) at the very end, so a
@@ -1899,7 +1804,6 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef, limit = 50 } = getHostRpcPreflight(req)
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -1939,8 +1843,6 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef } = getHostRpcPreflight(req)
-
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1987,8 +1889,6 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const { hostRef } = getHostRpcPreflight(req)
-
-        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,

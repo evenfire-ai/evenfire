@@ -85,9 +85,6 @@ beforeEach(() => {
   }
   globalThis.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input)
-    if (url.endsWith('/host-rpc-admission')) {
-      return new Response(null, { status: 204 })
-    }
     if (url.includes('/rpc/access/users/')) {
       controlApiCalls.push(url)
       controlApiRequests.push({ url, init })
@@ -252,7 +249,7 @@ describe('host authorization 403 carries a machine-readable code at every site',
   )
 
   it.each(DENYING_ROUTES)(
-    '$label: a missing control-api operation (404) -> typed version mismatch',
+    '$label: an unbound control-api 404 -> host_access_denied',
     async route => {
       await proveAuthorizedForwarding(route)
       // Witness: an authorized request reached control-api and the route then
@@ -268,14 +265,14 @@ describe('host authorization 403 carries a machine-readable code at every site',
       // ran) and contacted no Host rail.
       expect(controlApiCalls).toHaveLength(2)
       expect(hostCalls).toHaveLength(1)
-      expect(res.status).toBe(503)
-      expect(res.body).toEqual({ error: 'control_api_version_mismatch' })
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ error: DENIED_ERROR, code: 'host_access_denied' })
     }
   )
 
   it('messages: a real 403 denial stays host_access_denied', async () => {
-    // Witness for the 404 test above: the 403 mapping is still live on the same
-    // route, so the version-mismatch body is not a blanket replacement.
+    // Witness for the 404 test above: a coded 403 is still mapped on the same
+    // route, so the 404 denial is not a blanket replacement of every refusal.
     const messages = DENYING_ROUTES.find(route => route.label === 'messages')!
     await proveAuthorizedForwarding(messages)
     expect(controlApiCalls).toHaveLength(1)
@@ -296,7 +293,7 @@ describe('host authorization 403 carries a machine-readable code at every site',
     expect(res.body).toEqual({ error: DENIED_ERROR, code: 'host_access_denied' })
   })
 
-  it('messages: a threaded send (direct-run-bound) 404 -> typed version mismatch, never a 502', async () => {
+  it('messages: a threaded send posts the binding to the parent path, and a 404 is an upstream failure', async () => {
     const threaded: RouteCase = {
       label: 'messages with threadId',
       method: 'post',
@@ -307,9 +304,9 @@ describe('host authorization 403 carries a machine-readable code at every site',
     expect(controlApiCalls).toHaveLength(1)
     expect(hostCalls).toHaveLength(1)
 
-    // The threaded send is the direct-run-bound production shape: it must have
-    // POSTed the derived binding to /message-resolution before forwarding.
-    expect(String(controlApiRequests[0]!.url)).toMatch(/\/message-resolution$/)
+    // The threaded send is the direct-run-bound production shape: it POSTs
+    // the derived binding to the parent Host path before forwarding.
+    expect(String(controlApiRequests[0]!.url)).toMatch(/\/mcp-hosts\/chatllm$/)
     expect(controlApiRequests[0]!.init?.method).toBe('POST')
     expect(JSON.parse(String(controlApiRequests[0]!.init?.body))).toMatchObject({
       runId: expect.any(String),
@@ -323,13 +320,13 @@ describe('host authorization 403 carries a machine-readable code at every site',
 
     expect(controlApiCalls).toHaveLength(2)
     expect(hostCalls).toHaveLength(1)
-    expect(res.status).toBe(503)
-    expect(res.body).toEqual({ error: 'control_api_version_mismatch' })
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({ error: 'Upstream host unavailable' })
   })
 
   // These two answer their own 404 (rather than a coded 403) on a Host denial,
-  // so they live outside DENYING_ROUTES; their outer catches used to turn the
-  // same control-api 404 into 502. Both must reach the terminal 503 mapping.
+  // so they live outside DENYING_ROUTES. An unbound control-api 404 is that
+  // denial, not an upstream failure.
   it.each([
     {
       label: 'task result',
@@ -341,7 +338,7 @@ describe('host authorization 403 carries a machine-readable code at every site',
       method: 'post' as const,
       path: '/rpc/hosts/chatllm/tasks/task-1/cancel',
     },
-  ])('$label: a missing control-api operation (404) -> typed version mismatch', async route => {
+  ])('$label: an unbound control-api 404 stays Host-not-accessible', async route => {
     await proveAuthorizedForwarding(route)
     expect(controlApiCalls).toHaveLength(1)
     expect(hostCalls).toHaveLength(1)
@@ -352,8 +349,8 @@ describe('host authorization 403 carries a machine-readable code at every site',
 
     expect(controlApiCalls).toHaveLength(2)
     expect(hostCalls).toHaveLength(1)
-    expect(res.status).toBe(503)
-    expect(res.body).toEqual({ error: 'control_api_version_mismatch' })
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'Host not found or not accessible' })
   })
 })
 

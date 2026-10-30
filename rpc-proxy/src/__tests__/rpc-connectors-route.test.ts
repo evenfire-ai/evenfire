@@ -29,20 +29,9 @@ const controlApiMock = vi.hoisted(() => {
         this.name = 'ControlApiHostAccessRejectedError'
       }
     },
-    ControlApiHostRpcAdmissionError: class extends Error {
-      constructor(
-        readonly status: 429 | 503,
-        readonly body: { error: string; retryAfterSeconds?: number },
-        readonly headers: Record<string, string>
-      ) {
-        super(`Control API Host-RPC admission returned ${status}`)
-        this.name = 'ControlApiHostRpcAdmissionError'
-      }
-    },
     ControlApiConnectorsRejectedError,
     fetchUserConnectorsFromControlApi: vi.fn(),
     fetchHostConnectionFromControlApi: vi.fn(),
-    requestHostRpcAdmission: async () => undefined,
     requestHostWakeFromControlApi: vi.fn(),
   }
 })

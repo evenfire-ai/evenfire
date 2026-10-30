@@ -1,11 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  ControlApiArtifactReadRateLimitedError,
   ControlApiHostAccessRejectedError,
-  fetchArtifactReadHostConnectionFromControlApi,
   fetchHostConnectionFromControlApi,
 } from '../src/services/controlApiRestService.js'
-import { ControlApiHostVersionMismatchError } from '../src/services/controlApiVersionError.js'
 
 const BINDING = {
   runId: '00000000-0000-4000-8000-000000000123',
@@ -14,27 +11,33 @@ const BINDING = {
 }
 
 describe('control-api canonical host access client', () => {
-  it('preserves the canonical artifact-read 429 and Retry-After', async () => {
+  it('resolves an ordinary send with one GET to the parent host-access URL', async () => {
     const fetchImpl = vi.fn(
       async () =>
-        new Response(JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 17 }), {
-          status: 429,
-          headers: { 'content-type': 'application/json', 'retry-after': '17' },
-        })
+        new Response(
+          JSON.stringify({
+            userId: 'user-1',
+            hostRef: 'host-a',
+            url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
     )
 
     await expect(
-      fetchArtifactReadHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+      fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
         fetchImpl: fetchImpl as typeof fetch,
       })
-    ).rejects.toMatchObject({
-      name: ControlApiArtifactReadRateLimitedError.name,
-      retryAfterSeconds: 17,
+    ).resolves.toEqual({
+      name: 'host-a',
+      url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+      headers: {},
     })
 
-    expect(String(fetchImpl.mock.calls[0]![0])).toMatch(
-      /\/rpc\/access\/users\/user-1\/mcp-hosts\/host-a\/artifact-read$/
-    )
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    const [url, init] = fetchImpl.mock.calls[0]!
+    expect(String(url)).toMatch(/\/rpc\/access\/users\/user-1\/mcp-hosts\/host-a$/)
+    expect(init).toMatchObject({ method: 'GET' })
   })
 
   it('resolves and binds with one POST to the existing host-access URL', async () => {
@@ -179,79 +182,39 @@ describe('control-api canonical host access client', () => {
     expect(fetchImpl).toHaveBeenCalledOnce()
   })
 
-  it.each([
-    ['the legacy host read', {}, 'host-access'],
-    ['message resolution', { messageResolution: true }, 'host-message-resolution'],
-  ] as const)(
-    'a 404 on %s is a typed version mismatch, never a denial',
-    async (_label, options, operation) => {
-      const fetchImpl = jsonResponse(404, { error: 'not found' })
-
-      const rejection = fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
-        ...options,
-        fetchImpl: fetchImpl as typeof fetch,
-      })
-
-      await expect(rejection).rejects.toBeInstanceOf(ControlApiHostVersionMismatchError)
-      await expect(rejection).rejects.toMatchObject({ operation })
-      expect(fetchImpl).toHaveBeenCalledOnce()
-    }
-  )
-
-  // The direct-run-bound 404 is the common send shape during the rollout: it
-  // must reach the typed fence instead of the old 502. Both binding operations
-  // are covered, and the request shape proves the binding was actually POSTed.
-  it.each([
-    [
-      'a direct-run-bound legacy send',
-      { directRunBinding: BINDING },
-      'host-access',
-      '/mcp-hosts/host-a',
-    ],
-    [
-      'a direct-run-bound message resolution',
-      { messageResolution: true, directRunBinding: BINDING },
-      'host-message-resolution',
-      '/mcp-hosts/host-a/message-resolution',
-    ],
-  ] as const)(
-    'a 404 on %s is a typed version mismatch and posts the binding',
-    async (_label, options, operation, pathSuffix) => {
-      const fetchImpl = vi.fn(
-        async (_url: string | URL | Request, _init?: RequestInit) =>
-          new Response(JSON.stringify({ error: 'not found' }), {
-            status: 404,
-            headers: { 'content-type': 'application/json' },
-          })
-      )
-
-      const rejection = fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
-        ...options,
-        fetchImpl: fetchImpl as typeof fetch,
-      })
-
-      await expect(rejection).rejects.toBeInstanceOf(ControlApiHostVersionMismatchError)
-      await expect(rejection).rejects.toMatchObject({ operation })
-      expect(fetchImpl).toHaveBeenCalledOnce()
-      const [url, init] = fetchImpl.mock.calls[0]!
-      expect(String(url)).toMatch(new RegExp(`${pathSuffix}$`))
-      expect(init).toMatchObject({ method: 'POST', body: JSON.stringify(BINDING) })
-    }
-  )
-
-  it('a 404 on artifact-read names the artifact operation as a version mismatch', async () => {
+  it('a non-direct-run 404 resolves to host_access_denied on the parent path', async () => {
     const fetchImpl = jsonResponse(404, { error: 'not found' })
 
-    const rejection = fetchArtifactReadHostConnectionFromControlApi(
-      'user-1',
-      'host-a',
-      'signed-rpc-token',
-      { fetchImpl: fetchImpl as typeof fetch }
+    await expect(
+      fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).resolves.toEqual({ denied: true, code: 'host_access_denied' })
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    const [url, init] = fetchImpl.mock.calls[0]!
+    expect(String(url)).toMatch(/\/rpc\/access\/users\/user-1\/mcp-hosts\/host-a$/)
+    expect(init).toMatchObject({ method: 'GET' })
+  })
+
+  it('a direct-run-bound 404 is a lookup failure and posts the binding to the parent path', async () => {
+    const fetchImpl = vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) =>
+        new Response(JSON.stringify({ error: 'not found' }), {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        })
     )
 
-    await expect(rejection).rejects.toBeInstanceOf(ControlApiHostVersionMismatchError)
-    await expect(rejection).rejects.toMatchObject({ operation: 'host-artifact-read' })
-    expect(String(fetchImpl.mock.calls[0]![0])).toMatch(/\/artifact-read$/)
+    const rejection = fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+      directRunBinding: BINDING,
+      fetchImpl: fetchImpl as typeof fetch,
+    })
+
+    await expect(rejection).rejects.toThrow('Control API MCP host lookup failed (404)')
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    const [url, init] = fetchImpl.mock.calls[0]!
+    expect(String(url)).toMatch(/\/rpc\/access\/users\/user-1\/mcp-hosts\/host-a$/)
+    expect(init).toMatchObject({ method: 'POST', body: JSON.stringify(BINDING) })
   })
 
   it.each([

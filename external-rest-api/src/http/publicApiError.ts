@@ -128,6 +128,18 @@ function safePublicRateLimitHeaders(headers: Record<string, string>): Record<str
   return result
 }
 
+/**
+ * Caching guidance is an upstream contract for outages, not free-form metadata.
+ * Control API sends `no-store` on a session-backend 503 so no intermediary
+ * caches a transient authority failure; the sanitizer keeps only that literal
+ * value and never relays any other cache directive.
+ */
+function safeNoStoreHeader(headers: Record<string, string>): Record<string, string> {
+  const raw = headers['cache-control']
+  if (typeof raw !== 'string' || raw.trim().toLowerCase() !== 'no-store') return {}
+  return { 'cache-control': 'no-store' }
+}
+
 function safeUnsignedIntegerHeader(
   headers: Record<string, string>,
   name: string
@@ -241,8 +253,13 @@ export function sanitizeControlApiPublicError(
         ? safeHeaders
         : error.status === 413
           ? safeUnsignedIntegerHeader(responseHeaders, 'upload-length')
-          : retryable && safeHeaders['retry-after']
-            ? { 'retry-after': safeHeaders['retry-after'] }
+          : retryable
+            ? {
+                ...(safeHeaders['retry-after']
+                  ? { 'retry-after': safeHeaders['retry-after'] }
+                  : {}),
+                ...(error.status === 503 ? safeNoStoreHeader(responseHeaders) : {}),
+              }
             : {}
 
   return {
