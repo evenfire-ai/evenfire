@@ -145,7 +145,8 @@ mutation-lock wrapper can replace a 0 with its own release failure).
 
 ### REASON ids
 
-Each assertion has its own id. Preconditions (exit 2):
+Each id names one check; where a check has more than one step, its row lists
+every step. Preconditions (exit 2):
 
 | REASON | Failed assertion |
 | ------ | ---------------- |
@@ -153,16 +154,16 @@ Each assertion has its own id. Preconditions (exit 2):
 | `tooling-missing` | `jq` or `python3` missing on the host |
 | `context-not-owned` | `KUBECONTEXT` is not a branch-scoped context or does not match the profile/context variables |
 | `lock-not-held` | `scripts/minikube/require-t2-mutation-lock.sh` refused the inherited lease |
-| `cluster-prerequisites` | HCC, CoreDNS, the McpServer CRD or `deny-all-mcp-server` missing |
+| `cluster-prerequisites` | HCC, CoreDNS, the McpServer CRD or `deny-all-mcp-server` missing (`deny-all-mcp-server` must be an empty-selector `Egress` default deny), the HCC container missing from the Deployment, or the HCC Deployment or the Corefile could not be read |
 | `leftover-state` | A previous run left an override, a `hosts` row or a test resource |
-| `corefile-unexpected` | The Corefile does not have exactly one multi-line `hosts` block |
+| `corefile-unexpected` | The Corefile is empty or does not have exactly one multi-line `hosts` block |
 | `marker-missing` | The pre-gate marker has no usable `gitHead` |
 | `source-drift` | The code under test differs from the marker HEAD |
-| `hcc-env-not-applied` | The HCC env, rollout or startup resync log witness failed |
-| `window-witness` | An `egress-fqdn-state` entry kept a longer overlap than 65 s |
+| `hcc-env-not-applied` | The HCC override annotation, env, rollout, env read-back or startup resync log witness failed |
+| `window-witness` | HCC did not write the `ext-egress` policy with its `egress-fqdn-state` annotation within 60 s, the annotation could not be read back, or an entry kept a longer overlap than 65 s (only this last step writes `window-witness-violation.json`) |
 | `curl-missing` | `curl --version` failed in a proxy pod |
-| `control-template-witness` | The control's rendered `default.conf` does not have the expected `proxy_pass` form |
-| `corefile-not-applied` | The CoreDNS patch/read-back failed |
+| `control-template-witness` | The control's `proxy_pass` transformation of the branch template, or the `default.conf` rendered in the control pod (unreadable or not in the expected form), is wrong |
+| `corefile-not-applied` | The override Corefile could not be rendered or does not contain every row and `ttl 5`, or the CoreDNS patch, read-back or annotation check failed |
 
 Inconclusive (exit 3): `phase2-dns-set-b-not-visible`,
 `phase3-policy-b-not-converged`, `phase3-branch-not-ready`,
@@ -174,6 +175,15 @@ Inconclusive (exit 3): `phase2-dns-set-b-not-visible`,
 `upstream-rate-limited` (the upstream answered 403/429), `probe-unavailable`
 (only executor errors, no network result to judge), `policy-loop-missing`,
 `interrupted` and `unexpected-error`.
+
+These inconclusive ids cover more than one step:
+
+| REASON | What failed |
+| ------ | ----------- |
+| `phase3-policy-b-not-converged` | The McpServer could not be applied, or the policy was not exactly B within 90 s |
+| `phase4-policy-a-not-converged`, `phase5-policy-b-not-converged`, `phase6-policy-a-not-converged` | HCC recorded no address of the new set in `egress-fqdn-state` within 150 s, `t_dns` was not a timestamp, or the policy was not exactly the new set within `t_dns` + 90 s |
+| `phase3-branch-not-ready` | The branch proxy pod did not become Ready, or its baseline identity could not be read |
+| `phase4-control-not-ready` | The control ConfigMap or Deployment could not be created, the control pod did not become Ready, or its baseline identity could not be read |
 
 Product failures (exit 1):
 

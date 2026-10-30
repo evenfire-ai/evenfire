@@ -1099,7 +1099,10 @@ policy_ready() {
 assert_window_witness() {
   local state deltas
   state="$(policy_state_json || :)"
-  [ -n "$state" ] || finish 2 window-witness
+  [ -n "$state" ] || {
+    fail "the ${STATE_ANNOTATION} annotation of ${POLICY_NAME} could not be read back"
+    finish 2 window-witness
+  }
   deltas="$(printf '%s' "$state" | jq -r --argjson max "$WINDOW_MAX_DELTA_MS" '
     [ .[] | select((.expiresAt - .lastObservedAt) > $max) | {ip, delta:(.expiresAt - .lastObservedAt)} ]
     | if length == 0 then empty else . end')"
