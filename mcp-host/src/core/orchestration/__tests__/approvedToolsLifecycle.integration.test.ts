@@ -62,7 +62,6 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 const managers: McpManager[] = []
 const serverInfo = (name: string) => ({
   name,
-  contextRef: 'test-context',
   enabled: true,
   transport: { type: 'streamableHttp' as const, url: `http://${name}/mcp` },
   status: { deployed: true, ready: true },

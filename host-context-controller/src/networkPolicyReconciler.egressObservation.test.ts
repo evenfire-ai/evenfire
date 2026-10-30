@@ -39,7 +39,6 @@ function fixture(bindings: EgressBinding[]) {
     uid: 'server-uid',
     generation: 7,
     spec: {
-      contextRef: 'dev',
       image: 'observation:1',
       transport: { type: 'streamableHttp', port: 3000 },
       egressBindings: bindings,

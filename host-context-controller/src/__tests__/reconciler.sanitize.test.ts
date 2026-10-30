@@ -50,7 +50,6 @@ function makeServer(
     namespace: 'mcp-server',
     uid: 'uid-test-1234',
     spec: {
-      contextRef: 'ctx1',
       image: 'my-mcp-server:v1',
       transport: { type: 'streamableHttp', port: 3000, url: 'http://test.mcp-server.svc:3000/mcp' },
       ...specOverrides,

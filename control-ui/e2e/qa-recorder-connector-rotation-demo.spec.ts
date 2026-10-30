@@ -72,7 +72,6 @@ test.describe('demo: Control UI credential-rotation journey', () => {
           metadata: { name: connectorName },
           spec: {
             image: MOCK_MCP_IMAGE,
-            contextRef: contextName,
             description: 'issue #223 credential-rotation demo connector',
             transport: {
               type: 'streamableHttp',

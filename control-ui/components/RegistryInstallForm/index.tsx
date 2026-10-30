@@ -11,7 +11,6 @@ import { registryEntryToEgressBindings } from '@lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '@lib/egressModel'
 import { isValidK8sName, toK8sName } from '@lib/k8sValidation'
 import { buildPastedValue } from '@lib/pasteUtils'
-import { createPrivateContext } from '@lib/privateContext'
 import { getEmbeddedCredentialSchema } from '../registryInstallHelpers'
 import type { RegistryInstallFormProps } from './types'
 
@@ -129,21 +128,8 @@ export function RegistryInstallForm({
           ? []
           : egressBindings
 
-      // The install contract needs an access scope on the wire. It is an
-      // implementation detail: a private scope is generated silently (same
-      // pattern as agent creation) and the operator grants agents from the
-      // Installed Connectors list afterwards.
-      const contextRef = await createPrivateContext(
-        {
-          subject: serverName || entry.name,
-          description: `Connector access scope for ${serverName || entry.name}`,
-        },
-        'We couldn’t prepare this connector’s access — please try again.'
-      )
-
       await installFromRegistry({
         serverName: serverName || undefined,
-        contextRef,
         registryEntryName: entry.name,
         registryEntryVersion: entry.version,
         credentials,

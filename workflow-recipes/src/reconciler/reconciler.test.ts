@@ -7920,9 +7920,7 @@ describe('WorkflowRecipeReconciler', () => {
         (call: unknown[]) => (call[0] as Record<string, unknown>)?.plural === 'mcpservers'
       )
     expect(mcpServerCall).toBeDefined()
-    expect((mcpServerCall![0].body.spec as Record<string, unknown>).contextRef).toBe(
-      'wf-test-recipe'
-    )
+    expect(mcpServerCall![0].body.spec).not.toHaveProperty('contextRef')
     const contextCreate =
       mockCustomApi.createNamespacedCustomObject.mock.calls.find(
         (call: unknown[]) => (call[0] as Record<string, unknown>)?.plural === 'contexts'
@@ -7934,6 +7932,7 @@ describe('WorkflowRecipeReconciler', () => {
     expect((contextCreate![0].body.spec as Record<string, unknown>).contextId).toBe(
       'wf-test-recipe'
     )
+    expect(contextCreate![0].body.spec.mcpServers).toContain(mcpServerCall![0].body.metadata.name)
   })
 
   it('R.6.3 — transport workload without port fails validation', async () => {
@@ -9997,7 +9996,7 @@ describe('WorkflowRecipeReconciler', () => {
       )
     expect(mcpServerCall).toBeDefined()
     const mcpSpec = mcpServerCall![0].body.spec as Record<string, unknown>
-    expect(mcpSpec.contextRef).toBe('wf-test-recipe')
+    expect(mcpSpec).not.toHaveProperty('contextRef')
     expect(mcpSpec.egressBindings).toEqual([{ dns: 'duckduckgo.com', port: 443 }])
     const contextCall =
       mockCustomApi.createNamespacedCustomObject.mock.calls.find(
@@ -10008,6 +10007,7 @@ describe('WorkflowRecipeReconciler', () => {
       )
     expect(contextCall).toBeDefined()
     expect((contextCall![0].body.spec as Record<string, unknown>).contextId).toBe('wf-test-recipe')
+    expect(contextCall![0].body.spec.mcpServers).toContain(mcpServerCall![0].body.metadata.name)
     expect(workflowReconcile).toHaveBeenCalled()
   })
 

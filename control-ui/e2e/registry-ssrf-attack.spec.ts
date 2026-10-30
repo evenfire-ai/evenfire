@@ -217,7 +217,6 @@ test.describe('Registry SSRF Attack Vectors', () => {
         // Attempt install via control-api
         const { status, data } = await api(token, 'POST', '/api/v1/admin/registry/install', {
           serverName,
-          contextRef: 'context1',
           registryEntryName: entryName,
           registryEntryVersion: '1.0.0',
         })
@@ -267,7 +266,6 @@ test.describe('Registry SSRF Attack Vectors', () => {
     try {
       const { status, data } = await api(token, 'POST', '/api/v1/admin/registry/install', {
         serverName,
-        contextRef: 'context1',
         registryEntryName: entryName,
         registryEntryVersion: '1.0.0',
       })

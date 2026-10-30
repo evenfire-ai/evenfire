@@ -5,7 +5,6 @@ kind: McpServer
 metadata:
   name: postgres-server
 spec:
-  contextRef: context1
   description: Provides PostgreSQL database query capabilities
   image: mcp/postgres:latest
   transport:

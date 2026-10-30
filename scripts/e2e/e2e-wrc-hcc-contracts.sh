@@ -456,7 +456,6 @@ metadata:
   labels:
     e2e.clerum.io/suite: wrc-hcc-contracts
 spec:
-  contextRef: ${CONTEXT_NAME}
   image: clerum/nginx-egress-proxy:0.1.0
   transport:
     type: streamableHttp

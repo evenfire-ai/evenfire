@@ -309,7 +309,6 @@ metadata:
     ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
     np08.evenfire/run: ${RUN_ID}
 spec:
-  contextRef: ${CONTEXT_A}
   image: clerum/mock-mcp-server:dev
   managed: false
   transport:
@@ -331,7 +330,6 @@ metadata:
     ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
     np08.evenfire/run: ${RUN_ID}
 spec:
-  contextRef: ${CONTEXT_B}
   image: clerum/mock-mcp-server:dev
   managed: false
   transport:
@@ -353,7 +351,6 @@ metadata:
     ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
     np08.evenfire/run: ${RUN_ID}
 spec:
-  contextRef: ${CONTEXT_A}
   image: clerum/mock-mcp-server:dev
   managed: false
   transport:

@@ -235,7 +235,6 @@ function seedNetworkPolicyPassInventory(watcher: McpServerWatcher): void {
     name: 'stale-server',
     namespace: 'mcp-server',
     spec: {
-      contextRef: 'stale-context',
       image: 'clerum/stale-server:v1',
       transport: { type: 'streamableHttp' as const, port: 3000 },
     },
@@ -1488,7 +1487,6 @@ describe('McpServerWatcher startup', () => {
         generation: 1,
       },
       spec: {
-        contextRef: 'default',
         image: 'clerum/gap-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -1584,7 +1582,6 @@ describe('McpServerWatcher startup', () => {
                 generation: 1,
               },
               spec: {
-                contextRef: 'default',
                 image: 'clerum/recovered:test',
                 transport: { type: 'streamableHttp' as const, port: 3000 },
               },
@@ -1744,7 +1741,6 @@ describe('McpServerWatcher startup', () => {
           uid: 'current-uid',
           generation: 1,
           spec: {
-            contextRef: 'default',
             image: 'clerum/current:test',
             transport: { type: 'streamableHttp' as const, port: 3000 },
           },
@@ -1760,7 +1756,6 @@ describe('McpServerWatcher startup', () => {
         generation: 1,
       },
       spec: {
-        contextRef: 'default',
         image: 'clerum/stale:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -2630,7 +2625,6 @@ describe('McpServerWatcher startup', () => {
     const staleServer = {
       metadata: { name: 'stale-server', namespace: 'mcp-server' },
       spec: {
-        contextRef: 'default',
         image: 'clerum/stale-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -2639,7 +2633,6 @@ describe('McpServerWatcher startup', () => {
       name: 'current-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/current-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -2718,7 +2711,6 @@ describe('McpServerWatcher startup', () => {
       annotations: { 'clerum.io/recipe': 'status-recipe' },
       labels: { 'clerum.io/workload': 'status-server' },
       spec: {
-        contextRef: 'default',
         image: 'clerum/status-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -2778,7 +2770,6 @@ describe('McpServerWatcher startup', () => {
       annotations: { 'clerum.io/pre-deploy': 'true' },
       labels: { 'clerum.io/workload': 'network-ready-server' },
       spec: {
-        contextRef: 'default',
         image: 'clerum/network-ready-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -2816,7 +2807,6 @@ describe('McpServerWatcher startup', () => {
         generation: 1,
       },
       spec: {
-        contextRef: 'default',
         image: 'clerum/revision-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -3083,7 +3073,6 @@ describe('McpServerWatcher startup', () => {
       name: 'stale-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/stale-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'stale.example', port: 443 }],
@@ -3092,7 +3081,6 @@ describe('McpServerWatcher startup', () => {
     const currentServer = {
       metadata: { name: 'current-server', namespace: 'mcp-server' },
       spec: {
-        contextRef: 'default',
         image: 'clerum/current-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -3176,7 +3164,6 @@ describe('McpServerWatcher startup', () => {
       name: 'current-secret-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/current-secret-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         envSecret: { name: 'shared-env' },
@@ -3186,7 +3173,6 @@ describe('McpServerWatcher startup', () => {
       name: 'stale-secret-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/stale-secret-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         envSecret: { name: 'shared-env' },
@@ -3196,7 +3182,6 @@ describe('McpServerWatcher startup', () => {
       name: 'unrelated-secret-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/unrelated-secret-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         envSecret: { name: 'other-env' },
@@ -3250,7 +3235,6 @@ describe('McpServerWatcher startup', () => {
       name: 'authority-fenced-secret-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/authority-fenced-secret-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         envSecret: { name: 'shared-env' },
@@ -3347,7 +3331,6 @@ describe('McpServerWatcher startup', () => {
       name: 'stopped-secret-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/stopped-secret-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         envSecret: { name: 'shared-env' },
@@ -3370,7 +3353,6 @@ describe('McpServerWatcher startup', () => {
       uid: 'dns-blocked-server-uid',
       generation: 1,
       spec: {
-        contextRef: 'default',
         image: 'clerum/dns-blocked-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'blocked.example', port: 443 }],
@@ -3382,7 +3364,6 @@ describe('McpServerWatcher startup', () => {
       uid: 'independent-server-uid',
       generation: 1,
       spec: {
-        contextRef: 'default',
         image: 'clerum/independent-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -3647,7 +3628,6 @@ describe('McpServerWatcher startup', () => {
         generation: 1,
       },
       spec: {
-        contextRef: 'context-policy',
         image: 'clerum/context-policy-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -3776,7 +3756,6 @@ describe('McpServerWatcher startup', () => {
       uid: 'periodic-egress-uid',
       generation: 1,
       spec: {
-        contextRef: 'default',
         image: 'clerum/periodic-egress:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'periodic.example', port: 443 }],
@@ -3831,7 +3810,6 @@ describe('McpServerWatcher startup', () => {
       uid: 'same-stream-egress-uid',
       generation: 1,
       spec: {
-        contextRef: 'default',
         image: 'clerum/same-stream-egress:old',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'old.example', port: 443 }],
@@ -3886,7 +3864,6 @@ describe('McpServerWatcher startup', () => {
       uid: 'periodic-egress-uid',
       generation: 1,
       spec: {
-        contextRef: 'default',
         image: 'clerum/periodic-egress:old',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'old.example', port: 443 }],
@@ -4113,7 +4090,6 @@ describe('McpServerWatcher startup', () => {
       name: 'initial-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/initial-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'initial.example', port: 443 }],
@@ -4122,7 +4098,6 @@ describe('McpServerWatcher startup', () => {
     const queuedServer = {
       metadata: { name: 'queued-server', namespace: 'mcp-server' },
       spec: {
-        contextRef: 'default',
         image: 'clerum/queued-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -4172,7 +4147,6 @@ describe('McpServerWatcher startup', () => {
       name: 'first-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/first-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -4193,7 +4167,6 @@ describe('McpServerWatcher startup', () => {
       name: 'second-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/second-server:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -4353,7 +4326,6 @@ describe('McpServerWatcher startup', () => {
       namespace: 'mcp-server',
       generation: 1,
       spec: {
-        contextRef: 'default',
         image: 'clerum/stale-server:v1',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'stale.example', port: 443 }],
@@ -4388,7 +4360,6 @@ describe('McpServerWatcher startup', () => {
       namespace: 'mcp-server',
       generation: 2,
       spec: {
-        contextRef: 'default',
         image: 'clerum/stale-server:v2',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'current.example', port: 443 }],
@@ -4439,7 +4410,6 @@ describe('McpServerWatcher startup', () => {
       name: 'srv-a',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'ctx-a',
         image: 'clerum/srv-a:v1',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -4500,7 +4470,6 @@ describe('McpServerWatcher startup', () => {
       name: 'stale-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'stale-context',
         image: 'clerum/stale-server:v1',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -4631,7 +4600,6 @@ describe('McpServerWatcher startup', () => {
       name: 'current-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'current-context',
         image: 'clerum/current-server:v2',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -4999,7 +4967,6 @@ describe('McpServerWatcher startup', () => {
       name: 'openai-mcp',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'dev',
         image: 'openai:latest',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -5094,7 +5061,6 @@ describe('McpServerWatcher startup', () => {
         generation: 1,
       },
       spec: {
-        contextRef: 'default',
         image: 'clerum/restrictive-change:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'TCP' as const }],
@@ -5143,7 +5109,6 @@ describe('McpServerWatcher startup', () => {
       name: 'certificate-fenced-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/certificate-fenced:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'certificate-fenced.example', port: 443 }],
@@ -5790,7 +5755,6 @@ describe('McpServerWatcher startup', () => {
     const server = {
       metadata: { name: 'initial-runtime', namespace: 'mcp-server' },
       spec: {
-        contextRef: 'default',
         image: 'clerum/initial-runtime:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -6136,7 +6100,6 @@ describe('McpServerWatcher startup', () => {
     const server = {
       metadata: { name: 'web-search', namespace: 'mcp-server', generation: 4 },
       spec: {
-        contextRef: 'wf-research',
         image: 'clerum/web-search:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'duckduckgo.com', port: 443 }],
@@ -6196,7 +6159,6 @@ describe('McpServerWatcher startup', () => {
     const server = {
       metadata: { name: 'web-search', namespace: 'mcp-server', generation: 4 },
       spec: {
-        contextRef: 'wf-research',
         image: 'clerum/web-search:test',
         transport: { type: 'streamableHttp' as const, port: 3000 },
         egressBindings: [{ dns: 'duckduckgo.com', port: 443 }],
@@ -6298,7 +6260,6 @@ describe('McpServerWatcher external egress retries', () => {
   const serverObject = {
     metadata: { name: 'redis-tools', namespace: 'mcp-server' },
     spec: {
-      contextRef: 'context1',
       image: 'redis-tools:test',
       transport: { type: 'streamableHttp' as const, port: 3000 },
       egressBindings: [{ dns: 'example.com', port: 443 }],
@@ -10894,6 +10855,18 @@ describe('McpServerWatcher.hostFrontsOAuthServer (oauth:user-token scope probe)'
     watcher.stop()
   })
 
+  it('does not project a legacy server-level contextRef into the curated server info', async () => {
+    // serverCRD still carries spec.contextRef, as CRs persisted before the field
+    // left the CRD do; the allowlist is the only server-context relation.
+    const watcher = new McpServerWatcher()
+    withServers(watcher, [serverCRD({ name: 'notion', auth: { type: 'oauth' }, enabled: true })])
+    const infos = await (watcher as any).getServerInfosByContext('ctx')
+    expect(infos.map((info: { name: string }) => info.name)).toEqual(['notion'])
+    expect(infos[0]).not.toHaveProperty('contextRef')
+    expect(watcher.getAllServerInfos()[0]).not.toHaveProperty('contextRef')
+    watcher.stop()
+  })
+
   it('returns false when the Context fronts no servers', async () => {
     const watcher = new McpServerWatcher()
     withServers(watcher, [])
@@ -11172,7 +11145,6 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
       uid: 'ua',
       generation: 1,
       spec: {
-        contextRef: 'ctx',
         image: 'clerum/a:v1',
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
@@ -11203,7 +11175,6 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
       generation: 1,
       spec: {
         image: 'fixture:v1',
-        contextRef: 'ctx',
         transport: { type: 'streamableHttp', port: 3000 },
         envSecret: { name: 'fixture-env', keys: [] },
       },
@@ -11237,7 +11208,6 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
       generation: 1,
       spec: {
         image: 'fixture:v1',
-        contextRef: 'ctx',
         transport: { type: 'streamableHttp', port: 3000 },
         envSecret: { name: 'fixture-env', keys: [] },
       },
@@ -11308,7 +11278,6 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
         generation: 1,
         spec: {
           image: 'fixture:v1',
-          contextRef: 'ctx',
           transport: { type: 'streamableHttp', port: 3000 },
           envSecret: { name: 'fixture-env', keys: [] },
         },
