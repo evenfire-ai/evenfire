@@ -233,11 +233,13 @@ async function browseToFolder(page: Page, folderName: string): Promise<{ browser
   })
   await browser.getByRole('button', { name: folderName, exact: true }).click()
   await expect(browser).toBeVisible({ timeout: 30_000 })
+  // The active crumb stays enabled as a drop target and is marked as the
+  // current location (desktop-app/ui/src/pages/FilesPage.tsx, 2e63a7604).
   await expect(
     browser
       .getByRole('navigation', { name: 'File location' })
       .getByRole('button', { name: folderName, exact: true })
-  ).toBeDisabled({ timeout: 30_000 })
+  ).toHaveAttribute('aria-current', 'page', { timeout: 30_000 })
   return { browser }
 }
 
