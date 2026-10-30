@@ -553,8 +553,8 @@ export function mapRemoteInstallError(
       break
   }
 
-  // Context-not-found and Secret/Context allowlist failures arrive as a plain
-  // `{ error: '<string>' }`; formatApiError surfaces that string in `.message`.
+  // Secret and CR failures arrive as a plain `{ error: '<string>' }`;
+  // formatApiError surfaces that string in `.message`.
   return e.message?.trim() || 'Failed to install the remote server.'
 }
 
@@ -567,7 +567,6 @@ export function mapRemoteInstallError(
  */
 export function buildRemoteInstallRequest(input: {
   serverName: string
-  contextRef: string
   baseUrl: string
   mode: RemoteInstallMode
   grantScope: RemoteGrantScopeInput
@@ -579,7 +578,6 @@ export function buildRemoteInstallRequest(input: {
 }): InstallRemoteRequest {
   const body: InstallRemoteRequest = {
     serverName: input.serverName.trim(),
-    contextRef: input.contextRef,
     baseUrl: input.baseUrl.trim(),
     mode: input.mode,
     grantScope: input.grantScope,

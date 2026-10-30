@@ -159,7 +159,6 @@ export function ConnectorDetailPage() {
       <ConnectorAgentAccessDialog
         key={serverRef.name}
         server={serverRef}
-        connectorSpec={server?.spec}
         agentTargets={access.agentTargets}
         boundAgentNames={access.agentBindings.flatMap(binding =>
           binding.agents.map(agent => agent.id)

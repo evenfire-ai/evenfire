@@ -19,6 +19,15 @@ describe('Control API shutdown', () => {
     expect(poolIndex).toBeGreaterThan(names.indexOf('gfs-user-home-reconciler'))
   })
 
+  it('stops the shared OAuth grant sweep before database pools close', () => {
+    const names = [...CONTROL_API_SHUTDOWN_STEP_NAMES] as string[]
+
+    expect(names).toContain('oauth-shared-grant-sweep')
+    expect(names.indexOf('core-database-pool')).toBeGreaterThan(
+      names.indexOf('oauth-shared-grant-sweep')
+    )
+  })
+
   it('closes every registered resource in order and continues after failures', async () => {
     const completed: string[] = []
     const actions = Object.fromEntries(

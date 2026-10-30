@@ -25,6 +25,7 @@ export const CONTROL_API_SHUTDOWN_STEP_NAMES = [
   'workflow-schedule-worker',
   'workflow-approval-notification-worker',
   'oauth-proactive-refresh-cron',
+  'oauth-shared-grant-sweep',
   'workflow-approval-trace-projector',
   'entity-change-dispatcher',
   'gfs-user-home-reconciler',

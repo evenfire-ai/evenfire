@@ -470,10 +470,12 @@ verify_mcp_context_allowlist() {
   local timeout=${2:-${TIMEOUT_CONTEXT:-180}}
   local context_ref context_servers elapsed=0
 
+  # The McpServer carries no owner Context; WRC stamps the recipe's effective
+  # Context as a label, and the Context allowlist is what grants access.
   context_ref=$(kctl get mcpserver "$mcp_server_name" -n "$RECIPE_NS" \
-    -o jsonpath='{.spec.contextRef}' 2>/dev/null || echo "")
+    -o jsonpath='{.metadata.labels.clerum\.io/context}' 2>/dev/null || echo "")
   if [ -z "$context_ref" ]; then
-    fail "McpServer '${mcp_server_name}' has no spec.contextRef"
+    fail "McpServer '${mcp_server_name}' has no clerum.io/context label"
     return
   fi
 

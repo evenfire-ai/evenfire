@@ -12,9 +12,10 @@ import { MockGateway } from './mockGateway.js'
 
 /**
  * P-I5: seen from a Host, "does not exist", "outside my Context's allowlist",
- * "being deleted", "disabled" and, for shared servers, "owned by another
- * Context" are indistinguishable: same status, same bytes, and no grant or
- * Secret is read. The server's shape (OAuth, incoherent remote spec, not OAuth,
+ * "being deleted" and "disabled" are indistinguishable: same status, same
+ * bytes, and no grant or Secret is read. (A server has no owning Context: one
+ * enabled in another Context as well is simply outside or inside this Host's
+ * allowlist.) The server's shape (OAuth, incoherent remote spec, not OAuth,
  * unsupported provider) must not leak through either, which pins the
  * allowlist/state checks before the OAuth and coherence checks.
  */
@@ -41,13 +42,7 @@ const OTHER_CONTEXT = 'ctx-other'
 const SERVER = 'probe'
 const USER = '5e1d7a3c-9b2f-4c8e-a6d0-3f7b1e9c2a58'
 
-type State =
-  | 'missing'
-  | 'outside_allowlist'
-  | 'deleting'
-  | 'disabled'
-  | 'foreign_owner'
-  | 'no_owner'
+type State = 'missing' | 'outside_allowlist' | 'deleting' | 'disabled'
 type Shape = 'oauth' | 'remote_incoherent' | 'not_oauth' | 'unsupported_provider'
 
 let remoteIncoherent: (grantScope: 'user' | 'context') => Record<string, unknown>
@@ -71,12 +66,8 @@ beforeAll(async () => {
   })
 })
 
-function serverSpec(
-  shape: Shape,
-  grantScope: 'user' | 'context',
-  owner: string | undefined
-): Record<string, unknown> {
-  const base = owner === undefined ? {} : { contextRef: owner }
+function serverSpec(shape: Shape, grantScope: 'user' | 'context'): Record<string, unknown> {
+  const base = {}
   if (shape === 'not_oauth') return { ...base, auth: { type: 'none' } }
   if (shape === 'remote_incoherent') {
     return { ...base, auth: { type: 'oauth' }, oauth: remoteIncoherent(grantScope) }
@@ -102,7 +93,7 @@ interface Case {
   withContextId: boolean
 }
 
-// The full cartesian product (144 cases) instead of a random sample, so an
+// The full cartesian product (128 cases) instead of a random sample, so an
 // ordering regression is caught on every run rather than only on a lucky seed.
 const BOOLS = [false, true] as const
 function enumerate(states: State[], shapes: Shape[], scopes: Array<'user' | 'context'>): Case[] {
@@ -122,8 +113,6 @@ const CASES: Case[] = [
     ['oauth', 'remote_incoherent', 'not_oauth', 'unsupported_provider'],
     ['user', 'context']
   ),
-  // The owner rule only applies to shared OAuth servers.
-  ...enumerate(['foreign_owner', 'no_owner'], ['oauth', 'remote_incoherent'], ['context']),
 ]
 
 describe('P-I5: uniform server_not_found across the Context boundary', () => {
@@ -138,7 +127,7 @@ describe('P-I5: uniform server_not_found across the Context boundary', () => {
   })
 
   it('every hidden state answers 404 {"error":"server_not_found"} without reading grants or Secrets', async () => {
-    expect(CASES).toHaveLength(144)
+    expect(CASES).toHaveLength(128)
     for (const c of CASES) {
       mockPoolQuery.mockReset()
       membership(mockPoolQuery, { agents: { [USER]: [HOST] } })
@@ -149,14 +138,8 @@ describe('P-I5: uniform server_not_found across the Context boundary', () => {
       await seedAllowlistedContext(gateway, OTHER_CONTEXT, [SERVER], config.contextsNamespace)
       const token = await mintHccControlToken(app, gateway, HOST)
 
-      const owner =
-        c.state === 'no_owner'
-          ? undefined
-          : c.state === 'foreign_owner' || c.state === 'outside_allowlist'
-            ? OTHER_CONTEXT
-            : HOST_CONTEXT
       if (c.state !== 'missing') {
-        const spec = serverSpec(c.shape, c.grantScope, owner)
+        const spec = serverSpec(c.shape, c.grantScope)
         if (c.state === 'disabled') spec.enabled = false
         await gateway.createResource('mcpservers', { metadata: { name: SERVER }, spec }, MCP_NS)
         if (c.state === 'deleting') gateway.markDeleting('mcpservers', SERVER, MCP_NS)

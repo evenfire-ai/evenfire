@@ -1890,7 +1890,6 @@ export async function createMcpServer(payload: {
   metadata: { name: string }
   spec: {
     image: string
-    contextRef: string
     description?: string
     enabled?: boolean
     managed?: boolean
@@ -3858,7 +3857,6 @@ export async function listMcpSecrets(): Promise<{ items: McpSecretSummary[] }> {
 export type InstallFromRegistryRequest = {
   serverName?: string
   namespace?: string
-  contextRef: string
   registryEntryName: string
   registryEntryVersion: string
   credentials?: Record<string, string>
@@ -3869,14 +3867,22 @@ export type InstallFromRegistryRequest = {
   oauth?: OAuthInstallSubmit
 }
 
+/** A credential Secret the install referenced but could not fill: the entry requires keys and none were sent. */
+export type PendingMcpEnvSecretRef = {
+  kind: 'mcpEnvSecret'
+  secretName: string
+  namespace: string
+  keys: string[]
+  field: 'spec.envSecret'
+}
+
 export type InstallFromRegistryResponse = {
-  installed: boolean
   serverName: string
   namespace: string
-  contextRef: string
-  // The saga endpoint returns additional fields (correlationId, addedToContext, etc.)
-  // — we keep it open so callers can read whatever the BFF chooses to surface.
-  [key: string]: unknown
+  registryEntry: string
+  registryVersion: string
+  correlationId: string
+  pendingCredentials: PendingMcpEnvSecretRef[]
 }
 
 export async function installFromRegistry(

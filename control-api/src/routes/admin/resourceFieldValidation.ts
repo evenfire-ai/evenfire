@@ -69,12 +69,19 @@ export function validateIdentifierField(value: unknown, field: string): FieldIss
  * Collect display/identifier field issues for a hosts|contexts spec, applying the
  * ratchet: when `currentSpec` is provided (update), a field is validated only if
  * its value differs from the current CR; when null (create), every present field
- * is validated.
+ * is validated. `name` is the resource's `metadata.name`.
+ *
+ * A Context's `spec.contextId`, when present, must equal its name: memberships,
+ * Hosts and shared OAuth grants identify a Context by name, and an alias that
+ * differs would let the same Context answer to two identifiers (or collide with
+ * another Context's name). The ratchet keeps a Context written elsewhere with an
+ * alias editable as long as the alias is resent unchanged.
  */
 export function collectResourceSpecFieldIssues(
   plural: 'hosts' | 'contexts',
   spec: Record<string, unknown>,
-  currentSpec: Record<string, unknown> | null
+  currentSpec: Record<string, unknown> | null,
+  name: string
 ): FieldIssue[] {
   const issues: FieldIssue[] = []
   const changed = (key: string): boolean => currentSpec === null || spec[key] !== currentSpec[key]
@@ -92,6 +99,12 @@ export function collectResourceSpecFieldIssues(
     if (changed('contextId')) {
       const issue = validateIdentifierField(spec.contextId, 'spec.contextId')
       if (issue) issues.push(issue)
+      else if (spec.contextId !== undefined && spec.contextId !== name) {
+        issues.push({
+          field: 'spec.contextId',
+          message: 'spec.contextId must be omitted or equal to metadata.name.',
+        })
+      }
     }
   }
 

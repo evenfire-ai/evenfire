@@ -80,6 +80,7 @@ const { resolveBatchGrantExistence } = await import('../src/routes/mcpOauth.js')
 const { getCredentialSchema, getDigest, getEntryVersion, reportInstall } =
   await import('../src/services/registryClient.js')
 const { seedActiveMember, seedAgentHost } = await import('./fixtures/contextAllowlist.js')
+const { enableServerInContext } = await import('./fixtures/perServerInstall.js')
 const { resolveHccHostBinding } = await import('./fixtures/hccControlToken.js')
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -207,12 +208,12 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
     return app
   }
 
-  const install = (app: express.Express) =>
-    request(app)
+  /** The registry install, then the separate enable an install no longer does itself. */
+  const install = async (app: express.Express, gw: MockGateway) => {
+    const res = await request(app)
       .post('/admin/registry/install')
       .send({
         serverName: SERVER,
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -221,6 +222,9 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
           secret: { mode: 'managed', clientId: 'cid-value', clientSecret: 'csec-value' },
         },
       })
+    if (res.status === 201) await enableServerInContext(gw, 'default-context', SERVER, db)
+    return res
+  }
 
   /** Mint the state with the real authorize-URL builder, then hit the real callback. */
   async function consent(app: express.Express, gw: MockGateway): Promise<request.Response> {
@@ -265,8 +269,8 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
     return request(app).get(`/oauth-callback/${SERVER}`).query({ code: 'AUTH_CODE', state })
   }
 
-  // The binding is resolved per sweep, as the route does on every batch: the
-  // registry writes the Context allowlist on install and uninstall.
+  // The binding is resolved per sweep, as the route does on every batch: the enable
+  // and the registry uninstall both write the Context allowlist.
   const sweep = async (gw: MockGateway) =>
     resolveBatchGrantExistence(
       {
@@ -288,7 +292,7 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
     const app = makeApp(gw)
     user = await seedActiveMember(db, { contexts: ['default-context'], agents: [HOST] })
 
-    expect((await install(app)).status).toBe(201)
+    expect((await install(app, gw)).status).toBe(201)
     expect((await consent(app, gw)).status).toBe(200)
     // Precondition: the consent produced a connected user, visible to both readers.
     expect(await listUserGrantsForServer(db, { namespace: NS, name: SERVER })).toHaveLength(1)
@@ -296,7 +300,7 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
 
     const uninstall = await request(app).delete(`/admin/registry/uninstall/${SERVER}`)
     expect(uninstall.status).toBe(200)
-    expect((await install(app)).status).toBe(201)
+    expect((await install(app, gw)).status).toBe(201)
 
     // The reinstall has the same oauth_client_id; no user may appear connected to it.
     expect(await listUserGrantsForServer(db, { namespace: NS, name: SERVER })).toEqual([])

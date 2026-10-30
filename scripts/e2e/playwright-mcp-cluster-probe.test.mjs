@@ -43,7 +43,6 @@ const manifest = {
     image,
     command: ['node'],
     args: ['cli.js', '--headless'],
-    contextRef: 'context1',
     transport: { type: 'streamableHttp', url: 'http://fixture', port: 8931 },
   },
 }
@@ -542,11 +541,11 @@ test('creates only a run-owned McpServer and preserves the manifest runtime', ()
     resources.map(item => item.kind),
     ['McpServer']
   )
-  assert.equal(resources[0].spec.contextRef, `${runId}-ctx`)
+  assert.equal('contextRef' in resources[0].spec, false)
   assert.equal(resources[0].spec.image, image)
   assert.deepEqual(resources[0].spec.command, manifest.spec.command)
   assert.deepEqual(resources[0].spec.args, manifest.spec.args)
-  assert.equal(manifest.spec.contextRef, 'context1')
+  assert.equal(manifest.spec.transport.url, 'http://fixture')
   assert.throws(
     () => makeFixtures({ ...manifest, spec: { ...manifest.spec, image: 'wrong' } }, runId),
     /MANIFEST_INVALID/

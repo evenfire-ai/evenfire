@@ -30,6 +30,11 @@ import {
   stopOauthProactiveRefreshCron,
 } from './services/oauthProactiveRefreshCron.js'
 import {
+  runSharedGrantSweep,
+  startOauthSharedGrantSweepCron,
+  stopOauthSharedGrantSweepCron,
+} from './services/oauthSharedGrantSweepCron.js'
+import {
   startPluginWorkloadSdkMaintenanceCron,
   stopPluginWorkloadSdkMaintenanceCron,
 } from './services/pluginWorkloadSdkMaintenanceCron.js'
@@ -97,6 +102,7 @@ const shutdown = createShutdownHandler(async () => {
       'workflow-schedule-worker': stopWorkflowScheduleWorker,
       'workflow-approval-notification-worker': stopWorkflowApprovalNotificationDeliveryWorker,
       'oauth-proactive-refresh-cron': stopOauthProactiveRefreshCron,
+      'oauth-shared-grant-sweep': stopOauthSharedGrantSweepCron,
       'workflow-approval-trace-projector': stopWorkflowApprovalTraceProjector,
       'entity-change-dispatcher': stopEntityChangeDispatcher,
       'gfs-user-home-reconciler': stopGfsUserHomeReconciler,
@@ -254,6 +260,17 @@ async function main(): Promise<void> {
   // on our own install routes. Non-fatal: an unconnected cluster logs and retries.
   void reconcileRegistryPullSecret(gateway)
   startRegistryPullSecretReconcileCron(gateway, config.registryPullSecretReconcileIntervalMs)
+
+  // Purge shared OAuth grants no Context enables: on boot (rows written before the
+  // admin route hooks existed, or by writers outside control-api) and on a timer.
+  const sharedGrantSweepDeps = {
+    gateway,
+    db: { query: (text: string, values?: unknown[]) => pool.query(text, values) },
+    contextsNamespace: config.contextsNamespace,
+    mcpServersNamespace: config.mcpServersNamespace,
+  }
+  void runSharedGrantSweep(sharedGrantSweepDeps)
+  startOauthSharedGrantSweepCron(sharedGrantSweepDeps, config.oauthSharedGrantSweepIntervalMs)
 
   if (config.workflowRunsArchiveCronEnabled) {
     startWorkflowRunsArchiveCron({

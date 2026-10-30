@@ -3,7 +3,7 @@ import type {
   ConnectorAccessSummary,
 } from '../components/McpServerTable.types'
 import type { ContextResource, HostResource } from './api'
-import { contextAliases, contextWireId } from './contextIdentity'
+import { contextWireId } from './contextIdentity'
 
 function comparePrincipals(
   left: ConnectorAccessPrincipal,
@@ -61,15 +61,20 @@ export function hostOwnedContextNamesForConnector(
   hosts: readonly HostResource[],
   connectorName: string
 ): string[] {
-  const hostContextRefs = hosts
-    .filter(host => String(host.metadata?.name ?? '').trim())
-    .map(host => String(host.spec?.contextRef ?? '').trim())
-    .filter(Boolean)
-  const ownedRefs = contexts
-    .filter(context => context.spec?.mcpServers?.includes(connectorName))
-    .flatMap(context => {
-      const aliases = new Set(contextAliases(context))
-      return hostContextRefs.filter(contextRef => aliases.has(contextRef))
-    })
-  return Array.from(new Set(ownedRefs)).sort((left, right) => left.localeCompare(right))
+  // A Host reaches the Context whose name equals its contextRef exactly, as the token broker
+  // resolves it; an alias or padded ref would credit another Context's agents.
+  const hostContextRefs = new Set(
+    hosts
+      .filter(host => String(host.metadata?.name ?? '').trim())
+      .map(host => host.spec?.contextRef)
+      .filter((contextRef): contextRef is string => typeof contextRef === 'string' && !!contextRef)
+  )
+  return Array.from(
+    new Set(
+      contexts
+        .filter(context => context.spec?.mcpServers?.includes(connectorName))
+        .map(context => context.metadata?.name ?? '')
+        .filter(name => hostContextRefs.has(name))
+    )
+  ).sort((left, right) => left.localeCompare(right))
 }

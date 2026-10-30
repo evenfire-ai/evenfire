@@ -98,21 +98,15 @@ function appFor(
   return app
 }
 
-function gatewayWithContext(): MockGateway {
-  const gw = new MockGateway(config.mcpServersNamespace)
-  void gw.createResource(
-    'contexts',
-    { metadata: { name: 'research' }, spec: { contextId: 'research' } },
-    config.mcpServersNamespace
-  )
-  return gw
+function emptyGateway(): MockGateway {
+  return new MockGateway(config.mcpServersNamespace)
 }
 
 async function discover(
   pilot: PilotFixture,
   extraBody: Record<string, unknown> = {}
 ): Promise<WireCapture> {
-  const res = await request(appFor(pilot, gatewayWithContext()))
+  const res = await request(appFor(pilot, emptyGateway()))
     .post('/admin/mcp-servers/remote/discover')
     .send({ baseUrl: pilot.mcpUrl, ...extraBody })
   return { status: res.status, body: res.body }
@@ -123,9 +117,9 @@ async function install(
   body: Record<string, unknown>,
   opts: { gateway?: MockGateway; deps?: Omit<AdminRemoteMcpDeps, 'discover' | 'probe'> } = {}
 ): Promise<WireCapture> {
-  const res = await request(appFor(pilot, opts.gateway ?? gatewayWithContext(), opts.deps))
+  const res = await request(appFor(pilot, opts.gateway ?? emptyGateway(), opts.deps))
     .post('/admin/mcp-servers/remote')
-    .send({ contextRef: 'research', baseUrl: pilot.mcpUrl, ...body })
+    .send({ baseUrl: pilot.mcpUrl, ...body })
   return { status: res.status, body: res.body }
 }
 
@@ -374,7 +368,7 @@ describe('remote MCP wire goldens — POST / (install)', () => {
 
   it('install.clientIdInUse: a second per-server server on the same client_id → 409', async () => {
     const { db } = makeInMemoryDynamicClientsDb()
-    const gateway = gatewayWithContext()
+    const gateway = emptyGateway()
     const body = {
       mode: 'pre-registered',
       clientId: 'shared-client',

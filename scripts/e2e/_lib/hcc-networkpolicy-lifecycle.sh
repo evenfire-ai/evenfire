@@ -33,7 +33,6 @@ metadata:
   namespace: ${MCP_NS}
   labels: {e2e.clerum.io/run: "${RUN_ID}", e2e.clerum.io/suite: hcc-np604}
 spec:
-  contextRef: ${NP604_CONTEXT}
   image: clerum/mock-mcp-server:test
   imagePullPolicy: Never
   transport: {type: streamableHttp, port: 3000, url: "http://${name}.${MCP_NS}.svc.cluster.local:3000/mcp"}

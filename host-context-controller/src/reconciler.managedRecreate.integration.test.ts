@@ -21,7 +21,6 @@ function server(uid: string, managed: boolean, enabled = true): McpServerCRD {
     uid,
     generation: 1,
     spec: {
-      contextRef: 'ctx',
       image: 'example.invalid/runtime:v1',
       enabled,
       managed,

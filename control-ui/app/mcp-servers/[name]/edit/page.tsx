@@ -178,7 +178,7 @@ export default function EditMcpServerPage() {
         const contextNameSet = new Set(nextContextNames)
         const agentsById = new Map<string, ContextAccess['agents'][number]>()
         for (const host of hosts) {
-          const contextRef = String(host.spec?.contextRef ?? '').trim()
+          const contextRef = host.spec?.contextRef ?? ''
           const id = String(host.metadata?.name ?? '').trim()
           if (!contextNameSet.has(contextRef) || !id) continue
           agentsById.set(id, { id, label: getAgentDisplayName(id, hosts) })
