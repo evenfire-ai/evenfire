@@ -247,8 +247,18 @@ function appAlert(page: Page) {
   return page.locator('[role="alert"]:not([id="__next-route-announcer__"])')
 }
 
-/** Drives the three-step create flow to a connector referencing the shared
- *  Secret, with no credential value ever typed. */
+/** Fills the connector identity step and advances to the Secrets step. Waits
+ *  on the step heading rather than counting Continue clicks, so a change in
+ *  the number of steps fails here instead of timing out on a missing button. */
+async function openSecretsStep(page: Page, name: string) {
+  await page.goto('/connectors/new')
+  await page.getByPlaceholder('my-mcp-server').fill(name)
+  await page
+    .getByPlaceholder('us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest')
+    .fill('ghcr.io/example/brave-mcp:1.0')
+  await page.getByRole('button', { name: 'Continue' }).click()
+  await expect(page.getByRole('heading', { name: 'Secrets and environment' })).toBeVisible()
+}
 
 /** The picker is a custom single-select dropdown: open, then click the option. */
 async function chooseExistingSecret(page: Page, name: string) {
@@ -256,14 +266,10 @@ async function chooseExistingSecret(page: Page, name: string) {
   await page.getByRole('option', { name }).click()
 }
 
+/** Drives the create flow to a connector referencing the shared Secret, with
+ *  no credential value ever typed. */
 async function createConnectorUsingSharedSecret(page: Page, name: string) {
-  await page.goto('/connectors/new')
-  await page.getByPlaceholder('my-mcp-server').fill(name)
-  await page
-    .getByPlaceholder('us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest')
-    .fill('ghcr.io/example/brave-mcp:1.0')
-  await page.getByRole('button', { name: 'Continue' }).click()
-  await page.getByRole('button', { name: 'Continue' }).click()
+  await openSecretsStep(page, name)
 
   await page.getByRole('radio', { name: 'Use an existing Secret' }).click()
   await expect(page.getByLabel(/^Existing Secret/)).toBeEnabled()
@@ -347,13 +353,7 @@ test.describe('Connector Secret reuse — creation', () => {
     state.listSecretsFailures = 1
     await installApiMocks(page, state, 'brave-search')
 
-    await page.goto('/connectors/new')
-    await page.getByPlaceholder('my-mcp-server').fill('brave-search')
-    await page
-      .getByPlaceholder('us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest')
-      .fill('ghcr.io/example/brave-mcp:1.0')
-    await page.getByRole('button', { name: 'Continue' }).click()
-    await page.getByRole('button', { name: 'Continue' }).click()
+    await openSecretsStep(page, 'brave-search')
     await page.getByRole('radio', { name: 'Use an existing Secret' }).click()
 
     const alert = appAlert(page)
@@ -373,13 +373,7 @@ test.describe('Connector Secret reuse — creation', () => {
     state.secretsItems = []
     await installApiMocks(page, state, 'brave-search')
 
-    await page.goto('/connectors/new')
-    await page.getByPlaceholder('my-mcp-server').fill('brave-search')
-    await page
-      .getByPlaceholder('us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest')
-      .fill('ghcr.io/example/brave-mcp:1.0')
-    await page.getByRole('button', { name: 'Continue' }).click()
-    await page.getByRole('button', { name: 'Continue' }).click()
+    await openSecretsStep(page, 'brave-search')
     await page.getByRole('radio', { name: 'Use an existing Secret' }).click()
 
     // A genuinely empty listing: the picker enables, but there is nothing to
