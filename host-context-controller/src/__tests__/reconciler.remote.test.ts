@@ -12,6 +12,7 @@ import {
   createMockCustomApi,
 } from '../../test/__fixtures__/testMocks'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from '../constants'
+import { hccLogger } from '../logger'
 import { createsTotal } from '../metrics'
 import { McpServerReconciler } from '../reconciler'
 import { McpServerCRD } from '../types'
@@ -167,6 +168,11 @@ function cloneServer(
   }
 }
 
+function remoteConfig(reconciler: McpServerReconciler, server: McpServerCRD): string {
+  const cm = (reconciler as any).buildNginxConfigMap(server) as k8s.V1ConfigMap
+  return cm.data?.['default.conf.template'] ?? ''
+}
+
 function conditionsFromStatusPatch(patch: unknown): any[] {
   const statusAdd = Array.isArray(patch)
     ? patch.find(
@@ -227,22 +233,42 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(cm.metadata.namespace).toBe('mcp-server')
     })
 
-    it('should contain proxy_pass directive pointing to the remote baseUrl', () => {
-      const cm = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER)
-      const conf = cm.data['default.conf.template']
+    it('renders the upstream block with resolve and proxies through remote_upstream (U1)', () => {
+      const conf = remoteConfig(reconciler, REMOTE_SERVER)
 
-      expect(conf).toContain('proxy_pass https://mcp.sentry.io/sse')
+      expect(conf).toContain('upstream remote_upstream {')
+      expect(conf).toContain('zone remote_upstream 64k;')
+      expect(conf).toContain('server mcp.sentry.io:443 resolve;')
+      expect(conf).toContain('proxy_pass https://remote_upstream/sse;')
+      expect(conf).not.toContain('proxy_pass https://mcp.sentry.io')
+      // A second upstream server, resolver, TLS name or redirect would change
+      // where or how the proxy connects while every check above stays true, so
+      // the upstream block is exact and each directive appears once.
+      expect(conf).toContain(
+        'upstream remote_upstream {\n    zone remote_upstream 64k;\n    server mcp.sentry.io:443 resolve;\n}'
+      )
+      for (const directive of [
+        'upstream',
+        'resolver',
+        'proxy_pass',
+        'proxy_redirect',
+        'proxy_ssl_verify',
+        'proxy_ssl_name',
+      ]) {
+        expect(conf.match(new RegExp(`^\\s*${directive} `, 'gm')) ?? []).toHaveLength(1)
+      }
     })
 
-    it('should match the Sentry upstream path locally to avoid duplicating /sse paths', () => {
-      const cm = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER)
-      const conf = cm.data['default.conf.template']
+    it('renders the Sentry location adjacent to its upstream proxy_pass (U1b)', () => {
+      const conf = remoteConfig(reconciler, REMOTE_SERVER)
 
       expect(conf).toContain('location /sse {')
-      expect(conf).not.toContain('location / {\n        proxy_pass https://mcp.sentry.io/sse;')
+      expect(conf).toContain('location /sse {\n        proxy_pass https://remote_upstream/sse;')
+      expect(conf).toContain('server mcp.sentry.io:443 resolve;')
+      expect((conf.match(/^\s*location /gm) ?? []).length).toBe(2)
     })
 
-    it('should match the upstream path locally to avoid duplicating /mcp paths', () => {
+    it('renders the CoinGecko location adjacent to its upstream proxy_pass (U1c)', () => {
       const coinGeckoServer: McpServerCRD = {
         ...REMOTE_SERVER,
         name: 'mcp-coingecko-remote',
@@ -252,17 +278,15 @@ describe('McpServerReconciler remote egress proxy', () => {
         },
       }
 
-      const cm = (reconciler as any).buildNginxConfigMap(coinGeckoServer)
-      const conf = cm.data['default.conf.template']
+      const conf = remoteConfig(reconciler, coinGeckoServer)
 
       expect(conf).toContain('location /mcp {')
-      expect(conf).toContain('proxy_pass https://mcp.api.coingecko.com/mcp;')
-      expect(conf).not.toContain(
-        'location / {\n        proxy_pass https://mcp.api.coingecko.com/mcp;'
-      )
+      expect(conf).toContain('location /mcp {\n        proxy_pass https://remote_upstream/mcp;')
+      expect(conf).toContain('server mcp.api.coingecko.com:443 resolve;')
+      expect((conf.match(/^\s*location /gm) ?? []).length).toBe(2)
     })
 
-    it('should match / for bare-origin remote endpoints', () => {
+    it('renders / adjacent to its upstream proxy_pass for bare-origin endpoints (U1d)', () => {
       const rootServer: McpServerCRD = {
         ...REMOTE_SERVER,
         spec: {
@@ -271,11 +295,139 @@ describe('McpServerReconciler remote egress proxy', () => {
         },
       }
 
-      const cm = (reconciler as any).buildNginxConfigMap(rootServer)
-      const conf = cm.data['default.conf.template']
+      const conf = remoteConfig(reconciler, rootServer)
 
       expect(conf).toContain('location / {')
-      expect(conf).toContain('proxy_pass https://mcp.glassnode.com/;')
+      expect(conf).toContain('location / {\n        proxy_pass https://remote_upstream/;')
+      expect(conf).toContain('server mcp.glassnode.com:443 resolve;')
+      expect((conf.match(/^\s*location /gm) ?? []).length).toBe(2)
+    })
+
+    it('defaults the upstream port to 443 and pins TLS name, Host, and redirect (U2)', () => {
+      const conf = remoteConfig(reconciler, REMOTE_SERVER)
+
+      expect(conf).toContain('server mcp.sentry.io:443 resolve;')
+      expect(conf).toContain('proxy_ssl_name mcp.sentry.io;')
+      expect(conf).toContain('proxy_set_header Host mcp.sentry.io;')
+      expect(conf).toContain('proxy_redirect https://mcp.sentry.io/sse /sse;')
+    })
+
+    it('keeps an explicit port on server, Host, and redirect but not TLS name (U3)', () => {
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: 'https://api.example.com:8443/mcp' },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain('server api.example.com:8443 resolve;')
+      expect(conf).toContain('proxy_ssl_name api.example.com;')
+      expect(conf).toContain('proxy_set_header Host api.example.com:8443;')
+      expect(conf).toContain('proxy_redirect https://api.example.com:8443/mcp /mcp;')
+    })
+
+    it('emits the platform resolver literal at http level and no upstream keepalive (U4)', () => {
+      const conf = remoteConfig(reconciler, REMOTE_SERVER)
+
+      expect(conf).toContain('resolver ${NGINX_LOCAL_RESOLVERS} ipv6=off;')
+      expect(conf).not.toMatch(/resolver[^;]*valid=/)
+      expect(conf).not.toMatch(/\bkeepalive\b|proxy_http_version/)
+      expect(conf).toContain('proxy_pass https://remote_upstream/sse;')
+    })
+
+    it('appends the baseUrl query to proxy_pass and to the proxy_redirect match (U5)', () => {
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: 'https://api.example.com/mcp?a=1&b=2' },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain('proxy_pass https://remote_upstream/mcp?a=1&b=2;')
+      // Same prefix NGINX's implicit `proxy_redirect default` used with the old
+      // literal proxy_pass: a Location echoing the configured query (and any
+      // credential in it) is rewritten back to the bare location path.
+      expect(conf).toContain('proxy_redirect https://api.example.com/mcp?a=1&b=2 /mcp;')
+    })
+
+    it('keeps a query placeholder, never a value, in proxy_pass and proxy_redirect (Q1)', () => {
+      const queryName = ['api', 'key'].join('')
+      const placeholder = '$' + '{ALPHA_KEY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?${queryName}=${placeholder}` },
+        envSecret: {
+          name: 'sentry-credentials',
+          keys: [
+            { secretKey: 'SENTRY_AUTH_TOKEN', envVar: 'SENTRY_AUTH_TOKEN' },
+            { secretKey: 'alpha', envVar: 'ALPHA_KEY' },
+          ],
+        },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain(`proxy_pass https://remote_upstream/mcp?${queryName}=${placeholder};`)
+      expect(conf).toContain(
+        `proxy_redirect https://api.example.com/mcp?${queryName}=${placeholder} /mcp;`
+      )
+    })
+
+    it('renders the Alpha Vantage shape: a query placeholder declared by envSecret (A1.1)', () => {
+      const placeholder = '$' + '{ALPHAVANTAGE_API_KEY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: {
+          baseUrl: `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&apikey=${placeholder}`,
+        },
+        envSecret: {
+          name: 'alphavantage-credentials',
+          keys: [{ secretKey: 'ALPHAVANTAGE_API_KEY', envVar: 'ALPHAVANTAGE_API_KEY' }],
+        },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain(
+        `proxy_pass https://remote_upstream/query?function=TIME_SERIES_DAILY&apikey=${placeholder};`
+      )
+      expect(conf).toContain(`server www.alphavantage.co:443 resolve;`)
+    })
+
+    it('renders a query placeholder declared by spec.env (A1.1)', () => {
+      const placeholder = '$' + '{ALPHA_KEY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?apikey=${placeholder}` },
+        env: [{ name: 'ALPHA_KEY', value: '' }],
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain(`proxy_pass https://remote_upstream/mcp?apikey=${placeholder};`)
+    })
+
+    it('rejects an undeclared query placeholder without echoing the query (A1.1)', () => {
+      const marker = 'zz-undeclared-marker'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: {
+          baseUrl: `https://api.example.com/mcp?m=${marker}&apikey=` + '$' + '{UNDECLARED_KEY}',
+        },
+      })
+
+      let error: unknown
+      try {
+        remoteConfig(reconciler, server)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain('${UNDECLARED_KEY}')
+      expect(message).not.toContain(marker)
+      expect(message).not.toContain('?m=')
+    })
+
+    it('rejects a placeholder declared in a different case (A1.1)', () => {
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?apikey=` + '$' + '{ALPHA_KEY}' },
+        env: [{ name: 'alpha_key', value: '' }],
+      })
+
+      expect(() => remoteConfig(reconciler, server)).toThrow(
+        'query placeholder ${ALPHA_KEY} is not declared'
+      )
     })
 
     it('should listen on the transport port', () => {
@@ -538,7 +690,7 @@ describe('McpServerReconciler remote egress proxy', () => {
       })
 
       it('rejects CRLF injection attempts (header smuggling / nginx directive injection)', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const malicious = 'a\r\nproxy_pass http://evil.com'
         const cm = (reconciler as any).buildNginxConfigMap(
           buildWithAuth([{ header: 'X-Evil', valueTemplate: malicious }])
@@ -547,19 +699,28 @@ describe('McpServerReconciler remote egress proxy', () => {
 
         expect(conf).not.toContain('X-Evil')
         expect(conf).not.toContain('proxy_pass http://evil.com')
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining('CR/LF/NUL'))
+        expect(warn).toHaveBeenCalledWith(
+          'Rejecting authHeader with CR/LF/NUL in value for header',
+          {
+            scope: '[HCC]',
+            header: 'X-Evil',
+          }
+        )
         warn.mockRestore()
       })
 
       it('rejects invalid header names (disallowed chars like space)', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const cm = (reconciler as any).buildNginxConfigMap(
           buildWithAuth([{ header: 'X-Bad Header', valueTemplate: 'ok' }])
         )
         const conf = cm.data['default.conf.template']
 
         expect(conf).not.toContain('X-Bad Header')
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining('invalid name'))
+        expect(warn).toHaveBeenCalledWith('Rejecting authHeader with invalid name', {
+          scope: '[HCC]',
+          header: 'X-Bad Header',
+        })
         warn.mockRestore()
       })
 
@@ -572,7 +733,7 @@ describe('McpServerReconciler remote egress proxy', () => {
       })
 
       it('emits valid entries and rejects invalid ones in a mixed batch', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const cm = (reconciler as any).buildNginxConfigMap(
           buildWithAuth([
             { header: 'Authorization', valueTemplate: 'Bearer ${T}' },
@@ -593,7 +754,7 @@ describe('McpServerReconciler remote egress proxy', () => {
       })
 
       it('rejects values longer than the 2048-char bound', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const tooLong = 'x'.repeat(2049)
         const cm = (reconciler as any).buildNginxConfigMap(
           buildWithAuth([{ header: 'Authorization', valueTemplate: tooLong }])
@@ -604,12 +765,15 @@ describe('McpServerReconciler remote egress proxy', () => {
         // Dropped by sanitization → the static remote clears Authorization (D-2):
         // the rejected value is never rendered and the incoming header is not forwarded.
         expect(conf).toContain('proxy_set_header Authorization "";')
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining('too long'))
+        expect(warn).toHaveBeenCalledWith('Rejecting authHeader value too long for header', {
+          scope: '[HCC]',
+          header: 'Authorization',
+        })
         warn.mockRestore()
       })
 
       it('rejects NUL byte injection', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const cm = (reconciler as any).buildNginxConfigMap(
           buildWithAuth([{ header: 'Authorization', valueTemplate: 'Bearer\0evil' }])
         )
@@ -618,7 +782,13 @@ describe('McpServerReconciler remote egress proxy', () => {
         // Dropped by sanitization → the static remote clears Authorization (D-2).
         expect(conf).toContain('proxy_set_header Authorization "";')
         expect(conf).not.toContain('evil')
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining('CR/LF/NUL'))
+        expect(warn).toHaveBeenCalledWith(
+          'Rejecting authHeader with CR/LF/NUL in value for header',
+          {
+            scope: '[HCC]',
+            header: 'Authorization',
+          }
+        )
         warn.mockRestore()
       })
     })
@@ -725,8 +895,28 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(egressContainer.securityContext.allowPrivilegeEscalation).toBe(false)
     })
 
-    it('should inject envSecret as env vars in the egress-proxy container', () => {
-      const deployment = (reconciler as any).buildDeployment(REMOTE_SERVER)
+    it('appends the platform resolver and envsubst filter env after every CRD source (U6)', () => {
+      // The resolver and filter names arrive from three CRD sources (envMapping,
+      // spec.env and a Secret mapping). The platform entries must still come
+      // last: a CRD-supplied filter that excludes a declared placeholder would
+      // otherwise leave ${NAME} in the rendered config for NGINX to expand.
+      const server = cloneServer(REMOTE_SERVER, {
+        envMapping: { loggers: 'NGINX_ENVSUBST_FILTER' },
+        serverConfig: { loggers: 'debug' },
+        env: [
+          { name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS', value: '' },
+          { name: 'NGINX_ENVSUBST_FILTER', value: '^NGINX_LOCAL_RESOLVERS$' },
+        ],
+        envSecret: {
+          name: 'sentry-credentials',
+          keys: [
+            { secretKey: 'SENTRY_AUTH_TOKEN', envVar: 'SENTRY_AUTH_TOKEN' },
+            { secretKey: 'resolver', envVar: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS' },
+            { secretKey: 'filter', envVar: 'NGINX_ENVSUBST_FILTER' },
+          ],
+        },
+      })
+      const deployment = (reconciler as any).buildDeployment(server)
       const containers = deployment.spec.template.spec.containers
 
       const egressContainer = containers.find((c: any) => c.name === 'egress-proxy')
@@ -736,6 +926,21 @@ describe('McpServerReconciler remote egress proxy', () => {
         name: 'sentry-credentials',
         key: 'SENTRY_AUTH_TOKEN',
       })
+      // Witnesses that all three CRD sources produced an entry (envMapping,
+      // spec.env and the Secret mapping), and that the platform entries come
+      // after every one of them.
+      const names = egressContainer.env.map((e: any) => e.name)
+      expect(names.filter((n: string) => n === 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS')).toHaveLength(3)
+      expect(names.filter((n: string) => n === 'NGINX_ENVSUBST_FILTER')).toHaveLength(4)
+      expect(egressContainer.env.at(-2)).toEqual({
+        name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
+        value: '1',
+      })
+      expect(egressContainer.env.at(-1)).toEqual({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
+      const filterEntries = egressContainer.env.filter(
+        (e: any) => e.name === 'NGINX_ENVSUBST_FILTER'
+      )
+      expect(filterEntries.slice(0, -1).every((e: any) => e.value !== '')).toBe(true)
     })
 
     it('should backfill empty env vars for auth header placeholders when envSecret is absent', () => {
@@ -1041,7 +1246,7 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should fail closed for non-404 ConfigMap delete failure', async () => {
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
       const err = new Error('Internal Server Error') as Error & { code?: number }
       err.code = 500
       mockHccOwnedRuntimeReads(appsApi, coreApi)
@@ -1053,11 +1258,12 @@ describe('McpServerReconciler remote egress proxy', () => {
         'Failed to delete runtime Kubernetes resources for McpServer "mcp-sentry-remote"'
       )
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to delete ConfigMap'),
-        expect.anything()
-      )
-      consoleSpy.mockRestore()
+      expect(errorSpy).toHaveBeenCalledWith('Failed to delete ConfigMap', {
+        scope: '[Reconciler]',
+        name: 'mcp-sentry-remote-nginx-conf',
+        err,
+      })
+      errorSpy.mockRestore()
     })
   })
 
@@ -1361,7 +1567,10 @@ describe('McpServerReconciler remote egress proxy', () => {
       const result = (reconciler as any).sanitizeRemoteUrl('https://mcp.sentry.io/sse')
       expect(result.safeUrl).toBe('https://mcp.sentry.io/sse')
       expect(result.host).toBe('mcp.sentry.io')
+      expect(result.hostname).toBe('mcp.sentry.io')
+      expect(result.port).toBe('443')
       expect(result.path).toBe('/sse')
+      expect(result.search).toBe('')
     })
 
     it('should reject HTTP (non-HTTPS) URLs', () => {
@@ -1438,17 +1647,19 @@ describe('McpServerReconciler remote egress proxy', () => {
       }).toThrow()
     })
 
-    it('should strip newlines and injected characters from URL', () => {
-      // URL constructor normalizes these, then we reconstruct from parsed
-      const result = (reconciler as any).sanitizeRemoteUrl('https://mcp.sentry.io/sse')
-      expect(result.safeUrl).not.toContain('\n')
-      expect(result.safeUrl).not.toContain('\r')
+    it('should strip newlines and tabs and encode NUL in the parsed URL (U9)', () => {
+      const result = (reconciler as any).sanitizeRemoteUrl('https://mcp.sentry.io/s\r\ns\te?a=1\0b')
+      expect(result.path).toBe('/sse')
+      expect(result.search).toBe('?a=1%00b')
+      expect(result.safeUrl).toBe('https://mcp.sentry.io/sse?a=1%00b')
     })
 
     it('should accept a URL with path components', () => {
       const result = (reconciler as any).sanitizeRemoteUrl('https://api.example.com/v1/mcp/sse')
       expect(result.safeUrl).toBe('https://api.example.com/v1/mcp/sse')
       expect(result.host).toBe('api.example.com')
+      expect(result.hostname).toBe('api.example.com')
+      expect(result.port).toBe('443')
       expect(result.path).toBe('/v1/mcp/sse')
     })
 
@@ -1456,6 +1667,76 @@ describe('McpServerReconciler remote egress proxy', () => {
       const result = (reconciler as any).sanitizeRemoteUrl('https://api.example.com:8443/mcp')
       expect(result.safeUrl).toBe('https://api.example.com:8443/mcp')
       expect(result.host).toBe('api.example.com:8443')
+      expect(result.hostname).toBe('api.example.com')
+      expect(result.port).toBe('8443')
+    })
+
+    it('should return the parsed query for a URL with search components (U8)', () => {
+      const result = (reconciler as any).sanitizeRemoteUrl('https://api.example.com/mcp?a=1')
+      expect(result.search).toBe('?a=1')
+    })
+
+    it.each([
+      ['a lowercase placeholder', '?k=$' + '{alpha_key}'],
+      ['a placeholder starting with a digit', '?k=$' + '{1A}'],
+      ['a bare dollar', '?k=$ALPHA'],
+      ['an unterminated placeholder', '?k=$' + '{ALPHA'],
+      ['a brace expression', '?k={x}'],
+      ['a backslash', '?k=a' + String.fromCharCode(92) + 'b'],
+      ['a semicolon', '?k=a;b'],
+    ])('rejects %s in a remote URL query (Q2)', (_label, query) => {
+      let error: unknown
+      try {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://api.example.com/mcp${query}`)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toMatch(/invalid placeholder|forbidden character/)
+      expect(message).toMatch(/\[A-Z_\]\[A-Z0-9_\]\*/)
+      expect(message).not.toContain(query)
+      // The value alone must not be echoed either (it may be the credential).
+      expect(message).not.toContain(query.slice(query.indexOf('=') + 1))
+    })
+
+    it.each([
+      ['multiple uppercase placeholders', '?k=$' + '{A_1}&j=$' + '{B}'],
+      ['a name that only contains a reserved word', '?k=$' + '{MY_PATH}&j=$' + '{XNGINX_A}'],
+      ['a placeholder after literal values', '?a=1&k=$' + '{ALPHA_KEY}'],
+      ['an encoded dollar sequence', '?k=%24%7BA%7D'],
+    ])('accepts %s in a remote URL query (Q2)', (_label, query) => {
+      const result = (reconciler as any).sanitizeRemoteUrl(`https://api.example.com/mcp${query}`)
+      // Positive witness: the query survives verbatim for envsubst to resolve.
+      expect(result.search).toBe(query)
+    })
+
+    it.each([
+      ['a dollar sign', '/a$b/mcp'],
+      ['a semicolon', '/mcp;return'],
+    ])('rejects %s in the remote URL path without echoing the path (A1.2)', (_label, path) => {
+      let error: unknown
+      try {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://api.example.com${path}`)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain('remote.baseUrl path contains a forbidden character')
+      expect(message).not.toContain(path)
+    })
+
+    it.each([
+      ['a versioned path', '/v1/mcp'],
+      ['a percent-encoded dollar', '/a%24b/mcp'],
+      ['braces the URL parser encodes', '/a{b}/mcp'],
+    ])('accepts %s in the remote URL path (A1.2)', (_label, path) => {
+      const result = (reconciler as any).sanitizeRemoteUrl(`https://api.example.com${path}`)
+      // Positive witness: the path survives in the rendered components.
+      expect(result.path).toBe(new URL(`https://api.example.com${path}`).pathname)
     })
 
     it('should reject all IP addresses including non-private ones', () => {
@@ -1473,6 +1754,101 @@ describe('McpServerReconciler remote egress proxy', () => {
   })
 
   describe('reconcile failure modes for remote servers', () => {
+    it('fails the reconcile without writing when the baseUrl query is invalid (Q3)', async () => {
+      const marker = 'zz-q-marker-query'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?q=${marker}$` + '{ALPHA' },
+      })
+
+      await reconciler.reconcile(server)
+
+      const status = reconciler.getStatus(server.name)
+      // Witness: the reconcile reached the resource sync (it read the Secret).
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
+      expect(status.message).toContain('Resource sync failed')
+      expect(status.message).toMatch(/invalid placeholder|forbidden character/)
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(status.message).not.toContain(marker)
+    })
+
+    it('fails the reconcile without writing when the baseUrl path has a dollar sign (A1.2)', async () => {
+      const marker = 'zz-p-marker-path'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/${marker}$scheme/mcp` },
+      })
+
+      await reconciler.reconcile(server)
+
+      const status = reconciler.getStatus(server.name)
+      // Witness: the reconcile reached the resource sync (it read the Secret).
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
+      expect(status.message).toContain('Resource sync failed')
+      expect(status.message).toContain('remote.baseUrl path contains a forbidden character')
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(status.message).not.toContain(marker)
+    })
+
+    it('fails the reconcile before any write when a query placeholder is undeclared (A1.1)', async () => {
+      const marker = 'zz-q-marker-undeclared'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: {
+          baseUrl: `https://api.example.com/mcp?m=${marker}&q=` + '$' + '{UNDECLARED_KEY}',
+        },
+      })
+
+      await reconciler.reconcile(server)
+
+      const status = reconciler.getStatus(server.name)
+      // Witness: the reconcile reached the resource sync (it read the Secret).
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
+      expect(status.message).toContain('Resource sync failed')
+      expect(status.message).toContain('query placeholder ${UNDECLARED_KEY} is not declared')
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(status.message).not.toContain(marker)
+    })
+
+    it('never copies the Secret value into the ConfigMap or Deployment (Q4)', async () => {
+      const marker = ['q4', 'secret', 'value', 'marker'].join('-')
+      const encodedMarker = Buffer.from(marker, 'utf8').toString('base64')
+      const placeholder = '$' + '{ALPHA_KEY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?q=${placeholder}` },
+        envSecret: {
+          name: 'query-credentials',
+          keys: [{ secretKey: 'k', envVar: 'ALPHA_KEY' }],
+        },
+      })
+      coreApi.readNamespacedSecret.mockResolvedValueOnce({
+        data: { k: encodedMarker },
+      })
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
+      appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+
+      await reconciler.reconcile(server)
+
+      expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledTimes(1)
+      const configMap = coreApi.createNamespacedConfigMap.mock.calls[0][0].body
+      expect(configMap.data['default.conf.template']).toContain(
+        `proxy_pass https://remote_upstream/mcp?q=${placeholder};`
+      )
+      expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+      const deployment = appsApi.createNamespacedDeployment.mock.calls[0][0].body
+      const alphaEnv = deployment.spec.template.spec.containers[0].env.find(
+        (entry: any) => entry.name === 'ALPHA_KEY'
+      )
+      expect(alphaEnv.valueFrom.secretKeyRef).toEqual({
+        name: 'query-credentials',
+        key: 'k',
+      })
+      expect(JSON.stringify(configMap)).not.toContain(marker)
+      expect(JSON.stringify(deployment)).not.toContain(marker)
+      expect(JSON.stringify(configMap)).not.toContain(encodedMarker)
+      expect(JSON.stringify(deployment)).not.toContain(encodedMarker)
+    })
+
     it('should set status deployed:false when ConfigMap creation fails', async () => {
       coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       const err = new Error('Quota exceeded') as Error & { code?: number }
@@ -1523,7 +1899,7 @@ describe('McpServerReconciler remote egress proxy', () => {
 
 describe('plugin image-host allowlist (2.3)', () => {
   it('audit mode: a disallowed local image is warned but still built', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
     const appsApi = createMockAppsApi()
     const coreApi = createMockCoreApi()
     const customApi = createMockCustomApi()
@@ -1536,7 +1912,14 @@ describe('plugin image-host allowlist (2.3)', () => {
     await reconciler.reconcile(server)
 
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('audit mode'))
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('audit mode'),
+      expect.objectContaining({
+        scope: '[Reconciler]',
+        image: server.spec.image,
+        name: server.name,
+      })
+    )
     warn.mockRestore()
   })
 
