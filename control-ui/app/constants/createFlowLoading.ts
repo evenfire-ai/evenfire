@@ -73,6 +73,22 @@ export const CREATE_FLOW_LOADING = {
     steps: ['Package', 'Credentials', 'Install'],
     stepFlowClassName: 'cu-create-step-flow--3',
   },
+  addRemoteServer: {
+    iconKey: 'cable',
+    title: 'Add remote server',
+    subtitle: 'Discover a remote MCP server and install it as an OAuth connector.',
+    backLabel: 'Back',
+    steps: ['Identify', 'Configure', 'Confirm'],
+    stepFlowClassName: 'cu-create-step-flow--3',
+  },
+  installRemoteCatalogEntry: {
+    iconKey: 'store',
+    title: 'Install from Marketplace',
+    subtitle: 'Install a Marketplace remote OAuth connector into your cluster.',
+    backLabel: 'Back to Marketplace',
+    steps: ['Identify', 'Configure', 'Confirm'],
+    stepFlowClassName: 'cu-create-step-flow--3',
+  },
   installPlugin: {
     iconKey: 'workflow',
     title: 'Install Plugin',

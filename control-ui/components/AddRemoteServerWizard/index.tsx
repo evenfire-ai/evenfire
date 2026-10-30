@@ -1,16 +1,21 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreateStepFlow } from '@components/CreateStepFlow'
+import { RemoteOAuthProvenanceBadge } from '@components/RemoteOAuthProvenanceBadge'
+import { RemoteOAuthSetupGuide } from '@components/RemoteOAuthSetupGuide'
 import { useToast } from '@components/Toast'
 import { IconCopy } from '@components/icons'
 import { Button, CheckboxField, Field, SelectInput, TextInput } from '@components/ui'
 import { isSilentApiError } from '@lib/api'
 import { copyTextToClipboard } from '@lib/clipboard'
 import {
+  buildCatalogRemoteInstallRequest,
   buildRemoteInstallRequest,
+  describeCatalogTransportDead,
   describeTransportProbe,
+  discoverCatalogRemoteServer,
   discoverRemoteServer,
   displayClientMode,
   getEntraTenantIdError,
@@ -18,6 +23,7 @@ import {
   getRemoteServerNameError,
   installModeForRegistration,
   installRemoteServer,
+  isCatalogSlotTakenError,
   mapRemoteDiscoverError,
   mapRemoteInstallError,
   parseRemoteScopesInput,
@@ -33,12 +39,14 @@ import {
 } from '@lib/remoteMcp'
 import type {
   RemoteCallbackPreview,
+  RemoteCatalogDrift,
   RemoteDetected,
   RemoteGrantScope,
   RemoteTenantRequiredDetail,
   RemoteTransportProbe,
 } from '@lib/remoteMcp.types'
 import {
+  CATALOG_EXPECTED_REGISTRATION_LABEL,
   GRANT_SCOPE_OPTIONS,
   REGISTRATION_MODE_HINT,
   REGISTRATION_MODE_LABEL,
@@ -49,6 +57,7 @@ import {
 import type {
   AddRemoteServerWizardProps,
   AsEndpointHostsSummaryProps,
+  CatalogDriftNoticeProps,
   InstalledRedirectUri,
   RedirectUriCopyProps,
 } from './types'
@@ -59,14 +68,18 @@ export function AddRemoteServerWizard({
   pageHeader,
   onInstalled,
   onCancel,
+  catalog,
+  onSlotTaken,
 }: AddRemoteServerWizardProps) {
   const { showToast } = useToast()
 
   const [step, setStep] = useState(0)
 
-  // Step 0 — identity
-  const [baseUrl, setBaseUrl] = useState('')
+  // Step 0 — identity. In catalog mode the URL is the entry's (display only) and the
+  // name is whatever control-api's discover assigns to the slot.
+  const [baseUrl, setBaseUrl] = useState(catalog?.baseUrl ?? '')
   const [serverName, setServerName] = useState('')
+  const [catalogDrift, setCatalogDrift] = useState<RemoteCatalogDrift | null>(null)
 
   // Detection. Editing the URL clears `detected` (see the baseUrl onChange), so
   // a present `detected` always corresponds to the current URL (D-4: the pinned
@@ -93,7 +106,7 @@ export function AddRemoteServerWizard({
   // Step 1 — configuration
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
-  const [grantScope, setGrantScope] = useState<RemoteGrantScope>('user')
+  const [grantScope, setGrantScope] = useState<RemoteGrantScope>(catalog?.grantScope ?? 'user')
   const [scopesInput, setScopesInput] = useState('')
 
   // Step 2 — install
@@ -111,9 +124,16 @@ export function AddRemoteServerWizard({
   const trimmedBaseUrl = baseUrl.trim()
   const baseUrlError = baseUrl.length > 0 ? getRemoteBaseUrlError(trimmedBaseUrl) : ''
   const identifiersValid =
-    getRemoteBaseUrlError(trimmedBaseUrl) === '' && getRemoteServerNameError(serverName) === ''
+    (catalog !== undefined || getRemoteBaseUrlError(trimmedBaseUrl) === '') &&
+    getRemoteServerNameError(serverName) === ''
+  // In catalog mode the name only exists once discover assigns it, so Detect never waits on it.
+  const canDetect = catalog !== undefined || identifiersValid
   const tenantIdError = getEntraTenantIdError(tenantId)
   const tenantReady = !tenantPrompt || tenantIdError === ''
+  // An entry that names Entra as its authorization server shows the tenant field before
+  // the first discover answers; the authority template still comes from that answer.
+  const showTenantField =
+    Boolean(tenantPrompt) || catalog?.block.authorizationServerHint === 'entra-v2'
 
   const installMode = detected ? installModeForRegistration(detected.registrationMode) : null
   const needsCredentials = installMode ? requiresPreRegisteredCredentials(installMode) : false
@@ -128,6 +148,10 @@ export function AddRemoteServerWizard({
   const preRegisteredRedirectUri = needsCredentials
     ? remotePreRegisteredRedirectUri(callback, serverName)
     : null
+  // control-api already strips both from any entry not proven to be the curator's; the
+  // wizard holds the same line in case a response ever carries them anyway.
+  const catalogGuide = catalog?.trusted ? catalog.block.setupGuide : undefined
+  const catalogConsoleUrl = catalog?.trusted ? catalog.block.providerConsoleUrl : undefined
   const asEndpointHosts = detected?.asEndpointHosts
 
   // control-api requires the scopes for any authorization-server profile, not only
@@ -214,9 +238,23 @@ export function AddRemoteServerWizard({
     })
   }
 
+  function discoverWith(authorizationServer: string | undefined) {
+    if (catalog) {
+      return discoverCatalogRemoteServer({
+        catalogEntry: catalog.entry,
+        grantScope: catalog.grantScope,
+        authorizationServer,
+      })
+    }
+    return authorizationServer === undefined
+      ? discoverRemoteServer(trimmedBaseUrl)
+      : discoverRemoteServer(trimmedBaseUrl, authorizationServer)
+  }
+
   async function runDetect() {
-    const authorizationServer =
-      tenantPrompt && tenantIdError === ''
+    const tenantTyped = showTenantField && tenantIdError === ''
+    let authorizationServer =
+      tenantPrompt && tenantTyped
         ? tenantAuthority(tenantPrompt.tenantAuthorityTemplate, tenantId)
         : undefined
     setDetecting(true)
@@ -224,13 +262,30 @@ export function AddRemoteServerWizard({
     setTransport(null)
     setCallback(undefined)
     try {
+      let response: Awaited<ReturnType<typeof discoverWith>>
+      try {
+        response = await discoverWith(authorizationServer)
+      } catch (first) {
+        // A tenant typed before control-api named the authority template (an entry
+        // hinting Entra shows the field up front) is sent as soon as the template
+        // arrives, instead of asking the operator to press Detect again.
+        const required = tenantRequiredDetail(first)
+        if (!required || authorizationServer !== undefined || !tenantTyped) throw first
+        setTenantPrompt(required)
+        authorizationServer = tenantAuthority(required.tenantAuthorityTemplate, tenantId)
+        response = await discoverWith(authorizationServer)
+      }
       const {
         detected: nextDetected,
         transport: nextTransport,
         callback: nextCallback,
-      } = await (authorizationServer === undefined
-        ? discoverRemoteServer(trimmedBaseUrl)
-        : discoverRemoteServer(trimmedBaseUrl, authorizationServer))
+        serverName: assignedServerName,
+        catalogDrift: nextCatalogDrift,
+      } = response
+      if (catalog) {
+        setServerName(assignedServerName ?? '')
+        setCatalogDrift(nextCatalogDrift ?? null)
+      }
       if (transportBlocksContinue(nextTransport)) {
         // Dead MCP transport: never install a URL the probe proved dead. Hold on
         // step 0, surface the reason (and any canonical URL suggestion), and keep
@@ -243,8 +298,13 @@ export function AddRemoteServerWizard({
       setTransport(nextTransport ?? null)
       setCallback(nextCallback)
       setDetectedAuthorizationServer(authorizationServer)
-      setScopesInput(nextDetected.scopes.join(' '))
-      setStep(1)
+      const suggestedScopes = catalog?.block.scopes?.length
+        ? catalog.block.scopes
+        : nextDetected.scopes
+      setScopesInput(suggestedScopes.join(' '))
+      // Catalog mode stays on Identify so the operator sees the entry's URL, the
+      // assigned name and its provenance badge before moving on.
+      if (!catalog) setStep(1)
     } catch (e) {
       if (isSilentApiError(e)) return
       setDetected(null)
@@ -261,16 +321,24 @@ export function AddRemoteServerWizard({
     }
   }
 
+  // Catalog mode detects as soon as it opens; the ref keeps a double-invoked effect from
+  // sending a second discover.
+  const autoDetected = useRef(false)
+  useEffect(() => {
+    if (!catalog || autoDetected.current) return
+    autoDetected.current = true
+    void runDetect()
+    // Runs once per mount: the catalog target is fixed for the wizard's lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   async function runInstall() {
     if (!detected || !installMode || confirmationPending) return
     setInstalling(true)
     setInstallError('')
     try {
-      const body = buildRemoteInstallRequest({
-        serverName,
-        baseUrl: trimmedBaseUrl,
+      const shared = {
         mode: installMode,
-        grantScope,
         clientId: needsCredentials ? clientId : undefined,
         clientSecret: needsCredentials ? clientSecret : undefined,
         // With a profile control-api requires the list, so the one on screen is always
@@ -278,10 +346,20 @@ export function AddRemoteServerWizard({
         scopes: hasAsProfile ? effectiveScopes : scopesOverride,
         authorizationServer: detectedAuthorizationServer,
         confirmedUnverifiedScopes: unverifiedConfirmed ? unverifiedToConfirm : undefined,
-      })
+      }
+      const body = catalog
+        ? buildCatalogRemoteInstallRequest({ target: catalog, ...shared })
+        : buildRemoteInstallRequest({
+            serverName,
+            baseUrl: trimmedBaseUrl,
+            grantScope,
+            ...shared,
+          })
       const res = await installRemoteServer(body)
       showToast(
-        `Remote server ${res.serverName} installed. Give agents access from the Installed Connectors list whenever you’re ready.`,
+        catalog
+          ? `Remote server ${res.serverName} installed. Give agents access from its Marketplace card whenever you’re ready.`
+          : `Remote server ${res.serverName} installed. Give agents access from the Installed Connectors list whenever you’re ready.`,
         { tone: 'success' }
       )
       if (res.registrationMode === 'pre-registered' && res.redirectUri) {
@@ -301,7 +379,15 @@ export function AddRemoteServerWizard({
         setUnverifiedConfirmed(false)
         return
       }
-      setInstallError(mapRemoteInstallError(e, { callbackVariant: callback?.variant }))
+      const message = mapRemoteInstallError(e, {
+        callbackVariant: callback?.variant,
+        catalog: Boolean(catalog),
+      })
+      if (catalog && isCatalogSlotTakenError(e) && onSlotTaken) {
+        onSlotTaken(message)
+        return
+      }
+      setInstallError(message)
     } finally {
       setInstalling(false)
     }
@@ -331,26 +417,78 @@ export function AddRemoteServerWizard({
         >
           {step === 0 ? (
             <div className="cu-form-stack cu-agent-form-stack">
-              <Field
-                description="The base URL of the remote MCP server (its OAuth metadata is discovered from here)."
-                error={baseUrlError || undefined}
-                label="Remote server URL"
-                htmlFor="remote-base-url"
-                required
-              >
-                <TextInput
-                  id="remote-base-url"
-                  invalid={Boolean(baseUrlError)}
-                  monospace
-                  onChange={event => changeBaseUrl(event.target.value)}
-                  placeholder="https://mcp.example.com/mcp"
-                  disabled={detecting}
-                  autoFocus
-                  value={baseUrl}
-                />
-              </Field>
+              {catalog ? (
+                <>
+                  <div className="cu-remote-oauth-provenance">
+                    <span>
+                      Marketplace entry{' '}
+                      <strong>
+                        {catalog.entry.name} v{catalog.entry.version}
+                      </strong>
+                    </span>
+                    <RemoteOAuthProvenanceBadge
+                      block={catalog.block}
+                      publisher={catalog.publisher}
+                      trusted={catalog.trusted}
+                    />
+                  </div>
 
-              {tenantPrompt ? (
+                  <Field
+                    description="Taken from the Marketplace entry. It cannot be changed here."
+                    label="Remote server URL"
+                    htmlFor="remote-base-url"
+                  >
+                    <TextInput id="remote-base-url" monospace readOnly value={catalog.baseUrl} />
+                  </Field>
+
+                  <Field
+                    description="Assigned by the Marketplace to this slot, so the slot holds a single server."
+                    label="Server name"
+                    htmlFor="remote-server-name"
+                  >
+                    <TextInput
+                      id="remote-server-name"
+                      monospace
+                      readOnly
+                      placeholder="Assigned after detection"
+                      value={serverName}
+                    />
+                  </Field>
+
+                  <Field
+                    description="The Marketplace slot you are installing."
+                    label="Grant scope"
+                    htmlFor="remote-grant-scope"
+                  >
+                    <TextInput
+                      id="remote-grant-scope"
+                      readOnly
+                      value={grantScopeLabel(grantScope)}
+                    />
+                  </Field>
+                </>
+              ) : (
+                <Field
+                  description="The base URL of the remote MCP server (its OAuth metadata is discovered from here)."
+                  error={baseUrlError || undefined}
+                  label="Remote server URL"
+                  htmlFor="remote-base-url"
+                  required
+                >
+                  <TextInput
+                    id="remote-base-url"
+                    invalid={Boolean(baseUrlError)}
+                    monospace
+                    onChange={event => changeBaseUrl(event.target.value)}
+                    placeholder="https://mcp.example.com/mcp"
+                    disabled={detecting}
+                    autoFocus
+                    value={baseUrl}
+                  />
+                </Field>
+              )}
+
+              {showTenantField ? (
                 <Field
                   label="Microsoft Entra tenant ID"
                   description="This server signs in with Microsoft Entra ID. Enter your organization's Directory (tenant) ID — a GUID shown on the Microsoft Entra admin center overview."
@@ -361,7 +499,8 @@ export function AddRemoteServerWizard({
                   <TextInput
                     id="remote-entra-tenant-id"
                     monospace
-                    autoFocus
+                    // Mounted before the first discover in catalog mode, while disabled.
+                    autoFocus={!catalog}
                     value={tenantId}
                     placeholder="00000000-0000-0000-0000-000000000000"
                     disabled={detecting}
@@ -374,25 +513,27 @@ export function AddRemoteServerWizard({
                 </Field>
               ) : null}
 
-              <Field
-                description="Kubernetes resource name: lowercase alphanumeric and hyphens, max 63 chars."
-                error={serverNameError || undefined}
-                label="Server name"
-                htmlFor="remote-server-name"
-                required
-              >
-                <TextInput
-                  id="remote-server-name"
-                  invalid={Boolean(serverNameError)}
-                  monospace
-                  onChange={event =>
-                    setServerName(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
-                  }
-                  placeholder="example-remote"
-                  disabled={detecting}
-                  value={serverName}
-                />
-              </Field>
+              {catalog ? null : (
+                <Field
+                  description="Kubernetes resource name: lowercase alphanumeric and hyphens, max 63 chars."
+                  error={serverNameError || undefined}
+                  label="Server name"
+                  htmlFor="remote-server-name"
+                  required
+                >
+                  <TextInput
+                    id="remote-server-name"
+                    invalid={Boolean(serverNameError)}
+                    monospace
+                    onChange={event =>
+                      setServerName(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
+                    }
+                    placeholder="example-remote"
+                    disabled={detecting}
+                    value={serverName}
+                  />
+                </Field>
+              )}
 
               {discoverError ? (
                 <div className="cu-banner cu-banner--error" role="alert">
@@ -400,7 +541,13 @@ export function AddRemoteServerWizard({
                 </div>
               ) : null}
 
-              {deadTransport ? (
+              {deadTransport && catalog ? (
+                <div className="cu-banner cu-banner--error" role="alert">
+                  {describeCatalogTransportDead(deadTransport.httpStatus)}
+                </div>
+              ) : null}
+
+              {deadTransport && !catalog ? (
                 <div className="cu-banner cu-banner--error" role="alert">
                   <div>{describeTransportProbe(deadTransport)}</div>
                   {suggestedBaseUrl ? (
@@ -421,6 +568,8 @@ export function AddRemoteServerWizard({
 
           {step === 1 && detected ? (
             <div className="cu-form-stack cu-agent-form-stack">
+              {catalogDrift ? <CatalogDriftNotice drift={catalogDrift} /> : null}
+
               {noRefresh ? (
                 <div className="cu-banner cu-banner--warning" role="status">
                   This authorization server does not support token refresh, so users will have to
@@ -538,7 +687,29 @@ export function AddRemoteServerWizard({
                 <AsEndpointHostsSummary hosts={asEndpointHosts} withExplanation />
               ) : null}
 
-              {needsCredentials && preRegisteredRedirectUri ? (
+              {needsCredentials && catalog && (catalogGuide || catalogConsoleUrl) ? (
+                <RemoteOAuthSetupGuide guide={catalogGuide} providerConsoleUrl={catalogConsoleUrl}>
+                  {preRegisteredRedirectUri ? (
+                    <Field
+                      label="Redirect URI"
+                      description="Register this exact URI in the provider’s OAuth client before users connect."
+                    >
+                      <RedirectUriCopy uri={preRegisteredRedirectUri} onCopy={copyRedirectUri} />
+                    </Field>
+                  ) : null}
+                </RemoteOAuthSetupGuide>
+              ) : null}
+
+              {needsCredentials && catalog && !catalogGuide && !catalogConsoleUrl ? (
+                <div className="cu-banner cu-banner--info" role="note">
+                  This entry ships no setup guide from the Marketplace curator. Register an OAuth
+                  app at the provider with the redirect URI below, one app per slot.
+                </div>
+              ) : null}
+
+              {needsCredentials &&
+              preRegisteredRedirectUri &&
+              !(catalog && (catalogGuide || catalogConsoleUrl)) ? (
                 <Field
                   label="Redirect URI"
                   description="Register this exact URI in the provider’s OAuth client before users connect."
@@ -581,23 +752,33 @@ export function AddRemoteServerWizard({
                 </div>
               ) : null}
 
-              <Field
-                description="Whether each user authorizes their own token or the context shares one."
-                label="Grant scope"
-                htmlFor="remote-grant-scope"
-              >
-                <SelectInput
-                  id="remote-grant-scope"
-                  onChange={event => setGrantScope(event.target.value as RemoteGrantScope)}
-                  value={grantScope}
+              {catalog ? (
+                <Field
+                  description="Fixed by the Marketplace slot you are installing."
+                  label="Grant scope"
+                  htmlFor="remote-grant-scope"
                 >
-                  {GRANT_SCOPE_OPTIONS.map(option => (
-                    <option key={option.value} value={option.value}>
-                      {option.label} — {option.description}
-                    </option>
-                  ))}
-                </SelectInput>
-              </Field>
+                  <TextInput id="remote-grant-scope" readOnly value={grantScopeLabel(grantScope)} />
+                </Field>
+              ) : (
+                <Field
+                  description="Whether each user authorizes their own token or the context shares one."
+                  label="Grant scope"
+                  htmlFor="remote-grant-scope"
+                >
+                  <SelectInput
+                    id="remote-grant-scope"
+                    onChange={event => setGrantScope(event.target.value as RemoteGrantScope)}
+                    value={grantScope}
+                  >
+                    {GRANT_SCOPE_OPTIONS.map(option => (
+                      <option key={option.value} value={option.value}>
+                        {option.label} — {option.description}
+                      </option>
+                    ))}
+                  </SelectInput>
+                </Field>
+              )}
             </div>
           ) : null}
 
@@ -605,7 +786,8 @@ export function AddRemoteServerWizard({
             <div className="cu-form-stack cu-agent-form-stack">
               <p className="cu-field__hint">
                 {serverName} is installed. Register this redirect URI in the provider’s OAuth
-                client, then give agents access from the Installed Connectors list.
+                client, then give agents access from{' '}
+                {catalog ? 'its Marketplace card' : 'the Installed Connectors list'}.
               </p>
               {installed.changedSincePreview ? (
                 <div className="cu-banner cu-banner--warning" role="status">
@@ -622,6 +804,14 @@ export function AddRemoteServerWizard({
           {step === 2 && !installed && detected && installMode ? (
             <div className="cu-form-stack cu-agent-form-stack">
               <section className="cu-summary-list" aria-label="Install summary">
+                {catalog ? (
+                  <div className="cu-summary-list__row">
+                    <span>Marketplace entry</span>
+                    <strong>
+                      {catalog.entry.name} v{catalog.entry.version}
+                    </strong>
+                  </div>
+                ) : null}
                 <div className="cu-summary-list__row">
                   <span>Server name</span>
                   <strong>{serverName}</strong>
@@ -640,7 +830,7 @@ export function AddRemoteServerWizard({
                 </div>
                 <div className="cu-summary-list__row">
                   <span>Grant scope</span>
-                  <strong>{grantScope === 'user' ? 'Per user' : 'Per context'}</strong>
+                  <strong>{grantScopeLabel(grantScope)}</strong>
                 </div>
                 <div className="cu-summary-list__row">
                   <span>Authorization endpoint</span>
@@ -734,7 +924,7 @@ export function AddRemoteServerWizard({
                 </Button>
               ) : (
                 <Button
-                  disabled={!identifiersValid || !tenantReady || detecting}
+                  disabled={!canDetect || !tenantReady || detecting}
                   loading={detecting}
                   onClick={() => void runDetect()}
                   size="sm"
@@ -819,5 +1009,22 @@ function AsEndpointHostsSummary({ hosts, withExplanation = false }: AsEndpointHo
         ) : null}
       </section>
     </>
+  )
+}
+
+function grantScopeLabel(scope: RemoteGrantScope): string {
+  return scope === 'user' ? 'Per user' : 'Per context'
+}
+
+function CatalogDriftNotice({ drift }: CatalogDriftNoticeProps) {
+  // Whether a curator guide is missing for the credentials step is said once, by the
+  // credentials step itself; the drift notice only reports the drift.
+  return (
+    <div className="cu-banner cu-banner--warning" role="status">
+      The provider changed its configuration since this Marketplace entry was published (it expects{' '}
+      {CATALOG_EXPECTED_REGISTRATION_LABEL[drift.expected]}, discovery found{' '}
+      {REGISTRATION_MODE_LABEL[drift.detected]}), so the entry may be out of date. The install
+      follows what discovery found.
+    </div>
   )
 }

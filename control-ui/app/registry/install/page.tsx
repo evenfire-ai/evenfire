@@ -15,7 +15,7 @@ import { OAuthInstallForm } from '@components/OAuthInstallForm'
 import { RegistryInstallForm } from '@components/RegistryInstallForm'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
-import { SelectInput } from '@components/ui'
+import { Button, SelectInput } from '@components/ui'
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
@@ -24,7 +24,8 @@ import type { LlmAllowedModel, RegistryEntry } from '@lib/api'
 import { analyzeWorkflowRecipeEgress } from '@lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '@lib/egressModel'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
-import { getCatalogOAuthBlock } from '@lib/oauthInstall'
+import { getCatalogOAuthBlock, getRemoteOAuthCatalogBlock } from '@lib/oauthInstall'
+import type { RemoteOAuthCatalogView } from '@lib/oauthInstall.types'
 import { validateRecipe } from '@lib/recipeValidator'
 
 type TransportWorkloadEditorTarget = {
@@ -574,6 +575,94 @@ function RegistryRecipeInstallPreview({
   )
 }
 
+/**
+ * A remote-OAuth entry installs per slot through the remote wizard; this page never
+ * offers it the registry or OAuth install forms. With a single slot it forwards
+ * straight to the wizard; with two it asks which slot, because a slot is a separate
+ * server and nothing here can pick one for the operator.
+ */
+function RemoteOAuthInstallRedirect({
+  entry,
+  view,
+  onCancel,
+}: {
+  entry: RegistryEntry
+  view: RemoteOAuthCatalogView
+  onCancel: () => void
+}) {
+  const router = useRouter()
+  const onlyScope =
+    view.valid === true && view.block.allowedGrantScopes.length === 1
+      ? view.block.allowedGrantScopes[0]
+      : null
+
+  useEffect(() => {
+    if (onlyScope) {
+      router.replace(
+        CONTROL_ROUTES.connectors.remoteNew({
+          entry: entry.name,
+          version: entry.version,
+          scope: onlyScope,
+        })
+      )
+    }
+  }, [entry.name, entry.version, onlyScope, router])
+
+  if (view.valid === false) {
+    return (
+      <>
+        <div className="cu-banner cu-banner--error" role="alert">
+          {entry.name} v{entry.version} cannot be installed ({view.reason}). Report it to the
+          Marketplace curator.
+        </div>
+        <div className="cu-create-actions">
+          <Button onClick={onCancel} size="sm" variant="ghost">
+            Back to Marketplace
+          </Button>
+        </div>
+      </>
+    )
+  }
+  if (onlyScope) {
+    return (
+      <div className="cu-muted" role="status">
+        Opening the remote connector wizard…
+      </div>
+    )
+  }
+  return (
+    <>
+      <p className="cu-field__hint">
+        {entry.name} can be installed once per grant scope. Choose the slot to install; each slot is
+        a separate connector.
+      </p>
+      <div className="cu-create-actions">
+        <Button onClick={onCancel} size="sm" variant="ghost">
+          Cancel
+        </Button>
+        {view.block.allowedGrantScopes.map(scope => (
+          <Button
+            key={scope}
+            onClick={() =>
+              router.push(
+                CONTROL_ROUTES.connectors.remoteNew({
+                  entry: entry.name,
+                  version: entry.version,
+                  scope,
+                })
+              )
+            }
+            size="sm"
+            variant="primary"
+          >
+            {scope === 'user' ? 'Install per user' : 'Install per context'}
+          </Button>
+        ))}
+      </div>
+    </>
+  )
+}
+
 function RegistryInstallPageContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -613,6 +702,9 @@ function RegistryInstallPageContent() {
     void loadEntry()
   }, [entryName, entryVersion])
 
+  // A remote-OAuth entry is decided first: it must never reach the OAuth or registry
+  // install forms, whichever other keys its block carries.
+  const remoteOAuth = useMemo(() => getRemoteOAuthCatalogBlock(entry), [entry])
   // An mcp-server entry that declares OAuth routes to the OAuth install wizard
   // instead of the ordinary connector form (S1-U4).
   const catalogOAuth = useMemo(() => getCatalogOAuthBlock(entry), [entry])
@@ -669,6 +761,12 @@ function RegistryInstallPageContent() {
                 entry={entry}
                 onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
                 onInstalled={() => router.push(CONTROL_ROUTES.guardrails.root)}
+              />
+            ) : entry && remoteOAuth ? (
+              <RemoteOAuthInstallRedirect
+                entry={entry}
+                view={remoteOAuth}
+                onCancel={() => router.push(CONTROL_ROUTES.marketplace.connectors)}
               />
             ) : entry && catalogOAuth ? (
               <OAuthInstallForm

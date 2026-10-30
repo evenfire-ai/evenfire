@@ -1,0 +1,6 @@
+{
+  "status": 409,
+  "body": {
+    "error": "install_in_progress"
+  }
+}

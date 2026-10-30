@@ -1,23 +1,30 @@
 'use client'
 
 import { apiSend } from './api'
+import type { RegistryEntry } from './api'
 import { isValidK8sName } from './k8sValidation'
+import { getRemoteOAuthCatalogBlock } from './oauthInstall'
 import type {
+  DiscoverCatalogRemoteRequest,
   DiscoverRemoteResponse,
+  InstallCatalogRemoteRequest,
   InstallRemoteRequest,
   InstallRemoteResponse,
   InstallTransportUnreachableDetail,
   RemoteCallbackPreview,
   RemoteCallbackVariant,
+  RemoteCatalogInstallTarget,
   RemoteClientIdConflict,
   RemoteClientMode,
   RemoteDcrRejectionKind,
   RemoteDetected,
   RemoteDiscoveryErrorKind,
+  RemoteGrantScope,
   RemoteInstallMode,
   RemoteRegistrationMode,
   RemoteTenantRequiredDetail,
   RemoteTransportProbe,
+  RemoteWizardQuery,
 } from './remoteMcp.types'
 
 /** Real admin prefix for the remote MCP-OAuth routes (control-api). */
@@ -42,9 +49,24 @@ export async function discoverRemoteServer(
   })) as DiscoverRemoteResponse
 }
 
+/**
+ * Catalog-mode dry-run discovery. control-api reads the URL from the entry and answers
+ * with the slot's `serverName` (and `catalogDrift` when discovery contradicts the
+ * entry); the request carries neither a URL nor a name.
+ */
+export async function discoverCatalogRemoteServer(
+  request: DiscoverCatalogRemoteRequest
+): Promise<DiscoverRemoteResponse> {
+  return (await apiSend('POST', `${REMOTE_MCP_BASE}/discover`, {
+    catalogEntry: { name: request.catalogEntry.name, version: request.catalogEntry.version },
+    grantScope: request.grantScope,
+    ...(request.authorizationServer ? { authorizationServer: request.authorizationServer } : {}),
+  })) as DiscoverRemoteResponse
+}
+
 /** Transactional install saga. Resolves to the names-only summary (201). */
 export async function installRemoteServer(
-  body: InstallRemoteRequest
+  body: InstallRemoteRequest | InstallCatalogRemoteRequest
 ): Promise<InstallRemoteResponse> {
   return (await apiSend('POST', REMOTE_MCP_BASE, body)) as InstallRemoteResponse
 }
@@ -317,6 +339,136 @@ export function unverifiedScopesFromInstallError(error: unknown): string[] | nul
   return strings.length > 0 ? strings : null
 }
 
+// ── Catalog mode ─────────────────────────────────────────────────────────────
+
+const GRANT_SCOPE_VALUES: readonly RemoteGrantScope[] = ['user', 'context']
+
+/** A `.` or `..` path segment: never part of a registry name or version. */
+function hasDotSegment(value: string): boolean {
+  return value.split('/').some(segment => segment === '.' || segment === '..')
+}
+
+/**
+ * What the wizard page's query selects. Any catalog key makes it catalog mode, and a
+ * partial or malformed catalog query is an error rather than the manual wizard: a
+ * Marketplace link must never silently turn into a blank URL form.
+ */
+export function parseRemoteWizardQuery(query: {
+  entry: string | null
+  version: string | null
+  scope: string | null
+}): RemoteWizardQuery {
+  const entry = query.entry?.trim() ?? ''
+  const version = query.version?.trim() ?? ''
+  const scope = query.scope?.trim() ?? ''
+  if (query.entry === null && query.version === null && query.scope === null) {
+    return { mode: 'manual' }
+  }
+  if (!entry || !version || !scope) {
+    return {
+      mode: 'invalid',
+      message: 'This Marketplace link is incomplete. Return to the Marketplace and try again.',
+    }
+  }
+  if (hasDotSegment(entry) || hasDotSegment(version)) {
+    return {
+      mode: 'invalid',
+      message:
+        'This Marketplace link names an invalid entry. Return to the Marketplace and try again.',
+    }
+  }
+  if (!GRANT_SCOPE_VALUES.includes(scope as RemoteGrantScope)) {
+    return {
+      mode: 'invalid',
+      message:
+        'This Marketplace link names an unknown grant scope. Return to the Marketplace and pick a slot.',
+    }
+  }
+  return { mode: 'catalog', entry: { name: entry, version }, grantScope: scope as RemoteGrantScope }
+}
+
+/**
+ * Resolve a loaded catalog entry for one slot, or say why the wizard must not open.
+ * Installability is control-api's verdict (`remoteOAuth.valid`); the entry name and
+ * version are the ones the registry returned, which is what control-api requires back.
+ */
+export function resolveRemoteCatalogTarget(
+  entry: RegistryEntry,
+  grantScope: RemoteGrantScope
+): { ok: true; target: RemoteCatalogInstallTarget } | { ok: false; message: string } {
+  const view = getRemoteOAuthCatalogBlock(entry)
+  if (view === null) {
+    return {
+      ok: false,
+      message: `${entry.name} is not a remote OAuth connector, so it cannot be installed from here.`,
+    }
+  }
+  if (view.valid === false) {
+    return {
+      ok: false,
+      message: `${entry.name} v${entry.version} cannot be installed (${view.reason}). Report it to the Marketplace curator.`,
+    }
+  }
+  if (!view.block.allowedGrantScopes.includes(grantScope)) {
+    return {
+      ok: false,
+      message: `${entry.name} does not offer a ${grantScope === 'user' ? 'per-user' : 'per-context'} slot. Return to the Marketplace and pick one of its slots.`,
+    }
+  }
+  return {
+    ok: true,
+    target: {
+      entry: { name: entry.name, version: entry.version },
+      grantScope,
+      baseUrl: view.url,
+      block: view.block,
+      trusted: view.trusted,
+      publisher: view.publisher,
+    },
+  }
+}
+
+/**
+ * Banner copy for a dead transport probe on a catalog entry. There is no "use the
+ * suggested URL" here: the URL belongs to the entry, and control-api refuses any other.
+ */
+export function describeCatalogTransportDead(httpStatus: number): string {
+  return `This Marketplace entry's URL does not respond with MCP (HTTP ${httpStatus}), so it cannot be installed. Report it to the Marketplace curator.`
+}
+
+/** The slot is taken or being taken by another install: the wizard returns to the Marketplace. */
+export function isCatalogSlotTakenError(error: unknown): boolean {
+  const code = asCodedError(error).code
+  return code === 'server_name_in_use' || code === 'install_in_progress'
+}
+
+/** Copy for the catalog-mode request errors control-api answers before any write. */
+function describeCatalogRequestError(
+  code: string | undefined,
+  body: Record<string, unknown> | undefined
+): string | null {
+  switch (code) {
+    case 'catalog_entry_not_remote_oauth':
+      return 'This Marketplace entry is not a remote OAuth connector, so it cannot be installed from here.'
+    case 'catalog_entry_invalid': {
+      const reason = typeof body?.reason === 'string' && body.reason ? ` (${body.reason})` : ''
+      return `This Marketplace entry cannot be installed${reason}. Report it to the Marketplace curator.`
+    }
+    case 'catalog_entry_name_mismatch':
+      return 'The Marketplace entry resolved to a different name or version. Return to the Marketplace and open it again.'
+    case 'catalog_grant_scope_not_allowed':
+      return 'This Marketplace entry does not offer this grant scope. Return to the Marketplace and pick one of its slots.'
+    case 'catalog_server_name_not_allowed':
+    case 'catalog_base_url_mismatch':
+      return 'The install request was rejected as invalid. Reload the page and try again.'
+    case 'server_name_in_use':
+    case 'install_in_progress':
+      return 'This slot is already installed, or another install of it is in progress.'
+    default:
+      return null
+  }
+}
+
 // ── Error mapping to human-readable UI text ──────────────────────────────────
 
 type CodedError = {
@@ -460,6 +612,8 @@ function describeClientIdConflict(conflict: unknown): string {
  */
 export function mapRemoteDiscoverError(error: unknown): string {
   const e = asCodedError(error)
+  const catalogMessage = describeCatalogRequestError(e.code, e.body)
+  if (catalogMessage) return catalogMessage
   if (e.code === 'discovery_failed') {
     return describeDiscoveryFailure(e.body)
   }
@@ -477,13 +631,41 @@ export function mapRemoteDiscoverError(error: unknown): string {
  */
 export function mapRemoteInstallError(
   error: unknown,
-  context: { callbackVariant?: RemoteCallbackVariant } = {}
+  context: { callbackVariant?: RemoteCallbackVariant; catalog?: boolean } = {}
 ): string {
   const e = asCodedError(error)
   const code = e.code
   const body = e.body
   const serverMessage =
     body && typeof body.message === 'string' && body.message.trim() ? body.message.trim() : ''
+
+  if (context.catalog) {
+    switch (code) {
+      case 'oauth_client_id_in_use':
+        // The user and context slots of one entry are two servers: reusing the first
+        // slot's app for the second is the expected way to hit this.
+        return `Each slot needs its own OAuth app. ${describeClientIdConflict(body?.conflict)}`
+      case 'catalog_slot_residue': {
+        const secretName =
+          typeof body?.secretName === 'string' && body.secretName ? body.secretName : ''
+        return `A client Secret left by an earlier install${
+          secretName ? ` (${secretName})` : ''
+        } blocks this slot, and nothing was installed. Freeing it is a manual repair: a cluster operator must delete that Secret before this slot can be installed.`
+      }
+      case 'transport_unreachable': {
+        const detail = body?.detail && typeof body.detail === 'object' ? body.detail : undefined
+        const httpStatus =
+          detail && typeof (detail as { httpStatus?: unknown }).httpStatus === 'number'
+            ? (detail as { httpStatus: number }).httpStatus
+            : 404
+        return describeCatalogTransportDead(httpStatus)
+      }
+      default: {
+        const catalogMessage = describeCatalogRequestError(code, body)
+        if (catalogMessage) return catalogMessage
+      }
+    }
+  }
 
   switch (code) {
     case 'mode_unsupported':
@@ -595,3 +777,33 @@ export function buildRemoteInstallRequest(input: {
 }
 
 type RemoteGrantScopeInput = InstallRemoteRequest['grantScope']
+
+/**
+ * Catalog-mode install body. It has no `serverName` and no `baseUrl` field to fill:
+ * the slot name and the URL are control-api's, taken from the entry.
+ */
+export function buildCatalogRemoteInstallRequest(input: {
+  target: Pick<RemoteCatalogInstallTarget, 'entry' | 'grantScope'>
+  mode: RemoteInstallMode
+  clientId?: string
+  clientSecret?: string
+  authorizationServer?: string
+  scopes?: string[]
+  confirmedUnverifiedScopes?: string[]
+}): InstallCatalogRemoteRequest {
+  const body: InstallCatalogRemoteRequest = {
+    catalogEntry: { name: input.target.entry.name, version: input.target.entry.version },
+    grantScope: input.target.grantScope,
+    mode: input.mode,
+  }
+  if (input.mode === 'pre-registered') {
+    body.clientId = input.clientId?.trim()
+    body.clientSecret = input.clientSecret
+  }
+  if (input.authorizationServer !== undefined) body.authorizationServer = input.authorizationServer
+  if (input.scopes !== undefined) body.scopes = input.scopes
+  if (input.confirmedUnverifiedScopes && input.confirmedUnverifiedScopes.length > 0) {
+    body.confirmedUnverifiedScopes = input.confirmedUnverifiedScopes
+  }
+  return body
+}

@@ -14,6 +14,27 @@ export function safeMarkdownHref(rawHref: string): string | null {
   return null
 }
 
+/**
+ * The strict link policy for Markdown whose author is not this deployment's operator
+ * (a catalog setup guide): only an absolute `https://` URL with a host survives.
+ * `http:`, `mailto:`, fragments, relative and protocol-relative paths, `data:` and
+ * `javascript:` all return null and are rendered as text.
+ */
+export function safeHttpsHref(rawHref: string): string | null {
+  const href = rawHref.trim()
+  if (/[\s\x00-\x1f\x7f]/.test(href)) return null
+  if (!/^https:\/\/[^/\\?#@]/.test(href)) return null
+  try {
+    const parsed = new URL(href)
+    if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '') {
+      return null
+    }
+  } catch {
+    return null
+  }
+  return href
+}
+
 export function parseInlineMarkdown(source: string, idPrefix = 'inline'): MarkdownInlineNode[] {
   const nodes: MarkdownInlineNode[] = []
   let cursor = 0

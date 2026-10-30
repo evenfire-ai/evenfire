@@ -1,13 +1,32 @@
 import type { ReactNode } from 'react'
-import type { RemoteAsEndpointHosts, RemoteGrantScope } from '../../lib/remoteMcp.types'
+import type {
+  RemoteAsEndpointHosts,
+  RemoteCatalogDrift,
+  RemoteCatalogInstallTarget,
+  RemoteGrantScope,
+} from '../../lib/remoteMcp.types'
 
 export type AddRemoteServerWizardProps = {
   /** Rendered create-page header (icon, title, back). */
   pageHeader: ReactNode
-  /** Called after a successful install (201). Redirects to the connectors list. */
+  /** Called after a successful install (201). The page picks the destination. */
   onInstalled: () => void
   /** Called when the operator cancels from the first step. */
   onCancel: () => void
+  /**
+   * Marketplace catalog mode: the URL, the server name and the grant scope belong to
+   * the entry and the slot, so none of them is editable or sent. Absent = manual mode.
+   */
+  catalog?: RemoteCatalogInstallTarget
+  /**
+   * Catalog mode: another install holds the slot (or is taking it). The page shows the
+   * message and returns to the Marketplace, whose card then reloads the slot state.
+   */
+  onSlotTaken?: (message: string) => void
+}
+
+export type CatalogDriftNoticeProps = {
+  drift: RemoteCatalogDrift
 }
 
 export type GrantScopeOption = {

@@ -2,6 +2,7 @@
 // The submit shape mirrors the frozen control-api contract
 // (routes/admin/registry.ts InstallOAuthInputSchema): `oauth.id` is NEVER sent —
 // control-api derives and validates it (D-B5).
+import type { RegistryRemoteOAuthBlock } from './api'
 import type { GenericConfigSuggestion, GenericOAuthKnobs } from './oauthGeneric.types'
 
 export type OAuthGrantScope = 'user' | 'context'
@@ -79,4 +80,29 @@ export type McpSecretSummary = {
   keys: string[]
   uid?: string
   resourceVersion?: string
+}
+
+/**
+ * A remote-OAuth catalog entry as the UI consumes it. The verdict is control-api's
+ * (`entry.remoteOAuth`); the UI only narrows the wire shape it was handed.
+ */
+export type RemoteOAuthCatalogView =
+  | {
+      valid: true
+      block: RegistryRemoteOAuthBlock
+      /** `mcp_server_meta.remoteEndpoints[0].url`: shown, never sent back. */
+      url: string
+      /** True only for a curator entry, the only one whose badge and guide are kept. */
+      trusted: boolean
+      /** The publishing scope of a non-curator entry (`@acme`), else null. */
+      publisher: string | null
+    }
+  | { valid: false; reason: string }
+
+/** The verification and provenance chip of a remote-OAuth entry. */
+export type RemoteOAuthProvenanceBadge = {
+  label: string
+  tone: 'verified' | 'unverified'
+  /** Longer explanation (the known-issue note), shown as a tooltip. */
+  title?: string
 }

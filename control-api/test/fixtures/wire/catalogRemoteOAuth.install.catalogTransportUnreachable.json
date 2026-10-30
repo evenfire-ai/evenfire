@@ -1,0 +1,11 @@
+{
+  "status": 400,
+  "body": {
+    "error": "transport_unreachable",
+    "detail": {
+      "probedUrl": "https://mcp.vercel.com/mcp",
+      "httpStatus": 404,
+      "suggestedBaseUrl": "https://mcp.vercel.com/"
+    }
+  }
+}

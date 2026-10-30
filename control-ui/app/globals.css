@@ -4888,6 +4888,35 @@ td.cu-registry-description {
   margin-top: var(--cu-space-1);
 }
 
+/* Remote wizard, Marketplace catalog mode: the curator's OAuth app setup guide. */
+.cu-remote-oauth-setup-guide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-2);
+}
+
+.cu-remote-oauth-setup-guide__body {
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-remote-oauth-setup-guide__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
+}
+
+.cu-remote-oauth-setup-guide__actions a.cu-btn {
+  text-decoration: none;
+}
+
+/* Remote wizard, catalog mode: verification and provenance of the entry. */
+.cu-remote-oauth-provenance {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
 /* Remote wizard: the exact scopes an Entra install asks the operator to confirm. */
 .cu-unverified-scopes {
   margin: var(--cu-space-1) 0;

@@ -1,0 +1,54 @@
+{
+  "status": 200,
+  "body": {
+    "id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+    "name": "@evenfire/broken-remote",
+    "version": "1.0.0",
+    "entry_type": "mcp-server",
+    "description": "Remote MCP connector",
+    "author": "catalog",
+    "contact_email": null,
+    "origin": "human-authored",
+    "category": "productivity",
+    "tags": [],
+    "visibility": "public",
+    "content_creator_tag": "api-owner",
+    "config_creator_tag": "api-owner",
+    "trust_level": "mid",
+    "quality_tier": "unverified",
+    "status": "published",
+    "channel": "stable",
+    "deprecated_at": null,
+    "version_major": 1,
+    "version_minor": 0,
+    "version_patch": 0,
+    "version_prerelease": null,
+    "downloads": 0,
+    "installs": 0,
+    "created_at": "2026-10-28T00:00:00.000Z",
+    "updated_at": "2026-10-28T00:00:00.000Z",
+    "revision": 1,
+    "server_mode": "remote",
+    "transport": "streamableHttp",
+    "recipe_type": null,
+    "mcp_server_meta": {
+      "remoteEndpoints": [
+        {
+          "url": "https://mcp.linear.app/mcp"
+        }
+      ],
+      "oauth": {
+        "source": "remote"
+      }
+    },
+    "recipe_meta": null,
+    "hook_meta": null,
+    "artifact_refs": {},
+    "owner_type": "org",
+    "owner_id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+    "remoteOAuth": {
+      "valid": false,
+      "reason": "setup_guide_required"
+    }
+  }
+}
