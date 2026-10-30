@@ -68,7 +68,6 @@ function makeRemoteServer(): McpServerCRD {
     namespace: 'mcp-server',
     uid: 'uid-remote-test-1234',
     spec: {
-      contextRef: 'ctx1',
       image: 'my-mcp-server:v1',
       transport: { type: 'streamableHttp', port: 3000 },
       remote: { baseUrl: 'https://mcp.example.com/mcp' },
