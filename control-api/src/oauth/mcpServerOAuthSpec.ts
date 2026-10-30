@@ -1,7 +1,7 @@
 /**
  * Shared reader for an OAuth McpServer's `spec.oauth` declaration.
  *
- * The grant-scope / oauthClientId / contextRef derivation is a security-relevant
+ * The grant-scope / oauthClientId derivation is a security-relevant
  * rule (it decides WHICH grant coordinate governs a server). It is consumed by
  * three seams that must never drift apart (D4):
  *   - the token broker (`routes/mcpOauth.ts`) — the LLM/tool-call rail;
@@ -72,10 +72,6 @@ export interface McpServerOAuthSpecInput {
   metadata?: { uid?: unknown; name?: unknown }
   spec?: {
     oauth?: McpServerOAuthDecl
-    // `spec.contextRef` is REQUIRED + singular on the CRD ("the context this
-    // server belongs to", mcpserver.yaml). It is the AUTHORITATIVE Context of a
-    // context-identity server — the shared grant coordinate — never the body.
-    contextRef?: unknown
     remote?: { baseUrl?: unknown }
   }
 }
@@ -85,8 +81,6 @@ export type GrantScope = 'user' | 'context'
 export interface ResolvedServerOAuth {
   oauthClientId: string
   grantScope: GrantScope
-  /** Authoritative Context of the server (spec.contextRef); undefined if absent. */
-  contextRef?: string
   /**
    * metadata.uid of the CR this resolution was read from — the installation
    * identity grant reads are fenced by. Undefined when the object carried none.
@@ -130,7 +124,7 @@ export function readCrUid(server: McpServerOAuthSpecInput): string | undefined {
 }
 
 /**
- * Derive `{ oauthClientId, grantScope, contextRef, crUid }` from a McpServer's
+ * Derive `{ oauthClientId, grantScope, crUid }` from a McpServer's
  * `spec.oauth`. Returns null when the server carries no usable OAuth id, so
  * callers fail closed. `grantScope` defaults to `'user'` for anything other
  * than the explicit `'context'` sentinel (U1: immutable per server, CEL-guarded).
@@ -139,10 +133,6 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
   const oauth = server.spec?.oauth
   if (!oauth || typeof oauth.id !== 'string' || oauth.id.length === 0) return null
   const grantScope: GrantScope = oauth.grantScope === 'context' ? 'context' : 'user'
-  const contextRef =
-    typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
-      ? server.spec.contextRef
-      : undefined
   const legacyProvider =
     readOAuthLane(oauth) === 'baked' &&
     typeof oauth.provider === 'string' &&
@@ -152,7 +142,6 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
   return {
     oauthClientId: oauth.id,
     grantScope,
-    contextRef,
     crUid: readCrUid(server),
     ...(legacyProvider ? { legacyProvider } : {}),
   }
@@ -164,12 +153,16 @@ export interface McpServerGrantKeyCoords {
   mcpServerName: string
   /** The mcp-servers namespace — the grant owner's `recipeNamespace`. */
   mcpServersNamespace: string
-  /**
-   * End-user identity, for `grantScope='user'` servers only. IGNORED for
-   * `context` servers, which key by the server's AUTHORITATIVE `contextRef`
-   * (server-side), never by any caller-supplied context value.
-   */
+  /** End-user identity, for `grantScope='user'` servers only; ignored otherwise. */
   userId?: string
+  /**
+   * The Context (its `metadata.name`) of a `grantScope='context'` grant; ignored
+   * otherwise. A server has no Context of its own, so the caller supplies it from
+   * an authenticated source it has already validated: the consenting user's
+   * session (mint, disconnect), the signed state (callback) or the calling Host
+   * (broker, presence). Never an unchecked body value.
+   */
+  contextId?: string
 }
 
 /**
@@ -180,8 +173,7 @@ export interface McpServerGrantKeyCoords {
  * the coordinate the flavor needs is absent, so every caller decides fail-open
  * vs fail-closed for itself:
  *   - `user`    → needs a non-empty `userId`; null otherwise.
- *   - `context` → keys by the server's AUTHORITATIVE `contextRef` (server-side,
- *                 NEVER a body value); null when the server carries none.
+ *   - `context` → needs a non-empty `contextId`; null otherwise.
  *
  * It intentionally does NOT read the token or touch the DB — it only maps a
  * resolved OAuth declaration + coordinates to a key.
@@ -196,15 +188,13 @@ export function buildMcpServerGrantKey(
   coords: McpServerGrantKeyCoords
 ): OAuthGrantKey | null {
   if (resolved.grantScope === 'context') {
-    // Shared identity is keyed by the server's authoritative Context, decoupled
-    // from any caller-supplied userId/contextId (no body-trust).
-    if (!resolved.contextRef) return null
+    if (typeof coords.contextId !== 'string' || coords.contextId.length === 0) return null
     return {
       grantKind: 'shared',
       ownerKind: 'mcpserver',
       recipeNamespace: coords.mcpServersNamespace,
       recipeName: coords.mcpServerName,
-      contextId: resolved.contextRef,
+      contextId: coords.contextId,
       oauthClientId: resolved.oauthClientId,
       crUid: resolved.crUid,
       ...(resolved.legacyProvider ? { legacyProvider: resolved.legacyProvider } : {}),
@@ -239,10 +229,14 @@ export interface ResolvedServerOAuthSubject {
    */
   decl: OAuthClientDecl
   grantScope: GrantScope
-  /** Authoritative Context (spec.contextRef); undefined if absent. */
-  contextRef?: string
   /** metadata.uid of the CR this subject was read from; undefined if absent. */
   crUid?: string
+  /**
+   * `resolveServerOAuth` of the same CR: the grant coordinate the broker and the
+   * presence rails key by. The callback derives its grant key from it, so the
+   * row it writes can never differ in any key field from the one they read.
+   */
+  coordinate: ResolvedServerOAuth
 }
 
 export type RemoteOAuthSpecIncoherence =
@@ -571,12 +565,9 @@ export function resolveServerOAuthSubject(
 ): ResolvedServerOAuthSubject | null {
   const oauth = server.spec?.oauth
   if (!oauth || typeof oauth.id !== 'string' || oauth.id.length === 0) return null
-  const grantScope: GrantScope = oauth.grantScope === 'context' ? 'context' : 'user'
-  const contextRef =
-    typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
-      ? server.spec.contextRef
-      : undefined
-  const crUid = readCrUid(server)
+  const coordinate = resolveServerOAuth(server)
+  if (!coordinate) return null
+  const { grantScope, crUid } = coordinate
   const lane = readOAuthLane(oauth)
 
   // ─── Remote lane (`source:'remote'`) ─────────────────────────────────────
@@ -602,7 +593,7 @@ export function resolveServerOAuthSubject(
       decl.clientIdRef = secretSource.clientIdRef
       decl.clientSecretRef = secretSource.clientSecretRef
     }
-    return { decl, grantScope, contextRef, crUid }
+    return { decl, grantScope, crUid, coordinate }
   }
 
   // ─── Generic self-hosted lane (`source:'generic'`, DEC-28) ────────────────
@@ -626,7 +617,7 @@ export function resolveServerOAuthSubject(
       decl.clientIdRef = secretSource.clientIdRef
       decl.clientSecretRef = secretSource.clientSecretRef
     }
-    return { decl, grantScope, contextRef, crUid }
+    return { decl, grantScope, crUid, coordinate }
   }
 
   // ─── Baked lane (byte-identical to before) ───────────────────────────────
@@ -644,7 +635,7 @@ export function resolveServerOAuthSubject(
       backgroundAccess: oauth.backgroundAccess === true,
     },
     grantScope,
-    contextRef,
     crUid,
+    coordinate,
   }
 }

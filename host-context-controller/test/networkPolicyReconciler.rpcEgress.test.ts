@@ -35,7 +35,6 @@ function makeServerCache(
       name: s.name,
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'ctx-a',
         transport: {
           type: 'streamableHttp',
           url: `http://${s.name}:${s.port ?? 3000}/mcp`,

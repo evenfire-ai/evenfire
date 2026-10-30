@@ -166,7 +166,7 @@ describe('getAccessToken — entra-v2 refresh wire (I5, I7)', () => {
 
   beforeAll(async () => {
     gateway = new MockGateway(config.mcpServersNamespace)
-    await seedContext(gateway, config.mcpServersNamespace, 'ctx-a')
+    await seedContext(gateway, config.contextsNamespace, 'ctx-a')
     workIq = await installWorkIqServer({ scopes: [WORKIQ_GUID_SCOPE], gateway })
   })
 

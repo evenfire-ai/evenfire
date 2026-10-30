@@ -180,4 +180,31 @@ describe('connector edit agent access', () => {
     expect(screen.getByRole('textbox', { name: 'Egress rules' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Save egress' })).toBeEnabled()
   })
+
+  it('lists only agents whose named Context enables the connector', async () => {
+    vi.mocked(api.getMcpServer).mockResolvedValue({
+      metadata: { name: 'search' },
+      spec: { image: 'example/search:latest' },
+    })
+    // ctx-b enables the connector and carries ctx-a only as its alias; ctx-a does not enable it.
+    vi.mocked(api.getContexts).mockResolvedValue(
+      buildContextList([
+        buildContextResource({
+          metadata: { name: 'ctx-b', resourceVersion: 'rv-1' },
+          spec: { contextId: 'ctx-a', mcpServers: ['search'] },
+        }),
+        buildContextResource({ metadata: { name: 'ctx-a', resourceVersion: 'rv-2' } }),
+      ])
+    )
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [{ metadata: { name: 'agent-alpha' }, spec: { host: 'Alpha', contextRef: 'ctx-a' } }],
+    })
+
+    render(<EditMcpServerPage />)
+
+    expect(
+      await screen.findByText('No agents have access to this connector yet.')
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Alpha')).not.toBeInTheDocument()
+  })
 })

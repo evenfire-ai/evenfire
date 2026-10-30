@@ -23,7 +23,7 @@ MCP Proxy (:8083)
 MCP Server (e.g. mongodb-mcp:3000, stdio-bridge:3000)
 ```
 
-1. **Server discovery** -- `HccClient` polls `GET {HCC_API_URL}/api/v1/mcpservers` on a configurable interval. Each server entry includes a name, transport URL, readiness status, and context ref. Results are cached; stale/expired cache affects health probes.
+1. **Server discovery** -- `HccClient` polls `GET {HCC_API_URL}/api/v1/mcpservers` on a configurable interval. Each server entry includes a name, transport URL, enabled flag, and readiness status; a server has no owning Context (Context membership lives in `Context.spec.mcpServers`). Results are cached; stale/expired cache affects health probes.
 2. **Routing** -- `Router` maintains a `Map<name, ServerRoute>`. On each poll, it diffs the new list against the current map and logs additions/removals.
 3. **Forwarding** -- `HttpForwarder` pipes the incoming request body to the backend URL, buffers initial response chunks before committing headers (to avoid silent truncation on oversized responses), and enforces `maxResponseSize` and `requestTimeout`.
 4. **Metrics** -- Prometheus-format counters at `GET /metrics`: `mcp_proxy_requests_total`, `mcp_proxy_active_connections`, `mcp_proxy_server_health`.
@@ -31,26 +31,27 @@ MCP Server (e.g. mongodb-mcp:3000, stdio-bridge:3000)
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MCP_PROXY_PORT` | `8083` | HTTP listen port |
-| `HCC_API_URL` | `http://host-context-controller.control-plane:8081` | HCC API base URL |
-| `HCC_POLL_INTERVAL` | `30000` | Server discovery poll interval (ms) |
-| `HCC_CACHE_TTL` | `120000` | Cache staleness threshold (ms) -- health warns |
-| `HCC_CACHE_EXPIRY` | `300000` | Cache expiry threshold (ms) -- readiness fails |
-| `MCP_PROXY_REQUEST_TIMEOUT` | `30000` | Per-request forwarding timeout (ms) |
-| `MCP_PROXY_MAX_RESPONSE_SIZE` | `10485760` | Max response body size (10 MB) |
-| `CLERUM_DEV_MODE` | `false` | Dev mode: skip HCC polling, use static server list |
-| `MCP_PROXY_SERVERS` | `[]` | JSON array of `ServerRoute` objects (dev mode only) |
-| `LOG_LEVEL` | `info` | Log verbosity |
+| Variable                      | Default                                             | Description                                         |
+| ----------------------------- | --------------------------------------------------- | --------------------------------------------------- |
+| `MCP_PROXY_PORT`              | `8083`                                              | HTTP listen port                                    |
+| `HCC_API_URL`                 | `http://host-context-controller.control-plane:8081` | HCC API base URL                                    |
+| `HCC_POLL_INTERVAL`           | `30000`                                             | Server discovery poll interval (ms)                 |
+| `HCC_CACHE_TTL`               | `120000`                                            | Cache staleness threshold (ms) -- health warns      |
+| `HCC_CACHE_EXPIRY`            | `300000`                                            | Cache expiry threshold (ms) -- readiness fails      |
+| `MCP_PROXY_REQUEST_TIMEOUT`   | `30000`                                             | Per-request forwarding timeout (ms)                 |
+| `MCP_PROXY_MAX_RESPONSE_SIZE` | `10485760`                                          | Max response body size (10 MB)                      |
+| `CLERUM_DEV_MODE`             | `false`                                             | Dev mode: skip HCC polling, use static server list  |
+| `MCP_PROXY_SERVERS`           | `[]`                                                | JSON array of `ServerRoute` objects (dev mode only) |
+| `LOG_LEVEL`                   | `info`                                              | Log verbosity                                       |
 
 ## Local Development
 
 ```bash
 cd mcp-proxy
 npm install
+MCP_HOST=localhost
 CLERUM_DEV_MODE=true \
-MCP_PROXY_SERVERS='[{"name":"echo","url":"http://localhost:3001/mcp","contextRef":"dev","managed":true,"ready":true,"port":3001}]' \
+MCP_PROXY_SERVERS='[{"name":"echo","url":"http://'"$MCP_HOST"':3001/mcp","managed":true,"ready":true,"port":3001}]' \
 npm run dev
 ```
 

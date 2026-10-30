@@ -3,6 +3,8 @@ import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
 import {
+  type CallbackDeps,
+  type CallbackResult,
   type CallbackTarget,
   type McpServerOAuthReader,
   type McpServerOAuthSubject,
@@ -21,20 +23,19 @@ import {
   resolveServerOAuthSubject,
 } from '../../oauth/mcpServerOAuthSpec.js'
 import { isValidInstallNonce, isValidRemoteServerNameSegment } from '../../oauth/remoteCallback.js'
-import { userHasContextEnablingMcpServer } from '../../services/access/mcpInvocable.js'
-import { getUserContexts } from '../../services/directory/index.js'
+import {
+  userHasContextEnablingMcpServer,
+  userReachesContext,
+} from '../../services/access/mcpInvocable.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 
 /**
- * OAuth callback receiver. Hit directly by provider redirects — no Clerum
- * cookie, no Bearer token. Authentication is the signed `state` parameter
- * (HMAC-bound to recipeNs/recipeName/userId/oauthClientId at authorize-URL
- * issuance, re-verified here).
- *
- * Spec §9.9 / Decision 20.
+ * The production dependencies of the callback handler, closed over `gateway`.
+ * Exported so tests drive the handler through the same readers (and the same
+ * access rules) the route uses instead of hand-written stand-ins; a test only
+ * swaps the network edge (`fetchFn`) or the db.
  */
-export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
-  const router = Router()
+export function buildOAuthCallbackDeps(gateway: K8sGateway): CallbackDeps {
   const encryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
 
   const recipeReader: RecipeReader = {
@@ -76,9 +77,8 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
 
   // U5: resolve an OAuth McpServer subject when the signed state carries
   // `subjectKind:'mcp'`. Reads the CR from the mcp-servers namespace (the
-  // authoritative source of oauthClientId / grantScope / contextRef — never the
-  // state) and surfaces the namespace so grant persistence + Secret reads stay
-  // pinned to it.
+  // authoritative source of oauthClientId / grantScope — never the state) and
+  // surfaces the namespace so grant persistence + Secret reads stay pinned to it.
   const mcpServerReader: McpServerOAuthReader = {
     async read(mcpServerName): Promise<McpServerOAuthSubject | null> {
       let server: McpServerOAuthSpecInput
@@ -101,6 +101,118 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
     },
   }
 
+  return {
+    db: { query: (text, values) => pool.query(text, values) },
+    recipeReader,
+    secretReader,
+    mcpServerReader,
+    // Shared-identity mcp bootstrap: the signed Context must still be live,
+    // allowlist the server and be reached by the user — the same rule the
+    // authorize-URL mint applies.
+    contextAccessReader: (userId, contextName, mcpServerName) =>
+      userReachesContext({
+        gateway,
+        contextsNamespace: config.contextsNamespace,
+        hostsNamespace: config.hostsNamespace,
+        userId,
+        contextName,
+        mcpServerName,
+        requireAllowlist: true,
+      }),
+    // Per-user mcp consent requires some Context the user reaches (directly or
+    // through an assigned agent) to still allowlist the server — the same rule
+    // the authorize-URL mint applies.
+    userServerAccessReader: (userId, mcpServerName) =>
+      userHasContextEnablingMcpServer({
+        gateway,
+        contextsNamespace: config.contextsNamespace,
+        hostsNamespace: config.hostsNamespace,
+        userId,
+        mcpServerName,
+      }),
+    fetchFn: (input, init) => fetch(input, init),
+    stateSecret: config.oauthStateHmacSecret,
+    encryptionKey,
+  }
+}
+
+/**
+ * The HTTP answer for each callback outcome. Exhaustive over `CallbackResult`:
+ * a new kind without a mapping fails the typecheck, and an unknown value at
+ * runtime still answers 500 instead of leaving the provider redirect hanging.
+ */
+function sendCallbackResult(
+  res: Response,
+  result: CallbackResult,
+  integrationId: string
+): Response {
+  switch (result.kind) {
+    case 'ok':
+      return res
+        .status(200)
+        .type('html')
+        .send(
+          renderSuccessHtml(result.provider, integrationId, {
+            backgroundRequested: result.backgroundRequested,
+            backgroundEnabled: result.backgroundEnabled,
+            source: result.source,
+            // From the signed state, never from the URL segment.
+            mcpServerName: result.mcpServerName,
+          })
+        )
+    case 'invalid_state':
+      return res.status(400).json({ error: 'invalid_state', reason: result.reason })
+    case 'oauth_state_outdated':
+      return res.status(400).json({ error: 'oauth_state_outdated' })
+    case 'issuer_mismatch':
+      // RFC 9207 mix-up defence — no issuer echo. 400, consistent with the
+      // sibling invalid_state mapping.
+      return res.status(400).json({ error: 'issuer_mismatch' })
+    case 'issuer_binding_required':
+      // RFC 9207 mix-up defence, absence case: the remote server pinned no
+      // issuer at install, so the shared remote callback cannot attribute the
+      // code. Fail closed — same 400 class, distinct error for operator triage.
+      return res.status(400).json({ error: 'issuer_binding_required' })
+    case 'callback_base_url_unconfigured':
+      return res.status(503).json({ error: 'callback_base_url_unconfigured' })
+    case 'unknown_oauth_client':
+      return res.status(400).json({ error: 'unknown_oauth_client' })
+    case 'recipe_not_found':
+      return res.status(404).json({ error: 'recipe_not_found' })
+    case 'server_not_found':
+      return res.status(404).json({ error: 'server_not_found' })
+    case 'context_membership_denied':
+      return res.status(403).json({ error: 'context_membership_denied' })
+    case 'remote_oauth_spec_incoherent':
+      return res.status(409).json({ error: 'remote_oauth_spec_incoherent', reason: result.reason })
+    case 'secret_missing':
+      return res.status(503).json(integrationNotConfigured(integrationId, result.secret))
+    case 'unsupported_provider':
+      return res.status(500).json({ error: 'unsupported_provider', provider: result.provider })
+    case 'provider_token_exchange_failed':
+      return res
+        .status(502)
+        .json({ error: 'provider_token_exchange_failed', status: result.status })
+    case 'provider_response_invalid':
+      return res.status(502).json({ error: 'provider_response_invalid', detail: result.detail })
+    default:
+      result satisfies never
+      return res.status(500).json({ error: 'internal_error' })
+  }
+}
+
+/**
+ * OAuth callback receiver. Hit directly by provider redirects — no Clerum
+ * cookie, no Bearer token. Authentication is the signed `state` parameter
+ * (HMAC-bound to recipeNs/recipeName/userId/oauthClientId at authorize-URL
+ * issuance, re-verified here).
+ *
+ * Spec §9.9 / Decision 20.
+ */
+export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
+  const router = Router()
+  const deps = buildOAuthCallbackDeps(gateway)
+
   async function completeCallback(
     req: Request,
     res: Response,
@@ -121,83 +233,9 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
       const result = await handleOAuthCallback(
         // `iss` goes through raw: each remote variant decides how a malformed value reads.
         { target, code, state, iss: req.query.iss },
-        {
-          db: { query: (text, values) => pool.query(text, values) },
-          recipeReader,
-          secretReader,
-          mcpServerReader,
-          // Shared-identity mcp bootstrap requires the consenting user to be a
-          // member of the server's Context (defence in depth).
-          userContextsReader: getUserContexts,
-          // Per-user mcp consent requires some Context the user reaches
-          // (directly or through an assigned agent) to still allowlist the
-          // server — the same rule the authorize-URL mint applies.
-          userServerAccessReader: (userId, mcpServerName) =>
-            userHasContextEnablingMcpServer({
-              gateway,
-              mcpServersNamespace: config.mcpServersNamespace,
-              hostsNamespace: config.hostsNamespace,
-              userId,
-              mcpServerName,
-            }),
-          fetchFn: (input, init) => fetch(input, init),
-          stateSecret: config.oauthStateHmacSecret,
-          encryptionKey,
-        }
+        deps
       )
-
-      switch (result.kind) {
-        case 'ok':
-          return res
-            .status(200)
-            .type('html')
-            .send(
-              renderSuccessHtml(result.provider, integrationId, {
-                backgroundRequested: result.backgroundRequested,
-                backgroundEnabled: result.backgroundEnabled,
-                source: result.source,
-                // From the signed state, never from the URL segment.
-                mcpServerName: result.mcpServerName,
-              })
-            )
-        case 'invalid_state':
-          return res.status(400).json({ error: 'invalid_state', reason: result.reason })
-        case 'issuer_mismatch':
-          // RFC 9207 mix-up defence — no issuer echo. 400, consistent with the
-          // sibling invalid_state mapping.
-          return res.status(400).json({ error: 'issuer_mismatch' })
-        case 'issuer_binding_required':
-          // RFC 9207 mix-up defence, absence case: the remote server pinned no
-          // issuer at install, so the shared remote callback cannot attribute the
-          // code. Fail closed — same 400 class, distinct error for operator triage.
-          return res.status(400).json({ error: 'issuer_binding_required' })
-        case 'callback_base_url_unconfigured':
-          return res.status(503).json({ error: 'callback_base_url_unconfigured' })
-        case 'unknown_oauth_client':
-          return res.status(400).json({ error: 'unknown_oauth_client' })
-        case 'recipe_not_found':
-          return res.status(404).json({ error: 'recipe_not_found' })
-        case 'server_not_found':
-          return res.status(404).json({ error: 'server_not_found' })
-        case 'server_missing_context':
-          return res.status(400).json({ error: 'server_missing_context' })
-        case 'context_membership_denied':
-          return res.status(403).json({ error: 'context_membership_denied' })
-        case 'remote_oauth_spec_incoherent':
-          return res
-            .status(409)
-            .json({ error: 'remote_oauth_spec_incoherent', reason: result.reason })
-        case 'secret_missing':
-          return res.status(503).json(integrationNotConfigured(integrationId, result.secret))
-        case 'unsupported_provider':
-          return res.status(500).json({ error: 'unsupported_provider', provider: result.provider })
-        case 'provider_token_exchange_failed':
-          return res
-            .status(502)
-            .json({ error: 'provider_token_exchange_failed', status: result.status })
-        case 'provider_response_invalid':
-          return res.status(502).json({ error: 'provider_response_invalid', detail: result.detail })
-      }
+      return sendCallbackResult(res, result, integrationId)
     } catch (err) {
       next(err)
     }

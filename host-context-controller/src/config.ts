@@ -426,7 +426,7 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
 
 /**
  * Parse CLERUM_MCP_SERVERS JSON for dev mode.
- * Format: [{"name": "...", "spec": {"contextRef": "...", "transport": {...}}}]
+ * Format: [{"name": "...", "spec": {"image": "...", "transport": {...}}}]
  */
 function parseDevMcpServers(): McpServerCRD[] {
   const serversJson = process.env.CLERUM_MCP_SERVERS
@@ -693,11 +693,18 @@ export const config: Config = {
     'us-central1-docker.pkg.dev/your-gcp-project/clerum/mcp-host:0.6.0'
   )!,
   hostImagePullPolicy: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY', 'Always') as
-    'Always' | 'IfNotPresent' | 'Never',
+    | 'Always'
+    | 'IfNotPresent'
+    | 'Never',
   statelessImagePullPolicy: getEnv('CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY', '') as
-    '' | 'Always' | 'IfNotPresent' | 'Never',
+    | ''
+    | 'Always'
+    | 'IfNotPresent'
+    | 'Never',
   mcpServerImagePullPolicy: getEnv('CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY', 'IfNotPresent') as
-    'Always' | 'IfNotPresent' | 'Never',
+    | 'Always'
+    | 'IfNotPresent'
+    | 'Never',
   hostImagePullSecretName: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', 'clerum')!,
   hostPort: getEnvInt('CONTEXT_MAPPER_HOST_PORT', 8080),
   hostConfigMapName: getEnv('CONTEXT_MAPPER_HOST_CONFIGMAP_NAME', 'mcp-host-config')!,
@@ -742,7 +749,9 @@ export const config: Config = {
     'us-central1-docker.pkg.dev/your-gcp-project/clerum/workspace-files-controller:0.1.0'
   )!,
   wfcImagePullPolicy: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_POLICY', 'IfNotPresent') as
-    'Always' | 'IfNotPresent' | 'Never',
+    | 'Always'
+    | 'IfNotPresent'
+    | 'Never',
   wfcImagePullSecretName: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET', 'clerum')!,
   wfcPort: getEnvInt('CONTEXT_MAPPER_WFC_PORT', 8086),
   wfcInitImage: getEnv('CONTEXT_MAPPER_WFC_INIT_IMAGE', 'busybox:1.36')!,

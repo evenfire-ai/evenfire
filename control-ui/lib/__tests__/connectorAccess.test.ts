@@ -273,16 +273,38 @@ describe('hostOwnedContextNamesForConnector', () => {
     expect(hostOwnedContextNamesForConnector(contexts, hosts, 'search')).toEqual(['agent-scope'])
   })
 
-  it('resolves a Host contextRef through a legacy Context alias', () => {
+  it('resolves a Host contextRef by Context name, not through a legacy alias', () => {
     const contexts: ContextResource[] = [
       {
         metadata: { name: 'ctx-resource' },
         spec: { contextId: 'ctx-wire', mcpServers: ['search'] },
       },
     ]
-    const hosts = [{ metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-wire' } }]
+    const byName = [{ metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-resource' } }]
+    const byAlias = [{ metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-wire' } }]
 
     expect(contextNamesForConnector(contexts, 'search')).toEqual(['ctx-wire'])
-    expect(hostOwnedContextNamesForConnector(contexts, hosts, 'search')).toEqual(['ctx-wire'])
+    expect(hostOwnedContextNamesForConnector(contexts, byName, 'search')).toEqual(['ctx-resource'])
+    expect(hostOwnedContextNamesForConnector(contexts, byAlias, 'search')).toEqual([])
+  })
+
+  it('owns a scope only through the Context a Host names exactly', () => {
+    // ctx-b carries ctx-a only as its alias; the agent reaches ctx-a, which lacks the connector.
+    const contexts: ContextResource[] = [
+      { metadata: { name: 'ctx-b' }, spec: { contextId: 'ctx-a', mcpServers: ['search'] } },
+      { metadata: { name: 'ctx-a' }, spec: { contextId: 'ctx-a', mcpServers: [] } },
+    ]
+    const hosts = [{ metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-a' } }]
+
+    expect(hostOwnedContextNamesForConnector(contexts, hosts, 'search')).toEqual([])
+  })
+
+  it('does not match a Host contextRef that differs only by whitespace', () => {
+    const contexts: ContextResource[] = [
+      { metadata: { name: 'ctx-a' }, spec: { contextId: 'ctx-a', mcpServers: ['search'] } },
+    ]
+    const hosts = [{ metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-a ' } }]
+
+    expect(hostOwnedContextNamesForConnector(contexts, hosts, 'search')).toEqual([])
   })
 })
