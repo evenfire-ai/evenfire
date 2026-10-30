@@ -110,12 +110,19 @@ if [ "$action" = install ]; then
 fi
 tmp=$(/usr/bin/mktemp -d /var/tmp/evenfire-update.XXXXXX); /usr/bin/chmod 700 "$tmp"
 trap '/usr/bin/rm -rf "$tmp"' EXIT HUP INT TERM
+log="$stage/package-manager.log"
 copy_verified() {
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
   /usr/bin/cp -- "$1" "$2"; /usr/bin/chmod 600 "$2"
   [ "$(/usr/bin/sha256sum "$2" | /usr/bin/awk '{print $1}')" = "$3" ]
 }
-install_pkg() { if [ "$kind" = deb ]; then /usr/bin/dpkg --install "$1"; else /usr/bin/rpm --upgrade --oldpackage "$1"; fi; }
+install_pkg() {
+  if [ "$kind" = deb ]; then
+    /usr/bin/dpkg --install "$1" >>"$log" 2>&1
+  else
+    /usr/bin/rpm --upgrade --oldpackage "$1" >>"$log" 2>&1
+  fi
+}
 version_now() {
   if [ "$kind" = deb ]; then /usr/bin/dpkg-query --show --showformat='@@DPKG_VERSION@@' evenfire
   else /usr/bin/rpm --query --queryformat '%{VERSION}' evenfire; fi
@@ -153,6 +160,11 @@ root="$1"; stage="$2"; id="$3"; kind="$4"; target="$5"; targetHash="$6"; rollbac
 exe="$9"; version="@@ARG10@@"; targetAsar="@@ARG11@@"; capable="@@ARG12@@"; parent="@@ARG13@@"
 oldVersion="@@ARG14@@"; oldAsar="@@ARG15@@"; pending="@@ARG16@@"; rootB64="@@ARG17@@"; log="$stage/install.log"
 fail() { printf '%s\n' "$1" >> "$log"; exit 1; }
+version_now() {
+  if [ "$kind" = deb ]; then /usr/bin/dpkg-query --show --showformat='@@DPKG_VERSION@@' evenfire
+  else /usr/bin/rpm --query --queryformat '%{VERSION}' evenfire; fi
+}
+asar_now() { /usr/bin/sha256sum "$(/usr/bin/dirname "$exe")/resources/app.asar" | /usr/bin/awk '{print $1}'; }
 [ "$stage" = "$root/$id" ] && [ "$pending" = "$root/pending.json" ] || fail 'staging path mismatch'
 [ ! -L "$stage" ] && [ -f "$stage/operation.json" ] || fail 'staging record missing'
 grep -q "\"id\":\"$id\"" "$stage/operation.json" || fail 'operation record mismatch'
@@ -219,10 +231,21 @@ $currentVersion = [string]$plan.currentVersion
 $currentAsar = [string]$plan.currentAsar
 $log = Join-Path $stage 'install.log'
 function Fail([string]$Message) { Add-Content -LiteralPath $log -Value $Message; throw $Message }
+function Test-FullyQualifiedWindowsPath([string]$Candidate) {
+  try {
+    $root = [System.IO.Path]::GetPathRoot($Candidate)
+    if (!$root) { return $false }
+    $driveRooted = $root -match '^[A-Za-z]:\\$'
+    $uncRooted = $root -match '^\\\\[^\\]+\\[^\\]+\\$'
+    if (!$driveRooted -and !$uncRooted) { return $false }
+    [void][System.IO.Path]::GetFullPath($Candidate)
+    return $true
+  } catch { return $false }
+}
 if ($operationId -notmatch '^[0-9a-f-]{36}$') { Fail 'invalid operation id' }
 if ($setupDigest -notmatch '^[a-f0-9]{64}$' -or $targetAsar -notmatch '^[a-f0-9]{64}$') { Fail 'invalid package digest' }
 foreach ($candidate in @($stageRoot, $stage, $pendingPath, $installRoot, $setup)) {
-  if (!$candidate -or ![System.IO.Path]::IsPathFullyQualified($candidate)) { Fail 'invalid installation path' }
+  if (!$candidate -or !(Test-FullyQualifiedWindowsPath $candidate)) { Fail 'invalid installation path' }
 }
 if ($stage -ne (Join-Path $stageRoot $operationId)) { Fail 'staging path mismatch' }
 if ($pendingPath -ne (Join-Path $stageRoot 'pending.json')) { Fail 'pending pointer path mismatch' }

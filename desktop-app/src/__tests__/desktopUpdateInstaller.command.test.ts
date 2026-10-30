@@ -117,6 +117,10 @@ describe('Windows updater helper process inputs', () => {
     expect(encodedIndex).toBeGreaterThanOrEqual(0)
     const program = Buffer.from(launch.args[encodedIndex + 1]!, 'base64').toString('utf16le')
     expect(program).not.toContain("O''Connor")
+    expect(program).not.toContain('IsPathFullyQualified')
+    expect(program).toContain('Test-FullyQualifiedWindowsPath')
+    expect(program).toContain("$root -match '^[A-Za-z]:\\\\$'")
+    expect(program).toContain("$root -match '^\\\\\\\\[^\\\\]+\\\\[^\\\\]+\\\\$'")
     expect(JSON.parse(launch.standardInput)).toMatchObject({
       installRoot,
       operationId,
@@ -272,6 +276,11 @@ describe('Linux updater helper executable identity', () => {
     expect(rootScript).toContain('PATH=/usr/bin:/bin; export PATH')
     expect(launch.args).not.toContain('/environment-selected/OtherExecutable')
     expect(launch.args).toContain('/usr/lib/evenfire/Evenfire')
-    expect(rootScript).toContain('/usr/bin/dpkg-query')
+    expect(rootScript).toContain('>>"$log" 2>&1')
+    expect(rootScript).toContain('printf installed')
+    expect(launch.standardInput).toContain('version_now() {')
+    expect(launch.standardInput).toContain('asar_now() {')
+    expect(launch.standardInput).toContain('"$(version_now)" != "$version"')
+    expect(launch.standardInput).toContain('"$(asar_now)" != "$targetAsar"')
   })
 })
