@@ -97,6 +97,55 @@ describe('pinnedFetch — the socket pins to the validated IP (R2-L1)', () => {
     expect(seen.invoked).toBe(false)
   })
 
+  it('preserves temporary DNS failure as a typed transport cause', async () => {
+    const dnsError = Object.assign(new Error('temporary name resolution failure'), {
+      code: 'EAI_AGAIN',
+    })
+    const transport = observingTransport()
+    const result = await pinnedFetch('https://as.example.com/token', 'test', {
+      resolveDns: async () => {
+        throw dnsError
+      },
+      transport: transport.transport,
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { kind: 'transport_failed', cause: 'transient_dns' },
+    })
+    expect(transport.seen.invoked).toBe(false)
+  })
+
+  it('does not classify a provider timeout diagnostic as the request deadline', async () => {
+    const result = await pinnedFetch('https://as.example.com/token', 'test', {
+      resolveDns: async () => [VALIDATED_IP],
+      transport: async () => {
+        throw new Error('upstream timeout while sending the request')
+      },
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { kind: 'transport_failed', cause: 'transport_error' },
+    })
+  })
+
+  it('classifies the actual bounded deadline independently from its error message', async () => {
+    const result = await pinnedFetch('https://as.example.com/token', 'test', {
+      timeoutMs: 1,
+      resolveDns: async () => [VALIDATED_IP],
+      transport: input =>
+        new Promise((_resolve, reject) => {
+          input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })
+        }),
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { kind: 'transport_failed', cause: 'request_deadline' },
+    })
+  })
+
   it('rejects a public-to-private DNS change before the next request is connected', async () => {
     let resolutions = 0
     let secondTransportCalled = false
@@ -152,7 +201,10 @@ describe('pinnedFetch — the socket pins to the validated IP (R2-L1)', () => {
     const result = await pending
 
     expect(observedSignal?.aborted).toBe(true)
-    expect(result).toMatchObject({ ok: false, error: { kind: 'transport_failed' } })
+    expect(result).toMatchObject({
+      ok: false,
+      error: { kind: 'transport_failed', cause: 'caller_cancelled' },
+    })
   })
 
   it('does not resolve an endpoint after caller cancellation', async () => {
@@ -168,7 +220,10 @@ describe('pinnedFetch — the socket pins to the validated IP (R2-L1)', () => {
       },
     })
 
-    expect(result).toMatchObject({ ok: false, error: { kind: 'transport_failed' } })
+    expect(result).toMatchObject({
+      ok: false,
+      error: { kind: 'transport_failed', cause: 'caller_cancelled' },
+    })
     expect(resolverCalled).toBe(false)
   })
 })
