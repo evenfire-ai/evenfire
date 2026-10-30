@@ -357,6 +357,13 @@ export async function publishCopy(deps: Dependencies, input: CopyInput): Promise
         throw error;
       }
       await deps.manifests.markCommittedMany(client, input.requestId, stagedKeys);
+      // The recorded activity commits with the copy: a throw rolls it back and
+      // the existing failure path cleans the staged blobs. Folders-only copies
+      // record nothing.
+      const copiedFileIds = reserved
+        .filter((node) => node.kind === "file")
+        .map((node) => node.resourceId);
+      if (copiedFileIds.length > 0) await input.onPublished?.(client, copiedFileIds);
       await input.audit.record(auditEvent(input, root.resourceId, "succeeded"), client);
       deadline(input);
     }, { deadlineAtMs: input.deadlineAtMs, signal: input.signal, now: input.now });

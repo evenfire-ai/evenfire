@@ -147,6 +147,7 @@ function planeWith(build: (now: () => number) => ServingDeps["rateLimit"]): Plan
     } as unknown as ServingDeps["writeService"],
     metrics,
     rateLimit: build(() => clock.t),
+    agentActivity: { record: async () => "recorded" as const },
     now: () => clock.t,
   };
   return { deps, handler: new GfsServingHandler(deps), clock, metrics, authorizeCalls, store };

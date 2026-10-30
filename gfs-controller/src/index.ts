@@ -15,6 +15,7 @@ import { resolveAuthzContext } from "./authz/subjectResolver";
 import { createWriterCleanupRunner } from "./cleanup";
 import { loadConfig } from "./config";
 import { PgResourceStore } from "./db/resourceStore";
+import { recordAgentFileActivity } from "./db/userFileActivity";
 import { GfsWriteService, PgTransactor } from "./db/writeStore";
 import { PgBlobStagingStore, reconcileExpiredBlobs } from "./db/blobStaging";
 import { GfsMetrics } from "./metrics";
@@ -228,6 +229,13 @@ async function main(): Promise<void> {
       } : {}),
       metrics,
       rateLimit,
+      // Agent content reads, writes and copies are recorded for the user the
+      // run is bound to. Reads run on the pool as one autocommit statement (the
+      // read path has no transaction); writes and copies pass their own client.
+      agentActivity: {
+        record: (hostSubject, runId, resourceIds) =>
+          recordAgentFileActivity(pool, hostSubject, runId, resourceIds),
+      },
       // Upload mutation and capability advertisement are writer-only. Reader
       // replicas deliberately do not expose a v2 capability even if an
       // operator accidentally carries the same tuning env into both pods.

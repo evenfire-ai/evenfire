@@ -7,7 +7,8 @@ import { type AuthzContext, auditAttribution } from "../authz/permissionClient";
 import type { GfsPermission } from "../authz/resolve";
 import { GfsSubjectResolutionDeniedError } from "../authz/subjectResolver";
 import { checkTokenCeiling } from "../authz/tokenCeiling";
-import type { GfsWriteService } from "../db/writeStore";
+import { recordUserFileActivity } from "../db/userFileActivity";
+import type { GfsWriteService, TxClient } from "../db/writeStore";
 import { LogThrottle } from "../logThrottle";
 import type { GfsMetrics } from "../metrics";
 import { type RateLimiter, RateLimitExceededError } from "../quota/rateLimit";
@@ -19,6 +20,8 @@ import type {
   UploadSessionReceipt,
 } from "../upload/uploadSession";
 import { normalizeResourceId, PathError } from "../storage/paths";
+import type { AgentActivityStatus } from "../db/userFileActivity";
+import { AgentActivityStatusReporter, attributionRunOf } from "./agentActivity";
 import { type CopyRouteDeps, executeCopyRoute } from "./copyRoute";
 import { ok, toResponse } from "./envelope";
 import { GfsError } from "./errors";
@@ -122,6 +125,19 @@ export interface ServingDeps {
   /** Capability response is injected so PR1 can remain disabled and testable. */
   uploadCapabilities?: () => GfsUploadCapabilities;
   uploadService?: GfsUploadSessionService;
+  /**
+   * Records an agent's content read, write or copy for the user its Desktop chat
+   * run is bound to (D9, D16). Required: a serving handler must be able to
+   * attribute agent activity, and a failing record must fail the request instead
+   * of silently dropping the row.
+   */
+  agentActivity: {
+    record(
+      hostSubject: string,
+      runId: string,
+      resourceIds: string[],
+    ): Promise<AgentActivityStatus>;
+  };
 }
 
 export interface GfsUploadCapabilities {
@@ -257,9 +273,12 @@ function abortConnectionHeader(req: IncomingMessage): Record<string, string> | u
 export class GfsServingHandler {
   /** Keyed by kind and hashed subject; bounds the rate_limit_denied line volume. */
   private readonly denialLogThrottle: LogThrottle;
+  /** Throttles the unattributed-agent-activity line per run (D18, D23). */
+  private readonly agentActivityReporter: AgentActivityStatusReporter;
 
   constructor(private readonly deps: ServingDeps) {
     this.denialLogThrottle = new LogThrottle(RATE_LIMIT_DENIAL_LOG_INTERVAL_MS, () => this.clock());
+    this.agentActivityReporter = new AgentActivityStatusReporter(() => this.clock());
   }
 
   private clock(): number {
@@ -346,7 +365,16 @@ export class GfsServingHandler {
       } else if (uploadRoute) {
         await this.serveUpload(req, res, claims, ctx, method, url, uploadCollectionMatch, uploadItemMatch);
       } else if (method === "GET") {
-        await this.handleRead(res, claims, ctx, url, resourceMatch, resolveMatch, accessibleMatch);
+        await this.handleRead(
+          req,
+          res,
+          claims,
+          ctx,
+          url,
+          resourceMatch,
+          resolveMatch,
+          accessibleMatch,
+        );
         this.deps.metrics?.recordRead(this.clock() - started);
       } else if (copyMatch) {
         await this.serveCopy(req, res, claims, ctx, requestId!, started, copyAbort!.signal);
@@ -523,6 +551,7 @@ export class GfsServingHandler {
   }
 
   private async handleRead(
+    req: IncomingMessage,
     res: ServerResponse,
     claims: GfsVerifiedClaims,
     ctx: AuthzContext,
@@ -544,7 +573,7 @@ export class GfsServingHandler {
     if (sub === "children") {
       await this.serveChildren(res, claims, ctx, rid, url);
     } else if (sub === "content") {
-      await this.serveContent(res, claims, ctx, rid);
+      await this.serveContent(req, res, claims, ctx, rid);
     } else {
       await this.serveStat(res, claims, ctx, rid);
     }
@@ -591,6 +620,26 @@ export class GfsServingHandler {
    * sees every denial; the log line is throttled to one per subject and kind
    * per minute and carries how many lines it suppressed since the previous one.
    */
+  /**
+   * Record one published content write: the Desktop user's own write through the
+   * user function, or an agent's write for the user its run is bound to. The
+   * header is refused for user principals, so exactly one of the two applies.
+   */
+  private async recordPublishedWrite(
+    client: TxClient,
+    ctx: AuthzContext,
+    runId: string | undefined,
+    resourceId: string,
+  ): Promise<void> {
+    if (ctx.desktopUserId !== undefined) {
+      await recordUserFileActivity(client, ctx.desktopUserId, [resourceId]);
+      return;
+    }
+    if (runId === undefined) return;
+    const status = await this.deps.agentActivity.record(ctx.primarySubject, runId, [resourceId]);
+    this.agentActivityReporter.report(status, ctx.requestId, runId);
+  }
+
   private chargeAgentBudget(ctx: AuthzContext, write: boolean): void {
     if (!isAgentSub(ctx.primarySubject)) return;
     const kind = write ? "write" : "read";
@@ -735,11 +784,13 @@ export class GfsServingHandler {
   }
 
   private async serveContent(
+    req: IncomingMessage,
     res: ServerResponse,
     claims: GfsVerifiedClaims,
     ctx: AuthzContext,
     rid: string
   ): Promise<void> {
+    const runId = attributionRunOf(req, ctx);
     await this.authorizeOp(claims, ctx, rid, "read");
     const { resource, stream } = await downloadResource(
       this.deps.store,
@@ -747,6 +798,22 @@ export class GfsServingHandler {
       claims.drive,
       rid
     );
+    // An agent content read is recorded for the user its Desktop chat run is
+    // bound to, before the first byte: a record that fails sends no byte, and a
+    // read that could not open recorded nothing.
+    if (runId !== undefined) {
+      let status: AgentActivityStatus;
+      try {
+        status = await this.deps.agentActivity.record(ctx.primarySubject, runId, [rid]);
+      } catch (error) {
+        stream.destroy();
+        throw error;
+      }
+      if (status === "host_mismatch") {
+        stream.destroy();
+      }
+      this.agentActivityReporter.report(status, ctx.requestId, runId);
+    }
     res.writeHead(200, {
       "Content-Type": "application/octet-stream",
       "Content-Length": String(resource.bytes),
@@ -800,6 +867,7 @@ export class GfsServingHandler {
     admittedAtMs: number,
     signal: AbortSignal
   ): Promise<void> {
+    const runId = attributionRunOf(req, ctx);
     const body = await readJsonBody(req, { signal });
     const data = await executeCopyRoute({
       body,
@@ -809,6 +877,20 @@ export class GfsServingHandler {
       admittedAtMs,
       signal,
       now: () => this.clock(),
+      // A copy has no Desktop action: only an agent run records it (D16), with
+      // every file the copy created, inside the copy's own transaction.
+      ...(runId === undefined
+        ? {}
+        : {
+            onPublished: async (client: TxClient, fileResourceIds: string[]) => {
+              const status = await this.deps.agentActivity.record(
+                ctx.primarySubject,
+                runId,
+                fileResourceIds,
+              );
+              this.agentActivityReporter.report(status, requestId, runId);
+            },
+          }),
       deps: { ...this.deps.copy!, writes: this.deps.writeService! },
     });
     sendJson(res, 201, ok(data));
@@ -822,6 +904,7 @@ export class GfsServingHandler {
     parentId: string,
     requestId: string
   ): Promise<void> {
+    const runId = attributionRunOf(req, ctx);
     const body = await readJsonBody(req);
     const name = requireName(body, "name");
     const kind = optionalResourceKind(body);
@@ -840,6 +923,12 @@ export class GfsServingHandler {
       name,
       kind,
       content,
+      // In the publication transaction: the activity row commits with the file
+      // and rolls back with it. A directory is not content.
+      onPublished: (client, published) =>
+        published.kind === "file"
+          ? this.recordPublishedWrite(client, ctx, runId, published.resourceId)
+          : Promise.resolve(),
       mutation: {
         subject: ctx.primarySubject,
         requestId,
@@ -858,6 +947,7 @@ export class GfsServingHandler {
     resourceId: string,
     requestId: string
   ): Promise<void> {
+    const runId = attributionRunOf(req, ctx);
     const body = await readJsonBody(req);
     const content = readContentBuffer(body);
     const ifMatch = optionalNumber(body, "ifMatch");
@@ -872,6 +962,10 @@ export class GfsServingHandler {
       resourceId,
       ifMatch,
       content,
+      onPublished: (client, published) =>
+        published.kind === "file"
+          ? this.recordPublishedWrite(client, ctx, runId, published.resourceId)
+          : Promise.resolve(),
       mutation: {
         subject: ctx.primarySubject,
         requestId,
