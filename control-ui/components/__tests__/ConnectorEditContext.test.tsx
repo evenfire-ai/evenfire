@@ -173,7 +173,7 @@ describe('connector edit agent access', () => {
 
     activeTab = 'credentials'
     rerender(<EditMcpServerPage />)
-    expect(screen.getByRole('button', { name: 'Rotate credential' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Attach and restart' })).toBeEnabled()
 
     activeTab = 'egress'
     rerender(<EditMcpServerPage />)

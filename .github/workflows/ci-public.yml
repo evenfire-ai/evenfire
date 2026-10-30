@@ -191,6 +191,13 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm ci
 
+      - name: Test Playwright MCP cluster probe (hermetic)
+        if: matrix.service == 'host-context-controller'
+        run: >-
+          node scripts/tests/run-node-test-files.mjs
+          scripts/e2e/playwright-mcp-cluster-probe.test.mjs
+          scripts/e2e/test/playwright-mcp-cluster-runtime.test.mjs
+
       # The mcp-host images ship these faces, and the tests that set Arabic,
       # Hebrew and Han text in a PDF fail in CI instead of skipping without them.
       - name: Install the mcp-host image fonts
@@ -622,6 +629,12 @@ jobs:
       - name: Build (next build — typecheck + lint + compile)
         working-directory: control-ui
         run: npm run build
+      - name: Build Control UI image builder stage
+        # The next build above runs in the full checkout, where an import that
+        # leaves the image's Docker context (for example into control-api/)
+        # still resolves. Build & Publish builds the image only after a merge
+        # to dev, so build the same context here to fail the PR instead.
+        run: timeout 900s docker build --target builder -f control-ui/Dockerfile .
 
   e2e-vitest-node-unit:
     name: E2E Vitest node-unit (tests/e2e)

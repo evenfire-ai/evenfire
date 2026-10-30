@@ -1077,12 +1077,12 @@ async function getManagerRolesForTeams(
 ): Promise<Map<string, TeamRole>> {
   if (teamIds.length === 0) return new Map()
   const result = await pool.query(
-    `SELECT team_id, role
+    `SELECT tm.team_id, tm.role
        FROM team_members tm
        JOIN users u ON u.id = tm.user_id
-      WHERE user_id = $1
-        AND team_id = ANY($2::uuid[])
-        AND status = 'active'
+      WHERE tm.user_id = $1
+        AND tm.team_id = ANY($2::uuid[])
+        AND tm.status = 'active'
         AND u.lifecycle_state = 'active'`,
     [managerUserId.trim(), teamIds]
   )

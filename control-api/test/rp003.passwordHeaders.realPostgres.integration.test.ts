@@ -4,6 +4,7 @@ import { createPublicKey, randomBytes } from 'node:crypto'
 import type { Server } from 'node:http'
 import { Pool } from 'pg'
 import request from 'supertest'
+import type { PasswordCapture } from '../src/services/auth/passwordCredentialVerification.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const quotaHeaders = [
@@ -25,6 +26,7 @@ realPg('RP-003 complete password admission response metadata', () => {
   let admin: Pool
   let db: typeof import('../src/db.js')
   let engine: typeof import('../src/services/auth/passwordCredentialVerification.js')
+  let work: typeof import('../src/services/auth/passwordWorkOwnership.js')
   let app: express.Express, edge: express.Express, server: Server
   let externalConfig: (typeof import('../../external-rest-api/src/config.js'))['config']
   let previousUrl: string, previousToken: string
@@ -45,6 +47,7 @@ realPg('RP-003 complete password admission response metadata', () => {
     db = await import('../src/db.js')
     await db.initDb()
     engine = await import('../src/services/auth/passwordCredentialVerification.js')
+    work = await import('../src/services/auth/passwordWorkOwnership.js')
     const { requireInternalToken } = await import('../src/middleware/internalServiceAuth.js')
     const { createExternalAuthRouter } = await import('../src/routes/external/auth.js')
     app = express()
@@ -95,11 +98,14 @@ realPg('RP-003 complete password admission response metadata', () => {
     }
   })
   async function cooldown() {
-    for (let i = 0; i < 5; i++)
-      await engine.completePasswordEvaluation(
-        await engine.capturePasswordEvaluation(email, false),
-        false
-      )
+    for (let i = 0; i < 5; i++) {
+      const capture = (await engine.capturePasswordEvaluation(email, false)) as PasswordCapture
+      const lease = await work.acquirePasswordWork()
+      if (!lease) throw new Error('expected password work owner')
+      expect(await engine.markPasswordEvaluationRunning(capture, lease)).toBe(true)
+      await work.releasePasswordWork(lease)
+      expect(await engine.completePasswordEvaluation(capture, false, lease)).toBe(true)
+    }
   }
   function assertDenial(response: request.Response, status: number) {
     expect(response.status).toBe(status)
