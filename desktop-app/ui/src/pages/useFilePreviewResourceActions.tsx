@@ -1297,7 +1297,12 @@ export function useFilePreviewResourceActions({
     }
   }
 
-  const handleGrant = async (subjectKeys: string[], bits: string[]) => {
+  const handleGrant = async (
+    subjectKeys: string[],
+    bits: string[],
+    _inherit: boolean,
+    isDraftCurrent: () => boolean
+  ) => {
     const operationContext = moveContextRef.current
     if (!isGfsSessionGeneration(operationContext.sessionGeneration)) return
     if (
@@ -1330,10 +1335,12 @@ export function useFilePreviewResourceActions({
         )
       )
         return
-      pushToast?.(
-        `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
-        'success'
-      )
+      if (isDraftCurrent()) {
+        pushToast?.(
+          `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
+          'success'
+        )
+      }
     } catch (error) {
       if (
         !isGfsSessionAuthorityCurrent(
@@ -1351,7 +1358,7 @@ export function useFilePreviewResourceActions({
           operationContext.sessionGeneration
         )
       ) {
-        pushToast?.(describeGfsGrantError(error).message, 'error')
+        if (isDraftCurrent()) pushToast?.(describeGfsGrantError(error).message, 'error')
       }
       throw error
     }

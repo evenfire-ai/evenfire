@@ -2,7 +2,8 @@
 import { type ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   grantsListPage,
   listGrantsFailureMessage,
@@ -12,6 +13,7 @@ import {
   resolvedFile,
   sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { desktopQueryKeys } from '@/hooks/domain/queryKeys'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilePreviewPage } from '../FilePreviewPage'
 
@@ -101,19 +103,22 @@ type InheritedAccessProducers = {
   resolve: (uri: string) => Promise<unknown>
   listGrants: (id: string, drive?: string) => Promise<unknown>
   listShares: (id: string, drive?: string) => Promise<unknown>
+  grant?: (...args: Parameters<typeof window.clerum.gfs.grant>) => Promise<void>
+  affordances?: (...args: Parameters<typeof window.clerum.gfs.affordances>) => Promise<unknown>
+  agents?: () => Promise<unknown[]>
+  pushToast?: (message: string, tone: 'success' | 'error' | 'info' | 'warning') => void
 }
 
 async function openShareDialogWithInheritedAccess(producers: InheritedAccessProducers) {
   const controllerState = controller()
   hookMock.useGfsBrowserController.mockReturnValue(controllerState)
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  })
+  const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
   queryClients.push(queryClient)
   const resolve = vi.fn(producers.resolve)
-  const affordances = vi.fn(async () => activeAffordances)
+  const affordances = vi.fn(producers.affordances ?? (async () => activeAffordances))
   const listGrants = vi.fn(producers.listGrants)
   const listShares = vi.fn(producers.listShares)
+  const grant = vi.fn(producers.grant ?? (async () => undefined))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
@@ -122,11 +127,12 @@ async function openShareDialogWithInheritedAccess(producers: InheritedAccessProd
         downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
         resolve,
         affordances,
+        grant,
         listGrants,
         listShares,
       },
-      team: { directory: vi.fn(async () => ({ items: [] })) },
-      agents: { listMine: vi.fn(async () => []) },
+      team: { directory: vi.fn(async () => ({ currentTeamId: 'team-a', items: [] })) },
+      agents: { listMine: vi.fn(producers.agents ?? (async () => [])) },
     },
   })
   render(
@@ -136,6 +142,7 @@ async function openShareDialogWithInheritedAccess(producers: InheritedAccessProd
       fileKind="image"
       mimeType="image/png"
       byteLength={1}
+      pushToast={producers.pushToast}
     />,
     {
       wrapper: ({ children }: { children: ReactNode }) => (
@@ -151,7 +158,7 @@ async function openShareDialogWithInheritedAccess(producers: InheritedAccessProd
   const shareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
   fireEvent.click(within(shareMenu).getByRole('menuitem', { name: /^Share$/ }))
   const dialog = await screen.findByRole('dialog', { name: 'Share file diagram.png' })
-  return { controllerState, dialog, listGrants, listShares, resolve }
+  return { controllerState, dialog, grant, listGrants, listShares, queryClient, resolve }
 }
 
 async function inheritedTarget(parentResourceId: string) {
@@ -183,6 +190,62 @@ describe('FilePreviewPage permission-derived actions', () => {
     cleanup()
     for (const queryClient of queryClients.splice(0)) queryClient.clear()
     vi.restoreAllMocks()
+  })
+
+  it('suppresses a late Share success after same-session authority retires the Preview draft', async () => {
+    let finishGrant!: () => void
+    const oldGrant = new Promise<void>(resolve => {
+      finishGrant = resolve
+    })
+    const grant = vi.fn(() => oldGrant)
+    const pushToast = vi.fn()
+    const deniedAffordances = delegationAffordances(new Set(['read']), false)
+    let authorityDenied = false
+    const affordances = vi.fn(async () => (authorityDenied ? deniedAffordances : activeAffordances))
+    const { dialog, queryClient } = await openShareDialogWithInheritedAccess({
+      resolve: async uri => {
+        if (uri === resourceUri) return await inheritedTarget('preview-parent')
+        if (uri === 'gfs://main/preview-parent') {
+          return await inheritedParent('preview-parent', 'Parent folder', null)
+        }
+        throw new Error(`Unexpected resolve: ${uri}`)
+      },
+      listGrants: async () => grantsListPage([]),
+      listShares: async () => sharesListPage([]),
+      affordances,
+      grant,
+      agents: async () => [
+        {
+          name: 'chatllm',
+          contextRef: 'ctx-1',
+          mcpServers: [],
+          gfsSubject: { type: 'host' as const, id: '1st:mcp-host/chatllm' },
+        },
+      ],
+      pushToast,
+    })
+
+    const picker = within(dialog).getByRole('combobox', {
+      name: 'Add people, teams, or agents',
+    })
+    fireEvent.focus(picker)
+    fireEvent.change(picker, { target: { value: 'chatllm' } })
+    fireEvent.click(await within(dialog).findByRole('option', { name: /chatllm/ }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Share' }))
+    await waitFor(() => expect(grant).toHaveBeenCalledOnce())
+
+    authorityDenied = true
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        exact: true,
+        queryKey: desktopQueryKeys.gfsAffordances('preview-test-user:main', resourceId, 'main', 1),
+      })
+    })
+    expect(await within(dialog).findByText('Read-only access')).toBeTruthy()
+
+    await act(async () => finishGrant())
+    expect(grant).toHaveBeenCalledOnce()
+    expect(pushToast).not.toHaveBeenCalledWith('Access granted to 1 subject', 'success')
   })
 
   it('gates Share, Rename, Move, and Delete from resource and parent affordances', async () => {
