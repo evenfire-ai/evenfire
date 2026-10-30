@@ -3,8 +3,11 @@ import { EventEmitter } from 'node:events'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import http from 'node:http'
 import {
   baseImage,
+  controlApiFetch,
   fixtureImage,
   fixturePassLine,
   installSignalRestore,
@@ -386,4 +389,37 @@ test('the playwright log redacts the admin password, the session cookie and bear
   assert.ok(!report.includes(jwt))
   assert.ok(!report.includes('opaque-bearer-value'))
   assert.match(report, /3 passed \(41\.2s\)/)
+})
+
+test('control-api requests never reuse a socket across a blocking call', async () => {
+  const connectionHeaders = []
+  let connections = 0
+  const server = http.createServer((request, response) => {
+    connectionHeaders.push(request.headers.connection)
+    response.setHeader('content-type', 'application/json')
+    response.end('{}')
+  })
+  // Shorter than the blocking call below, like control-api's idle timeout
+  // against a whole Playwright run.
+  server.keepAliveTimeout = 50
+  server.on('connection', () => {
+    connections += 1
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/api/v1/admin/llm-models`
+    const first = await controlApiFetch(url, { headers: { Cookie: 'session=1' } })
+    assert.equal(first.status, 200)
+    await first.json()
+    spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 200)'])
+    const second = await controlApiFetch(url, { headers: { Cookie: 'session=1' } })
+    assert.equal(second.status, 200)
+    await second.json()
+    // Witness: both requests reached the server.
+    assert.equal(connectionHeaders.length, 2)
+    assert.deepEqual(connectionHeaders, ['close', 'close'])
+    assert.equal(connections, 2)
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+  }
 })

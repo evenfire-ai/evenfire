@@ -220,6 +220,17 @@ export function installSignalRestore(target, restore, write = text => process.st
   }
 }
 
+/**
+ * A control-api request on its own connection. The runner blocks its event loop
+ * in spawnSync for the whole Playwright run, and control-api closes idle
+ * keep-alive sockets after a few seconds, so a pooled socket is dead when
+ * restoration resumes and reusing it fails the restore with `fetch failed`
+ * (ECONNRESET). No idle socket is kept across a blocking call.
+ */
+export function controlApiFetch(url, init = {}) {
+  return fetch(url, { ...init, headers: { ...init.headers, connection: 'close' } })
+}
+
 function command(binary, args, { input, timeout = 60_000, env = process.env } = {}) {
   const result = spawnSync(binary, args, {
     input,
@@ -406,7 +417,7 @@ async function main() {
   ]).trim()
   if (!authValue) throw new Error('Owned lane admin login is not configured')
   const ADMIN_PASSWORD = authValue
-  const auth = await fetch(`${api}/admin/auth/login`, {
+  const auth = await controlApiFetch(`${api}/admin/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -431,7 +442,7 @@ async function main() {
     }
   }
   const admin = async (method, route, body) => {
-    const response = await fetch(`${api}/admin/${route}`, {
+    const response = await controlApiFetch(`${api}/admin/${route}`, {
       method,
       headers: { Cookie: cookie, 'content-type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
