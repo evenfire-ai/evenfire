@@ -6,7 +6,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { AUDIT_MAX_AGE_MS, type AuditEntry, PluginAuditLog } from '../pluginAuditLog.js'
 import { type ConsentGrant, LocalConsentStore } from '../pluginConsentStore.js'
-import { inspectWindowsPluginStoragePaths } from '../pluginStorageWindowsAcl.js'
+import {
+  PluginStoragePrivacyError,
+  PluginStoragePrivacyGuard,
+  inspectWindowsPluginStoragePaths,
+} from '../pluginStorageWindowsAcl.js'
 import {
   WINDOWS_SESSION_AUTHORITY_NATIVE_ASSEMBLY_ENV,
   windowsSessionAuthorityNativeAssemblyPath,
@@ -209,6 +213,23 @@ async function evidence(
   return inspectWindowsPluginStoragePaths(items)
 }
 
+async function expectUnauthorizedPrincipalRejection(operation: Promise<unknown>) {
+  const error = await operation.then(
+    () => undefined,
+    rejection => rejection
+  )
+  expect(error).toBeInstanceOf(PluginStoragePrivacyError)
+  expect(error).toMatchObject({
+    reason: 'native-verifier-rejected',
+    diagnostic: {
+      failure: 'verifier-rejected',
+      nativePhase: 'inspect-complete',
+      nativeReason: 'unauthorized-principal-access',
+    },
+  })
+  return error
+}
+
 beforeEach(async () => {
   userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-plugin-acl-'))
 })
@@ -340,10 +361,8 @@ describe('Windows plugin storage DACL privacy', () => {
       await addAuthenticatedUsersAccess(file)
 
       const reopened = new LocalConsentStore(directory)
-      await expect(reopened.get(grant())).rejects.toThrow('privacy could not be verified')
-      await expect(reopened.put(grant({ capability: 'org.read' }))).rejects.toThrow(
-        'privacy could not be verified'
-      )
+      await expectUnauthorizedPrincipalRejection(reopened.get(grant()))
+      await expectUnauthorizedPrincipalRejection(reopened.put(grant({ capability: 'org.read' })))
       expect(await fs.readFile(file)).toEqual(before)
     }
   )
@@ -352,9 +371,7 @@ describe('Windows plugin storage DACL privacy', () => {
     const directory = path.join(userDataDirectory, 'plugin-consent')
     await addAuthenticatedUsersAccess(userDataDirectory, true)
 
-    await expect(new LocalConsentStore(directory).put(grant())).rejects.toThrow(
-      'privacy could not be verified'
-    )
+    await expectUnauthorizedPrincipalRejection(new LocalConsentStore(directory).put(grant()))
     await expect(fs.lstat(directory)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
@@ -369,7 +386,7 @@ describe('Windows plugin storage DACL privacy', () => {
     await fs.copyFile(previous, file)
     await addAuthenticatedUsersAccess(file)
 
-    await expect(store.get(grant())).rejects.toThrow('privacy could not be verified')
+    await expectUnauthorizedPrincipalRejection(store.get(grant()))
   })
 
   windowsIt('rejects an in-place DACL change without a filesystem identity change', async () => {
@@ -386,10 +403,8 @@ describe('Windows plugin storage DACL privacy', () => {
     const after = await fs.lstat(file, { bigint: true })
     expect(after.dev).toBe(before.dev)
     expect(after.ino).toBe(before.ino)
-    await expect(store.get(grant())).rejects.toThrow('privacy could not be verified')
-    await expect(store.put(grant({ capability: 'org.read' }))).rejects.toThrow(
-      'privacy could not be verified'
-    )
+    await expectUnauthorizedPrincipalRejection(store.get(grant()))
+    await expectUnauthorizedPrincipalRejection(store.put(grant({ capability: 'org.read' })))
     expect(await fs.readFile(file)).toEqual(originalBytes)
   })
 
@@ -397,24 +412,37 @@ describe('Windows plugin storage DACL privacy', () => {
     const directory = path.join(userDataDirectory, 'plugin-consent')
     const file = path.join(directory, `${ENV_KEY}.json`)
     const originalRename = fs.rename.bind(fs)
+    const renameCalls: { source: string; destination: string }[] = []
+    let temporaryFileExistedAtRename = false
+    let destinationMutationCompleted = false
     const renameSpy = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      const sourcePath = String(source)
+      const destinationPath = String(destination)
+      renameCalls.push({ source: sourcePath, destination: destinationPath })
+      if (sourcePath.includes('.tmp-')) {
+        await fs.lstat(sourcePath)
+        temporaryFileExistedAtRename = true
+      }
       await originalRename(source, destination)
-      if (String(source).includes('.tmp-')) {
-        await addAuthenticatedUsersAccess(String(destination))
+      if (sourcePath.includes('.tmp-')) {
+        await addAuthenticatedUsersAccess(destinationPath)
+        destinationMutationCompleted = true
       }
     })
 
     try {
-      await expect(new LocalConsentStore(directory).put(grant())).rejects.toThrow(
-        'privacy could not be verified'
-      )
+      await expectUnauthorizedPrincipalRejection(new LocalConsentStore(directory).put(grant()))
     } finally {
       renameSpy.mockRestore()
     }
 
-    await expect(new LocalConsentStore(directory).get(grant())).rejects.toThrow(
-      'privacy could not be verified'
-    )
+    expect(renameCalls).toHaveLength(1)
+    expect(renameCalls[0]?.source).toContain('.tmp-')
+    expect(renameCalls[0]?.destination).toBe(file)
+    expect(temporaryFileExistedAtRename).toBe(true)
+    expect(destinationMutationCompleted).toBe(true)
+    expect((await fs.lstat(file)).isFile()).toBe(true)
+    await expectUnauthorizedPrincipalRejection(new LocalConsentStore(directory).get(grant()))
   })
 
   windowsIt('rechecks a replaced consent directory before returning cached grants', async () => {
@@ -430,7 +458,7 @@ describe('Windows plugin storage DACL privacy', () => {
     await fs.copyFile(path.join(previous, `${ENV_KEY}.json`), file)
     await addAuthenticatedUsersAccess(directory, true)
 
-    await expect(store.get(grant())).rejects.toThrow('privacy could not be verified')
+    await expectUnauthorizedPrincipalRejection(store.get(grant()))
   })
 
   windowsIt('retains inherited effective access after an atomic consent replacement', async () => {
@@ -530,9 +558,9 @@ describe('Windows plugin storage DACL privacy', () => {
       }
 
       expect(await fs.readFile(rotated, 'utf8')).toContain('identity.read')
-      await expect(
+      await expectUnauthorizedPrincipalRejection(
         evidence({ path: rotated, directory: false, requireInherited: true })
-      ).rejects.toThrow('privacy could not be verified')
+      )
       await expect(fs.lstat(file)).rejects.toMatchObject({ code: 'ENOENT' })
       expect(await new PluginAuditLog(directory).read(ENV_KEY)).toEqual([])
     }
@@ -547,7 +575,33 @@ describe('Windows plugin storage DACL privacy', () => {
     await addAuthenticatedUsersAccess(file)
 
     const reopened = new PluginAuditLog(directory)
-    await reopened.append(ENV_KEY, auditEntry({ capability: 'org.read' }))
+    const originalVerifyFile = PluginStoragePrivacyGuard.prototype.verifyFile
+    const verificationFailures: unknown[] = []
+    const verifyFileSpy = vi
+      .spyOn(PluginStoragePrivacyGuard.prototype, 'verifyFile')
+      .mockImplementation(async function (this: PluginStoragePrivacyGuard, target) {
+        try {
+          return await originalVerifyFile.call(this, target)
+        } catch (error) {
+          if (target === file) verificationFailures.push(error)
+          throw error
+        }
+      })
+    try {
+      await reopened.append(ENV_KEY, auditEntry({ capability: 'org.read' }))
+    } finally {
+      verifyFileSpy.mockRestore()
+    }
+    expect(verificationFailures).toHaveLength(1)
+    expect(verificationFailures[0]).toBeInstanceOf(PluginStoragePrivacyError)
+    expect(verificationFailures[0]).toMatchObject({
+      reason: 'native-verifier-rejected',
+      diagnostic: {
+        failure: 'verifier-rejected',
+        nativePhase: 'inspect-complete',
+        nativeReason: 'unauthorized-principal-access',
+      },
+    })
     expect(await fs.readFile(file)).toEqual(before)
     expect(await reopened.read(ENV_KEY)).toEqual([])
   })

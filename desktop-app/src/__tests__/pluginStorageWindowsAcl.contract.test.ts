@@ -16,12 +16,14 @@ vi.mock('node:child_process', () => ({ spawnSync: spawnSyncMock }))
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
 let rejectedInspectionPath: string | undefined
+let rejectedInspectionCount = 0
 const inspectedPaths: string[] = []
 
 afterEach(() => {
   Object.defineProperty(process, 'platform', platformDescriptor)
   vi.unstubAllEnvs()
   rejectedInspectionPath = undefined
+  rejectedInspectionCount = 0
   inspectedPaths.length = 0
   spawnSyncMock.mockReset()
 })
@@ -40,12 +42,17 @@ function mockFreshNativeInspection(): void {
     ) as { items: { path: string; directory: boolean }[] }
     inspectedPaths.push(...request.items.map(item => item.path))
     if (request.items.some(item => item.path === rejectedInspectionPath)) {
+      rejectedInspectionCount += 1
       return {
         error: undefined,
         signal: null,
         status: 2,
-        stdout: JSON.stringify({ ok: false, phase: 'inspect-object', reason: 'inspection-failed' }),
-        stderr: '',
+        stdout: JSON.stringify({
+          ok: false,
+          phase: 'inspect-object',
+          reason: 'unauthorized-principal-access',
+        }),
+        stderr: 'EVENFIRE_PLUGIN_ACL_PHASE=inspect-complete;ordinal=1;elapsedMs=1\r\n',
       }
     }
     const items = request.items.map(item => {
@@ -96,6 +103,15 @@ function auditEntry() {
   }
 }
 
+function isUnauthorizedPrincipalRejection(error: unknown): boolean {
+  return (
+    error instanceof PluginStoragePrivacyError &&
+    error.reason === 'native-verifier-rejected' &&
+    error.diagnostic?.nativePhase === 'inspect-complete' &&
+    error.diagnostic.nativeReason === 'unauthorized-principal-access'
+  )
+}
+
 describe('Windows plugin storage native evidence contract', () => {
   it('reinspects a consent file when its identity is unchanged', async () => {
     prepareWindowsInspection()
@@ -110,7 +126,11 @@ describe('Windows plugin storage native evidence contract', () => {
       const before = await fs.lstat(file, { bigint: true })
       rejectedInspectionPath = file
 
-      await expect(store.get(consentGrant())).rejects.toThrow('privacy could not be verified')
+      const rejection = await store.get(consentGrant()).then(
+        () => undefined,
+        error => error
+      )
+      expect(isUnauthorizedPrincipalRejection(rejection)).toBe(true)
 
       const after = await fs.lstat(file, { bigint: true })
       expect(after.dev).toBe(before.dev)
@@ -169,17 +189,71 @@ describe('Windows plugin storage native evidence contract', () => {
     const directory = path.join(root, 'consent')
     const file = path.join(directory, 'testenv-0123456789ab.json')
     const originalRename = fs.rename.bind(fs)
+    const renameCalls: { source: string; destination: string }[] = []
+    let temporaryFileExistedAtRename = false
     const renameSpy = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      const sourcePath = String(source)
+      const destinationPath = String(destination)
+      renameCalls.push({ source: sourcePath, destination: destinationPath })
+      if (sourcePath.includes('.tmp-')) {
+        await fs.lstat(sourcePath)
+        temporaryFileExistedAtRename = true
+      }
       await originalRename(source, destination)
-      if (String(source).includes('.tmp-')) rejectedInspectionPath = String(destination)
+      if (sourcePath.includes('.tmp-')) rejectedInspectionPath = destinationPath
     })
     try {
-      await expect(new LocalConsentStore(directory).put(consentGrant())).rejects.toThrow(
-        'privacy could not be verified'
+      const rejection = await new LocalConsentStore(directory).put(consentGrant()).then(
+        () => undefined,
+        error => error
       )
+      expect(isUnauthorizedPrincipalRejection(rejection)).toBe(true)
+      expect(renameCalls).toHaveLength(1)
+      expect(renameCalls[0]?.source).toContain('.tmp-')
+      expect(renameCalls[0]?.destination).toBe(file)
+      expect(temporaryFileExistedAtRename).toBe(true)
+      expect((await fs.lstat(file)).isFile()).toBe(true)
+      expect(inspectedPaths.at(-1)).toBe(file)
       expect(await fs.readFile(file, 'utf8')).toContain('identity.read')
       expect(spawnSyncMock).toHaveBeenCalledTimes(4)
-      expect(inspectedPaths.at(-1)).toBe(file)
+    } finally {
+      renameSpy.mockRestore()
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('distinguishes a pre-rename helper timeout from a produced destination DACL denial', async () => {
+    prepareWindowsInspection()
+    const timeout = Object.assign(new Error('spawnSync timed out'), { code: 'ETIMEDOUT' })
+    spawnSyncMock.mockReturnValue({
+      error: timeout,
+      signal: 'SIGTERM',
+      status: null,
+      stdout: '',
+      stderr: 'EVENFIRE_PLUGIN_ACL_PHASE=helper-load-start;ordinal=0;elapsedMs=14990\r\n',
+    })
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'plugin-acl-pre-rename-timeout-'))
+    const directory = path.join(root, 'consent')
+    const renameSpy = vi.spyOn(fs, 'rename')
+    try {
+      const rejection = await new LocalConsentStore(directory).put(consentGrant()).then(
+        () => undefined,
+        error => error
+      )
+
+      // The pre-correction generic message matched this exact producer failure.
+      expect(rejection).toMatchObject({
+        message: 'Plugin storage privacy could not be verified',
+        reason: 'native-inspection-process-timeout',
+        diagnostic: {
+          failure: 'process-timeout',
+          processErrorCode: 'ETIMEDOUT',
+          signal: 'SIGTERM',
+          nativePhase: 'helper-load-start',
+        },
+      })
+      expect(isUnauthorizedPrincipalRejection(rejection)).toBe(false)
+      expect(renameSpy).not.toHaveBeenCalled()
     } finally {
       renameSpy.mockRestore()
       await fs.rm(root, { recursive: true, force: true })
@@ -202,9 +276,11 @@ describe('Windows plugin storage native evidence contract', () => {
       await store.put(consentGrant())
       await fs.writeFile(file, '{')
 
-      await expect(new LocalConsentStore(directory).get(consentGrant())).rejects.toThrow(
-        'privacy could not be verified'
+      const rejection = await new LocalConsentStore(directory).get(consentGrant()).then(
+        () => undefined,
+        error => error
       )
+      expect(isUnauthorizedPrincipalRejection(rejection)).toBe(true)
 
       const names = await fs.readdir(directory)
       expect(names).toHaveLength(1)
@@ -235,6 +311,8 @@ describe('Windows plugin storage native evidence contract', () => {
       await log.append('testenv-0123456789ab', auditEntry())
 
       expect(await fs.readFile(rotated, 'utf8')).toContain('identity.read')
+      expect(rejectedInspectionCount).toBe(1)
+      expect(inspectedPaths).toContain(rotated)
       await expect(fs.lstat(file)).rejects.toMatchObject({ code: 'ENOENT' })
       expect(await log.read('testenv-0123456789ab')).toEqual([])
     } finally {
