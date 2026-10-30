@@ -150,6 +150,11 @@ resolution (`H8 query-accept`), stderr query redaction (`H9 redact`), signal
 delivery (`H10 signals`), filter-death detection (`H11 filter-death`), and the
 template value check (`H12 value-reject`).
 
+The CDN answer-set rotation is proven end to end on a branch-owned minikube
+profile by [scripts/e2e/e2e-egress-cdn-rotation.sh](../scripts/e2e/e2e-egress-cdn-rotation.sh);
+see [docs/testing/egress-cdn-rotation.md](../docs/testing/egress-cdn-rotation.md)
+for the operator steps and the test-only overrides it restores.
+
 ## Updating NGINX
 
 A newer fixed release on an accepted line (for example 1.30.6 → 1.30.7):
