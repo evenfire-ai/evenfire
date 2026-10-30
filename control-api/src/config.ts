@@ -7,10 +7,6 @@ import {
 import { type DevJwtSlot, loadOrCreateDevJwtSigningMaterial } from './devSigningKeys.js'
 import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
 import { rootLogger } from './observability/logger.js'
-import {
-  type OidcProviderConfiguration,
-  loadOidcProviderConfiguration,
-} from './oidc/configuration.js'
 
 function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
   const parsed = Number(process.env[name])
@@ -311,7 +307,6 @@ type Config = {
   // defaults are usable without ceremony but prod overrides are forced.
   oauthStateHmacSecret: string
   oauthEncryptionKey: string
-  oidcProviderConfiguration?: OidcProviderConfiguration
   // Public base URL the OAuth callback is reachable at (e.g.
   // https://example.com). Used to build the redirect_uri for the token
   // exchange so it matches the authorize step regardless of the internal proxy
@@ -711,7 +706,6 @@ const oauthEncryptionKey = requiredOrDevDefault(
   // 32-byte hex-encoded dev key (AES-256-GCM). Prod must override.
   '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
 )
-const oidcProviderConfiguration = loadOidcProviderConfiguration(process.env, oauthEncryptionKey)
 
 // Computed as locals because the two values are coupled: image-input evidence
 // written by a sync expires TTL after the capture it came from, so a TTL shorter
@@ -1344,7 +1338,6 @@ export const config: Config = {
     'dev-oauth-state-hmac-secret-32-bytes-pad'
   ),
   oauthEncryptionKey,
-  oidcProviderConfiguration,
   // Optional: when set, used verbatim as the origin of the public OAuth callback
   // URL (the redirect_uri). Empty → derive from the request Host (local dev).
   oauthCallbackBaseUrl: process.env.CONTROL_API_OAUTH_CALLBACK_BASE_URL ?? '',
