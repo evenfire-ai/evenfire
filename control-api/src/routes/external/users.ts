@@ -29,6 +29,7 @@ import {
   updateProfile,
   updateUserPassword,
 } from '../../services/directory/index.js'
+import { mapWithConcurrencyLimit } from '../../utils/mapWithConcurrencyLimit.js'
 import {
   PASSWORD_CREDENTIAL_CHANGED_RESPONSE,
   PASSWORD_NOT_SET_RESPONSE,
@@ -58,26 +59,6 @@ function projectTeamMembers(values: unknown): TeamDirectoryMember[] {
       status: String(row.status || ''),
     }
   })
-}
-
-async function mapWithConcurrencyLimit<T, R>(
-  items: T[],
-  limit: number,
-  mapper: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let nextIndex = 0
-  const workerCount = Math.min(limit, items.length)
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
-      while (nextIndex < items.length) {
-        const index = nextIndex
-        nextIndex += 1
-        results[index] = await mapper(items[index])
-      }
-    })
-  )
-  return results
 }
 
 export function createExternalUsersRouter(gateway: K8sGateway): Router {

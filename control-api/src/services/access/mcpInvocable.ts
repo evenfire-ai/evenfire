@@ -31,8 +31,9 @@ import {
   buildMcpServerGrantKey,
   resolveServerOAuth,
 } from '../../oauth/mcpServerOAuthSpec.js'
-import { oauthGrantExists } from '../../oauth/store.js'
+import { type OAuthGrantKey, oauthGrantExists } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
+import { mapWithConcurrencyLimit } from '../../utils/mapWithConcurrencyLimit.js'
 import {
   type AgentDirectoryEntry,
   buildAgentDirectoryEntry,
@@ -424,6 +425,16 @@ export function filterInvocable(
   return out
 }
 
+/**
+ * Grant lookups in flight per resolution. Each holds a core-pool connection
+ * (default 10, shared with every other request), so the bound keeps one
+ * connectors read with many Contexts from taking the whole pool. It is per
+ * request: a few concurrent reads can still fill the pool, and a lookup that
+ * times out waiting for a connection excludes its pair (fail-closed), which is
+ * the accepted trade-off for not running them one by one.
+ */
+const GRANT_PRESENCE_CONCURRENCY = 4
+
 /** Grant presence by flavor: shared grants per Context, per-user grants per server. */
 interface GrantPresence {
   shared: Map<string, Set<string>>
@@ -451,7 +462,12 @@ async function computeGrantPresenceByContext(
     if (n) byName.set(n, s)
   }
 
-  const presence: GrantPresence = { shared: new Map(), user: new Set() }
+  const checks: Array<{
+    name: string
+    contextName: string
+    isShared: boolean
+    key: OAuthGrantKey
+  }> = []
   const checkedUser = new Set<string>()
   const checkedShared = new Set<string>()
   for (const { contextName, mcpServerName: name } of pairs) {
@@ -476,26 +492,39 @@ async function computeGrantPresenceByContext(
       contextId: contextName,
     })
     if (!key) continue // fail-closed: missing grant coordinate for the flavor
-
-    try {
-      if (!(await oauthGrantExists(db, key))) continue
-      if (!isShared) {
-        presence.user.add(name)
-        continue
-      }
-      const forContext = presence.shared.get(contextName) ?? new Set<string>()
-      forContext.add(name)
-      presence.shared.set(contextName, forContext)
-    } catch (err) {
-      // A grant-check DB error excludes THIS pair (fail-closed) rather than
-      // failing the whole request — loudly, matching the sibling resolver's
-      // observable-degradation posture (`resolveMcpServersForAgents`).
-      log.error(
-        { err, mcpServerName: name, contextName: isShared ? contextName : undefined },
-        'grant-presence check failed; server excluded'
-      )
-    }
+    checks.push({ name, contextName, isShared, key })
   }
+
+  const exists = await mapWithConcurrencyLimit(
+    checks,
+    GRANT_PRESENCE_CONCURRENCY,
+    async ({ name, contextName, isShared, key }) => {
+      try {
+        return await oauthGrantExists(db, key)
+      } catch (err) {
+        // A grant-check DB error excludes THIS pair (fail-closed) rather than
+        // failing the whole request — loudly, matching the sibling resolver's
+        // observable-degradation posture (`resolveMcpServersForAgents`).
+        log.error(
+          { err, mcpServerName: name, contextName: isShared ? contextName : undefined },
+          'grant-presence check failed; server excluded'
+        )
+        return false
+      }
+    }
+  )
+
+  const presence: GrantPresence = { shared: new Map(), user: new Set() }
+  checks.forEach(({ name, contextName, isShared }, i) => {
+    if (!exists[i]) return
+    if (!isShared) {
+      presence.user.add(name)
+      return
+    }
+    const forContext = presence.shared.get(contextName) ?? new Set<string>()
+    forContext.add(name)
+    presence.shared.set(contextName, forContext)
+  })
   return presence
 }
 
