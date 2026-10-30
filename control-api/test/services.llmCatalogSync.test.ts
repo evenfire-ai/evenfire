@@ -148,13 +148,16 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     expect(inserts[0].sql).toMatch(/'discovery'/)
     expect(inserts[0].sql).toMatch(/false/)
     expect(inserts[0].sql).toMatch(/ON CONFLICT \(provider, model\) DO NOTHING/)
-    // params: provider, model, ctx, display, image_input
+    // params: provider, model, ctx, display, image_input, enable decision,
+    // catalog_status. The decision is false: the auto-enable flag is off.
     expect(inserts[0].params).toEqual([
       'claude',
       'claude-opus-4-5',
       200000,
       'Opus',
       discoveryProvenance('2026-07-10T00:00:00.000Z'),
+      false,
+      null,
     ])
     expect(res.added).toBe(1)
     expect(res.updated).toBe(0)
@@ -290,6 +293,8 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
         },
       }),
       '2026-08-19T16:16:10.000Z',
+      'claude',
+      'claude-opus-4-5',
     ])
   })
 
@@ -317,12 +322,17 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     expect(sql).toMatch(/CASE\s+WHEN t\.enabled THEN t\.display_name/)
     // `enabled` is never assigned in the SET clause.
     expect(/enabled\s*=/.test(sql)).toBe(false)
+    // …then live?, catalog_status, and the pair the SELECT read.
     expect(updates[0].params).toEqual([
       'd1',
       200000,
       'Opus',
       discoveryProvenance('2026-07-10T00:00:00.000Z'),
       '2026-07-10T00:00:00.000Z',
+      false,
+      null,
+      'claude',
+      'claude-opus-4-5',
     ])
     expect(res.updated).toBe(1)
     expect(res.added).toBe(0)

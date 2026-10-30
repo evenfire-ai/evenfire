@@ -21,6 +21,7 @@ import {
 } from '@clerum/llm-providers'
 import type { DbClient, DbTransactionClient } from '../db.js'
 import { pool } from '../db.js'
+import { PROVIDER_KEY_MAP } from './modelsDevClient.js'
 
 /** Catalog provenance (spec 09 §2.2). 'manual' = operator/seed; 'discovery' =
  *  auto-discovered (F2). The admin API only ever creates 'manual' rows. */
@@ -302,6 +303,46 @@ export async function listStaleAllowedModels(db: DbClient = pool): Promise<LlmAl
   return (result.rows as Record<string, unknown>[]).map(rowToModel)
 }
 
+/**
+ * Enabled rows the attention feed flags regardless of who references them:
+ * the catalog calls them deprecated, or a discovered model vanished from the
+ * catalog while still served. Shared with `llmAttention.ts`, which reads it.
+ */
+export interface CatalogAttentionRow {
+  provider: string
+  model: string
+  display_name: string | null
+  deprecated: boolean
+  stale_discovery: boolean
+}
+
+const CATALOG_PROVIDERS: string[] = Object.keys(PROVIDER_KEY_MAP)
+
+export async function listCatalogAttentionModels(
+  db: DbClient = pool
+): Promise<CatalogAttentionRow[]> {
+  const result = await db.query(
+    `SELECT provider, model, display_name,
+            (catalog_status = 'deprecated') IS TRUE AS deprecated,
+            (stale AND source = 'discovery') AS stale_discovery
+       FROM llm_allowed_models
+      WHERE enabled
+        AND provider = ANY($1::text[])
+        AND (catalog_status = 'deprecated' OR (stale AND source = 'discovery'))
+      ORDER BY provider ASC, model ASC`,
+    // Only providers fed by the public catalog: the subscription providers keep
+    // their own catalogs and their own `stale` semantics.
+    [CATALOG_PROVIDERS]
+  )
+  return (result.rows as Record<string, unknown>[]).map(row => ({
+    provider: String(row.provider),
+    model: String(row.model),
+    display_name: toNullableString(row.display_name),
+    deprecated: row.deprecated === true,
+    stale_discovery: row.stale_discovery === true,
+  }))
+}
+
 export async function getAllowedModel(
   id: string,
   db: DbClient = pool
@@ -418,6 +459,9 @@ export async function updateAllowedModel(
     params.push(field === 'image_input' ? imageInputToColumn(input.image_input) : value)
   }
   if (renamed && input.image_input === undefined) sets.push('image_input = NULL')
+  // The catalog's lifecycle tag is about the old pair too; the next live sync
+  // fills it again if the new pair is in the catalog.
+  if (renamed) sets.push('catalog_status = NULL')
   if (sets.length === 0) return existing
 
   sets.push(`updated_at = NOW()`)

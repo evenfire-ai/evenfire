@@ -19,6 +19,7 @@ import {
   deleteAllowedModel,
   getAllowedModel,
   listAllowedModels,
+  listCatalogAttentionModels,
   listStaleAllowedModels,
   updateAllowedModel,
   updateLlmAllowedModelSchema,
@@ -186,27 +187,29 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   // ── Operator attention feed (Fase 5, Pieza C) ───────────────────────────────
   // Persistent alert backing the non-destructive Fase 4 cron: every enabled
   // `stale` catalog model that is STILL referenced by a Host/grant, so the
-  // operator can disable it through the impact-gated PUT. Only actionable items
-  // appear; an unreferenced stale model — or one already disabled — yields
-  // nothing (`listStaleAllowedModels` filters `AND enabled`). Reuses `impactSources`
+  // operator can disable it through the impact-gated PUT. For that kind an
+  // unreferenced stale model — or one already disabled — yields nothing
+  // (`listStaleAllowedModels` filters `AND enabled`). Reuses `impactSources`
   // (the same fail-loud enumeration the `?force` gate uses, regla D4): if any
   // Host LIST fails, `computeAttention` propagates → asyncHandler → 500, never a
   // partial feed that hides a live reference. Inherits the `/admin/*` control-ui
   // admin auth gate (app.ts) — no new auth. Extensible: `items[].kind` is an
-  // open union with one member today (`stale_model_referenced`).
+  // open union; the deprecated / stale-discovery kinds list every enabled match,
+  // referenced or not (see llmAttention.ts).
   router.get(
     '/admin/attention',
     asyncHandler(async (_req: Request, res: Response) => {
       const staleModels = await listStaleAllowedModels()
-      const report = await computeAttention(staleModels, impactSources)
+      const catalogRows = await listCatalogAttentionModels()
+      const report = await computeAttention(staleModels, impactSources, catalogRows)
       res.status(200).json(report)
     })
   )
 
   // ── Discovery (F2, spec 09 §2 + §8-F2) ──────────────────────────────────────
   // On-demand catalog sync from the public models.dev catalog into
-  // `llm_allowed_models` as disabled `source='discovery'` rows for operator
-  // curation. The fixed two-segment `discovery/*` paths cannot be captured by
+  // `llm_allowed_models` as `source='discovery'` rows for operator curation,
+  // disabled unless auto-enable allows them on insert (llmCatalogSync.ts header). The fixed two-segment `discovery/*` paths cannot be captured by
   // the single-segment `/:id` param route regardless of order, but they are
   // registered before it anyway for clarity. No scheduler yet (F2 is on-demand
   // only; a scheduled trigger is a follow-up). These routes inherit the same

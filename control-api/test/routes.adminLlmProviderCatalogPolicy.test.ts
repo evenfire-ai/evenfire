@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
 import { PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT } from '@clerum/llm-providers'
 import { createApp } from '../src/app.js'
+import { config } from '../src/config.js'
 import { PROVIDER_KEY_MAP } from '../src/services/modelsDevClient.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -153,6 +154,22 @@ describe('admin llm-provider catalog-policy routes', () => {
     }
     expect(providers.some(p => String(p.provider).endsWith('-subscription'))).toBe(false)
   })
+
+  it.each([false, true])(
+    'GET reports whether this replica has auto-enable switched on (%s)',
+    async flag => {
+      const previous = config.llmCatalogAutoEnableEnabled
+      config.llmCatalogAutoEnableEnabled = flag
+      try {
+        mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        const res = await authed('get', '/api/v1/admin/llm-providers/catalog-policy').expect(200)
+        expect(res.body.auto_enable_enabled).toBe(flag)
+        expect(Array.isArray(res.body.providers)).toBe(true)
+      } finally {
+        config.llmCatalogAutoEnableEnabled = previous
+      }
+    }
+  )
 
   it('PUT upserts under the catalog-sync lock and returns the updated entry', async () => {
     stubToggleTx(null, false)

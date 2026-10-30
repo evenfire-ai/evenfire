@@ -189,8 +189,9 @@ async function main(): Promise<void> {
   // LLM catalog discovery sync cron (Fase 4). Code default off; the base deploy
   // sets LLM_CATALOG_SYNC_CRON_ENABLED=true. When on, the first sync runs a few
   // seconds after start (not awaited — boot never waits on models.dev), then
-  // every interval. Non-destructive: inserts disabled discovery rows, only
-  // stale-flags vanished ones under the §4.5 guards.
+  // every interval. Non-destructive: inserts discovery rows (disabled unless
+  // auto-enable allows them on insert), never changes `enabled` of an existing
+  // row, only stale-flags vanished ones under the §4.5 guards.
   // Started AFTER the gateway exists (#654): every run publishes the allowlist
   // ConfigMap when it differs from Postgres, so it needs a materializer — the
   // same one the admin routes use.

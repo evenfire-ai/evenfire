@@ -113,8 +113,9 @@ export type RawModelsDevCatalog = Record<string, RawModelsDevProvider>
  *
  * NOTE: Azure/Bedrock ids in models.dev are generic model ids, NOT the Azure
  * deployment names / regional inference-profile ids a real deployment uses.
- * Discovery inserts them as `enabled=false, source='discovery'`, so they are
- * only ever review candidates — the operator's hand-added `source='manual'`
+ * Discovery inserts them as `source='discovery'` and their providers' auto-enable
+ * policy defaults to off, so they are only review candidates unless an operator
+ * turns that policy on — the operator's hand-added `source='manual'`
  * rows (deployment names, `us.anthropic.*` profiles) are never touched (§11.2).
  */
 export type ModelsDevMappedProviderId = Exclude<

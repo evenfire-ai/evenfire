@@ -36,6 +36,18 @@ export interface FakeRow {
   display_name: string | null
   vendor: string | null
   image_input: ImageInputCapability | null
+  catalog_status: string | null
+}
+
+/** A `llm_model_prices` row, the columns the sync writes. */
+export interface FakePriceRow {
+  provider: string
+  model: string
+  input_token_price: number
+  output_token_price: number
+  cache_read_token_price: number
+  cache_write_token_price: number
+  enabled: boolean
 }
 
 export interface SeedRow {
@@ -48,12 +60,25 @@ export interface SeedRow {
   display_name?: string | null
   vendor?: string | null
   image_input?: ImageInputCapability | null
+  catalog_status?: string | null
+}
+
+export interface FakeDbSeed {
+  /** `llm_catalog_dismissed` pairs, as `provider/model`. */
+  dismissed?: string[]
+  prices?: FakePriceRow[]
 }
 
 export interface FakeDb {
   connector: { connect: Mock<() => Promise<{ query: FakeQuery; release: () => void }>> }
   /** Live view of the table after a run — assert against this. */
   rows: FakeRow[]
+  /** `llm_catalog_dismissed`, as `provider/model`. */
+  dismissed: Set<string>
+  /** `llm_model_prices` after a run. */
+  prices: FakePriceRow[]
+  /** The `provider_counts` JSON of every recorded run, in order. */
+  runs: Array<{ source: string; provider_counts: unknown }>
   /** Row lookup by (provider, model), for terse assertions. */
   get: (provider: string, model: string) => FakeRow | undefined
   /**
@@ -80,7 +105,10 @@ export interface FakeDb {
 
 let idSeq = 0
 
-export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
+export function makeFakeDb(seed: SeedRow[] = [], extra: FakeDbSeed = {}): FakeDb {
+  const dismissed = new Set(extra.dismissed ?? [])
+  const prices: FakePriceRow[] = (extra.prices ?? []).map(p => ({ ...p }))
+  const runs: FakeDb['runs'] = []
   const rows: FakeRow[] = seed.map(s => ({
     id: `seed-${(idSeq += 1)}`,
     provider: s.provider,
@@ -92,6 +120,7 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
     display_name: s.display_name ?? null,
     vendor: s.vendor ?? null,
     image_input: s.image_input ?? null,
+    catalog_status: s.catalog_status ?? null,
   }))
 
   /** JSONB parameters arrive as canonical JSON text (the services serialize them). */
@@ -156,27 +185,58 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
       return { rows: out, rowCount: out.length }
     }
 
-    // NEW row insert — ON CONFLICT (provider, model) DO NOTHING.
+    // NEW row insert — ON CONFLICT (provider, model) DO NOTHING. `enabled` is
+    // the decision parameter AND "no tombstone", evaluated by the statement
+    // itself; RETURNING yields a row only when the insert happened.
     if (/INSERT INTO llm_allowed_models/.test(sql)) {
-      const [provider, model, ctx, display, imageInput] = params as [
+      const [provider, model, ctx, display, imageInput, enable, status] = params as [
         string,
         string,
         number | null,
         string | null,
         unknown,
+        boolean,
+        string | null,
       ]
       if (rows.some(r => r.provider === provider && r.model === model)) return empty
+      const isDismissed = dismissed.has(`${provider}/${model}`)
+      const enabled = enable === true && !isDismissed
       rows.push({
         id: `ins-${(idSeq += 1)}`,
         provider,
         model,
-        enabled: false,
+        enabled,
         source: 'discovery',
         stale: false,
         context_window_tokens: ctx ?? null,
         display_name: display ?? null,
         vendor: null,
         image_input: parseJsonb(imageInput),
+        catalog_status: status ?? null,
+      })
+      return { rows: [{ enabled, dismissed: isDismissed }], rowCount: 1 }
+    }
+
+    // Catalog price for a pair the run just inserted: only when no price row
+    // exists for the pair, enabled or not.
+    if (/INSERT INTO llm_model_prices/.test(sql)) {
+      const [provider, model, input, output, cacheRead, cacheWrite] = params as [
+        string,
+        string,
+        number,
+        number,
+        number,
+        number,
+      ]
+      if (prices.some(p => p.provider === provider && p.model === model)) return empty
+      prices.push({
+        provider,
+        model,
+        input_token_price: input,
+        output_token_price: output,
+        cache_read_token_price: cacheRead,
+        cache_write_token_price: cacheWrite,
+        enabled: true,
       })
       return { rows: [], rowCount: 1 }
     }
@@ -187,8 +247,16 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
     // the suites asserting a manual row's other columns would still pass here,
     // which is why the SQL-shape test asserts the statement's text too.
     if (/UPDATE llm_allowed_models[\s\S]*t\.source = 'manual'/.test(sql)) {
-      const [id, imageInput, capturedAt] = params as [string, unknown, string]
-      const row = rows.find(r => r.id === id && r.source === 'manual')
+      const [id, imageInput, capturedAt, provider, model] = params as [
+        string,
+        unknown,
+        string,
+        string,
+        string,
+      ]
+      const row = rows.find(
+        r => r.id === id && r.source === 'manual' && r.provider === provider && r.model === model
+      )
       if (!row) return empty
       const before = JSON.stringify(row.image_input)
       if (replaceableEvidence(row, capturedAt)) row.image_input = parseJsonb(imageInput)
@@ -203,16 +271,23 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
     // PRESENT discovery row refresh — last_seen + stale=false + NULL-fill guarded
     // to disabled rows (COALESCE), never touching `enabled`.
     if (/UPDATE llm_allowed_models[\s\S]*SET\s+last_seen_at/.test(sql)) {
-      const [id, ctx, display, imageInput, capturedAt] = params as [
+      const [id, ctx, display, imageInput, capturedAt, live, status, provider, model] = params as [
         string,
         number | null,
         string | null,
         unknown,
         string,
+        boolean,
+        string | null,
+        string,
+        string,
       ]
-      const row = rows.find(r => r.id === id && r.source === 'discovery')
+      const row = rows.find(
+        r => r.id === id && r.source === 'discovery' && r.provider === provider && r.model === model
+      )
       if (!row) return empty
       row.stale = false
+      if (live === true) row.catalog_status = status ?? null
       if (!row.enabled) {
         row.context_window_tokens = row.context_window_tokens ?? ctx ?? null
         row.display_name = row.display_name ?? display ?? null
@@ -253,6 +328,10 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
 
     // Run summary.
     if (/INSERT INTO llm_catalog_sync_runs/.test(sql)) {
+      runs.push({
+        source: String(params[0]),
+        provider_counts: params[4] === undefined ? null : JSON.parse(String(params[4])),
+      })
       return { rows: [{ ran_at: new Date('2026-08-12T00:00:00Z') }], rowCount: 1 }
     }
 
@@ -267,6 +346,9 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
   return {
     connector,
     rows,
+    dismissed,
+    prices,
+    runs,
     get: (provider, model) => rows.find(r => r.provider === provider && r.model === model),
     materializer: writer as FakeDb['materializer'],
     cluster,

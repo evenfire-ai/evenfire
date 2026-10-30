@@ -9,13 +9,14 @@
  * allowlist pair, a hand-added id). Instead we SELECT the provider's rows and
  * branch on `source` BEFORE writing:
  *
- *   - NEW (provider, model) not in DB → INSERT source='discovery', enabled=false,
- *     discovered_at=now, last_seen_at=now, stale=false + ctx/display from catalog.
- *     (`ON CONFLICT DO NOTHING` only guards a concurrent manual insert race — it
- *     is DO NOTHING, never DO UPDATE, so it can never overwrite a manual row.)
- *   - PRESENT with source='discovery' → UPDATE last_seen_at=now, stale=false and
- *     NULL-FILL ctx/display only (COALESCE keeps any operator-edited non-null).
- *     `enabled` is NEVER touched.
+ *   - NEW (provider, model) not in DB → INSERT source='discovery',
+ *     discovered_at=now, last_seen_at=now, stale=false + ctx/display/status from
+ *     the catalog. (`ON CONFLICT DO NOTHING` only guards a concurrent manual
+ *     insert race — it is DO NOTHING, never DO UPDATE, so it can never overwrite
+ *     a manual row.) See "Enabled on insert" below for the value of `enabled`.
+ *   - PRESENT with source='discovery' → UPDATE last_seen_at=now, stale=false,
+ *     NULL-FILL ctx/display only (COALESCE keeps any operator-edited non-null)
+ *     and, on a live run, refresh `catalog_status`. `enabled` is NEVER touched.
  *   - PRESENT with source='manual' → INVISIBLE for everything an operator
  *     authored: `enabled`, `source`, `stale`, `last_seen_at`, `discovered_at`,
  *     ctx and display are never written. ONLY `image_input` is filled, under
@@ -26,16 +27,30 @@
  *     NEVER auto-disabled (R3.7): an enabled model that vanished stays enabled +
  *     served, only flagged stale for an operator decision.
  *
- * The sync re-materializes the `clerum-llm-allowed-models` ConfigMap in exactly
- * one case: it changed `image_input` on an ENABLED row (#654). That column is
- * served, so leaving the ConfigMap behind would keep mcp-host refusing images
- * for a model the catalog now says supports them. Every other serialized column
- * of an enabled row is still invariant across syncs — new inserts are
- * `enabled=false`, the stale flag is not serialized, and the NULL-fill CASE
- * guards ctx/display to disabled rows — so a run that changes no enabled row's
- * evidence writes nothing to the ConfigMap. `enabled` itself is never touched:
- * a discovered model only reaches runtime once an operator enables it via the
- * normal PUT path.
+ * Enabled on insert. A new row starts enabled only when ALL of these hold: the
+ * auto-enable flag is on, the run is live and plausible, the provider's policy
+ * (read once, after the sync lock) is on, the model passes the eligibility rules
+ * (`autoEnableRejection`), and no operator removed the pair before (a row in
+ * `llm_catalog_dismissed`). The tombstone is read INSIDE the INSERT statement,
+ * never from an earlier read: a DELETE that commits after this run started must
+ * still be seen. A tombstoned pair is still inserted, only disabled. Rows that
+ * already exist never change `enabled` — whatever an operator decided stands,
+ * and so does a model inserted disabled that models.dev later fixes.
+ *
+ * With the flag on, a run that cannot decide (vendored, or a live catalog that
+ * fails the plausibility floor) does NOT insert models of providers whose policy
+ * is on. Inserting them disabled would be final, because the next live run sees
+ * an existing row and never enables it. Providers whose policy is off insert
+ * disabled rows as before.
+ *
+ * A row this run inserted also gets its catalog price, in the same transaction,
+ * unless the pair already has ANY price row (enabled or not): an operator's
+ * price, even one switched off, is never second-guessed. Existing prices are
+ * never written.
+ *
+ * Publication is decided by STATE, not by what the run changed (see
+ * `syncDiscoveredModels`): after COMMIT the writer compares the ConfigMap hash
+ * with what Postgres projects and writes only on a difference.
  *
  * Known race: an admin write to `image_input` that commits while the sync's
  * UPDATE runs can make that row report no change, because `prev` reads the
@@ -62,10 +77,16 @@ import type { AllowedModelsConfigMapPublisher } from './llmAllowedModelsConfigMa
 import { type AllowlistPublishRetry, llmAllowlistPublishRetry } from './llmAllowlistPublishRetry.js'
 import { acquireCatalogSyncLock } from './llmCatalogSyncLock.js'
 import {
+  type CatalogPolicyProviderId,
+  readEffectiveAutoEnablePolicy,
+} from './llmProviderCatalogSettings.js'
+import {
+  type AutoEnableRejection,
   type DiscoveredModel,
   type FetchLike,
   type ImageInputState,
   type ModelsDevCatalogResult,
+  autoEnableRejection,
   loadModelsDevCatalog,
   mapCatalogToProviders,
 } from './modelsDevClient.js'
@@ -144,7 +165,35 @@ export interface CatalogSyncResult {
   enabledImageInputChanged: number
   /** True when this run wrote the ConfigMap (false: it already matched Postgres). */
   materialized: boolean
+  /**
+   * Per-provider breakdown of the run, keyed by provider id; only providers
+   * where something was counted appear. Optional for consumers: added after the
+   * fields above.
+   */
+  providerCounts?: CatalogSyncProviderCounts
 }
+
+/** What one run did with one provider's NEW models. */
+export interface CatalogSyncProviderCount {
+  /** Rows this run inserted. */
+  inserted: number
+  /** Of those, rows inserted enabled. */
+  autoEnabled: number
+  /** New models not inserted: auto-enable on, policy on, run could not decide. */
+  skippedUndecidable: number
+  /**
+   * Inserted rows that failed an eligibility rule, by the first rule failed.
+   * Counted only where the run could have enabled them (flag on, live and
+   * plausible, policy on): elsewhere eligibility decides nothing.
+   */
+  ineligible: Record<AutoEnableRejection, number>
+  /** Inserted rows whose pair an operator had removed before (inserted disabled). */
+  dismissed: number
+  /** Price rows inserted for rows this run inserted. */
+  pricesLoaded: number
+}
+
+export type CatalogSyncProviderCounts = Partial<Record<LlmProviderId, CatalogSyncProviderCount>>
 
 /** The last persisted sync run, for the status endpoint. */
 export interface CatalogSyncRun {
@@ -155,6 +204,8 @@ export interface CatalogSyncRun {
   added: number
   updated: number
   staled: number
+  /** Absent for runs recorded before the breakdown existed. */
+  providerCounts?: CatalogSyncProviderCounts
 }
 
 const log = rootLogger.child({ service: 'llm_catalog_sync' })
@@ -205,6 +256,71 @@ function countEnabledEvidenceChange(
   }
 }
 
+function emptyProviderCount(): CatalogSyncProviderCount {
+  return {
+    inserted: 0,
+    autoEnabled: 0,
+    skippedUndecidable: 0,
+    ineligible: { no_text_output: 0, no_tool_call: 0, status: 0, not_runnable: 0 },
+    dismissed: 0,
+    pricesLoaded: 0,
+  }
+}
+
+function isEmptyProviderCount(c: CatalogSyncProviderCount): boolean {
+  return (
+    c.inserted === 0 &&
+    c.skippedUndecidable === 0 &&
+    c.pricesLoaded === 0 &&
+    Object.values(c.ineligible).every(n => n === 0)
+  )
+}
+
+/**
+ * What the run may do with NEW models. `policy` is null when the auto-enable
+ * flag is off: then nothing is enabled and nothing is skipped, exactly as
+ * before the flag existed.
+ */
+interface InsertDecisionContext {
+  policy: Record<CatalogPolicyProviderId, boolean> | null
+  /** Live and plausible: the catalog is trustworthy enough to enable from. */
+  canDecide: boolean
+  /** Whether this run refreshes `catalog_status` on existing discovery rows. */
+  live: boolean
+}
+
+interface RunCounters {
+  added: number
+  updated: number
+  staled: number
+  enabledImageInputChanged: number
+  byProvider: CatalogSyncProviderCounts
+}
+
+async function insertCatalogPrice(
+  client: SyncTxClient,
+  provider: LlmProviderId,
+  model: DiscoveredModel
+): Promise<boolean> {
+  const cost = model.cost
+  if (!cost) return false
+  // The active-price index is partial (WHERE enabled), so the conflict target
+  // must repeat that predicate or Postgres cannot infer it. NOT EXISTS covers
+  // what the index cannot: a disabled price row the operator kept.
+  const res = await client.query(
+    `INSERT INTO llm_model_prices
+       (provider, model, input_token_price, output_token_price,
+        cache_read_token_price, cache_write_token_price)
+     SELECT $1::text, $2::text, $3::numeric, $4::numeric, $5::numeric, $6::numeric
+      WHERE NOT EXISTS (
+        SELECT 1 FROM llm_model_prices p WHERE p.provider = $1::text AND p.model = $2::text
+      )
+     ON CONFLICT (provider, model) WHERE enabled DO NOTHING`,
+    [provider, model.model_id, cost.input, cost.output, cost.cache_read, cost.cache_write]
+  )
+  return (res.rowCount ?? 0) > 0
+}
+
 async function reconcileProvider(
   client: SyncTxClient,
   provider: LlmProviderId,
@@ -212,13 +328,37 @@ async function reconcileProvider(
   markStale: boolean,
   providerMinLive: number,
   imageEvidence: { capturedAt: string; ttlMs: number },
-  counters: {
-    added: number
-    updated: number
-    staled: number
-    enabledImageInputChanged: number
-  }
+  decision: InsertDecisionContext,
+  counters: RunCounters
 ): Promise<void> {
+  const providerCount = emptyProviderCount()
+  await reconcileProviderRows(
+    client,
+    provider,
+    discovered,
+    markStale,
+    providerMinLive,
+    imageEvidence,
+    decision,
+    counters,
+    providerCount
+  )
+  if (!isEmptyProviderCount(providerCount)) counters.byProvider[provider] = providerCount
+}
+
+async function reconcileProviderRows(
+  client: SyncTxClient,
+  provider: LlmProviderId,
+  discovered: DiscoveredModel[],
+  markStale: boolean,
+  providerMinLive: number,
+  imageEvidence: { capturedAt: string; ttlMs: number },
+  decision: InsertDecisionContext,
+  counters: RunCounters,
+  providerCount: CatalogSyncProviderCount
+): Promise<void> {
+  const policyOn = decision.policy?.[provider as CatalogPolicyProviderId] === true
+
   const existingRes = await client.query(
     `SELECT id, model, source FROM llm_allowed_models WHERE provider = $1`,
     [provider]
@@ -247,17 +387,43 @@ async function reconcileProvider(
     )
 
     if (!existing) {
-      // NEW → insert a disabled discovery row. ON CONFLICT DO NOTHING guards only
-      // a concurrent manual insert (never DO UPDATE → never clobbers manual).
+      if (policyOn && !decision.canDecide) {
+        providerCount.skippedUndecidable += 1
+        continue
+      }
+      const rejection = autoEnableRejection(model)
+      const enable = policyOn && decision.canDecide && rejection === null
+      // ON CONFLICT DO NOTHING guards only a concurrent manual insert (never DO
+      // UPDATE → never clobbers manual), and then RETURNING yields no row, so
+      // nothing below runs for a pair this run did not create.
       const ins = await client.query(
         `INSERT INTO llm_allowed_models
            (provider, model, enabled, source, discovered_at, last_seen_at, stale,
-            context_window_tokens, display_name, image_input)
-         VALUES ($1, $2, false, 'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb)
-         ON CONFLICT (provider, model) DO NOTHING`,
-        [provider, model.model_id, ctx, display, imageInputJson]
+            context_window_tokens, display_name, image_input, catalog_status)
+         VALUES ($1, $2,
+                 $6::boolean AND NOT EXISTS (
+                   SELECT 1 FROM llm_catalog_dismissed d
+                    WHERE d.provider = $1 AND d.model = $2
+                 ),
+                 'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7)
+         ON CONFLICT (provider, model) DO NOTHING
+         RETURNING enabled,
+                   EXISTS (
+                     SELECT 1 FROM llm_catalog_dismissed d
+                      WHERE d.provider = $1 AND d.model = $2
+                   ) AS dismissed`,
+        [provider, model.model_id, ctx, display, imageInputJson, enable, model.catalog_status]
       )
       counters.added += ins.rowCount ?? 0
+      const inserted = ins.rows[0] as { enabled?: unknown; dismissed?: unknown } | undefined
+      if (!inserted) continue
+      providerCount.inserted += 1
+      if (inserted.enabled === true) providerCount.autoEnabled += 1
+      if (inserted.dismissed === true) providerCount.dismissed += 1
+      if (policyOn && decision.canDecide && rejection !== null) {
+        providerCount.ineligible[rejection] += 1
+      }
+      if (await insertCatalogPrice(client, provider, model)) providerCount.pricesLoaded += 1
       continue
     }
 
@@ -285,8 +451,9 @@ async function reconcileProvider(
                 END
            FROM llm_allowed_models AS prev
           WHERE t.id = $1 AND prev.id = t.id AND t.source = 'manual'
+            AND t.provider = $4 AND t.model = $5
       RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed`,
-        [existing.id, imageInputJson, imageEvidence.capturedAt]
+        [existing.id, imageInputJson, imageEvidence.capturedAt, provider, model.model_id]
       )
       countEnabledEvidenceChange(man.rows, counters)
       continue
@@ -295,12 +462,12 @@ async function reconcileProvider(
     // PRESENT & discovery → refresh liveness (last_seen_at/stale — NOT
     // ConfigMap-serialized) for every discovery row, but NULL-FILL the
     // CM-serialized columns (context_window_tokens/display_name) ONLY while the
-    // row is still disabled. Once an operator has ENABLED a discovery row it is
-    // in the `clerum-llm-allowed-models` ConfigMap; freezing its serialized
-    // columns here keeps the CM byte-stable so the sync never needs to
-    // re-materialize (its guarantee). COALESCE keeps any operator-edited
-    // non-null; `enabled` is never assigned. The freshest metadata for an
-    // enabled row lands on the operator's next edit (which re-materializes).
+    // row is still disabled. Once a discovery row is enabled (by an operator, or
+    // by this sync on insert) it is in the `clerum-llm-allowed-models`
+    // ConfigMap; freezing its serialized columns here keeps what is served
+    // stable across runs. COALESCE keeps any operator-edited non-null;
+    // `enabled` is never assigned. The freshest metadata for an enabled row
+    // lands on the operator's next edit (which re-materializes).
     //
     // `image_input` deliberately does NOT follow the enabled-row freeze (#654).
     // It is not operator-authored (operator-authored evidence is `curated`, and
@@ -316,6 +483,14 @@ async function reconcileProvider(
     // therefore never regress evidence a later live run stamped. `<=` rather
     // than `<` so a re-run against the same capture rewrites; the RETURNING
     // flag keeps the materialization count exact.
+    //
+    // `catalog_status` is refreshed only from a live catalog: the vendored
+    // snapshot carries no status, and reading its absence as "no longer
+    // deprecated" would silence the attention item.
+    //
+    // Both UPDATEs here match the id AND the pair read by the SELECT above: an
+    // operator rename committed in between leaves the id pointing at another
+    // model, which must not inherit this entry's evidence or status.
     const upd = await client.query(
       `UPDATE llm_allowed_models AS t
           SET last_seen_at = NOW(),
@@ -334,11 +509,23 @@ async function reconcileProvider(
                  AND (t.image_input->'evidence'->>'checkedAt')::timestamptz <= $5::timestamptz
                   THEN $4::jsonb
                 ELSE t.image_input
-              END
+              END,
+              catalog_status = CASE WHEN $6::boolean THEN $7::text ELSE t.catalog_status END
          FROM llm_allowed_models AS prev
         WHERE t.id = $1 AND prev.id = t.id AND t.source = 'discovery'
+          AND t.provider = $8 AND t.model = $9
     RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed`,
-      [existing.id, ctx, display, imageInputJson, imageEvidence.capturedAt]
+      [
+        existing.id,
+        ctx,
+        display,
+        imageInputJson,
+        imageEvidence.capturedAt,
+        decision.live,
+        model.catalog_status,
+        provider,
+        model.model_id,
+      ]
     )
     counters.updated += upd.rowCount ?? 0
     countEnabledEvidenceChange(upd.rows, counters)
@@ -389,9 +576,9 @@ async function reconcileProvider(
 /**
  * Run one catalog sync: load the models.dev catalog (live, else vendored), map
  * it to our providers, and source-guarded-reconcile into `llm_allowed_models`
- * inside a single transaction, then persist a run summary. Re-materializes the
- * ConfigMap after COMMIT only when it changed `image_input` on an enabled row
- * (see the module header).
+ * inside a single transaction, then persist a run summary. After COMMIT the
+ * ConfigMap is published only if its content differs from what Postgres now
+ * projects (see the module header).
  */
 export async function syncDiscoveredModels(
   opts: {
@@ -411,6 +598,8 @@ export async function syncDiscoveredModels(
     publishRetry?: AllowlistPublishRetry
     /** Image-evidence validity window (default from config). */
     imageEvidenceTtlMs?: number
+    /** Whether new models may start enabled (default from config). */
+    autoEnableEnabled?: boolean
   },
   connector: SyncConnector = pool
 ): Promise<CatalogSyncResult> {
@@ -418,6 +607,7 @@ export async function syncDiscoveredModels(
   const minPlausibleLiveTotal = opts.minPlausibleLiveTotal ?? config.modelsDevMinPlausibleLiveTotal
   const providerMinLive = opts.providerMinLive ?? config.llmCatalogSyncProviderMinLive
   const imageEvidenceTtlMs = opts.imageEvidenceTtlMs ?? config.llmCatalogImageEvidenceTtlMs
+  const autoEnableEnabled = opts.autoEnableEnabled ?? config.llmCatalogAutoEnableEnabled
   const { source, fetchedAt, capturedAt, catalog } = await load({ fetchImpl: opts.fetchImpl })
   const byProvider = mapCatalogToProviders(catalog)
   // Stamped with the SOURCE capture time (see discoveryImageInput); the payload
@@ -429,11 +619,13 @@ export async function syncDiscoveredModels(
   // persisted history / no per-provider math. If a LIVE run's TOTAL mapped model
   // count is implausibly small, we suppress the vanished→stale inference for the
   // WHOLE run — a flappy/truncated external catalog must not mass-stale the
-  // allowlist. "Abort" here means skip only the stale UPDATEs: the inert
-  // `INSERT enabled=false` rows for genuinely-new models still proceed (they
-  // never reach runtime until an operator enables them). Cold start (empty DB)
-  // is unaffected: the stale UPDATE's universe (source='discovery' AND
-  // stale=false) is empty, so it marks 0 rows with or without this guard.
+  // allowlist. "Abort" here means skip the stale UPDATEs, and also mark the run
+  // unable to decide auto-enable: with the auto-enable flag on, new models of
+  // providers whose policy is on are not inserted at all; every other new model
+  // is inserted disabled, as with the flag off (see the module header). The
+  // stale part does not affect a cold start (empty DB): the stale UPDATE's
+  // universe (source='discovery' AND stale=false) is empty, so it marks 0 rows
+  // with or without this guard.
   const totalLive = PROVIDER_IDS.reduce((n, p) => n + (byProvider[p]?.length ?? 0), 0)
   const sourceIsLive = source === 'live'
   const globallyImplausible = sourceIsLive && totalLive < minPlausibleLiveTotal
@@ -444,7 +636,7 @@ export async function syncDiscoveredModels(
         totalLive,
         minPlausibleLiveTotal,
       },
-      `LIVE catalog returned only ${totalLive} total model(s) (< floor ${minPlausibleLiveTotal}); suppressing ALL stale-marking this run (inserts still proceed)`
+      `LIVE catalog returned only ${totalLive} total model(s) (< floor ${minPlausibleLiveTotal}); suppressing ALL stale-marking this run (inserts of providers without auto-enable still proceed)`
     )
   }
 
@@ -454,8 +646,24 @@ export async function syncDiscoveredModels(
     providerMinLive,
     imageEvidence,
     source,
+    autoEnableEnabled,
+    canDecide: sourceIsLive && !globallyImplausible,
   })
   const { counters } = committed
+
+  log.info(
+    {
+      event: 'llm_catalog_sync_run',
+      source,
+      autoEnableEnabled,
+      globallyImplausible,
+      added: counters.added,
+      updated: counters.updated,
+      staled: counters.staled,
+      providerCounts: counters.byProvider,
+    },
+    'llm catalog sync committed'
+  )
 
   // Published after COMMIT and after the run's client went back to the pool:
   // the publish waits on its own lock and holds its own connection, and holding
@@ -500,6 +708,7 @@ export async function syncDiscoveredModels(
     staled: counters.staled,
     enabledImageInputChanged: counters.enabledImageInputChanged,
     materialized,
+    providerCounts: counters.byProvider,
   }
 }
 
@@ -511,11 +720,10 @@ async function reconcileCatalogInTransaction(
     providerMinLive: number
     imageEvidence: { capturedAt: string; ttlMs: number }
     source: 'live' | 'vendored'
+    autoEnableEnabled: boolean
+    canDecide: boolean
   }
-): Promise<{
-  ranAt: string
-  counters: { added: number; updated: number; staled: number; enabledImageInputChanged: number }
-}> {
+): Promise<{ ranAt: string; counters: RunCounters }> {
   const client = await connector.connect()
   let inTransaction = false
   try {
@@ -528,7 +736,20 @@ async function reconcileCatalogInTransaction(
     // vanished→stale inference for the whole run (`markStale`); layer 2
     // (per-provider floor) is applied inside reconcileProvider. A vendored
     // fallback must not stale live models (see reconcileProvider).
-    const counters = { added: 0, updated: 0, staled: 0, enabledImageInputChanged: 0 }
+    // Read under the lock: the policy toggle takes the same lock, so this run
+    // sees a toggle entirely or not at all.
+    const decision: InsertDecisionContext = {
+      policy: run.autoEnableEnabled ? await readEffectiveAutoEnablePolicy(client) : null,
+      canDecide: run.canDecide,
+      live: run.source === 'live',
+    }
+    const counters: RunCounters = {
+      added: 0,
+      updated: 0,
+      staled: 0,
+      enabledImageInputChanged: 0,
+      byProvider: {},
+    }
     for (const provider of PROVIDER_IDS) {
       await reconcileProvider(
         client,
@@ -537,6 +758,7 @@ async function reconcileCatalogInTransaction(
         run.markStale,
         run.providerMinLive,
         run.imageEvidence,
+        decision,
         counters
       )
     }
@@ -545,10 +767,16 @@ async function reconcileCatalogInTransaction(
     // read it back so the result's `ranAt` matches what the status endpoint will
     // later report for this run.
     const runRes = await client.query(
-      `INSERT INTO llm_catalog_sync_runs (source, added, updated, staled)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO llm_catalog_sync_runs (source, added, updated, staled, provider_counts)
+       VALUES ($1, $2, $3, $4, $5::jsonb)
        RETURNING ran_at`,
-      [run.source, counters.added, counters.updated, counters.staled]
+      [
+        run.source,
+        counters.added,
+        counters.updated,
+        counters.staled,
+        JSON.stringify(counters.byProvider),
+      ]
     )
     await client.query('COMMIT')
     inTransaction = false
@@ -575,7 +803,7 @@ export async function getLastCatalogSyncRun(
   db: { query: SyncTxClient['query'] } = pool
 ): Promise<CatalogSyncRun | null> {
   const res = await db.query(
-    `SELECT id, ran_at, source, added, updated, staled
+    `SELECT id, ran_at, source, added, updated, staled, provider_counts
        FROM llm_catalog_sync_runs
       ORDER BY ran_at DESC
       LIMIT 1`
@@ -583,7 +811,7 @@ export async function getLastCatalogSyncRun(
   const row = res.rows[0] as Record<string, unknown> | undefined
   if (!row) return null
   const ranAt = row.ran_at
-  return {
+  const run: CatalogSyncRun = {
     id: String(row.id),
     ranAt: ranAt instanceof Date ? ranAt.toISOString() : String(ranAt),
     source: row.source === 'vendored' ? 'vendored' : 'live',
@@ -591,4 +819,9 @@ export async function getLastCatalogSyncRun(
     updated: Number(row.updated ?? 0),
     staled: Number(row.staled ?? 0),
   }
+  const providerCounts = row.provider_counts
+  if (providerCounts && typeof providerCounts === 'object' && !Array.isArray(providerCounts)) {
+    run.providerCounts = providerCounts as CatalogSyncProviderCounts
+  }
+  return run
 }

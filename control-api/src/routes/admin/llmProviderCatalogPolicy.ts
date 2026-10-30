@@ -1,5 +1,6 @@
 import { type Request, type Response, Router } from 'express'
 import { z } from 'zod'
+import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rootLogger } from '../../observability/logger.js'
@@ -27,6 +28,11 @@ function sendZodError(res: Response, error: z.ZodError): void {
 // Inherits the `/admin/*` control-ui admin auth gate (app.ts). The policy only
 // decides whether NEWLY discovered models start enabled; existing rows and the
 // runtime ConfigMap are untouched, so no re-materialization follows a toggle.
+//
+// The GET also reports whether this replica has auto-enable switched on at all:
+// with the flag off a policy set to on enables nothing, and the operator editing
+// it must be able to see that. The flag is per replica; during a rollout two
+// replicas may answer differently.
 export function createAdminLlmProviderCatalogPolicyRouter(): Router {
   const router = Router()
 
@@ -34,7 +40,10 @@ export function createAdminLlmProviderCatalogPolicyRouter(): Router {
     '/admin/llm-providers/catalog-policy',
     asyncHandler(async (_req: Request, res: Response) => {
       const providers = await listProviderCatalogPolicy()
-      res.status(200).json({ providers })
+      res.status(200).json({
+        providers,
+        auto_enable_enabled: config.llmCatalogAutoEnableEnabled,
+      })
     })
   )
 

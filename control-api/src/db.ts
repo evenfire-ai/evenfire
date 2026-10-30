@@ -6429,6 +6429,47 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       `)
     },
   },
+  {
+    version: '0133_llm_allowed_models_catalog_status',
+    apply: async db => {
+      // The lifecycle tag models.dev puts on a discovered model, so the attention
+      // feed can flag an enabled model the catalog now calls deprecated. Not part
+      // of the served allowlist. Anything outside the known tags is stored as NULL
+      // by the sync, so the CHECK can never fail a run on upstream data. The
+      // runtime's table-level grant (legacy DML) already covers a new column.
+      await db.query(`
+        ALTER TABLE llm_allowed_models
+          ADD COLUMN IF NOT EXISTS catalog_status TEXT NULL;
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+             WHERE conname = 'llm_allowed_models_catalog_status_check'
+               AND conrelid = 'llm_allowed_models'::regclass
+          ) THEN
+            ALTER TABLE llm_allowed_models
+              ADD CONSTRAINT llm_allowed_models_catalog_status_check
+              CHECK (catalog_status IS NULL OR catalog_status IN ('deprecated', 'alpha', 'beta'));
+          END IF;
+        END
+        $$;
+      `)
+    },
+  },
+  {
+    version: '0134_llm_catalog_sync_runs_provider_counts',
+    apply: async db => {
+      // Per-provider outcome of each catalog sync run (inserted, auto-enabled,
+      // skipped, ineligible by rule, dismissed, priced). JSONB rather than one
+      // column per counter: the breakdown is diagnostic, read whole, and its keys
+      // follow the eligibility rules, which may grow. NULL on runs recorded before
+      // this column existed. The runtime's append grant on the table covers it.
+      await db.query(`
+        ALTER TABLE llm_catalog_sync_runs
+          ADD COLUMN IF NOT EXISTS provider_counts JSONB NULL;
+      `)
+    },
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {

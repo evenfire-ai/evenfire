@@ -129,6 +129,12 @@ type Config = {
   // seconds after start and then one every llmCatalogSyncIntervalMs (default
   // 24h), cross-replica-deduped by a session advisory lock inside the cron.
   llmCatalogSyncCronEnabled: boolean
+  // Default OFF. When on, a model the catalog sync inserts starts enabled if a
+  // LIVE, plausible run finds its provider's auto-enable policy on and the model
+  // eligible, and no operator removed the pair before. Ships dark so the code
+  // can be deployed before the behaviour is validated; existing rows are never
+  // touched either way.
+  llmCatalogAutoEnableEnabled: boolean
   // Default OFF. Codex subscription management/admission stays dark until
   // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
   codexSubscriptionEnabled: boolean
@@ -159,8 +165,10 @@ type Config = {
   llmCatalogImageEvidenceTtlMs: number
   // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
   // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
-  // (a flappy/truncated external catalog must not mass-stale the allowlist);
-  // the inert `enabled=false` inserts still proceed. Calibrated off the vendored
+  // (a flappy/truncated external catalog must not mass-stale the allowlist)
+  // and cannot enable anything on insert; with LLM_CATALOG_AUTO_ENABLE_ENABLED
+  // on it also skips new models of providers whose auto-enable policy is on
+  // (llmCatalogSync.ts header). Calibrated off the vendored
   // snapshot (~1058 mapped models across 22 providers) — a conservative <10%
   // floor catches a catastrophic collapse without tripping on normal variation.
   modelsDevMinPlausibleLiveTotal: number
@@ -900,6 +908,8 @@ export const config: Config = {
   // idiom used by the other crons. This one stays dark until an operator turns
   // it on deliberately.
   llmCatalogSyncCronEnabled: process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
+  // Default OFF, same exact-token idiom as the discovery cron.
+  llmCatalogAutoEnableEnabled: process.env.LLM_CATALOG_AUTO_ENABLE_ENABLED === 'true',
   // Default OFF. Absent or any value other than the exact token `true` keeps
   // Codex subscription management and admission dark.
   codexSubscriptionEnabled: process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true',
