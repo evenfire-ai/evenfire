@@ -475,6 +475,31 @@ describe('Windows plugin storage DACL privacy', () => {
   assert.deepEqual(fullConfig.on.push.paths, ['.validation/windows/pr977-r24m7-run-2.trigger'])
   assertPinnedCheckouts(focusedConfig, 'Focused workflow', 1, expectedFocusedSourceSha)
   assertPinnedCheckouts(fullConfig, 'Full workflow', 4, expectedFullSourceSha)
+  for (const path of [
+    'scripts/pr977/capture-windows-native-fingerprint.mjs',
+    'scripts/pr977/windows-native-spawn-observer.cjs',
+    'scripts/pr977/test-windows-native-fingerprint.mjs',
+  ]) {
+    assert.ok(focusedConfig.on.push.paths.includes(path), `Focused trigger must include ${path}`)
+  }
+  const fingerprintStep = focusedConfig.jobs['focused-windows-plugin-dacl'].steps.find(step =>
+    /Prepare the checked-out Windows native helper/.test(step.name ?? '')
+  )
+  assert.ok(fingerprintStep, 'Focused workflow must prepare the native helper')
+  assert.match(fingerprintStep.run, /PR977_NATIVE_PREPARATION_ELAPSED_MS/)
+  assert.match(fingerprintStep.run, /capture-windows-native-fingerprint\.mjs/)
+  const processStep = focusedConfig.jobs['focused-windows-plugin-dacl'].steps.find(step =>
+    /Run focused consent and audit processes/.test(step.name ?? '')
+  )
+  assert.match(processStep.run, /run-focused-windows-processes\.mjs/)
+  assert.match(focusedRunner, /windows-native-spawn-observer\.cjs/)
+  assert.match(focusedRunner, /PR977_NATIVE_LOAD_ATTEMPTS_PATH/)
+  assert.match(focusedRunner, /validateNativeHelperAttempt/)
+  const artifactStep = focusedConfig.jobs['focused-windows-plugin-dacl'].steps.find(step =>
+    /Preserve sanitized reports and progress/.test(step.name ?? '')
+  )
+  assert.match(artifactStep.with.path, /environment-fingerprint\.json/)
+  assert.match(artifactStep.with.path, /native-helper-load-attempts\.jsonl/)
   const staleFocusedConfig = structuredClone(focusedConfig)
   getCheckoutSteps(staleFocusedConfig, 'source')[0].with.ref =
     '68b8ea7430ade92e1107381f0d08d76a2c72ec71'

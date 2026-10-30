@@ -8,6 +8,9 @@ import {
   validateFocusedManifest,
 } from './focused-windows-plan.mjs'
 import { verifyFocusedProcess } from './verify-focused-windows-report.mjs'
+import diagnostics from './windows-native-spawn-observer.cjs'
+
+const { validateEnvironmentFingerprint, validateNativeHelperAttempt } = diagnostics
 
 function runCommand(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', ...options })
@@ -51,6 +54,27 @@ async function main() {
     throw new Error('Focused artifact root is missing or not absolute')
   mkdirSync(artifactRoot, { recursive: true })
   const identityPath = path.join(artifactRoot, 'source-identity.json')
+  const fingerprintPath = path.join(artifactRoot, 'environment-fingerprint.json')
+  const helperAttemptsPath = path.join(artifactRoot, 'native-helper-load-attempts.jsonl')
+  let fingerprint
+  try {
+    fingerprint = validateEnvironmentFingerprint(
+      JSON.parse(readFileSync(fingerprintPath, 'utf8')),
+      sourceSha,
+      harnessSha
+    )
+  } catch {
+    throw new Error(
+      'Focused orchestration refused a missing or invalid Windows environment fingerprint'
+    )
+  }
+  if (
+    !fingerprint.runtimeProbeSucceeded ||
+    !fingerprint.nativeHelper.preparationSucceeded ||
+    !existsSync(helperAttemptsPath)
+  ) {
+    throw new Error('Focused orchestration refused incomplete native environment diagnostics')
+  }
   writeFileSync(
     identityPath,
     `${JSON.stringify({
@@ -65,8 +89,12 @@ async function main() {
   const watchdog = path.join(scriptRoot, 'run-vitest-with-watchdog.mjs')
   const sanitizer = path.join(scriptRoot, 'sanitize-windows-vitest-report.mjs')
   const reporter = path.join(scriptRoot, 'windows-diagnostic-reporter.mjs')
+  const spawnObserver = path.join(scriptRoot, 'windows-native-spawn-observer.cjs')
   const selectedTarget = readFileSync(targetPath, 'utf8').trim()
   const summary = await executeFocusedSequence(manifest, async processSpec => {
+    const previousAttemptCount = readFileSync(helperAttemptsPath, 'utf8')
+      .split(/\r?\n/)
+      .filter(Boolean).length
     const processDirectory = path.join(artifactRoot, `process-${processSpec.id}`)
     mkdirSync(processDirectory, { recursive: true })
     const progressPath = path.join(processDirectory, 'progress.jsonl')
@@ -105,6 +133,11 @@ async function main() {
         env: {
           ...process.env,
           PR977_DESKTOP_ROOT: desktopRoot,
+          PR977_FOCUSED_PROCESS_ID: processSpec.id,
+          PR977_NATIVE_LOAD_ATTEMPTS_PATH: helperAttemptsPath,
+          NODE_OPTIONS: [process.env.NODE_OPTIONS?.trim(), `--require="${spawnObserver}"`]
+            .filter(Boolean)
+            .join(' '),
         },
         stdio: 'inherit',
       }
@@ -148,9 +181,32 @@ async function main() {
       expectedSourceSha,
       expectedHarnessSha,
     })
+    const attempts = readFileSync(helperAttemptsPath, 'utf8')
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map(line => {
+        try {
+          return JSON.parse(line)
+        } catch {
+          throw new Error('Native helper diagnostics contain a malformed attempt record')
+        }
+      })
+    if (
+      attempts.length > 256 ||
+      attempts.some(value => {
+        const processId = value?.processId
+        return (
+          !['consent', 'audit-rotation'].includes(processId) ||
+          !validateNativeHelperAttempt(value, processId)
+        )
+      }) ||
+      !attempts.slice(previousAttemptCount).some(value => value.processId === processSpec.id)
+    ) {
+      throw new Error(`Focused ${processSpec.id} process lacks valid native helper timing evidence`)
+    }
     process.stdout.write(
       `Completed focused process ${processSpec.id}: ${verified.passed} required case(s), ` +
-        `${verified.elapsedMs} ms\n`
+        `${verified.elapsedMs} ms; native-inspector-attempts=${attempts.length - previousAttemptCount}\n`
     )
     return verified
   })

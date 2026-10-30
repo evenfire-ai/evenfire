@@ -20,6 +20,9 @@ on:
       - scripts/pr977/test-verify-plugin-storage-prevhead-proof.mjs
       - scripts/pr977/test-aggregate-windows-full-shards.mjs
       - scripts/pr977/sanitize-windows-vitest-report.mjs
+      - scripts/pr977/capture-windows-native-fingerprint.mjs
+      - scripts/pr977/windows-native-spawn-observer.cjs
+      - scripts/pr977/test-windows-native-fingerprint.mjs
 
 permissions:
   contents: read
@@ -106,11 +109,19 @@ jobs:
         working-directory: source/desktop-app
         shell: pwsh
         run: |
-          npm run prepare:windows-native
-          if ($LASTEXITCODE -ne 0) { throw 'Native helper preparation failed' }
-          if (-not (Test-Path -LiteralPath 'resources/WindowsSessionAuthorityNative.dll' -PathType Leaf)) {
-            throw 'The checked-out native helper was not produced'
-          }
+          $preparationTimer = [System.Diagnostics.Stopwatch]::StartNew()
+          npm run prepare:windows-native *> $null
+          $preparationExit = $LASTEXITCODE
+          $preparationTimer.Stop()
+          $helperExists = Test-Path -LiteralPath 'resources/WindowsSessionAuthorityNative.dll' -PathType Leaf
+          $prepared = $preparationExit -eq 0 -and $helperExists
+          $env:PR977_NATIVE_PREPARATION_ELAPSED_MS = [string]$preparationTimer.ElapsedMilliseconds
+          $env:PR977_NATIVE_PREPARATION_SUCCEEDED = if ($prepared) { 'true' } else { 'false' }
+          $env:PR977_RUNNER_IMAGE_LABEL = 'windows-2025'
+          node ../../validation/scripts/pr977/capture-windows-native-fingerprint.mjs
+          $fingerprintExit = $LASTEXITCODE
+          if ($fingerprintExit -ne 0) { throw 'Windows native environment fingerprint failed' }
+          if (-not $prepared) { throw 'Native helper preparation failed' }
 
       - name: Verify Windows diagnostic harness contracts
         working-directory: source/desktop-app
@@ -131,6 +142,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Previous-head proof verifier contract tests failed' }
           node ../../validation/scripts/pr977/test-aggregate-windows-full-shards.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Windows shard aggregation contract tests failed' }
+          node ../../validation/scripts/pr977/test-windows-native-fingerprint.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native fingerprint contracts failed' }
 
       - name: Verify fixed native stderr phase capture
         working-directory: source/desktop-app
@@ -160,6 +173,8 @@ jobs:
           name: pr977-focused-plugin-dacl-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/pr977-focused/source-identity.json
+            ${{ runner.temp }}/pr977-focused/environment-fingerprint.json
+            ${{ runner.temp }}/pr977-focused/native-helper-load-attempts.jsonl
             ${{ runner.temp }}/pr977-focused/focused-summary.json
             ${{ runner.temp }}/pr977-focused/process-consent/focused-report.json
             ${{ runner.temp }}/pr977-focused/process-consent/progress.jsonl
