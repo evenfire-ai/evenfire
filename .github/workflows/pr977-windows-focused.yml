@@ -133,13 +133,13 @@ jobs:
           $caseManifest = Get-Content ../../validation/.validation/windows/focused-test-cases.json -Raw |
             ConvertFrom-Json
           $patternParts = @($caseManifest.selected | ForEach-Object { [regex]::Escape([string]$_) })
-          # Vitest matches the full name (suite plus test); an unanchored title matches across
-          # the Vitest 4/5 suite-name separator without selecting sibling cases.
-          $testNamePattern = '(?:' + ($patternParts -join '|') + ')'
+          # Vitest 4 joins suite and case with one space; anchor only manifest cases.
+          $testNamePattern = '^Windows plugin storage DACL privacy (?:' +
+            ($patternParts -join '|') + ')$'
           $env:PR977_DESKTOP_ROOT = (Get-Location).Path
           node ../../validation/scripts/pr977/run-vitest-with-watchdog.mjs `
             --maximum-runtime-ms=480000 `
-            --no-progress-ms=180000 `
+            --no-progress-ms=120000 `
             --progress=$progress `
             --status=$status `
             -- node node_modules/vitest/vitest.mjs run `

@@ -127,6 +127,9 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
 describe('Windows plugin storage DACL privacy', () => {
   ${[...caseManifest.selected, ...caseManifest.deselected]
     .map(title => `it(${JSON.stringify(title)}, () => expect(true).toBe(true))`)
+    .concat(
+      `it(${JSON.stringify(`prefix ${caseManifest.selected[0]} suffix`)}, () => expect(true).toBe(true))`
+    )
     .join('\n  ')}
 })
 `
@@ -163,11 +166,12 @@ describe('Windows plugin storage DACL privacy', () => {
   assert.equal(anchoredSelection.numPassedTests, 0)
   assert.equal(
     anchoredSelection.numPendingTests,
-    caseManifest.selected.length + caseManifest.deselected.length
+    caseManifest.selected.length + caseManifest.deselected.length + 1
   )
-  const workingSelection = runSelection(`(?:${alternatives})`, 'working-selection.json')
+  const fullNamePattern = `^Windows plugin storage DACL privacy (?:${alternatives})$`
+  const workingSelection = runSelection(fullNamePattern, 'working-selection.json')
   assert.equal(workingSelection.numPassedTests, caseManifest.selected.length)
-  assert.equal(workingSelection.numPendingTests, caseManifest.deselected.length)
+  assert.equal(workingSelection.numPendingTests, caseManifest.deselected.length + 1)
   assert.equal(workingSelection.numFailedTests, 0)
   const selectedStatuses = new Map(
     workingSelection.testResults.flatMap(file =>
@@ -177,6 +181,43 @@ describe('Windows plugin storage DACL privacy', () => {
   for (const title of caseManifest.selected) assert.equal(selectedStatuses.get(title), 'passed')
   for (const title of caseManifest.deselected)
     assert.ok(['pending', 'skipped'].includes(selectedStatuses.get(title)))
+  const decoyTitle = `prefix ${caseManifest.selected[0]} suffix`
+  assert.ok(['pending', 'skipped'].includes(selectedStatuses.get(decoyTitle)))
+
+  const unexpectedManifest = path.join(directory, 'unexpected-target.txt')
+  const unexpectedCases = path.join(directory, 'unexpected-cases.json')
+  const unexpectedReport = path.join(directory, 'unexpected-report.json')
+  writeFileSync(unexpectedManifest, 'src/__tests__/selection.test.ts\n')
+  writeFileSync(
+    unexpectedCases,
+    JSON.stringify({ selected: caseManifest.selected, deselected: caseManifest.deselected })
+  )
+  writeFileSync(
+    unexpectedReport,
+    JSON.stringify({
+      ...workingSelection,
+      success: true,
+      numTestFiles: 1,
+      numTodoTests: 0,
+      counterConsistency: { valid: true },
+      testResults: workingSelection.testResults.map(result => ({
+        ...result,
+        name: 'src/__tests__/selection.test.ts',
+      })),
+    })
+  )
+  const verifierRejectsUnexpectedCase = spawnSync(
+    process.execPath,
+    [
+      path.join(here, 'verify-focused-windows-report.mjs'),
+      unexpectedReport,
+      unexpectedManifest,
+      unexpectedCases,
+    ],
+    { encoding: 'utf8' }
+  )
+  assert.notEqual(verifierRejectsUnexpectedCase.status, 0)
+  assert.match(verifierRejectsUnexpectedCase.stderr, /Focused case inventory differs/)
   rmSync(selectionFile)
   const outputs = {}
   for (const [name, reporter] of [
@@ -344,6 +385,23 @@ describe('Windows plugin storage DACL privacy', () => {
   assert.ok(
     progress.every(event => !/Users|C:\\\\|synthetic-private-value/.test(JSON.stringify(event)))
   )
+  const focusedWorkflow = readFileSync(
+    path.join(here, '../../.github/workflows/pr977-windows-focused.yml'),
+    'utf8'
+  )
+  const fullWorkflow = readFileSync(
+    path.join(here, '../../.github/workflows/pr977-exact-source-windows-full-sharded.yml'),
+    'utf8'
+  )
+  assert.match(focusedWorkflow, /timeout-minutes:\s*15/)
+  assert.match(focusedWorkflow, /--maximum-runtime-ms=480000/)
+  assert.match(focusedWorkflow, /--no-progress-ms=120000/)
+  assert.match(fullWorkflow, /desktop-windows-build:[\s\S]*?timeout-minutes:\s*20/)
+  assert.match(fullWorkflow, /native-windows-authority:[\s\S]*?timeout-minutes:\s*20/)
+  assert.match(fullWorkflow, /desktop-windows-shard:[\s\S]*?timeout-minutes:\s*25/)
+  assert.match(fullWorkflow, /--maximum-runtime-ms=960000/)
+  assert.match(fullWorkflow, /--maximum-runtime-ms=1200000/)
+  assert.equal((fullWorkflow.match(/--no-progress-ms=120000/g) ?? []).length, 2)
   process.stdout.write(
     'Actual Vitest nested-suite, original-message, verifier, timeout, setup, teardown and assertion proofs passed.\n'
   )

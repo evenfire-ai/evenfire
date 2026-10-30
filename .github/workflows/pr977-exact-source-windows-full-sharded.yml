@@ -90,7 +90,7 @@ jobs:
 
   native-windows-authority:
     runs-on: windows-2025
-    timeout-minutes: 22
+    timeout-minutes: 20
     steps:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -149,8 +149,8 @@ jobs:
           $progressPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority-progress.jsonl'
           $statusPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority-watchdog.json'
           node ../../validation/scripts/pr977/run-vitest-with-watchdog.mjs `
-            --maximum-runtime-ms=1020000 `
-            --no-progress-ms=180000 `
+            --maximum-runtime-ms=960000 `
+            --no-progress-ms=120000 `
             "--progress=$progressPath" `
             "--status=$statusPath" `
             -- node node_modules/vitest/vitest.mjs run `
@@ -205,7 +205,7 @@ jobs:
   desktop-windows-shard:
     needs: [desktop-windows-build, native-windows-authority]
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -283,8 +283,8 @@ jobs:
           npm run prepare:windows-native
           if ($LASTEXITCODE -ne 0) { throw "Native helper preparation failed for shard $shard" }
           node ../../validation/scripts/pr977/run-vitest-with-watchdog.mjs `
-            --maximum-runtime-ms=1440000 `
-            --no-progress-ms=180000 `
+            --maximum-runtime-ms=1200000 `
+            --no-progress-ms=120000 `
             "--progress=$progressPath" `
             "--status=$statusPath" `
             -- node node_modules/vitest/vitest.mjs run `
