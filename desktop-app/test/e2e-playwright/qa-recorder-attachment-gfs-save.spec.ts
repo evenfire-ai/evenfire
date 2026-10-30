@@ -1,5 +1,7 @@
 import { type ElectronApplication, type Locator, type Page, expect, test } from '@playwright/test'
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { assertGfsFixtureCleaned } from '../../../tests/e2e/gfsFixtureCleanupAssertions'
 import { uniqueGfsFixtureName } from '../../../tests/e2e/gfsFixtureCore'
 import {
@@ -39,9 +41,10 @@ import {
  * E2E_GUARDIAN_IPC_FLOW: Desktop chat, the model catalog, the agent list, the
  * composer and the Files browser all travel over Electron IPC, so the renderer
  * has no HTTP request to await for any transition in this journey. The visible
- * oracles are the composer chips, the sent bubble, the progress stepper and the
- * Files rows; the business oracles are the GFS child rows, the Desktop download
- * bytes, and the provider-boundary ledger of the derived fixture.
+ * oracles are the composer chips, the sent bubble, the fixture's answer and the
+ * Files rows; the business oracles are the GFS child rows, the file the Desktop
+ * download writes to disk, and the provider-boundary ledger of the derived
+ * fixture.
  *
  * An image and a binary file attached to the current chat message are saved by
  * the agent into a seeded EvenDrive folder, named by the folder name the user
@@ -173,14 +176,14 @@ async function attachDocument(
 }
 
 /*
- * The stepper is asserted only for `gfs_save_attachment`. The Host's progress
- * reporter does not replay tool events to a subscriber that arrives after them
- * (`mcp-host/src/progress/sseProgressReporter.ts` replays terminal and suspended
- * only), and Desktop subscribes after the send returns the task id. The fixture
- * answers in milliseconds, so the discovery call can finish before the stream
- * opens and never reach the stepper. Discovery is proven by the ledger instead:
+ * The progress stepper is not an oracle in this lane. The Host's progress
+ * reporter replays only terminal and suspended events to a late subscriber
+ * (`mcp-host/src/progress/sseProgressReporter.ts`), and Desktop subscribes
+ * after the send returns the task id. The fixture answers in milliseconds, so
+ * both tool calls can finish before the stream opens and the turn renders no
+ * stepper at all (issue #1272). The ledger proves the tool sequence instead:
  * the fixture requests the save only after it parsed a successful
- * `clerum__gfs_accessible` result.
+ * `clerum__gfs_accessible` result, and records the save result it received.
  */
 /** Side of the large PNG: 1000x1000 random RGB pixels, about 2.86 MiB once encoded. */
 const LARGE_PNG_SIDE = 1000
@@ -205,31 +208,6 @@ function buildLargePng(): Buffer {
     )
   }
   return png
-}
-
-const SENSITIVE_OUTPUT =
-  /\/data\/gfs|\/mnt\/|\.generations|blob_key|blobKey|\bSQL\b|internal (?:path|error)|stack trace/i
-
-function toolRow(stepper: Locator, name: string): Locator {
-  return stepper.locator('.stepper-step').filter({ hasText: name }).last()
-}
-
-async function expectToolSuccess(stepper: Locator, name: string): Promise<void> {
-  const row = toolRow(stepper, name)
-  await expect(row).toBeVisible({ timeout: 15_000 })
-  await expect(row.locator('.stepper-step-fn')).toContainText(name)
-  await expect(row.locator('.stepper-step-duration.state-error')).toHaveCount(0)
-}
-
-async function expectToolForbidden(stepper: Locator, name: string): Promise<void> {
-  const row = toolRow(stepper, name)
-  await expect(row).toBeVisible({ timeout: 15_000 })
-  await expect(row.locator('.stepper-step-fn')).toContainText(name)
-  await expect(row.locator('.stepper-step-duration.state-error')).toContainText(
-    /gfsc 403.*forbidden/i
-  )
-  await expect(row).not.toContainText(/gfsc 503|not_mounted/i)
-  await expect(stepper).not.toContainText(SENSITIVE_OUTPUT)
 }
 
 /**
@@ -296,79 +274,32 @@ function fileResourceControls(browser: Locator, resourceName: string) {
   }
 }
 
-async function installGfsDownloadCapture(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    type CapturedGfsDownload = {
-      filename: string
-      blob: Blob
-    }
-    const win = window as Window & {
-      __clerumE2eGfsDownloads?: CapturedGfsDownload[]
-      __clerumE2eGfsDownloadCaptureInstalled?: boolean
-    }
-    if (win.__clerumE2eGfsDownloadCaptureInstalled) return
-    win.__clerumE2eGfsDownloadCaptureInstalled = true
-    win.__clerumE2eGfsDownloads = []
-
-    // Observe the Blob produced from the real preload/IPC response while
-    // preserving both production APIs. This does not replace or mock GFS.
-    const blobByUrl = new Map<string, Blob>()
-    const originalCreateObjectURL = URL.createObjectURL.bind(URL)
-    URL.createObjectURL = (object: Blob | MediaSource) => {
-      const url = originalCreateObjectURL(object)
-      if (object instanceof Blob) blobByUrl.set(url, object)
-      return url
-    }
-
-    const originalAnchorClick = HTMLAnchorElement.prototype.click
-    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
-      const filename = this.download
-      const blob = blobByUrl.get(this.href)
-      if (filename && blob) win.__clerumE2eGfsDownloads?.push({ filename, blob })
-      return originalAnchorClick.call(this)
-    }
-  })
-}
-
-async function hashCapturedGfsDownload(
-  page: Page,
-  filename: string,
-  bytes: number
-): Promise<string> {
-  const hash = createHash('sha256')
-  const chunkBytes = 8 * 1024 * 1024
-  for (let offset = 0; offset < bytes; offset += chunkBytes) {
-    const encoded = await page.evaluate(
-      async ({ filenameToFind, start, end }) => {
-        const downloads =
-          (
-            window as Window & {
-              __clerumE2eGfsDownloads?: Array<{ filename: string; blob: Blob }>
-            }
-          ).__clerumE2eGfsDownloads ?? []
-        const download = downloads.find(item => item.filename === filenameToFind)
-        if (!download) throw new Error(`captured GFS download not found: ${filenameToFind}`)
-        const chunk = new Uint8Array(await download.blob.slice(start, end).arrayBuffer())
-        let binary = ''
-        for (let index = 0; index < chunk.length; index += 0x8000) {
-          binary += String.fromCharCode(...chunk.subarray(index, index + 0x8000))
-        }
-        return btoa(binary)
-      },
-      { filenameToFind: filename, start: offset, end: Math.min(bytes, offset + chunkBytes) }
-    )
-    hash.update(Buffer.from(encoded, 'base64'))
-  }
-  return hash.digest('hex')
-}
-
+/**
+ * Download a file from the Files row and check the file written to disk.
+ *
+ * Desktop saves a GFS file through an `<a download>` on a Blob
+ * (`desktop-app/ui/src/lib/gfsDownload.ts`); Electron then asks for a path in a
+ * native Save dialog that Playwright cannot drive. Setting the save path in the
+ * window session's `will-download` handler has the same effect as choosing that
+ * path and pressing Save, so the dialog does not open and the real download
+ * completes to disk.
+ */
 async function expectGfsDownload(
+  app: ElectronApplication,
   page: Page,
   controls: ReturnType<typeof fileResourceControls>,
   filename: string,
   expected: { bytes: number; sha256: string }
 ): Promise<void> {
-  await installGfsDownloadCapture(page)
+  const savePath = test.info().outputPath('downloads', filename)
+  mkdirSync(dirname(savePath), { recursive: true })
+  await app.evaluate(({ BrowserWindow }, target) => {
+    const [window] = BrowserWindow.getAllWindows()
+    if (!window) throw new Error('no Desktop window to attach the download handler to')
+    window.webContents.session.once('will-download', (_event, item) => {
+      item.setSavePath(target)
+    })
+  }, savePath)
   // Row actions stay hidden and ignore the pointer until the row is hovered
   // (`.da-gfs-drive__grid .da-gfs-list__actions` in styles.css), as for a user.
   await controls.name.hover()
@@ -377,29 +308,13 @@ async function expectGfsDownload(
     timeout: 300_000,
   })
   await expect
-    .poll(
-      () =>
-        page.evaluate(filenameToFind => {
-          const downloads =
-            (
-              window as Window & {
-                __clerumE2eGfsDownloads?: Array<{
-                  filename: string
-                  blob: Blob
-                }>
-              }
-            ).__clerumE2eGfsDownloads ?? []
-          const download = downloads.find(item => item.filename === filenameToFind)
-          return download ? { filename: download.filename, bytes: download.blob.size } : null
-        }, filename),
-      {
-        timeout: 300_000,
-        intervals: [100, 500, 1_000],
-        message: `Desktop should expose the real GFS IPC bytes for ${filename}`,
-      }
-    )
-    .toEqual({ filename, bytes: expected.bytes })
-  expect(await hashCapturedGfsDownload(page, filename, expected.bytes)).toBe(expected.sha256)
+    .poll(() => (existsSync(savePath) ? statSync(savePath).size : -1), {
+      timeout: 300_000,
+      intervals: [100, 500, 1_000],
+      message: `Desktop should write ${filename} to ${savePath}`,
+    })
+    .toBe(expected.bytes)
+  expect(sha256Hex(readFileSync(savePath))).toBe(expected.sha256)
 }
 
 test.describe('attachment-gfs-save fixture', () => {
@@ -490,7 +405,6 @@ test.describe('attachment-gfs-save fixture', () => {
         page.locator('.composer-attachment-chip').filter({ hasText: fileName })
       ).toBeVisible()
     })
-    const progressIndex = await page.getByTestId('progress-expand-btn').count()
     await test.step('ask the agent to save it by folder name', async () => {
       await composer(page).fill(
         `Save this image to EvenDrive. EVENDRIVE_SAVE folder="${folder.name}" drive=main`
@@ -498,11 +412,6 @@ test.describe('attachment-gfs-save fixture', () => {
       await sendButton(page).click()
       await expect(sentMessageAttachments(page).filter({ hasText: fileName })).toBeVisible()
       await expect(page.getByText(SAVE_ANSWER_SUCCESS)).toBeVisible({ timeout: 60_000 })
-    })
-    await test.step('the save ran without error', async () => {
-      const expand = page.getByTestId('progress-expand-btn').nth(progressIndex)
-      await expand.click()
-      await expectToolSuccess(expand.locator('..'), 'gfs_save_attachment')
     })
     await test.step('business signal: one file with the same length in GFS', async () => {
       await expect
@@ -519,7 +428,7 @@ test.describe('attachment-gfs-save fixture', () => {
       const { browser } = await browseToFolder(page, folder.name)
       const controls = fileResourceControls(browser, fileName)
       await expect(controls.name).toBeVisible()
-      await expectGfsDownload(page, controls, fileName, {
+      await expectGfsDownload(app!, page, controls, fileName, {
         bytes: png.length,
         sha256: sha256Hex(png),
       })
@@ -580,7 +489,6 @@ test.describe('attachment-gfs-save fixture', () => {
       await expect(chip).toHaveCount(1, { timeout: 20_000 })
       await expect(chip).toHaveAttribute('data-file-status', 'ready', { timeout: 20_000 })
     })
-    const progressIndex = await page.getByTestId('progress-expand-btn').count()
     await test.step('ask the agent to save it by folder name', async () => {
       await composer(page).fill(
         `Save this file to EvenDrive. EVENDRIVE_SAVE folder="${folder.name}" drive=main`
@@ -588,11 +496,6 @@ test.describe('attachment-gfs-save fixture', () => {
       await sendButton(page).click()
       await expect(sentMessageAttachments(page).filter({ hasText: fileName })).toBeVisible()
       await expect(page.getByText(SAVE_ANSWER_SUCCESS)).toBeVisible({ timeout: 60_000 })
-    })
-    await test.step('the save ran without error', async () => {
-      const expand = page.getByTestId('progress-expand-btn').nth(progressIndex)
-      await expand.click()
-      await expectToolSuccess(expand.locator('..'), 'gfs_save_attachment')
     })
     await test.step('business signal: one file with the same length in GFS', async () => {
       await expect
@@ -609,7 +512,7 @@ test.describe('attachment-gfs-save fixture', () => {
       const { browser } = await browseToFolder(page, folder.name)
       const controls = fileResourceControls(browser, fileName)
       await expect(controls.name).toBeVisible()
-      await expectGfsDownload(page, controls, fileName, {
+      await expectGfsDownload(app!, page, controls, fileName, {
         bytes: blob.length,
         sha256: sha256Hex(blob),
       })
@@ -636,11 +539,9 @@ test.describe('attachment-gfs-save fixture', () => {
     })
     expect(savedBefore).toMatchObject({ kind: 'file', bytes: blob.length, deleted: false })
     const beforeTurnTwo = readImageCapabilityEvidence(env)
-    let progressBefore = 0
     await test.step('a second turn without an attachment is not offered the save tool', async () => {
       await page.getByTestId('nav-chat').click()
       await expect(composer(page)).toBeVisible({ timeout: 30_000 })
-      progressBefore = await page.getByTestId('progress-expand-btn').count()
       // Witness: this turn carries no attachment.
       await expect(fileChips(page)).toHaveCount(0)
       await composer(page).fill(
@@ -651,8 +552,6 @@ test.describe('attachment-gfs-save fixture', () => {
       await expect(page.getByText(SAVE_TOOL_ABSENT)).toBeVisible({ timeout: 60_000 })
     })
     await test.step('the second turn ran no tool and left the saved file untouched', async () => {
-      // A turn without tools draws no stepper, so the count must not move.
-      await expect(page.getByTestId('progress-expand-btn')).toHaveCount(progressBefore)
       const appended = appendedAttempts(beforeTurnTwo, readImageCapabilityEvidence(env))
       const kinds = appended.map(row => row.responseKind)
       expect(kinds.filter(k => k === FIXTURE_RESPONSE_KIND.attachmentSaveToolAbsent)).toHaveLength(
@@ -717,7 +616,6 @@ test.describe('attachment-gfs-save fixture', () => {
         page.locator('.composer-attachment-chip').filter({ hasText: fileName })
       ).toBeVisible()
     })
-    const progressIndex = await page.getByTestId('progress-expand-btn').count()
     await test.step('ask the agent to save it by folder name', async () => {
       await composer(page).fill(
         `Save this image to EvenDrive. EVENDRIVE_SAVE folder="${folder.name}" drive=main`
@@ -725,11 +623,6 @@ test.describe('attachment-gfs-save fixture', () => {
       await sendButton(page).click()
       await expect(sentMessageAttachments(page).filter({ hasText: fileName })).toBeVisible()
       await expect(page.getByText(SAVE_ANSWER_FAILURE)).toBeVisible({ timeout: 60_000 })
-    })
-    await test.step('the save was forbidden', async () => {
-      const expand = page.getByTestId('progress-expand-btn').nth(progressIndex)
-      await expand.click()
-      await expectToolForbidden(expand.locator('..'), 'gfs_save_attachment')
     })
     await test.step('business signal: no file was written', async () => {
       expect(
