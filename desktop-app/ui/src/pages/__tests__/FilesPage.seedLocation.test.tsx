@@ -1012,7 +1012,9 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       rejectRefresh(new Error(rateLimitMessage))
       await Promise.resolve()
     })
-    expect(await screen.findByText(/Could not verify sharing permissions/i)).toBeTruthy()
+    expect(
+      await screen.findByText('Too many file requests. Wait before retrying permissions.')
+    ).toBeTruthy()
     expect(screen.getByRole('combobox', { name: 'Add people, teams, or agents' })).toBe(manageInput)
     expect(
       await screen.findByText('Too many file requests. Wait before retrying permissions.')
@@ -1613,7 +1615,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     })
   })
 
-  it('keeps typed Manage fields during a background permission revalidation', async () => {
+  it('keeps Manage fields while revalidating, then retires the draft on authority denial', async () => {
     const folder = await resolveResource(
       resolvedDirectory('folder-1', 'Reports', { gfsUri: SEED_URI })
     )
@@ -1743,12 +1745,10 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
         true
       )
     )
-    expect(within(dialog).getByText('Team Two')).toBeTruthy()
+    expect(within(dialog).queryByText('Team Two')).toBeNull()
     expect(
-      within(dialog)
-        .getByRole('button', { name: 'Access role for selected recipients' })
-        .textContent?.includes('Editor')
-    ).toBe(true)
-    expect(within(dialog).getByText(/Your sharing permission changed/)).toBeTruthy()
+      within(dialog).queryByRole('button', { name: 'Access role for selected recipients' })
+    ).toBeNull()
+    expect(within(dialog).getByText('Read-only access')).toBeTruthy()
   })
 })
