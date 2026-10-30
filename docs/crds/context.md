@@ -39,9 +39,11 @@ Connectors tab when the Context belongs to an agent.
 - **Agents.** The agent wizard creates a private Context for each new agent
   and sets the Host's `contextRef` to it. Its `mcpServers` are the connectors
   picked in the wizard.
-- **Connector installs.** Installing a connector from the Marketplace, through
-  an OAuth connector install, or as a custom connector with no existing scope
-  selected creates a private Context as that connector's access scope.
+- **Connector installs create no Context.** Installing a connector from the
+  Marketplace, through an OAuth connector install, or as a custom or remote
+  connector creates only the McpServer: it writes no Context and edits no
+  `mcpServers` allowlist. Enabling the connector for an agent is a separate
+  step that adds its name to that agent's Context.
 - **Workflow recipes.** A WorkflowRecipe that runs MCP transport workloads and
   sets no `spec.contextRef` gets a private Context named `wf-<recipeName>`
   (hash-shortened past 63 characters), created by the workflow-recipes
@@ -50,7 +52,8 @@ Connectors tab when the Context belongs to an agent.
   [WorkflowRecipePolicy](workflowrecipepolicy.md).
 
 UI-created private Contexts are named `<subject>-<5 digits>`, where the
-subject is the agent or connector name in kebab case.
+subject is the agent name in kebab case. Older Contexts named after a
+connector came from installs that no longer create one.
 
 ## Additional Printer Columns
 

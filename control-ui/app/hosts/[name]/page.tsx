@@ -105,7 +105,7 @@ function parseHostTab(value: string | undefined): HostTab {
 }
 
 function contextResourceName(context: ContextResource | null): string {
-  return String(context?.metadata?.name || context?.spec?.contextId || '').trim()
+  return context?.metadata?.name ?? ''
 }
 
 function normalizeConnectorNames(value: unknown): string[] {
@@ -588,10 +588,14 @@ export default function HostDetailsPage() {
         setContextRefDraft(overview.contextRef)
         setChannelsDraft(overview.channels)
         // Overview read-only summary: linked context's MCP servers + access counts.
-        const ref = overview.contextRef.trim()
-        const matched = (contextsList || []).find(
-          item => String(item.spec?.contextId || item.metadata?.name || '').trim() === ref
-        ) as ContextResource | undefined
+        // The token broker resolves a Host's Context by exact name; spec.contextId is only an
+        // alias and must not redirect connector edits to another Context.
+        const ref = overview.contextRef
+        const matched = ref
+          ? ((contextsList || []).find(item => item.metadata?.name === ref) as
+              | ContextResource
+              | undefined)
+          : undefined
         setAgentContext(matched ?? null)
         const servers = normalizeConnectorNames(matched?.spec?.mcpServers)
         setContextMcpServers(servers)
@@ -751,13 +755,12 @@ export default function HostDetailsPage() {
 
     const normalizedServers = normalizeConnectorNames(nextServers)
     const currentSpec = (agentContext?.spec || {}) as Record<string, unknown>
-    const contextId = String(currentSpec.contextId || contextName).trim()
-    if (!contextId) {
-      setError(
-        'Connector settings are not available for this agent yet. Reload the agent and try again.'
-      )
-      return false
-    }
+    // Forwarded untouched: control-api rejects a changed alias that differs from the name, so
+    // normalizing an externally written value would block every edit of this Context.
+    const contextId =
+      typeof currentSpec.contextId === 'string' && currentSpec.contextId
+        ? currentSpec.contextId
+        : contextName
 
     setBusy(true)
     setError('')

@@ -7,8 +7,8 @@
  * rules, so they MUST call into this module. Spec §6.
  *
  * Rules:
- *   - A server is **allowed** if any Context CR whose `spec.contextId` is in
- *     the scoped context-ids lists it in `spec.mcpServers`.
+ *   - A server is **allowed** if any live Context CR whose `metadata.name` is in
+ *     the scoped context ids lists it, exactly, in `spec.mcpServers`.
  *   - A server is **invocable** if it's allowed AND:
  *       - `spec.enabled !== false`
  *       - `spec.auth.type` is on the allowlist — absent/`"none"`/`"oauth"`
@@ -31,14 +31,16 @@ import {
   buildMcpServerGrantKey,
   resolveServerOAuth,
 } from '../../oauth/mcpServerOAuthSpec.js'
-import { oauthGrantExists } from '../../oauth/store.js'
+import { type OAuthGrantKey, oauthGrantExists } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
+import { mapWithConcurrencyLimit } from '../../utils/mapWithConcurrencyLimit.js'
 import {
   type AgentDirectoryEntry,
   buildAgentDirectoryEntry,
 } from '../directory/accessReconciliation.js'
 import { getUserAgents } from '../directory/agentAccess.js'
 import { getUserContexts } from '../directory/contextAccess.js'
+import { isCanonicalUuid, isLive, isValidK8sName } from './brokerHostBinding.js'
 
 const log = rootLogger.child({ module: 'mcpInvocable' })
 const connectorsLog = rootLogger.child({ module: 'mcp-connectors' })
@@ -86,7 +88,8 @@ export interface AgentWithConnectors extends AgentDirectoryEntry {
 }
 
 interface ContextCR {
-  spec?: { contextId?: string; mcpServers?: unknown[] }
+  metadata?: { name?: unknown; deletionTimestamp?: unknown }
+  spec?: { mcpServers?: unknown }
 }
 
 interface McpServerCR {
@@ -105,7 +108,6 @@ interface McpServerCR {
       // panel; never gates oauth-ness (that is `id` via `resolveServerOAuth`).
       provider?: unknown
     }
-    contextRef?: unknown
   }
 }
 
@@ -186,52 +188,73 @@ async function loadVisibleAgentHosts(
 }
 
 /**
- * Resolve the set of allowed server names per context.
- * When `scopedContextIds` is provided, contexts NOT in scope are dropped.
- * When omitted, every context in the namespace is indexed — appropriate when
- * the caller authorizes by agent rather than by context.
+ * The allowlist a Context grants, compared exactly as the broker and
+ * host-context-controller compare it: an entry that only matches after trimming
+ * names no server.
+ */
+export function contextAllowlist(
+  ctx: { spec?: { mcpServers?: unknown } } | null | undefined
+): Set<string> {
+  const raw = ctx?.spec?.mcpServers
+  const set = new Set<string>()
+  if (!Array.isArray(raw)) return set
+  for (const name of raw) {
+    if (typeof name === 'string' && name.length > 0) set.add(name)
+  }
+  return set
+}
+
+/**
+ * Resolve the set of allowed server names per Context, keyed by the Context's
+ * `metadata.name` (the identifier memberships, Hosts and shared grants use).
+ * Contexts being deleted are skipped, as the broker skips them. When
+ * `scopedContextNames` is provided, Contexts not in scope are dropped.
  */
 async function loadAllowedNamesByContext(
   gateway: Pick<K8sGateway, 'listResource'>,
-  mcpServersNamespace: string,
-  scopedContextIds?: ReadonlySet<string>
+  contextsNamespace: string,
+  scopedContextNames?: ReadonlySet<string>
 ): Promise<Map<string, Set<string>>> {
-  const contexts = asArray<ContextCR>(await gateway.listResource('contexts', mcpServersNamespace))
+  const contexts = await gateway.listResource('contexts', contextsNamespace)
+  return allowlistsOfLiveContexts(contexts, scopedContextNames)
+}
+
+/**
+ * The allowlist of every live Context in a Context list, keyed by
+ * `metadata.name`. Contexts being deleted are left out, as the broker leaves
+ * them out.
+ */
+export function allowlistsOfLiveContexts(
+  contexts: unknown,
+  scopedContextNames?: ReadonlySet<string>
+): Map<string, Set<string>> {
   const byContext = new Map<string, Set<string>>()
-  for (const ctx of contexts) {
-    const ctxId = ctx.spec?.contextId
-    if (!ctxId) continue
-    if (scopedContextIds && !scopedContextIds.has(ctxId)) continue
-    const set = new Set<string>()
-    for (const name of ctx.spec?.mcpServers || []) {
-      if (typeof name === 'string' && name.trim()) set.add(name.trim())
-    }
-    byContext.set(ctxId, set)
+  for (const ctx of asArray<ContextCR>(contexts)) {
+    const name = ctx.metadata?.name
+    if (typeof name !== 'string' || name.length === 0) continue
+    if (!isLive(ctx.metadata)) continue
+    if (scopedContextNames && !scopedContextNames.has(name)) continue
+    byContext.set(name, contextAllowlist(ctx))
   }
   return byContext
 }
 
 /**
- * Union of the `spec.mcpServers` allowlists of the given Contexts (by
- * `spec.contextId`), names trimmed. Shared by the user-scope consent gate and
- * the flat `/mcp-servers` rail, so those two cannot drift on which servers a
- * set of Contexts enables. The per-agent resolvers (`resolveMcpServersForAgents`,
- * `resolveConnectorsForAgents`) read `loadAllowedNamesByContext` directly
- * instead: they need each agent's own Context allowlist, not a union, and
- * both paths apply the same per-Context trimming there. An empty `contextIds`
- * resolves without listing Contexts.
+ * Union of the allowlists of the given Contexts (by `metadata.name`). Used by
+ * the user-scope consent gate, which only needs "does any Context enable it".
+ * An empty `contextNames` resolves without listing Contexts.
  */
 export async function allowedMcpServerNamesForContexts(
   gateway: Pick<K8sGateway, 'listResource'>,
-  mcpServersNamespace: string,
-  contextIds: readonly string[]
+  contextsNamespace: string,
+  contextNames: readonly string[]
 ): Promise<Set<string>> {
   const union = new Set<string>()
-  if (contextIds.length === 0) return union
+  if (contextNames.length === 0) return union
   const allowedByContext = await loadAllowedNamesByContext(
     gateway,
-    mcpServersNamespace,
-    new Set(contextIds)
+    contextsNamespace,
+    new Set(contextNames)
   )
   for (const names of allowedByContext.values()) {
     for (const name of names) union.add(name)
@@ -244,15 +267,17 @@ export async function allowedMcpServerNamesForContexts(
  * its `spec.mcpServers` allowlist. This is the access rule for consenting to
  * (and completing consent for) a per-user OAuth server: the grant is keyed by
  * (user, server) and serves every Context that enables the server, so access
- * follows the allowlists, never the server's own `spec.contextRef`.
+ * follows the allowlists.
  *
  * A Context is reached directly (`getUserContexts`, active users) or through
  * an agent assigned to the user (`getUserAgents` → a Host the agent directory
  * shows → its `spec.contextRef`). Those are the two sources the flat
  * `/mcp-servers` catalog and the per-agent connectors panel resolve from, so
- * anything either offers the user can be connected. Team membership
- * (`team_contexts`, `team_agents`) does not count: neither catalog reads it
- * for a user, and this path has no trusted team id.
+ * anything either offers the user can be connected. Team access
+ * (`team_contexts`, `team_agents`) is not counted here, even though the broker
+ * and the desktop chat catalog do admit team agents: this path has no trusted
+ * team id. So a user who reaches a server only through a team can be offered
+ * it and still have this consent check reject it — a known gap.
  *
  * Agents are read only when the direct Contexts do not enable the server, so
  * a Host read failure cannot break consent that direct membership already
@@ -262,7 +287,7 @@ export async function allowedMcpServerNamesForContexts(
  */
 export async function userHasContextEnablingMcpServer(opts: {
   gateway: Pick<K8sGateway, 'listResource' | 'getResource'>
-  mcpServersNamespace: string
+  contextsNamespace: string
   hostsNamespace: string
   userId: string
   mcpServerName: string
@@ -270,23 +295,74 @@ export async function userHasContextEnablingMcpServer(opts: {
   const { contextIds } = await getUserContexts(opts.userId)
   const direct = await allowedMcpServerNamesForContexts(
     opts.gateway,
-    opts.mcpServersNamespace,
+    opts.contextsNamespace,
     contextIds
   )
   if (direct.has(opts.mcpServerName)) return true
 
   const { agentNames } = await getUserAgents(opts.userId)
   const hosts = await loadVisibleAgentHosts(opts.gateway, opts.hostsNamespace, agentNames)
-  const agentContextIds: string[] = []
+  const agentContextNames: string[] = []
   for (const { host } of hosts) {
     const contextRef = host.spec?.contextRef
-    if (contextRef) agentContextIds.push(contextRef)
+    if (contextRef) agentContextNames.push(contextRef)
   }
-  if (agentContextIds.length === 0) return false
-  const reached = await allowedMcpServerNamesForContexts(opts.gateway, opts.mcpServersNamespace, [
-    ...new Set([...contextIds, ...agentContextIds]),
+  if (agentContextNames.length === 0) return false
+  const reached = await allowedMcpServerNamesForContexts(opts.gateway, opts.contextsNamespace, [
+    ...new Set([...contextIds, ...agentContextNames]),
   ])
   return reached.has(opts.mcpServerName)
+}
+
+/**
+ * Whether `userId` may act on the shared grant of Context `contextName`: the
+ * access rule for consenting to, completing consent for and revoking a
+ * context-scope OAuth server, whose grant belongs to one named Context.
+ *
+ * The Context must exist by name in `contextsNamespace` and not be being
+ * deleted, and the user must reach it from the same sources the connectors
+ * panel shows them: directly (`user_contexts`) or through an assigned agent
+ * whose visible Host's `spec.contextRef` is that name. With `requireAllowlist`
+ * the Context must also allowlist `mcpServerName` exactly. Revocation does not
+ * require it, so a member can still remove a grant the Context no longer
+ * enables.
+ *
+ * A malformed name or a userId that is not a canonical UUID is a plain denial,
+ * decided before any read: the membership columns are UUIDs and would turn it
+ * into a database error. A not-found Context is a denial; any other read
+ * failure propagates, so callers fail closed with a 500.
+ */
+export async function userReachesContext(opts: {
+  gateway: Pick<K8sGateway, 'getResource'>
+  contextsNamespace: string
+  hostsNamespace: string
+  userId: string
+  contextName: string
+  mcpServerName: string
+  requireAllowlist: boolean
+}): Promise<boolean> {
+  if (!isValidK8sName(opts.contextName) || !isCanonicalUuid(opts.userId)) return false
+
+  let ctx: ContextCR
+  try {
+    ctx = (await opts.gateway.getResource(
+      'contexts',
+      opts.contextName,
+      opts.contextsNamespace
+    )) as ContextCR
+  } catch (error) {
+    if (isK8sResourceNotFound(error)) return false
+    throw error
+  }
+  if (!ctx || ctx.metadata?.name !== opts.contextName || !isLive(ctx.metadata)) return false
+  if (opts.requireAllowlist && !contextAllowlist(ctx).has(opts.mcpServerName)) return false
+
+  const { contextIds } = await getUserContexts(opts.userId)
+  if (contextIds.includes(opts.contextName)) return true
+
+  const { agentNames } = await getUserAgents(opts.userId)
+  const hosts = await loadVisibleAgentHosts(opts.gateway, opts.hostsNamespace, agentNames)
+  return hosts.some(({ host }) => host.spec?.contextRef === opts.contextName)
 }
 
 /**
@@ -350,92 +426,165 @@ export function filterInvocable(
 }
 
 /**
- * Compute the set of candidate server names that have a valid OAuth grant for
- * this caller, by flavor (mini-spec 04 §2 step 3). Non-oauth servers are never
- * added here (the auth-type allowlist governs them). FAIL-CLOSED throughout: a
- * missing oauth id / contextRef, an unknown grantScope, or a DB error EXCLUDES
- * the server (it is simply not added to the set), so the rpc-proxy gate treats
- * it as un-serviceable rather than propagating a 500 for the whole request.
- *
- * The `user` branch is fully exercised in v1. The `context` (shared-grant)
- * branch is implemented + covered by the pure property test here; its
- * cross-service, end-to-end activation is exercised by U6(api).
+ * Grant lookups in flight per resolution. Each holds a core-pool connection
+ * (default 10, shared with every other request), so the bound keeps one
+ * connectors read with many Contexts from taking the whole pool. It is per
+ * request: a few concurrent reads can still fill the pool, and a lookup that
+ * times out waiting for a connection excludes its pair (fail-closed), which is
+ * the accepted trade-off for not running them one by one.
  */
-async function computeGrantPresence(
+const GRANT_PRESENCE_CONCURRENCY = 4
+
+/** Grant presence by flavor: shared grants per Context, per-user grants per server. */
+interface GrantPresence {
+  shared: Map<string, Set<string>>
+  user: Set<string>
+}
+
+/**
+ * Which (Context, server) pairs have a valid OAuth grant for this caller, by
+ * flavor. A `context` server is checked once per distinct Context that enables
+ * it among `pairs` (its grant belongs to that Context); a `user` server once,
+ * keyed by the caller. Non-oauth servers are never added (the auth-type
+ * allowlist governs them). FAIL-CLOSED throughout: a missing oauth id or a DB
+ * error EXCLUDES the pair rather than failing the whole request.
+ */
+async function computeGrantPresenceByContext(
   db: DbClient,
   mcpServersNamespace: string,
   callerUserId: string,
   servers: McpServerCR[],
-  candidateNames: ReadonlySet<string>
-): Promise<Set<string>> {
+  pairs: Iterable<{ contextName: string; mcpServerName: string }>
+): Promise<GrantPresence> {
   const byName = new Map<string, McpServerCR>()
   for (const s of servers) {
     const n = s.metadata?.name
     if (n) byName.set(n, s)
   }
 
-  const present = new Set<string>()
-  for (const name of candidateNames) {
+  const checks: Array<{
+    name: string
+    contextName: string
+    isShared: boolean
+    key: OAuthGrantKey
+  }> = []
+  const checkedUser = new Set<string>()
+  const checkedShared = new Set<string>()
+  for (const { contextName, mcpServerName: name } of pairs) {
     const s = byName.get(name)
     if (!s) continue
     // Only oauth servers are grant-gated; `none` servers pass on the allowlist.
     if (s.spec?.auth?.type !== 'oauth') continue
     const resolved = resolveServerOAuth(s)
     if (!resolved) continue // fail-closed: no usable oauth id
-    // Same key derivation (D4) as the mint and the grant-existence sweep. Shared
-    // (`context`) identity is keyed by the server's AUTHORITATIVE `contextRef`,
-    // decoupled from the caller's userId (mini-spec 04 §2 3b; exercised by
-    // U6(api)); a context server without a contextRef yields null → fail-closed.
+    const isShared = resolved.grantScope === 'context'
+    const memo = isShared ? `${contextName}\u0000${name}` : name
+    const checked = isShared ? checkedShared : checkedUser
+    if (checked.has(memo)) continue
+    checked.add(memo)
+
+    // The one key derivation the callback, the broker and the disconnect also use,
+    // so presence always looks up the row they write and read.
     const key = buildMcpServerGrantKey(resolved, {
       mcpServerName: name,
       mcpServersNamespace,
       userId: callerUserId,
+      contextId: contextName,
     })
     if (!key) continue // fail-closed: missing grant coordinate for the flavor
-
-    try {
-      if (await oauthGrantExists(db, key)) present.add(name)
-    } catch (err) {
-      // A grant-check DB error excludes THIS server (fail-closed) rather than
-      // failing the whole request — loudly, matching the sibling resolver's
-      // observable-degradation posture (`resolveMcpServersForAgents`).
-      log.error(
-        { err, mcpServerName: name },
-        'grant-presence check failed; server excluded from rpc-proxy rail'
-      )
-    }
+    checks.push({ name, contextName, isShared, key })
   }
-  return present
+
+  const exists = await mapWithConcurrencyLimit(
+    checks,
+    GRANT_PRESENCE_CONCURRENCY,
+    async ({ name, contextName, isShared, key }) => {
+      try {
+        return await oauthGrantExists(db, key)
+      } catch (err) {
+        // A grant-check DB error excludes THIS pair (fail-closed) rather than
+        // failing the whole request — loudly, matching the sibling resolver's
+        // observable-degradation posture (`resolveMcpServersForAgents`).
+        log.error(
+          { err, mcpServerName: name, contextName: isShared ? contextName : undefined },
+          'grant-presence check failed; server excluded'
+        )
+        return false
+      }
+    }
+  )
+
+  const presence: GrantPresence = { shared: new Map(), user: new Set() }
+  checks.forEach(({ name, contextName, isShared }, i) => {
+    if (!exists[i]) return
+    if (!isShared) {
+      presence.user.add(name)
+      return
+    }
+    const forContext = presence.shared.get(contextName) ?? new Set<string>()
+    forContext.add(name)
+    presence.shared.set(contextName, forContext)
+  })
+  return presence
+}
+
+/** The servers with a grant usable from Context `contextName`. */
+function presentFromContext(presence: GrantPresence, contextName: string): Set<string> {
+  return new Set([...presence.user, ...(presence.shared.get(contextName) ?? [])])
+}
+
+/** Every (Context, server) pair the allowlists name. */
+function allowlistedPairs(
+  allowedByContext: ReadonlyMap<string, ReadonlySet<string>>
+): Array<{ contextName: string; mcpServerName: string }> {
+  const pairs: Array<{ contextName: string; mcpServerName: string }> = []
+  for (const [contextName, names] of allowedByContext) {
+    for (const mcpServerName of names) pairs.push({ contextName, mcpServerName })
+  }
+  return pairs
 }
 
 /**
- * Flat list of invocable `{name, url}` for the given scoped context ids.
- * Used by `/rpc/access/users/:id/mcp-servers` — the rpc-proxy rail, so it
- * additionally applies the OAuth grant-presence gate (mini-spec 04).
+ * Flat list of invocable `{name, url}` for the given Contexts (the user's
+ * direct `user_contexts`). Used by `/rpc/access/users/:id/mcp-servers` — the
+ * rpc-proxy rail, so it additionally applies the OAuth grant-presence gate: an
+ * oauth server is invocable when SOME of these Contexts both enables it and
+ * holds a grant usable there (the caller's own grant for a `user` server, that
+ * Context's shared grant for a `context` server).
  */
 export async function resolveInvocableMcpServersForContexts(
   gateway: K8sGateway,
   mcpServersNamespace: string,
   scopedContextIds: readonly string[],
   callerUserId: string,
-  db: DbClient
+  db: DbClient,
+  contextsNamespace: string
 ): Promise<InvocableMcpServer[]> {
   if (scopedContextIds.length === 0) return []
 
-  const [union, mcpServers] = await Promise.all([
-    allowedMcpServerNamesForContexts(gateway, mcpServersNamespace, scopedContextIds),
+  const [allowedByContext, mcpServers] = await Promise.all([
+    loadAllowedNamesByContext(gateway, contextsNamespace, new Set(scopedContextIds)),
     gateway.listResource('mcpservers', mcpServersNamespace),
   ])
   const serverList = asArray<McpServerCR>(mcpServers)
 
-  const grantPresence = await computeGrantPresence(
+  const presence = await computeGrantPresenceByContext(
     db,
     mcpServersNamespace,
     callerUserId,
     serverList,
-    union
+    allowlistedPairs(allowedByContext)
   )
-  const invocable = filterInvocable(union, serverList, mcpServersNamespace, grantPresence)
+  const invocable = new Set<string>()
+  for (const [contextName, names] of allowedByContext) {
+    const fromHere = filterInvocable(
+      names,
+      serverList,
+      mcpServersNamespace,
+      presentFromContext(presence, contextName)
+    )
+    for (const name of fromHere) invocable.add(name)
+  }
 
   const byName = new Map<string, McpServerCR>()
   for (const s of serverList) {
@@ -473,11 +622,12 @@ export async function resolveMcpServersForAgents(
   gateway: K8sGateway,
   opts: {
     mcpServersNamespace: string
+    contextsNamespace: string
     hostsNamespace: string
     agentNames: readonly string[]
   }
 ): Promise<AgentWithMcpServers[]> {
-  const { mcpServersNamespace, hostsNamespace, agentNames } = opts
+  const { mcpServersNamespace, contextsNamespace, hostsNamespace, agentNames } = opts
   if (agentNames.length === 0) return []
 
   // A non-404 Host read failure propagates so callers can preserve their
@@ -508,7 +658,7 @@ export async function resolveMcpServersForAgents(
     try {
       allowedByContext = await loadAllowedNamesByContext(
         gateway,
-        mcpServersNamespace,
+        contextsNamespace,
         scopedContextIds
       )
     } catch (err) {
@@ -555,8 +705,8 @@ function deriveNonOauthAuthKind(server: McpServerCR): 'static' | undefined {
 
 /**
  * Classify ONE server into the tri-state, given the authoritative grant-presence
- * set (`grantPresent`, computed by `computeGrantPresence` — the SAME flavored
- * key construction the rpc-proxy gate uses, D4). FAIL-CLOSED: a server that is
+ * set of the agent's Context (`grantPresent`, from `computeGrantPresenceByContext`
+ * — the SAME flavored key construction the rpc-proxy gate uses). FAIL-CLOSED: a server that is
  * not an OAuth connector (not `auth.type==='oauth'`, or no usable oauth id) is
  * `no_oauth`, never `authorized`; an OAuth server absent from `grantPresent`
  * (no grant OR a grant-read error, both swallowed fail-closed upstream) is
@@ -579,7 +729,7 @@ function deriveNonOauthAuthKind(server: McpServerCR): 'static' | undefined {
  */
 function classifyConnector(server: McpServerCR, grantPresent: ReadonlySet<string>): ConnectorEntry {
   const name = String(server.metadata?.name)
-  // Gate on `auth.type==='oauth'` to stay aligned with `computeGrantPresence`,
+  // Gate on `auth.type==='oauth'` to stay aligned with `computeGrantPresenceByContext`,
   // which only ever considers (and thus admits into `grantPresent`) oauth
   // servers. A server carrying `spec.oauth` but a non-oauth auth type is NOT an
   // oauth connector on this rail.
@@ -623,13 +773,14 @@ export async function resolveConnectorsForAgents(
   gateway: K8sGateway,
   opts: {
     mcpServersNamespace: string
+    contextsNamespace: string
     hostsNamespace: string
     agentNames: readonly string[]
     userId: string
   },
   db: DbClient
 ): Promise<AgentWithConnectors[]> {
-  const { mcpServersNamespace, hostsNamespace, agentNames, userId } = opts
+  const { mcpServersNamespace, contextsNamespace, hostsNamespace, agentNames, userId } = opts
   if (agentNames.length === 0) return []
 
   const visibleHosts = await loadVisibleAgentHosts(gateway, hostsNamespace, agentNames)
@@ -663,7 +814,7 @@ export async function resolveConnectorsForAgents(
     try {
       allowedByContext = await loadAllowedNamesByContext(
         gateway,
-        mcpServersNamespace,
+        contextsNamespace,
         scopedContextIds
       )
     } catch (err) {
@@ -676,18 +827,15 @@ export async function resolveConnectorsForAgents(
     }
   }
 
-  // Union of every allowlisted name across the visible agents' contexts, so the
-  // authoritative grant-presence check runs ONCE per unique oauth server.
-  const union = new Set<string>()
-  for (const names of allowedByContext.values()) {
-    for (const name of names) union.add(name)
-  }
-  const grantPresent = await computeGrantPresence(
+  // One presence check per distinct (Context, shared server) and per user
+  // server; each agent is then classified with its own Context's grants, so a
+  // grant in one Context never marks an agent of another Context authorized.
+  const presence = await computeGrantPresenceByContext(
     db,
     mcpServersNamespace,
     userId,
     serverList,
-    union
+    allowlistedPairs(allowedByContext)
   )
 
   return visibleHosts.map(({ host, directoryEntry }) => {
@@ -699,6 +847,7 @@ export async function resolveConnectorsForAgents(
     if (!allowed || allowed.size === 0) {
       return { ...directoryEntry, contextRef, connectors: [] }
     }
+    const grantPresent = presentFromContext(presence, contextRef)
     const connectors: ConnectorEntry[] = []
     for (const name of [...allowed].sort((a, b) => a.localeCompare(b))) {
       const server = byName.get(name)

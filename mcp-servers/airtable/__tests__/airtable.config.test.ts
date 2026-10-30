@@ -28,7 +28,6 @@ const EXAMPLE_SECRET_YAML = join(__dirname, '../example.secret.yaml')
 // =============================================================================
 
 interface McpServerSpec {
-  contextRef: string
   description: string
   image: string
   imagePullPolicy: string
@@ -118,15 +117,9 @@ describe('Airtable MCP Server - CRD Configuration', () => {
     })
   })
 
-  describe('Context Reference', () => {
-    it('should reference context1', () => {
-      expect(crd.spec.contextRef).toBe('context1')
-    })
-
-    it('should match the Context CRD configuration', () => {
-      // This validates that airtable-server is included in context1.yaml
-      const expectedContextRef = 'context1'
-      expect(crd.spec.contextRef).toBe(expectedContextRef)
+  describe('Context membership', () => {
+    it('does not declare contextRef (Contexts expose servers via spec.mcpServers)', () => {
+      expect(crd.spec).not.toHaveProperty('contextRef')
     })
   })
 

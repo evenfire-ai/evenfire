@@ -14,7 +14,6 @@ import { expect, test } from '../helpers/auth-fixture'
 
 const RUN = Date.now()
 const CONTEXT_NAME = `e2e-member-shared-ctx-${RUN}`
-const CONTEXT_ID = `e2e-member-shared-scope-${RUN}`
 const HOST_NAME_A = `e2e-member-shared-host-a-${RUN}`
 const HOST_NAME_B = `e2e-member-shared-host-b-${RUN}`
 const HOST_DISPLAY_A = `e2e-member-shared-agent-a-${RUN}`
@@ -43,7 +42,7 @@ test.describe('Control UI — Member Agents shared scope rows', () => {
     // One scope shared by two hosts.
     await controlApi.createContext({
       metadata: { name: CONTEXT_NAME },
-      spec: { contextId: CONTEXT_ID, description: 'E2E member shared access scope' },
+      spec: { contextId: CONTEXT_NAME, description: 'E2E member shared access scope' },
     })
     for (const [hostName, hostDisplay] of [
       [HOST_NAME_A, HOST_DISPLAY_A],
@@ -53,13 +52,13 @@ test.describe('Control UI — Member Agents shared scope rows', () => {
         metadata: { name: hostName },
         spec: {
           host: hostDisplay,
-          contextRef: CONTEXT_ID,
+          contextRef: CONTEXT_NAME,
           secretRef: '',
           channels: [],
         },
       })
     }
-    await controlApi.updateUserContexts(userId, [...originalContextIds, CONTEXT_ID])
+    await controlApi.updateUserContexts(userId, [...originalContextIds, CONTEXT_NAME])
   })
 
   test.afterAll(async () => {
@@ -101,8 +100,8 @@ test.describe('Control UI — Member Agents shared scope rows', () => {
       .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_B, exact: true }) })
     await expect(rowA).toHaveCount(1)
     await expect(rowB).toHaveCount(1)
-    await expect(rowA).not.toContainText(CONTEXT_ID)
-    await expect(rowB).not.toContainText(CONTEXT_ID)
+    await expect(rowA).not.toContainText(CONTEXT_NAME)
+    await expect(rowB).not.toContainText(CONTEXT_NAME)
 
     // The pre-D8 joined label never renders.
     await expect(authedPage.getByRole('cell', { name: JOINED_LABEL, exact: true })).toHaveCount(0)
@@ -123,7 +122,7 @@ test.describe('Control UI — Member Agents shared scope rows', () => {
     await expect(confirmDialog).toBeVisible()
     await expect(confirmDialog).toContainText(HOST_DISPLAY_A)
     await expect(confirmDialog).not.toContainText(JOINED_LABEL)
-    await expect(confirmDialog).not.toContainText(CONTEXT_ID)
+    await expect(confirmDialog).not.toContainText(CONTEXT_NAME)
     await expect(confirmDialog).toContainText(
       'This revokes the agent and every connector it carries.'
     )
@@ -147,6 +146,6 @@ test.describe('Control UI — Member Agents shared scope rows', () => {
     expect(agentNames ?? []).not.toContain(HOST_NAME_A)
     expect(agentNames ?? []).toContain(HOST_NAME_B)
     const { contextIds } = await controlApi.getUserContexts(userId)
-    expect(contextIds ?? []).toContain(CONTEXT_ID)
+    expect(contextIds ?? []).toContain(CONTEXT_NAME)
   })
 })

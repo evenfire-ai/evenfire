@@ -3,11 +3,11 @@
 // Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
 // Installs a Marketplace MCP entry through the Package → Credentials →
 // Install wizard (asserting the step rail carries no Context step or button),
-// follows the success dialog's "Go to Connectors" action, expands the new
-// connector ("No agents have access yet."), and grants a seeded agent access
-// through the "Add agents" flow. The installed connector, its
-// silently-provisioned private scope, and the seeded host + context are
-// deleted via the Control API in the finally. Entry discovery mirrors
+// follows the success dialog's "Go to Connectors" action, checks the new
+// connector reaches no agent, and grants a seeded agent access through the
+// row's "Add to agents" action. The install creates no Context; the installed
+// connector and the seeded host + context are deleted via the Control API in
+// the finally. Entry discovery mirrors
 // qa-recorder-marketplace-browse.spec.ts; the journey skips when no
 // installable MCP entry exists.
 //
@@ -21,7 +21,6 @@ import {
   assertAllowedTarget,
   loginThroughUi,
   requireRecorderConfirm,
-  resourceName,
   screenshotAndLog,
   uniqueE2EName,
 } from './qa-recorder-helpers'
@@ -35,8 +34,6 @@ type RegistryEntrySummary = {
 }
 
 type RegistryEntryListResponse = { data?: RegistryEntrySummary[] }
-
-type ContextListItem = { metadata?: { name?: string }; name?: string }
 
 test.describe('optional QA recorder: Control UI marketplace install', () => {
   test('records installing a Marketplace connector and granting an agent access', async ({
@@ -58,7 +55,7 @@ test.describe('optional QA recorder: Control UI marketplace install', () => {
     try {
       await loginThroughUi(page, credentials)
 
-      // Seed an agent (context + host) first so the "Add agents" grant on the
+      // Seed an agent (context + host) first so the "Add to agents" grant on the
       // Installed Connectors list has a target.
       const ctxRes = await api(page.request, 'POST', '/api/v1/admin/contexts', {
         metadata: { name: contextName },
@@ -195,37 +192,33 @@ test.describe('optional QA recorder: Control UI marketplace install', () => {
       await successDialog.getByRole('button', { name: 'Go to Connectors', exact: true }).click()
       await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
 
-      // The fresh install has no agents yet.
-      const row = page.getByRole('button', { name: new RegExp(`Expand connector ${serverName}`) })
-      await expect(row).toBeVisible({ timeout: 30_000 })
-      // The connectors table auto-refreshes every 10s; a click landing on a
-      // re-rendered (detached) row is a silent no-op — retry until expanded.
-      const collapse = page.getByRole('button', {
-        name: new RegExp(`Collapse connector ${serverName}`),
-      })
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        await row.click()
-        if (await collapse.isVisible({ timeout: 3_000 }).catch(() => false)) break
-      }
-      await expect(collapse).toBeVisible({ timeout: 10_000 })
-      const detail = page.locator('.cu-connector-detail')
-      await expect(detail).toBeVisible({ timeout: 10_000 })
-      await expect(detail.getByText('No agents have access yet.', { exact: true })).toBeVisible()
+      // The fresh install has no agents yet. The connector list has no expandable rows;
+      // its search also matches bound agent labels, so filtering by the agent shows
+      // whether the row is bound.
+      const connectorSearch = page.getByLabel('Search connectors', { exact: true })
+      const connectorRow = page.getByRole('row', { name: new RegExp(serverName) })
+      await connectorSearch.fill(agentName)
+      await expect(connectorRow).toHaveCount(0)
+      await connectorSearch.fill(serverName)
+      await expect(connectorRow).toBeVisible({ timeout: 30_000 })
       await screenshotAndLog(page, testInfo, `${journey}-no-agents`)
 
-      // Grant the seeded agent from the Installed Connectors list.
-      await detail.getByRole('button', { name: 'Add agents', exact: true }).click()
+      // Grant the seeded agent from the connector row's actions menu.
+      await connectorRow
+        .getByRole('button', { name: `Actions for connector ${serverName}`, exact: true })
+        .click()
+      await page.getByRole('menuitem', { name: 'Add to agents', exact: true }).click()
       const grantDialog = page.getByRole('dialog', { name: 'Give agents access to this connector' })
       await expect(grantDialog).toBeVisible()
-      await grantDialog.getByRole('button', { name: 'Select agents', exact: true }).click()
-      await grantDialog.getByRole('option', { name: agentName, exact: true }).click()
+      await grantDialog.getByRole('checkbox', { name: new RegExp(agentName) }).check()
       await grantDialog.getByRole('button', { name: 'Add to agent', exact: true }).click()
       await expect(
         page
           .getByRole('status')
           .filter({ hasText: `Connector ${serverName} added to agent ${agentName}.` })
       ).toBeVisible({ timeout: 20_000 })
-      await expect(detail.getByText(agentName, { exact: true })).toBeVisible({ timeout: 20_000 })
+      await connectorSearch.fill(agentName)
+      await expect(connectorRow).toBeVisible({ timeout: 20_000 })
       await screenshotAndLog(page, testInfo, `${journey}-agent-granted`)
     } finally {
       await api(
@@ -233,29 +226,6 @@ test.describe('optional QA recorder: Control UI marketplace install', () => {
         'DELETE',
         `/api/v1/admin/mcp-servers/${encodeURIComponent(serverName)}`
       )
-      // The install silently provisions a private scope (<name>-#####); find
-      // it by prefix and tear it down too.
-      try {
-        const scopesRes = await api<{ items?: ContextListItem[] }>(
-          page.request,
-          'GET',
-          '/api/v1/admin/contexts'
-        )
-        if (scopesRes.status === 200) {
-          const privateScope = (scopesRes.data.items ?? [])
-            .map(item => resourceName(item))
-            .find(name => new RegExp(`^${serverName}-[0-9]{5}$`).test(name))
-          if (privateScope) {
-            await api(
-              page.request,
-              'DELETE',
-              `/api/v1/admin/contexts/${encodeURIComponent(privateScope)}`
-            )
-          }
-        }
-      } catch {
-        // Best-effort private-scope discovery; the connector itself is gone.
-      }
       await api(page.request, 'DELETE', `/api/v1/admin/hosts/${encodeURIComponent(agentName)}`)
       await api(page.request, 'DELETE', `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`)
     }

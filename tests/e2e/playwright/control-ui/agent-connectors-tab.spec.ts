@@ -33,7 +33,6 @@ test.describe('Control UI — Agent detail connectors tab', () => {
           metadata: { name: serverName },
           spec: {
             image: 'clerum/mock-mcp-server:test',
-            contextRef: contextName,
             enabled: true,
             managed: true,
             transport: {

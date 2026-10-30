@@ -461,7 +461,6 @@ describe('reference-only Secret reassignment', () => {
   function assignedServer() {
     const current = server()
     current.spec.envSecret = oldReference
-    current.spec.contextRef = 'private-context'
     current.spec.remote = {
       authType: 'bearer',
       authHeaders: [{ name: 'Authorization', valueTemplate: 'Bearer ${API_KEY}' }],

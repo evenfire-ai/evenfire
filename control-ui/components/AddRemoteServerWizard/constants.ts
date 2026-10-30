@@ -5,9 +5,9 @@ export const REMOTE_WIZARD_STEPS = ['Identify', 'Configure', 'Confirm'] as const
 
 export const REMOTE_WIZARD_STEP_DETAILS = [
   {
-    description: 'URL, name, and agent context',
+    description: 'URL and name',
     title: 'Identify the remote server',
-    subtitle: 'Enter the remote MCP server URL, name it, and pick the context to attach it to.',
+    subtitle: 'Enter the remote MCP server URL and name it.',
   },
   {
     description: 'Detected OAuth configuration',

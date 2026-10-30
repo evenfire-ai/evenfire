@@ -96,6 +96,7 @@ function readerKey(server: ServerCR, name: string, userId?: string): OAuthGrantK
     mcpServerName: name,
     mcpServersNamespace: NS,
     userId,
+    contextId: 'ctx-1',
   })
   if (!key) throw new Error('fixture: no grant key')
   return key

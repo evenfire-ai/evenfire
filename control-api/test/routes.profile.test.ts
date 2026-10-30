@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
+import { rootLogger } from '../src/observability/logger.js'
 import { createExternalRouter } from '../src/routes/external/index.js'
 import { createRpcAccessRouter } from '../src/routes/rpc-access/index.js'
 import {
@@ -190,7 +191,9 @@ describe('routes/profile', () => {
     const gateway = {
       listResource: vi.fn(async (plural: string) => {
         if (plural === 'contexts') {
-          return [{ spec: { contextId: 'ctx-a', mcpServers: ['mcp-a'] } }]
+          return [
+            { metadata: { name: 'ctx-a' }, spec: { contextId: 'ctx-a', mcpServers: ['mcp-a'] } },
+          ]
         }
         if (plural === 'hosts') {
           return [{ metadata: { name: 'agent-a' }, spec: { enabled: true } }]
@@ -650,7 +653,7 @@ describe('routes/profile', () => {
     })
     const gateway = accessCatalogGateway()
     gateway.getResource.mockRejectedValue(transientError)
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined)
 
     const app = express()
     app.use(express.json())

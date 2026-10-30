@@ -4,7 +4,6 @@ metadata:
   name: mongodb-server
   namespace: mcp-server
 spec:
-  contextRef: context1
   description: >-
     MongoDB MCP Server - provides tools for interacting with MongoDB databases
     including querying, aggregation, schema inspection, index management, and
