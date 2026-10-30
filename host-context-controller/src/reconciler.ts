@@ -135,6 +135,25 @@ const MAX_AUTH_HEADER_VALUE_LENGTH = 2048
 // the ConfigMap. Restrict them to uppercase environment-variable names so an
 // unresolved value cannot become an arbitrary NGINX variable.
 const QUERY_PLACEHOLDER_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g
+// Container env names a CRD may not set: they can compromise the runtime.
+const FORBIDDEN_ENV = new Set([
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'PATH',
+  'NODE_OPTIONS',
+  'PYTHONPATH',
+  'JAVA_TOOL_OPTIONS',
+  'KUBECONFIG',
+  'KUBERNETES_SERVICE_HOST',
+  'KUBERNETES_SERVICE_PORT',
+])
+// A query placeholder is backfilled into the egress-proxy env, so its name must
+// not be a forbidden one. NGINX_* names belong to the image entrypoint: for
+// example 15-local-resolvers.envsh rewrites NGINX_LOCAL_RESOLVERS after the
+// wrapper has checked the template values, and with several nameservers that
+// value holds spaces that would split proxy_pass.
+const isReservedQueryPlaceholder = (name: string): boolean =>
+  FORBIDDEN_ENV.has(name) || name.startsWith('NGINX_')
 const WRC_OWNED_RUNTIME_READY_REASON = 'WrcOwnedRuntimeRegistered'
 // Keep fleet admission aligned with the external-egress convergence lane:
 // enough parallelism for independent servers without allocating one pending
@@ -1000,6 +1019,13 @@ export class McpServerReconciler {
           'query placeholders must use ${NAME} with NAME matching [A-Z_][A-Z0-9_]*'
       )
     }
+    for (const match of parsed.search.matchAll(QUERY_PLACEHOLDER_RE)) {
+      if (isReservedQueryPlaceholder(match[1])) {
+        throw new Error(
+          `remote.baseUrl query placeholder \${${match[1]}} uses a reserved environment variable name`
+        )
+      }
+    }
     // Reconstruct safe URL from parsed components (strips injected chars like newlines)
     const path = parsed.pathname
     const safeUrl = parsed.origin + path + parsed.search
@@ -1329,17 +1355,6 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     // ── HIGH: sanitize env vars — block dangerous names ──
-    const FORBIDDEN_ENV = new Set([
-      'LD_PRELOAD',
-      'LD_LIBRARY_PATH',
-      'PATH',
-      'NODE_OPTIONS',
-      'PYTHONPATH',
-      'JAVA_TOOL_OPTIONS',
-      'KUBECONFIG',
-      'KUBERNETES_SERVICE_HOST',
-      'KUBERNETES_SERVICE_PORT',
-    ])
     if (server.spec.env) {
       server.spec.env = server.spec.env.filter(e => {
         if (FORBIDDEN_ENV.has(e.name.toUpperCase())) {
@@ -1461,7 +1476,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       }
       // Raw string slice, not sanitizeRemoteUrl: buildDeployment must not start
       // throwing on URLs it accepted before; the ConfigMap builder validates them.
-      const baseUrl = server.spec.remote.baseUrl
+      // Cut the fragment first: a `?` inside it is not the query, and a
+      // placeholder there is never rendered nor validated.
+      const baseUrl = server.spec.remote.baseUrl.split('#', 1)[0]
       const queryStart = baseUrl.indexOf('?')
       const query = queryStart >= 0 ? baseUrl.slice(queryStart) : ''
       for (const match of query.matchAll(QUERY_PLACEHOLDER_RE)) backfill(match[1])

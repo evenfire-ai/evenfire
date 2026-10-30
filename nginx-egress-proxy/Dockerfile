@@ -9,13 +9,16 @@ FROM nginx:1.30.6-alpine@sha256:c59d1f8b1e0e42da75be973424cd72e23f7f8adfb54e982f
 # upstream error line. egress-proxy-entrypoint keeps NGINX as PID 1 and routes
 # only stderr through egress-proxy-log-filter; egress-proxy-liveness is the exec
 # liveness probe that makes a dead filter a visible container restart.
+# egress-proxy-template-check refuses to start when a value that envsubst will
+# insert into a template would change the NGINX syntax around it.
 COPY egress-proxy-entrypoint /usr/local/bin/egress-proxy-entrypoint
 COPY egress-proxy-log-filter /usr/local/bin/egress-proxy-log-filter
 COPY egress-proxy-liveness /usr/local/bin/egress-proxy-liveness
+COPY egress-proxy-template-check /usr/local/bin/egress-proxy-template-check
 
 RUN set -eux; \
     chmod 0755 /usr/local/bin/egress-proxy-entrypoint /usr/local/bin/egress-proxy-liveness; \
-    chmod 0644 /usr/local/bin/egress-proxy-log-filter; \
+    chmod 0644 /usr/local/bin/egress-proxy-log-filter /usr/local/bin/egress-proxy-template-check; \
     rm -f /etc/nginx/conf.d/default.conf; \
     sed -i '/^user[[:space:]]/d; s|pid[[:space:]].*;|pid /tmp/nginx.pid;|' /etc/nginx/nginx.conf; \
     mkdir -p /etc/nginx/templates /etc/nginx/conf.d /var/cache/nginx /var/run/nginx /tmp/client_temp /tmp/proxy_temp; \

@@ -989,6 +989,43 @@ describe('McpServerReconciler remote egress proxy', () => {
       ])
       expectRemoteLivenessWitness(reconciler, mappedServer)
     })
+
+    it('does not backfill a placeholder that sits in the URL fragment (BR-2)', () => {
+      const valid = '$' + '{VALID_KEY}'
+      const reserved = '$' + '{PATH}'
+      const token = '$' + '{TOKEN}'
+      const { envSecret: _envSecret, ...specWithoutSecret } = REMOTE_SERVER.spec
+      const envNamesFor = (
+        baseUrl: string,
+        authHeaders?: { header: string; valueTemplate: string }[]
+      ) => {
+        const server: McpServerCRD = {
+          ...REMOTE_SERVER,
+          spec: {
+            ...specWithoutSecret,
+            remote: authHeaders ? { baseUrl, authHeaders } : { baseUrl },
+          },
+        }
+        const deployment = (reconciler as any).buildDeployment(server)
+        const egressContainer = deployment.spec.template.spec.containers.find(
+          (c: any) => c.name === 'egress-proxy'
+        )
+        return egressContainer.env.map((e: any) => e.name) as string[]
+      }
+
+      // A real query followed by a fragment: the query placeholder is the witness.
+      const afterQuery = envNamesFor(`https://api.example.com/mcp?k=${valid}#${reserved}`)
+      expect(afterQuery).toContain('VALID_KEY')
+      expect(afterQuery).not.toContain('PATH')
+
+      // No real query: the first `?` is inside the fragment. The header
+      // placeholder is the witness that the backfill ran.
+      const insideFragment = envNamesFor(`https://api.example.com/mcp#x?y=${reserved}`, [
+        { header: 'Authorization', valueTemplate: `Bearer ${token}` },
+      ])
+      expect(insideFragment).toContain('TOKEN')
+      expect(insideFragment).not.toContain('PATH')
+    })
   })
 
   // ─── Test 3: buildDeployment for local servers ─────────────────────────
@@ -1606,7 +1643,29 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it.each([
+      ['PATH', '?k=$' + '{PATH}'],
+      ['LD_PRELOAD', '?a=1&k=$' + '{LD_PRELOAD}'],
+      ['NGINX_ENTRYPOINT_LOCAL_RESOLVERS', '?k=$' + '{NGINX_ENTRYPOINT_LOCAL_RESOLVERS}'],
+      ['NGINX_LOCAL_RESOLVERS', '?k=$' + '{NGINX_LOCAL_RESOLVERS}'],
+    ])('rejects the reserved name %s as a query placeholder (BR-2)', (name, query) => {
+      let error: unknown
+      try {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://api.example.com/mcp${query}`)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain('reserved environment variable name')
+      expect(message).toContain(name)
+      expect(message).not.toContain(query)
+      expectRemoteLivenessWitness(reconciler, REMOTE_SERVER)
+    })
+
+    it.each([
       ['multiple uppercase placeholders', '?k=$' + '{A_1}&j=$' + '{B}'],
+      ['a name that only contains a reserved word', '?k=$' + '{MY_PATH}&j=$' + '{XNGINX_A}'],
       ['a placeholder after literal values', '?a=1&k=$' + '{ALPHA_KEY}'],
       ['an encoded dollar sequence', '?k=%24%7BA%7D'],
     ])('accepts %s in a remote URL query (Q2)', (_label, query) => {
@@ -1761,6 +1820,28 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(status.message).not.toContain(marker)
       expectRemoteLivenessWitness(reconciler, REMOTE_SERVER)
     })
+
+    it.each([['PATH'], ['NGINX_ENTRYPOINT_LOCAL_RESOLVERS']])(
+      'fails the reconcile before any write when a query placeholder is the reserved name %s (BR-2)',
+      async name => {
+        const marker = 'zz-q-marker-reserved'
+        const server = cloneServer(REMOTE_SERVER, {
+          remote: { baseUrl: `https://api.example.com/mcp?m=${marker}&q=$` + `{${name}}` },
+        })
+
+        await reconciler.reconcile(server)
+
+        const status = reconciler.getStatus(server.name)
+        // Witness: the reconcile reached the resource sync (it read the Secret).
+        expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
+        expect(status.message).toContain('Resource sync failed')
+        expect(status.message).toContain('reserved environment variable name')
+        expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+        expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+        expect(status.message).not.toContain(marker)
+        expectRemoteLivenessWitness(reconciler, REMOTE_SERVER)
+      }
+    )
 
     it('never copies the Secret value into the ConfigMap or Deployment (Q4)', async () => {
       const marker = ['q4', 'secret', 'value', 'marker'].join('-')

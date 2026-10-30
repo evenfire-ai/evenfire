@@ -3,8 +3,9 @@
 Hardened nginx image that serves as the pinned egress path for **remote** MCP
 servers (McpServer CRDs with `spec.remote.baseUrl`).
 
-**This directory contains the Dockerfile and three small runtime scripts**
-(`egress-proxy-entrypoint`, `egress-proxy-log-filter`, `egress-proxy-liveness`).
+**This directory contains the Dockerfile and four small runtime scripts**
+(`egress-proxy-entrypoint`, `egress-proxy-template-check`,
+`egress-proxy-log-filter`, `egress-proxy-liveness`).
 All proxy logic (config generation, URL/header sanitization, deployment) lives
 in [host-context-controller](../host-context-controller/) (`src/reconciler.ts`).
 
@@ -34,7 +35,10 @@ For each remote McpServer, host-context-controller:
    Query placeholders must be complete `${NAME}` values where `NAME` matches
    `[A-Z_][A-Z0-9_]*`; bare dollars, malformed braces, backslashes, and
    semicolons are rejected. The URL parser strips TAB/CR/LF and percent-encodes
-   other control characters and spaces before that check.
+   other control characters and spaces before that check. A placeholder name
+   that is a forbidden container variable (`PATH`, `LD_PRELOAD`, …) or starts
+   with `NGINX_` is rejected, because the placeholder is backfilled into the
+   container env.
 2. **Renders a per-server `default.conf.template` ConfigMap** that resolves and
    re-resolves the external base URL with NGINX. The resolver comes from the
    pod's `/etc/resolv.conf`, and the upstream `server ... resolve` directive
@@ -53,9 +57,24 @@ For each remote McpServer, host-context-controller:
    env vars sourced from `spec.envSecret`. Query placeholders use the same
    runtime mechanism. With placeholders, credentials never appear in the
    ConfigMap or Deployment; a literal value inlined in the CRD would still be
-   emitted into the ConfigMap — always use placeholders. Secret values consumed
-   by NGINX templates must contain only `[A-Za-z0-9._~-]`; other characters can
-   change the generated NGINX directive or URL after envsubst.
+   emitted into the ConfigMap — always use placeholders.
+
+Before NGINX starts, `egress-proxy-entrypoint` runs `egress-proxy-template-check`
+over the templates. envsubst substitutes every defined variable (`$NAME` and
+`${NAME}`), so the check reads each reference to a defined variable, works out
+where it sits the way NGINX's tokenizer does, and rejects a value that would
+change the syntax there:
+
+| Where the reference sits                               | Rejected in the value                              |
+| ------------------------------------------------------ | -------------------------------------------------- |
+| inside `"..."` (auth headers)                          | control characters (TAB, CR, LF, …), `"`, `$`, `\` |
+| inside an unquoted argument (query, path)              | control characters, space, `;`, `{`, `}`, `$`, `\` |
+| argument start, inside `'...'`, a comment, after a `\` | any value                                          |
+
+A rejected value stops the container before NGINX starts (CrashLoopBackOff,
+readiness never passes). The log names the template file, the variable and the
+context, never the value. This includes a credential pasted with a trailing
+TAB or newline. Undefined variables are left untouched, as envsubst leaves them.
 
 HCC appends `NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1` after CRD-provided env,
 `spec.envSecret`, and empty-placeholder backfill. Kubernetes uses the last
@@ -128,7 +147,8 @@ intermediates) is accepted; an untrusted CA, an expired certificate, a hostname
 mismatch, and the test CA without the mounted trust store are rejected.
 The harness also covers the DNS switch (`H7 dns-switch`), query placeholder
 resolution (`H8 query-accept`), stderr query redaction (`H9 redact`), signal
-delivery (`H10 signals`), and filter-death detection (`H11 filter-death`).
+delivery (`H10 signals`), filter-death detection (`H11 filter-death`), and the
+template value check (`H12 value-reject`).
 
 ## Updating NGINX
 

@@ -27,7 +27,7 @@
 # The upstream sends only the leaf, so OpenSSL reports a missing issuer of the
 # leaf as error 21, not 20 (which needs an intermediate with a missing issuer).
 #
-# Cases (11, the run fails unless exactly this many ran):
+# Cases (12, the run fails unless exactly this many ran):
 #
 #   valid, chain2, untrusted, expired, wrongsan, nobundle   TLS contract
 #   dns-switch     the upstream's A record moves to another container while the
@@ -42,6 +42,11 @@
 #   signals        QUIT and TERM reach the NGINX master, which is PID 1
 #   filter-death   the exec liveness script fails once the stderr filter dies,
 #                  and no unfiltered error line reaches the logs
+#   value-reject   a query value, a header value and a lowercase name matching a
+#                  template NGINX variable that would change the NGINX syntax
+#                  stop the container before NGINX starts, naming the variable
+#                  and never the value; a valid header value with + / = and a
+#                  space is served unchanged
 #
 # Requires docker, curl, openssl, node and `npm ci` in host-context-controller.
 #
@@ -57,6 +62,7 @@
 #   liveness-health-only  liveness script checks /health only -> filter-death red
 #   redact-first-only     filter redacts only the first field -> redact (req4) red
 #   redact-first-quote    filter ends the field at the first quote -> redact (req4) red
+#   no-value-check        wrapper skips the template value check -> value-reject red
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -73,7 +79,7 @@ UPSTREAM_X="$NAME-upstream-x"
 UPSTREAM_Y="$NAME-upstream-y"
 DNS="$NAME-dns"
 WORK="$(mktemp -d)"
-EXPECTED_CASES=11
+EXPECTED_CASES=12
 # Pinned by multi-arch index digest: the CI matrix runs this harness on amd64
 # and arm64, and a tag alone would let the two runs use different CoreDNS
 # builds. registry.k8s.io is used instead of Docker Hub so this image does not
@@ -94,7 +100,7 @@ if [ ! -f "$HCC_DIR/node_modules/ts-node/dist/bin.js" ]; then
 fi
 case "$MUTATION" in
   "" | verify-off | depth-1 | no-resolve | no-ssl-name | no-redact | liveness-health-only | \
-    redact-first-only | redact-first-quote) ;;
+    redact-first-only | redact-first-quote | no-value-check) ;;
   *) echo "FAIL: unknown NGINX_TLS_TEST_MUTATION '$MUTATION'" >&2; exit 1 ;;
 esac
 
@@ -162,6 +168,13 @@ LIVENESS
   chmod 0755 "$build_context/egress-proxy-liveness"
 fi
 case "$MUTATION" in
+  no-value-check)
+    build_context="$WORK/image-mutation"
+    cp -R "$DOCKERFILE_DIR" "$build_context"
+    # shellcheck disable=SC2016 # literal shell text in the wrapper
+    mutate "$build_context/egress-proxy-entrypoint" \
+      'exec awk -f "$TEMPLATE_CHECK" $templates' 'exec true'
+    ;;
   redact-first-only | redact-first-quote)
     build_context="$WORK/image-mutation"
     cp -R "$DOCKERFILE_DIR" "$build_context"
@@ -779,7 +792,7 @@ start_proxy() {
     -d --name "$container" --network "$NETWORK"
     "${PROXY_SECURITY_ARGS[@]}"
     -e "$PROXY_ENV_ENTRY"
-    -e "UPSTREAM_TOKEN=$AUTH_SECRET"
+    -e "UPSTREAM_TOKEN=${PROXY_UPSTREAM_TOKEN:-$AUTH_SECRET}"
     -v "$WORK/templates/$template:/etc/nginx/templates:ro"
     -p 127.0.0.1::3000
   )
@@ -1415,6 +1428,94 @@ liveness_fails() {
   ! docker exec "$1" "$LIVENESS_BIN" "$LIVENESS_PORT"
 }
 
+# ─── H12: a template value that would change the NGINX syntax stops the proxy ─
+
+# Same arguments as start_proxy (so an image without the check would really
+# start), but no readiness wait: start_proxy's wait_for exits the whole run.
+run_unready_proxy() {
+  local container="$1" template="$2" token="$3"
+  shift 3
+  docker run -d --name "$container" --network "$NETWORK" \
+    "${PROXY_SECURITY_ARGS[@]}" \
+    -e "$PROXY_ENV_ENTRY" \
+    -e "UPSTREAM_TOKEN=$token" \
+    -v "$WORK/templates/$template:/etc/nginx/templates:ro" \
+    -v "$WORK/trust-ca-a.pem:/etc/ssl/certs/ca-certificates.crt:ro" \
+    -p 127.0.0.1::3000 "$@" "$PROXY_IMAGE" >/dev/null
+}
+
+container_exited_nonzero() {
+  local state
+  state="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$1" 2>/dev/null)" || return 1
+  [ "${state%% *}" = "exited" ] && [ "${state##* }" != "0" ]
+}
+
+# One rejected value: the container must exit non-zero before the official
+# entrypoint runs, name the variable, and never print the value.
+expect_rejected_value() {
+  local label="$1" template="$2" var="$3" token="$4"
+  shift 4
+  local container="$NAME-proxy-value-reject-$label" log
+  run_unready_proxy "$container" "$template" "$token" "$@"
+  if ! wait_until "value-reject $label: the proxy to exit" "$READY_SECONDS" container_exited_nonzero "$container"; then
+    fail "value-reject ($label): the proxy did not exit non-zero; state: $(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$container" 2>&1)"
+  elif ! log="$(container_log "$container")"; then
+    fail "value-reject ($label): could not read the log"
+  elif ! printf '%s\n' "$log" | grep -qF -- "the value of $var is not allowed"; then
+    fail "value-reject ($label): the log does not name $var: $(printf '%s\n' "$log" | tail -n 3)"
+  elif printf '%s\n' "$log" | grep -qF -- "docker-entrypoint"; then
+    fail "value-reject ($label): the official entrypoint ran before the refusal"
+  elif printf '%s\n' "$log" | grep -qF -e "$VALUE_M1" -e "$VALUE_M2" -e "${VALUE_M1:0:8}" -e "${VALUE_M2:0:8}"; then
+    fail "value-reject ($label): the rejected value reached the log"
+  else
+    echo "PASS: value-reject ($label) -> exit non-zero before NGINX starts, the log names $var and not the value"
+  fi
+  docker rm -f "$container" >/dev/null 2>&1 || true
+}
+
+expect_value_reject() {
+  local case_name="value-reject" container="$NAME-proxy-value-ok" failures_before code line
+  local good="ok+/= tok-$RUN_ID"
+  local token="tok-$case_name-$RUN_ID"
+  cases=$((cases + 1))
+  failures_before=$failures
+  # Random first, so the 8-character prefixes scanned above are unique.
+  VALUE_M1="$(openssl rand -hex 12)-m1"
+  VALUE_M2="$(openssl rand -hex 12)-m2"
+
+  # Each value is one NGINX accepts when unchecked (the injected `return` sits in
+  # the location and `#` comments out the rest of the line), so only the check
+  # can stop the container.
+  # (a) unquoted query argument.
+  expect_rejected_value query query-accept UPSTREAM_QUERY_KEY "$AUTH_SECRET" \
+    -e "UPSTREAM_QUERY_KEY=$VALUE_M1; return 200 $VALUE_M2; #"
+  # (b) quoted auth header: the value closes the quoted string.
+  expect_rejected_value header 8441 UPSTREAM_TOKEN "$VALUE_M1\"; return 200 $VALUE_M2; #"
+  # (d) a lowercase name that matches the template's own $scheme at an argument start.
+  expect_rejected_value scheme 8441 scheme "$AUTH_SECRET" \
+    -e "scheme=$VALUE_M1; return 200 $VALUE_M2; #"
+
+  # (c) positive control: base64-style characters and a space are valid inside
+  # the quoted header, and the upstream receives them unchanged.
+  PROXY_UPSTREAM_TOKEN="$good" start_proxy value-ok query-accept yes on -e "UPSTREAM_QUERY_KEY=$QUERY_MARKER"
+  code="$(proxy_request "$container" "$token")"
+  if [ "$code" != "200" ]; then
+    fail "$case_name (ok): expected 200, got $code; proxy log: $(container_log "$container" | tail -n 5)"
+  elif ! wait_log "$UPSTREAM" "token=$token "; then
+    fail "$case_name (ok): upstream did not log token $token within ${LOG_SECONDS}s"
+  elif ! line="$(upstream_log_line "$UPSTREAM" "$token")"; then
+    fail "$case_name (ok): could not read the upstream log"
+  elif ! printf '%s' "$line" | grep -qF "auth=\"Bearer $good\""; then
+    fail "$case_name (ok): the upstream did not receive the header value unchanged: $line"
+  else
+    echo "PASS: $case_name (ok) -> a header value with + / = and a space starts and reaches the upstream unchanged"
+  fi
+  docker rm -f "$container" >/dev/null 2>&1 || true
+  if [ "$failures" -eq "$failures_before" ]; then
+    echo "PASS: $case_name -> query, header and argument-start values are refused and a valid value is served"
+  fi
+}
+
 # ─── Cases ───────────────────────────────────────────────────────────────────
 
 QUERY_MARKER="qk-$RUN_ID-$(openssl rand -hex 32)"
@@ -1431,6 +1532,7 @@ expect_query_accept
 expect_redact
 expect_signals
 expect_filter_death
+expect_value_reject
 
 echo "cases=$cases failures=$failures startup_no_live_upstreams=$startup_no_live"
 if [ "$cases" -ne "$EXPECTED_CASES" ]; then
