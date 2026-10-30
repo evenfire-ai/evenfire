@@ -12,6 +12,7 @@ import type {
   ToolResult,
 } from '../types'
 import type { LoopConfig } from './loopConfig'
+import { MODEL_STEP_RETRY_DEADLINE_MS, modelStepRetryDelayMs } from './modelStepRetrySchedule'
 import { isRetryableLlmTransportError } from './toolUseLoopIntentRecovery'
 
 const LLM_TRANSPORT_RETRY_DELAY_MS = 350
@@ -71,12 +72,29 @@ export async function manageMessagesForIteration(
   return managed
 }
 
+/** Cancels model-step retries 60 s after the first eligible provider_unavailable. */
+function startRetryDeadline(firstFailureAt: number, taskSignal: AbortSignal | undefined) {
+  const cap = new AbortController()
+  const timer = setTimeout(
+    () => cap.abort(new DOMException('Model step retry deadline reached', 'TimeoutError')),
+    firstFailureAt + MODEL_STEP_RETRY_DEADLINE_MS - Date.now()
+  )
+  return {
+    signal: taskSignal ? AbortSignal.any([taskSignal, cap.signal]) : cap.signal,
+    get expired() {
+      return cap.signal.aborted
+    },
+    dispose: () => clearTimeout(timer),
+  }
+}
+
 export async function callReasoningForIteration(
   config: LoopConfig,
   context: ReasoningContext,
   lastToolResults: ToolResult[] | null,
   iteration: number
 ): Promise<{ result: RespondResult; continuingFromToolResults: boolean }> {
+  let deadline: ReturnType<typeof startRetryDeadline> | undefined
   const callStartedAt = Date.now()
   const heartbeatInterval = config.progressReporter
     ? setInterval(() => {
@@ -93,19 +111,20 @@ export async function callReasoningForIteration(
     : null
   try {
     const continuingFromToolResults = Boolean(lastToolResults)
-    const callReasoning = async (): Promise<RespondResult> => {
+    const callReasoning = async (signal: AbortSignal | undefined): Promise<RespondResult> => {
+      const attemptContext = { ...context, signal }
       if (lastToolResults) {
         logger.debug(
           { iteration, resultCount: lastToolResults.length },
           'Continuing with tool results'
         )
-        return config.reasoning.continueWithToolResults(context, lastToolResults)
+        return config.reasoning.continueWithToolResults(attemptContext, lastToolResults)
       }
       logger.debug({ iteration }, 'Requesting model response')
-      return config.reasoning.respondWithTools(context)
+      return config.reasoning.respondWithTools(attemptContext)
     }
 
-    let result = await callReasoning()
+    let result = await callReasoning(context.signal)
     if (
       result.type === 'error' &&
       isRetryableLlmTransportError(result.error) &&
@@ -114,7 +133,7 @@ export async function callReasoningForIteration(
       logger.warn({ iteration, err: result.error }, 'Retrying model transport failure')
       await delay(LLM_TRANSPORT_RETRY_DELAY_MS, config.abortSignal)
       if (!config.abortSignal?.aborted) {
-        result = await callReasoning()
+        result = await callReasoning(context.signal)
       }
     }
 
@@ -122,10 +141,25 @@ export async function callReasoningForIteration(
     // model step, inside the same heartbeat window, before the loop can settle
     // the checkpoint. The gate is the recorder's own settle predicate, so a
     // retry can only happen where a manual Retry model step would have been
-    // offered. The counter is per model step and consumes no loop iteration.
+    // offered. Each retry uses its jittered schedule wait. The counter and
+    // 60 s deadline are per model step and consume no loop iteration. The
+    // transport retry above keeps its task signal and does not start the clock.
     const checkpointRecorder = config.modelStepCheckpointRecorder
+    const firstFailureAt = Date.now()
+    const random = config.modelStepRetryRandom ?? Math.random
     let modelStepRetries = 0
     let retryCause: Error | undefined
+    const logRetryDeadline = (inFlight: boolean) =>
+      logger.warn(
+        {
+          iteration,
+          attempt: modelStepRetries,
+          deadlineMs: MODEL_STEP_RETRY_DEADLINE_MS,
+          inFlight,
+          checkpointId: checkpointRecorder?.checkpointId,
+        },
+        'Model step retry deadline reached'
+      )
     while (
       result.type === 'error' &&
       modelStepRetries < (config.modelStepAutoRetries ?? 0) &&
@@ -133,6 +167,11 @@ export async function callReasoningForIteration(
       checkpointRecorder.canResume(result.error) &&
       !config.abortSignal?.aborted
     ) {
+      const delayMs = modelStepRetryDelayMs(modelStepRetries, random)
+      if (Date.now() + delayMs >= firstFailureAt + MODEL_STEP_RETRY_DEADLINE_MS) {
+        logRetryDeadline(false)
+        break
+      }
       modelStepRetries++
       // F6: the first failure of this step is the one that keeps the checkpoint
       // resumable when the retries end on another error.
@@ -142,13 +181,23 @@ export async function callReasoningForIteration(
           iteration,
           attempt: modelStepRetries,
           limit: config.modelStepAutoRetries,
+          delayMs,
           checkpointId: checkpointRecorder.checkpointId,
         },
         'Retrying model step after provider_unavailable'
       )
-      await delay(LLM_TRANSPORT_RETRY_DELAY_MS, config.abortSignal)
+      await delay(delayMs, config.abortSignal)
       if (config.abortSignal?.aborted) break
-      result = await callReasoning()
+      deadline ??= startRetryDeadline(firstFailureAt, config.abortSignal)
+      const retried = await callReasoning(deadline.signal)
+      if (config.abortSignal?.aborted) break
+      if (deadline.expired) {
+        // The cut attempt carries no provider evidence. Preserve the previous
+        // provider failure and its resumable notice, including during failover.
+        logRetryDeadline(true)
+        break
+      }
+      result = retried
     }
     if (retryCause !== undefined && result.type === 'error') {
       checkpointRecorder?.noteModelStepRetry(retryCause, result.error)
@@ -166,6 +215,7 @@ export async function callReasoningForIteration(
     return { result, continuingFromToolResults }
   } finally {
     if (heartbeatInterval) clearInterval(heartbeatInterval)
+    deadline?.dispose()
   }
 }
 

@@ -5,6 +5,7 @@ import { toModelStepCheckpointView } from '../../core/conversation/modelStepChec
 import { makeSqliteStore } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
 import { LlmError, LlmErrorCode } from '../../core/errors'
+import { AUTO_RETRY_TEST_TIMEOUT_MS } from '../../core/orchestration/__tests__/modelStepRetryTestTimeout'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { createModelStepCheckpointRecorder } from '../../core/orchestration/modelStepCheckpointRecorder'
 import {
@@ -446,100 +447,109 @@ describe('real-producer checkpoint identity regressions', () => {
       } finally {
         await f.handle.shutdown()
       }
-    }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
   )
 
-  it('#1156: expired approval keeps approval_expired when the abandon rejects', async () => {
-    const resolve = vi.fn()
-    const f = await claimedContinuation(approvalProvider(), {
-      resolve,
-      probe: vi.fn(async () => ({ alive: [], expired: [] })),
-    })
-    try {
-      await f.executor.run()
-      expect(f.executor.executorState).toBe('waiting_approval')
-      const approval = f.executor.pendingApproval!
-      const expired = new ApprovalExpiredError({
-        code: 'approval_expired',
-        request_id: approval.request_id,
-        task_id: f.task.id,
-        tool_name: approval.tool_name,
-        expired_refs: [],
-        user_message: 'Approved content has expired.',
+  it(
+    '#1156: expired approval keeps approval_expired when the abandon rejects',
+    async () => {
+      const resolve = vi.fn()
+      const f = await claimedContinuation(approvalProvider(), {
+        resolve,
+        probe: vi.fn(async () => ({ alive: [], expired: [] })),
       })
-      resolve.mockRejectedValueOnce(expired)
-      const transition = f.checkpoints.transition.bind(f.checkpoints)
-      const rejected = vi
-        .spyOn(f.checkpoints, 'transition')
-        .mockImplementation((sessionKey, fence, input) => {
-          if (input.to === 'abandoned') throw new TypeError('abandon failure body')
-          return transition(sessionKey, fence, input)
+      try {
+        await f.executor.run()
+        expect(f.executor.executorState).toBe('waiting_approval')
+        const approval = f.executor.pendingApproval!
+        const expired = new ApprovalExpiredError({
+          code: 'approval_expired',
+          request_id: approval.request_id,
+          task_id: f.task.id,
+          tool_name: approval.tool_name,
+          expired_refs: [],
+          user_message: 'Approved content has expired.',
         })
-      const logged = vi.spyOn(logger, 'error')
-      await f.executor.resumeAfterApproval(false)
-      expect(resolve).toHaveBeenCalledTimes(1)
-      expect(rejected).toHaveBeenCalledWith(
-        SESSION_KEY,
-        f.fence,
-        expect.objectContaining({ to: 'abandoned' })
-      )
-      expect(f.deps.onFail).toHaveBeenCalledExactlyOnceWith(
-        f.task,
-        expect.objectContaining({ code: 'approval_expired', message: expired.message })
-      )
-      expect(logged).toHaveBeenCalledWith(
-        {
-          taskId: f.task.id,
-          checkpointId: f.fence.checkpointId,
-          op: 'abandon',
-          errorName: 'TypeError',
-        },
-        'Model-step continuation cleanup failed'
-      )
-      expect(header(f.handle).status).toBe('claimed')
-      expect(f.execute).toHaveBeenCalledTimes(0)
-    } finally {
-      await f.handle.shutdown()
-    }
-  })
+        resolve.mockRejectedValueOnce(expired)
+        const transition = f.checkpoints.transition.bind(f.checkpoints)
+        const rejected = vi
+          .spyOn(f.checkpoints, 'transition')
+          .mockImplementation((sessionKey, fence, input) => {
+            if (input.to === 'abandoned') throw new TypeError('abandon failure body')
+            return transition(sessionKey, fence, input)
+          })
+        const logged = vi.spyOn(logger, 'error')
+        await f.executor.resumeAfterApproval(false)
+        expect(resolve).toHaveBeenCalledTimes(1)
+        expect(rejected).toHaveBeenCalledWith(
+          SESSION_KEY,
+          f.fence,
+          expect.objectContaining({ to: 'abandoned' })
+        )
+        expect(f.deps.onFail).toHaveBeenCalledExactlyOnceWith(
+          f.task,
+          expect.objectContaining({ code: 'approval_expired', message: expired.message })
+        )
+        expect(logged).toHaveBeenCalledWith(
+          {
+            taskId: f.task.id,
+            checkpointId: f.fence.checkpointId,
+            op: 'abandon',
+            errorName: 'TypeError',
+          },
+          'Model-step continuation cleanup failed'
+        )
+        expect(header(f.handle).status).toBe('claimed')
+        expect(f.execute).toHaveBeenCalledTimes(0)
+      } finally {
+        await f.handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
-  it('#1157: a lost claim at approval keeps its error when releasing the turn rejects', async () => {
-    const llm = approvalProvider()
-    const f = await claimedContinuation(llm)
-    try {
-      await f.executor.run()
-      expect(f.executor.executorState).toBe('waiting_approval')
-      const renew = vi.spyOn(f.checkpoints, 'renewLease').mockResolvedValue(false)
-      const releaseError = new TypeError('turn release failure body')
-      const failTurn = vi
-        .spyOn(f.deps.conversationManager, 'failTurn')
-        .mockRejectedValue(releaseError)
-      const deny = vi.spyOn(f.deps.conversationManager, 'deny').mockRejectedValue(releaseError)
-      const logged = vi.spyOn(logger, 'error')
-      await f.executor.resumeAfterApproval(false)
-      expect(renew).toHaveBeenCalled()
-      expect(failTurn.mock.calls.length + deny.mock.calls.length).toBeGreaterThan(0)
-      expect(f.deps.onFail).toHaveBeenCalledExactlyOnceWith(
-        f.task,
-        expect.objectContaining({
-          message: 'Model-step continuation claim was lost during approval',
-        })
-      )
-      expect(logged).toHaveBeenCalledWith(
-        {
-          taskId: f.task.id,
-          checkpointId: f.fence.checkpointId,
-          op: 'fail_turn',
-          errorName: 'TypeError',
-        },
-        'Model-step continuation cleanup failed'
-      )
-      expect(f.execute).toHaveBeenCalledTimes(0)
-      expect(llm.calls()).toBe(1)
-    } finally {
-      await f.handle.shutdown()
-    }
-  })
+  it(
+    '#1157: a lost claim at approval keeps its error when releasing the turn rejects',
+    async () => {
+      const llm = approvalProvider()
+      const f = await claimedContinuation(llm)
+      try {
+        await f.executor.run()
+        expect(f.executor.executorState).toBe('waiting_approval')
+        const renew = vi.spyOn(f.checkpoints, 'renewLease').mockResolvedValue(false)
+        const releaseError = new TypeError('turn release failure body')
+        const failTurn = vi
+          .spyOn(f.deps.conversationManager, 'failTurn')
+          .mockRejectedValue(releaseError)
+        const deny = vi.spyOn(f.deps.conversationManager, 'deny').mockRejectedValue(releaseError)
+        const logged = vi.spyOn(logger, 'error')
+        await f.executor.resumeAfterApproval(false)
+        expect(renew).toHaveBeenCalled()
+        expect(failTurn.mock.calls.length + deny.mock.calls.length).toBeGreaterThan(0)
+        expect(f.deps.onFail).toHaveBeenCalledExactlyOnceWith(
+          f.task,
+          expect.objectContaining({
+            message: 'Model-step continuation claim was lost during approval',
+          })
+        )
+        expect(logged).toHaveBeenCalledWith(
+          {
+            taskId: f.task.id,
+            checkpointId: f.fence.checkpointId,
+            op: 'fail_turn',
+            errorName: 'TypeError',
+          },
+          'Model-step continuation cleanup failed'
+        )
+        expect(f.execute).toHaveBeenCalledTimes(0)
+        expect(llm.calls()).toBe(1)
+      } finally {
+        await f.handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
   it.each([
     { entry: 'run', cleanup: 'abandon' },
@@ -604,7 +614,8 @@ describe('real-producer checkpoint identity regressions', () => {
       } finally {
         await f.handle.shutdown()
       }
-    }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
   )
 
   it.each(['tool_dispatch', 'tool_result'] as const)(
@@ -679,7 +690,8 @@ describe('real-producer checkpoint identity regressions', () => {
       } finally {
         await f.handle.shutdown()
       }
-    }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
   )
 
   it.each([
@@ -728,8 +740,8 @@ describe('real-producer checkpoint identity regressions', () => {
         originalDeps.taskLifecycle.register(original)
         await new TaskExecutor(original, originalDeps).run()
         await handle.persistQueue.drain()
-        // The 503 is retried once automatically before it settles (N=1).
-        expect(llm.calls()).toBe(3)
+        // The 503 is retried three times automatically before it settles (N=3).
+        expect(llm.calls()).toBe(5)
         expect(execution).toHaveBeenCalledTimes(1)
         expect(header(handle).status).toBe('resumable')
         if (removed) tools.length = 0
@@ -745,146 +757,245 @@ describe('real-producer checkpoint identity regressions', () => {
       } finally {
         await handle.shutdown()
       }
-    }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
   )
 
-  it('R3-H1: a deferred native bridge destination resolves before continuation', async () => {
-    Object.assign(appConfig, {
-      enableApproval: false,
-      dynamicToolsEnabled: false,
-      promptCacheEnabled: false,
-      nativeToolPresentation: 'auto',
-      nativeToolDiscoveryBytes: 1,
-    })
-    vi.spyOn(Date, 'now').mockReturnValue(NOW)
-    const handle = makeSqliteStore()
-    try {
-      const original = task('identity-native')
-      const llm = provider('openai', (_messages, call) =>
-        call === 1
-          ? {
-              calls: [
-                {
-                  id: 'native-1',
-                  name: 'clerum__tool_call',
-                  arguments: { name: 'system_info', arguments: {} },
-                },
-              ],
-            }
-          : { error: new Error('upstream 503') }
-      )
-      const originalDeps = deps(handle, llm)
-      originalDeps.taskLifecycle.register(original)
-      await new TaskExecutor(original, originalDeps).run()
-      await handle.persistQueue.drain()
-      // The 503 is retried once automatically before it settles (N=1).
-      expect(llm.calls()).toBe(3)
-      expect(header(handle).status).toBe('resumable')
-      const resumed = provider('openai', () => ({ content: 'native result accepted' }))
-      const verdict = await continueTurn(handle, original, originalDeps, resumed)
-      expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
-      expect(resumed.calls()).toBe(1)
-    } finally {
-      await handle.shutdown()
-    }
-  })
+  it(
+    'H-reset: a Desktop Retry gets all three automatic retries after the origin exhausts them',
+    async () => {
+      Object.assign(appConfig, {
+        enableApproval: false,
+        dynamicToolsEnabled: true,
+        promptCacheEnabled: false,
+      })
+      vi.spyOn(Date, 'now').mockReturnValue(NOW)
+      const handle = makeSqliteStore()
+      const warn = vi.spyOn(logger, 'warn')
+      try {
+        const manager = new McpManager()
+        vi.spyOn(manager, 'getAllTools').mockReturnValue([
+          {
+            name: 'server__part__write',
+            serverName: 'server__part',
+            inputSchema: { type: 'object' },
+          },
+        ])
+        const execution = vi.spyOn(manager, 'callTool').mockResolvedValue({
+          toolName: 'server__part__write',
+          result: { content: [{ type: 'text', text: 'effect completed' }] },
+          isError: false,
+        })
+        const llm = provider('openai', (_messages, call) =>
+          call === 1
+            ? {
+                calls: [
+                  {
+                    id: 'bridge-reset',
+                    name: 'clerum__tool_call',
+                    arguments: { name: 'server__part__write', arguments: {} },
+                  },
+                ],
+              }
+            : { error: new Error('upstream 503') }
+        )
+        const original = task('identity-reset-origin')
+        const originalDeps = deps(handle, llm, manager)
+        originalDeps.taskLifecycle.register(original)
+        await new TaskExecutor(original, originalDeps).run()
+        await handle.persistQueue.drain()
+        expect(llm.calls()).toBe(5)
+        expect(originalDeps.onFail).toHaveBeenCalledTimes(1)
+        expect(originalDeps.onFail).toHaveBeenCalledWith(
+          original,
+          expect.objectContaining({ modelStepCheckpointId: header(handle).checkpoint_id })
+        )
+        expect(header(handle).status).toBe('resumable')
+        expect(
+          warn.mock.calls.filter(
+            call => call[1] === 'Retrying model step after provider_unavailable'
+          )
+        ).toHaveLength(3)
+        expect(execution).toHaveBeenCalledTimes(1)
+
+        vi.mocked(originalDeps.onFail).mockClear()
+        warn.mockClear()
+        const resumed = provider('openai', (_messages, call) =>
+          call <= 3
+            ? { error: new Error('upstream 503') }
+            : { content: 'Desktop Retry recovered after three outages' }
+        )
+        const verdict = await continueTurn(handle, original, originalDeps, resumed)
+        expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
+        expect(resumed.calls()).toBe(4)
+        expect(originalDeps.onComplete).toHaveBeenCalledTimes(1)
+        expect(originalDeps.onFail).not.toHaveBeenCalled()
+        expect(
+          handle.worker.db.prepare("SELECT content FROM messages WHERE role = 'assistant'").all()
+        ).toContainEqual({ content: 'Desktop Retry recovered after three outages' })
+        expect(
+          warn.mock.calls
+            .filter(call => call[1] === 'Retrying model step after provider_unavailable')
+            .map(call => call[0])
+        ).toEqual([1, 2, 3].map(attempt => expect.objectContaining({ attempt })))
+        expect(execution).toHaveBeenCalledTimes(1)
+        expect(header(handle).status).toBe('completed')
+      } finally {
+        await handle.shutdown()
+      }
+    },
+    2 * AUTO_RETRY_TEST_TIMEOUT_MS
+  )
+
+  it(
+    'R3-H1: a deferred native bridge destination resolves before continuation',
+    async () => {
+      Object.assign(appConfig, {
+        enableApproval: false,
+        dynamicToolsEnabled: false,
+        promptCacheEnabled: false,
+        nativeToolPresentation: 'auto',
+        nativeToolDiscoveryBytes: 1,
+      })
+      vi.spyOn(Date, 'now').mockReturnValue(NOW)
+      const handle = makeSqliteStore()
+      try {
+        const original = task('identity-native')
+        const llm = provider('openai', (_messages, call) =>
+          call === 1
+            ? {
+                calls: [
+                  {
+                    id: 'native-1',
+                    name: 'clerum__tool_call',
+                    arguments: { name: 'system_info', arguments: {} },
+                  },
+                ],
+              }
+            : { error: new Error('upstream 503') }
+        )
+        const originalDeps = deps(handle, llm)
+        originalDeps.taskLifecycle.register(original)
+        await new TaskExecutor(original, originalDeps).run()
+        await handle.persistQueue.drain()
+        // The 503 is retried three times automatically before it settles (N=3).
+        expect(llm.calls()).toBe(5)
+        expect(header(handle).status).toBe('resumable')
+        const resumed = provider('openai', () => ({ content: 'native result accepted' }))
+        const verdict = await continueTurn(handle, original, originalDeps, resumed)
+        expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
+        expect(resumed.calls()).toBe(1)
+      } finally {
+        await handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
   it.each([
     { name: 'missing destination', arguments: {} },
     { name: 'invalid arguments', arguments: { name: 'system_info', arguments: [] } },
-  ])('R3-H1: $name in a persisted bridge envelope fails closed', async ({ arguments: invalid }) => {
-    Object.assign(appConfig, {
-      enableApproval: false,
-      dynamicToolsEnabled: false,
-      promptCacheEnabled: false,
-      nativeToolPresentation: 'auto',
-      nativeToolDiscoveryBytes: 1,
-    })
-    vi.spyOn(Date, 'now').mockReturnValue(NOW)
-    const handle = makeSqliteStore()
-    try {
-      const original = task('identity-invalid')
-      const llm = provider('openai', (_messages, call) =>
-        call === 1
-          ? {
-              calls: [
-                {
-                  id: 'native-1',
-                  name: 'clerum__tool_call',
-                  arguments: { name: 'system_info', arguments: {} },
-                },
-              ],
-            }
-          : { error: new Error('upstream 503') }
-      )
-      const originalDeps = deps(handle, llm)
-      originalDeps.taskLifecycle.register(original)
-      await new TaskExecutor(original, originalDeps).run()
-      await handle.persistQueue.drain()
-      expect(header(handle).status).toBe('resumable')
-      const row = handle.worker.db
-        .prepare(
-          "SELECT seq, payload FROM model_step_checkpoint_entries WHERE kind = 'message' AND payload LIKE '%clerum__tool_call%'"
-        )
-        .get() as { seq: number; payload: string }
-      const recorded = JSON.parse(row.payload) as ChatMessage
-      recorded.tool_calls![0]!.arguments = invalid
-      handle.worker.db
-        .prepare(
-          'UPDATE model_step_checkpoint_entries SET payload = ? WHERE checkpoint_id = ? AND seq = ?'
-        )
-        .run(JSON.stringify(recorded), header(handle).checkpoint_id, row.seq)
-      const resumed = provider('openai', () => ({ content: 'must not be reached' }))
-      const verdict = await continueTurn(handle, original, originalDeps, resumed)
-      expect(verdict).toHaveBeenCalledWith({ kind: 'blocked', blockedReason: 'grant_revoked' })
-      expect(resumed.calls()).toBe(0)
-    } finally {
-      await handle.shutdown()
-    }
-  })
-
-  it('C-1: the checkpoint keeps the configured pair after fallback tool results', async () => {
-    Object.assign(appConfig, {
-      enableApproval: false,
-      dynamicToolsEnabled: false,
-      promptCacheEnabled: false,
-    })
-    vi.spyOn(Date, 'now').mockReturnValue(NOW)
-    const handle = makeSqliteStore()
-    try {
-      const primary = provider('claude', () => ({ error: new Error('upstream 503') }))
-      const fallback = provider('openai', (_messages, call) =>
-        call === 1
-          ? { calls: [{ id: 'system-1', name: 'system_info', arguments: {} }] }
-          : { error: new Error('upstream 503') }
-      )
-      const policy: LlmPolicy = {
-        cooldownSeconds: 300,
-        triggerOn: ['provider_unavailable'],
-        fallbacks: [{ provider: 'openai', model: 'fallback-model' }],
-      }
-      const original = task('identity-failover')
-      const originalDeps = deps(handle, primary)
-      originalDeps.failover = {
-        policy,
-        engine: new FailoverEngine(policy, { metricInc: () => {} }),
-        buildProvider: () => fallback,
-      }
-      originalDeps.taskLifecycle.register(original)
-      await new TaskExecutor(original, originalDeps).run()
-      await handle.persistQueue.drain()
-      expect(primary.calls()).toBe(1)
-      // Two fallback calls plus the automatic retry of the failed step (N=1).
-      expect(fallback.calls()).toBe(3)
-      expect(header(handle)).toMatchObject({
-        status: 'resumable',
-        provider: 'claude',
-        model: 'primary-model',
+  ])(
+    'R3-H1: $name in a persisted bridge envelope fails closed',
+    async ({ arguments: invalid }) => {
+      Object.assign(appConfig, {
+        enableApproval: false,
+        dynamicToolsEnabled: false,
+        promptCacheEnabled: false,
+        nativeToolPresentation: 'auto',
+        nativeToolDiscoveryBytes: 1,
       })
-    } finally {
-      await handle.shutdown()
-    }
-  })
+      vi.spyOn(Date, 'now').mockReturnValue(NOW)
+      const handle = makeSqliteStore()
+      try {
+        const original = task('identity-invalid')
+        const llm = provider('openai', (_messages, call) =>
+          call === 1
+            ? {
+                calls: [
+                  {
+                    id: 'native-1',
+                    name: 'clerum__tool_call',
+                    arguments: { name: 'system_info', arguments: {} },
+                  },
+                ],
+              }
+            : { error: new Error('upstream 503') }
+        )
+        const originalDeps = deps(handle, llm)
+        originalDeps.taskLifecycle.register(original)
+        await new TaskExecutor(original, originalDeps).run()
+        await handle.persistQueue.drain()
+        expect(header(handle).status).toBe('resumable')
+        const row = handle.worker.db
+          .prepare(
+            "SELECT seq, payload FROM model_step_checkpoint_entries WHERE kind = 'message' AND payload LIKE '%clerum__tool_call%'"
+          )
+          .get() as { seq: number; payload: string }
+        const recorded = JSON.parse(row.payload) as ChatMessage
+        recorded.tool_calls![0]!.arguments = invalid
+        handle.worker.db
+          .prepare(
+            'UPDATE model_step_checkpoint_entries SET payload = ? WHERE checkpoint_id = ? AND seq = ?'
+          )
+          .run(JSON.stringify(recorded), header(handle).checkpoint_id, row.seq)
+        const resumed = provider('openai', () => ({ content: 'must not be reached' }))
+        const verdict = await continueTurn(handle, original, originalDeps, resumed)
+        expect(verdict).toHaveBeenCalledWith({ kind: 'blocked', blockedReason: 'grant_revoked' })
+        expect(resumed.calls()).toBe(0)
+      } finally {
+        await handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
+
+  it(
+    'C-1: the checkpoint keeps the configured pair after fallback tool results',
+    async () => {
+      Object.assign(appConfig, {
+        enableApproval: false,
+        dynamicToolsEnabled: false,
+        promptCacheEnabled: false,
+      })
+      vi.spyOn(Date, 'now').mockReturnValue(NOW)
+      const handle = makeSqliteStore()
+      try {
+        const primary = provider('claude', () => ({ error: new Error('upstream 503') }))
+        const fallback = provider('openai', (_messages, call) =>
+          call === 1
+            ? { calls: [{ id: 'system-1', name: 'system_info', arguments: {} }] }
+            : { error: new Error('upstream 503') }
+        )
+        const policy: LlmPolicy = {
+          cooldownSeconds: 300,
+          triggerOn: ['provider_unavailable'],
+          fallbacks: [{ provider: 'openai', model: 'fallback-model' }],
+        }
+        const original = task('identity-failover')
+        const originalDeps = deps(handle, primary)
+        originalDeps.failover = {
+          policy,
+          engine: new FailoverEngine(policy, { metricInc: () => {} }),
+          buildProvider: () => fallback,
+        }
+        originalDeps.taskLifecycle.register(original)
+        await new TaskExecutor(original, originalDeps).run()
+        await handle.persistQueue.drain()
+        expect(primary.calls()).toBe(1)
+        // The fallback tool call, the failed step and its three automatic retries (N=3).
+        expect(fallback.calls()).toBe(5)
+        expect(header(handle)).toMatchObject({
+          status: 'resumable',
+          provider: 'claude',
+          model: 'primary-model',
+        })
+      } finally {
+        await handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
   it.each([true, false])(
     'C-5: warm approval (prior tool=%s) offers Retry after 503 and completes without replay',
     async withConfirmed => {
@@ -895,8 +1006,8 @@ describe('real-producer checkpoint identity regressions', () => {
         await f.executor.resumeAfterApproval(false)
         await f.handle.persistQueue.drain()
         expect(f.execute).toHaveBeenCalledTimes(1)
-        // The post-approval 503 is retried once automatically (N=1).
-        expect(f.llm.calls()).toBe(3)
+        // The post-approval 503 is retried three times automatically (N=3).
+        expect(f.llm.calls()).toBe(5)
         expect(f.llm.requests[1]!.filter(m => m.tool_call_id === 'approved-write')).toEqual([
           expect.objectContaining({
             tool_call_id: 'approved-write',
@@ -931,7 +1042,8 @@ describe('real-producer checkpoint identity regressions', () => {
       } finally {
         await f.handle.shutdown()
       }
-    }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
   )
 
   it.each(['deny', 'cancel'] as const)(
@@ -1079,52 +1191,56 @@ describe('real-producer checkpoint identity regressions', () => {
     }
   })
 
-  it('C-6: failed resumable settlement abandons the header and preserves the original turn error', async () => {
-    Object.assign(appConfig, {
-      enableApproval: false,
-      dynamicToolsEnabled: false,
-      promptCacheEnabled: false,
-    })
-    vi.spyOn(Date, 'now').mockReturnValue(NOW)
-    const handle = makeSqliteStore()
-    try {
-      const llm = provider('openai', (_messages, call) =>
-        call === 1
-          ? { calls: [{ id: 'tool-before-failure', name: 'system_info', arguments: {} }] }
-          : { error: new Error('upstream 503') }
-      )
-      const original = task('settlement-failure')
-      const originalDeps = deps(handle, llm)
-      const checkpoints = originalDeps.modelStepCheckpoints!.store
-      const writes = vi.spyOn(checkpoints, 'transition').mockImplementationOnce(async () => {
-        throw new Error('injected write failure')
+  it(
+    'C-6: failed resumable settlement abandons the header and preserves the original turn error',
+    async () => {
+      Object.assign(appConfig, {
+        enableApproval: false,
+        dynamicToolsEnabled: false,
+        promptCacheEnabled: false,
       })
-      originalDeps.taskLifecycle.register(original)
-      await new TaskExecutor(original, originalDeps).run()
-      // The 503 is retried once automatically before settlement (N=1).
-      expect(llm.calls()).toBe(3)
-      expect(llm.requests[1]!.filter(m => m.role === 'tool')).toHaveLength(1)
-      expect(originalDeps.onFail).toHaveBeenCalledWith(
-        original,
-        expect.objectContaining({
-          code: LlmErrorCode.ModelOverloaded,
-          message: 'upstream 503',
-          providerCode: 'provider_unavailable',
+      vi.spyOn(Date, 'now').mockReturnValue(NOW)
+      const handle = makeSqliteStore()
+      try {
+        const llm = provider('openai', (_messages, call) =>
+          call === 1
+            ? { calls: [{ id: 'tool-before-failure', name: 'system_info', arguments: {} }] }
+            : { error: new Error('upstream 503') }
+        )
+        const original = task('settlement-failure')
+        const originalDeps = deps(handle, llm)
+        const checkpoints = originalDeps.modelStepCheckpoints!.store
+        const writes = vi.spyOn(checkpoints, 'transition').mockImplementationOnce(async () => {
+          throw new Error('injected write failure')
         })
-      )
-      expect(writes).toHaveBeenCalledTimes(2)
-      expect(writes).toHaveBeenLastCalledWith(SESSION_KEY, expect.any(Object), {
-        from: ['open'],
-        to: 'abandoned',
-      })
-      expect(await writes.mock.results[1]!.value).not.toBeNull()
-      expect(header(handle)).toBeUndefined()
-      expect(await checkpoints.sweep()).toMatchObject({ purgedCheckpoints: 0 })
-      expect(header(handle)).toBeUndefined()
-    } finally {
-      await handle.shutdown()
-    }
-  })
+        originalDeps.taskLifecycle.register(original)
+        await new TaskExecutor(original, originalDeps).run()
+        // The 503 is retried three times automatically before settlement (N=3).
+        expect(llm.calls()).toBe(5)
+        expect(llm.requests[1]!.filter(m => m.role === 'tool')).toHaveLength(1)
+        expect(originalDeps.onFail).toHaveBeenCalledWith(
+          original,
+          expect.objectContaining({
+            code: LlmErrorCode.ModelOverloaded,
+            message: 'upstream 503',
+            providerCode: 'provider_unavailable',
+          })
+        )
+        expect(writes).toHaveBeenCalledTimes(2)
+        expect(writes).toHaveBeenLastCalledWith(SESSION_KEY, expect.any(Object), {
+          from: ['open'],
+          to: 'abandoned',
+        })
+        expect(await writes.mock.results[1]!.value).not.toBeNull()
+        expect(header(handle)).toBeUndefined()
+        expect(await checkpoints.sweep()).toMatchObject({ purgedCheckpoints: 0 })
+        expect(header(handle)).toBeUndefined()
+      } finally {
+        await handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
   it.each(['write_failure', 'fence_lost'] as const)(
     'C-6: cleanup %s logs safe fields and preserves the original failure',
@@ -1153,8 +1269,8 @@ describe('real-producer checkpoint identity regressions', () => {
         const warning = vi.spyOn(logger, 'warn')
         originalDeps.taskLifecycle.register(original)
         await new TaskExecutor(original, originalDeps).run()
-        // The 503 is retried once automatically before settlement (N=1).
-        expect(llm.calls()).toBe(3)
+        // The 503 is retried three times automatically before settlement (N=3).
+        expect(llm.calls()).toBe(5)
         expect(llm.requests[1]!.some(m => m.tool_call_id === 'confirmed-tool')).toBe(true)
         expect(writes).toHaveBeenCalledTimes(2)
         expect(warning).toHaveBeenCalledWith(
@@ -1175,101 +1291,106 @@ describe('real-producer checkpoint identity regressions', () => {
       } finally {
         await handle.shutdown()
       }
-    }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
   )
-  it('C-3: a reaped reused-ID dispatch stays unknown and continuation never replays the confirmed tool', async () => {
-    Object.assign(appConfig, {
-      enableApproval: false,
-      dynamicToolsEnabled: false,
-      promptCacheEnabled: false,
-    })
-    vi.spyOn(Date, 'now').mockReturnValue(NOW)
-    const handle = makeSqliteStore()
-    try {
-      const manager = new McpManager()
-      vi.spyOn(manager, 'getAllTools').mockReturnValue([
-        { name: 'server__write', serverName: 'server', inputSchema: { type: 'object' } },
-      ])
-      const execute = vi.spyOn(manager, 'callTool').mockResolvedValue({
-        toolName: 'server__write',
-        result: { content: [{ type: 'text', text: 'confirmed first effect' }] },
-        isError: false,
+  it(
+    'C-3: a reaped reused-ID dispatch stays unknown and continuation never replays the confirmed tool',
+    async () => {
+      Object.assign(appConfig, {
+        enableApproval: false,
+        dynamicToolsEnabled: false,
+        promptCacheEnabled: false,
       })
-      const call = { id: 'call_0', name: 'server__write', arguments: {} }
-      const llm = provider('openai', (_messages, attempt) =>
-        attempt === 1 ? { calls: [call] } : { error: new Error('upstream 503') }
-      )
-      const original = task('reused-id-origin')
-      const originalDeps = deps(handle, llm, manager)
-      originalDeps.taskLifecycle.register(original)
-      await new TaskExecutor(original, originalDeps).run()
-      expect(execute).toHaveBeenCalledTimes(1)
-      // The 503 is retried once automatically before it settles (N=1).
-      expect(llm.calls()).toBe(3)
-      const checkpoints = originalDeps.modelStepCheckpoints!.store
-      const row = header(handle)
-      expect(row.status).toBe('resumable')
-      const claim = await checkpoints.claim({
-        sessionKey: SESSION_KEY,
-        checkpointId: row.checkpoint_id,
-        version: row.version,
-        hostInstanceId: 'interrupted-instance',
-        newTaskId: 'interrupted-task',
-        leaseMs: 300_000,
-      })
-      if (claim.outcome !== 'claimed') throw new Error(`Claim failed: ${claim.outcome}`)
-      const recordedMessages = (await checkpoints.loadEntries(SESSION_KEY, row.checkpoint_id))
-        .filter(entry => entry.kind === 'message')
-        .map(entry => JSON.parse(entry.payload) as ChatMessage)
-      const recorder = createModelStepCheckpointRecorder({
-        store: checkpoints,
-        sessionKey: SESSION_KEY,
-        mode: {
-          kind: 'continuation',
-          fence: claim.fence,
-          confirmedResults: claim.snapshot.tools.confirmed,
-          loopState: claim.snapshot.header.loop_state,
-        },
-        redact: text => text,
-        taskBudget: () => claim.snapshot.header.task_budget,
-        resumableTtlMs: 86_400_000,
-        attachmentTtlMs: 3_600_000,
-        now: () => NOW,
-        onFenceLost: () => {
-          throw new Error('Unexpected producer fence loss')
-        },
-      })
-      await recorder.begin(recordedMessages)
-      await recorder.syncMessages([
-        ...recordedMessages,
-        { role: 'assistant', content: '', tool_calls: [call] },
-      ])
-      await recorder.recordDispatch(call)
-      // Simulate process loss between the durable dispatch and its tool effect.
-      expect((await checkpoints.loadLive(SESSION_KEY))!.tools).toEqual({
-        confirmed: 1,
-        unknown: 1,
-        notDispatched: 0,
-      })
-      expect(await checkpoints.bootReap('instance-a')).toEqual({ abandoned: 0, reopened: 1 })
-      expect(header(handle).status).toBe('resumable')
-      const resumed = provider('openai', () => ({ content: 'Recovered without replay' }))
-      const verdict = await continueTurn(handle, original, originalDeps, resumed)
-      expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
-      expect(resumed.calls()).toBe(1)
-      expect(
-        resumed.requests[0]!.filter(m => m.role === 'tool' && m.tool_call_id === 'call_0')
-      ).toEqual([
-        expect.objectContaining({ content: expect.stringContaining('confirmed first effect') }),
-        expect.objectContaining({ content: 'Tool outcome unknown; not re-executed' }),
-      ])
-      expect(execute).toHaveBeenCalledTimes(1)
-      expect(originalDeps.onComplete).toHaveBeenCalledTimes(1)
-      expect(header(handle).status).toBe('completed')
-    } finally {
-      await handle.shutdown()
-    }
-  })
+      vi.spyOn(Date, 'now').mockReturnValue(NOW)
+      const handle = makeSqliteStore()
+      try {
+        const manager = new McpManager()
+        vi.spyOn(manager, 'getAllTools').mockReturnValue([
+          { name: 'server__write', serverName: 'server', inputSchema: { type: 'object' } },
+        ])
+        const execute = vi.spyOn(manager, 'callTool').mockResolvedValue({
+          toolName: 'server__write',
+          result: { content: [{ type: 'text', text: 'confirmed first effect' }] },
+          isError: false,
+        })
+        const call = { id: 'call_0', name: 'server__write', arguments: {} }
+        const llm = provider('openai', (_messages, attempt) =>
+          attempt === 1 ? { calls: [call] } : { error: new Error('upstream 503') }
+        )
+        const original = task('reused-id-origin')
+        const originalDeps = deps(handle, llm, manager)
+        originalDeps.taskLifecycle.register(original)
+        await new TaskExecutor(original, originalDeps).run()
+        expect(execute).toHaveBeenCalledTimes(1)
+        // The 503 is retried three times automatically before it settles (N=3).
+        expect(llm.calls()).toBe(5)
+        const checkpoints = originalDeps.modelStepCheckpoints!.store
+        const row = header(handle)
+        expect(row.status).toBe('resumable')
+        const claim = await checkpoints.claim({
+          sessionKey: SESSION_KEY,
+          checkpointId: row.checkpoint_id,
+          version: row.version,
+          hostInstanceId: 'interrupted-instance',
+          newTaskId: 'interrupted-task',
+          leaseMs: 300_000,
+        })
+        if (claim.outcome !== 'claimed') throw new Error(`Claim failed: ${claim.outcome}`)
+        const recordedMessages = (await checkpoints.loadEntries(SESSION_KEY, row.checkpoint_id))
+          .filter(entry => entry.kind === 'message')
+          .map(entry => JSON.parse(entry.payload) as ChatMessage)
+        const recorder = createModelStepCheckpointRecorder({
+          store: checkpoints,
+          sessionKey: SESSION_KEY,
+          mode: {
+            kind: 'continuation',
+            fence: claim.fence,
+            confirmedResults: claim.snapshot.tools.confirmed,
+            loopState: claim.snapshot.header.loop_state,
+          },
+          redact: text => text,
+          taskBudget: () => claim.snapshot.header.task_budget,
+          resumableTtlMs: 86_400_000,
+          attachmentTtlMs: 3_600_000,
+          now: () => NOW,
+          onFenceLost: () => {
+            throw new Error('Unexpected producer fence loss')
+          },
+        })
+        await recorder.begin(recordedMessages)
+        await recorder.syncMessages([
+          ...recordedMessages,
+          { role: 'assistant', content: '', tool_calls: [call] },
+        ])
+        await recorder.recordDispatch(call)
+        // Simulate process loss between the durable dispatch and its tool effect.
+        expect((await checkpoints.loadLive(SESSION_KEY))!.tools).toEqual({
+          confirmed: 1,
+          unknown: 1,
+          notDispatched: 0,
+        })
+        expect(await checkpoints.bootReap('instance-a')).toEqual({ abandoned: 0, reopened: 1 })
+        expect(header(handle).status).toBe('resumable')
+        const resumed = provider('openai', () => ({ content: 'Recovered without replay' }))
+        const verdict = await continueTurn(handle, original, originalDeps, resumed)
+        expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
+        expect(resumed.calls()).toBe(1)
+        expect(
+          resumed.requests[0]!.filter(m => m.role === 'tool' && m.tool_call_id === 'call_0')
+        ).toEqual([
+          expect.objectContaining({ content: expect.stringContaining('confirmed first effect') }),
+          expect.objectContaining({ content: 'Tool outcome unknown; not re-executed' }),
+        ])
+        expect(execute).toHaveBeenCalledTimes(1)
+        expect(originalDeps.onComplete).toHaveBeenCalledTimes(1)
+        expect(header(handle).status).toBe('completed')
+      } finally {
+        await handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
   // #1043 §2.1 (B3) — the operator's retry budget must reach the running loop
   // per task. Zero retries: the single failed step settles resumable and is

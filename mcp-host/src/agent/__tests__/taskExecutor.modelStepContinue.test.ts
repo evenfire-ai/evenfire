@@ -20,6 +20,7 @@ import {
 } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
 import { LlmErrorCode } from '../../core/errors'
+import { AUTO_RETRY_TEST_TIMEOUT_MS } from '../../core/orchestration/__tests__/modelStepRetryTestTimeout'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { buildTurnContextBlock } from '../../core/orchestration/turnContext'
 import {
@@ -1270,71 +1271,75 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     })
   })
 
-  it('8. records a new confirmed result and leaves a second outage resumable', async () => {
-    const entries = [
-      {
-        kind: 'message' as const,
-        toolCallId: null,
-        payload: JSON.stringify({
-          role: 'assistant',
-          content: '',
-          tool_calls: [{ id: 'confirmed-1', name: 'system_info', arguments: {} }],
-        }),
-      },
-      {
-        kind: 'tool_dispatch' as const,
-        toolCallId: 'confirmed-1',
-        payload: '{"name":"system_info"}',
-      },
-      {
-        kind: 'tool_result' as const,
-        toolCallId: 'confirmed-1',
-        payload: '{"name":"system_info","isError":false}',
-      },
-      {
-        kind: 'message' as const,
-        toolCallId: 'confirmed-1',
-        payload: JSON.stringify({
-          role: 'tool',
-          tool_call_id: 'confirmed-1',
-          name: 'system_info',
-          content: 'old confirmed result',
-        }),
-      },
-    ]
-    const fixture = await claimedCheckpoint({ entries, confirmedResults: 1 })
-    const events = new SimpleEventEmitter()
-    const toolNames = toolCallNames(events)
-    const llm = provider(undefined, messages => {
-      if (
-        messages.some(
-          message => message.role === 'tool' && message.tool_call_id === 'new-confirmed-1'
-        )
-      ) {
-        return { error: new Error('upstream 503') }
-      }
-      return {
-        calls: [{ id: 'new-confirmed-1', name: 'system_info', arguments: {} }],
-      }
-    })
-    const run = await runContinuation(fixture, llm, { events })
-    await run.executor.run()
-    await fixture.handle.persistQueue.drain()
+  it(
+    '8. records a new confirmed result and leaves a second outage resumable',
+    async () => {
+      const entries = [
+        {
+          kind: 'message' as const,
+          toolCallId: null,
+          payload: JSON.stringify({
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'confirmed-1', name: 'system_info', arguments: {} }],
+          }),
+        },
+        {
+          kind: 'tool_dispatch' as const,
+          toolCallId: 'confirmed-1',
+          payload: '{"name":"system_info"}',
+        },
+        {
+          kind: 'tool_result' as const,
+          toolCallId: 'confirmed-1',
+          payload: '{"name":"system_info","isError":false}',
+        },
+        {
+          kind: 'message' as const,
+          toolCallId: 'confirmed-1',
+          payload: JSON.stringify({
+            role: 'tool',
+            tool_call_id: 'confirmed-1',
+            name: 'system_info',
+            content: 'old confirmed result',
+          }),
+        },
+      ]
+      const fixture = await claimedCheckpoint({ entries, confirmedResults: 1 })
+      const events = new SimpleEventEmitter()
+      const toolNames = toolCallNames(events)
+      const llm = provider(undefined, messages => {
+        if (
+          messages.some(
+            message => message.role === 'tool' && message.tool_call_id === 'new-confirmed-1'
+          )
+        ) {
+          return { error: new Error('upstream 503') }
+        }
+        return {
+          calls: [{ id: 'new-confirmed-1', name: 'system_info', arguments: {} }],
+        }
+      })
+      const run = await runContinuation(fixture, llm, { events })
+      await run.executor.run()
+      await fixture.handle.persistQueue.drain()
 
-    expect(toolNames).toEqual(['system_info'])
-    // Three calls: the tool call, the outage and its single automatic retry.
-    expect(llm.calls()).toBe(3)
-    expect(run.onFail).toHaveBeenCalledTimes(1)
-    expect(run.onFail.mock.calls[0]![1]).toMatchObject({
-      code: LlmErrorCode.ModelOverloaded,
-      providerCode: 'provider_unavailable',
-      modelStepCheckpointId: 'checkpoint-b2',
-    })
-    expect(header(fixture.handle)).toMatchObject({ status: 'resumable', version: 4 })
-    const ledger = checkpointEntries(fixture.handle)
-    expect(ledger.filter(entry => entry.kind === 'tool_result')).toHaveLength(2)
-    expect(ledger).toContainEqual({ kind: 'tool_result', tool_call_id: 'new-confirmed-1' })
-  })
+      expect(toolNames).toEqual(['system_info'])
+      // Five calls: the tool call, the outage and its three automatic retries.
+      expect(llm.calls()).toBe(5)
+      expect(run.onFail).toHaveBeenCalledTimes(1)
+      expect(run.onFail.mock.calls[0]![1]).toMatchObject({
+        code: LlmErrorCode.ModelOverloaded,
+        providerCode: 'provider_unavailable',
+        modelStepCheckpointId: 'checkpoint-b2',
+      })
+      expect(header(fixture.handle)).toMatchObject({ status: 'resumable', version: 4 })
+      const ledger = checkpointEntries(fixture.handle)
+      expect(ledger.filter(entry => entry.kind === 'tool_result')).toHaveLength(2)
+      expect(ledger).toContainEqual({ kind: 'tool_result', tool_call_id: 'new-confirmed-1' })
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
   it('9. abandons and cancels the reopened turn after abort', async () => {
     const fixture = await claimedCheckpoint({})
@@ -1734,82 +1739,86 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     }
   )
 
-  it('11b. a provider outage after approval retries without executing the approved tool again', async () => {
-    Object.assign(appConfig, { enableApproval: true })
-    const fixture = await claimedCheckpoint({})
-    const llm = provider(undefined, messages =>
-      messages.some(message => message.role === 'tool')
-        ? { error: new Error('upstream 503') }
-        : {
-            calls: [
-              {
-                id: 'approval-retry',
-                name: 'shell_exec',
-                arguments: { command: 'printf approved-once' },
-              },
-            ],
-          }
-    )
-    const first = await runContinuation(fixture, llm, {
-      deps: {
-        approvalConfig: {
-          defaultPolicy: 'channel_users',
-          channels: {},
-          tools: { shell_exec: true },
+  it(
+    '11b. a provider outage after approval retries without executing the approved tool again',
+    async () => {
+      Object.assign(appConfig, { enableApproval: true })
+      const fixture = await claimedCheckpoint({})
+      const llm = provider(undefined, messages =>
+        messages.some(message => message.role === 'tool')
+          ? { error: new Error('upstream 503') }
+          : {
+              calls: [
+                {
+                  id: 'approval-retry',
+                  name: 'shell_exec',
+                  arguments: { command: 'printf approved-once' },
+                },
+              ],
+            }
+      )
+      const first = await runContinuation(fixture, llm, {
+        deps: {
+          approvalConfig: {
+            defaultPolicy: 'channel_users',
+            channels: {},
+            tools: { shell_exec: true },
+          },
         },
-      },
-    })
-    await first.executor.run()
-    expect(header(fixture.handle)).toMatchObject({ status: 'claimed', version: 3 })
-    expect(
-      fixture.handle.worker.db.prepare('SELECT request_id FROM pending_approvals').all()
-    ).toHaveLength(1)
-    await first.executor.resumeAfterApproval(true)
-    expect(first.onFail).toHaveBeenCalledTimes(1)
-    expect(
-      fixture.handle.worker.db.prepare('SELECT request_id FROM pending_approvals').all()
-    ).toHaveLength(0)
-    expect(header(fixture.handle)).toMatchObject({ status: 'resumable', version: 4 })
+      })
+      await first.executor.run()
+      expect(header(fixture.handle)).toMatchObject({ status: 'claimed', version: 3 })
+      expect(
+        fixture.handle.worker.db.prepare('SELECT request_id FROM pending_approvals').all()
+      ).toHaveLength(1)
+      await first.executor.resumeAfterApproval(true)
+      expect(first.onFail).toHaveBeenCalledTimes(1)
+      expect(
+        fixture.handle.worker.db.prepare('SELECT request_id FROM pending_approvals').all()
+      ).toHaveLength(0)
+      expect(header(fixture.handle)).toMatchObject({ status: 'resumable', version: 4 })
 
-    const retryClaim = await fixture.checkpoints.claim({
-      sessionKey: SESSION_KEY,
-      checkpointId: 'checkpoint-b2',
-      version: 4,
-      hostInstanceId: 'host-instance-retry',
-      newTaskId: 'task-retry',
-      leaseMs: LEASE_MS,
-    })
-    if (retryClaim.outcome !== 'claimed') {
-      throw new Error(`Retry claim failed: ${retryClaim.outcome}`)
-    }
-    expect(retryClaim.snapshot.tools.confirmed).toBe(1)
-    fixture.taskBudget = retryClaim.snapshot.header.task_budget!
-    fixture.confirmedResults = retryClaim.snapshot.tools.confirmed
-    const retryProvider = provider(undefined, () => ({ content: 'retry final answer' }))
-    const retry = await runContinuation(fixture, retryProvider, {
-      taskId: 'task-retry',
-      fence: retryClaim.fence,
-    })
-    await retry.executor.run()
-    await fixture.handle.persistQueue.drain()
+      const retryClaim = await fixture.checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: 'checkpoint-b2',
+        version: 4,
+        hostInstanceId: 'host-instance-retry',
+        newTaskId: 'task-retry',
+        leaseMs: LEASE_MS,
+      })
+      if (retryClaim.outcome !== 'claimed') {
+        throw new Error(`Retry claim failed: ${retryClaim.outcome}`)
+      }
+      expect(retryClaim.snapshot.tools.confirmed).toBe(1)
+      fixture.taskBudget = retryClaim.snapshot.header.task_budget!
+      fixture.confirmedResults = retryClaim.snapshot.tools.confirmed
+      const retryProvider = provider(undefined, () => ({ content: 'retry final answer' }))
+      const retry = await runContinuation(fixture, retryProvider, {
+        taskId: 'task-retry',
+        fence: retryClaim.fence,
+      })
+      await retry.executor.run()
+      await fixture.handle.persistQueue.drain()
 
-    expect(retry.onComplete).toHaveBeenCalledTimes(1)
-    expect(retryProvider.calls()).toBe(1)
-    expect(retryProvider.requests[0]).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ role: 'tool', tool_call_id: 'approval-retry' }),
-      ])
-    )
-    expect(
-      fixture.handle.worker.db
-        .prepare(
-          `SELECT kind FROM model_step_checkpoint_entries
+      expect(retry.onComplete).toHaveBeenCalledTimes(1)
+      expect(retryProvider.calls()).toBe(1)
+      expect(retryProvider.requests[0]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: 'tool', tool_call_id: 'approval-retry' }),
+        ])
+      )
+      expect(
+        fixture.handle.worker.db
+          .prepare(
+            `SELECT kind FROM model_step_checkpoint_entries
            WHERE checkpoint_id = ? AND tool_call_id = ? AND kind = 'tool_dispatch'`
-        )
-        .all('checkpoint-b2', 'approval-retry')
-    ).toHaveLength(1)
-    expect(header(fixture.handle)).toMatchObject({ status: 'completed', version: 6 })
-  })
+          )
+          .all('checkpoint-b2', 'approval-retry')
+      ).toHaveLength(1)
+      expect(header(fixture.handle)).toMatchObject({ status: 'completed', version: 6 })
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
   it('11b2. a poisoned approval with a failed abandon stops its lease without releasing the claim', async () => {
     Object.assign(appConfig, { enableApproval: true })
@@ -2534,135 +2543,139 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     ])
   })
 
-  it('14. keeps a pinned continuation off failover and still completes on the primary', async () => {
-    const entries = [
-      {
-        kind: 'message' as const,
-        toolCallId: null,
-        payload: JSON.stringify({
-          role: 'assistant',
-          content: '',
-          tool_calls: [{ id: 'confirmed-k1', name: 'system_info', arguments: {} }],
-        }),
-      },
-      {
-        kind: 'tool_dispatch' as const,
-        toolCallId: 'confirmed-k1',
-        payload: '{"name":"system_info"}',
-      },
-      {
-        kind: 'tool_result' as const,
-        toolCallId: 'confirmed-k1',
-        payload: '{"name":"system_info","isError":false}',
-      },
-      {
-        kind: 'message' as const,
-        toolCallId: 'confirmed-k1',
-        payload: JSON.stringify({
-          role: 'tool',
-          tool_call_id: 'confirmed-k1',
-          name: 'system_info',
-          content: 'old confirmed result',
-        }),
-      },
-    ]
-    const policy: LlmPolicy = {
-      cooldownSeconds: 300,
-      triggerOn: ['provider_unavailable'],
-      fallbacks: [{ provider: 'fallback', model: 'fallback-model' }],
-    }
-    const fallback = provider('fallback', () => ({ content: 'fallback answer' }))
-    const buildProvider = vi.fn(() => fallback)
-    const failover = {
-      engine: new FailoverEngine(policy, { metricInc: () => {} }),
-      policy,
-      buildProvider,
-    }
-    const fixture = await claimedCheckpoint({ entries, confirmedResults: 1 })
-    const outage = provider(undefined, () => ({ error: new Error('upstream 503') }))
-    const failed = await runContinuation(fixture, outage, { deps: { failover } })
-    await failed.executor.run()
-    await fixture.handle.persistQueue.drain()
-    expect(buildProvider).not.toHaveBeenCalled()
-    expect(fallback.calls()).toBe(0)
-    expect(header(fixture.handle)).toMatchObject({ status: 'resumable' })
-
-    const reclaimed = await fixture.checkpoints.claim({
-      sessionKey: SESSION_KEY,
-      checkpointId: fixture.fence.checkpointId,
-      version: header(fixture.handle).version,
-      hostInstanceId: 'host-instance-b2',
-      newTaskId: 'task-continuation-retry',
-      leaseMs: LEASE_MS,
-    })
-    if (reclaimed.outcome !== 'claimed') throw new Error(reclaimed.outcome)
-    const primary = provider(undefined, () => ({ content: 'pinned primary answer' }))
-    const retried = await runContinuation(fixture, primary, {
-      taskId: 'task-continuation-retry',
-      fence: reclaimed.fence,
-      deps: { failover },
-    })
-    await retried.executor.run()
-    await fixture.handle.persistQueue.drain()
-    expect(buildProvider).not.toHaveBeenCalled()
-    expect(primary.calls()).toBe(1)
-    expect(header(fixture.handle)).toMatchObject({ status: 'completed' })
-    expect(turnRows(fixture.handle)).toContainEqual(
-      expect.objectContaining({ role: 'assistant', content: 'pinned primary answer' })
-    )
-
-    const plainTask: Task = {
-      id: 'task-ordinary-failover',
-      source: 'channel',
-      sourceMessage: fixture.message,
-      traceContext: null,
-      priority: 'normal',
-      status: 'pending',
-      createdAt: new Date(NOW),
-      conversationHistory: [],
-    }
-    const ordinary = new TaskExecutor(plainTask, {
-      conversationManager: fixture.manager,
-      llmProvider: outage,
-      mcpManager: new McpManager(),
-      workspaceService: undefined,
-      approvalConfig: undefined,
-      modelName: 'checkpoint-model',
-      contextWindowTokens: 100_000,
-      config: {
-        maxTaskDuration: 300_000,
-        maxToolCallsPerTask: 20,
-        autoStart: true,
-        taskDelay: 0,
-        approvalTimeout: 300_000,
-      },
-      coreEvents: new SimpleEventEmitter(),
-      cronScheduler: null,
-      taskLifecycle: new TaskLifecycle(),
-      onApprovalNeeded: vi.fn(),
-      onComplete: vi.fn(),
-      onFail: vi.fn(),
-      dynamicEnvProvider: () => ({}),
-      failover,
-    })
-    const wrapped = (
-      ordinary as unknown as {
-        wrapFailoverPort: (
-          port: LlmPortAdapter,
-          conversation: unknown
-        ) => { completeWithTools: (request: unknown) => Promise<unknown> }
+  it(
+    '14. keeps a pinned continuation off failover and still completes on the primary',
+    async () => {
+      const entries = [
+        {
+          kind: 'message' as const,
+          toolCallId: null,
+          payload: JSON.stringify({
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'confirmed-k1', name: 'system_info', arguments: {} }],
+          }),
+        },
+        {
+          kind: 'tool_dispatch' as const,
+          toolCallId: 'confirmed-k1',
+          payload: '{"name":"system_info"}',
+        },
+        {
+          kind: 'tool_result' as const,
+          toolCallId: 'confirmed-k1',
+          payload: '{"name":"system_info","isError":false}',
+        },
+        {
+          kind: 'message' as const,
+          toolCallId: 'confirmed-k1',
+          payload: JSON.stringify({
+            role: 'tool',
+            tool_call_id: 'confirmed-k1',
+            name: 'system_info',
+            content: 'old confirmed result',
+          }),
+        },
+      ]
+      const policy: LlmPolicy = {
+        cooldownSeconds: 300,
+        triggerOn: ['provider_unavailable'],
+        fallbacks: [{ provider: 'fallback', model: 'fallback-model' }],
       }
-    ).wrapFailoverPort(
-      new LlmPortAdapter(outage, 'checkpoint-model', 'openai'),
-      fixture.manager.getSessionByKey(SESSION_KEY)
-    )
-    await wrapped.completeWithTools({
-      messages: [{ role: 'user', content: 'ordinary failover' }],
-      tools: [],
-    })
-    expect(buildProvider).toHaveBeenCalledTimes(1)
-    expect(fallback.calls()).toBe(1)
-  })
+      const fallback = provider('fallback', () => ({ content: 'fallback answer' }))
+      const buildProvider = vi.fn(() => fallback)
+      const failover = {
+        engine: new FailoverEngine(policy, { metricInc: () => {} }),
+        policy,
+        buildProvider,
+      }
+      const fixture = await claimedCheckpoint({ entries, confirmedResults: 1 })
+      const outage = provider(undefined, () => ({ error: new Error('upstream 503') }))
+      const failed = await runContinuation(fixture, outage, { deps: { failover } })
+      await failed.executor.run()
+      await fixture.handle.persistQueue.drain()
+      expect(buildProvider).not.toHaveBeenCalled()
+      expect(fallback.calls()).toBe(0)
+      expect(header(fixture.handle)).toMatchObject({ status: 'resumable' })
+
+      const reclaimed = await fixture.checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: fixture.fence.checkpointId,
+        version: header(fixture.handle).version,
+        hostInstanceId: 'host-instance-b2',
+        newTaskId: 'task-continuation-retry',
+        leaseMs: LEASE_MS,
+      })
+      if (reclaimed.outcome !== 'claimed') throw new Error(reclaimed.outcome)
+      const primary = provider(undefined, () => ({ content: 'pinned primary answer' }))
+      const retried = await runContinuation(fixture, primary, {
+        taskId: 'task-continuation-retry',
+        fence: reclaimed.fence,
+        deps: { failover },
+      })
+      await retried.executor.run()
+      await fixture.handle.persistQueue.drain()
+      expect(buildProvider).not.toHaveBeenCalled()
+      expect(primary.calls()).toBe(1)
+      expect(header(fixture.handle)).toMatchObject({ status: 'completed' })
+      expect(turnRows(fixture.handle)).toContainEqual(
+        expect.objectContaining({ role: 'assistant', content: 'pinned primary answer' })
+      )
+
+      const plainTask: Task = {
+        id: 'task-ordinary-failover',
+        source: 'channel',
+        sourceMessage: fixture.message,
+        traceContext: null,
+        priority: 'normal',
+        status: 'pending',
+        createdAt: new Date(NOW),
+        conversationHistory: [],
+      }
+      const ordinary = new TaskExecutor(plainTask, {
+        conversationManager: fixture.manager,
+        llmProvider: outage,
+        mcpManager: new McpManager(),
+        workspaceService: undefined,
+        approvalConfig: undefined,
+        modelName: 'checkpoint-model',
+        contextWindowTokens: 100_000,
+        config: {
+          maxTaskDuration: 300_000,
+          maxToolCallsPerTask: 20,
+          autoStart: true,
+          taskDelay: 0,
+          approvalTimeout: 300_000,
+        },
+        coreEvents: new SimpleEventEmitter(),
+        cronScheduler: null,
+        taskLifecycle: new TaskLifecycle(),
+        onApprovalNeeded: vi.fn(),
+        onComplete: vi.fn(),
+        onFail: vi.fn(),
+        dynamicEnvProvider: () => ({}),
+        failover,
+      })
+      const wrapped = (
+        ordinary as unknown as {
+          wrapFailoverPort: (
+            port: LlmPortAdapter,
+            conversation: unknown
+          ) => { completeWithTools: (request: unknown) => Promise<unknown> }
+        }
+      ).wrapFailoverPort(
+        new LlmPortAdapter(outage, 'checkpoint-model', 'openai'),
+        fixture.manager.getSessionByKey(SESSION_KEY)
+      )
+      await wrapped.completeWithTools({
+        messages: [{ role: 'user', content: 'ordinary failover' }],
+        tools: [],
+      })
+      expect(buildProvider).toHaveBeenCalledTimes(1)
+      expect(fallback.calls()).toBe(1)
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
   it('15. a rejected response completion abandons the owned checkpoint and a later turn can finish', async () => {
     const fixture = await claimedCheckpoint({})
