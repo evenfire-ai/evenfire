@@ -1719,7 +1719,7 @@ describe('automatic model-step retry (#1043 §2.1)', () => {
   }
 
   it('H1: a dispatched Codex provider_unavailable after a confirmed tool retries the step and answers', async () => {
-    const { worker, store, recorder } = harness()
+    const { store, recorder } = harness()
     const settle = vi.spyOn(recorder, 'settle')
     const transition = vi.spyOn(store, 'transition')
     const tool = createMockTool('read_file')
@@ -1748,7 +1748,7 @@ describe('automatic model-step retry (#1043 §2.1)', () => {
   })
 
   it('H2: the same dispatched outage through the Grok classifier also retries', async () => {
-    const { worker, store, recorder } = harness()
+    const { store, recorder } = harness()
     const settle = vi.spyOn(recorder, 'settle')
     const transition = vi.spyOn(store, 'transition')
     const tool = createMockTool('read_file')
