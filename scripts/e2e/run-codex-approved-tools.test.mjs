@@ -617,6 +617,14 @@ function retryLayerReads(overrides = {}) {
         { stage: 'model_step_continued' },
         { stage: 'model_step_continued' },
       ],
+      completions: 3,
+      searchCalls: 1,
+      describeCalls: 1,
+      businessCalls: 2,
+      finalResponses: 1,
+      deniedResponses: 0,
+      rejected: 0,
+      ignoredEvidence: 'not-a-count',
       modelStepRetry: { turns: 1, continuations: 1, approvalRequests: 0, cappedAbortedEarly: true },
     }),
     ...overrides,
@@ -650,7 +658,17 @@ test('the retry layer counts proxy and Host markers without keeping a body', asy
   })
   assert.deepEqual(record.retryLayer.fixture, {
     counters: { turns: 1, continuations: 1, approvalRequests: 0 },
+    ordinaryCounters: {
+      completions: 3,
+      searchCalls: 1,
+      describeCalls: 1,
+      businessCalls: 2,
+      finalResponses: 1,
+      deniedResponses: 0,
+      rejected: 0,
+    },
     stages: ['model_step_search', 'model_step_continued'],
+    stageCounts: { model_step_search: 1, model_step_continued: 2 },
     rejections: {},
   })
   // No field of the record carries a log or request body.

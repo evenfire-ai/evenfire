@@ -372,6 +372,36 @@ export function evidenceCounters(evidence) {
   return copy
 }
 
+/** The fixture's ordinary-journey counters, copied from a closed field list. */
+export function evidenceOrdinaryCounters(evidence) {
+  const copy = {}
+  for (const field of [
+    'completions',
+    'searchCalls',
+    'describeCalls',
+    'businessCalls',
+    'finalResponses',
+    'deniedResponses',
+    'rejected',
+  ]) {
+    const value = evidence?.[field]
+    if (Number.isSafeInteger(value) && value >= 0) copy[field] = value
+  }
+  return copy
+}
+
+/** Per-stage request counts; stage names are fixture constants, never payload. */
+export function evidenceStageCounts(evidence) {
+  const counts = {}
+  for (const request of evidence?.requests ?? []) {
+    const stage = request?.stage
+    if (typeof stage !== 'string' || !/^[a-z0-9_]{1,80}$/.test(stage)) continue
+    if (counts[stage] === undefined && Object.keys(counts).length >= 32) continue
+    counts[stage] = (counts[stage] ?? 0) + 1
+  }
+  return counts
+}
+
 /**
  * The fixture's rejection counts by bounded internal error name, so a 422 in
  * the persisted evidence names its exact throw. Only fixture-constant names
@@ -448,7 +478,9 @@ export async function observeRetryLayer({
       },
       fixture: {
         counters: evidenceCounters(evidence),
+        ordinaryCounters: evidenceOrdinaryCounters(evidence),
         stages: evidenceStages(evidence),
+        stageCounts: evidenceStageCounts(evidence),
         rejections: evidenceRejections(evidence),
       },
     },
