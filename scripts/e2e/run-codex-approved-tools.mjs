@@ -348,8 +348,7 @@ export function parseAdmissionCounters(text) {
 /** Per-reason change between the two reads; a reason absent before reads as 0. */
 export function admissionDelta(before, after) {
   const delta = {}
-  for (const reason of Object.keys(after))
-    delta[reason] = after[reason] - (before[reason] ?? 0)
+  for (const reason of Object.keys(after)) delta[reason] = after[reason] - (before[reason] ?? 0)
   return delta
 }
 
@@ -370,6 +369,23 @@ export function evidenceCounters(evidence) {
   const copy = {}
   for (const [field, value] of Object.entries(counters))
     if (Number.isSafeInteger(value)) copy[field] = value
+  return copy
+}
+
+/**
+ * The fixture's rejection counts by bounded internal error name, so a 422 in
+ * the persisted evidence names its exact throw. Only fixture-constant names
+ * with safe-integer counts are copied; anything else is dropped.
+ */
+export function evidenceRejections(evidence) {
+  const rejections = evidence?.rejections
+  if (!rejections || typeof rejections !== 'object' || Array.isArray(rejections)) return {}
+  const copy = {}
+  for (const [name, value] of Object.entries(rejections)) {
+    if (Object.keys(copy).length >= 32) break
+    if (/^[a-z0-9_]{1,80}$/.test(name) && Number.isSafeInteger(value) && value > 0)
+      copy[name] = value
+  }
   return copy
 }
 
@@ -430,7 +446,11 @@ export async function observeRetryLayer({
         continueFailed: countMarkerLines(hostLog, retryLayerHostMarkers.continueFailed),
         hostDraining: countMarkerLines(hostLog, retryLayerHostMarkers.hostDraining),
       },
-      fixture: { counters: evidenceCounters(evidence), stages: evidenceStages(evidence) },
+      fixture: {
+        counters: evidenceCounters(evidence),
+        stages: evidenceStages(evidence),
+        rejections: evidenceRejections(evidence),
+      },
     },
     admission: {
       counters: 'password_admission_denials_total',

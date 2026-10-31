@@ -13,6 +13,7 @@ import {
   modelStepRetryExpectedDelta,
   modelStepRetrySetupTitle,
   modelStepRetryTitles,
+  nativeWorkflowTitle,
   observeRetryLayer,
   parseAdmissionCounters,
   persistRetryLayer,
@@ -28,7 +29,6 @@ import {
   validateModelStepEvidence,
   validateReport,
   validateSuite,
-  nativeWorkflowTitle,
 } from './run-codex-approved-tools.mjs'
 
 // Synthetic reporter records exercise false-green rejection, not product data.
@@ -100,7 +100,9 @@ test('the suite splits the registry: a Codex model-step run is the setup case pl
     assert.equal(specFileFor(title), 'codex-subscription-approved-tools.spec.ts', title)
   // The native workflow case is registered to its own spec, never to the base one.
   assert.equal(specFileFor(nativeWorkflowTitle), 'codex-native-workflow.spec.ts')
-  assert.ok(!expectedTitles('deterministic', 'codex', 'approved-tools').includes(nativeWorkflowTitle))
+  assert.ok(
+    !expectedTitles('deterministic', 'codex', 'approved-tools').includes(nativeWorkflowTitle)
+  )
   // The Grok suite keeps its three provider-specific cases plus the same setup.
   assert.deepEqual(expectedTitles('deterministic', 'grok', 'model-step-retry'), [
     modelStepRetrySetupTitle,
@@ -128,7 +130,10 @@ test('refuses every suite, provider and mode combination the lane does not run',
     () => expectedTitles('deterministic', 'codex'),
     /approved-tools, native-workflow or model-step-retry/
   )
-  assert.throws(() => validateSuite('approved'), /approved-tools, native-workflow or model-step-retry/)
+  assert.throws(
+    () => validateSuite('approved'),
+    /approved-tools, native-workflow or model-step-retry/
+  )
   assert.throws(() => expectedTitles('deterministic', 'grok', 'approved-tools'), /model-step-retry/)
   for (const mode of ['real', 'real-hybrid'])
     assert.throws(() => expectedTitles(mode, 'codex', 'model-step-retry'), /deterministic/)
@@ -646,12 +651,38 @@ test('the retry layer counts proxy and Host markers without keeping a body', asy
   assert.deepEqual(record.retryLayer.fixture, {
     counters: { turns: 1, continuations: 1, approvalRequests: 0 },
     stages: ['model_step_search', 'model_step_continued'],
+    rejections: {},
   })
   // No field of the record carries a log or request body.
   const serialized = JSON.stringify(record)
   assert.ok(!serialized.includes('checkpointId'))
   assert.ok(!serialized.includes('502'))
   assert.ok(!serialized.includes('cappedAbortedEarly'))
+})
+
+test('the retry layer keeps bounded fixture rejection names and drops anything else', async () => {
+  const record = await observeSample({
+    readFixtureEvidence: async () => ({
+      requests: [{ stage: 'model_step_search' }],
+      modelStepRetry: { turns: 1 },
+      rejections: {
+        missing_business_result: 2,
+        unexpected_retry: 1,
+        'Not A Name!': 5,
+        negative_count: -1,
+        fractional_count: 1.5,
+        string_count: '3',
+      },
+    }),
+  })
+  // Liveness witness: the valid counters and stages still arrive, so the
+  // filtered rejections are the filter firing, not a dead evidence read.
+  assert.deepEqual(record.retryLayer.fixture.counters, { turns: 1 })
+  assert.deepEqual(record.retryLayer.fixture.stages, ['model_step_search'])
+  assert.deepEqual(record.retryLayer.fixture.rejections, {
+    missing_business_result: 2,
+    unexpected_retry: 1,
+  })
 })
 
 test('the admission record keeps the per-reason before/after delta only', async () => {
@@ -756,7 +787,8 @@ test('the evidence origin must be one profile-owned loopback origin', () => {
     /disagree on the evidence origin/
   )
   assert.throws(
-    () => upstreamEvidenceOrigin([{ ...retryScenario, upstreamEvidenceUrl: 'https://example.test' }]),
+    () =>
+      upstreamEvidenceOrigin([{ ...retryScenario, upstreamEvidenceUrl: 'https://example.test' }]),
     /loopback/
   )
 })
