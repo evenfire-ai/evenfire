@@ -21,6 +21,7 @@ import {
 } from '@hooks/domain/useGfsBrowserController'
 import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
+import { parseHttpStatus } from '@lib/gfsGrantErrors'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
@@ -245,9 +246,13 @@ function FileExplorerNode({
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
   const childDenied = isGfsChildrenDenied(childQuery.error, childQuery.data)
+  const childErrorMessage = errorMessage(childQuery.error)
+  const childHttpStatus = childErrorMessage ? parseHttpStatus(childErrorMessage) : null
   const childError = childDenied
     ? 'This folder is no longer available.'
-    : errorMessage(childQuery.error)
+    : childHttpStatus !== null
+      ? 'Unable to load folder contents.'
+      : childErrorMessage
   const childItems = useMemo(
     () =>
       childDenied ? [] : sortTreeItems((childQuery.data?.pages ?? []).flatMap(page => page.items)),

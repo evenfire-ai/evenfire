@@ -7,6 +7,7 @@ import { FileExplorerTree } from '@components/SidebarNav/FileExplorerTree'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import {
   accessibleResource,
+  childView,
   listAccessiblePage,
   listChildrenPage,
   resolveResource,
@@ -77,7 +78,7 @@ function deferred<T>() {
 }
 
 const currentUri = 'gfs://main/0123456789abcdef0123456789abcdef'
-const renewedChild = accessibleResource('fresh-child-id', 'Renewed child.txt', 'file')
+const renewedChild = childView('fresh-child-id', 'Renewed child.txt', 'file')
 
 let generation = 7
 let reads = 0
@@ -234,6 +235,8 @@ describe('FileExplorerTree expanded-folder authority handoff', () => {
     })
     expect(screen.getByTestId('access').textContent).toBe('active')
     expect(screen.getByTestId('location').textContent).toBe(currentUri)
+    expect(document.body.textContent).not.toContain('The previous session expired.')
+    expect(document.body.textContent).toContain('Unable to load folder contents.')
 
     await mounted.publishRenewedGeneration()
     expect(screen.getByTestId('access').textContent).toBe('active')
@@ -258,19 +261,35 @@ describe('FileExplorerTree expanded-folder authority handoff', () => {
   })
 
   it.each([
-    [403, 'forbidden', 'Private folder details must not be exposed.'],
-    [404, 'not_found', 'Missing folder details must not be exposed.'],
-    [410, 'deleted', 'Deleted folder details must not be exposed.'],
-    [500, 'internal_error', 'Transient server failure.'],
+    [
+      403,
+      'forbidden',
+      'Private folder details must not be exposed.',
+      'This folder is no longer available.',
+    ],
+    [
+      404,
+      'not_found',
+      'Missing folder details must not be exposed.',
+      'This folder is no longer available.',
+    ],
+    [
+      410,
+      'deleted',
+      'Deleted folder details must not be exposed.',
+      'Unable to load folder contents.',
+    ],
+    [500, 'internal_error', 'Transient server failure.', 'Unable to load folder contents.'],
   ])(
     'keeps resource-local or transient HTTP %s failures out of shared revocation',
-    async (status, code, message) => {
+    async (status, code, message, displayMessage) => {
       await mount(status, code, message)
       releaseResponse?.()
       await waitFor(() => expect(delivered).toBeInstanceOf(Error))
       expect(screen.getByTestId('access').textContent).toBe('active')
       expect(screen.getByTestId('location').textContent).toBe(currentUri)
-      expect(screen.queryByText(message)).toBeNull()
+      expect(document.body.textContent).not.toContain(message)
+      expect(document.body.textContent).toContain(displayMessage)
     }
   )
 })
