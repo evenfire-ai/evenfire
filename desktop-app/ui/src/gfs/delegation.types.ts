@@ -20,6 +20,9 @@ export interface GfsDelegationPanelProps {
   subjectOptions: GfsDelegationSubjectOption[]
   subjectOptionsLoading?: boolean
   subjectOptionsError?: string | null
+  /** Legacy presentation details retained until all callers use the explicit check state. */
+  permissionPending?: boolean
+  permissionError?: string | null
   /** The cached affordance result is being revalidated and cannot authorize a grant. */
   permissionCheckPending?: boolean
   /** The latest affordance check failed; cached bits remain non-actionable. */
