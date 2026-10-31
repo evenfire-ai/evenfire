@@ -924,9 +924,17 @@ describe('useGfsBrowserController', () => {
     expect(shouldRevalidateGfsQuery(affordanceKey)).toBe(false)
   })
 
-  afterEach(() => {
-    cleanup()
+  afterEach(async () => {
+    const client = lastHarnessQueryClient
     lastHarnessQueryClient = null
+    cleanup()
+    // Settle in-flight query observers while jsdom still exists. Otherwise a
+    // late resolution schedules React work through setImmediate, the scheduler
+    // callback runs after environment teardown, and Vitest reports an unhandled
+    // `window is not defined` error even though every test passed.
+    await client?.cancelQueries()
+    await client?.clear()
+    await act(async () => {})
     onlineManager.setOnline(true)
     focusManager.setFocused(undefined)
     vi.restoreAllMocks()
