@@ -430,11 +430,9 @@ async function getMcpServerRuntimeReadiness(
     }
   }
 
-  const mcpSpec = asRecord(mcpServer.spec)
-  const contextRef =
-    typeof mcpSpec?.contextRef === 'string' && mcpSpec.contextRef.trim()
-      ? mcpSpec.contextRef.trim()
-      : effectiveWorkflowContextRef(recipeName, recipeSpec)
+  // The recipe decides which Context its runtime server must be enabled in; a
+  // McpServer CR carries no Context of its own.
+  const contextRef = effectiveWorkflowContextRef(recipeName, recipeSpec)
   try {
     const context = (await gateway.getResource(
       'contexts',

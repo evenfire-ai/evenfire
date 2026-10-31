@@ -105,6 +105,9 @@ export function createEmbedOwnershipMachine(
         case 'handoffReady':
           deps.onHandoffReady?.(effect.requestId)
           return
+        case 'handoffFailed':
+          deps.onHandoffFailed?.(effect.requestId)
+          return
         case 'launchSettled':
           settle(effect.launchId, effect.outcome)
           return

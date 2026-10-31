@@ -64,7 +64,7 @@ afterEach(() => {
 
 async function pruningGateway(): Promise<PruningGateway> {
   const gw = new PruningGateway(NS)
-  await seedContext(gw, NS, CONTEXT)
+  await seedContext(gw, config.contextsNamespace, CONTEXT)
   return gw
 }
 
@@ -81,7 +81,6 @@ function preRegisteredBody(
 ): Record<string, unknown> {
   return {
     serverName: 'workiq',
-    contextRef: CONTEXT,
     baseUrl: pilot.mcpUrl,
     mode: 'pre-registered',
     clientId: '11111111-2222-3333-4444-555555555555',
@@ -143,8 +142,8 @@ describe('remote install on an apiserver that prunes spec.oauth.asProfile', () =
     expect(deleteSecret).toHaveBeenCalledWith('workiq-oauth-client', NS, secrets[0])
     await expect(gw.getResource('mcpservers', 'workiq', NS)).rejects.toThrow()
     await expect(gw.getSecret('workiq-oauth-client', NS)).rejects.toThrow()
-    // Nothing was attached to the Context either.
-    const ctx = (await gw.getResource('contexts', CONTEXT, NS)) as {
+    // An install never writes a Context allowlist.
+    const ctx = (await gw.getResource('contexts', CONTEXT, config.contextsNamespace)) as {
       spec: { mcpServers?: unknown[] }
     }
     expect(ctx.spec.mcpServers ?? []).toEqual([])
@@ -211,7 +210,6 @@ describe('remote install on an apiserver that prunes spec.oauth.asProfile', () =
       discovery,
       body: {
         serverName: 'sentry',
-        contextRef: CONTEXT,
         baseUrl: PILOTS.sentry.mcpUrl,
         mode: 'pre-registered',
         clientId: 'client-abc',

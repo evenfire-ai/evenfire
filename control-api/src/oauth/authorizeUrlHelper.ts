@@ -70,6 +70,11 @@ export type BuildAuthorizeUrlInput =
   | (BuildAuthorizeUrlCommonInput & {
       subjectKind: 'mcp'
       mcpServerName: string
+      /**
+       * The Context a context-scope consent was validated for. Signed into the
+       * state so the callback creates the grant for exactly that Context.
+       */
+      contextId?: string
     })
 
 export interface BuildAuthorizeUrlDeps {
@@ -112,10 +117,9 @@ export async function buildAuthorizeUrl(
     const decl = subject.decl
     if (decl.id !== input.oauthClientId) return { kind: 'unknown_oauth_client' }
 
-    // The state binds the initiating user + the server; grant-scope routing is
-    // resolved authoritatively on the callback, so the mcp state is per-user
-    // shaped regardless of grantScope (context binding is authoritative via
-    // spec.contextRef, not carried here).
+    // The state binds the initiating user, the server and, for a context-scope
+    // consent, the Context the caller validated; the grant scope itself is read
+    // again from the CR on the callback.
     return mintAuthorizeUrl(decl, subject.namespace, input, deps, {
       subjectKind: 'mcp',
       mcpServerName: input.mcpServerName,
@@ -123,6 +127,7 @@ export async function buildAuthorizeUrl(
       oauthClientId: input.oauthClientId,
       grantKind: input.grantKind,
       background: input.background ?? false,
+      ...(input.contextId !== undefined ? { contextId: input.contextId } : {}),
     })
   }
 

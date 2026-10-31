@@ -161,7 +161,6 @@ export interface McpServerSpec {
   // Ownership contract:
   // - managed:true or omitted => HCC owns the runtime.
   // - managed:false => WRC owns the runtime; HCC only exposes discovery/status.
-  contextRef: string
   description?: string
   image: string
   imagePullPolicy?: 'Always' | 'IfNotPresent' | 'Never'
@@ -667,7 +666,6 @@ export interface McpServerStatus {
 export interface McpServerInfo {
   name: string
   description?: string
-  contextRef: string
   transport: McpServerTransport
   auth?: McpServerAuth
   // OAuth broker config; present iff auth.type === 'oauth'. Discovery metadata
@@ -684,6 +682,7 @@ export interface McpServerInfo {
  */
 export interface McpServersResponse {
   servers: McpServerInfo[]
+  // Legacy constant '*' of the v1 route; no consumer reads it. Goes away with that route.
   contextRef: string
   timestamp: string
 }

@@ -4,7 +4,6 @@ metadata:
   name: playwright-server
   namespace: mcp-server
 spec:
-  contextRef: context1
   description: >-
     Playwright MCP Server - browser automation tools for navigation, DOM interaction,
     code execution, and screenshot capture.

@@ -2,13 +2,44 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
+  DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfigHandoffSelection,
   EntityChangeStreamEvent,
+  GfsResourceDeepLinkEnvelope,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
   SandboxUiReleasedEvent,
 } from './types.js'
+
+type SandboxUiQueuedDeepLinkEnvelope = SandboxUiDeepLinkEnvelope & {
+  userNavigationGenerationAtActivation: number
+}
+type SandboxUiSessionInvalidation = {
+  sessionGeneration: number
+  appDeepLinkMinimumId: number
+  gfsDeepLinkMinimumId: number
+}
+
+function parseSandboxUiSessionInvalidation(value: unknown): SandboxUiSessionInvalidation | null {
+  if (!value || typeof value !== 'object') return null
+  const event = value as Record<string, unknown>
+  if (
+    !Number.isSafeInteger(event.sessionGeneration) ||
+    Number(event.sessionGeneration) < 0 ||
+    !Number.isSafeInteger(event.appDeepLinkMinimumId) ||
+    Number(event.appDeepLinkMinimumId) < 1 ||
+    !Number.isSafeInteger(event.gfsDeepLinkMinimumId) ||
+    Number(event.gfsDeepLinkMinimumId) < 1
+  ) {
+    return null
+  }
+  return {
+    sessionGeneration: Number(event.sessionGeneration),
+    appDeepLinkMinimumId: Number(event.appDeepLinkMinimumId),
+    gfsDeepLinkMinimumId: Number(event.gfsDeepLinkMinimumId),
+  }
+}
 
 // Sandboxed Electron preloads cannot load relative runtime modules. Keep this
 // allowlist self-contained and pin it to the authoritative registry in
@@ -176,6 +207,23 @@ const clerum = Object.freeze({
     switch: (teamId: string) => ipcRenderer.invoke('team:switch', { teamId }),
   },
   gfs: {
+    getUserNavigationGeneration: (): number | null =>
+      ipcRenderer.sendSync('gfs:getUserNavigationGeneration'),
+    advanceUserNavigationGeneration: (): number | null =>
+      ipcRenderer.sendSync('gfs:advanceUserNavigationGeneration'),
+    listPendingDeepLinks: () => ipcRenderer.invoke('gfs:listPendingDeepLinks'),
+    clearPendingDeepLinks: () => ipcRenderer.invoke('gfs:clearPendingDeepLinks'),
+    acknowledgeDeepLink: (id: number, authority?: DeepLinkAcknowledgmentAuthority) =>
+      ipcRenderer.invoke('gfs:acknowledgeDeepLink', {
+        id,
+        ...(authority !== undefined ? { authority } : {}),
+      }),
+    onDeepLink: (callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
+      const listener = (_event: unknown, payload: GfsResourceDeepLinkEnvelope) => callback(payload)
+      ipcRenderer.on('gfs:deepLink', listener)
+      return () => ipcRenderer.off('gfs:deepLink', listener)
+    },
+    copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
     download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
       cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
@@ -271,13 +319,15 @@ const clerum = Object.freeze({
     moveResource: (
       resourceId: string,
       destinationId: string,
-      drive?: string,
-      ifMatch?: number,
-      newName?: string
+      drive: string | undefined,
+      ifMatch: number | undefined,
+      newName: string | undefined,
+      expectedSessionGeneration: number
     ) =>
       ipcRenderer.invoke('gfs:moveResource', {
         resourceId,
         destinationId,
+        expectedSessionGeneration,
         drive,
         ifMatch,
         newName,
@@ -752,8 +802,11 @@ const clerum = Object.freeze({
     copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
     listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),
-    acknowledgeDeepLink: (id: number) =>
-      ipcRenderer.invoke('sandboxUi:acknowledgeDeepLink', { id }),
+    acknowledgeDeepLink: (id: number, authority?: DeepLinkAcknowledgmentAuthority) =>
+      ipcRenderer.invoke('sandboxUi:acknowledgeDeepLink', {
+        id,
+        ...(authority !== undefined ? { authority } : {}),
+      }),
     setBounds: (bounds: { x: number; y: number; width: number; height: number; dpr?: number }) =>
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
     setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),
@@ -799,10 +852,18 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:findResult', listener)
       return () => ipcRenderer.off('sandboxUi:findResult', listener)
     },
-    onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => {
-      const listener = (_event: unknown, args: SandboxUiDeepLinkEnvelope) => callback(args)
+    onDeepLink: (callback: (args: SandboxUiQueuedDeepLinkEnvelope) => void) => {
+      const listener = (_event: unknown, args: SandboxUiQueuedDeepLinkEnvelope) => callback(args)
       ipcRenderer.on('sandboxUi:deepLink', listener)
       return () => ipcRenderer.off('sandboxUi:deepLink', listener)
+    },
+    onSessionInvalidated: (callback: (event: SandboxUiSessionInvalidation) => void) => {
+      const listener = (_event: unknown, payload: unknown) => {
+        const event = parseSandboxUiSessionInvalidation(payload)
+        if (event) callback(event)
+      }
+      ipcRenderer.on('sandboxUi:sessionInvalidated', listener)
+      return () => ipcRenderer.off('sandboxUi:sessionInvalidated', listener)
     },
     onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => {
       const listener = (_event: unknown, args: SandboxUiReleasedEvent) => callback(args)

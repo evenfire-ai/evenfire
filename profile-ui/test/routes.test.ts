@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
-import { SANDBOX_UI_WEB_LINK_PATH } from '@clerum/desktop-app-links'
+import { GFS_RESOURCE_WEB_LINK_PATH, SANDBOX_UI_WEB_LINK_PATH } from '@clerum/desktop-app-links'
 import { PROFILE_ROUTES } from '../app/constants/routes'
 
 function collectRoutePaths(value: unknown): string[] {
@@ -43,7 +43,9 @@ function appRoutePatterns(): RegExp[] {
 
 test('PROFILE_ROUTES resolve to App Router pages or route handlers', () => {
   const appRoutes = appRoutePatterns()
-  const routePaths = [...new Set(collectRoutePaths(PROFILE_ROUTES))]
+  const routePaths = [
+    ...new Set([...collectRoutePaths(PROFILE_ROUTES), GFS_RESOURCE_WEB_LINK_PATH]),
+  ]
   const unresolved = routePaths.filter(route => !appRoutes.some(pattern => pattern.test(route)))
 
   assert.deepEqual(unresolved, [])

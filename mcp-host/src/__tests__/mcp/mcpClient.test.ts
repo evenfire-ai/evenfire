@@ -59,7 +59,6 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 function makeServerInfo(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
   return {
     name: 'test-server',
-    contextRef: 'default',
     enabled: true,
     status: { deployed: true, ready: true },
     transport: {

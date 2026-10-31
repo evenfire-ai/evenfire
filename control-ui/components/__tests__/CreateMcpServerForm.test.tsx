@@ -2,11 +2,6 @@ import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
-import {
-  MCP_SERVER_PENDING_BODY,
-  SECRETS_PENDING_BODY,
-  uninstallIncompleteResponse,
-} from '../../test/fixtures/mcpServerUninstall'
 import { CreateMcpServerForm } from '../CreateMcpServerForm'
 import { ToastProvider } from '../Toast'
 
@@ -16,10 +11,6 @@ vi.mock('next/navigation', () => ({
 }))
 vi.mock('../../lib/api', async importOriginal => {
   const actual = await importOriginal<typeof import('../../lib/api')>()
-  const { buildContextResource } = await import('../../test/fixtures/contextResource')
-  const context1 = buildContextResource({
-    metadata: { name: 'context1', resourceVersion: 'rv-context1' },
-  })
   return {
     // Spread the real module so helpers the form imports directly (e.g.
     // getMcpSecretRollbackRepairIdentity) keep their real behaviour; every
@@ -37,17 +28,12 @@ vi.mock('../../lib/api', async importOriginal => {
       resourceVersion: '1',
     }),
     deleteMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
-    deleteMcpServer: vi.fn().mockResolvedValue({ name: 'test-server' }),
-    getAgentTeams: vi.fn().mockResolvedValue({ items: [] }),
-    getAgentUsers: vi.fn().mockResolvedValue({ items: [] }),
-    // The form no longer reads the context list; kept as a spy to lock that contract.
-    getContexts: vi.fn(),
-    getContext: vi.fn().mockResolvedValue(context1),
-    getContextTeams: vi.fn().mockResolvedValue({ items: [] }),
-    getContextUsers: vi.fn().mockResolvedValue({ items: [] }),
     listOrgImages: vi.fn().mockResolvedValue({ org: 'evenfire-dev', images: [] }),
-    getHosts: vi.fn().mockResolvedValue({ items: [] }),
-    updateContext: vi.fn().mockResolvedValue({}),
+    // Creating a connector touches no Context or agent: kept as spies to lock that contract.
+    getContexts: vi.fn(),
+    getContext: vi.fn(),
+    getHosts: vi.fn(),
+    updateContext: vi.fn(),
   }
 })
 
@@ -61,8 +47,7 @@ function render(children: ReactNode) {
 }
 
 async function fillIdentity(name = 'brave-search') {
-  await waitFor(() => expect(api.getHosts).toHaveBeenCalledTimes(1))
-  fireEvent.change(screen.getByPlaceholderText('my-mcp-server'), {
+  fireEvent.change(await screen.findByPlaceholderText('my-mcp-server'), {
     target: { value: name },
   })
   fireEvent.change(
@@ -71,28 +56,11 @@ async function fillIdentity(name = 'brave-search') {
   )
 }
 
-function goToAccessStep() {
-  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-}
-
-function continueToSecretsStep() {
-  // Already on the Access step: a single Continue lands on Secrets.
-  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-}
-
-async function selectAgents(...labels: string[]) {
-  fireEvent.click(await screen.findByRole('button', { name: 'Select agents...' }))
-  for (const label of labels) {
-    fireEvent.click(screen.getByRole('option', { name: label }))
-  }
-}
-
 function openAdvanced() {
   fireEvent.click(screen.getByText('Advanced options'))
 }
 
 function continueToSecrets() {
-  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
 }
 
@@ -138,39 +106,6 @@ describe('CreateMcpServerForm — render', () => {
     expect(continueButton).not.toBeDisabled()
   })
 
-  it('loads available agents into the dedicated Access step', async () => {
-    vi.mocked(api.getHosts).mockResolvedValueOnce({
-      items: [
-        { metadata: { name: 'agents/product' }, spec: { contextRef: 'context1' } },
-        { metadata: { name: 'research-agent' }, spec: { contextRef: 'research' } },
-        // Hosts without a contextRef are not selectable agent targets.
-        { metadata: { name: 'orphan-agent' } },
-      ],
-    })
-    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
-
-    await fillIdentity()
-    goToAccessStep()
-
-    await waitFor(() =>
-      expect(screen.getByRole('heading', { name: 'Agent access' })).toBeInTheDocument()
-    )
-    expect(
-      screen.getByText(
-        /^Optionally choose the agents that can use this connector right away\. You can also grant access later/
-      )
-    ).toBeInTheDocument()
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Select agents...' }))
-
-    // Agent options are labeled with the derived display name.
-    expect(screen.getByRole('option', { name: 'product' })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: 'research-agent' })).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: 'orphan-agent' })).not.toBeInTheDocument()
-    // The context concept is gone from this flow.
-    expect(api.getContexts).not.toHaveBeenCalled()
-  })
-
   it('selects an organization image and fills its full registry coordinate', async () => {
     vi.mocked(api.listOrgImages).mockResolvedValueOnce({
       org: 'evenfire-dev',
@@ -196,43 +131,15 @@ describe('CreateMcpServerForm — render', () => {
     ).toBeInTheDocument()
   })
 
-  it('uses connector, access, and secrets steps', () => {
+  it('uses connector and secrets steps, with no access step', () => {
     const { container } = render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
-    expect(container.querySelectorAll('.cu-agent-step-rail__item')).toHaveLength(3)
+    expect(container.querySelectorAll('.cu-agent-step-rail__item')).toHaveLength(2)
     const stepTitles = Array.from(container.querySelectorAll('.cu-agent-step-rail__title')).map(
       element => element.textContent
     )
-    expect(stepTitles).toEqual(['Connector', 'Access', 'Secrets'])
+    expect(stepTitles).toEqual(['Connector', 'Secrets'])
     expect(screen.queryByText('Step 1 of 3')).not.toBeInTheDocument()
     expect(screen.queryByText('Step 1 of 4')).not.toBeInTheDocument()
-  })
-
-  it('previews who can use the connector for selected agents', async () => {
-    vi.mocked(api.getAgentUsers).mockResolvedValueOnce({
-      items: [{ id: 'user-1', displayName: 'Josue', email: 'josue@example.com', name: 'josue' }],
-    })
-    vi.mocked(api.getAgentTeams).mockResolvedValueOnce({
-      items: [{ id: 'team-1', name: 'Development Team' }],
-    })
-    vi.mocked(api.getHosts).mockResolvedValueOnce({
-      items: [{ metadata: { name: 'agents/product' }, spec: { contextRef: 'context1' } }],
-    })
-    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
-
-    await fillIdentity()
-    goToAccessStep()
-    await selectAgents('product')
-
-    const preview = await screen.findByLabelText('Agent access preview')
-    expect(screen.getByText('Access preview')).toBeInTheDocument()
-    expect(preview).toHaveTextContent('product')
-    expect(preview).toHaveTextContent('Josue')
-    expect(preview).toHaveTextContent('Development Team')
-    // The preview follows direct Agent grants, not legacy Context mappings.
-    expect(api.getAgentUsers).toHaveBeenCalledWith('agents/product')
-    expect(api.getAgentTeams).toHaveBeenCalledWith('agents/product')
-    expect(api.getContextUsers).not.toHaveBeenCalled()
-    expect(api.getContextTeams).not.toHaveBeenCalled()
   })
 
   it('hides the advanced options by default and reveals them on toggle', async () => {
@@ -356,21 +263,10 @@ describe('CreateMcpServerForm — submit', () => {
     chooseNoCredentials()
   }
 
-  it('creates the connector in the selected agents’ scope with one write per context', async () => {
-    // Two agents sharing one contextRef must produce exactly one allowlist write.
-    vi.mocked(api.getHosts).mockResolvedValueOnce({
-      items: [
-        { metadata: { name: 'agents/product' }, spec: { contextRef: 'context1' } },
-        { metadata: { name: 'research-agent' }, spec: { contextRef: 'context1' } },
-      ],
-    })
+  it('creates the connector without a Context and leaves agent access for later', async () => {
     const onCreated = vi.fn()
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={onCreated} />)
-    await fillIdentity()
-    goToAccessStep()
-    await selectAgents('product', 'research-agent')
-    continueToSecretsStep()
-    chooseNoCredentials()
+    await fillRequired()
 
     const submit = screen.getByRole('button', { name: 'Create connector' })
     await waitFor(() => expect(submit).not.toBeDisabled())
@@ -380,13 +276,11 @@ describe('CreateMcpServerForm — submit', () => {
       expect(api.createMcpServer).toHaveBeenCalledTimes(1)
     })
     // Spec shape: streamableHttp default, managed: true default, in-cluster URL from the name.
-    // The connector is attached to the selected agents' contextRef.
     const createCall = (api.createMcpServer as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(createCall).toMatchObject({
       metadata: { name: 'brave-search' },
       spec: {
         image: 'ghcr.io/example/mcp:1.0',
-        contextRef: 'context1',
         enabled: true,
         managed: true,
         transport: {
@@ -396,132 +290,27 @@ describe('CreateMcpServerForm — submit', () => {
         },
       },
     })
-    // With agents selected no private scope is created.
+    expect(createCall.spec).not.toHaveProperty('contextRef')
     expect(api.apiSend).not.toHaveBeenCalled()
+    expect(api.getHosts).not.toHaveBeenCalled()
+    expect(api.getContext).not.toHaveBeenCalled()
+    expect(api.updateContext).not.toHaveBeenCalled()
 
-    // Allowlist update: one read + one additive write for the shared contextRef.
-    await waitFor(() => {
-      expect(api.getContext).toHaveBeenCalledWith('context1')
-      expect(api.updateContext).toHaveBeenCalledTimes(1)
-    })
-    const updateCall = (api.updateContext as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(updateCall[0]).toBe('context1')
-    expect(updateCall[1]).toMatchObject({
-      metadata: { resourceVersion: 'rv-context1' },
-      spec: { contextId: 'context1', mcpServers: ['brave-search'] },
-    })
-
-    // Success toast + delayed onCreated callback
-    expect(screen.getByText('Connector created successfully.')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Connector created. Give agents access from the Installed Connectors list whenever you’re ready.'
+      )
+    ).toBeInTheDocument()
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1), { timeout: 1500 })
   })
 
-  it('rolls back a returned context-scoped OAuth connector and Secret across Agent scopes', async () => {
-    vi.mocked(api.getHosts).mockResolvedValueOnce({
-      items: [
-        { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-alpha' } },
-        { metadata: { name: 'agent-beta' }, spec: { contextRef: 'ctx-beta' } },
-      ],
-    })
-    vi.mocked(api.createMcpServer).mockResolvedValueOnce({
-      metadata: { name: 'shared-drive' },
-      spec: {
-        contextRef: 'ctx-alpha',
-        oauth: { grantScope: 'context' },
-      },
-    })
+  it('sends managed: false when the operator deploys the pod themselves', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
-    await fillIdentity('shared-drive')
-    goToAccessStep()
-    await selectAgents('agent-alpha', 'agent-beta')
-    continueToSecretsStep()
-    chooseNewSecret()
-    fireEvent.change(screen.getByPlaceholderText('brave-search-credentials'), {
-      target: { value: 'shared-drive-oauth' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Add Key Mapping' }))
-    fireEvent.change(screen.getByPlaceholderText('api-key'), {
-      target: { value: 'api-key' },
-    })
-    fireEvent.change(screen.getByPlaceholderText('BRAVE_API_KEY'), {
-      target: { value: 'DRIVE_API_KEY' },
-    })
-    fireEvent.change(screen.getByPlaceholderText('sk-...'), {
-      target: { value: 'test-secret' },
-    })
-
-    fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
-
-    expect(
-      await screen.findByText(/shared OAuth identity.*original access scope/i)
-    ).toBeInTheDocument()
-    expect(api.deleteMcpServer).toHaveBeenCalledWith('shared-drive')
-    // The rollback delete is compare-and-swap fenced: it must carry the
-    // identity createMcpSecret returned, so it can never delete a Secret some
-    // other writer replaced in between.
-    expect(api.deleteMcpSecret).toHaveBeenCalledWith('shared-drive-oauth', {
-      uid: 'uid-test-credentials',
-      resourceVersion: '1',
-    })
-    expect(api.getContext).not.toHaveBeenCalled()
-    expect(api.updateContext).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    {
-      body: SECRETS_PENDING_BODY,
-      expected:
-        'Automatic cleanup of connector "shared-drive" is incomplete (pending cleanup: connector Secrets); it is still installed. Delete it from the Installed Connectors list to finish.',
-    },
-    {
-      body: MCP_SERVER_PENDING_BODY,
-      expected:
-        'Automatic cleanup of connector "shared-drive" is incomplete (pending cleanup: connector resource); it may still be installed. Delete it from the Installed Connectors list to finish.',
-    },
-  ])(
-    'tells the operator an incomplete rollback and what is pending ($body.pending)',
-    async ({ body, expected }) => {
-      vi.mocked(api.getHosts).mockResolvedValueOnce({
-        items: [
-          { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-alpha' } },
-          { metadata: { name: 'agent-beta' }, spec: { contextRef: 'ctx-beta' } },
-        ],
-      })
-      vi.mocked(api.createMcpServer).mockResolvedValueOnce({
-        metadata: { name: 'shared-drive' },
-        spec: { contextRef: 'ctx-alpha', oauth: { grantScope: 'context' } },
-      })
-      // The real client parses the producer's 503 body; only the network is stubbed.
-      vi.mocked(api.deleteMcpServer).mockImplementationOnce(async name => {
-        const actual = await vi.importActual<typeof import('../../lib/api')>('../../lib/api')
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(uninstallIncompleteResponse(body)))
-        try {
-          return await actual.deleteMcpServer(name)
-        } finally {
-          vi.unstubAllGlobals()
-        }
-      })
-      render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
-      await fillIdentity('shared-drive')
-      goToAccessStep()
-      await selectAgents('agent-alpha', 'agent-beta')
-      continueToSecretsStep()
-      chooseNoCredentials()
-
-      fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
-
-      expect(await screen.findByText(expected, { exact: false })).toBeInTheDocument()
-      expect(
-        screen.queryByText(/Automatic cleanup failed for the connector/)
-      ).not.toBeInTheDocument()
-    }
-  )
-
-  it('creates a private access scope when no agents are selected', async () => {
-    const onCreated = vi.fn()
-    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={onCreated} />)
     await fillIdentity()
-    // Skip the optional Access step without selecting any agent.
+    openAdvanced()
+    fireEvent.change(screen.getByDisplayValue(/^Yes — Evenfire creates/), {
+      target: { value: 'false' },
+    })
     continueToSecrets()
     chooseNoCredentials()
 
@@ -529,66 +318,9 @@ describe('CreateMcpServerForm — submit', () => {
     await waitFor(() => expect(submit).not.toBeDisabled())
     fireEvent.click(submit)
 
-    await waitFor(() => {
-      expect(api.apiSend).toHaveBeenCalledWith('POST', '/api/v1/admin/contexts', expect.any(Object))
-    })
-    const scopeCall = vi
-      .mocked(api.apiSend)
-      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
-    expect(scopeCall).toBeDefined()
-    const scopeBody = scopeCall![2] as {
-      metadata: { name: string }
-      spec: { contextId: string; description: string; mcpServers: string[] }
-    }
-    expect(scopeBody.metadata.name).toMatch(/^brave-search-[0-9]{5}$/)
-    expect(scopeBody.spec.contextId).toBe(scopeBody.metadata.name)
-    expect(scopeBody.spec.description).toBe('Connector access scope for brave-search')
-    expect(scopeBody.spec.mcpServers).toEqual(['brave-search'])
-
-    // The generated scope name becomes the created McpServer's contextRef.
-    await waitFor(() => {
-      expect(api.createMcpServer).toHaveBeenCalledTimes(1)
-    })
+    await waitFor(() => expect(api.createMcpServer).toHaveBeenCalledTimes(1))
     const createCall = (api.createMcpServer as ReturnType<typeof vi.fn>).mock.calls[0][0]
-    expect(createCall.spec.contextRef).toBe(scopeBody.metadata.name)
-
-    // No allowlist writes on this path.
-    expect(api.getContext).not.toHaveBeenCalled()
-    expect(api.updateContext).not.toHaveBeenCalled()
-    expect(screen.getByText('Connector created successfully.')).toBeInTheDocument()
-    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1), { timeout: 1500 })
-  })
-
-  it('reports a partial failure when the access write rejects after creation', async () => {
-    vi.mocked(api.getHosts).mockResolvedValueOnce({
-      items: [{ metadata: { name: 'agents/product' }, spec: { contextRef: 'context1' } }],
-    })
-    ;(api.updateContext as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error('context write failed')
-    )
-    const onCreated = vi.fn()
-    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={onCreated} />)
-    await fillIdentity()
-    goToAccessStep()
-    await selectAgents('product')
-    continueToSecretsStep()
-    chooseNoCredentials()
-
-    const submit = screen.getByRole('button', { name: 'Create connector' })
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
-
-    await waitFor(() => {
-      expect(api.createMcpServer).toHaveBeenCalledTimes(1)
-      expect(
-        screen.getByText(
-          `Connector created, but we couldn't give access to product. ` +
-            `Grant "brave-search" to those agents from the Installed Connectors list.`
-        )
-      ).toBeInTheDocument()
-    })
-    expect(onCreated).not.toHaveBeenCalled()
-    expect(screen.queryByText('Connector created successfully.')).not.toBeInTheDocument()
+    expect(createCall.spec.managed).toBe(false)
   })
 
   it('submits exact-host egress bindings when configured', async () => {
@@ -965,7 +697,11 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     })
     // Rollback must NOT fire on success
     expect(api.deleteMcpSecret).not.toHaveBeenCalled()
-    expect(screen.getByText('Connector created successfully.')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Connector created. Give agents access from the Installed Connectors list whenever you’re ready.'
+      )
+    ).toBeInTheDocument()
   })
 })
 

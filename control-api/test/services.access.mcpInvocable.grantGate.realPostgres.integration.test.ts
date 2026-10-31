@@ -97,7 +97,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
     ((await g.getResource('mcpservers', name, NS)) as { metadata: { uid: string } }).metadata.uid
 
   const list = async (g: MockGateway, userId: string) =>
-    (await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], userId, db)).map(s => s.name)
+    (await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], userId, db, NS)).map(s => s.name)
 
   it('user-flavor: excluded without a grant, invocable after the caller upserts one', async () => {
     const g = gatewayWith([{ name: 'gdrive-u', grantScope: 'user', contextRef: 'ctx-1' }])

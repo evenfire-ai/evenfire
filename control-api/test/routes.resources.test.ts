@@ -493,7 +493,7 @@ describe('routes/resources', () => {
 
     await request(app)
       .put('/admin/contexts/not-found')
-      .send({ spec: { contextId: 'x' } })
+      .send({ spec: { contextId: 'not-found' } })
       .expect(500)
 
     await request(app).get('/invalid-resource').expect(404)
