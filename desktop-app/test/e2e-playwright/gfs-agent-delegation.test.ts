@@ -1,3 +1,4 @@
+// E2E_GUARDIAN_IPC_FLOW: Desktop Files and agent actions cross IPC; the suite asserts persisted grants and tool outcomes.
 /**
  * E2E — Desktop per-agent GFS delegation (plan "compressed-drifting-matsumoto",
  * ADDENDUM 1): full pre/post permission sequence with TWO agents.
@@ -68,7 +69,7 @@ import {
   getGfsTreeSnapshot,
   gfsGrantRevokeAuditCount,
 } from './helpers/gfsFixtures'
-import { openResourcesNavItem } from './navigationHelpers'
+import { DesktopFilesNav } from './pages/DesktopFilesNav'
 import { launchAndLogin } from './workflowUi'
 
 const OWNER_EMAIL = 'test@clerum.io'
@@ -136,7 +137,9 @@ function seedAgentGfsDelegationFixtures(ownerEmail: string): AgentGfsDelegationF
 }
 
 async function openFilesBrowser(page: Page): Promise<Locator> {
-  await openResourcesNavItem(page, 'nav-files')
+  const nav = new DesktopFilesNav(page)
+  await nav.openFiles()
+  await nav.openSharedWithMe()
   const browser = page.getByRole('region', { name: 'EvenDrive browser' })
   await expect(browser).toBeVisible({ timeout: 20_000 })
   return browser
@@ -166,9 +169,9 @@ async function openShareDialogForFixtureFolder(
   fixtures: AgentGfsDelegationFixtures
 ): Promise<Locator> {
   const browser = await openFilesBrowser(page)
-  await browser.getByRole('button', { name: fixtures.folder.name, exact: true }).click()
+  await browser.getByRole('button', { name: `Open ${fixtures.folder.name}`, exact: true }).click()
   await expect(
-    browser.getByRole('button', { name: fixtures.folder.fileName, exact: true })
+    browser.getByRole('button', { name: `Open ${fixtures.folder.fileName}`, exact: true })
   ).toBeVisible({ timeout: 20_000 })
   await browser
     .getByRole('button', { name: `Options for ${fixtures.folder.name}`, exact: true })
@@ -310,10 +313,12 @@ async function grantAgentAccessViaShareDialog(
       .click()
     await expectHostGrantComposer(dialog, 'Editor')
   }
-  await dialog.getByRole('button', { name: 'Share', exact: true }).click()
-  await expect(page.getByText('Access granted to 1 subject', { exact: true }).first()).toBeVisible({
-    timeout: 20_000,
+  const toast = page.getByRole('status').filter({
+    has: page.getByText('Access granted to 1 subject', { exact: true }),
   })
+  await expect(toast).toHaveCount(0, { timeout: 20_000 })
+  await dialog.getByRole('button', { name: 'Share', exact: true }).click()
+  await expect(toast).toHaveCount(1, { timeout: 20_000 })
   await expect(grantRowActions(dialog, opts.agentLabel)).toBeVisible({ timeout: 20_000 })
   await expect(
     dialog.getByRole('button', { name: `Access role for ${opts.agentLabel}`, exact: true })
@@ -353,13 +358,15 @@ async function grantMultipleAgentsViaShareDialog(
   // Read-only default kept; directory inherit default ON, asserted not toggled.
   await expectHostGrantComposer(dialog, 'Read')
   // ONE press → one atomic PUT carrying subjects:[…N…].
+  const toast = page.getByRole('status').filter({
+    has: page.getByText(`Access granted to ${opts.agentLabels.length} subjects`, { exact: true }),
+  })
+  await expect(toast).toHaveCount(0, { timeout: 20_000 })
   await dialog.getByRole('button', { name: 'Share', exact: true }).click()
   // Plural toast proves the batch was accepted as a unit (singular would mean
   // the multi-select collapsed to one subject — the exact regression this
   // guards).
-  await expect(
-    page.getByText(`Access granted to ${opts.agentLabels.length} subjects`, { exact: true }).first()
-  ).toBeVisible({ timeout: 20_000 })
+  await expect(toast).toHaveCount(1, { timeout: 20_000 })
   // list-after-write: every grantee now has a row (grants GET returned all N).
   for (const label of opts.agentLabels) {
     await expect(grantRowActions(dialog, label)).toBeVisible({ timeout: 20_000 })
@@ -377,14 +384,16 @@ async function revokeGrantViaShareDialog(
 ): Promise<void> {
   const trigger = grantRowActions(dialog, label)
   await expect(trigger).toBeVisible({ timeout: 20_000 })
+  const toast = page.getByRole('status').filter({
+    has: page.getByText(`Access revoked for ${label}`, { exact: true }),
+  })
+  await expect(toast).toHaveCount(0, { timeout: 20_000 })
   await trigger.click()
   await page
     .getByRole('menu', { name: `Actions for ${label}`, exact: true })
     .getByRole('menuitem', { name: 'Remove access', exact: true })
     .click()
-  await expect(page.getByText(`Access revoked for ${label}`, { exact: true }).first()).toBeVisible({
-    timeout: 20_000,
-  })
+  await expect(toast).toHaveCount(1, { timeout: 20_000 })
   await expect(grantRowActions(dialog, label)).toHaveCount(0, { timeout: 20_000 })
 }
 
@@ -419,9 +428,11 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
     try {
       await test.step('user sees the delegated folder and file in the Files page', async () => {
         const browser = await openFilesBrowser(page)
-        await browser.getByRole('button', { name: fixtures.folder.name, exact: true }).click()
+        await browser
+          .getByRole('button', { name: `Open ${fixtures.folder.name}`, exact: true })
+          .click()
         await expect(
-          browser.getByRole('button', { name: fixtures.folder.fileName, exact: true })
+          browser.getByRole('button', { name: `Open ${fixtures.folder.fileName}`, exact: true })
         ).toBeVisible({ timeout: 20_000 })
       })
 
