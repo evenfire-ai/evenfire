@@ -192,11 +192,11 @@ const clerum = Object.freeze({
       ipcRenderer.on('desktopUpdate:extracting', listener)
       return () => ipcRenderer.off('desktopUpdate:extracting', listener)
     },
-    onDesktopUpdateSaving: (callback: (version: string) => void) => {
+    onDesktopUpdatePreparing: (callback: (version: string) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: { version: string }) =>
         callback(payload.version)
-      ipcRenderer.on('desktopUpdate:saving', listener)
-      return () => ipcRenderer.off('desktopUpdate:saving', listener)
+      ipcRenderer.on('desktopUpdate:preparing', listener)
+      return () => ipcRenderer.off('desktopUpdate:preparing', listener)
     },
     onDesktopUpdateOpening: (callback: (version: string) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: { version: string }) =>

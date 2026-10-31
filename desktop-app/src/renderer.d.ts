@@ -126,7 +126,7 @@ declare global {
         onDesktopUpdateCheckRequested: (callback: () => void) => () => void
         onDesktopUpdateProgress: (callback: (progress: DesktopUpdateProgress) => void) => () => void
         onDesktopUpdateExtracting: (callback: (version: string) => void) => () => void
-        onDesktopUpdateSaving: (callback: (version: string) => void) => () => void
+        onDesktopUpdatePreparing: (callback: (version: string) => void) => () => void
         onDesktopUpdateOpening: (callback: (version: string) => void) => () => void
         onDesktopUpdateDownloaded: (
           callback: (payload: DesktopUpdateDownloadedEvent) => void

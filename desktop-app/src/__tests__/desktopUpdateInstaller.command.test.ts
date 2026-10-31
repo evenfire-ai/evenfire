@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { prepareVerifiedDesktopPayload } from '../desktopUpdateArtifacts.js'
@@ -276,11 +278,202 @@ describe('Linux updater helper executable identity', () => {
     expect(rootScript).toContain('PATH=/usr/bin:/bin; export PATH')
     expect(launch.args).not.toContain('/environment-selected/OtherExecutable')
     expect(launch.args).toContain('/usr/lib/evenfire/Evenfire')
+    expect(rootScript).toContain('/usr/bin/dpkg-query')
+  })
+
+  it('keeps package-manager diagnostics out of the completion result channel', async () => {
+    const plan = await makePlan('deb', '/environment-selected/OtherExecutable')
+    launch.markerPath = path.join(plan.stageRoot, 'privileged-ready')
+
+    await launchDesktopInstallHelper(plan)
+
+    const rootScript = Buffer.from(launch.args.at(-1)!, 'base64').toString('utf8')
     expect(rootScript).toContain('>>"$log" 2>&1')
-    expect(rootScript).toContain('printf installed')
+  })
+
+  it('runs package completion checks in the shell that decides install success', async () => {
+    const plan = await makePlan('deb', '/environment-selected/OtherExecutable')
+    launch.markerPath = path.join(plan.stageRoot, 'privileged-ready')
+
+    await launchDesktopInstallHelper(plan)
+
     expect(launch.standardInput).toContain('version_now() {')
     expect(launch.standardInput).toContain('asar_now() {')
     expect(launch.standardInput).toContain('"$(version_now)" != "$version"')
     expect(launch.standardInput).toContain('"$(asar_now)" != "$targetAsar"')
+  })
+
+  it('returns clean installed and rollback tokens despite native package-manager output', async () => {
+    const plan = await makePlan('deb', '/environment-selected/OtherExecutable')
+    launch.markerPath = path.join(plan.stageRoot, 'privileged-ready')
+    await writeFile(
+      path.join(plan.operationPath, 'operation.json'),
+      JSON.stringify({ id: plan.operationId })
+    )
+
+    await launchDesktopInstallHelper(plan)
+
+    const binDirectory = path.join(temporaryRoot, 'stub-bin')
+    await mkdir(binDirectory)
+    const statePath = path.join(temporaryRoot, 'installed-version')
+    const targetAsarPath = path.join(plan.payload.appPath, 'resources', 'app.asar')
+    const installedAsarPath = path.join(plan.location.installRoot, 'resources', 'app.asar')
+    const oldAsarPath = path.join(temporaryRoot, 'old-app.asar')
+    const targetBytes = Buffer.from('verified app archive')
+    const oldBytes = Buffer.from('installed app archive')
+    await writeFile(oldAsarPath, oldBytes)
+    await writeFile(plan.payload.packagePath, 'target package bytes')
+    await writeFile(plan.rollbackPackagePath!, 'rollback package bytes')
+    const targetHash = createHash('sha256')
+      .update(await readFile(plan.payload.packagePath))
+      .digest('hex')
+    const rollbackHash = createHash('sha256')
+      .update(await readFile(plan.rollbackPackagePath!))
+      .digest('hex')
+    const targetAsar = createHash('sha256').update(targetBytes).digest('hex')
+    const oldAsar = createHash('sha256').update(oldBytes).digest('hex')
+    const dpkgPath = path.join(binDirectory, 'dpkg')
+    const queryPath = path.join(binDirectory, 'dpkg-query')
+    const checksumPath = path.join(binDirectory, 'sha256sum')
+    const writeExecutable = async (filePath: string, source: string) => {
+      await writeFile(filePath, source)
+      await chmod(filePath, 0o700)
+    }
+    await writeExecutable(
+      dpkgPath,
+      `#!/bin/sh\nprintf 'native package manager stdout\\n'\nprintf 'native package manager stderr\\n' >&2\ncase "$2" in\n  */target.pkg) printf '0.12.0' > ${JSON.stringify(statePath)}; if [ "${'${FORCE_TARGET_MISMATCH:-}'}" = 1 ]; then cp ${JSON.stringify(oldAsarPath)} ${JSON.stringify(installedAsarPath)}; else cp ${JSON.stringify(targetAsarPath)} ${JSON.stringify(installedAsarPath)}; fi ;;\n  */rollback.pkg) printf '0.11.0' > ${JSON.stringify(statePath)}; cp ${JSON.stringify(oldAsarPath)} ${JSON.stringify(installedAsarPath)} ;;\n  *) exit 12 ;;\nesac\n`
+    )
+    await writeExecutable(queryPath, `#!/bin/sh\ncat ${JSON.stringify(statePath)}\n`)
+    await writeExecutable(checksumPath, '#!/bin/sh\nexec /usr/bin/shasum -a 256 "$@"\n')
+
+    const rootScript = Buffer.from(launch.args.at(-1)!, 'base64')
+      .toString('utf8')
+      .replaceAll('/usr/bin/dpkg-query', queryPath)
+      .replaceAll('/usr/bin/dpkg', dpkgPath)
+      .replaceAll('/usr/bin/sha256sum', checksumPath)
+      .replaceAll('/usr/bin/chmod', '/bin/chmod')
+      .replaceAll('/usr/bin/cp', '/bin/cp')
+      .replaceAll('/usr/bin/rm', '/bin/rm')
+    const scriptPath = path.join(temporaryRoot, 'root-helper.sh')
+    await writeFile(scriptPath, rootScript)
+    const run = (expectedVersion: string, expectedAsar: string, forceMismatch = false) =>
+      execFileSync(
+        '/bin/sh',
+        [
+          scriptPath,
+          plan.operationPath,
+          plan.operationId,
+          'deb',
+          'install',
+          plan.payload.packagePath,
+          targetHash,
+          plan.rollbackPackagePath!,
+          rollbackHash,
+          '0.12.0',
+          expectedVersion,
+          targetAsar,
+          expectedAsar,
+          path.join(plan.location.installRoot, 'Evenfire'),
+          '2147483647',
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, FORCE_TARGET_MISMATCH: forceMismatch ? '1' : '0' },
+        }
+      )
+
+    await writeFile(installedAsarPath, oldBytes)
+    const installedResult = run('0.11.0', oldAsar)
+    expect(installedResult).toBe('installed')
+    expect(await readFile(path.join(plan.operationPath, 'package-manager.log'), 'utf8')).toContain(
+      'native package manager stdout'
+    )
+
+    await writeFile(installedAsarPath, oldBytes)
+    const rollbackResult = run('0.11.0', oldAsar, true)
+    expect(rollbackResult).toBe('rollback')
+  })
+
+  it('checks the outer Linux completion in its own shell and rolls back version or hash mismatch', async () => {
+    const plan = await makePlan('deb', '/environment-selected/OtherExecutable')
+    launch.markerPath = path.join(plan.stageRoot, 'privileged-ready')
+    await launchDesktopInstallHelper(plan)
+
+    const binDirectory = path.join(temporaryRoot, 'outer-stubs')
+    await mkdir(binDirectory)
+    const versionPath = path.join(temporaryRoot, 'outer-version')
+    const digestPath = path.join(temporaryRoot, 'outer-digest')
+    const callCountPath = path.join(temporaryRoot, 'pkexec-calls')
+    const casePath = path.join(temporaryRoot, 'outer-case')
+    const appPidPath = path.join(temporaryRoot, 'launched-app.pid')
+    const executablePath = path.join(plan.location.installRoot, 'Evenfire')
+    const targetAsar = launch.args[11]!
+    const writeExecutable = async (filePath: string, source: string) => {
+      await writeFile(filePath, source)
+      await chmod(filePath, 0o700)
+    }
+    const queryPath = path.join(binDirectory, 'dpkg-query')
+    const checksumPath = path.join(binDirectory, 'sha256sum')
+    const pkexecPath = path.join(binDirectory, 'pkexec')
+    await writeExecutable(queryPath, `#!/bin/sh\n/bin/cat ${JSON.stringify(versionPath)}\n`)
+    await writeExecutable(checksumPath, `#!/bin/sh\n/bin/cat ${JSON.stringify(digestPath)}\n`)
+    await writeExecutable(
+      pkexecPath,
+      `#!/bin/sh\n/bin/cat >/dev/null\ncalls=0\n[ ! -f ${JSON.stringify(callCountPath)} ] || calls=$(/bin/cat ${JSON.stringify(callCountPath)})\ncalls=$((calls + 1))\nprintf '%s' "$calls" > ${JSON.stringify(callCountPath)}\nif [ "$calls" -eq 1 ]; then\n  case "$(/bin/cat ${JSON.stringify(casePath)})" in\n    version) printf '0.99.0' > ${JSON.stringify(versionPath)}; printf '%s' ${JSON.stringify(targetAsar)} > ${JSON.stringify(digestPath)} ;;\n    hash) printf '0.12.0' > ${JSON.stringify(versionPath)}; printf 'wrong-hash' > ${JSON.stringify(digestPath)} ;;\n    *) printf '0.12.0' > ${JSON.stringify(versionPath)}; printf '%s' ${JSON.stringify(targetAsar)} > ${JSON.stringify(digestPath)} ;;\n  esac\n  printf installed\nelse\n  printf '0.11.0' > ${JSON.stringify(versionPath)}; printf '%s' ${JSON.stringify(plan.currentAsarSha256)} > ${JSON.stringify(digestPath)}; printf rollback\nfi\n`
+    )
+    await writeExecutable(
+      executablePath,
+      `#!/bin/sh\nprintf '%s' "$$" > ${JSON.stringify(appPidPath)}\nprintf started > "$STARTUP_MARKER"\nexec /bin/sleep 5\n`
+    )
+    const outerScript = launch.standardInput
+      .replace('PATH=/usr/bin:/bin; export PATH', `PATH=${binDirectory}:/usr/bin:/bin; export PATH`)
+      .replaceAll('/usr/bin/dpkg-query', queryPath)
+      .replaceAll('/usr/bin/sha256sum', checksumPath)
+      .replaceAll('/usr/bin/pkexec', pkexecPath)
+      .replaceAll('/usr/bin/sleep', '/bin/sleep')
+      .replaceAll('/usr/bin/rm', '/bin/rm')
+    const outerScriptPath = path.join(temporaryRoot, 'outer-helper.sh')
+    await writeFile(outerScriptPath, outerScript)
+
+    const runCase = async (kind: 'healthy' | 'version' | 'hash') => {
+      await mkdir(plan.operationPath, { recursive: true, mode: 0o700 })
+      await writeFile(
+        path.join(plan.operationPath, 'operation.json'),
+        JSON.stringify({ id: plan.operationId })
+      )
+      await writeFile(path.join(plan.stageRoot, 'pending.json'), '{}')
+      await writeFile(casePath, kind)
+      await rm(callCountPath, { force: true })
+      const startupMarker = path.join(plan.operationPath, 'startup-ok.json')
+      await rm(startupMarker, { force: true })
+      const args = launch.args.slice(1)
+      args[8] = executablePath
+      const invoke = () =>
+        execFileSync('/bin/sh', ['-c', outerScript, 'outer-helper', ...args], {
+          encoding: 'utf8',
+          env: { ...process.env, STARTUP_MARKER: startupMarker },
+        })
+      if (kind === 'healthy') {
+        expect(invoke()).toBe('')
+      } else {
+        try {
+          invoke()
+          throw new Error('The failed post-startup check unexpectedly succeeded.')
+        } catch (error) {
+          expect(error).toMatchObject({ status: 1 })
+        }
+      }
+      try {
+        process.kill(Number(await readFile(appPidPath, 'utf8')), 'SIGTERM')
+      } catch {
+        // The helper may already have stopped the failed target process during rollback.
+      }
+      expect(await readFile(callCountPath, 'utf8')).toBe(kind === 'healthy' ? '1' : '2')
+      await expect(readFile(plan.pendingPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+
+    await runCase('healthy')
+    await runCase('version')
+    await runCase('hash')
   })
 })

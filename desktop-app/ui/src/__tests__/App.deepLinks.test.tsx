@@ -601,6 +601,24 @@ describe('App deep-link orchestration', () => {
     expect(desktopUpdateCheckHarness.download).not.toHaveBeenCalled()
   })
 
+  it('keeps the incompatible-startup update alert available if pending lookup fails', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    desktopUpdateCheckHarness.renderButtons = true
+    desktopUpdateCheckHarness.getPresentation.mockResolvedValue({ manualInstall: true })
+    desktopUpdateCheckHarness.getPending.mockRejectedValue(new Error('pending state unavailable'))
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    const view = renderApp(<App />)
+
+    await waitFor(() =>
+      expect(view.getByRole('button', { name: 'Download installer' })).not.toBeNull()
+    )
+    expect(desktopUpdateCheckHarness.download).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
   it('continues startup consent through a pre-updater download without another confirmation', async () => {
     const status = await createOutdatedDesktopReleaseStatus('0.11.9')
     const downloaded = await createPreUpdaterDownload(status.latestVersion)
@@ -657,7 +675,7 @@ describe('App deep-link orchestration', () => {
     )
     desktopUpdateCheckHarness.openInstaller.mockRejectedValue(
       new Error(
-        'macOS could not open the installer. The DMG remains in Downloads; open it manually to continue.'
+        'macOS could not open the installer. The verified installer remains in Evenfire’s update cache; open it manually to continue.'
       )
     )
     const view = renderApp(<App />)
@@ -671,18 +689,23 @@ describe('App deep-link orchestration', () => {
     expect(view.getByText(/extracting the original Evenfire Desktop installer/)).not.toBeNull()
 
     finishExtraction()
-    await waitFor(() => expect(view.getByText('Saving installer')).not.toBeNull())
-    expect(view.getByText('Saving the verified installer to Downloads.')).not.toBeNull()
+    await waitFor(() => expect(view.getByText('Preparing installer')).not.toBeNull())
+    expect(
+      view.getByText('Preparing the verified installer in Evenfire’s private update cache.')
+    ).not.toBeNull()
     finishDownload()
     await waitFor(() => expect(view.getByText('Ready to install')).not.toBeNull())
     expect(
-      view.getByText(/drag Evenfire into Applications, replace the existing app, then reopen/)
-    ).not.toBeNull()
-    await userEvent.click(view.getByRole('button', { name: 'Open installer & Quit Evenfire' }))
+      view.getAllByText(/drag Evenfire into Applications, choose Replace if prompted, then reopen/)
+    ).not.toHaveLength(0)
+    const updateDialog = view.container.querySelector('.desktop-update-dialog')!
+    await userEvent.click(
+      within(updateDialog).getByRole('button', { name: 'Open installer & Quit Evenfire' })
+    )
     await waitFor(() =>
       expect(
-        view.getByText(
-          'macOS could not open the installer. The DMG remains in Downloads; open it manually to continue. You can keep using the app.'
+        within(updateDialog).getByText(
+          'macOS could not open the installer. The verified installer remains in Evenfire’s update cache; open it manually to continue. You can keep using the app.'
         )
       ).not.toBeNull()
     )
@@ -908,7 +931,7 @@ describe('App deep-link orchestration', () => {
             desktopUpdateCheckHarness.onExtracting = callback
             return vi.fn()
           },
-          onDesktopUpdateSaving: (callback: (version: string) => void) => {
+          onDesktopUpdatePreparing: (callback: (version: string) => void) => {
             desktopUpdateCheckHarness.onSaving = callback
             return vi.fn()
           },

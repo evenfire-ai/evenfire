@@ -71,6 +71,8 @@ function createDependencies(
     extractMacDmg?: DesktopUpdateManagerDependencies['extractMacDmg']
     verifyMacDmg?: DesktopUpdateManagerDependencies['verifyMacDmg']
     saveMacInstaller?: DesktopUpdateManagerDependencies['saveMacInstaller']
+    promoteMacInstaller?: DesktopUpdateManagerDependencies['promoteMacInstaller']
+    discardMacInstaller?: DesktopUpdateManagerDependencies['discardMacInstaller']
     openMacInstaller?: DesktopUpdateManagerDependencies['openMacInstaller']
     hashFile?: DesktopUpdateManagerDependencies['hashFile']
     bindingId?: () => string | null
@@ -151,22 +153,33 @@ function createDependencies(
     vi.fn(
       async ({
         version,
-        downloadsDirectory,
+        cacheDirectory,
+        operationId,
+        architecture,
+        environmentBindingId,
       }: {
         sourcePath: string
-        downloadsDirectory: string
+        cacheDirectory: string
+        operationId: string
         version: string
+        architecture: 'x64' | 'arm64'
+        environmentBindingId: string
       }) => {
-        await fs.mkdir(downloadsDirectory, { recursive: true })
-        const filePath = path.join(
-          await fs.realpath(downloadsDirectory),
-          `Evenfire-v${version}.dmg`
-        )
-        await fs.mkdir(path.dirname(filePath), { recursive: true })
+        await fs.mkdir(cacheDirectory, { recursive: true, mode: 0o700 })
+        const resolvedCacheDirectory = await fs.realpath(cacheDirectory)
+        const filePath = path.join(resolvedCacheDirectory, `Evenfire-v${version}.dmg`)
         await fs.writeFile(filePath, 'published-dmg')
         return { filePath, sha256: EXPECTED_DIGEST }
       }
     )
+  const promoteMacInstaller =
+    options.promoteMacInstaller ??
+    vi.fn(async ({ cacheDirectory, expected }) => {
+      await fs.writeFile(
+        path.join(cacheDirectory, 'current.json'),
+        JSON.stringify({ ...expected, retiredInstallers: [] })
+      )
+    })
   return {
     platform,
     architecture,
@@ -182,6 +195,12 @@ function createDependencies(
     extractMacDmg,
     verifyMacDmg,
     saveMacInstaller,
+    promoteMacInstaller,
+    discardMacInstaller:
+      options.discardMacInstaller ??
+      vi.fn(async ({ cacheDirectory, expected }) => {
+        await fs.rm(path.join(cacheDirectory, expected.fileName), { force: true })
+      }),
     openMacInstaller: options.openMacInstaller ?? vi.fn(async () => ''),
   }
 }
@@ -201,9 +220,7 @@ describe('DesktopUpdateManager', () => {
     environment.key = 'prod'
     mockApp.isPackaged = true
     mockApp.getVersion.mockReturnValue('0.11.0')
-    mockApp.getPath.mockImplementation((name: string) =>
-      name === 'downloads' ? path.join(userDataPath, 'Downloads') : userDataPath
-    )
+    mockApp.getPath.mockImplementation(() => userDataPath)
     events = []
     const created = createPolicyBackedService()
     service = created.service
@@ -406,9 +423,43 @@ describe('DesktopUpdateManager', () => {
 
     await expect(manager.downloadDesktopUpdate(UPDATE_VERSION)).rejects.toThrow('no safe DMG entry')
     await expect(fs.readdir(path.join(userDataPath, 'desktop-update-staging'))).resolves.toEqual([])
-    await expect(fs.readdir(path.join(userDataPath, 'Downloads'))).rejects.toMatchObject({
+    await expect(fs.readdir(path.join(userDataPath, 'update-installers'))).rejects.toMatchObject({
       code: 'ENOENT',
     })
+  })
+
+  it('promotes the verified macOS candidate only after policy and pending journal checks', async () => {
+    const promoteMacInstaller: NonNullable<
+      DesktopUpdateManagerDependencies['promoteMacInstaller']
+    > = vi.fn(async ({ cacheDirectory, expected }) => {
+      const stageRoot = path.join(userDataPath, 'desktop-update-staging')
+      const pointer = JSON.parse(
+        await fs.readFile(path.join(stageRoot, 'pending.json'), 'utf8')
+      ) as { operationId: string }
+      const operation = JSON.parse(
+        await fs.readFile(path.join(stageRoot, pointer.operationId, 'operation.json'), 'utf8')
+      ) as { state: string; manualInstallerPath?: string }
+      expect(operation.state).toBe('downloaded')
+      expect(operation.manualInstallerPath).toContain('update-installers')
+      await fs.writeFile(
+        path.join(cacheDirectory, 'current.json'),
+        JSON.stringify({ ...expected, retiredInstallers: [] })
+      )
+    })
+    dependencies = createDependencies({
+      platform: 'darwin',
+      architecture: 'arm64',
+      promoteMacInstaller,
+    })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+
+    await expect(manager.downloadDesktopUpdate(UPDATE_VERSION)).resolves.toMatchObject({
+      manualInstall: true,
+    })
+
+    expect(getDesktopReleasePolicy).toHaveBeenCalledTimes(2)
+    expect(promoteMacInstaller).toHaveBeenCalledOnce()
+    expect(events.at(-1)).toMatchObject({ type: 'downloaded', manualInstall: true })
   })
 
   it('invalidates a prepared macOS installer when the backend changes before handoff', async () => {
@@ -430,9 +481,8 @@ describe('DesktopUpdateManager', () => {
 
     await expect(pending).rejects.toThrow('backend changed during the update')
     await expect(fs.readdir(path.join(userDataPath, 'desktop-update-staging'))).resolves.toEqual([])
-    await expect(
-      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
-    ).resolves.toBe('published-dmg')
+    await expect(fs.readdir(path.join(userDataPath, 'update-installers'))).resolves.toEqual([])
+    expect(dependencies.promoteMacInstaller).not.toHaveBeenCalled()
     environment.key = 'prod'
   })
 
@@ -583,14 +633,20 @@ describe('DesktopUpdateManager', () => {
     await expect(manager.downloadDesktopUpdate(UPDATE_VERSION, true)).resolves.toMatchObject({
       manualInstall: true,
     })
-    expect(await fs.readdir(path.join(userDataPath, 'Downloads'))).toEqual(['Evenfire-v0.12.0.dmg'])
+    expect(events).toContainEqual({ type: 'preparing', version: UPDATE_VERSION })
+    expect(await fs.readdir(path.join(userDataPath, 'update-installers'))).toEqual(
+      expect.arrayContaining(['Evenfire-v0.12.0.dmg', 'current.json'])
+    )
     const stageRoot = path.join(userDataPath, 'desktop-update-staging')
     const operationId = (await fs.readdir(stageRoot)).find(name => name !== 'pending.json')!
     const operation = JSON.parse(
       await fs.readFile(path.join(stageRoot, operationId, 'operation.json'), 'utf8')
     ) as { manualInstallerPath: string; manualInstallerSha256: string }
     expect(operation.manualInstallerPath).toBe(
-      path.join(await fs.realpath(path.join(userDataPath, 'Downloads')), 'Evenfire-v0.12.0.dmg')
+      path.join(
+        await fs.realpath(path.join(userDataPath, 'update-installers')),
+        'Evenfire-v0.12.0.dmg'
+      )
     )
     expect(operation.manualInstallerSha256).toBe(EXPECTED_DIGEST)
     await expect(manager.getPendingDesktopUpdate()).resolves.toMatchObject({ manualInstall: true })
@@ -598,14 +654,21 @@ describe('DesktopUpdateManager', () => {
     await expect(manager.openDownloadedMacInstaller(UPDATE_VERSION)).resolves.toEqual({
       opened: true,
     })
+    await expect(manager.openDownloadedMacInstaller(UPDATE_VERSION)).resolves.toEqual({
+      opened: true,
+    })
     expect(openMacInstaller).toHaveBeenCalledOnce()
+    expect(mockApp.quit).toHaveBeenCalledOnce()
     expect(openMacInstaller).toHaveBeenCalledWith(
-      path.join(await fs.realpath(path.join(userDataPath, 'Downloads')), 'Evenfire-v0.12.0.dmg')
+      path.join(
+        await fs.realpath(path.join(userDataPath, 'update-installers')),
+        'Evenfire-v0.12.0.dmg'
+      )
     )
     expect(dependencies.launchInstallHelper).not.toHaveBeenCalled()
     expect(mockApp.quit).toHaveBeenCalledOnce()
     await expect(
-      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+      fs.readFile(path.join(userDataPath, 'update-installers', 'Evenfire-v0.12.0.dmg'), 'utf8')
     ).resolves.toBe('published-dmg')
   })
 
@@ -620,11 +683,11 @@ describe('DesktopUpdateManager', () => {
     await manager.downloadDesktopUpdate(UPDATE_VERSION)
 
     await expect(manager.openDownloadedMacInstaller(UPDATE_VERSION)).rejects.toThrow(
-      'DMG remains in Downloads'
+      'verified installer remains in Evenfire’s update cache'
     )
     expect(mockApp.quit).not.toHaveBeenCalled()
     await expect(
-      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+      fs.readFile(path.join(userDataPath, 'update-installers', 'Evenfire-v0.12.0.dmg'), 'utf8')
     ).resolves.toBe('published-dmg')
   })
 
@@ -642,7 +705,7 @@ describe('DesktopUpdateManager', () => {
 
     await expect(restartedManager.getPendingDesktopUpdate()).resolves.toBeNull()
     await expect(
-      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+      fs.readFile(path.join(userDataPath, 'update-installers', 'Evenfire-v0.12.0.dmg'), 'utf8')
     ).resolves.toBe('published-dmg')
   })
 
@@ -669,7 +732,7 @@ describe('DesktopUpdateManager', () => {
     expect(openMacInstaller).not.toHaveBeenCalled()
     expect(mockApp.quit).not.toHaveBeenCalled()
     await expect(
-      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+      fs.readFile(path.join(userDataPath, 'update-installers', 'Evenfire-v0.12.0.dmg'), 'utf8')
     ).resolves.toBe('published-dmg')
   })
 
@@ -692,7 +755,7 @@ describe('DesktopUpdateManager', () => {
     expect(openMacInstaller).not.toHaveBeenCalled()
     expect(mockApp.quit).not.toHaveBeenCalled()
     await expect(
-      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+      fs.readFile(path.join(userDataPath, 'update-installers', 'Evenfire-v0.12.0.dmg'), 'utf8')
     ).resolves.toBe('published-dmg')
   })
 
@@ -705,7 +768,7 @@ describe('DesktopUpdateManager', () => {
     await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
     await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
     await expect(
-      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+      fs.readFile(path.join(userDataPath, 'update-installers', 'Evenfire-v0.12.0.dmg'), 'utf8')
     ).resolves.toBe('published-dmg')
   })
 
@@ -748,7 +811,7 @@ describe('DesktopUpdateManager', () => {
     expect(mockApp.quit).not.toHaveBeenCalled()
     await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
     await expect(
-      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+      fs.readFile(path.join(userDataPath, 'update-installers', 'Evenfire-v0.12.0.dmg'), 'utf8')
     ).resolves.toBe('published-dmg')
   })
 
@@ -783,7 +846,7 @@ describe('DesktopUpdateManager', () => {
     await expect(pendingPromise).resolves.toBeNull()
     await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
     await expect(
-      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+      fs.readFile(path.join(userDataPath, 'update-installers', 'Evenfire-v0.12.0.dmg'), 'utf8')
     ).resolves.toBe('published-dmg')
   })
 
@@ -798,7 +861,7 @@ describe('DesktopUpdateManager', () => {
     })
     manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
     await manager.downloadDesktopUpdate(UPDATE_VERSION)
-    const installerPath = path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg')
+    const installerPath = path.join(userDataPath, 'update-installers', 'Evenfire-v0.12.0.dmg')
     await fs.writeFile(installerPath, 'tampered-dmg')
 
     await expect(manager.openDownloadedMacInstaller(UPDATE_VERSION)).rejects.toThrow(

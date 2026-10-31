@@ -230,7 +230,7 @@ type DesktopUpdateFlow = {
     | 'available'
     | 'downloading'
     | 'extracting'
-    | 'saving'
+    | 'preparing'
     | 'ready'
     | 'downloaded'
     | 'installing'
@@ -287,7 +287,7 @@ function getSafeDesktopUpdateFailure(error: string | undefined, backendOrigin?: 
     message = error
   } else if (
     error ===
-      'macOS could not open the installer. The DMG remains in Downloads; open it manually to continue.' ||
+      'macOS could not open the installer. The verified installer remains in Evenfire’s update cache; open it manually to continue.' ||
     error ===
       'The saved macOS installer is missing or has changed. Download it again before opening.'
   ) {
@@ -334,8 +334,8 @@ function DesktopUpdatePanel({
         ? 'Downloading Desktop update'
         : flow.phase === 'extracting'
           ? 'Extracting installer'
-          : flow.phase === 'saving'
-            ? 'Saving installer'
+          : flow.phase === 'preparing'
+            ? 'Preparing installer'
             : flow.phase === 'ready'
               ? 'Ready to install'
               : flow.phase === 'downloaded'
@@ -395,14 +395,13 @@ function DesktopUpdatePanel({
           {flow.phase === 'extracting' && status ? (
             <p>Verifying and extracting the original Evenfire Desktop installer.</p>
           ) : null}
-          {flow.phase === 'saving' && status ? (
-            <p>Saving the verified installer to Downloads.</p>
+          {flow.phase === 'preparing' && status ? (
+            <p>Preparing the verified installer in Evenfire’s private update cache.</p>
           ) : null}
           {flow.phase === 'ready' && status ? (
             <p>
-              Evenfire Desktop {status.latestVersion} is ready. Open the saved DMG, drag Evenfire
-              into Applications, replace the existing app, then reopen Evenfire. Opening the DMG
-              does not install the update.
+              Evenfire {status.latestVersion} is ready. Open the installer, drag Evenfire into
+              Applications, choose Replace if prompted, then reopen Evenfire.
             </p>
           ) : null}
           {flow.phase === 'downloaded' && status ? (
@@ -519,7 +518,7 @@ export function App() {
     if (
       desktopUpdateFlow?.phase === 'downloading' ||
       desktopUpdateFlow?.phase === 'extracting' ||
-      desktopUpdateFlow?.phase === 'saving'
+      desktopUpdateFlow?.phase === 'preparing'
     ) {
       void window.clerum.auth.cancelDesktopUpdate().catch(() => undefined)
     }
@@ -601,11 +600,13 @@ export function App() {
             )
           })
         : () => {}
-    const removeSaving =
-      typeof authBridge?.onDesktopUpdateSaving === 'function'
-        ? authBridge.onDesktopUpdateSaving(version => {
+    const removePreparing =
+      typeof authBridge?.onDesktopUpdatePreparing === 'function'
+        ? authBridge.onDesktopUpdatePreparing(version => {
             setDesktopUpdateFlow(current =>
-              current?.status?.latestVersion === version ? { ...current, phase: 'saving' } : current
+              current?.status?.latestVersion === version
+                ? { ...current, phase: 'preparing' }
+                : current
             )
           })
         : () => {}
@@ -653,7 +654,7 @@ export function App() {
     return () => {
       removeProgress()
       removeExtracting()
-      removeSaving()
+      removePreparing()
       removeOpening()
       removeDownloaded()
       removeError()
@@ -670,6 +671,7 @@ export function App() {
     const requestId = ++desktopUpdateRequestRef.current
     void window.clerum.auth
       .getPendingDesktopUpdate()
+      .catch(() => null)
       .then(async pending => {
         if (requestId !== desktopUpdateRequestRef.current) return
         if (pending && pending.version === status.latestVersion) {
