@@ -8,9 +8,16 @@ import { humanRecordedPause } from '../helpers/humanPause'
 export class DesktopResourceView {
   constructor(private readonly page: Page) {}
 
+  private currentFolderMenuTrigger() {
+    return this.page
+      .getByRole('navigation', { name: 'File location' })
+      .locator('..')
+      .getByRole('button', { name: /^Options for / })
+  }
+
   /** Open the current folder's three-dot menu and choose a visible action. */
   private async openCurrentFolderMenuAction(action: string): Promise<void> {
-    await this.page.getByRole('button', { name: /Options for / }).click()
+    await this.currentFolderMenuTrigger().click()
     await this.page
       .getByRole('menu', { name: /Actions for / })
       .getByRole('menuitem', { name: action, exact: true })
@@ -105,8 +112,11 @@ export class DesktopResourceView {
 
   /** The open folder accepts writes: its header offers New folder only with write access. */
   async expectWritable(): Promise<void> {
-    const browser = this.page.getByRole('region', { name: 'EvenDrive browser' })
-    await expect(browser.getByRole('button', { name: /Options for / })).toBeVisible()
+    await this.currentFolderMenuTrigger().click()
+    const menu = this.page.getByRole('menu', { name: /^Actions for / })
+    await expect(menu.getByRole('menuitem', { name: 'New folder', exact: true })).toBeEnabled()
+    await this.page.keyboard.press('Escape')
+    await expect(menu).toBeHidden()
   }
 
   async expectRefused(code: string): Promise<void> {
