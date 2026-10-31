@@ -44,13 +44,17 @@ log() {
   printf '%s\n' "$*" >>"${TEST_LOG_FILE:?}"
 }
 
+if [[ "${1:-}" != "--context" || -z "${2:-}" ]]; then
+  echo "kubectl requires an explicit context" >&2
+  exit 2
+fi
+selected_context="$2"
+shift 2
+
 if [[ "${1:-}" == "config" && "${2:-}" == "current-context" ]]; then
+  log "config current-context --context=$selected_context"
   echo "stub-context"
   exit 0
-fi
-
-if [[ "${1:-}" == "--context" ]]; then
-  shift 2
 fi
 
 if [[ "${1:-}" == "-n" ]]; then
@@ -123,7 +127,8 @@ assert_no_chatllm_restart_when_preflight_is_already_current() {
   TEST_CONTEXT_LIST='["airtable-server"]' \
   KUBECONTEXT="stub-context" \
   AIRTABLE_API_KEY="real-key" \
-  bash "$tmp/repo/scripts/e2e/playwright-preflight-dev.sh" >/dev/null 2>&1
+  bash "$tmp/repo/scripts/e2e/playwright-preflight-dev.sh" >/dev/null 2>&1 || \
+    fail "preflight failed with an unchanged secret and allowlist"
 
   if grep -q "rollout restart deployment/chatllm" "$log_file"; then
     fail "preflight restarted chatllm even though secret and allowlist were already current"
@@ -154,7 +159,8 @@ assert_chatllm_restart_when_allowlist_changes() {
   TEST_CONTEXT_LIST='["mongodb-only"]' \
   KUBECONTEXT="stub-context" \
   AIRTABLE_API_KEY="real-key" \
-  bash "$tmp/repo/scripts/e2e/playwright-preflight-dev.sh" >/dev/null 2>&1
+  bash "$tmp/repo/scripts/e2e/playwright-preflight-dev.sh" >/dev/null 2>&1 || \
+    fail "preflight failed when the allowlist changed"
 
   if grep -q "patch " "$log_file" && \
      grep -q "rollout restart deployment/chatllm" "$log_file"; then
@@ -181,7 +187,8 @@ assert_chatllm_restart_when_secret_changes() {
   TEST_CONTEXT_LIST='["airtable-server"]' \
   KUBECONTEXT="stub-context" \
   AIRTABLE_API_KEY="new-key" \
-  bash "$tmp/repo/scripts/e2e/playwright-preflight-dev.sh" >/dev/null 2>&1
+  bash "$tmp/repo/scripts/e2e/playwright-preflight-dev.sh" >/dev/null 2>&1 || \
+    fail "preflight failed when the secret changed"
 
   if grep -q "rollout restart deployment/airtable-server" "$log_file" && \
      grep -q "rollout restart deployment/chatllm" "$log_file"; then
@@ -208,7 +215,8 @@ assert_branch_scoped_clerum_profile_uses_minikube_manifest() {
   TEST_CONTEXT_LIST='["airtable-server"]' \
   KUBECONTEXT="clerum-security-review-exec-pod-feature-3b5a3652" \
   AIRTABLE_API_KEY="real-key" \
-  bash "$tmp/repo/scripts/e2e/playwright-preflight-dev.sh" >/dev/null 2>&1
+  bash "$tmp/repo/scripts/e2e/playwright-preflight-dev.sh" >/dev/null 2>&1 || \
+    fail "preflight failed for the branch-scoped profile"
 
   if grep -q "deploy/overlays/minikube/instances-e2e/airtable-server.yaml" "$log_file"; then
     pass "preflight uses the minikube Airtable manifest for branch-scoped clerum profiles"
@@ -220,10 +228,35 @@ assert_branch_scoped_clerum_profile_uses_minikube_manifest() {
   rm -rf "$tmp"
 }
 
+assert_default_context_lookup_is_explicit() {
+  local tmp log_file
+  tmp="$(mktemp -d)"
+  log_file="$tmp/kubectl.log"
+  make_stub_repo "$tmp/repo"
+  make_stub_kubectl "$tmp/kubectl"
+
+  PATH="$tmp:$PATH" \
+  TEST_LOG_FILE="$log_file" \
+  TEST_EXISTING_SECRET_B64="$(printf '%s' 'real-key' | base64)" \
+  TEST_CONTEXT_LIST='["airtable-server"]' \
+  AIRTABLE_API_KEY="real-key" \
+  env -u KUBECONTEXT -u E2E_K8S_CONTEXT \
+    bash "$tmp/repo/scripts/e2e/playwright-preflight-dev.sh" >/dev/null 2>&1 || \
+    fail "preflight failed without an explicit caller context"
+
+  if grep -q 'config current-context --context=clerum-test' "$log_file"; then
+    pass "preflight uses an explicit context when looking up the default"
+  else
+    fail "preflight did not use an explicit context for the default lookup"
+  fi
+  rm -rf "$tmp"
+}
+
 assert_no_chatllm_restart_when_preflight_is_already_current
 assert_chatllm_restart_when_allowlist_changes
 assert_chatllm_restart_when_secret_changes
 assert_branch_scoped_clerum_profile_uses_minikube_manifest
+assert_default_context_lookup_is_explicit
 
 if [[ "$FAIL" -ne 0 ]]; then
   exit 1
