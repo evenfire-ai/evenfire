@@ -1,11 +1,13 @@
+import type { GfsResourceAction } from '@lib/gfsResourceActions'
+
 export type GfsResourceMenuProps = {
   resourceName: string
+  actions?: GfsResourceAction[]
   onManage?: () => void
   onCopyLink?: () => void
   onCreateFolder?: () => void
   onDelete?: () => void
   onOpen?: () => void
-  onOpenGfsLink?: () => void
   /**
    * Notified on open-state transitions so callers can lazily load per-row data
    * (e.g. delete affordances) only while a menu is open.

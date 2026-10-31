@@ -22,6 +22,8 @@ interface UseAuthControllerParams {
   setStatus: SetStatusFn
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
   onSessionReloadFailed?: () => void
+  onSessionEnded: () => void
+  logoutForEnvironmentMismatch: () => Promise<number | null>
 }
 
 function isInvitationExpiredError(error: unknown) {
@@ -62,6 +64,8 @@ export function useAuthController({
   setStatus,
   onSessionNeedsLoad,
   onSessionReloadFailed,
+  onSessionEnded,
+  logoutForEnvironmentMismatch,
 }: UseAuthControllerParams) {
   const [booting, setBootingState] = useState(true)
   const bootingRef = useRef(true)
@@ -251,13 +255,14 @@ export function useAuthController({
 
   useEffect(() => {
     return window.clerum.auth.onExternalLogout(() => {
+      onSessionEnded()
       setIsAuthenticated(false)
       setMe(null)
       setTemporarySessionExpiresAt(null)
       setPassword('')
       setStatus('Signed out after password update.', 'info')
     })
-  }, [setStatus])
+  }, [onSessionEnded, setStatus])
 
   useEffect(() => {
     return window.clerum.auth.onSessionStateChanged(() => {

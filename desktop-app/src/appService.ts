@@ -986,6 +986,7 @@ export interface AppServiceOptions {
   getUserDataDirectory?: () => string
   reportDeferredLogoutFailure?: (error: unknown) => void
   notifySessionExpired?: (sessionGeneration: number) => void
+  onSandboxUiSessionInvalidated?: () => void
 }
 
 type ActiveTeamContextHop = {
@@ -1032,6 +1033,7 @@ export class AppService {
   private readonly getUserDataDirectory: () => string
   private readonly reportDeferredLogoutFailure: (error: unknown) => void
   private readonly notifySessionExpired: (sessionGeneration: number) => void
+  private readonly onSandboxUiSessionInvalidated?: () => void
   private readonly pendingCredentialProducers = new Set<Promise<unknown>>()
   private quitPreparationStarted = false
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
@@ -1164,6 +1166,7 @@ export class AppService {
     this.getUserDataDirectory = options.getUserDataDirectory ?? (() => app.getPath('userData'))
     this.reportDeferredLogoutFailure = options.reportDeferredLogoutFailure ?? (() => {})
     this.notifySessionExpired = options.notifySessionExpired ?? (() => {})
+    this.onSandboxUiSessionInvalidated = options.onSandboxUiSessionInvalidated
     this.sessionAuthority = new SessionAuthorityCoordinator({
       getTokenStore: () => this.tokenStore,
       getUserDataDirectory: this.getUserDataDirectory,
@@ -3127,6 +3130,13 @@ export class AppService {
   /** Retires the sandbox-ui work of a session that is being cleared or replaced. */
   private invalidateSandboxUiSession(): void {
     this.sandboxUiSessionEpoch += 1
+    try {
+      this.onSandboxUiSessionInvalidated?.()
+    } catch (error) {
+      // Queue retirement is best-effort notification; it must not interrupt the
+      // synchronous session-generation fence or physical teardown scheduling.
+      desktopRuntimeLog.error('[DeepLinks] Could not clear session-owned queues:', error)
+    }
     this.scheduleSandboxUiTeardown()
   }
 
@@ -6861,14 +6871,32 @@ export class AppService {
   async moveGfsResource(
     resourceId: string,
     destinationId: string,
+    expectedSessionGeneration: number,
     drive?: string,
     ifMatch?: number,
     newName?: string
   ) {
-    return this.gfsClient.moveResource(
-      { resourceId, drive, destinationId, ifMatch, ...(newName !== undefined ? { newName } : {}) },
-      this.requireSessionToken()
-    )
+    if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+      throw new Error('invalid_session_generation')
+    }
+    this.assertSessionGeneration(expectedSessionGeneration)
+    try {
+      const receipt = await this.gfsClient.moveResource(
+        {
+          resourceId,
+          drive,
+          destinationId,
+          ifMatch,
+          ...(newName !== undefined ? { newName } : {}),
+        },
+        this.requireSessionToken()
+      )
+      this.assertSessionGeneration(expectedSessionGeneration)
+      return receipt
+    } catch (error) {
+      this.assertSessionGeneration(expectedSessionGeneration)
+      throw error
+    }
   }
 
   async deleteGfsResource(resourceId: string, drive?: string, ifMatch?: number) {
@@ -7026,15 +7054,24 @@ export class AppService {
     if (this.memoryOnlySession) this.endMemoryOnlySession()
   }
 
-  private temporarySessionState(): Pick<SessionState, 'sessionMode' | 'expiresAt'> {
+  private temporarySessionState(): Pick<
+    SessionState,
+    'sessionMode' | 'expiresAt' | 'sessionGeneration'
+  > {
     const lease = this.memoryOnlySession
-    return lease ? { sessionMode: 'temporary', expiresAt: lease.expiresAt } : {}
+    return {
+      sessionGeneration: this.sessionGeneration,
+      ...(lease ? { sessionMode: 'temporary' as const, expiresAt: lease.expiresAt } : {}),
+    }
   }
 
   async getSessionState(): Promise<SessionState> {
     if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
     if (!this.sessionToken || !this.me) {
-      if (this.restoreSavedSessionInFlight) return this.restoreSavedSession()
+      if (this.restoreSavedSessionInFlight) {
+        const restored = await this.restoreSavedSession()
+        return { ...restored, sessionGeneration: this.sessionGeneration }
+      }
       // createWindow() already performs the saved-token restore before showing
       // the renderer. Do not immediately repeat a failed 60-second network
       // attempt from the renderer bootstrap; a new app launch or environment
@@ -7043,9 +7080,10 @@ export class AppService {
         this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey() &&
         Date.now() - this.savedSessionRestoreAttemptedAtMs < SAVED_SESSION_RESTORE_RETRY_DELAY_MS
       ) {
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       }
-      return this.restoreSavedSession()
+      const restored = await this.restoreSavedSession()
+      return { ...restored, sessionGeneration: this.sessionGeneration }
     }
     return { authenticated: true, me: this.me, ...this.temporarySessionState() }
   }
@@ -9831,6 +9869,16 @@ export class AppService {
         teamId: String(teamId || '').trim() || undefined,
       }),
     }
+  }
+
+  async createGfsResourceDeepLink(uri: string): Promise<{ url: string }> {
+    const { buildGfsResourceWebLink, normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
+    const canonicalUri = normalizeGfsResourceUri(uri)
+    if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
+    return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
   }
 
   async setSandboxUiBounds(bounds: import('./sandboxUiDriver.js').SandboxUiBounds): Promise<void> {

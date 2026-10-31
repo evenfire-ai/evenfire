@@ -2,34 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import type { AppService } from '../appService.js'
-import type { TokenStore } from '../tokenStore.js'
-
-const credentialFixture = vi.hoisted(() => ({
-  directory: `${process.cwd()}/.uninitialized-bootstrap-fixture`,
-  safeStorageAvailable: false,
-}))
-vi.mock('electron', () => ({
-  app: {
-    getPath: () => credentialFixture.directory,
-    isReady: () => true,
-    isPackaged: false,
-  },
-  safeStorage: {
-    isEncryptionAvailable: () => credentialFixture.safeStorageAvailable,
-    getSelectedStorageBackend: () => 'gnome_libsecret',
-    encryptString: (value: string) => Buffer.from(`encrypted:${value}`),
-    decryptString: (value: Buffer) => value.toString().replace(/^encrypted:/, ''),
-  },
-}))
 
 // The chat store binds to the filesystem (Electron userData). Mock it so
 // passwordLogin can be asserted to bind the env-scoped store without touching
 // real directories.
-vi.mock('../chatStoreBinding.js', async () => {
-  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
-  return createChatStoreBindingMock()
-})
+vi.mock('../chatStoreBinding.js', () => ({
+  bindChatStoreForUser: vi.fn(),
+  unbindChatStore: vi.fn(),
+  __setChatStoreBaseDirForTests: vi.fn(),
+}))
 
 describe('AppService invitation configuration lookup', () => {
   const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
@@ -38,60 +19,13 @@ describe('AppService invitation configuration lookup', () => {
   const originalProfileUiBaseUrl = process.env.PROFILE_UI_BASE_URL
   const tempDirs = new Set<string>()
 
-  function authenticatedToken(userId: string): string {
-    const payload = Buffer.from(
-      JSON.stringify({ sub: userId, exp: Math.floor(Date.now() / 1000) + 60 * 60 })
-    ).toString('base64url')
-    return `header.${payload}.signature`
-  }
-
   async function createTempConfigPath(prefix: string): Promise<string> {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`))
     tempDirs.add(tempDir)
-    credentialFixture.directory = tempDir
     return path.join(tempDir, 'config.json')
   }
 
-  async function createIsolatedTokenStore(configPath: string): Promise<TokenStore> {
-    const { TokenStore } = await import('../tokenStore.js')
-    return new TokenStore({ isolatedUserDataPath: path.dirname(configPath) })
-  }
-
-  async function acceptCurrentFormatSession(
-    configPath: string,
-    tokenStore: TokenStore
-  ): Promise<{ token: string; me: Record<string, unknown> }> {
-    const { AppService } = await import('../appService.js')
-    const token = authenticatedToken('user-1')
-    const me = {
-      id: 'user-1',
-      email: 'user@example.com',
-      name: null,
-      picture: null,
-      teamId: 'team-1',
-      teamName: 'Marketing',
-      role: 'member',
-    }
-    const producer = new AppService({
-      tokenStore,
-      getUserDataDirectory: () => path.dirname(configPath),
-    })
-    const mutableProducer = producer as unknown as {
-      authClient: {
-        passwordLogin: ReturnType<typeof vi.fn>
-        getMe: ReturnType<typeof vi.fn>
-      }
-    }
-    mutableProducer.authClient = {
-      passwordLogin: vi.fn().mockResolvedValue({ token, me }),
-      getMe: vi.fn().mockResolvedValue(me),
-    }
-    await (producer as AppService).passwordLogin(me.email, 'synthetic-password')
-    return { token, me }
-  }
-
   afterEach(async () => {
-    credentialFixture.safeStorageAvailable = false
     if (originalConfigPath === undefined) {
       delete process.env.CLERUM_DESKTOP_CONFIG_PATH
     } else {
@@ -131,19 +65,15 @@ describe('AppService invitation configuration lookup', () => {
       { AppService },
       { config, getActiveLegacyRestOnlyEnvKey, isDesktopRuntimeConfigured, resolveEnvKey },
     ] = await Promise.all([import('../appService.js'), import('../config.js')])
-    const { prepareChatStoreBindingForUser, requireChatStore } =
-      await import('../chatStoreBinding.js')
+    const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
 
-    const service = new AppService({
-      getUserDataDirectory: () => path.dirname(configPath),
-    }) as unknown as {
+    const service = new AppService() as unknown as {
       authClient: {
         passwordLogin: ReturnType<typeof vi.fn>
-        getMe: ReturnType<typeof vi.fn>
         getDesktopEnvironment: ReturnType<typeof vi.fn>
       }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
-      tokenStore: TokenStore
+      tokenStore: { setSessionToken: ReturnType<typeof vi.fn> }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
       completeDesktopSetup: (email: string, authorizationToken: string) => Promise<unknown>
       passwordLogin: (email: string, password: string) => Promise<unknown>
@@ -165,7 +95,7 @@ describe('AppService invitation configuration lookup', () => {
         appName: 'Evenfire',
       }),
       passwordLogin: vi.fn().mockResolvedValue({
-        token: authenticatedToken('user-1'),
+        token: 'session-token',
         me: {
           id: 'user-1',
           email: 'user@example.com',
@@ -176,17 +106,10 @@ describe('AppService invitation configuration lookup', () => {
           role: 'member',
         },
       }),
-      getMe: vi.fn().mockResolvedValue({
-        id: 'user-1',
-        email: 'user@example.com',
-        name: null,
-        picture: null,
-        teamId: 'team-1',
-        teamName: 'Marketing',
-        role: 'member',
-      }),
     } as never
-    service.tokenStore = await createIsolatedTokenStore(configPath)
+    service.tokenStore = {
+      setSessionToken: vi.fn().mockResolvedValue(undefined),
+    } as never
     service.rpcTokenManager = {
       clear: vi.fn(),
     } as never
@@ -209,16 +132,11 @@ describe('AppService invitation configuration lookup', () => {
     expect(result).toMatchObject({ authenticated: true, me: { email: 'user@example.com' } })
     // The env-scoped chat store must be bound after a password login, or every
     // chat:* IPC throws "Not authenticated" until something else re-binds.
-    expect(prepareChatStoreBindingForUser).toHaveBeenCalledWith(
+    expect(bindChatStoreForUser).toHaveBeenCalledWith(
       'user-1',
       resolveEnvKey('https://api.example.com', 'https://rpc.example.com'),
       { legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()], teamId: 'team-1' }
     )
-    expect(requireChatStore().getAuthorityScope()).toEqual({
-      environmentKey: resolveEnvKey('https://api.example.com', 'https://rpc.example.com'),
-      userId: 'user-1',
-      teamId: 'team-1',
-    })
     expect(config.externalRestApiBaseUrl).toBe('https://api.example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://rpc.example.com')
     expect(config.desktopProfileUiBaseUrl).toBe('https://profile.example.com')
@@ -247,9 +165,7 @@ describe('AppService invitation configuration lookup', () => {
       import('../appService.js'),
       import('../config.js'),
     ])
-    const service = new AppService({
-      getUserDataDirectory: () => path.dirname(configPath),
-    }) as unknown as {
+    const service = new AppService() as unknown as {
       authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
       completeDesktopSetup: (email: string, authorizationToken: string) => Promise<unknown>
@@ -291,22 +207,16 @@ describe('AppService invitation configuration lookup', () => {
   })
 
   it('does not contact member-registration-service when runtime config is already set', async () => {
-    const configPath = await createTempConfigPath('clerum-desktop-config-already-set')
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
     delete process.env.PROFILE_UI_BASE_URL
     vi.resetModules()
 
     const { AppService } = await import('../appService.js')
-    const service = new AppService({
-      getUserDataDirectory: () => path.dirname(configPath),
-    }) as unknown as {
-      authClient: {
-        passwordLogin: ReturnType<typeof vi.fn>
-        getMe: ReturnType<typeof vi.fn>
-      }
+    const service = new AppService() as unknown as {
+      authClient: { passwordLogin: ReturnType<typeof vi.fn> }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
-      tokenStore: TokenStore
+      tokenStore: { setSessionToken: ReturnType<typeof vi.fn> }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
       passwordLogin: (email: string, password: string) => Promise<unknown>
     }
@@ -316,7 +226,7 @@ describe('AppService invitation configuration lookup', () => {
     } as never
     service.authClient = {
       passwordLogin: vi.fn().mockResolvedValue({
-        token: authenticatedToken('user-1'),
+        token: 'session-token',
         me: {
           id: 'user-1',
           email: 'user@example.com',
@@ -327,17 +237,10 @@ describe('AppService invitation configuration lookup', () => {
           role: 'member',
         },
       }),
-      getMe: vi.fn().mockResolvedValue({
-        id: 'user-1',
-        email: 'user@example.com',
-        name: null,
-        picture: null,
-        teamId: 'team-1',
-        teamName: 'Marketing',
-        role: 'member',
-      }),
     } as never
-    service.tokenStore = await createIsolatedTokenStore(configPath)
+    service.tokenStore = {
+      setSessionToken: vi.fn().mockResolvedValue(undefined),
+    } as never
     service.rpcTokenManager = {
       clear: vi.fn(),
     } as never
@@ -366,18 +269,15 @@ describe('AppService invitation configuration lookup', () => {
 
     let now = 1_000
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
-    const [{ AppService }] = await Promise.all([import('../appService.js'), import('../config.js')])
-    credentialFixture.safeStorageAvailable = true
-    const tokenStore = await createIsolatedTokenStore(configPath)
-    credentialFixture.safeStorageAvailable = true
-    await acceptCurrentFormatSession(configPath, tokenStore)
-    const clearSessionToken = vi.spyOn(tokenStore, 'clearSessionToken')
-    const service = new AppService({
-      tokenStore,
-      getUserDataDirectory: () => path.dirname(configPath),
-    }) as unknown as {
+    const { AppService } = await import('../appService.js')
+    const getSessionToken = vi.fn().mockResolvedValue('stored-token')
+    const clearSessionToken = vi.fn().mockResolvedValue(undefined)
+    const service = new AppService() as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
-      tokenStore: TokenStore
+      tokenStore: {
+        getSessionToken: ReturnType<typeof vi.fn>
+        clearSessionToken: ReturnType<typeof vi.fn>
+      }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
       initialize: () => Promise<unknown>
       getSessionState: () => Promise<unknown>
@@ -389,10 +289,14 @@ describe('AppService invitation configuration lookup', () => {
         email: 'user@example.com',
         name: null,
         picture: null,
-        teamId: 'team-1',
+        teamId: null,
         teamName: null,
         role: null,
       }),
+    } as never
+    service.tokenStore = {
+      getSessionToken,
+      clearSessionToken,
     } as never
     service.rpcTokenManager = {
       clear: vi.fn(),
@@ -400,16 +304,20 @@ describe('AppService invitation configuration lookup', () => {
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
-      await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+      await expect(service.initialize()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+        sessionGeneration: 0,
+      })
 
       expect(clearSessionToken).not.toHaveBeenCalled()
 
-      // Source verification may reread the selected credential. A cached
-      // failed restore must not start another storage/authentication attempt.
       await expect(service.getSessionState()).resolves.toEqual({
         authenticated: false,
         me: null,
+        sessionGeneration: 0,
       })
+      expect(getSessionToken).toHaveBeenCalledTimes(1)
       expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
 
       now += 5_001
@@ -417,6 +325,7 @@ describe('AppService invitation configuration lookup', () => {
         authenticated: true,
         me: { id: 'user-1' },
       })
+      expect(getSessionToken).toHaveBeenCalledTimes(2)
       expect(service.authClient.getMe).toHaveBeenCalledTimes(2)
     } finally {
       warn.mockRestore()
@@ -425,29 +334,26 @@ describe('AppService invitation configuration lookup', () => {
   })
 
   it('fails closed when the saved-token store cannot be read', async () => {
-    const configPath = await createTempConfigPath('clerum-desktop-token-read-failure')
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
     vi.resetModules()
 
-    const [{ AppService }] = await Promise.all([import('../appService.js'), import('../config.js')])
+    const { AppService } = await import('../appService.js')
     const getMe = vi.fn()
-    const tokenStore = await createIsolatedTokenStore(configPath)
-    credentialFixture.safeStorageAvailable = true
-    await acceptCurrentFormatSession(configPath, tokenStore)
-    const readSessionTokenCandidate = vi
-      .spyOn(tokenStore, 'readSessionTokenCandidate')
-      .mockRejectedValue(new Error('fixture-session-read unavailable'))
-    const service = new AppService({
-      tokenStore,
-      getUserDataDirectory: () => path.dirname(configPath),
-    }) as unknown as {
+    const service = new AppService() as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
-      tokenStore: TokenStore
+      tokenStore: {
+        getSessionToken: ReturnType<typeof vi.fn>
+        clearSessionToken: ReturnType<typeof vi.fn>
+      }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
       getSessionState: () => Promise<unknown>
     }
     service.authClient = { getMe } as never
+    service.tokenStore = {
+      getSessionToken: vi.fn().mockRejectedValue(new Error('keychain unavailable')),
+      clearSessionToken: vi.fn(),
+    } as never
     service.rpcTokenManager = { clear: vi.fn() } as never
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
@@ -455,58 +361,41 @@ describe('AppService invitation configuration lookup', () => {
       await expect(service.getSessionState()).resolves.toEqual({
         authenticated: false,
         me: null,
+        sessionGeneration: 0,
       })
     } finally {
       warn.mockRestore()
     }
     expect(getMe).not.toHaveBeenCalled()
-    expect(readSessionTokenCandidate).toHaveBeenCalledOnce()
   })
 
-  it('accepts logout at the durable LP boundary while exact-source cleanup is pending', async () => {
+  it('preserves the session when clearing the saved token fails', async () => {
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
-    const configPath = await createTempConfigPath('clerum-desktop-logout-failure')
     vi.resetModules()
 
-    const [{ AppService }, { getActiveEnvKey }, markerStore, { SessionAuthorityRecordRepository }] =
-      await Promise.all([
-        import('../appService.js'),
-        import('../config.js'),
-        import('../pendingExternalLogout.js'),
-        import('../sessionAuthorityRecord.js'),
-      ])
-    const reportFailure = vi.fn()
-    const tokenStore = await createIsolatedTokenStore(configPath)
-    credentialFixture.safeStorageAvailable = true
-    const strictClear = vi.spyOn(tokenStore, 'clearSessionTokenStrictly')
-    vi.spyOn(tokenStore, 'deleteSessionCredentialSourceIfUnselectedWithProof').mockRejectedValue(
-      new Error('fixture-token cleanup unavailable')
-    )
-    const service = new AppService({
-      tokenStore,
-      getUserDataDirectory: () => path.dirname(configPath),
-      reportDeferredLogoutFailure: reportFailure,
-    }) as unknown as {
-      tokenStore: TokenStore
-      rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
-      logoutInProgress: boolean
-      sessionToken: string | null
-      me: unknown
-      suspendDesktopGfsUploadsForAuthBoundary: ReturnType<typeof vi.fn>
-      sessionAuthorityCleanupInFlight: Promise<void> | null
+    const [{ AppService }, { getActiveEnvKey, getActiveLegacyRestOnlyEnvKey }] = await Promise.all([
+      import('../appService.js'),
+      import('../config.js'),
+    ])
+    const service = new AppService() as unknown as {
       authClient: {
-        passwordLogin: ReturnType<typeof vi.fn>
         getMe: ReturnType<typeof vi.fn>
+        passwordLogin: ReturnType<typeof vi.fn>
       }
+      tokenStore: {
+        clearSessionToken: ReturnType<typeof vi.fn>
+        getSessionToken: ReturnType<typeof vi.fn>
+        setSessionToken: ReturnType<typeof vi.fn>
+      }
+      rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
+      updateDesktopGfsUploadState: ReturnType<typeof vi.fn>
       passwordLogin: (email: string, password: string) => Promise<unknown>
-      logout: () => Promise<{ kind: string; sessionGeneration: number }>
-      getSessionGeneration: () => number
+      logout: () => Promise<void>
+      getSessionState: () => Promise<unknown>
+      getCachedUserId: () => string | null
+      gfsDispatchBlocked: boolean
     }
-    service.tokenStore = tokenStore
-    service.rpcTokenManager = { clear: vi.fn() } as never
-    service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
-    const token = authenticatedToken('user-1')
     const me = {
       id: 'user-1',
       email: 'user@example.com',
@@ -516,42 +405,36 @@ describe('AppService invitation configuration lookup', () => {
       teamName: 'Marketing',
       role: 'member',
     }
+    const getMe = vi.fn().mockResolvedValue(me)
+    const getSessionToken = vi.fn().mockResolvedValue('test-token')
     service.authClient = {
-      passwordLogin: vi.fn().mockResolvedValue({ token, me }),
-      getMe: vi.fn().mockResolvedValue(me),
-    }
-    await service.passwordLogin(me.email, 'synthetic-password')
-    const generationBeforeLogout = service.getSessionGeneration()
-    await expect(service.logout()).resolves.toMatchObject({
-      kind: 'committed',
-      sessionGeneration: generationBeforeLogout + 1,
+      passwordLogin: vi.fn().mockResolvedValue({ token: 'test-token', me }),
+      getMe,
+    } as never
+    service.tokenStore = {
+      getSessionToken,
+      setSessionToken: vi.fn().mockResolvedValue(undefined),
+      clearSessionToken: vi.fn().mockRejectedValue(new Error('keychain unavailable')),
+    } as never
+    service.rpcTokenManager = { clear: vi.fn() } as never
+    service.updateDesktopGfsUploadState = vi.fn().mockResolvedValue(undefined)
+
+    await service.passwordLogin('user@example.com', 'fake-password')
+    expect(service.getCachedUserId()).toBe('user-1')
+
+    await expect(service.logout()).rejects.toThrow(/keychain unavailable/)
+    expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
+      legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()],
     })
-    expect(strictClear).not.toHaveBeenCalled()
-    expect(
-      markerStore.readPendingExternalLogoutIntent(path.dirname(configPath), getActiveEnvKey())
-    ).toEqual({
-      intent: 'logout-pending',
+    await expect(service.getSessionState()).resolves.toEqual({
+      authenticated: true,
+      me,
+      sessionGeneration: 3,
     })
-    expect(service.sessionToken).toBeNull()
-    expect(service.me).toBeNull()
-    await service.sessionAuthorityCleanupInFlight
-    expect(
-      service.tokenStore.deleteSessionCredentialSourceIfUnselectedWithProof
-    ).toHaveBeenCalledOnce()
-    expect(reportFailure).toHaveBeenCalledOnce()
-    expect(service.logoutInProgress).toBe(false)
-    const storageScope = await tokenStore.createSessionAuthorityStorageScope()
-    const authority = new SessionAuthorityRecordRepository(
-      storageScope,
-      getActiveEnvKey(),
-      tokenStore
-    ).observe()
-    expect(authority.status).toBe('observed')
-    if (authority.status === 'observed') {
-      expect(authority.record.frame.mode).toBe('logged-out')
-      expect(authority.record.cleanupDebts).toHaveLength(1)
-      expect(authority.record.cleanupDebts[0]?.source.format).toBe('v1')
-    }
+    expect(service.getCachedUserId()).toBe('user-1')
+    expect(getSessionToken).not.toHaveBeenCalled()
+    expect(getMe).not.toHaveBeenCalled()
+    expect(service.gfsDispatchBlocked).toBe(false)
   })
 
   it('shares one saved-session restore across concurrent session-state requests', async () => {
@@ -568,10 +451,19 @@ describe('AppService invitation configuration lookup', () => {
     process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:8091'
     process.env.RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
     vi.resetModules()
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn(() => path.dirname(configPath)),
+        isPackaged: false,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+
     const [{ AppService }, chatStoreBinding] = await Promise.all([
       import('../appService.js'),
       import('../chatStoreBinding.js'),
-      import('../config.js'),
     ])
     chatStoreBinding.__setChatStoreBaseDirForTests(path.dirname(configPath))
     const me = {
@@ -587,21 +479,23 @@ describe('AppService invitation configuration lookup', () => {
     const pendingMe = new Promise<typeof me>(resolve => {
       resolveMe = resolve
     })
-    const tokenStore = await createIsolatedTokenStore(configPath)
-    credentialFixture.safeStorageAvailable = true
-    await acceptCurrentFormatSession(configPath, tokenStore)
+    const getSessionToken = vi.fn().mockResolvedValue('stored-token')
     const getMe = vi.fn().mockReturnValue(pendingMe)
-    const service = new AppService({
-      tokenStore,
-      getUserDataDirectory: () => path.dirname(configPath),
-    }) as unknown as {
+    const service = new AppService() as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
-      tokenStore: TokenStore
+      tokenStore: {
+        getSessionToken: ReturnType<typeof vi.fn>
+        clearSessionToken: ReturnType<typeof vi.fn>
+      }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
       initialize: () => Promise<unknown>
       getSessionState: () => Promise<unknown>
     }
     service.authClient = { getMe } as never
+    service.tokenStore = {
+      getSessionToken,
+      clearSessionToken: vi.fn(),
+    } as never
     service.rpcTokenManager = { clear: vi.fn() } as never
 
     const first = service.initialize()
@@ -609,15 +503,14 @@ describe('AppService invitation configuration lookup', () => {
     resolveMe(me)
 
     await expect(Promise.all([first, second])).resolves.toEqual([
-      { authenticated: true, me },
-      { authenticated: true, me },
+      { authenticated: true, me, sessionGeneration: 1 },
+      { authenticated: true, me, sessionGeneration: 1 },
     ])
-    // Both callers share one authentication attempt; the result is observable
-    // at the public authentication boundary rather than through a legacy reader.
+    expect(getSessionToken).toHaveBeenCalledTimes(1)
     expect(getMe).toHaveBeenCalledTimes(1)
   })
 
-  it('does not claim durable logout or advance ownership when no session was accepted', async () => {
+  it('keeps the completed logout generation when an expired restore finds no saved token', async () => {
     const configPath = await createTempConfigPath('clerum-desktop-restore-after-logout')
     await fs.writeFile(
       configPath,
@@ -639,26 +532,32 @@ describe('AppService invitation configuration lookup', () => {
     const service = new AppService() as unknown as {
       getSessionGeneration: () => number
       getSessionState: () => Promise<unknown>
-      logout: () => Promise<{ kind: 'committed' | 'not-committed'; sessionGeneration: number }>
-      savedSessionRestoreAttemptedEnvKey: string | null
+      logout: () => Promise<number>
+      savedSessionRestoreAttemptedEnvKey: string
       savedSessionRestoreAttemptedAtMs: number
-      tokenStore: TokenStore
+      tokenStore: {
+        clearSessionToken: ReturnType<typeof vi.fn>
+        getSessionToken: ReturnType<typeof vi.fn>
+      }
     }
-    const tokenStore = await createIsolatedTokenStore(configPath)
-    service.tokenStore = tokenStore
-    vi.spyOn(tokenStore, 'clearSessionTokenStrictly').mockResolvedValue({
-      keytarAvailable: true,
-      keytarDisabled: false,
-      keytarDisposition: 'available',
-    })
+    service.tokenStore = {
+      clearSessionToken: vi.fn().mockResolvedValue(undefined),
+      getSessionToken: vi.fn().mockResolvedValue(null),
+    } as never
 
-    const logoutOutcome = await service.logout()
-    service.savedSessionRestoreAttemptedEnvKey = null
+    const logoutGeneration = await service.logout()
+    service.savedSessionRestoreAttemptedEnvKey = getActiveEnvKey()
     service.savedSessionRestoreAttemptedAtMs = 0
 
-    await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
-    expect(logoutOutcome.kind).toBe('not-committed')
-    expect(service.getSessionGeneration()).toBe(logoutOutcome.sessionGeneration)
+    await expect(service.getSessionState()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: logoutGeneration,
+    })
+    expect(service.getSessionGeneration()).toBe(logoutGeneration)
+    expect(service.tokenStore.getSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
+      legacyEnvKeys: expect.any(Array),
+    })
   })
 
   it('clears a saved token when startup session restore is rejected by the API', async () => {
@@ -677,20 +576,18 @@ describe('AppService invitation configuration lookup', () => {
     delete process.env.PROFILE_UI_BASE_URL
     vi.resetModules()
 
-    const [{ AppService }, { getActiveEnvKey }, { ApiError }] = await Promise.all([
+    const [{ AppService }, { resolveEnvKey }, { ApiError }] = await Promise.all([
       import('../appService.js'),
       import('../config.js'),
       import('../httpClient.js'),
     ])
-    credentialFixture.safeStorageAvailable = true
-    const tokenStore = await createIsolatedTokenStore(configPath)
-    await tokenStore.setSessionToken('stored-token', getActiveEnvKey())
-    const service = new AppService({
-      tokenStore,
-      getUserDataDirectory: () => path.dirname(configPath),
-    }) as unknown as {
+    const clearSessionToken = vi.fn().mockResolvedValue(undefined)
+    const service = new AppService() as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
-      tokenStore: TokenStore
+      tokenStore: {
+        getSessionToken: ReturnType<typeof vi.fn>
+        clearSessionToken: ReturnType<typeof vi.fn>
+      }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
       initialize: () => Promise<unknown>
     }
@@ -698,14 +595,26 @@ describe('AppService invitation configuration lookup', () => {
     service.authClient = {
       getMe: vi.fn().mockRejectedValue(new ApiError('401 Unauthorized', 401, '')),
     } as never
+    service.tokenStore = {
+      getSessionToken: vi.fn().mockResolvedValue('stored-token'),
+      clearSessionToken,
+    } as never
     service.rpcTokenManager = {
       clear: vi.fn(),
     } as never
 
-    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    await expect(service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: 0,
+    })
 
-    expect(await tokenStore.getSessionToken(getActiveEnvKey())).toBe('stored-token')
-    expect(service.authClient.getMe).not.toHaveBeenCalled()
+    expect(clearSessionToken).toHaveBeenCalledWith(
+      resolveEnvKey('https://api.example.com', 'https://rpc.example.com'),
+      {
+        legacyEnvKeys: [resolveEnvKey('https://api.example.com')],
+      }
+    )
   })
 
   it('clears a saved token when startup session restore is forbidden', async () => {
@@ -724,20 +633,17 @@ describe('AppService invitation configuration lookup', () => {
     delete process.env.PROFILE_UI_BASE_URL
     vi.resetModules()
 
-    const [{ AppService }, { ApiError }, { getActiveEnvKey }] = await Promise.all([
+    const [{ AppService }, { ApiError }] = await Promise.all([
       import('../appService.js'),
       import('../httpClient.js'),
-      import('../config.js'),
     ])
-    credentialFixture.safeStorageAvailable = true
-    const tokenStore = await createIsolatedTokenStore(configPath)
-    await tokenStore.setSessionToken('stored-token', getActiveEnvKey())
-    const service = new AppService({
-      tokenStore,
-      getUserDataDirectory: () => path.dirname(configPath),
-    }) as unknown as {
+    const clearSessionToken = vi.fn().mockResolvedValue(undefined)
+    const service = new AppService() as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
-      tokenStore: TokenStore
+      tokenStore: {
+        getSessionToken: ReturnType<typeof vi.fn>
+        clearSessionToken: ReturnType<typeof vi.fn>
+      }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
       initialize: () => Promise<unknown>
     }
@@ -745,14 +651,21 @@ describe('AppService invitation configuration lookup', () => {
     service.authClient = {
       getMe: vi.fn().mockRejectedValue(new ApiError('403 Forbidden', 403, '')),
     } as never
+    service.tokenStore = {
+      getSessionToken: vi.fn().mockResolvedValue('stored-token'),
+      clearSessionToken,
+    } as never
     service.rpcTokenManager = {
       clear: vi.fn(),
     } as never
 
-    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    await expect(service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: 0,
+    })
 
-    expect(await tokenStore.getSessionToken(getActiveEnvKey())).toBe('stored-token')
-    expect(service.authClient.getMe).not.toHaveBeenCalled()
+    expect(clearSessionToken).toHaveBeenCalled()
   })
 
   it('persists a manually saved runtime environment', async () => {

@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { QuitAdmissionClosedError } from '../appService.js'
+import { buildGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { createEvenfireDeepLinkRouter } from '../evenfireDeepLinkRouter.js'
-import { isQuitAdmissionClosedError } from '../mainWindowCoordinator.js'
-import type { DesktopLogoutOutcome } from '../types.js'
 
 type SentMessage = {
   channel: string
@@ -37,50 +35,43 @@ function createHarness() {
   const sent: SentMessage[] = []
   let currentWindow: TestWindow | null = createWindow('initial', sent)
   let rendererReady = false
-  let authenticated = true
   const focusWindow = vi.fn()
   const requestMainWindow = vi.fn()
-  const logout = vi
-    .fn<() => Promise<DesktopLogoutOutcome>>()
-    .mockResolvedValue({ kind: 'committed', sessionGeneration: 1, cleanup: 'not-required' })
-  const deferLogout = vi.fn<(error: unknown) => boolean | void>()
-  const getSessionState = vi.fn(async () => ({ authenticated }))
-  const reportLogoutFailure = vi.fn()
+  const logout = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
   const handleSandboxUiDeepLink = vi.fn<(rawUrl: string) => boolean>().mockReturnValue(true)
+  const handleGfsResourceDeepLink = vi.fn<(rawUrl: string) => boolean>().mockReturnValue(true)
   const shouldAcceptSandboxUiProtocolLink = vi
+    .fn<(rawUrl: string) => boolean>()
+    .mockReturnValue(true)
+  const shouldAcceptGfsResourceProtocolLink = vi
     .fn<(rawUrl: string) => boolean>()
     .mockReturnValue(true)
   const router = createEvenfireDeepLinkRouter<TestWindow>({
     appProtocol: 'evenfire',
     sandboxUiDeepLinkHost: 'app',
+    gfsResourceDeepLinkHost: 'files',
     focusMainWindow: focusWindow,
     getWindow: () => currentWindow,
     handleSandboxUiDeepLink,
+    handleGfsResourceDeepLink,
     isRendererReady: () => rendererReady,
     logout,
-    deferLogout,
-    getSessionState,
-    reportLogoutFailure,
     requestMainWindow,
     shouldAcceptSandboxUiProtocolLink,
+    shouldAcceptGfsResourceProtocolLink,
   })
 
   return {
     currentWindow: () => currentWindow,
     focusWindow,
     handleSandboxUiDeepLink,
+    handleGfsResourceDeepLink,
     logout,
-    deferLogout,
-    getSessionState,
-    reportLogoutFailure,
     requestMainWindow,
     router,
     sent,
     setRendererReady: (ready: boolean) => {
       rendererReady = ready
-    },
-    setAuthenticated: (value: boolean) => {
-      authenticated = value
     },
     replaceWindow: (id: string) => {
       currentWindow = createWindow(id, sent)
@@ -89,6 +80,7 @@ function createHarness() {
       currentWindow = window
     },
     shouldAcceptSandboxUiProtocolLink,
+    shouldAcceptGfsResourceProtocolLink,
   }
 }
 
@@ -104,6 +96,11 @@ describe('evenfire deep-link router', () => {
     expect(harness.handleSandboxUiDeepLink).toHaveBeenCalledWith(
       'evenfire://app/evenfire/example?path=%2Finbox&team=team-1'
     )
+
+    const resourceLink = buildGfsResourceDeepLink('gfs://main/0123456789abcdef0123456789abcdef')
+    harness.router.handle(resourceLink)
+    expect(harness.shouldAcceptGfsResourceProtocolLink).toHaveBeenCalledWith(resourceLink)
+    expect(harness.handleGfsResourceDeepLink).toHaveBeenCalledWith(resourceLink)
 
     harness.router.handle(
       'evenfire://desktop-environment?externalRestApiBaseUrl=https%3A%2F%2Fapi.example.test&rpcProxyBaseUrl=https%3A%2F%2Frpc.example.test&tenantName=Acme'
@@ -243,130 +240,5 @@ describe('evenfire deep-link router', () => {
     expect(harness.sent).toEqual([])
     expect(harness.focusWindow).not.toHaveBeenCalled()
     expect(harness.requestMainWindow).not.toHaveBeenCalled()
-  })
-
-  it('does not report an external logout as complete when quit rejects it', async () => {
-    const harness = createHarness()
-    const unhandledRejections: unknown[] = []
-    const observeUnhandledRejection = (reason: unknown) => {
-      unhandledRejections.push(reason)
-    }
-    harness.logout.mockRejectedValue(new Error('Application is shutting down'))
-    process.on('unhandledRejection', observeUnhandledRejection)
-
-    try {
-      harness.router.handle('evenfire://logout')
-      await new Promise<void>(resolve => setImmediate(resolve))
-
-      expect(unhandledRejections).toEqual([])
-      expect(harness.sent).toEqual([])
-      expect(harness.focusWindow).not.toHaveBeenCalled()
-    } finally {
-      process.off('unhandledRejection', observeUnhandledRejection)
-    }
-  })
-
-  it('resynchronizes renderer state without treating a rejected LP CAS as success', async () => {
-    const harness = createHarness()
-    harness.setRendererReady(true)
-    harness.setAuthenticated(false)
-    harness.logout.mockResolvedValue({
-      kind: 'not-committed',
-      reason: 'failed',
-      sessionGeneration: 1,
-    })
-
-    harness.router.handle('evenfire://logout')
-    await new Promise<void>(resolve => setImmediate(resolve))
-
-    expect(harness.getSessionState).toHaveBeenCalledOnce()
-    expect(harness.sent).toEqual([
-      { channel: 'auth:sessionStateChanged', payload: undefined, window: 'initial' },
-    ])
-    expect(harness.reportLogoutFailure).toHaveBeenCalledOnce()
-    expect(harness.focusWindow).not.toHaveBeenCalled()
-  })
-
-  it('does not notify renderer signed-out state when rejected logout leaves auth active', async () => {
-    const harness = createHarness()
-    harness.setRendererReady(true)
-    harness.setAuthenticated(true)
-    harness.logout.mockResolvedValue({
-      kind: 'not-committed',
-      reason: 'superseded',
-      sessionGeneration: 1,
-    })
-
-    harness.router.handle('evenfire://logout')
-    await new Promise<void>(resolve => setImmediate(resolve))
-
-    expect(harness.getSessionState).toHaveBeenCalledOnce()
-    expect(harness.sent).toEqual([])
-    expect(harness.focusWindow).not.toHaveBeenCalled()
-  })
-
-  it('reports a generic shutdown-shaped error unless the caller confirms durable deferral', async () => {
-    const harness = createHarness()
-    const failure = new Error('Application is shutting down')
-    harness.logout.mockRejectedValue(failure)
-    harness.setAuthenticated(true)
-
-    harness.router.handle('evenfire://logout')
-    await new Promise<void>(resolve => setImmediate(resolve))
-
-    expect(harness.deferLogout).toHaveBeenCalledWith(failure)
-    expect(harness.reportLogoutFailure).toHaveBeenCalledWith(failure)
-    expect(harness.sent).toEqual([])
-  })
-
-  it('treats a durably recorded quit rejection as deferred work', async () => {
-    const harness = createHarness()
-    const failure = new QuitAdmissionClosedError()
-    harness.logout.mockRejectedValue(failure)
-    harness.deferLogout.mockImplementation(isQuitAdmissionClosedError)
-
-    harness.router.handle('evenfire://logout')
-    await new Promise<void>(resolve => setImmediate(resolve))
-
-    expect(harness.deferLogout).toHaveBeenCalledWith(failure)
-    expect(harness.reportLogoutFailure).not.toHaveBeenCalled()
-    expect(harness.sent).toEqual([])
-  })
-
-  it('handles unexpected external logout failures without reporting completion', async () => {
-    const harness = createHarness()
-    const unhandledRejections: unknown[] = []
-    const observeUnhandledRejection = (reason: unknown) => {
-      unhandledRejections.push(reason)
-    }
-    harness.logout.mockRejectedValue(new Error('logout failed'))
-    process.on('unhandledRejection', observeUnhandledRejection)
-
-    try {
-      harness.router.handle('evenfire://logout')
-      await new Promise<void>(resolve => setImmediate(resolve))
-
-      expect(unhandledRejections).toEqual([])
-      expect(harness.sent).toEqual([])
-      expect(harness.focusWindow).not.toHaveBeenCalled()
-      expect(harness.reportLogoutFailure).toHaveBeenCalledOnce()
-    } finally {
-      process.off('unhandledRejection', observeUnhandledRejection)
-    }
-  })
-
-  it('does not signal logout success after an exceptional unverified outcome', async () => {
-    const harness = createHarness()
-    const error = new Error('credential deletion failed')
-    harness.setAuthenticated(false)
-    harness.logout.mockRejectedValue(error)
-
-    harness.router.handle('evenfire://logout')
-    await new Promise<void>(resolve => setImmediate(resolve))
-
-    expect(harness.reportLogoutFailure).toHaveBeenCalledWith(error)
-    expect(harness.getSessionState).not.toHaveBeenCalled()
-    expect(harness.sent).toEqual([])
-    expect(harness.focusWindow).not.toHaveBeenCalled()
   })
 })

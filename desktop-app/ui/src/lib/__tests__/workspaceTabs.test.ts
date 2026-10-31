@@ -4,6 +4,7 @@ import {
   activeWorkspaceTab,
   closeWorkspaceTab,
   createEmptyWorkspaceTabsState,
+  createFilesTab,
   createWorkspaceTabsState,
   cycleWorkspaceTab,
   firstWorkspaceTab,
@@ -287,6 +288,30 @@ describe('workspaceTabs — files multi-instance by path (mini-spec 06 §3)', ()
     state = openFilesTab(state, { id: 'f-root-again' })
     expect(state.tabs.filter(t => t.kind === 'files')).toHaveLength(3)
     expect(state.activeTabId).toBe('f-root')
+  })
+
+  it('can reserve an independent Files destination without repurposing an inactive root', () => {
+    let state = openFilesTab(createWorkspaceTabsState('chat'), {
+      id: 'files-root',
+      path: null,
+      title: 'Existing root',
+    })
+    state = selectWorkspaceTab(state, 'chat')
+
+    const next = createFilesTab(state, { id: 'deep-link-owner', path: null })
+
+    expect(next.activeTabId).toBe('deep-link-owner')
+    expect(next.tabs.filter(tab => tab.kind === 'files')).toHaveLength(2)
+    expect(next.tabs.find(tab => tab.id === 'files-root')).toMatchObject({
+      id: 'files-root',
+      title: 'Existing root',
+      files: { path: null },
+    })
+    expect(next.tabs.find(tab => tab.id === 'deep-link-owner')).toMatchObject({
+      id: 'deep-link-owner',
+      kind: 'files',
+      files: { path: null },
+    })
   })
 
   it('aligns the title when focusing an existing path', () => {

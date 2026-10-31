@@ -112,6 +112,21 @@ function takeOwnership(state: EmbedOwnershipState, launch: Launch): EmbedOwnersh
   return { ...withView(state, { ...launch, phase: 'waiting' }), owner: launch.launchId }
 }
 
+function retryFailedCloseBeforeLaunch(
+  state: EmbedOwnershipState,
+  launch: Launch
+): RowResult | null {
+  const retained = [...state.views.values()].find(
+    view => view.tabId === launch.tabId && view.phase === 'closeFailed'
+  )
+  if (!retained) return null
+  const closing = withView(state, { ...retained, phase: 'closeRequested' })
+  return {
+    state: takeOwnership(closing, launch),
+    effects: [{ type: 'close', launchId: retained.launchId }],
+  }
+}
+
 type RowResult = {
   state: EmbedOwnershipState
   effects: EmbedEffect[]
@@ -119,6 +134,8 @@ type RowResult = {
   failure?: EmbedFailure
   /** A handoff whose wait set is taken after the sweep. */
   handoffRequestId?: number
+  /** The owner present when a handoff began, for a failed-close rollback. */
+  handoffOwnerLaunchId?: LaunchId | null
 }
 
 function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
@@ -127,11 +144,17 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
     case 'projected': {
       if (event.activeAppTabId === state.activeAppTabId) return unchanged
       const ownerTab = state.owner === null ? null : state.views.get(state.owner)?.tabId
+      const retainedFailedClose = [...state.views.values()].find(
+        view => view.tabId === event.activeAppTabId && view.phase === 'closeFailed'
+      )
       return {
         state: {
           ...state,
           activeAppTabId: event.activeAppTabId,
-          owner: ownerTab === event.activeAppTabId ? state.owner : null,
+          owner:
+            ownerTab === event.activeAppTabId
+              ? state.owner
+              : (retainedFailedClose?.launchId ?? null),
         },
         effects: [],
       }
@@ -147,18 +170,29 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
 
     case 'relaunch': {
       if (event.launch.tabId !== state.activeAppTabId) return unchanged
+      const retry = retryFailedCloseBeforeLaunch(state, event.launch)
+      if (retry) return retry
       return { state: takeOwnership(state, event.launch), effects: [] }
     }
 
     case 'backToApps':
       return state.owner === null ? unchanged : { state: { ...state, owner: null }, effects: [] }
 
-    case 'handoff':
-      return {
-        state: state.owner === null ? state : { ...state, owner: null },
-        effects: [],
-        handoffRequestId: event.requestId,
+    case 'handoff': {
+      let next = state.owner === null ? state : { ...state, owner: null }
+      const effects: EmbedEffect[] = []
+      for (const view of next.views.values()) {
+        if (view.phase !== 'closeFailed') continue
+        next = withView(next, { ...view, phase: 'closeRequested' })
+        effects.push({ type: 'close', launchId: view.launchId })
       }
+      return {
+        state: next,
+        effects,
+        handoffRequestId: event.requestId,
+        handoffOwnerLaunchId: state.owner,
+      }
+    }
 
     case 'slotMeasured': {
       const record = state.views.get(event.launchId)
@@ -223,8 +257,58 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
     case 'closeFailed': {
       const record = state.views.get(event.launchId)
       if (!record || record.phase !== 'closeRequested') return unchanged
-      // Main could not confirm the close; treat the view as gone so the tab is not stuck.
-      return { state: withoutView(state, record.launchId), effects: [] }
+      const failedHandoffs = state.handoffs.filter(handoff => handoff.waitFor.has(record.launchId))
+      const failedRequestIds = new Set(failedHandoffs.map(handoff => handoff.requestId))
+      const failedSuccessors = [...state.views.values()].filter(
+        view =>
+          view.tabId === record.tabId &&
+          view.launchId !== record.launchId &&
+          view.phase === 'waiting'
+      )
+      const waitingSuccessorOwnsTab = failedSuccessors.some(
+        successor => successor.launchId === state.owner
+      )
+      let next: EmbedOwnershipState = {
+        ...withView(state, { ...record, phase: 'closeFailed' }),
+        handoffs: state.handoffs.filter(handoff => !failedRequestIds.has(handoff.requestId)),
+      }
+      // Keep the current replacement pending behind the possibly-live native
+      // view. A later terminal release can advance it; a newer explicit launch
+      // still supersedes it and retries closing the retained view first.
+      for (const successor of failedSuccessors) {
+        if (successor.launchId !== state.owner) next = withoutView(next, successor.launchId)
+      }
+      const ownsFailedHandoff = failedHandoffs.some(
+        handoff => handoff.ownerLaunchId === record.launchId
+      )
+      if (
+        state.activeAppTabId === record.tabId &&
+        ownsFailedHandoff &&
+        state.owner === null &&
+        !waitingSuccessorOwnsTab
+      ) {
+        next = { ...next, owner: record.launchId }
+      }
+      const failedLaunch = failedSuccessors.find(successor => successor.launchId === state.owner)
+      return {
+        state: next,
+        effects: [
+          ...failedHandoffs.map(handoff => ({
+            type: 'handoffFailed' as const,
+            requestId: handoff.requestId,
+          })),
+        ],
+        ...(failedLaunch
+          ? {
+              failure: {
+                tabId: failedLaunch.tabId,
+                launchId: failedLaunch.launchId,
+                kind: 'open' as const,
+                message: 'The current app could not be closed safely. Try launching again.',
+              },
+            }
+          : {}),
+      }
     }
 
     case 'released': {
@@ -373,6 +457,7 @@ export function reduceEmbedOwnership(
     const handoff: EmbedHandoff = {
       requestId: row.handoffRequestId,
       waitFor: new Set(next.views.keys()),
+      ownerLaunchId: row.handoffOwnerLaunchId ?? null,
     }
     next = { ...next, handoffs: [...next.handoffs, handoff] }
   }

@@ -85,6 +85,7 @@ function gfsService() {
     moveGfsResource: (
       resourceId: string,
       destinationId: string,
+      expectedSessionGeneration: number,
       drive?: string,
       ifMatch?: number
     ) => Promise<{ resourceId: string; version: number }>
@@ -105,7 +106,7 @@ describe('AppService GFS delegation subject boundary', () => {
     const service = gfsService()
     const destinationId = '33333333-3333-4333-8333-333333333333'
 
-    await service.moveGfsResource(RESOURCE_ID, destinationId, 'main', 8)
+    await service.moveGfsResource(RESOURCE_ID, destinationId, 0, 'main', 8)
 
     expect(service.gfsClient.moveResource).toHaveBeenCalledTimes(1)
     expect(service.gfsClient.moveResource).toHaveBeenCalledWith(
@@ -1095,7 +1096,11 @@ describe('AppService GFS upload security scope', () => {
         releaseAbort()
 
         await expect(pendingOutcome).resolves.toContain('authentication fence')
-        await expect(login).resolves.toEqual({ authenticated: true, me: nextMe })
+        await expect(login).resolves.toMatchObject({
+          authenticated: true,
+          me: nextMe,
+          sessionGeneration: expect.any(Number),
+        })
         expect(service.sessionToken).toBe('token-b')
         expect(service.me).toEqual(nextMe)
         expect(service.gfsDispatchBlocked).toBe(false)

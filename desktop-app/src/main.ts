@@ -1,4 +1,4 @@
-import { BrowserWindow, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
+import { BrowserWindow, IpcMainEvent, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AppService } from './appService.js'
@@ -19,7 +19,17 @@ import {
   verifyDevIsolationRuntime,
 } from './devIsolation.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
-import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
+import { GFS_RESOURCE_DEEP_LINK_HOST, parseGfsResourceDeepLink } from './gfsDeepLinks.js'
+import {
+  GfsResourceDeepLinkQueue,
+  GfsUserNavigationGeneration,
+  createLogoutWithGfsResourceDeepLinkClear,
+} from './gfsResourceDeepLinkQueue.js'
+import {
+  assertTrustedSender,
+  registerDeepLinkAcknowledgmentHandlers,
+  registerIpcHandlers,
+} from './ipc.js'
 import {
   createDeferredExternalLogoutFailureHandler,
   createDeferredExternalLogoutStateRefreshHandler,
@@ -74,6 +84,9 @@ process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
+const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
+const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
+const gfsUserNavigationGeneration = new GfsUserNavigationGeneration()
 const appService = new AppService({
   ...(devIsolationPlan
     ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
@@ -87,7 +100,22 @@ const appService = new AppService({
       mainWindow.webContents.send('auth:sessionExpired', sessionGeneration)
     }
   },
+  onSandboxUiSessionInvalidated: () => {
+    const appDeepLinkMinimumId = sandboxUiDeepLinkQueue.clear()
+    const gfsDeepLinkMinimumId = gfsResourceDeepLinkQueue.clear()
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sandboxUi:sessionInvalidated', {
+        sessionGeneration: appService.getSessionGeneration(),
+        appDeepLinkMinimumId,
+        gfsDeepLinkMinimumId,
+      })
+    }
+  },
 })
+const logoutAndClearGfsResourceDeepLinks = createLogoutWithGfsResourceDeepLinkClear(
+  gfsResourceDeepLinkQueue,
+  () => appService.logout()
+)
 registerQuitDrain(
   app,
   () => appService.prepareForQuit(),
@@ -123,7 +151,11 @@ registerQuitDrain(
     console.error(`[Desktop] Quit preparation failed; continuing quit (${errorName}).`)
   }
 )
-const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
+registerDeepLinkAcknowledgmentHandlers(appService, () => mainWindow, {
+  appQueue: sandboxUiDeepLinkQueue,
+  gfsQueue: gfsResourceDeepLinkQueue,
+  navigation: gfsUserNavigationGeneration,
+})
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
 const mcpOauthCompletionQueue = new McpOauthCompletionQueue(completion => {
@@ -310,12 +342,39 @@ ipcMain.handle('sandboxUi:clearPendingDeepLinks', event => {
   assertTrustedSender(event)
   sandboxUiDeepLinkQueue.clear()
 })
-
-ipcMain.handle('sandboxUi:acknowledgeDeepLink', (event, payload: { id?: unknown }) => {
+ipcMain.handle('gfs:listPendingDeepLinks', event => {
   assertTrustedSender(event)
-  const id = Number(payload?.id)
-  if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid app deep-link id')
-  sandboxUiDeepLinkQueue.acknowledge(id)
+  return { links: gfsResourceDeepLinkQueue.list() }
+})
+
+function isTrustedGfsNavigationSender(event: IpcMainEvent): boolean {
+  try {
+    assertTrustedSender(event)
+  } catch {
+    return false
+  }
+  return Boolean(mainWindow && event.sender === mainWindow.webContents)
+}
+
+ipcMain.on('gfs:getUserNavigationGeneration', event => {
+  if (!isTrustedGfsNavigationSender(event)) {
+    event.returnValue = null
+    return
+  }
+  event.returnValue = gfsUserNavigationGeneration.current()
+})
+
+ipcMain.on('gfs:advanceUserNavigationGeneration', event => {
+  if (!isTrustedGfsNavigationSender(event)) {
+    event.returnValue = null
+    return
+  }
+  event.returnValue = gfsUserNavigationGeneration.advance()
+})
+
+ipcMain.handle('gfs:clearPendingDeepLinks', event => {
+  assertTrustedSender(event)
+  return gfsResourceDeepLinkQueue.clear()
 })
 function focusMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
@@ -344,9 +403,20 @@ function handleSandboxUiDeepLink(rawUrl: string): boolean {
   // Coalesce only while the same semantic target is awaiting renderer
   // acknowledgement. Query-parameter order cannot bypass this check, and once
   // acknowledged, an immediate user re-click creates a fresh envelope.
-  const envelope = sandboxUiDeepLinkQueue.enqueue(target)
+  const envelope = sandboxUiDeepLinkQueue.enqueue(target, gfsUserNavigationGeneration.current())
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sandboxUi:deepLink', envelope)
+  }
+  requestMainWindow()
+  return true
+}
+
+function handleGfsResourceDeepLink(rawUrl: string): boolean {
+  const target = parseGfsResourceDeepLink(rawUrl)
+  if (!target) return false
+  const envelope = gfsResourceDeepLinkQueue.enqueue(target, gfsUserNavigationGeneration.current())
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('gfs:deepLink', envelope)
   }
   requestMainWindow()
   return true
@@ -358,8 +428,10 @@ const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   getWindow: () => mainWindow,
   getSessionState: async () => ({ authenticated: Boolean(appService.getCachedUserId()) }),
   handleSandboxUiDeepLink,
+  handleGfsResourceDeepLink,
+  gfsResourceDeepLinkHost: GFS_RESOURCE_DEEP_LINK_HOST,
   isRendererReady: () => mainWindowRendererReady,
-  logout: () => appService.logout(),
+  logout: logoutAndClearGfsResourceDeepLinks,
   // AppService records the environment-scoped marker before rejecting this
   // shutdown-time logout. The router treats that rejection as deferred work.
   deferLogout: isQuitAdmissionClosedError,
@@ -372,6 +444,7 @@ const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   requestMainWindow,
   sandboxUiDeepLinkHost: SANDBOX_UI_DEEP_LINK_HOST,
   shouldAcceptSandboxUiProtocolLink,
+  shouldAcceptGfsResourceProtocolLink: rawUrl => parseGfsResourceDeepLink(rawUrl) !== null,
 })
 
 function registerCustomProtocols(): void {
@@ -631,7 +704,7 @@ if (gotSingleInstanceLock) {
       // runtime eagerly on first call, and a plugin can be mounted the moment
       // the window paints.
       initPluginSdkRuntime({ service: appService, getMainWindow: () => mainWindow })
-      registerIpcHandlers(appService)
+      registerIpcHandlers(appService, logoutAndClearGfsResourceDeepLinks)
       mainWindowLifecycleReady = true
       wirePowerMonitor()
       app.on('activate', () => {

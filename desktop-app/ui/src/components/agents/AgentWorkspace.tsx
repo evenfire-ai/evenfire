@@ -90,13 +90,13 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   } = useContextsDataController()
   const {
     teams,
-    currentTeamId,
     teamMembers,
     teamDirectory,
     ensureHydrated: ensureTeamsHydrated,
     loading: teamsLoading,
     error: teamsError,
   } = useTeamsDataController()
+  const currentTeamId = String(me?.teamId ?? '').trim()
   const { agentContextByName, agentDisplayByName, selectedAgentMcpServers } =
     useMcpServersDataController({
       selectedAgent,

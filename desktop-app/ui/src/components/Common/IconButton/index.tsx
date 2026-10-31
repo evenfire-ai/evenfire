@@ -10,6 +10,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
     label,
     loading = false,
     size = 'md',
+    tooltip = true,
     type = 'button',
     variant = 'ghost',
     ...props
@@ -31,7 +32,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
       )}
       disabled={loading || props.disabled}
       ref={ref}
-      title={props.title || label}
+      title={tooltip ? props.title || label : undefined}
       type={type}
     >
       {children}

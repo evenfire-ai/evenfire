@@ -14,6 +14,7 @@ let authState = {
   isAuthenticated: true,
   me: { id: 'user-1', teamId: 'team-1' },
   runtimeConfigState: { envKey: 'test' },
+  sessionGeneration: 7,
 }
 
 function source(overrides: Partial<Omit<GfsDragSource, 'generation'>> = {}) {
@@ -38,6 +39,7 @@ beforeEach(() => {
     isAuthenticated: true,
     me: { id: 'user-1', teamId: 'team-1' },
     runtimeConfigState: { envKey: 'test' },
+    sessionGeneration: 7,
   }
 })
 
@@ -117,7 +119,7 @@ describe('GfsDragSessionProvider — lifecycle binding', () => {
 
     // The shared fail-closed boundary writes 'revoked' via setQueryData; the
     // provider subscription must clear the active drag in the same turn.
-    queryClient.setQueryData(desktopQueryKeys.gfsAccessState('test:user-1:team-1'), 'revoked')
+    queryClient.setQueryData(desktopQueryKeys.gfsAccessState('test:user-1:team-1', 7), 'revoked')
     await waitFor(() => expect(api!.activeSource()).toBeNull())
   })
 
@@ -167,6 +169,30 @@ describe('GfsDragSessionProvider — lifecycle binding', () => {
       })
     }
   }
+
+  it('invalidates a same-scope drag when published session generation changes', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    let api: ReturnType<typeof useGfsDragSession> | null = null
+    const view = () => (
+      <QueryClientProvider client={queryClient}>
+        <GfsDragSessionProvider>
+          <Probe onApi={captured => (api = captured)} />
+        </GfsDragSessionProvider>
+      </QueryClientProvider>
+    )
+    const mounted = render(view())
+    expect(api!.beginDrag(source())).toBe(true)
+    const gestureGeneration = api!.currentGeneration()
+
+    authState = { ...authState, sessionGeneration: 8 }
+    mounted.rerender(view())
+
+    expect(api!.activeSource()).toBeNull()
+    expect(api!.currentGeneration()).toBeGreaterThan(gestureGeneration)
+    expect(queryClient.getQueryData(desktopQueryKeys.gfsAccessState('test:user-1:team-1', 8))).toBe(
+      'active'
+    )
+  })
 
   it('invalidates on logout and unmount while refusing further drags', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
