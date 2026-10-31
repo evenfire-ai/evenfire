@@ -212,13 +212,6 @@ function makeController(): AppController {
     forceControllerRender()
     return navigationIntentSequence
   })
-  const selectWorkspaceTabById = vi.fn((id: string) => {
-    if (!controller.workspaceTabs.tabs.some(tab => tab.id === id)) return false
-    beginUserNavigationIntent()
-    clearAppsPicker()
-    setWorkspaceTabs((state: WorkspaceState) => selectWorkspaceTab(state, id))
-    return true
-  })
   const openFilesSection = vi.fn((path: string | null = null) => {
     beginUserNavigationIntent()
     clearAppsPicker()
