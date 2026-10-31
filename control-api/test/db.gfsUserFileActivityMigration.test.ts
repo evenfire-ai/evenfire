@@ -108,7 +108,7 @@ describe('0132_gfs_user_file_activity migration', () => {
       'gfs_record_agent_file_activity(TEXT, UUID, UUID[])',
     ]) {
       expect(sql).toMatch(
-        new RegExp(`REVOKE ALL ON FUNCTION ${signature.replace(/[()[\]]/g, '\\$&')} FROM PUBLIC`)
+        new RegExp(`REVOKE ALL ON FUNCTION ${signature.replace(/[\\()[\]]/g, '\\$&')} FROM PUBLIC`)
       )
     }
     expect(sql).toMatch(

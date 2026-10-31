@@ -1337,7 +1337,6 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
       ownerS = await launchDesktopAs(testInfo, owner)
       await test.step('J7a-1 O writes three files and a destination folder, then shares the folder', async () => {
         const page = ownerS!.page
-        const nav = new DesktopFilesNav(page)
         const view = new DesktopResourceView(page)
         await openHomeFolder(page, ownerHome)
         await view.createFolder(folder)
@@ -1580,7 +1579,6 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
       ownerS = await launchDesktopAs(testInfo, owner)
       const page = ownerS.page
       await test.step('J7b-1 O uploads 24 files and shares the folder', async () => {
-        const nav = new DesktopFilesNav(page)
         const view = new DesktopResourceView(page)
         await openHomeFolder(page, ownerHome)
         await view.createFolder(folder)
