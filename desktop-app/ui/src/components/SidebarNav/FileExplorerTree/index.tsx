@@ -4,6 +4,8 @@ import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
+  GFS_RECENT_FILES_LABEL,
+  GFS_RECENT_FILES_LOCATION,
   GFS_RESOURCE_DRAG_TYPE,
   GFS_SHARED_WITH_ME_LABEL,
   GFS_SHARED_WITH_ME_LOCATION,
@@ -1224,6 +1226,19 @@ export function FileExplorerTree({
     <div className="da-file-explorer">
       {ctrl.accessState === 'active' ? (
         <div role="tree" aria-label="File destinations">
+          <Button
+            align="start"
+            block
+            className="da-file-explorer__label"
+            color="neutral"
+            role="treeitem"
+            size="sm"
+            type="button"
+            variant="text"
+            onClick={() => onOpenFolder(GFS_RECENT_FILES_LOCATION)}
+          >
+            {GFS_RECENT_FILES_LABEL}
+          </Button>
           {homeRoot ? (
             <FileExplorerNode
               accessActive={ctrl.accessState === 'active'}

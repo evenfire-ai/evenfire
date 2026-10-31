@@ -43,35 +43,28 @@ const queryRows = () => screen.queryAllByRole('button', { name: /^Open / })
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
 })
 
-describe('GfsRecentFilesCard paging (D20)', () => {
-  it('reveals ten rows at a time and hides the control once everything is shown', () => {
+describe('GfsRecentFilesCard overview limit', () => {
+  it('shows only the five newest rows without a load-more control', () => {
     renderCard()
-    expect(rows()).toHaveLength(10)
-    expect(rows()[0]?.getAttribute('aria-label')).toBe('Open file-0.txt')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
-    expect(rows()).toHaveLength(20)
-    expect(rows()[19]?.getAttribute('aria-label')).toBe('Open file-19.txt')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
-    // Witness: all 25 rows are on screen, which is why the control is gone.
-    expect(rows()).toHaveLength(25)
+    expect(rows().map(row => row.getAttribute('aria-label'))).toEqual(
+      many.slice(0, 5).map(item => `Open ${item.name}`)
+    )
+    expect(screen.queryByRole('button', { name: 'Open file-5.txt' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
   })
 
-  it('shows no control when the list already fits on the first page', () => {
-    renderCard({ files: many.slice(0, 10) })
-    // Witness: ten rows rendered, so the absent control is a decision.
-    expect(rows()).toHaveLength(10)
+  it('shows all rows when fewer than five files exist', () => {
+    renderCard({ files: many.slice(0, 3) })
+    expect(rows()).toHaveLength(3)
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
   })
 
-  it('keeps the revealed count across a refetch that reorders the list', () => {
+  it('updates the five visible files when a refetch reorders the list', () => {
     const { rerender, onOpen } = renderCard()
-    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
-    expect(rows()).toHaveLength(20)
+    expect(rows()).toHaveLength(5)
 
     const reordered = [file(24), ...many.slice(0, 24)]
     rerender(
@@ -85,7 +78,7 @@ describe('GfsRecentFilesCard paging (D20)', () => {
       />
     )
 
-    expect(rows()).toHaveLength(20)
+    expect(rows()).toHaveLength(5)
     // Witness: the new first row is on screen, so the refetch really landed.
     expect(rows()[0]?.getAttribute('aria-label')).toBe('Open file-24.txt')
   })
@@ -125,12 +118,38 @@ describe('GfsRecentFilesCard row contract (D17)', () => {
     expect(within(region).queryByRole('button', { name: /^Options for / })).toBeNull()
   })
 
-  it('prints the activity time with a machine-readable date and a readable label', () => {
-    renderCard({ files: [many[0]!] })
+  it('shows the local time today and the date and time for another day', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 30, 16, 0))
+    const today = new Date(2026, 9, 30, 10, 15)
+    const yesterday = new Date(2026, 9, 29, 18, 45)
+    renderCard({
+      files: [
+        file(0, { lastActivityAt: today.toISOString() }),
+        file(1, { lastActivityAt: yesterday.toISOString() }),
+      ],
+    })
     const region = screen.getByRole('region', { name: 'Recent files' })
-    const time = region.querySelector('time')
-    expect(time?.getAttribute('datetime')).toBe(many[0]!.lastActivityAt)
-    expect(time?.textContent?.length).toBeGreaterThan(0)
+    const times = region.querySelectorAll('time')
+    expect(times[0]?.getAttribute('datetime')).toBe(today.toISOString())
+    expect(times[0]?.textContent).toBe(
+      today.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    )
+    expect(times[1]?.getAttribute('datetime')).toBe(yesterday.toISOString())
+    expect(times[1]?.textContent).toBe(
+      yesterday.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
+    )
+  })
+
+  it('opens from a non-interactive row cell and only once from the name button', () => {
+    const { onOpen } = renderCard({ files: [many[0]!] })
+    const row = screen.getByRole('button', { name: 'Open file-0.txt' })
+    const time = row.querySelector('time')
+    expect(time).toBeTruthy()
+    fireEvent.click(time!)
+    expect(onOpen).toHaveBeenCalledTimes(1)
+    fireEvent.click(within(row).getByRole('button', { name: 'file-0.txt' }))
+    expect(onOpen).toHaveBeenCalledTimes(2)
   })
 })
 

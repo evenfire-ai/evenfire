@@ -15388,6 +15388,10 @@ pre {
   box-shadow: none;
 }
 
+.da-gfs-drive[hidden] {
+  display: none;
+}
+
 .da-gfs-drive__header.page-card__header {
   min-width: 0;
   display: flex;

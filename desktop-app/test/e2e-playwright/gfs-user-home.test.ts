@@ -1331,6 +1331,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     let aS: DesktopSession | null = null
     let bS: DesktopSession | null = null
     try {
+      fx.createTeam('j7a', [owner, a, b])
       fx.associateAgent(owner, agent)
       fx.associateAgent(a, agent)
       fx.associateAgent(b, agent)
@@ -1565,7 +1566,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     }
   })
 
-  test('J7b Recent files: uploads fill the card, Load more reveals the rest, the page scrolls; a ZIP export records nothing', async ({}, testInfo) => {
+  test('J7b Recent files: five files appear in the overview and their own view; a ZIP export records nothing', async ({}, testInfo) => {
     test.setTimeout(4 * RESPONSE_TIMEOUT_MS + 30 * 60_000)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const owner = fx.createUser('j7b-owner')
@@ -1578,6 +1579,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     let ownerS: DesktopSession | null = null
     let aS: DesktopSession | null = null
     try {
+      fx.createTeam('j7b', [owner, a])
       const ownerHome = await fx.waitForHomeState(owner.id, 'ready')
       await fx.waitForHomeState(a.id, 'ready')
       ownerS = await launchDesktopAs(testInfo, owner)
@@ -1605,45 +1607,39 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         const timestamps = activity.map(row => row.lastActivityAt)
         expect(new Set(timestamps).size).toBe(24)
       })
-      await test.step('J7b-2 the first page and "Load more" reveal ten rows at a time', async () => {
+      await test.step('J7b-2 the overview shows only the five newest files', async () => {
         const nav = new DesktopFilesNav(page)
         const newest = [...names].reverse()
-        await nav.expectRecentFiles(newest.slice(0, 10))
-        await expect(nav.recentLoadMore()).toBeVisible()
-        await nav.recentLoadMore().click()
-        await expect(nav.recentRows()).toHaveCount(20)
-        await expect
-          .poll(() =>
-            nav.recentRows().evaluateAll(rows => rows.map(row => row.getAttribute('aria-label')))
-          )
-          .toEqual(newest.slice(0, 20).map(name => `Open ${name}`))
-        await nav.recentLoadMore().click()
-        await expect(nav.recentRows()).toHaveCount(24)
-        await expect
-          .poll(() =>
-            nav.recentRows().evaluateAll(rows => rows.map(row => row.getAttribute('aria-label')))
-          )
-          .toEqual(newest.map(name => `Open ${name}`))
-        await expect(nav.recentLoadMore()).toHaveCount(0)
+        await nav.expectRecentFiles(newest.slice(0, 5))
+        await expect(nav.recentFiles().getByRole('button', { name: 'Load more' })).toHaveCount(0)
+        await expect(page.getByRole('region', { name: 'My home' })).toBeInViewport({ ratio: 1 })
+        await expect(page.getByRole('navigation', { name: 'File location' })).toBeInViewport()
       })
-      await test.step('J7b-3 the card grows and the page scrolls, with no internal cap', async () => {
+      await test.step('J7b-3 the sidebar opens a separate five-file view with activity times', async () => {
         const nav = new DesktopFilesNav(page)
-        const heading = nav.recentFiles().getByRole('heading', { name: 'Recent files' })
-        await heading.scrollIntoViewIfNeeded()
-        const lastRow = nav
-          .recentFiles()
-          .getByRole('button', { name: `Open ${names[0]}`, exact: true })
-        // Precondition: the default window cannot show all 24 rows at once.
-        await expect(lastRow).not.toBeInViewport()
-        await lastRow.scrollIntoViewIfNeeded()
-        await expect(lastRow).toBeInViewport()
-        await expect(heading).not.toBeInViewport()
-        const order = await page.evaluate(() => {
-          const regions = Array.from(document.querySelectorAll('[role="region"]'))
-          return regions.map(node => node.getAttribute('aria-label')).filter(Boolean)
+        await page.getByRole('treeitem', { name: 'Recent files', exact: true }).click()
+        await expect(page.getByRole('heading', { name: 'Recent files', level: 2 })).toBeVisible()
+        await expect(nav.recentRows()).toHaveCount(5)
+        await expect
+          .poll(() =>
+            nav.recentRows().evaluateAll(rows => rows.map(row => row.getAttribute('aria-label')))
+          )
+          .toEqual(
+            [...names]
+              .reverse()
+              .slice(0, 5)
+              .map(name => `Open ${name}`)
+          )
+        await expect(nav.recentFiles().locator('time')).toHaveCount(5)
+        const newestRow = nav.recentFiles().getByRole('button', {
+          name: `Open ${names[23]}`,
+          exact: true,
         })
-        expect(order.indexOf('Recent files')).toBeGreaterThanOrEqual(0)
-        expect(order.indexOf('EvenDrive browser')).toBeGreaterThan(order.indexOf('Recent files'))
+        await expect(newestRow.locator('time')).toContainText(/\d/)
+        await expect(newestRow.locator('time')).toHaveAttribute('datetime', /.+/)
+        await expect(page.getByRole('region', { name: 'My home' })).toHaveCount(0)
+        await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toHaveCount(0)
+        await expect(nav.recentFiles().getByRole('button', { name: 'Load more' })).toHaveCount(0)
       })
 
       aS = await launchDesktopAs(testInfo, a)

@@ -11,7 +11,7 @@ import type { Tone } from '@/uiTypes'
  */
 export interface FileExplorerTreeProps {
   /** Double-click / Enter on a folder → open (or focus) its files tab at that
-   *  `gfsUri`; the "Shared with me" label opens `GFS_SHARED_WITH_ME_LOCATION`. */
+   *  `gfsUri`; Recent files and Shared with me use their client-only locations. */
   onOpenFolder: (location: string) => void
   /** Single-click / Enter on a previewable file → open (or focus) its preview tab. */
   onOpenPreview: (preview: GfsPreviewResource) => void

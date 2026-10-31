@@ -178,8 +178,10 @@ where you are.
   **Open EvenDrive link** lets you paste a link to go straight to that item.
 - **Recent files.** The EvenDrive overview starts with **Recent files**: files
   you opened, downloaded or changed, and files an agent read, changed or copied
-  in your Desktop chats, most recent first. The card shows ten at a time and
-  **Load more** reveals the rest. It lists only files you can still read, it is
+  in your Desktop chats, most recent first. The overview and the separate
+  **Recent files** sidebar view show the five most recent files. Each row shows
+  the local time of its last activity and, for an earlier day, the date. It
+  lists only files you can still read, it is
   private to you, it keeps your 100 most recent files, and it is deleted with
   your account. Exporting a folder as a zip does not add files to it, and a
   plugin reading files does not add to it either. **Agent activity in Slack and

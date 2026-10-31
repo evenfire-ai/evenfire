@@ -110,18 +110,16 @@ export class DesktopFilesNav {
     return this.recentFiles().getByRole('button', { name: /^Open / })
   }
 
-  recentLoadMore(): ReturnType<Page['getByRole']> {
-    return this.recentFiles().getByRole('button', { name: 'Load more', exact: true })
-  }
-
-  /** At most one page of names (ten); the caller asserts the rest by count. */
+  /** The overview shows at most five recent names. */
   async expectRecentFiles(names: string[]): Promise<void> {
     await this.openEvenDriveOverview()
     await expect(this.recentFiles()).toHaveAttribute('aria-busy', 'false')
     await expect(this.recentRows()).toHaveCount(names.length)
-    for (const [index, name] of names.entries()) {
-      await expect(this.recentRows().nth(index)).toHaveAccessibleName(`Open ${name}`)
-    }
+    await expect
+      .poll(() =>
+        this.recentRows().evaluateAll(rows => rows.map(row => row.getAttribute('aria-label')))
+      )
+      .toEqual(names.map(name => `Open ${name}`))
     await humanRecordedPause([400, 800])
   }
 

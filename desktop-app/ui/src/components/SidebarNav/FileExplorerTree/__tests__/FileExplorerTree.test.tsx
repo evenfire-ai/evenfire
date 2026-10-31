@@ -3,7 +3,11 @@ import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { FOLDER_HOVER_EXPAND_DELAY_MS, GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
+import {
+  FOLDER_HOVER_EXPAND_DELAY_MS,
+  GFS_RECENT_FILES_LOCATION,
+  GFS_SHARED_WITH_ME_LOCATION,
+} from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { desktopQueryDefaults } from '@lib/queryClient'
@@ -152,6 +156,10 @@ describe('My home', () => {
       )
     )
     const home = screen.getByRole('treeitem', { name: 'My home' })
+    const recent = screen.getByRole('treeitem', { name: 'Recent files' })
+    expect(recent.compareDocumentPosition(home) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(recent)
+    expect(onOpenFolder).toHaveBeenLastCalledWith(GFS_RECENT_FILES_LOCATION)
     expect(await within(home).findByRole('treeitem', { name: 'Projects' })).toBeTruthy()
     expect(listHomeChildren).toHaveBeenCalledWith(
       'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',

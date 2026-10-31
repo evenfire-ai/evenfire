@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { randomUUID } from 'node:crypto'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
-import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
+import { GFS_RECENT_FILES_LOCATION, GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
@@ -586,11 +586,22 @@ describe('FilesPage', () => {
 
     renderFilesPage()
 
+    const row = screen.getByRole('button', { name: 'Open Product' })
+    fireEvent.click(row)
+    fireEvent.keyDown(row, { key: 'Enter' })
+    const sizeCell = row.querySelector('.da-gfs-drive__size')
+    expect(sizeCell).toBeTruthy()
+    fireEvent.click(sizeCell!)
+    expect(openResource).toHaveBeenCalledTimes(3)
+
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Product' }))
     })
 
     expect(openResource).toHaveBeenCalledWith(expect.objectContaining({ resourceId: 'folder-1' }))
+    expect(openResource).toHaveBeenCalledTimes(4)
+    fireEvent.click(within(row).getByRole('button', { name: 'Options for Product' }))
+    expect(openResource).toHaveBeenCalledTimes(4)
     expect(screen.queryByRole('tab')).toBeNull()
   })
 
@@ -8390,6 +8401,18 @@ describe('FilesPage', () => {
       )
     })
 
+    it('opens Recent files as its own tab without resolving a GFS URI', () => {
+      const { controller, onLocationChange, onPendingGfsUriHandled } =
+        renderAt(GFS_RECENT_FILES_LOCATION)
+      expect(screen.getByRole('heading', { name: 'Recent files', level: 2 })).toBeTruthy()
+      expect(screen.getByRole('region', { name: 'Recent files' })).toBeTruthy()
+      expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
+      expect(screen.queryByRole('region', { name: 'EvenDrive browser' })).toBeNull()
+      expect(controller.openUri).not.toHaveBeenCalled()
+      expect(onPendingGfsUriHandled).toHaveBeenCalledTimes(1)
+      expect(onLocationChange).toHaveBeenLastCalledWith(GFS_RECENT_FILES_LOCATION, 'Recent files')
+    })
+
     it('shows the home and what others share in the overview, and narrows to Shared with me from the trail', () => {
       const { controller, onLocationChange } = renderAt(null)
       expect(screen.getByRole('region', { name: 'My home' })).toBeTruthy()
@@ -9112,6 +9135,18 @@ describe('FilesPage recent files card (D1, D17, D20)', () => {
     renderFilesPage(undefined, onOpenPreview)
 
     fireEvent.click(screen.getByRole('button', { name: 'Open diagram.png' }))
+
+    expect(onOpenPreview).toHaveBeenCalledWith(
+      expect.objectContaining({ gfsUri: 'gfs://main/recent-1' })
+    )
+  })
+
+  it('opens a recent file from the separate Recent files view', () => {
+    withRecent()
+    const onOpenPreview = vi.fn()
+    renderFilesPage(undefined, onOpenPreview, GFS_RECENT_FILES_LOCATION)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open recent-1.txt' }))
 
     expect(onOpenPreview).toHaveBeenCalledWith(
       expect.objectContaining({ gfsUri: 'gfs://main/recent-1' })

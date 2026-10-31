@@ -38,6 +38,8 @@ import {
 import {
   GFS_DEFAULT_DISCOVERY_DRIVE,
   GFS_MY_HOME_LABEL,
+  GFS_RECENT_FILES_LABEL,
+  GFS_RECENT_FILES_LOCATION,
   GFS_RESOURCE_DRAG_TYPE,
   GFS_SHARED_WITH_ME_LABEL,
   GFS_SHARED_WITH_ME_LOCATION,
@@ -402,11 +404,12 @@ export function FilesPage({
   const [renameTarget, setRenameTarget] = useState<GfsActionTarget | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
-  // What the root shows: the EvenDrive overview (the caller's home and what
-  // others share) or only what others share. Seeded from the tab location.
-  const [rootView, setRootView] = useState<'overview' | 'shared'>(() =>
-    pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION ? 'shared' : 'overview'
-  )
+  // Client-only views are seeded from the tab location, never resolved as GFS URIs.
+  const [rootView, setRootView] = useState<'overview' | 'shared' | 'recent'>(() => {
+    if (pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION) return 'shared'
+    if (pendingGfsUri === GFS_RECENT_FILES_LOCATION) return 'recent'
+    return 'overview'
+  })
   const [pendingGfsDeepLinkFailure, setPendingGfsDeepLinkFailure] = useState<{
     id: number
     message: string
@@ -1759,7 +1762,10 @@ export function FilesPage({
     if (!pendingGfsUri) return
     // A view id, not a resource: nothing to resolve. The page is keyed by its
     // tab, so this seed only arrives on mount, where `rootView` already took it.
-    if (pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION) {
+    if (
+      pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION ||
+      pendingGfsUri === GFS_RECENT_FILES_LOCATION
+    ) {
       onPendingGfsUriHandled?.()
       return
     }
@@ -1881,6 +1887,10 @@ export function FilesPage({
     }
     if (currentGfsUri === null && rootView === 'shared') {
       onLocationChange?.(GFS_SHARED_WITH_ME_LOCATION, GFS_SHARED_WITH_ME_LABEL)
+      return
+    }
+    if (currentGfsUri === null && rootView === 'recent') {
+      onLocationChange?.(GFS_RECENT_FILES_LOCATION, GFS_RECENT_FILES_LABEL)
       return
     }
     onLocationChange?.(currentGfsUri, currentName)
@@ -3055,7 +3065,9 @@ export function FilesPage({
   }, [accessibleResources, ctrl.home, current, currentIsFolder, items])
   const myHome = useMemo(
     () =>
-      current || rootView === 'shared' ? null : callerHomeRootNode(ctrl.home, accessibleResources),
+      current || rootView !== 'overview'
+        ? null
+        : callerHomeRootNode(ctrl.home, accessibleResources),
     [accessibleResources, ctrl.home, current, rootView]
   )
   // The controller owns current-view loading semantics, including the
@@ -3236,9 +3248,8 @@ export function FilesPage({
     void handleDownload(resource.gfsUri, resource.name)
   }
 
-  // The card belongs to the overview only (D1): not in a folder, not in Shared
-  // with me, and not while the session's authority is revoked.
-  const showRecentFiles = !current && rootView === 'overview' && !accessRevoked
+  const recentOnly = !current && rootView === 'recent'
+  const showRecentFiles = !current && rootView !== 'shared' && !accessRevoked
   const resourceMenuActionsFor = (resource: GfsDriveResource) => {
     const isDirectory = resource.kind === 'directory'
     const canPreview =
@@ -3298,8 +3309,16 @@ export function FilesPage({
     <section className="page da-gfs-page">
       <GfsResourceTitlebarActions
         target={titlebarLeadingTarget}
-        onRefresh={current ? () => void handleRefreshCurrent() : () => void ctrl.retryDiscovery()}
-        refreshing={current ? refreshingCurrent : visibleLoading}
+        onRefresh={
+          recentOnly
+            ? () => ctrl.refreshRecentFiles()
+            : current
+              ? () => void handleRefreshCurrent()
+              : () => void ctrl.retryDiscovery()
+        }
+        refreshing={
+          recentOnly ? ctrl.fetchingRecentFiles : current ? refreshingCurrent : visibleLoading
+        }
         onCopyLink={current ? () => void handleCopyLink(current.gfsUri) : undefined}
         onOpenLink={() => setOpenLinkOpen(true)}
       />
@@ -3310,8 +3329,12 @@ export function FilesPage({
         {dropVerdictAnnouncement}
       </p>
       <div className="page-header">
-        <h2>Files</h2>
-        <p className="muted">Browse and manage everything shared with you in one place.</p>
+        <h2>{recentOnly ? GFS_RECENT_FILES_LABEL : 'Files'}</h2>
+        <p className="muted">
+          {recentOnly
+            ? 'Files you or your agents opened or changed, most recent first.'
+            : 'Browse and manage everything shared with you in one place.'}
+        </p>
       </div>
 
       <div className="page-layout da-gfs-layout">
@@ -3345,6 +3368,7 @@ export function FilesPage({
         <section
           className="page-card da-gfs-drive"
           aria-label="EvenDrive browser"
+          hidden={recentOnly && !accessRevoked}
           aria-busy={driveBusy}
           onDragEnter={handleGfsDragEnter}
           onDragLeave={handleGfsDragLeave}

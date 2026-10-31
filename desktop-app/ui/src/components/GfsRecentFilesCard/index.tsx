@@ -1,10 +1,8 @@
-import { useState } from 'react'
 import { Button, EmptyState } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
-import { GFS_RECENT_FILES_LABEL, GFS_RECENT_FILES_PAGE_SIZE } from '@constants/gfsBrowser'
+import { GFS_RECENT_FILES_LABEL, GFS_RECENT_FILES_VISIBLE_LIMIT } from '@constants/gfsBrowser'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
-import { formatRelativeTime } from '@lib/format'
 import { GFS_LISTING_GRID_COLUMNS } from '@lib/gfsListingGrid'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import type { GfsRecentFileRow, GfsRecentFilesCardProps } from './types'
@@ -14,18 +12,29 @@ function activityTitle(iso: string): string {
   return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString()
 }
 
+function activityLabel(iso: string): string {
+  const activity = new Date(iso)
+  if (Number.isNaN(activity.getTime())) return iso
+  const now = new Date()
+  const sameDay =
+    activity.getFullYear() === now.getFullYear() &&
+    activity.getMonth() === now.getMonth() &&
+    activity.getDate() === now.getDate()
+  return sameDay
+    ? activity.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : activity.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
+}
+
 /**
- * The EvenDrive overview's "Recent files" card (D1, D11, D17, D20).
+ * The "Recent files" card used by the EvenDrive overview and its own view.
  *
  * It reuses the listing's grid and row contract — the same template constant,
  * the same `.da-grid__row--clickable` behaviour, the same name/size cells — so
  * it reads as the same surface as the browser card. The only new lane is "Your
  * activity" (D11), which takes the listing's actions lane.
  *
- * Paging is client-side (D20): the API returns the whole list (at most 100) and
- * the card reveals ten rows at a time with the Files page's "Load more" control.
- * `visibleCount` lives here, so leaving the overview resets it, while a refetch
- * of a mounted card keeps what the user already revealed.
+ * Both views show only the five newest entries. The backend retains its
+ * existing history.
  */
 export function GfsRecentFilesCard({
   files,
@@ -35,9 +44,7 @@ export function GfsRecentFilesCard({
   onRetry,
   onOpen,
 }: GfsRecentFilesCardProps) {
-  const [visibleCount, setVisibleCount] = useState(GFS_RECENT_FILES_PAGE_SIZE)
-  const shown = files.slice(0, visibleCount)
-  const hasMore = files.length > visibleCount
+  const shown = files.slice(0, GFS_RECENT_FILES_VISIBLE_LIMIT)
 
   return (
     <section
@@ -124,23 +131,12 @@ export function GfsRecentFilesCard({
                     dateTime={file.lastActivityAt}
                     title={activityTitle(file.lastActivityAt)}
                   >
-                    {formatRelativeTime(file.lastActivityAt)}
+                    {activityLabel(file.lastActivityAt)}
                   </time>
                 </div>
               ))}
             </div>
           </div>
-          {hasMore ? (
-            <div className="da-gfs-footer-actions">
-              <Button
-                onClick={() => setVisibleCount(count => count + GFS_RECENT_FILES_PAGE_SIZE)}
-                size="sm"
-                variant="outline"
-              >
-                Load more
-              </Button>
-            </div>
-          ) : null}
         </>
       )}
     </section>
