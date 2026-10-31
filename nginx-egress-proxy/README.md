@@ -40,10 +40,11 @@ For each remote McpServer, host-context-controller:
    strips as forbidden; `spec.envSecret`; `envMapping`; or a placeholder of
    `spec.remote.authHeaders`); an undeclared name is rejected, because it would
    otherwise survive into the rendered config, where NGINX resolves it as one of
-   its own variables. The path takes no placeholders and must not contain `$`
-   (or the other characters the query check rejects: `\`, `;`, `{`, `}`,
-   control characters and space), because it is rendered into the NGINX
-   template unquoted. The value of a query placeholder must use only
+   its own variables. The path takes no placeholders. Before the path check,
+   the URL parser converts `\` to `/` and percent-encodes braces, spaces, and
+   control characters, so the check rejects `$` and `;` in practice because
+   they would change the unquoted NGINX template. The value of a query
+   placeholder must use only
    `[A-Za-z0-9._~-]` and complete `%XX` escapes; store any other character
    percent-encoded. The proxy never encodes a value, and an already
    percent-encoded value is passed through unchanged.
