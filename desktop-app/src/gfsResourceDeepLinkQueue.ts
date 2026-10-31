@@ -61,10 +61,10 @@ export class GfsResourceDeepLinkQueue {
   }
 }
 
-export function createLogoutWithGfsResourceDeepLinkClear(
+export function createLogoutWithGfsResourceDeepLinkClear<T>(
   queue: GfsResourceDeepLinkQueue,
-  logout: () => Promise<number>
-): () => Promise<number> {
+  logout: () => Promise<T>
+): () => Promise<T> {
   return async () => {
     queue.clear()
     try {
