@@ -1612,17 +1612,27 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await expect(nav.recentLoadMore()).toBeVisible()
         await nav.recentLoadMore().click()
         await expect(nav.recentRows()).toHaveCount(20)
-        await expect(nav.recentRows().nth(19)).toHaveAccessibleName(`Open ${newest[19]}`)
+        await expect
+          .poll(() =>
+            nav.recentRows().evaluateAll(rows => rows.map(row => row.getAttribute('aria-label')))
+          )
+          .toEqual(newest.slice(0, 20).map(name => `Open ${name}`))
         await nav.recentLoadMore().click()
         await expect(nav.recentRows()).toHaveCount(24)
-        await expect(nav.recentRows().nth(23)).toHaveAccessibleName(`Open ${newest[23]}`)
+        await expect
+          .poll(() =>
+            nav.recentRows().evaluateAll(rows => rows.map(row => row.getAttribute('aria-label')))
+          )
+          .toEqual(newest.map(name => `Open ${name}`))
         await expect(nav.recentLoadMore()).toHaveCount(0)
       })
       await test.step('J7b-3 the card grows and the page scrolls, with no internal cap', async () => {
         const nav = new DesktopFilesNav(page)
         const heading = nav.recentFiles().getByRole('heading', { name: 'Recent files' })
         await heading.scrollIntoViewIfNeeded()
-        const lastRow = nav.recentRows().last()
+        const lastRow = nav
+          .recentFiles()
+          .getByRole('button', { name: `Open ${names[0]}`, exact: true })
         // Precondition: the default window cannot show all 24 rows at once.
         await expect(lastRow).not.toBeInViewport()
         await lastRow.scrollIntoViewIfNeeded()
