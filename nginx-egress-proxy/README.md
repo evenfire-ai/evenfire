@@ -283,9 +283,10 @@ Image tag scope: the filter and the template change described above do not move
 the image tag. `deploy/base` and `scripts/validate-nginx-images.sh` keep
 `clerum/nginx-egress-proxy:0.1.0`. Deployed environments pin per-commit
 `sha-<short>` tags, so the new filter and the new template line reach a cluster
-together, with the commit that carries them. HCC puts no ConfigMap hash on the
-pod template, so a ConfigMap update alone would not roll a pod; the per-commit
-tag is what rolls it. The T2 lane builds
+together, with the commit that carries them. HCC also records the rendered
+ConfigMap digest on the remote pod template, so a ConfigMap-only template
+change rolls the pod. The per-commit image tag remains necessary to keep HCC
+and this image paired when their code changes together. The T2 lane builds
 `clerum/nginx-egress-proxy:test`.
 
 <!-- auto-deploy proof: OSS dev → build → mirror → infra apply (2026-07-22) -->
