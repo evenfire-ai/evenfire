@@ -64,6 +64,14 @@ describe('GfsRecentFilesCard overview limit', () => {
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
   })
 
+  it('shows ten in the overview when the layout has room', () => {
+    renderCard({ overviewLimit: 10 })
+    expect(rows().map(row => row.getAttribute('aria-label'))).toEqual(
+      many.slice(0, 10).map(item => `Open ${item.name}`)
+    )
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+  })
+
   it('updates the five visible files when a refetch reorders the list', () => {
     const { rerender, onOpen } = renderCard()
     expect(rows()).toHaveLength(5)

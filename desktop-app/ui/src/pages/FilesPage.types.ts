@@ -44,6 +44,8 @@ export interface FilesPageProps {
    * `gfsUri` carries no name, hence the second argument.
    */
   onLocationChange?: (gfsUri: string | null, name: string | null) => void
+  /** Open an overview destination in its own Files tab. */
+  onOpenFilesSection?: (location: string | null, focusTab?: boolean) => void
   /** Monotonic signal from the app-level entity stream for live path reconciliation. */
   remoteGfsChangeEpoch?: number
   /**

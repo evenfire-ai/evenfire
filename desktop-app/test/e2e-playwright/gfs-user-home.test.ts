@@ -1380,7 +1380,6 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         const nav = new DesktopFilesNav(page)
         await nav.expectRecentFiles([f3, f2, f1])
         expect(fx.recentActivity(owner.id).map(row => row.resourceId)).toEqual([f3Id, f2Id, f1Id])
-        await nav.expectRecentGridMatchesBrowser()
       })
       const ownerActivity = fx.recentActivity(owner.id)
       const ownerTimestamps = new Map(
@@ -1610,13 +1609,37 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         const timestamps = activity.map(row => row.lastActivityAt)
         expect(new Set(timestamps).size).toBe(24)
       })
-      await test.step('J7b-2 the overview shows only the five newest files', async () => {
+      await test.step('J7b-2 the overview fits recent files and both destinations', async () => {
         const nav = new DesktopFilesNav(page)
         const newest = [...names].reverse()
-        await nav.expectRecentFiles(newest.slice(0, 5))
+        await nav.openEvenDriveOverview()
+        await expect(nav.recentFiles()).toHaveAttribute('aria-busy', 'false')
+        await expect.poll(async () => [5, 10].includes(await nav.recentRows().count())).toBe(true)
+        const overviewCount = await nav.recentRows().count()
+        await nav.expectRecentFiles(newest.slice(0, overviewCount))
         await expect(nav.recentFiles().getByRole('button', { name: 'Load more' })).toHaveCount(0)
         await expect(page.getByRole('region', { name: 'My home' })).toBeInViewport({ ratio: 1 })
-        await expect(page.getByRole('navigation', { name: 'File location' })).toBeInViewport()
+        await expect(page.getByRole('region', { name: 'Shared with me' })).toBeInViewport({
+          ratio: 1,
+        })
+        await page.getByRole('region', { name: 'My home' }).getByRole('button').click()
+        await expect(
+          page
+            .getByRole('toolbar', { name: 'Workspace tabs' })
+            .getByRole('button', { name: 'My home', exact: true })
+        ).toHaveAttribute('aria-pressed', 'true')
+        await nav.openEvenDriveOverview()
+        await page.getByRole('region', { name: 'Shared with me' }).getByRole('button').focus()
+        await page.keyboard.press('Enter')
+        const sharedTab = page
+          .getByRole('toolbar', { name: 'Workspace tabs' })
+          .getByRole('button', {
+            name: 'Shared with me',
+            exact: true,
+          })
+        await expect(sharedTab).toHaveAttribute('aria-pressed', 'true')
+        await expect(sharedTab).toBeFocused()
+        await nav.openEvenDriveOverview()
       })
       await test.step('J7b-3 the sidebar opens a separate view with activity times and Load more', async () => {
         const nav = new DesktopFilesNav(page)

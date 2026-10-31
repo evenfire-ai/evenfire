@@ -149,9 +149,9 @@ When an agent produces files, they appear under the answer in a
 
 ## EvenDrive
 
-**EvenDrive** in the sidebar opens the **Files** page. It shows your
-**My home** folder and the list of everything that has been shared with you.
-Under **EvenDrive** in the sidebar, **My home** opens your own folder and
+**EvenDrive** in the sidebar opens the **Files** overview with recent files and
+links to **My home** and **Shared with me**. Under **EvenDrive** in the sidebar,
+**My home** opens your own folder and
 **Shared with me** opens only what others share; the folders of each are
 listed below it. Click a folder to go into it. The breadcrumb at the top shows
 where you are.
@@ -178,9 +178,10 @@ where you are.
   **Open EvenDrive link** lets you paste a link to go straight to that item.
 - **Recent files.** The EvenDrive overview starts with **Recent files**: files
   you opened, downloaded or changed, and files an agent read, changed or copied
-  in your Desktop chats, most recent first. The overview and the separate
-  **Recent files** sidebar view show the five most recent files initially. In
-  the separate view, **Load more** reveals five more at a time. Each row shows
+  in your Desktop chats, most recent first. The overview shows up to ten when
+  both destination links fit on screen, or five otherwise. The separate
+  **Recent files** view starts with five; **Load more** reveals five more at a
+  time. Each row shows
   the local time of its last activity and, for an earlier day, the date. It
   lists only files you can still read, it is
   private to you, it keeps your 100 most recent files, and it is deleted with

@@ -33,11 +33,12 @@ function activityLabel(iso: string): string {
  * it reads as the same surface as the browser card. The only new lane is "Your
  * activity" (D11), which takes the listing's actions lane.
  *
- * The overview stays at five entries; the dedicated view can reveal more.
+ * The overview adapts between five and ten; the dedicated view can reveal more.
  */
 export function GfsRecentFilesCard({
   files,
   expandable = false,
+  overviewLimit = GFS_RECENT_FILES_VISIBLE_LIMIT,
   visibleCount: savedVisibleCount,
   onVisibleCountChange,
   loading,
@@ -53,7 +54,7 @@ export function GfsRecentFilesCard({
   const [dayAnchor, setDayAnchor] = useState(() => Date.now())
   const rowsById = useRef(new Map<string, HTMLButtonElement>())
   const pendingFocusId = useRef<string | null>(null)
-  const shown = files.slice(0, expandable ? visibleCount : GFS_RECENT_FILES_VISIBLE_LIMIT)
+  const shown = files.slice(0, expandable ? visibleCount : overviewLimit)
   const hasMore = expandable && files.length > visibleCount
 
   useEffect(() => {
@@ -91,7 +92,9 @@ export function GfsRecentFilesCard({
       aria-busy={fetching}
     >
       <div className="page-card__header da-gfs-drive__header">
-        <h3 className="da-gfs-section-title">{GFS_RECENT_FILES_LABEL}</h3>
+        <h3 className={`da-gfs-section-title${expandable ? ' da-gfs-section-title--current' : ''}`}>
+          {GFS_RECENT_FILES_LABEL}
+        </h3>
       </div>
       <p className="visually-hidden" role="status" aria-live="polite">
         {announcement}

@@ -16,6 +16,8 @@ export type GfsRecentFilesCardProps = {
   files: readonly GfsRecentFileRow[]
   /** Allow the dedicated view to reveal more history in groups of five. */
   expandable?: boolean
+  /** The overview may show up to ten when its destination rows fit. */
+  overviewLimit?: number
   visibleCount?: number
   onVisibleCountChange?: (count: number) => void
   loading: boolean

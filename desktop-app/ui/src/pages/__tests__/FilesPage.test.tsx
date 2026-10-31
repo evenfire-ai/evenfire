@@ -131,9 +131,10 @@ function baseController() {
 function renderFilesPage(
   pushToast?: (message: string, tone: Tone) => void,
   onOpenPreview?: (preview: unknown) => void,
-  pendingGfsUri?: string | null,
+  pendingGfsUri: string | null = GFS_SHARED_WITH_ME_LOCATION,
   onPendingGfsUriHandled?: () => void,
-  titlebarLeadingTarget?: HTMLElement | null
+  titlebarLeadingTarget?: HTMLElement | null,
+  onOpenFilesSection: (location: string | null, focusTab?: boolean) => void = vi.fn()
 ) {
   const clerum = (window as unknown as { clerum?: Record<string, unknown> }).clerum
   if (clerum) {
@@ -161,6 +162,7 @@ function renderFilesPage(
         pendingGfsUri={pendingGfsUri}
         onPendingGfsUriHandled={onPendingGfsUriHandled}
         titlebarLeadingTarget={titlebarLeadingTarget}
+        onOpenFilesSection={onOpenFilesSection}
       />
     </QueryClientProvider>
   )
@@ -5220,7 +5222,7 @@ describe('FilesPage', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const makeElement = () => (
       <QueryClientProvider client={queryClient}>
-        <FilesPage />
+        <FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
       </QueryClientProvider>
     )
     const { rerender } = render(makeElement())
@@ -8326,12 +8328,11 @@ describe('FilesPage', () => {
       bytes: 0,
       permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
     })
-    const openResource = vi.fn()
+    const onOpenFilesSection = vi.fn()
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
       accessibleResources: [row('alpha-1', 'Alpha shared'), row('home-1', 'fixture')],
-      openResource,
     })
     renderFilesPage()
     const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
@@ -8339,11 +8340,11 @@ describe('FilesPage', () => {
     expect(within(shared).getAllByText('Alpha shared').length).toBeGreaterThan(0)
     expect(within(shared).queryByText('My home')).toBeNull()
     expect(within(shared).queryByText('fixture')).toBeNull()
+    cleanup()
+    renderFilesPage(undefined, undefined, null, undefined, undefined, onOpenFilesSection)
     const myHome = screen.getByRole('region', { name: 'My home' })
     fireEvent.click(within(myHome).getByRole('button', { name: 'My home' }))
-    expect(openResource).toHaveBeenCalledWith(
-      expect.objectContaining({ resourceId: 'home-1', name: 'My home' })
-    )
+    expect(onOpenFilesSection).toHaveBeenCalledWith('gfs://main/home-1', true)
   })
 
   describe('EvenDrive overview and the Shared with me view', () => {
@@ -8370,16 +8371,18 @@ describe('FilesPage', () => {
       hookMock.useGfsBrowserController.mockReturnValue(controller)
       const onLocationChange = vi.fn()
       const onPendingGfsUriHandled = vi.fn()
+      const onOpenFilesSection = vi.fn()
       render(
         <QueryClientProvider client={new QueryClient()}>
           <FilesPage
             pendingGfsUri={pendingGfsUri}
             onLocationChange={onLocationChange}
             onPendingGfsUriHandled={onPendingGfsUriHandled}
+            onOpenFilesSection={onOpenFilesSection}
           />
         </QueryClientProvider>
       )
-      return { controller, onLocationChange, onPendingGfsUriHandled }
+      return { controller, onLocationChange, onPendingGfsUriHandled, onOpenFilesSection }
     }
 
     it('shows only what others share in the Shared with me view, without resolving it', () => {
@@ -8407,7 +8410,9 @@ describe('FilesPage', () => {
         renderAt(GFS_RECENT_FILES_LOCATION)
       expect(screen.getByRole('heading', { name: 'Files', level: 2 })).toBeTruthy()
       expect(screen.getByRole('region', { name: 'Recent files' })).toBeTruthy()
-      expect(screen.getByRole('heading', { name: 'Recent files', level: 3 })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: 'Recent files', level: 3 }).className).toContain(
+        'da-gfs-section-title--current'
+      )
       expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
       expect(screen.queryByRole('region', { name: 'EvenDrive browser' })).toBeNull()
       expect(controller.openUri).not.toHaveBeenCalled()
@@ -8436,19 +8441,19 @@ describe('FilesPage', () => {
       expect(retryRecentFiles).not.toHaveBeenCalled()
     })
 
-    it('shows the home and what others share in the overview, and narrows to Shared with me from the trail', () => {
-      const { controller, onLocationChange } = renderAt(null)
+    it('opens My home and Shared with me from overview destinations without listing their contents', () => {
+      const { controller, onLocationChange, onOpenFilesSection } = renderAt(null)
       expect(screen.getByRole('region', { name: 'My home' })).toBeTruthy()
       expect(onLocationChange).toHaveBeenLastCalledWith(null, null)
-      const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
-      fireEvent.click(within(shared).getByRole('button', { name: 'Shared with me' }))
-      expect(controller.reset).toHaveBeenCalledTimes(1)
-      expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
-      expect(within(shared).getAllByText('Alpha shared').length).toBeGreaterThan(0)
-      expect(onLocationChange).toHaveBeenLastCalledWith(
-        GFS_SHARED_WITH_ME_LOCATION,
-        'Shared with me'
+      expect(screen.queryByText('Alpha shared')).toBeNull()
+      fireEvent.click(within(screen.getByRole('region', { name: 'My home' })).getByRole('button'))
+      expect(onOpenFilesSection).toHaveBeenLastCalledWith('gfs://main/home-1', true)
+      fireEvent.click(
+        within(screen.getByRole('region', { name: 'Shared with me' })).getByRole('button')
       )
+      expect(onOpenFilesSection).toHaveBeenLastCalledWith(GFS_SHARED_WITH_ME_LOCATION, true)
+      expect(controller.reset).not.toHaveBeenCalled()
+      expect(onLocationChange).toHaveBeenLastCalledWith(null, null)
     })
 
     it('keeps My home visible while provisioning and when it needs attention', () => {
@@ -9129,9 +9134,9 @@ describe('FilesPage recent files card (D1, D17, D20)', () => {
     })
   }
 
-  it('renders the card before My home, with the listing grid template', () => {
+  it('renders recent files before the two overview destinations', () => {
     withRecent()
-    renderFilesPage()
+    renderFilesPage(undefined, undefined, null)
 
     const recent = screen.getByRole('region', { name: 'Recent files' })
     const home = screen.getByRole('region', { name: 'My home' })
@@ -9139,17 +9144,18 @@ describe('FilesPage recent files card (D1, D17, D20)', () => {
 
     const heading = within(recent).getByRole('heading', { name: 'Recent files' })
     expect(heading.tagName).toBe('H3')
+    const homeTitle = within(home).getByRole('button', { name: 'My home' })
+    const sharedTitle = within(screen.getByRole('region', { name: 'Shared with me' })).getByRole(
+      'button'
+    )
+    expect(heading.className).toContain('da-gfs-section-title')
+    expect(homeTitle.className).toContain('da-gfs-overview-destination')
+    expect(sharedTitle.className).toContain('da-gfs-overview-destination')
+    expect(homeTitle.className).toBe(sharedTitle.className)
 
     const recentGrid = recent.querySelector('.da-grid.da-gfs-drive__grid') as HTMLElement | null
-    const browserGrid = document
-      .querySelector('.da-gfs-page .da-gfs-drive')
-      ?.querySelector('.da-grid.da-gfs-drive__grid') as HTMLElement | null
     expect(recentGrid).toBeTruthy()
-    expect(browserGrid).toBeTruthy()
     expect(recentGrid!.style.getPropertyValue('--da-grid-cols')).toBe(GFS_LISTING_GRID_COLUMNS)
-    expect(browserGrid!.style.getPropertyValue('--da-grid-cols')).toBe(
-      recentGrid!.style.getPropertyValue('--da-grid-cols')
-    )
   })
 
   it('refreshes both recent files and discovery from the overview toolbar', () => {
@@ -9159,7 +9165,7 @@ describe('FilesPage recent files card (D1, D17, D20)', () => {
     const target = document.createElement('div')
     document.body.appendChild(target)
     try {
-      renderFilesPage(undefined, undefined, undefined, undefined, target)
+      renderFilesPage(undefined, undefined, null, undefined, target)
       fireEvent.click(within(target).getByRole('button', { name: 'Refresh' }))
       expect(refreshRecentFiles).toHaveBeenCalledOnce()
       expect(retryDiscovery).toHaveBeenCalledOnce()
@@ -9181,7 +9187,7 @@ describe('FilesPage recent files card (D1, D17, D20)', () => {
     const target = document.createElement('div')
     document.body.appendChild(target)
     try {
-      renderFilesPage(undefined, undefined, undefined, undefined, target)
+      renderFilesPage(undefined, undefined, null, undefined, target)
       const refresh = within(target).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement
       expect(refresh.disabled).toBe(true)
       act(() => vi.advanceTimersByTime(5_000))
@@ -9207,7 +9213,7 @@ describe('FilesPage recent files card (D1, D17, D20)', () => {
       ],
     })
     const onOpenPreview = vi.fn()
-    renderFilesPage(undefined, onOpenPreview)
+    renderFilesPage(undefined, onOpenPreview, null)
 
     fireEvent.click(screen.getByRole('button', { name: 'Open diagram.png' }))
 
@@ -9253,7 +9259,7 @@ describe('FilesPage recent files card (D1, D17, D20)', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
 
-    renderFilesPage()
+    renderFilesPage(undefined, undefined, null)
 
     fireEvent.click(screen.getByRole('button', { name: 'Open archive.zip' }))
 
@@ -9266,9 +9272,7 @@ describe('FilesPage recent files card (D1, D17, D20)', () => {
   it('is absent outside the overview', () => {
     // Shared with me: the card belongs to the overview only.
     hookMock.useGfsBrowserController.mockReturnValue({ ...baseController() })
-    renderFilesPage()
-    const browser = document.querySelector('.da-gfs-page .da-gfs-drive') as HTMLElement
-    fireEvent.click(within(browser).getByRole('button', { name: 'Shared with me' }))
+    renderFilesPage(undefined, undefined, GFS_SHARED_WITH_ME_LOCATION)
     expect(screen.queryByRole('region', { name: 'Recent files' })).toBeNull()
 
     cleanup()

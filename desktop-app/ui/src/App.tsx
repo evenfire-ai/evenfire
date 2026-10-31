@@ -1298,6 +1298,23 @@ export function App() {
       : null
   const activeFilesTabIdRef = React.useRef<string | null>(null)
   activeFilesTabIdRef.current = activeFilesTabId
+  const focusFilesTabAfterOpenRef = React.useRef(false)
+  const handleOverviewDestination = React.useCallback(
+    (location: string | null, focusTab = false) => {
+      focusFilesTabAfterOpenRef.current = focusTab
+      vm.openFilesSection(location)
+    },
+    [vm.openFilesSection]
+  )
+  React.useLayoutEffect(() => {
+    if (!focusFilesTabAfterOpenRef.current || !activeFilesTabId) return
+    focusFilesTabAfterOpenRef.current = false
+    document
+      .querySelector<HTMLElement>(
+        '[aria-label="Workspace tabs"] .chat-view-tab.is-active .chat-view-tab__select'
+      )
+      ?.focus()
+  }, [activeFilesTabId])
   const handleRecentVisibleCountChange = React.useCallback(
     (count: number) => {
       const ownerTabId = activeFilesTabIdRef.current
@@ -4404,6 +4421,7 @@ export function App() {
                                       onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
                                       remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                       onLocationChange={handleActiveFilesLocationChange}
+                                      onOpenFilesSection={handleOverviewDestination}
                                       onOpenPreview={vm.openPreviewSection}
                                       onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
                                       routeDialogRequestId={gfsRouteDialogRequestId}

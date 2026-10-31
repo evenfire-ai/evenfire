@@ -8,7 +8,7 @@ export class DesktopFilesNav {
 
   async openFiles(): Promise<void> {
     await openResourcesNavItem(this.page, 'nav-files')
-    await expect(this.page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
+    await expect(this.page.getByRole('heading', { name: 'Files', level: 2 })).toBeVisible()
     await humanRecordedPause([600, 1200])
   }
 
@@ -110,7 +110,7 @@ export class DesktopFilesNav {
     return this.recentFiles().getByRole('button', { name: /^Open / })
   }
 
-  /** The overview shows at most five recent names. */
+  /** The overview shows at most ten recent names, subject to available space. */
   async expectRecentFiles(names: string[]): Promise<void> {
     await this.openEvenDriveOverview()
     await expect(this.recentFiles()).toHaveAttribute('aria-busy', 'false')
@@ -146,28 +146,6 @@ export class DesktopFilesNav {
     await this.openSharedWithMe()
     await expect(this.recentFiles()).toHaveCount(0)
     await humanRecordedPause([400, 800])
-  }
-
-  /**
-   * The card and the browser card declare the same column template. Compared as
-   * the `--da-grid-cols` value they declare, not as resolved pixel tracks: the
-   * two cards have different frames (the browser card has no padding or border)
-   * and the same template resolves to different pixel widths inside them.
-   */
-  async expectRecentGridMatchesBrowser(): Promise<void> {
-    const declared = (locator: ReturnType<Page['locator']>) =>
-      locator.evaluate(element =>
-        getComputedStyle(element).getPropertyValue('--da-grid-cols').trim()
-      )
-    const recent = await declared(this.recentFiles().locator('.da-grid.da-gfs-drive__grid'))
-    const browser = await declared(
-      this.page
-        .getByRole('region', { name: 'EvenDrive browser' })
-        .locator('.da-grid.da-gfs-drive__grid')
-    )
-    expect(recent.length).toBeGreaterThan(0)
-    expect(browser).toBe(recent)
-    await humanRecordedPause([200, 400])
   }
 
   async openSharedWithMe(): Promise<void> {

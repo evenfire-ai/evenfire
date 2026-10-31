@@ -56,6 +56,7 @@ import {
   type GfsUriOpenFailure,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
+import { useRecentOverviewLimit } from '@hooks/useRecentOverviewLimit'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
 import {
   GFS_AUTHORITY_STALE_TIME_MS,
@@ -376,6 +377,7 @@ export function FilesPage({
   onPendingGfsDeepLinkOutcome,
   remoteGfsChangeEpoch,
   onLocationChange,
+  onOpenFilesSection,
   onOpenPreview,
   onOpenPendingGfsPreview,
   routeDialogRequestId = 0,
@@ -3059,12 +3061,13 @@ export function FilesPage({
     if (current) {
       return currentIsFolder ? sortDriveResources(items) : []
     }
+    if (rootView === 'overview') return []
     // Root view ("Shared with me"): only what others share with the caller.
     // The caller's own home is not shared with them; it has its own entry.
     return sortDriveResources(
       accessibleResources.filter(resource => !isCallerHomeRoot(ctrl.home, resource))
     )
-  }, [accessibleResources, ctrl.home, current, currentIsFolder, items])
+  }, [accessibleResources, ctrl.home, current, currentIsFolder, items, rootView])
   const myHome = useMemo(
     () =>
       current || rootView !== 'overview'
@@ -3075,9 +3078,11 @@ export function FilesPage({
   const showHomeSection =
     !current &&
     rootView === 'overview' &&
+    !accessRevoked &&
     ctrl.home?.state !== 'retired' &&
     Boolean(
       myHome ||
+      ctrl.authorityPending ||
       ctrl.loadingHome ||
       ctrl.homeError ||
       ctrl.home?.state === 'pending' ||
@@ -3262,6 +3267,7 @@ export function FilesPage({
   }
 
   const recentOnly = !current && rootView === 'recent'
+  const overviewOnly = !current && rootView === 'overview'
   const showRecentFiles =
     !current &&
     rootView !== 'shared' &&
@@ -3272,6 +3278,26 @@ export function FilesPage({
     recentAuthorityFailure ?? (ctrl.authorityPending ? null : ctrl.recentFilesFailure)
   const recentLoading =
     (ctrl.authorityPending && !recentAuthorityFailure) || ctrl.loadingRecentFiles
+  const overviewLayoutRef = useRef<HTMLDivElement | null>(null)
+  const overviewContentKey = JSON.stringify({
+    files: ctrl.recentFiles
+      .slice(0, 10)
+      .map(file => [file.resourceId, file.name, file.lastActivityAt]),
+    showHomeSection,
+    homeState: ctrl.home?.state,
+    homeError: ctrl.homeError,
+    loadingHome: ctrl.loadingHome,
+    authorityPending: ctrl.authorityPending,
+    discoveryFailure: ctrl.discoveryFailure,
+    accessibleNotice,
+    visibleError: visibleError ? describeGfsReadError(visibleError).message : null,
+  })
+  const overviewLimit = useRecentOverviewLimit(
+    overviewLayoutRef,
+    overviewOnly && showRecentFiles,
+    ctrl.recentFiles.length,
+    overviewContentKey
+  )
   const refreshBlockedUntil = Math.max(
     !current && ctrl.discoveryFailure?.kind === 'rate-limited'
       ? (ctrl.discoveryFailure.retryAvailableAt ?? 0)
@@ -3382,10 +3408,11 @@ export function FilesPage({
         <p className="muted">Browse your files and resources shared with you.</p>
       </div>
 
-      <div className="page-layout da-gfs-layout">
+      <div className="page-layout da-gfs-layout" ref={overviewLayoutRef}>
         {showRecentFiles ? (
           <GfsRecentFilesCard
             expandable={recentOnly}
+            overviewLimit={overviewLimit}
             visibleCount={recentOnly ? recentVisibleCount : undefined}
             onVisibleCountChange={recentOnly ? onRecentVisibleCountChange : undefined}
             failure={recentFailure}
@@ -3403,22 +3430,19 @@ export function FilesPage({
         ) : null}
         {showHomeSection ? (
           <section className="page-card da-gfs-my-home" aria-label="My home">
-            <div className="page-card__header da-gfs-drive__header">
-              {myHome ? (
-                <Button
-                  align="start"
-                  className="da-gfs-drive__breadcrumb da-gfs-my-home__open"
-                  color="neutral"
-                  onClick={() => ctrl.openResource(myHome)}
-                  variant="text"
-                >
-                  <IconContexts aria-hidden="true" width={16} height={16} />
-                  {myHome.name}
-                </Button>
-              ) : (
-                <h3 className="da-gfs-section-title">My home</h3>
-              )}
-            </div>
+            <Button
+              align="between"
+              block
+              className="da-gfs-overview-destination"
+              data-gfs-overview-destination="home"
+              color="neutral"
+              disabled={!myHome || !onOpenFilesSection}
+              onClick={event => myHome && onOpenFilesSection?.(myHome.gfsUri, event.detail === 0)}
+              variant="ghost"
+            >
+              <span>My home</span>
+              <IconChevronRight aria-hidden="true" width={16} height={16} />
+            </Button>
             {!myHome && ctrl.homeError ? (
               <div role="alert">
                 <EmptyState title="Could not load My home" body={ctrl.homeError} />
@@ -3437,17 +3461,47 @@ export function FilesPage({
                   body="Your folder will appear here when it is ready."
                 />
               </div>
-            ) : !myHome && ctrl.loadingHome ? (
+            ) : !myHome &&
+              (ctrl.loadingHome || (ctrl.authorityPending && !ctrl.discoveryFailure)) ? (
               <div className="da-gfs-loading" role="status">
                 Loading My home…
               </div>
             ) : null}
           </section>
         ) : null}
+        {overviewOnly && !accessRevoked ? (
+          <section className="page-card da-gfs-overview-section" aria-label="Shared with me">
+            <Button
+              align="between"
+              block
+              className="da-gfs-overview-destination"
+              data-gfs-overview-destination="shared"
+              color="neutral"
+              disabled={!onOpenFilesSection}
+              onClick={event =>
+                onOpenFilesSection?.(GFS_SHARED_WITH_ME_LOCATION, event.detail === 0)
+              }
+              variant="ghost"
+            >
+              <span>{GFS_SHARED_WITH_ME_LABEL}</span>
+              <IconChevronRight aria-hidden="true" width={16} height={16} />
+            </Button>
+            {blockingDiscoveryFailure ? (
+              <GfsReadFailureCard
+                failure={blockingDiscoveryFailure}
+                onRetry={() => void ctrl.retryDiscovery()}
+              />
+            ) : accessibleNotice ? (
+              <StatusBanner tone="info" text={accessibleNotice} />
+            ) : visibleError ? (
+              <StatusBanner tone="error" text={describeGfsReadError(visibleError).message} />
+            ) : null}
+          </section>
+        ) : null}
         <section
           className={`page-card da-gfs-drive${!current && rootView === 'overview' ? ' da-gfs-drive--overview' : ''}`}
           aria-label="EvenDrive browser"
-          hidden={recentOnly && !accessRevoked}
+          hidden={(recentOnly || overviewOnly) && !accessRevoked}
           aria-busy={driveBusy}
           onDragEnter={handleGfsDragEnter}
           onDragLeave={handleGfsDragLeave}
@@ -3459,7 +3513,7 @@ export function FilesPage({
               <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
                 {homeTrail ? null : (
                   <Button
-                    className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root"
+                    className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root da-gfs-section-title"
                     color="neutral"
                     // In the Shared with me view this is the active crumb: inert,
                     // and styled as a view root like "My home" at the home root.
@@ -3497,7 +3551,9 @@ export function FilesPage({
                     ) : (
                       <Button
                         className={`da-gfs-drive__breadcrumb${
-                          homeTrail && index === 0 ? ' da-gfs-drive__breadcrumb--view-root' : ''
+                          homeTrail && index === 0
+                            ? ' da-gfs-drive__breadcrumb--view-root da-gfs-section-title'
+                            : ''
                         }${
                           dragOverFolderId === crumb.resourceId
                             ? ' da-gfs-drive__breadcrumb--allowed'
