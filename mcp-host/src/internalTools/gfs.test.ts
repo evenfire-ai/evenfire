@@ -1,15 +1,19 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createCanvas } from '@napi-rs/canvas'
+import { createHash, randomBytes } from 'node:crypto'
+import type { Attachment } from '../core/types'
 import { resolveOfficialVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import { VisualInputBudget } from '../visualInput/policy'
 import {
   type GfscReadClient,
   type GfscWriteClient,
+  buildGfsAttachmentSaveTools,
   buildGfsCopyTools,
   buildGfsReadTools,
   buildGfsWriteTools,
 } from './gfs'
 import { GfscHttpError } from './gfsClient'
+import { GFS_LEGACY_WRITE_MAX_BYTES } from './gfsFilePolicy'
 
 /**
  * P3-S04 — agent gfs READ tools. Four read-only tools (list/read/stat/resolve)
@@ -267,6 +271,7 @@ describe('buildGfsWriteTools (P4)', () => {
       resolve: vi.fn(),
       write: vi.fn(async () => ({ gfsUri: 'gfs://main/abc', version: 4 })),
       createFile: vi.fn(async () => ({ resourceId: 'file' })),
+      createFileFromBytes: vi.fn(async () => ({ resourceId: 'file' })),
       createFolder: vi.fn(async () => ({ resourceId: 'folder' })),
       rename: vi.fn(async () => ({ resourceId: 'abc', version: 5 })),
       copy: vi.fn(async () => ({
@@ -281,6 +286,123 @@ describe('buildGfsWriteTools (P4)', () => {
       ...overrides,
     } as GfscWriteClient
   }
+
+  describe('buildGfsAttachmentSaveTools', () => {
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      randomBytes(64),
+    ])
+    const image = {
+      id: 'img-1',
+      kind: 'image',
+      mimeType: 'image/png',
+      encoding: 'base64',
+      dataBase64: png.toString('base64'),
+      filename: 'logo.png',
+    } as Attachment
+    const bin = randomBytes(300)
+    const file = {
+      id: 'file-1',
+      kind: 'file',
+      mimeType: 'application/octet-stream',
+      encoding: 'base64',
+      dataBase64: bin.toString('base64'),
+      filename: 'blob.bin',
+    } as Attachment
+    const target = { drive: 'main', parentResourceId: 'folder-rid' }
+    const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex')
+
+    function tool(client: GfscWriteClient, attachments: Attachment[]) {
+      const [definition] = buildGfsAttachmentSaveTools(client, attachments)
+      expect(definition?.name).toBe('clerum__gfs_save_attachment')
+      return definition!
+    }
+
+    it('saves an image byte for byte under its attached name', async () => {
+      const c = writeClient()
+      const r = await tool(c, [image, file]).execute({ ...target, attachmentId: 'img-1' }, '')
+      expect(r.success).toBe(true)
+      expect(c.createFileFromBytes).toHaveBeenCalledTimes(1)
+      const [args] = vi.mocked(c.createFileFromBytes).mock.calls[0]!
+      expect(args).toMatchObject({ ...target, name: 'logo.png' })
+      expect(sha(Buffer.from(args.contentBase64, 'base64'))).toBe(sha(png))
+      expect(JSON.parse(r.content!)).toMatchObject({
+        attachmentId: 'img-1',
+        name: 'logo.png',
+        bytes: png.length,
+      })
+    })
+
+    it('rejects an id that is not part of the current message without writing', async () => {
+      const c = writeClient()
+      const r = await tool(c, [image]).execute(
+        { ...target, attachmentId: 'from-earlier-message' },
+        ''
+      )
+      // Witness: the tool ran and answered with its own code.
+      expect(r).toEqual({
+        success: false,
+        error: expect.stringMatching(/^attachment_not_found:/),
+      })
+      expect(c.createFileFromBytes).not.toHaveBeenCalled()
+    })
+
+    it('rejects an attachment over the legacy write ceiling without writing', async () => {
+      const c = writeClient()
+      const big = {
+        ...file,
+        id: 'big',
+        dataBase64: Buffer.alloc(GFS_LEGACY_WRITE_MAX_BYTES + 1).toString('base64'),
+      }
+      const r = await tool(c, [big]).execute({ ...target, attachmentId: 'big' }, '')
+      expect(r).toEqual({ success: false, error: expect.stringMatching(/^limit_exceeded:/) })
+      expect(c.createFileFromBytes).not.toHaveBeenCalled()
+      // Boundary twin: exactly at the ceiling is written.
+      const atCap = {
+        ...file,
+        id: 'cap',
+        dataBase64: Buffer.alloc(GFS_LEGACY_WRITE_MAX_BYTES).toString('base64'),
+      }
+      const ok = await tool(c, [atCap]).execute({ ...target, attachmentId: 'cap' }, '')
+      expect(ok.success).toBe(true)
+      expect(c.createFileFromBytes).toHaveBeenCalledTimes(1)
+    })
+
+    it('rejects an attachment without a name or without bytes', async () => {
+      const c = writeClient()
+      const unnamed = { ...image, id: 'unnamed', filename: undefined }
+      const resumed = { ...file, id: 'resumed' } as Partial<Attachment>
+      delete resumed.dataBase64
+      const t = tool(c, [unnamed, resumed as Attachment])
+      expect((await t.execute({ ...target, attachmentId: 'unnamed' }, '')).error).toMatch(
+        /^attachment_name_missing:/
+      )
+      expect((await t.execute({ ...target, attachmentId: 'resumed' }, '')).error).toMatch(
+        /^bytes_unavailable_after_restart:/
+      )
+      expect(c.createFileFromBytes).not.toHaveBeenCalled()
+    })
+
+    it('maps gfsc denials through the redacted mutation taxonomy', async () => {
+      for (const [status, category] of [
+        [403, 'forbidden'],
+        [409, 'conflict'],
+        [413, 'limit_exceeded'],
+      ] as const) {
+        const c = writeClient({
+          createFileFromBytes: vi.fn(async () => {
+            throw new GfscHttpError(status, 'detail must not leak')
+          }),
+        })
+        const r = await tool(c, [image]).execute({ ...target, attachmentId: 'img-1' }, '')
+        expect(c.createFileFromBytes).toHaveBeenCalledTimes(1)
+        expect(r).toEqual({
+          success: false,
+          error: `GFS mutation failed (gfsc ${status}: ${category})`,
+        })
+      }
+    })
+  })
 
   it('exposes only the narrowly named non-destructive write tools', () => {
     expect(buildGfsWriteTools(writeClient()).map(t => t.name)).toEqual([

@@ -2,6 +2,9 @@ const MIB = 1024 * 1024
 
 export const GFS_HOST_ACTIVE_DOWNLOADS = 2
 
+/** gfsc's legacy JSON write ceiling (`legacyBase64.maxFileBytes`, gfs-controller/src/api/serve.ts). */
+export const GFS_LEGACY_WRITE_MAX_BYTES = 16 * MIB
+
 /**
  * Retained-storage variables of the fixed quota model, removed in #1028 when
  * the budget became a share of the workspace volume. A deployment that still

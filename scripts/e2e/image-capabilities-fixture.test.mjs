@@ -3,8 +3,11 @@ import { EventEmitter } from 'node:events'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import http from 'node:http'
 import {
   baseImage,
+  controlApiFetch,
   fixtureImage,
   fixturePassLine,
   installSignalRestore,
@@ -56,17 +59,26 @@ test('the Playwright lane defaults to the image journey and accepts only known l
     config: 'desktop-app/test/e2e-playwright/playwright.image-capabilities.config.ts',
     label: 'image-capabilities-playwright',
     grep: 'image-capabilities fixture: ',
+    minimumExpected: 1,
   })
   assert.deepEqual(playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'document-upload' }), {
     lane: 'document-upload',
     config: 'desktop-app/test/e2e-playwright/playwright.document-upload.config.ts',
     label: 'document-upload-playwright',
     grep: 'document-upload fixture: ',
+    minimumExpected: 1,
+  })
+  assert.deepEqual(playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'attachment-gfs-save' }), {
+    lane: 'attachment-gfs-save',
+    config: 'desktop-app/test/e2e-playwright/playwright.attachment-gfs-save.config.ts',
+    label: 'attachment-gfs-save-playwright',
+    grep: 'attachment-gfs-save fixture: ',
+    minimumExpected: 3,
   })
   for (const lane of ['', 'documents', '../evil.config.ts', '__proto__', 'toString']) {
     assert.throws(
       () => playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane }),
-      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload/,
+      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload, attachment-gfs-save/,
       lane
     )
   }
@@ -89,10 +101,14 @@ test('run still resolves and validates the Playwright lane', () => {
     action: 'run',
     ...playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'document-upload' }),
   })
+  assert.deepEqual(selectFixtureAction('run', { IMAGE_CAPABILITIES_LANE: 'attachment-gfs-save' }), {
+    action: 'run',
+    ...playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'attachment-gfs-save' }),
+  })
   for (const lane of ['typo', '', '__proto__']) {
     assert.throws(
       () => selectFixtureAction('run', { IMAGE_CAPABILITIES_LANE: lane }),
-      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload/,
+      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload, attachment-gfs-save/,
       lane
     )
   }
@@ -191,6 +207,28 @@ test('the Playwright verdict is PASS only for a complete, clean report from the 
   ]) {
     assert.throws(() => playwrightVerdict(report, options), pattern, label)
   }
+})
+
+test('the attachment-gfs-save verdict requires its lane minimum of expected tests', () => {
+  const lane = 'attachment-gfs-save'
+  const configFile = laneConfigFile(lane)
+  const options = { lane, configFile }
+  const reportFor = count => {
+    const titles = Array.from(
+      { length: count },
+      (_, index) => `attachment-gfs-save fixture: journey ${index + 1}`
+    )
+    return { ...playwrightReport({ titles }), config: { configFile } }
+  }
+  // Witness: three expected specs meet the lane minimum and are accepted.
+  assert.equal(playwrightVerdict(reportFor(3), options), 'PASS')
+  const short = reportFor(2)
+  assert.equal(short.stats.expected, 2)
+  assert.throws(
+    () => playwrightVerdict(short, options),
+    /below the attachment-gfs-save minimum of 3/,
+    'two expected tests'
+  )
 })
 
 test('the Playwright verdict fails a report whose suites list fewer specs than it counted', () => {
@@ -351,4 +389,37 @@ test('the playwright log redacts the admin password, the session cookie and bear
   assert.ok(!report.includes(jwt))
   assert.ok(!report.includes('opaque-bearer-value'))
   assert.match(report, /3 passed \(41\.2s\)/)
+})
+
+test('control-api requests never reuse a socket across a blocking call', async () => {
+  const connectionHeaders = []
+  let connections = 0
+  const server = http.createServer((request, response) => {
+    connectionHeaders.push(request.headers.connection)
+    response.setHeader('content-type', 'application/json')
+    response.end('{}')
+  })
+  // Shorter than the blocking call below, like control-api's idle timeout
+  // against a whole Playwright run.
+  server.keepAliveTimeout = 50
+  server.on('connection', () => {
+    connections += 1
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/api/v1/admin/llm-models`
+    const first = await controlApiFetch(url, { headers: { Cookie: 'session=1' } })
+    assert.equal(first.status, 200)
+    await first.json()
+    spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 200)'])
+    const second = await controlApiFetch(url, { headers: { Cookie: 'session=1' } })
+    assert.equal(second.status, 200)
+    await second.json()
+    // Witness: both requests reached the server.
+    assert.equal(connectionHeaders.length, 2)
+    assert.deepEqual(connectionHeaders, ['close', 'close'])
+    assert.equal(connections, 2)
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+  }
 })

@@ -228,6 +228,34 @@ describe('gfs runtime gfsc client', () => {
     ])
   })
 
+  it('sends attachment bytes unchanged as contentBase64 on the create route', async () => {
+    const fetchFn = vi.fn(async (_input: string, _init?: RequestInit) =>
+      jsonResponse({ ok: true, data: {} })
+    )
+    const client = createGfscClient(
+      { get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined), fetch: fetchFn },
+      clientOptions
+    )
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff])
+    const contentBase64 = png.toString('base64')
+    await client.createFileFromBytes({
+      drive: 'main',
+      parentResourceId: 'parent/id',
+      name: 'logo.png',
+      contentBase64,
+    })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(
+      'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/parent%2Fid/children?drive=main'
+    )
+    const init = fetchFn.mock.calls[0]?.[1]
+    expect(init?.method).toBe('POST')
+    const body = JSON.parse(String(init?.body))
+    expect(body).toEqual({ name: 'logo.png', kind: 'file', contentBase64 })
+    expect(body).not.toHaveProperty('content')
+    expect(Buffer.from(body.contentBase64, 'base64').equals(png)).toBe(true)
+  })
+
   it('fails loud when the mounted runtime token file is empty', async () => {
     const client = createGfscClient(
       {
@@ -1093,6 +1121,14 @@ describe('gfsc client retry: cancellation, deadline, scope and jitter', () => {
         (client, call) =>
           client.createFile(
             { drive: 'main', parentResourceId: 'pid', name: 'a.txt', content: 'x' },
+            call
+          ),
+      ],
+      [
+        'createFileFromBytes',
+        (client, call) =>
+          client.createFileFromBytes(
+            { drive: 'main', parentResourceId: 'pid', name: 'a.bin', contentBase64: 'eA==' },
             call
           ),
       ],

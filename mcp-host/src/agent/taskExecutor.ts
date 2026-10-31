@@ -20,6 +20,7 @@ import {
   mergeAttachmentReadLedgerSnapshots,
   readAttachmentReadLedgerSnapshot,
 } from '../core/attachments/attachmentReadBudget'
+import { attachmentSaveAvailable } from '../core/attachments/attachmentSave'
 import { compactConversation } from '../core/conversation/compaction'
 import { ConversationManager } from '../core/conversation/conversation'
 import { deriveAutoTitle } from '../core/conversation/sessionTitle'
@@ -66,6 +67,7 @@ import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
 import {
   type PreparedGfsFile,
   attachedFilesForTurnContext,
+  attachedImagesForTurnContext,
   buildTurnContextBlock,
 } from '../core/orchestration/turnContext'
 import { DefaultReasoningFactory } from '../core/reasoning'
@@ -108,6 +110,7 @@ import type {
 import { ApprovalExpiredError } from '../core/types'
 import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
+import { getGfsToolScopes } from '../internalTools/gfsClient'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
@@ -1254,8 +1257,12 @@ export class TaskExecutor {
     const hasFileAttachments =
       this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
     const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
-    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences) {
-      this.prependTurnContextBlock(messages)
+    const saveAvailable = attachmentSaveAvailable(
+      getGfsToolScopes({ get: key => process.env[key] }),
+      this.task.sourceMessage?.attachments
+    )
+    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences || saveAvailable) {
+      this.prependTurnContextBlock(messages, saveAvailable)
     }
     const promptAssemblyStart = Date.now()
     const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
@@ -1279,7 +1286,7 @@ export class TaskExecutor {
    * no human user text we inject a synthetic `<cron task>` placeholder so the
    * wire shape stays consistent (P1-004 §5.5).
    */
-  private prependTurnContextBlock(messages: ChatMessage[]): void {
+  private prependTurnContextBlock(messages: ChatMessage[], saveAvailable: boolean): void {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
@@ -1296,6 +1303,9 @@ export class TaskExecutor {
             }
           : undefined,
         attachedFiles: attachedFilesForTurnContext(this.task.sourceMessage?.attachments),
+        attachmentSave: saveAvailable
+          ? { images: attachedImagesForTurnContext(this.task.sourceMessage?.attachments) }
+          : undefined,
         referencedFiles: referencedFilesForTurnContext(
           this.task.sourceMessage?.fileReferenceResolutions
         ),
