@@ -122,14 +122,18 @@ export function approvedToolsProvider(): 'codex' | 'grok' {
 }
 /**
  * The suite this lane run owns; required, with no default. `approved-tools` is
- * the base journey suite (and the real-hybrid pair); `model-step-retry` is the
- * visible setup plus the retry cases. Each run reads exactly one, and the
- * combinations the lane does not run are refused here as well as by prepare.
+ * the seven base journeys (and the real-hybrid pair); `native-workflow` is the
+ * single workflow journey with its own coordinator fixture (#1048 MS-NW);
+ * `model-step-retry` is the visible setup plus the retry cases. Each run reads
+ * exactly one, and the combinations the lane does not run are refused here as
+ * well as by prepare.
  */
-export function approvedToolsSuite(): 'approved-tools' | 'model-step-retry' {
+export function approvedToolsSuite(): 'approved-tools' | 'native-workflow' | 'model-step-retry' {
   const value = required('APPROVED_TOOLS_SUITE')
-  if (value !== 'approved-tools' && value !== 'model-step-retry')
-    throw new Error('APPROVED_TOOLS_SUITE must be approved-tools or model-step-retry')
+  if (value !== 'approved-tools' && value !== 'native-workflow' && value !== 'model-step-retry')
+    throw new Error(
+      'APPROVED_TOOLS_SUITE must be approved-tools, native-workflow or model-step-retry'
+    )
   return value
 }
 /**
@@ -162,6 +166,11 @@ export function scenarios(): Scenario[] {
     throw new Error('Exactly one Codex model-step-retry scenario required')
   if (!grok && suite === 'approved-tools' && (!Array.isArray(parsed) || parsed.length !== 3))
     throw new Error('Exactly three approved-tools scenarios required')
+  // The native workflow run prepares its one scenario separately
+  // (`APPROVED_TOOLS_WORKFLOW_SCENARIO`): it owns no receipt catalog, and the
+  // workflow helper asserts that isolation.
+  if (suite === 'native-workflow' && (!Array.isArray(parsed) || parsed.length !== 0))
+    throw new Error('The native-workflow suite prepares no receipt scenario')
   const fields = [
     'runId',
     'agentName',
@@ -200,6 +209,7 @@ export function scenarios(): Scenario[] {
     if (row.catalogSize !== 83) throw new Error('The model-step-retry scenario must be 83 tools')
     return rows
   }
+  if (suite === 'native-workflow') return rows
   if (catalogSizes.some(size => rows.filter(row => row.catalogSize === size).length !== 1))
     throw new Error('Scenarios must cover 83, 150, 250 exactly once')
   for (const key of ['runId', 'agentName', 'contextName', 'connectorName', 'fixtureUrl'] as const) {

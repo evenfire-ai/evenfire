@@ -257,6 +257,30 @@ if (verb === 'get') {
     if (input.action === 'cleanup') journal.cleanupOutcome = 'recorded-identities-absent'
     process.stdout.write(JSON.stringify({ e2eIdentity: journal }))
     event('identity-' + input.action)
+  } else if ((args[args.indexOf('-e') + 1] || '').includes('Object.fromEntries')) {
+    // #1048 MS-SUB: the subscription flag probe prints one boolean per flag. The
+    // event names the workload so a lane that skipped the gate is visible.
+    event('flag-probe:' + target)
+    const program = args[args.indexOf('-e') + 1]
+    const start = program.indexOf('Object.fromEntries(') + 'Object.fromEntries('.length
+    const keys = JSON.parse(program.slice(start, program.indexOf('].map(', start) + 1))
+    process.stdout.write(JSON.stringify(Object.fromEntries(keys.map(key => [key, true]))))
+  } else if ((args[args.indexOf('-e') + 1] || '').includes('workflowFeatureCheck') || (args[args.indexOf('-e') + 1] || '').includes('WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE')) {
+    // #1048 MS-NW: only the native-workflow suite may read this policy.
+    event('workflow-policy')
+    process.stdout.write('true')
+  } else if ((args[args.indexOf('-e') + 1] || '').includes('process.argv[1]')) {
+    // #1048 MS-SUB: the read-only Grok connection probe.
+    process.stdout.write(JSON.stringify({
+      connections: [{
+        connection_key: 'grok-fixture',
+        display_name: 'User authorized Grok',
+        status: 'connected',
+        revoked_at: null,
+        catalog_status: 'ready',
+      }],
+      models: [{ model: 'grok-4.6', enabled: true, stale: false }],
+    }))
   } else process.stdout.write('true')
 } else if (verb === 'create') {
   const proposed = JSON.parse(fs.readFileSync(0, 'utf8'))
@@ -412,6 +436,14 @@ async function interrupt(
     )
     assert.match(beforeSignal, /forward-started/)
     assert.match(beforeSignal, /config-patched/)
+    // #1048 MS-SUB: the read-only subscription gate ran before the first
+    // mutation, and #1048 MS-NW: neither suite here prepares a WorkflowRecipe, so
+    // the coordinator policy is never read.
+    assert.match(beforeSignal, /flag-probe:deployment\/control-api/)
+    assert.ok(
+      !beforeSignal.includes('workflow-policy'),
+      'a suite without a WorkflowRecipe must not read the coordinator policy'
+    )
     assert.ok(beforeSignal.indexOf('lease-checked') < beforeSignal.indexOf('config-patched'))
     const activeConfig = JSON.parse(fs.readFileSync(f.configFile))
     assert.equal(activeConfig.data.CODEX_TOOL_PRESENTATION, 'auto')

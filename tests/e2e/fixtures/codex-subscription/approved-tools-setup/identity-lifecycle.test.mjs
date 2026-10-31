@@ -295,7 +295,7 @@ test('every pre-mutation refusal names its own closed code before any DB access'
     [
       'scenario_set_invalid',
       i => {
-        i.scenarios = i.scenarios.slice(0, 3)
+        i.scenarios = i.scenarios.slice(0, 2)
       },
     ],
     [
@@ -1083,7 +1083,63 @@ test('the suite is required, closed, and selects the model-step-retry scenario s
   assert.throws(
     () =>
       createFixtureIdentityJournal({ ...input, scenarios: input.scenarios.slice(0, 1) }, { env }),
-    /four approved-tools scenarios/
+    /3 approved-tools scenarios/
+  )
+})
+
+test('the live per-suite shapes own exactly their grants (#1048 MS-NW)', async () => {
+  // The live base suite prepares three receipt catalogs and no workflow, so it
+  // owns no WorkflowRecipe and no trigger grant.
+  const base = { ...input, scenarios: input.scenarios.slice(0, 3) }
+  const baseRun = harness()
+  const baseJournal = await createFixtureIdentities(base, baseRun.adapters)
+  assert.deepEqual(baseJournal.grants, {
+    agents: input.scenarios.slice(0, 3).map(row => row.agentName),
+    contexts: input.scenarios.slice(0, 3).map(row => row.contextName),
+  })
+  assert.equal(baseJournal.grants.workflow, undefined)
+  assert.equal(
+    baseRun.state.calls.filter(call => call.sql.startsWith('INSERT INTO user_workflow_triggers'))
+      .length,
+    0
+  )
+  assert.equal(
+    baseRun.state.calls.filter(call => call.sql.startsWith('INSERT INTO user_agents')).length,
+    3
+  )
+
+  // native-workflow prepares the one workflow agent and owns the trigger grant;
+  // the base journal above is refused for it and vice versa.
+  const workflow = { ...input, suite: 'native-workflow', scenarios: [input.scenarios[3]] }
+  const workflowRun = harness()
+  const workflowJournal = await createFixtureIdentities(workflow, workflowRun.adapters)
+  assert.deepEqual(workflowJournal.grants, {
+    agents: [input.scenarios[3].agentName],
+    contexts: [input.scenarios[3].contextName],
+    workflow: { namespace: 'sandbox-recipes', name: `${run}-recipe` },
+  })
+  assert.equal(
+    workflowRun.state.calls.filter(call =>
+      call.sql.startsWith('INSERT INTO user_workflow_triggers')
+    ).length,
+    1
+  )
+  assert.throws(
+    () =>
+      createFixtureIdentityJournal(
+        { ...workflow, scenarios: input.scenarios.slice(0, 3) },
+        { env }
+      ),
+    /one native-workflow scenario/
+  )
+  assert.throws(
+    () => createFixtureIdentityJournal({ ...base, suite: 'native-workflow' }, { env }),
+    /one native-workflow scenario/
+  )
+  // Liveness: the base suite still creates its three agents and contexts.
+  assert.equal(
+    baseRun.state.calls.filter(call => call.sql.startsWith('INSERT INTO user_contexts')).length,
+    3
   )
 })
 

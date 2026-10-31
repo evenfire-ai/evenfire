@@ -16,8 +16,13 @@ import {
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const playwright = path.join(repo, 'tests/e2e/playwright')
 const specFile = 'codex-subscription-approved-tools.spec.ts'
+const nativeWorkflowSpecFile = 'codex-native-workflow.spec.ts'
 const modelStepSpecFile = 'model-step-retry-codex.spec.ts'
 const hybridSpecFile = 'model-step-retry-codex-hybrid.spec.ts'
+// #1048 MS-NW: the native workflow journey left the base group. It depends on
+// the custom coordinator image, so it is its own suite run and its own spec.
+export const nativeWorkflowTitle =
+  'native workflow: visible approval, trigger, status and result artifact'
 export const hybridRetryTitles = [
   'real hybrid R1: a confirmed fixture read survives four injected 503s and Retry completes',
   'real hybrid R2: approval inside the continuation executes the receipt once',
@@ -107,16 +112,18 @@ function validateProvider(provider) {
   return provider
 }
 
-// The lane splits into two suite runs that never share a fixture run
-// directory: `approved-tools` (the base journeys, the native workflow and the
-// limit probes) and `model-step-retry` (the visible setup plus the retry
-// cases). Each run selects exactly one, so a base-spec defect cannot decide the
-// retry cases' verdict.
-export const approvedToolsSuites = ['approved-tools', 'model-step-retry']
+// The lane splits into three suite runs that never share a fixture run
+// directory: `approved-tools` (the seven base journeys and the limit probes),
+// `native-workflow` (the one workflow case) and `model-step-retry` (the visible
+// setup plus the retry cases). Each run selects exactly one, so a base-spec
+// defect cannot decide the retry cases' verdict.
+export const approvedToolsSuites = ['approved-tools', 'native-workflow', 'model-step-retry']
 
 export function validateSuite(suite) {
   if (!approvedToolsSuites.includes(suite))
-    throw new Error('Select the approved-tools or model-step-retry suite explicitly')
+    throw new Error(
+      'Select the approved-tools, native-workflow or model-step-retry suite explicitly'
+    )
   return suite
 }
 
@@ -146,11 +153,15 @@ export function expectedTitles(mode, provider = 'codex', suite) {
       throw new Error('The Codex model-step-retry suite runs only in deterministic mode')
     return [modelStepRetrySetupTitle, ...modelStepRetryTitles]
   }
+  if (suite === 'native-workflow') {
+    if (mode !== 'deterministic')
+      throw new Error('The Codex native-workflow suite runs only in deterministic mode')
+    return [nativeWorkflowTitle]
+  }
   if (mode === 'real-hybrid') return hybridRetryTitles
   return [
     'unauthenticated agent route guard prevents connector use',
     'authenticated user without agent access cannot select the protected agents',
-    'native workflow: visible approval, trigger, status and result artifact',
     ...[83, 150, 250].map(
       size => `approved tools ${size}: ordinary discovery, reuse, approval decisions and revocation`
     ),
@@ -179,13 +190,11 @@ export function requiredRunnerKeys(mode, provider = 'codex', suite) {
   // The Grok lane has no workflow or unauthorized-user journey; it needs the
   // name of the connection the user created in the Control UI.
   if (provider === 'grok') return [...keys, 'APPROVED_TOOLS_GROK_CONNECTION_NAME']
+  // Only the native-workflow run prepares a workflow scenario, and only the base
+  // run creates the unauthorized user that its negative case selects.
+  if (suite === 'native-workflow') return [...keys, 'APPROVED_TOOLS_WORKFLOW_SCENARIO']
   if (suite === 'model-step-retry' || mode === 'real-hybrid') return keys
-  return [
-    ...keys,
-    'APPROVED_TOOLS_WORKFLOW_SCENARIO',
-    'APPROVED_TOOLS_UNAUTHORIZED_EMAIL',
-    'APPROVED_TOOLS_UNAUTHORIZED_PASSWORD',
-  ]
+  return [...keys, 'APPROVED_TOOLS_UNAUTHORIZED_EMAIL', 'APPROVED_TOOLS_UNAUTHORIZED_PASSWORD']
 }
 
 /**
@@ -203,6 +212,7 @@ export function readsModelStepEvidence(mode, suite) {
 // is not the registered case.
 export function specFileFor(title) {
   if (title === modelStepRetrySetupTitle) return modelStepSpecFile
+  if (title === nativeWorkflowTitle) return nativeWorkflowSpecFile
   if (hybridRetryTitles.includes(title)) return hybridSpecFile
   return modelStepRetryTitles.includes(title) ? modelStepSpecFile : specFile
 }
@@ -283,6 +293,194 @@ async function readModelStepEvidence(url) {
   if (!response.ok) throw new Error(`Upstream evidence returned ${response.status}`)
   return response.json()
 }
+
+// MS-1 (runner part): the layer that stopped a Retry click, persisted in the run
+// directory before the restore, pass or fail. Counts and closed tokens only:
+// no log body, no request or response body, no credential. The proxy and Host
+// markers are the two hops between the Desktop and the model; the admission
+// counters are the login cost the lane paid to get there.
+export const retryLayerProxyMarkers = Object.freeze({
+  continueRequests: 'method=continue-model-step',
+  forwardFailed: 'continue model step forward failed',
+})
+export const retryLayerHostMarkers = Object.freeze({
+  admissionFailed: 'Model-step continuation admission failed',
+  continueFailed: 'Error continuing model-step checkpoint',
+  hostDraining: 'host_draining',
+})
+export const RETRY_LAYER_FILE = 'retry-layer.json'
+export const ADMISSION_FILE = 'admission.json'
+
+export function countMarkerLines(text, marker) {
+  if (typeof text !== 'string') throw new Error('Retry layer evidence requires the log text')
+  return text.split('\n').filter(line => line.includes(marker)).length
+}
+
+/**
+ * The Host's admission refusal carries its `code` on the structured line. Only
+ * that closed token and the count leave this function; the message body does not.
+ */
+export function admissionFailureCodes(text) {
+  if (typeof text !== 'string') throw new Error('Retry layer evidence requires the log text')
+  const codes = {}
+  for (const line of text.split('\n')) {
+    if (!line.includes(retryLayerHostMarkers.admissionFailed)) continue
+    const match = /"(?:code|errCode)"\s*:\s*"([A-Za-z0-9_.-]{1,80})"/.exec(line)
+    const code = match ? match[1] : 'unnamed'
+    codes[code] = (codes[code] ?? 0) + 1
+  }
+  return codes
+}
+
+/** `password_admission_denials_total{reason="…"} <count>` lines only. */
+export function parseAdmissionCounters(text) {
+  if (typeof text !== 'string') throw new Error('Admission evidence requires the metrics text')
+  const counters = {}
+  for (const line of text.split('\n')) {
+    const match = /^password_admission_denials_total\{reason="([a-z_]+)"\}\s+([0-9]+)$/.exec(
+      line.trim()
+    )
+    if (match) counters[match[1]] = Number(match[2])
+  }
+  return counters
+}
+
+/** Per-reason change between the two reads; a reason absent before reads as 0. */
+export function admissionDelta(before, after) {
+  const delta = {}
+  for (const reason of Object.keys(after))
+    delta[reason] = after[reason] - (before[reason] ?? 0)
+  return delta
+}
+
+/** The bounded stage names the fixture recorded, in first-seen order. */
+export function evidenceStages(evidence) {
+  const stages = []
+  for (const request of evidence?.requests ?? []) {
+    if (typeof request?.stage === 'string' && !stages.includes(request.stage))
+      stages.push(request.stage)
+  }
+  return stages
+}
+
+/** The fixture's model-step counters, copied as counts only. */
+export function evidenceCounters(evidence) {
+  const counters = evidence?.modelStepRetry
+  if (!counters || typeof counters !== 'object') return {}
+  const copy = {}
+  for (const [field, value] of Object.entries(counters))
+    if (Number.isSafeInteger(value)) copy[field] = value
+  return copy
+}
+
+/** The one loopback evidence origin every prepared scenario shares. */
+export function upstreamEvidenceOrigin(rows) {
+  if (!Array.isArray(rows) || rows.length === 0)
+    throw new Error('Retry layer evidence requires at least one prepared scenario')
+  const origins = new Set()
+  for (const row of rows) {
+    const url = new URL('/approved-tools/evidence', row?.upstreamEvidenceUrl)
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || !url.port)
+      throw new Error('Upstream evidence must be a profile-owned loopback origin with port')
+    origins.add(url.origin)
+  }
+  if (origins.size !== 1) throw new Error('Prepared scenarios disagree on the evidence origin')
+  return new URL('/approved-tools/evidence', [...origins][0] + '/')
+}
+
+export function scenarioRows(scenarios, workflowScenario) {
+  const rows = Array.isArray(scenarios) ? scenarios : []
+  return workflowScenario ? [...rows, workflowScenario] : rows
+}
+
+/**
+ * Collects the retry-layer record and the admission record from injected reads,
+ * so the shape is testable without a cluster. `since` is the lane start the two
+ * log reads are bounded by.
+ */
+export async function observeRetryLayer({
+  provider,
+  suite,
+  mode,
+  since,
+  scenarioRows: rows,
+  hostDeployment,
+  readProxyLog,
+  readHostLog,
+  readAdmission,
+  readFixtureEvidence,
+  admissionBefore,
+}) {
+  const proxyLog = await readProxyLog(since)
+  const hostLog = await readHostLog(hostDeployment, since)
+  const admissionAfter = await readAdmission()
+  const evidence = await readFixtureEvidence(upstreamEvidenceOrigin(rows))
+  return {
+    retryLayer: {
+      lane: { provider, suite, upstream: mode },
+      window: { since },
+      proxy: {
+        continueRequests: countMarkerLines(proxyLog, retryLayerProxyMarkers.continueRequests),
+        forwardFailed: countMarkerLines(proxyLog, retryLayerProxyMarkers.forwardFailed),
+      },
+      host: {
+        deployment: hostDeployment,
+        admissionFailed: countMarkerLines(hostLog, retryLayerHostMarkers.admissionFailed),
+        admissionCodes: admissionFailureCodes(hostLog),
+        continueFailed: countMarkerLines(hostLog, retryLayerHostMarkers.continueFailed),
+        hostDraining: countMarkerLines(hostLog, retryLayerHostMarkers.hostDraining),
+      },
+      fixture: { counters: evidenceCounters(evidence), stages: evidenceStages(evidence) },
+    },
+    admission: {
+      counters: 'password_admission_denials_total',
+      before: admissionBefore,
+      after: admissionAfter,
+      delta: admissionDelta(admissionBefore, admissionAfter),
+    },
+  }
+}
+
+/** Writes both files into the run directory; the only place they are created. */
+export function persistRetryLayer(evidenceDirectory, record) {
+  for (const [name, value] of [
+    [RETRY_LAYER_FILE, record.retryLayer],
+    [ADMISSION_FILE, record.admission],
+  ]) {
+    const body = JSON.stringify(value, null, 2) + '\n'
+    if (Buffer.byteLength(body) > 128 * 1024)
+      throw new Error(`Retry layer evidence exceeds its byte budget: ${name}`)
+    fs.writeFileSync(path.join(evidenceDirectory, name), body, { flag: 'wx', mode: 0o600 })
+  }
+}
+
+/**
+ * Runs one lane phase and persists its layer evidence before the caller decides
+ * the report verdict. A capture failure is deferred, never substituted: the
+ * phase's own error (or the report verdict) is decided first, and the capture
+ * error is thrown only when that verdict is green. This is the `finally` the
+ * runner's main uses; keeping it here makes the ordering testable.
+ */
+export async function runLane({ runPhase, capture, validate }) {
+  let captureError
+  try {
+    runPhase()
+  } finally {
+    try {
+      await capture()
+    } catch (error) {
+      captureError = error
+    }
+  }
+  const verdict = validate()
+  if (captureError) throw captureError
+  return verdict
+}
+
+// The in-pod admission read: the Control API metrics endpoint is internal to the
+// cluster and needs no credential, so one `kubectl exec` returns exactly the
+// password-admission lines. The program is fixed; only the port is read.
+export const admissionProbeScript = `fetch('http://127.0.0.1:' + (process.env.CONTROL_API_PORT || '8090') + '/metrics').then(response => { if (!response.ok) throw new Error('metrics returned ' + response.status); return response.text() }).then(text => { process.stdout.write(text.split('\\n').filter(line => line.startsWith('password_admission_denials_total')).join('\\n')) }).catch(error => { process.stderr.write(String(error && error.message ? error.message : error).slice(0, 256) + '\\n'); process.exit(1) })`
 
 export function runPhaseTimeouts() {
   return {
@@ -428,6 +626,7 @@ async function main() {
       [
         'tools/e2e_static_audit.py',
         `tests/e2e/playwright/desktop/${specFile}`,
+        `tests/e2e/playwright/desktop/${nativeWorkflowSpecFile}`,
         `tests/e2e/playwright/desktop/${modelStepSpecFile}`,
         `tests/e2e/playwright/desktop/${hybridSpecFile}`,
         'tests/e2e/playwright/helpers/approved-tools-chat.ts',
@@ -441,23 +640,94 @@ async function main() {
       throw new Error('E2E Guardian audit failed')
     const evidenceUrl = readsModelStepEvidence(mode, suite) ? modelStepEvidenceUrl() : undefined
     const evidenceBefore = evidenceUrl ? await readModelStepEvidence(evidenceUrl) : undefined
-    runNode(
-      [
-        path.join(playwright, 'node_modules/@playwright/test/cli.js'),
-        'test',
-        '--config=playwright.codex-approved-tools.config.ts',
-      ],
-      playwright,
-      env,
-      APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS
-    )
-    const verified = validateReport(
-      JSON.parse(readOwnedDescriptor(reportFile)),
-      mode,
-      provider,
-      suite
-    )
-    const evidenceAfter = evidenceUrl ? await readModelStepEvidence(evidenceUrl) : undefined
+    const preparedScenarios = JSON.parse(required('APPROVED_TOOLS_SCENARIOS'))
+    const workflowScenario = process.env.APPROVED_TOOLS_WORKFLOW_SCENARIO
+      ? JSON.parse(required('APPROVED_TOOLS_WORKFLOW_SCENARIO'))
+      : undefined
+    const rows = scenarioRows(preparedScenarios, workflowScenario)
+    // MS-1: the lane start bounds both log reads, and the admission counters are
+    // read before the first Desktop login so the delta is this lane's own cost.
+    const laneStartedAt = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString()
+    const cluster = {
+      profile: required('MINIKUBE_PROFILE'),
+      kubectl: (args, timeout = 60_000) => {
+        const result = spawnSync(
+          'kubectl',
+          ['--context', required('MINIKUBE_PROFILE'), '--request-timeout=30s', ...args],
+          { encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024 }
+        )
+        if (result.error || result.signal || result.status !== 0)
+          throw new Error('Retry layer observation failed')
+        return result.stdout
+      },
+    }
+    const readAdmission = async () =>
+      parseAdmissionCounters(
+        cluster.kubectl([
+          '-n',
+          'control-plane',
+          'exec',
+          'deployment/control-api',
+          '--',
+          'node',
+          '-e',
+          admissionProbeScript,
+        ])
+      )
+    const admissionBefore = await readAdmission()
+    const hostDeployment = rows.find(row => row?.catalogSize === 83)?.agentName
+    if (typeof hostDeployment !== 'string' || !hostDeployment)
+      throw new Error('Retry layer evidence requires the prepared 83-tool agent')
+    let capturedEvidence
+    const verified = await runLane({
+      runPhase: () =>
+        runNode(
+          [
+            path.join(playwright, 'node_modules/@playwright/test/cli.js'),
+            'test',
+            '--config=playwright.codex-approved-tools.config.ts',
+          ],
+          playwright,
+          env,
+          APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS
+        ),
+      capture: async () => {
+        const record = await observeRetryLayer({
+          provider,
+          suite,
+          mode,
+          since: laneStartedAt,
+          scenarioRows: rows,
+          hostDeployment,
+          readProxyLog: since =>
+            cluster.kubectl([
+              '-n',
+              'rpc-proxy',
+              'logs',
+              'deploy/rpc-proxy',
+              `--since-time=${since}`,
+            ]),
+          readHostLog: (deploymentName, since) =>
+            cluster.kubectl([
+              '-n',
+              'mcp-host',
+              'logs',
+              `deploy/${deploymentName}`,
+              `--since-time=${since}`,
+            ]),
+          readAdmission,
+          readFixtureEvidence: async url => {
+            capturedEvidence = await readModelStepEvidence(url)
+            return capturedEvidence
+          },
+          admissionBefore,
+        })
+        persistRetryLayer(evidence, record)
+      },
+      validate: () =>
+        validateReport(JSON.parse(readOwnedDescriptor(reportFile)), mode, provider, suite),
+    })
+    const evidenceAfter = evidenceUrl ? capturedEvidence : undefined
     const modelStepRetry =
       suite === 'model-step-retry'
         ? validateModelStepEvidence(evidenceBefore, evidenceAfter, provider)

@@ -24,7 +24,6 @@ import {
   scenarios,
 } from '../helpers/approved-tools-scenarios'
 import { prepareSubscriptionVisible } from '../helpers/approved-tools-subscription'
-import { workflowJourney } from '../helpers/approved-tools-workflow'
 import { expectSignedOutLaunch, signOutDesktop } from '../helpers/desktop-session'
 import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginControlUiVisible } from '../helpers/visible-login'
@@ -79,12 +78,6 @@ async function saveConnector(page: Page, scenario: Scenario, remove: boolean) {
   if (remove) await expect(row).toHaveCount(0)
   else await expect(row).toBeVisible()
 }
-
-test('native workflow: visible approval, trigger, status and result artifact', async ({
-  page,
-}, testInfo) => {
-  await workflowJourney(page, testInfo)
-})
 
 async function receiptApproval(page: Page, scenario: Scenario, previousCalls: number) {
   const pending = page

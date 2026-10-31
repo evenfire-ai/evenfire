@@ -2,6 +2,14 @@ import { randomUUID } from 'node:crypto'
 
 const labels = ['83', '150', '250', 'workflow']
 const modelStepLabels = ['83']
+// #1048 MS-NW: each suite owns its prepared scenario set. The base journeys keep
+// the three receipt catalogs and own no workflow; only native-workflow owns the
+// recipe and its trigger grant; model-step-retry runs the single 83-tool agent.
+const suiteLabels = Object.freeze({
+  'approved-tools': ['83', '150', '250'],
+  'native-workflow': ['workflow'],
+  'model-step-retry': modelStepLabels,
+})
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const sqlstatePattern = /^[0-9A-Z]{5}$/
 const unclassifiedSqlstate = 'UNKNOWN'
@@ -215,19 +223,39 @@ function identities(run) {
 
 // `suite` is an identity *input* field only. It selects the scenario set; the
 // journal is bound to that set by its grants, so no journal field changes.
+const legacyApprovedToolsLabels = ['83', '150', '250', 'workflow']
+
+/**
+ * The scenario layout one suite run owns. A journal prepared before #1048 has no
+ * `suite` field; prepare's legacy restore path passes it as `approved-tools`, and
+ * that historical layout is the only one carrying the fourth (workflow) row. It
+ * is accepted as such, and only when all four rows are present, so a live base
+ * run can never keep a workflow grant.
+ */
+function suiteShape(suite, scenarios) {
+  if (!Object.hasOwn(suiteLabels, suite ?? '')) return null
+  const live = suiteLabels[suite]
+  const labelsForSuite =
+    suite === 'approved-tools' &&
+    Array.isArray(scenarios) &&
+    scenarios.length === legacyApprovedToolsLabels.length
+      ? legacyApprovedToolsLabels
+      : live
+  return { labels: labelsForSuite, workflow: labelsForSuite.includes('workflow') }
+}
+
 function scenarioGrants(input) {
-  const single = suiteIsSingle(input.suite)
+  const shape = suiteShape(input.suite, input.scenarios)
+  requireValue(shape, 'Invalid fixture suite', 'suite_invalid')
+  const expectedLabels = shape.labels
   requireValue(
-    ['approved-tools', 'model-step-retry'].includes(input.suite),
-    'Invalid fixture suite',
-    'suite_invalid'
-  )
-  requireValue(
-    Array.isArray(input.scenarios) && input.scenarios.length === (single ? 1 : 4),
-    single ? 'Expected one model-step-retry scenario' : 'Expected four approved-tools scenarios',
+    Array.isArray(input.scenarios) && input.scenarios.length === expectedLabels.length,
+    expectedLabels.length === 1
+      ? `Expected one ${input.suite} scenario`
+      : `Expected ${expectedLabels.length} ${input.suite} scenarios`,
     'scenario_set_invalid'
   )
-  const expected = (single ? modelStepLabels : labels).map(label => ({
+  const expected = expectedLabels.map(label => ({
     runId: `${input.run}-${label}`,
     agentName: `${input.run}-agent-${label}`,
     contextName: `${input.run}-context-${label}`,
@@ -242,7 +270,9 @@ function scenarioGrants(input) {
   return {
     agents: expected.map(value => value.agentName),
     contexts: expected.map(value => value.contextName),
-    ...(single ? {} : { workflow: { namespace: 'sandbox-recipes', name: `${input.run}-recipe` } }),
+    ...(shape.workflow
+      ? { workflow: { namespace: 'sandbox-recipes', name: `${input.run}-recipe` } }
+      : {}),
   }
 }
 
@@ -344,9 +374,10 @@ export function createFixtureIdentityJournal(input, { env }) {
 
 function validateConnectionEvidence(journal, input) {
   const single = suiteIsSingle(input.suite)
-  const allowedScenarios = single ? modelStepLabels : labels
+  const allowedScenarios = suiteShape(input.suite, input.scenarios)?.labels ?? []
   requireValue(
-    Array.isArray(journal.connections) && journal.connections.length <= (single ? 1 : 4),
+    Array.isArray(journal.connections) &&
+      journal.connections.length <= (single ? 1 : allowedScenarios.length),
     'Connection journal is required',
     'connection_evidence_invalid'
   )

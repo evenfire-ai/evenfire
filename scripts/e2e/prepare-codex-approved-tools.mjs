@@ -40,6 +40,18 @@ export const controlApiMarkerCheck = `const fs = require('node:fs'); const marke
 const proxyRunAnnotation = 'evenfire.ai/codex-tools-fixture-run'
 const workflowImage = 'clerum/workflow-custom-sdk-e2e:approved-tools-test'
 const workflowFeatureCheck = `process.stdout.write(JSON.stringify(process.env.WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE === 'true' && process.env.WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST === 'false' && (process.env.WRC_ALLOWED_COORDINATOR_IMAGE_PREFIXES || '').split(',').some(prefix => prefix.trim() && '${workflowImage}'.startsWith(prefix.trim()))))`
+// MS-SUB: one boolean per requested flag, so a refused subscription gate names
+// the exact flag rather than the whole set. The remote program is a fixed shape
+// closed over the flag list, never free text.
+export function flagProbeScript(keys) {
+  if (
+    !Array.isArray(keys) ||
+    keys.length === 0 ||
+    keys.some(key => typeof key !== 'string' || !/^[A-Z][A-Z0-9_]{0,80}$/.test(key))
+  )
+    throw new Error('Invalid feature probe')
+  return `process.stdout.write(JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map(key => [key, process.env[key] === 'true']))))`
+}
 const proxyFlags = [
   'CODEX_APPROVED_TOOLS_TEST_ONLY',
   'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE',
@@ -57,19 +69,29 @@ export function validateProvider(provider) {
 }
 
 // The suite is a required selection with no default: an unset value is a
-// misconfigured lane, not an approved-tools run.
-export const APPROVED_TOOLS_SUITES = Object.freeze(['approved-tools', 'model-step-retry'])
+// misconfigured lane, not an approved-tools run. `approved-tools` is the base
+// journey suite (seven cases); `native-workflow` owns the one workflow case and
+// the resources it alone uses (#1048 MS-NW); `model-step-retry` runs the visible
+// setup plus C1-C12.
+export const APPROVED_TOOLS_SUITES = Object.freeze([
+  'approved-tools',
+  'native-workflow',
+  'model-step-retry',
+])
 
 export function validateSuite(suite) {
   if (!APPROVED_TOOLS_SUITES.includes(suite))
-    throw new Error('APPROVED_TOOLS_SUITE_UNSUPPORTED: expected approved-tools or model-step-retry')
+    throw new Error(
+      'APPROVED_TOOLS_SUITE_UNSUPPORTED: expected approved-tools, native-workflow or model-step-retry'
+    )
   return suite
 }
 
 // Allowed provider x suite x upstream-mode combinations. Prepared by this
-// script: codex+approved-tools+{deterministic,real-hybrid}, codex+model-step-retry
-// +deterministic, grok+model-step-retry+deterministic. `real` prepares nothing
-// here but stays a legal matrix cell for the runner and the config.
+// script: codex+approved-tools+{deterministic,real-hybrid}, codex+native-workflow
+// +deterministic, codex+model-step-retry+deterministic,
+// grok+model-step-retry+deterministic. `real` prepares nothing here but stays a
+// legal matrix cell for the runner and the config.
 export function validateSuiteMatrix(provider, suite, mode) {
   validateProvider(provider)
   validateSuite(suite)
@@ -82,6 +104,12 @@ export function validateSuiteMatrix(provider, suite, mode) {
   if (suite === 'model-step-retry' && mode !== 'deterministic')
     throw new Error(
       'APPROVED_TOOLS_SUITE_UNSUPPORTED: model-step-retry suite requires deterministic upstream'
+    )
+  // The native workflow journey runs against the deterministic coordinator
+  // fixture only; the real and real-hybrid cells never prepare it.
+  if (suite === 'native-workflow' && mode !== 'deterministic')
+    throw new Error(
+      'APPROVED_TOOLS_SUITE_UNSUPPORTED: native-workflow suite requires deterministic upstream'
     )
   return suite
 }
@@ -135,6 +163,285 @@ export function requireGrokConnectionName(value) {
     )
   return name
 }
+
+// MS-SUB: read-only subscription gates. Both providers are checked here so a
+// lane stops before its first mutation, not in the setup UI after the identities
+// and the agent exist. Nothing in this section writes: no fixture state, no API
+// login (so no password-admission cost), no cluster mutation.
+export const CODEX_SUBSCRIPTION_GATE_DISABLED = 'CODEX_SUBSCRIPTION_GATE_DISABLED'
+export const GROK_SUBSCRIPTION_GATE_DISABLED = 'GROK_SUBSCRIPTION_GATE_DISABLED'
+
+/** The closed per-provider tokens the gate may print. */
+export function subscriptionGateToken(provider) {
+  return validateProvider(provider) === 'grok'
+    ? GROK_SUBSCRIPTION_GATE_DISABLED
+    : CODEX_SUBSCRIPTION_GATE_DISABLED
+}
+
+/** The model every prepared agent of this provider runs (the lane's model). */
+export function providerModelName(provider) {
+  return validateProvider(provider) === 'grok' ? GROK_MODEL_NAME : 'gpt-5.3-codex'
+}
+
+/** The flags each provider's lane needs in the running workloads. */
+export function subscriptionGateFlags(provider) {
+  validateProvider(provider)
+  return provider === 'grok'
+    ? {
+        controlApi: ['CONTROL_API_GROK_SUBSCRIPTION_ENABLED', 'GROK_LLM_PROXY_EXECUTION_ENABLED'],
+        proxy: ['GROK_LLM_PROXY_EXECUTION_ENABLED'],
+        host: [],
+      }
+    : {
+        controlApi: ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED', 'CODEX_LLM_PROXY_EXECUTION_ENABLED'],
+        proxy: ['CODEX_LLM_PROXY_EXECUTION_ENABLED'],
+        host: ['MCP_HOST_CODEX_SUBSCRIPTION_ENABLED'],
+      }
+}
+
+/**
+ * The provider flag gate. `execFlags` reads the live environment of one workload
+ * and returns `{ [flag]: boolean }`; `hostConfig` is the `mcp-host-config`
+ * ConfigMap. A false flag fails with the provider token and the exact flag name,
+ * so the operator can name what is off without reading a workload.
+ */
+export function checkSubscriptionGates({ provider, execFlags, hostConfig }) {
+  const token = subscriptionGateToken(provider)
+  const flags = subscriptionGateFlags(provider)
+  for (const [deploymentName, keys] of [
+    ['control-api', flags.controlApi],
+    [provider === 'grok' ? 'grok-llm-proxy' : 'codex-llm-proxy', flags.proxy],
+  ]) {
+    if (!keys.length) continue
+    const observed = execFlags(deploymentName, keys)
+    for (const key of keys)
+      if (observed?.[key] !== true) throw new Error(`${token}: ${key}`)
+  }
+  for (const key of flags.host)
+    if (hostConfig?.data?.[key] !== 'true') throw new Error(`${token}: ${key}`)
+  return { provider, checked: [...flags.controlApi, ...flags.proxy, ...flags.host] }
+}
+
+// The Grok connection is user-owned: the lane only reads it. These are the only
+// two statements the gate issues, and neither names a ciphertext column.
+export const GROK_CONNECTION_SELECT = `SELECT connection_key, display_name, status, revoked_at, catalog_status
+    FROM grok_subscription_connections WHERE connection_key = $1 OR display_name = $1`
+export const GROK_CATALOG_SELECT = `SELECT m.model, m.enabled, m.stale
+    FROM grok_catalog_models m
+    JOIN grok_subscription_connections c ON c.id = m.connection_id
+    WHERE c.connection_key = $1 OR c.display_name = $1`
+// `assertGrokConnectionKey` (control-api/src/services/grokSubscriptionSchema.ts:4-16):
+// a key outside this grammar is hidden from the admin list, so a lane that
+// names it can never be bound from the Control UI.
+export const GROK_CONNECTION_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+export const GROK_MODEL_NAME = 'grok-4.6'
+
+export function isAddressableGrokConnectionKey(value) {
+  const key = typeof value === 'string' ? value.trim() : ''
+  return (
+    GROK_CONNECTION_KEY_PATTERN.test(key) &&
+    key !== 'unassigned' &&
+    key !== 'deployment-default'
+  )
+}
+
+/**
+ * Evaluates the two read-only row sets the gate collected. Every refusal has its
+ * own token, and the pass names the connection, its status and its catalog
+ * status so the lane's evidence proves what it accepted.
+ */
+export async function evaluateGrokSubscription(db, { connectionName, modelName }) {
+  const name = requireGrokConnectionName(connectionName)
+  if (typeof modelName !== 'string' || !modelName.trim())
+    throw new Error('GROK_CONNECTION_MODEL_MISSING: the lane names no model')
+  const connections = (await db.query(GROK_CONNECTION_SELECT, [name])).rows
+  if (!Array.isArray(connections)) throw new Error('GROK_CONNECTION_MISSING: no row set returned')
+  if (connections.length === 0)
+    throw new Error(`GROK_CONNECTION_MISSING: no Grok connection matches '${name}'`)
+  if (connections.length > 1)
+    throw new Error(`GROK_CONNECTION_AMBIGUOUS: ${connections.length} Grok connections match '${name}'`)
+  const [row] = connections
+  if (row.revoked_at !== null || row.status === 'revoked')
+    throw new Error(`GROK_CONNECTION_REVOKED: ${row.connection_key}`)
+  if (row.status !== 'connected')
+    throw new Error(`GROK_CONNECTION_NOT_CONNECTED: ${row.connection_key} is ${row.status}`)
+  if (!isAddressableGrokConnectionKey(row.connection_key))
+    throw new Error(`GROK_CONNECTION_NOT_ADDRESSABLE: ${row.connection_key}`)
+  if (row.catalog_status !== 'ready')
+    throw new Error(`GROK_CONNECTION_CATALOG_NOT_READY: ${row.connection_key} is ${row.catalog_status}`)
+  const models = (await db.query(GROK_CATALOG_SELECT, [name])).rows
+  if (!Array.isArray(models)) throw new Error('GROK_CONNECTION_MODEL_MISSING: no model row set returned')
+  const entry = models.find(candidate => candidate?.model === modelName)
+  if (!entry) throw new Error(`GROK_CONNECTION_MODEL_MISSING: ${modelName}`)
+  if (entry.enabled !== true)
+    throw new Error(`GROK_CONNECTION_MODEL_UNAVAILABLE: ${modelName} is disabled`)
+  if (entry.stale !== false)
+    throw new Error(`GROK_CONNECTION_MODEL_UNAVAILABLE: ${modelName} is stale`)
+  return {
+    connectionKey: row.connection_key,
+    displayName: row.display_name,
+    status: row.status,
+    catalogStatus: row.catalog_status,
+    model: entry.model,
+    modelEnabled: entry.enabled === true,
+  }
+}
+
+/**
+ * The in-pod read. It runs the two SELECTs above inside one `READ ONLY`
+ * transaction on a single pooled client (a `pool.query` sequence does not pin a
+ * connection) and prints the two bounded row sets; the host evaluates them with
+ * `evaluateGrokSubscription`, so the refusal logic has exactly one home. The
+ * connection name arrives as `node -e <script> <name>` (argv[1]), never inside
+ * the program text.
+ */
+export const grokSubscriptionProbeScript = `const connectionName = process.argv[1]
+import('/app/control-api/dist/db.js').then(async ({ pool }) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN READ ONLY')
+    const connections = (await client.query(${JSON.stringify(GROK_CONNECTION_SELECT)}, [connectionName])).rows
+    const models = (await client.query(${JSON.stringify(GROK_CATALOG_SELECT)}, [connectionName])).rows
+    await client.query('ROLLBACK')
+    process.stdout.write(JSON.stringify({ connections, models }))
+  } finally {
+    client.release()
+    await pool.end()
+  }
+}).catch(error => {
+  process.stderr.write(String(error && error.message ? error.message : error).slice(0, 512) + '\\n')
+  process.exit(1)
+})`
+
+/** The connection-name argument the probe accepts; same closed set as the env name. */
+export const GROK_CONNECTION_ARGUMENT = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,199}$/
+
+const grokConnectionColumns = ['connection_key', 'display_name', 'status', 'revoked_at', 'catalog_status']
+
+/** Strictly bounded parse of the probe output: the exact projected columns. */
+export function parseGrokSubscriptionProbe(output) {
+  const parsed = JSON.parse(output)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+    throw new Error('GROK_CONNECTION_READ_FAILED: invalid probe output')
+  const { connections, models } = parsed
+  if (!Array.isArray(connections) || !Array.isArray(models))
+    throw new Error('GROK_CONNECTION_READ_FAILED: invalid probe output')
+  for (const row of connections) {
+    if (!row || typeof row !== 'object' || Array.isArray(row))
+      throw new Error('GROK_CONNECTION_READ_FAILED: invalid connection row')
+    if (Object.keys(row).some(key => !grokConnectionColumns.includes(key)))
+      throw new Error('GROK_CONNECTION_READ_FAILED: unexpected connection column')
+    if (typeof row.connection_key !== 'string' || typeof row.status !== 'string')
+      throw new Error('GROK_CONNECTION_READ_FAILED: invalid connection row')
+  }
+  for (const row of models) {
+    if (!row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).length !== 3)
+      throw new Error('GROK_CONNECTION_READ_FAILED: invalid catalog row')
+    if (typeof row.model !== 'string' || typeof row.enabled !== 'boolean' || typeof row.stale !== 'boolean')
+      throw new Error('GROK_CONNECTION_READ_FAILED: invalid catalog row')
+  }
+  return { connections, models }
+}
+
+/** Replays the in-pod read into the same query surface the evaluator uses. */
+export function replayedGrokSubscriptionDatabase(rows) {
+  return {
+    async query(sql) {
+      if (sql === GROK_CONNECTION_SELECT) return { rows: rows.connections }
+      if (sql === GROK_CATALOG_SELECT) return { rows: rows.models }
+      throw new Error('GROK_CONNECTION_READ_FAILED: unexpected statement')
+    },
+  }
+}
+
+/**
+ * The read-only transport every subscription gate call uses. All three
+ * operations are strict: the flag probe is a fixed program, the Grok read is a
+ * fixed program plus a closed-set connection name, and the Host ConfigMap read is
+ * memoized so the gate and the Host-config capture observe one read.
+ */
+export function subscriptionGateTransport({ provider, kubectl }) {
+  let hostConfig
+  return (operation, deploymentName, keys) => {
+    if (operation === 'read-host-config') {
+      if (!hostConfig)
+        hostConfig = JSON.parse(
+          kubectl(['-n', 'mcp-host', 'get', 'configmap/mcp-host-config', '-o', 'json'])
+        )
+      return hostConfig
+    }
+    if (operation === 'exec-flags') {
+      const observed = JSON.parse(
+        kubectl([
+          '-n',
+          'control-plane',
+          'exec',
+          `deployment/${deploymentName}`,
+          '--',
+          'node',
+          '-e',
+          flagProbeScript(keys),
+        ])
+      )
+      if (!observed || typeof observed !== 'object' || Array.isArray(observed))
+        throw new Error(`${subscriptionGateToken(provider)}: ${deploymentName} printed no flags`)
+      const flags = {}
+      for (const key of keys) flags[key] = observed[key] === true
+      return flags
+    }
+    if (operation === 'grok-probe')
+      return kubectl([
+        '-n',
+        'control-plane',
+        'exec',
+        'deployment/control-api',
+        '--',
+        'node',
+        '-e',
+        grokSubscriptionProbeScript,
+        requireGrokConnectionName(process.env.APPROVED_TOOLS_GROK_CONNECTION_NAME),
+      ])
+    throw new Error('Invalid subscription gate operation')
+  }
+}
+
+/**
+ * Standalone `check-subscriptions`: every provider's read-only gate, run by the
+ * lane's launcher before any mutation and again as prepare's first step. It
+ * returns the bounded receipt the caller prints; it never touches fixture state.
+ */
+export async function checkSubscriptions({ provider, kubectlExec, connectionName, modelName }) {
+  validateProvider(provider)
+  const hostConfig = kubectlExec('read-host-config')
+  const gates = checkSubscriptionGates({
+    provider,
+    execFlags: (deploymentName, keys) => kubectlExec('exec-flags', deploymentName, keys),
+    hostConfig,
+  })
+  if (provider === 'grok') {
+    const probe = parseGrokSubscriptionProbe(kubectlExec('grok-probe', connectionName))
+    const receipt = await evaluateGrokSubscription(replayedGrokSubscriptionDatabase(probe), {
+      connectionName,
+      modelName,
+    })
+    return { ...gates, connection: receipt }
+  }
+  return { ...gates, connection: undefined }
+}
+
+/** The exact probe programs each workload may run for the subscription gate. */
+export function subscriptionProbeScripts(resource) {
+  const probes = {
+    'deployment/control-api': [
+      flagProbeScript(subscriptionGateFlags('codex').controlApi),
+      flagProbeScript(subscriptionGateFlags('grok').controlApi),
+    ],
+    'deployment/codex-llm-proxy': [flagProbeScript(subscriptionGateFlags('codex').proxy)],
+    'deployment/grok-llm-proxy': [flagProbeScript(subscriptionGateFlags('grok').proxy)],
+  }
+  return probes[resource] ?? []
+}
+
 
 // Only this one nonsecret setting belongs to the mutation. An absent original
 // is recorded as null so JSON merge patch deletes it on restore.
@@ -319,7 +626,7 @@ function scenarioMetadata(
         ? requireGrokConnectionName(connectionName)
         : `Codex fixture ${label} ${run}`,
     connectionKey: `${run}-grant-${label}`,
-    modelName: provider === 'grok' ? 'grok-4.6' : 'gpt-5.3-codex',
+    modelName: providerModelName(provider),
     fixtureUrl: `http://127.0.0.1:${port}`,
     upstreamEvidenceUrl: `http://127.0.0.1:${probePort}`,
   }
@@ -498,6 +805,56 @@ export function makeResources(scenarios) {
       },
     ]
   })
+}
+
+// The suite decides which fixtures a lane prepares (#1048 MS-NW). The base
+// journeys own the three receipt catalogs and nothing else; only the
+// native-workflow suite owns the workflow backend, its port, its `WorkflowRecipe`
+// and the coordinator policy that admits its image. `model-step-retry` prepares
+// the single 83-tool catalog the retry cases use.
+const suiteScenarioLabels = Object.freeze({
+  'approved-tools': ['83', '150', '250'],
+  'native-workflow': ['workflow'],
+  'model-step-retry': ['83'],
+})
+
+/**
+ * How many profile-owned loopback ports this suite run needs: one per prepared
+ * agent plus the shared upstream probe. The base suite prepares three catalogs
+ * and the probe (4); the other two prepare one agent and the probe (2).
+ */
+export function suitePortCount(suite) {
+  validateSuite(suite)
+  return suiteScenarioLabels[suite].length + 1
+}
+
+/**
+ * The whole fixture set a suite run prepares, as pure data. `ports` are the
+ * non-probe ports in prepared order and `probePort` the shared upstream probe.
+ * The caller allocates them, dry-runs the returned resources against the server,
+ * and only then mutates the profile.
+ */
+export function makeSuiteFixtures({ run, suite, provider = 'codex', connectionName, ports, probePort }) {
+  validateSuiteMatrix(provider, suite, 'deterministic')
+  const labels = suiteScenarioLabels[suite]
+  if (!Array.isArray(ports) || ports.length !== labels.length)
+    throw new Error(`APPROVED_TOOLS_SUITE_UNSUPPORTED: ${suite} needs ${labels.length} fixture ports`)
+  if (suite === 'native-workflow') {
+    const workflowScenario = makeWorkflowScenario(run, ports[0], probePort)
+    return {
+      scenarios: [],
+      workflowScenario,
+      allScenarios: [workflowScenario],
+      resources: [...makeResources([workflowScenario]), ...makeWorkflowResources(workflowScenario)],
+    }
+  }
+  const scenarios = makeScenarios(run, ports, probePort, provider, connectionName, suite)
+  return {
+    scenarios,
+    workflowScenario: undefined,
+    allScenarios: scenarios,
+    resources: makeResources(scenarios),
+  }
 }
 
 // `kubectl create --dry-run=server -f - -o json` on a List prints either one
@@ -867,27 +1224,18 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
         return args
       if (resource === 'deployment/workflow-recipes' && operation[7] === workflowFeatureCheck)
         return args
-      const keys =
-        resource === 'deployment/control-api'
-          ? ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED', 'CODEX_LLM_PROXY_EXECUTION_ENABLED']
-          : resource === 'deployment/grok-llm-proxy'
-            ? ['GROK_LLM_PROXY_EXECUTION_ENABLED']
-            : resource === 'deployment/codex-llm-proxy'
-              ? ['CODEX_LLM_PROXY_EXECUTION_ENABLED']
-              : null
-      if (
-        resource === 'deployment/control-api' &&
-        operation[7] ===
-          `process.stdout.write(JSON.stringify(${JSON.stringify(['CONTROL_API_GROK_SUBSCRIPTION_ENABLED', 'GROK_LLM_PROXY_EXECUTION_ENABLED'])}.every(key => process.env[key] === 'true')))`
-      )
-        return args
-      if (
-        keys &&
-        operation[7] ===
-          `process.stdout.write(JSON.stringify(${JSON.stringify(keys)}.every(key => process.env[key] === 'true')))`
-      )
-        return args
+      if (subscriptionProbeScripts(resource).includes(operation[7])) return args
     }
+    if (
+      operation.length === 9 &&
+      resource === 'deployment/control-api' &&
+      operation[4] === '--' &&
+      operation[5] === 'node' &&
+      operation[6] === '-e' &&
+      operation[7] === grokSubscriptionProbeScript &&
+      GROK_CONNECTION_ARGUMENT.test(operation[8] ?? '')
+    )
+      return args
     if (
       operation.length === 10 &&
       resource === '-i' &&
@@ -1347,10 +1695,34 @@ async function main() {
   process.umask(0o077)
   if (!process.version.startsWith('v24.')) throw new Error('Node24 is required')
   const action = process.argv[2] ?? 'prepare'
-  if (!['prepare', 'run', 'restore'].includes(action))
-    throw new Error('Expected prepare, run, or restore')
+  if (!['prepare', 'run', 'restore', 'check-subscriptions'].includes(action))
+    throw new Error('Expected prepare, run, restore, or check-subscriptions')
   const provider = validateProvider(required('APPROVED_TOOLS_PROVIDER'))
   const suite = validateSuite(required('APPROVED_TOOLS_SUITE'))
+  // MS-SUB: the standalone read-only gate. It takes no mutation lease, writes no
+  // fixture state and opens no Control UI session, so the lane's launcher can run
+  // it before anything else and stop on a token without leaving a footprint.
+  if (action === 'check-subscriptions') {
+    validateSuiteMatrix(provider, suite, 'deterministic')
+    const checkProfile = required('MINIKUBE_PROFILE')
+    if (
+      checkProfile !== required('CONTROL_API_REAL_PG_CONTEXT') ||
+      !/^clerum-.+-[a-f0-9]{7,8}$/.test(checkProfile)
+    )
+      throw new Error('Owned branch Minikube context required')
+    const checkKubectl = args =>
+      command('kubectl', ['--context=' + checkProfile, '--request-timeout=30s', ...args])
+    const receipt = await checkSubscriptions({
+      provider,
+      connectionName: process.env.APPROVED_TOOLS_GROK_CONNECTION_NAME,
+      modelName: providerModelName(provider),
+      kubectlExec: subscriptionGateTransport({ provider, kubectl: checkKubectl }),
+    })
+    process.stdout.write(
+      `${JSON.stringify({ subscription: 'ready', provider, suite, checked: receipt.checked.length, ...(receipt.connection ? { connectionKey: receipt.connection.connectionKey, status: receipt.connection.status, catalogStatus: receipt.connection.catalogStatus, model: receipt.connection.model } : {}) })}\n`
+    )
+    return
+  }
   const proxy = proxyPreset(provider)
   if (action !== 'restore') {
     const mode = required('APPROVED_TOOLS_UPSTREAM_MODE')
@@ -1371,6 +1743,23 @@ async function main() {
   )
   const kc = args => ['--context=' + profile, '--request-timeout=30s', ...args]
   const kubectl = (args, options) => command('kubectl', kc(args), options)
+  // MS-SUB: the read-only subscription gate is the preparation's first step for
+  // every lane, real-hybrid included, so nothing is mutated when the provider's
+  // subscription path is unavailable. The standalone `check-subscriptions`
+  // action runs the same code without a lease or a run directory.
+  const subscriptionTransport = action === 'restore' ? undefined : subscriptionGateTransport({ provider, kubectl })
+  if (subscriptionTransport) {
+    const subscriptionReceipt = await checkSubscriptions({
+      provider,
+      connectionName: process.env.APPROVED_TOOLS_GROK_CONNECTION_NAME,
+      modelName: providerModelName(provider),
+      kubectlExec: subscriptionTransport,
+    })
+    if (subscriptionReceipt.connection)
+      process.stdout.write(
+        `${JSON.stringify({ subscription: 'ready', connectionKey: subscriptionReceipt.connection.connectionKey, status: subscriptionReceipt.connection.status, catalogStatus: subscriptionReceipt.connection.catalogStatus, model: subscriptionReceipt.connection.model })}\n`
+      )
+  }
   const head = command('head', []).trim()
   const profilePidDirectory = fs.realpathSync(
     path.join(required('T2_PROFILE_ROOT'), profile, 'pids')
@@ -1926,6 +2315,9 @@ async function main() {
         '9090',
       ])
       process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(hybridScenarios)
+      // Real-hybrid prepares no workflow row; a stale handoff key would point the
+      // runner's evidence read at another run.
+      delete process.env.APPROVED_TOOLS_WORKFLOW_SCENARIO
       try {
         await command('runner', [], {
           timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS,
@@ -1983,46 +2375,12 @@ async function main() {
     required(name)
   // The supported Minikube overlays enable these already. Refuse a stale or
   // differently configured runtime; fixture setup must not weaken feature gates.
-  for (const [deploymentName, keys] of [
-    [
-      'control-api',
-      provider === 'grok'
-        ? ['CONTROL_API_GROK_SUBSCRIPTION_ENABLED', 'GROK_LLM_PROXY_EXECUTION_ENABLED']
-        : ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED', 'CODEX_LLM_PROXY_EXECUTION_ENABLED'],
-    ],
-    [
-      proxy.name,
-      [
-        provider === 'grok'
-          ? 'GROK_LLM_PROXY_EXECUTION_ENABLED'
-          : 'CODEX_LLM_PROXY_EXECUTION_ENABLED',
-      ],
-    ],
-  ]) {
-    const check = `process.stdout.write(JSON.stringify(${JSON.stringify(keys)}.every(key => process.env[key] === 'true')))`
-    if (
-      kubectl([
-        '-n',
-        'control-plane',
-        'exec',
-        `deployment/${deploymentName}`,
-        '--',
-        'node',
-        '-e',
-        check,
-      ]).trim() !== 'true'
-    )
-      throw new Error(
-        'Selected subscription Minikube feature gates are not enabled in the running workload'
-      )
-  }
-  const hostFlags = JSON.parse(
-    kubectl(['-n', 'mcp-host', 'get', 'configmap/mcp-host-config', '-o', 'json'])
-  )
-  if (provider === 'codex' && hostFlags.data?.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true')
-    throw new Error('Host Codex feature gate is not enabled by the Minikube overlay')
+  // The subscription gate for this lane already ran as preparation's first step.
+  const hostFlags = subscriptionTransport('read-host-config')
+  // The workflow coordinator policy admits the fixture image only for the suite
+  // that prepares a WorkflowRecipe (#1048 MS-NW).
   if (
-    provider === 'codex' &&
+    suite === 'native-workflow' &&
     kubectl([
       '-n',
       'control-plane',
@@ -2052,6 +2410,7 @@ async function main() {
   const imageProof = buildApprovedToolsImageProof({
     profile,
     provider,
+    suite,
     sourceHead: head,
     manifest: imageManifest,
     images: observedImages,
@@ -2060,31 +2419,24 @@ async function main() {
   // The same fresh identity names feed both setup and the visible login runner.
   process.env.TEST_USER_EMAIL = `${run}@example.test`
   process.env.APPROVED_TOOLS_UNAUTHORIZED_EMAIL = `${run}-unauthorized@example.test`
+  // The suite decides the prepared set (#1048 MS-NW): the base journeys own the
+  // three receipt catalogs and the probe, native-workflow squares the one workflow
+  // agent, and model-step-retry the single 83-tool catalog.
   const ports = []
-  // approved-tools: three catalogs + the workflow backend + the probe.
-  // model-step-retry: one catalog + the probe.
-  const portCount = suite === 'model-step-retry' ? 2 : 5
+  const portCount = suitePortCount(suite)
   while (ports.length < portCount) {
     const port = await freePort()
     if (!ports.includes(port)) ports.push(port)
   }
   const probePort = ports.at(-1)
-  const scenarioCount = suite === 'model-step-retry' ? 1 : 3
-  const scenarios = makeScenarios(
+  const { scenarios, workflowScenario, allScenarios, resources } = makeSuiteFixtures({
     run,
-    ports.slice(0, -1).slice(0, scenarioCount),
-    probePort,
+    suite,
     provider,
-    process.env.APPROVED_TOOLS_GROK_CONNECTION_NAME,
-    suite
-  )
-  const workflowScenario =
-    suite === 'approved-tools' ? makeWorkflowScenario(run, ports[3], probePort) : undefined
-  const allScenarios = workflowScenario ? [...scenarios, workflowScenario] : scenarios
-  const resources = [
-    ...makeResources(allScenarios),
-    ...(workflowScenario ? makeWorkflowResources(workflowScenario) : []),
-  ]
+    connectionName: process.env.APPROVED_TOOLS_GROK_CONNECTION_NAME,
+    ports: ports.slice(0, -1),
+    probePort,
+  })
   const proposed = { apiVersion: 'v1', kind: 'List', items: resources }
   const validated = parseDryRunItems(
     kubectl(['create', '--dry-run=server', '-f', '-', '-o', 'json'], {
@@ -2371,8 +2723,14 @@ async function main() {
     if (action === 'run') {
       process.env.APPROVED_TOOLS_FIXTURE_USER_ID = state.identityJournal.users[0].id
       process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(scenarios)
-      if (workflowScenario)
+      // A suite that prepares no workflow row must not inherit one from the
+      // caller's environment: the runner reads this key to find the fixture
+      // evidence origin, and a stale row would describe another run.
+      if (workflowScenario) {
         process.env.APPROVED_TOOLS_WORKFLOW_SCENARIO = JSON.stringify(workflowScenario)
+      } else {
+        delete process.env.APPROVED_TOOLS_WORKFLOW_SCENARIO
+      }
       try {
         await command('runner', [], {
           timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS,
@@ -2417,10 +2775,16 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main().catch(error => {
-    // Two closed messages may be printed: the Grok precondition token and the
-    // coded identity failure. Everything else keeps the fixed operator line, so
-    // no runtime or database text can reach the console.
-    if (error.message.startsWith('GROK_CONNECTION_REQUIRED:'))
+    // A closed set of messages may be printed: the subscription gate tokens
+    // (`CODEX_SUBSCRIPTION_GATE_DISABLED`, `GROK_SUBSCRIPTION_GATE_DISABLED`, the
+    // `GROK_CONNECTION_*` refusals, which name a flag or a connection key and
+    // never a credential) and the coded identity failure. Everything else keeps
+    // the fixed operator line, so no runtime or database text reaches the console.
+    if (
+      error.message.startsWith('GROK_CONNECTION_') ||
+      error.message.startsWith('GROK_SUBSCRIPTION_GATE_DISABLED:') ||
+      error.message.startsWith('CODEX_SUBSCRIPTION_GATE_DISABLED:')
+    )
       process.stderr.write(error.message + '\n')
     else if (isIdentityFailureMessage(error.message)) process.stderr.write(error.message + '\n')
     process.stderr.write(

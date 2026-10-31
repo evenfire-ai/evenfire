@@ -216,25 +216,53 @@ Use the [setup instructions](../../tests/e2e/fixtures/codex-subscription/approve
 for the required environment and a fresh evidence directory under the canonical
 checkout's ignored `.local-notes/infra/runs/` path.
 
-1. `make minikube-build-codex-approved-tools-fixtures` acquires seven images:
-   the normal Control API, Codex proxy and custom-workflow SDK bases, plus the
-   Control API OAuth, proxy, MCP and workflow test fixtures. The private body
-   validates the inherited lease before building. Fixture tags never replace
-   production tags. Acquisition changes the manifest timestamp, so complete the
-   supported reconcile and exact-HEAD validation sequence before preparation.
-2. `make minikube-run-codex-approved-tools` prepares the isolated resources,
-   runs the visible deterministic Playwright journey, and restores the recorded
-   Control API/proxy images and environments and cleans up owned resources and
-   forwards. It can run as the T2 Playwright command after image acquisition and
-   reconciliation; a successful hermetic test alone is not a runtime verdict.
-3. For investigation, `make minikube-prepare-codex-approved-tools` leaves the
+1. `make minikube-build-codex-approved-tools-fixtures` acquires five images:
+   the normal Control API and Codex proxy bases, plus the Control API OAuth,
+   proxy and MCP test fixtures. The native workflow journey is its own suite run
+   and needs the custom coordinator pair: `make
+   minikube-build-codex-approved-tools-native-workflow-fixtures` acquires those
+   two (`workflow-custom-sdk-e2e` and `codex-approved-tools-workflow-e2e`).
+   Acquire both targets on the same HEAD when the native-workflow lane runs,
+   because its image proof requires every ref of that suite at the reviewed
+   commit. The private bodies validate the inherited lease before building.
+   Fixture tags never replace production tags. Acquisition changes the manifest
+   timestamp, so complete the supported reconcile and exact-HEAD validation
+   sequence before preparation.
+2. The lane splits into three suite runs that never share a fixture run
+   directory, a lease or a verdict: `approved-tools` (seven base journeys),
+   `native-workflow` (one workflow case) and `model-step-retry` (the visible
+   setup plus C1-C12). Each run prepares only what its cases use: the base suite
+   prepares the three receipt catalogs, `native-workflow` prepares the one
+   workflow agent and its `WorkflowRecipe`, and `model-step-retry` prepares the
+   single 83-tool catalog. Run them with
+   `make minikube-run-codex-approved-tools`,
+   `make minikube-run-codex-native-workflow` and
+   `make minikube-run-codex-model-step-retry`. Each target prepares the isolated
+   resources, runs the visible deterministic Playwright journey, writes the
+   lane's `retry-layer.json` and `admission.json` evidence before the restore,
+   and restores the recorded Control API/proxy images and environments and
+   cleans up owned resources and forwards. A run can follow image acquisition and
+   reconciliation as the T2 Playwright command; a successful hermetic test alone
+   is not a runtime verdict.
+3. Before any suite run, `node scripts/e2e/prepare-codex-approved-tools.mjs
+   check-subscriptions` (with `APPROVED_TOOLS_PROVIDER` and
+   `APPROVED_TOOLS_SUITE`) runs the read-only subscription gate: the provider's
+   feature flags in the running Control API, proxy and `mcp-host-config`, and for
+   the Grok lane one read-only `grok_subscription_connections` /
+   `grok_catalog_models` read through the fixture Control API pod. It takes no
+   mutation lease and writes no fixture state; a token
+   (`CODEX_SUBSCRIPTION_GATE_DISABLED: <flag>`,
+   `GROK_SUBSCRIPTION_GATE_DISABLED: <flag>`, `GROK_CONNECTION_*`) means the lead
+   must enable or re-authorize the subscription in the Control UI first.
+4. For investigation, `make minikube-prepare-codex-approved-tools` leaves the
    test fixtures active. Finish with `make minikube-restore-codex-approved-tools`
-   using the same evidence directory. Restoration verifies run ownership;
-   incomplete cleanup must be resolved before another run or T2 certification.
+   (or the suite-specific restore target) using the same evidence directory.
+   Restoration verifies run ownership; incomplete cleanup must be resolved
+   before another run or T2 certification.
 
 The synthetic lane requires deterministic upstream mode. It does not establish
-real-subscription interoperability or authorize real account use. The four
-public targets and the guarded build body have hermetic boundary coverage in
+real-subscription interoperability or authorize real account use. The public
+targets and the guarded build bodies have hermetic boundary coverage in
 `scripts/tests/test-minikube-mutation-boundary.sh`.
 
 ### Orphaned lock recovery

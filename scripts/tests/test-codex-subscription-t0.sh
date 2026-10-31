@@ -261,7 +261,10 @@ run_node_group "approved-tools-fixtures-and-runner" \
   "tests/e2e/fixtures/codex-subscription/approved-tools-setup/seed.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools-oauth/provider.test.mjs" \
   "scripts/e2e/approved-tools-resource-cleanup.test.mjs" \
-  "tests/e2e/fixtures/codex-subscription/approved-tools-workflow/index.test.mjs"
+  "tests/e2e/fixtures/codex-subscription/approved-tools-workflow/index.test.mjs" \
+  "tests/e2e/playwright/helpers/login-ledger.test.mjs" \
+  "tests/e2e/playwright/helpers/desktop-diagnostics.test.mjs" \
+  "scripts/e2e/model-step-retry-constants-parity.test.mjs"
 
 
 run_group "control-api" "control-api" \

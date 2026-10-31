@@ -17,15 +17,19 @@ if (provider === 'grok' && suite !== 'model-step-retry')
   throw new Error('The Grok approved-tools lane runs only the model-step-retry suite')
 if (suite === 'model-step-retry' && mode !== 'deterministic')
   throw new Error('The model-step-retry suite runs only in deterministic mode')
+if (suite === 'native-workflow' && mode !== 'deterministic')
+  throw new Error('The native-workflow suite runs only in deterministic mode')
 
-// #1044: one suite per lane run, with no dependency between them.
-// `approved-tools` runs the base journeys (or, in real-hybrid mode, the two
-// hybrid cases); `model-step-retry` runs the visible setup once plus the retry
-// cases it owns. Playwright matches `grep` against the joined project/file/title
-// path, so the patterns are not anchored; the trailing colon keeps C10 and C11
-// apart from C1. The setup title is the one constant both suites exclude from
-// their own project, so a setup failure skips them and the runner refuses the
-// skip instead of repeating the grant capture in a fresh worker.
+// #1048: one suite per lane run, with no dependency between them.
+// `approved-tools` runs the seven base journeys (or, in real-hybrid mode, the two
+// hybrid cases); `native-workflow` runs the one workflow case, which owns the
+// custom coordinator fixture; `model-step-retry` runs the visible setup once plus
+// the retry cases it owns. Playwright matches `grep` against the joined
+// project/file/title path, so the patterns are not anchored; the trailing colon
+// keeps C10 and C11 apart from C1. The setup title is the one constant both retry
+// suites exclude from their own project, so a setup failure skips them and the
+// runner refuses the skip instead of repeating the grant capture in a fresh
+// worker.
 const setupGrep = /model step retry setup: /
 const modelStepSetupProject = {
   name: 'model-step-retry-setup',
@@ -58,7 +62,9 @@ const approvedToolsProjects =
           testMatch: 'model-step-retry-codex-hybrid.spec.ts',
         },
       ]
-    : [{ name: 'approved-tools', testMatch: 'codex-subscription-approved-tools.spec.ts' }]
+    : suite === 'native-workflow'
+      ? [{ name: 'native-workflow', testMatch: 'codex-native-workflow.spec.ts' }]
+      : [{ name: 'approved-tools', testMatch: 'codex-subscription-approved-tools.spec.ts' }]
 
 export default defineConfig({
   testDir: './desktop',

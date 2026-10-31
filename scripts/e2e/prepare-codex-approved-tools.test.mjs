@@ -18,6 +18,14 @@ import {
 import {
   APPROVED_TOOLS_SUITES,
   assertResourceRoundTrip,
+  checkSubscriptionGates,
+  evaluateGrokSubscription,
+  flagProbeScript,
+  makeSuiteFixtures,
+  parseGrokSubscriptionProbe,
+  providerModelName,
+  replayedGrokSubscriptionDatabase,
+  suitePortCount,
   identityCleanupRequest,
   identityFailureMessage,
   isIdentityFailureMessage,
@@ -39,6 +47,7 @@ import {
   validateSuiteMatrix,
   validateSuiteOwnership,
 } from './prepare-codex-approved-tools.mjs'
+import * as prepareModule from './prepare-codex-approved-tools.mjs'
 
 test('original proxy image must satisfy the same policy used for restoration', () => {
   for (const image of [
@@ -783,7 +792,11 @@ test('Grok scenario helper accepts one prepared agent without weakening Codex is
 })
 
 test('the suite matrix admits only the three supported lanes and has no default', () => {
-  assert.deepEqual([...APPROVED_TOOLS_SUITES], ['approved-tools', 'model-step-retry'])
+  assert.deepEqual([...APPROVED_TOOLS_SUITES], [
+    'approved-tools',
+    'native-workflow',
+    'model-step-retry',
+  ])
   for (const mode of ['deterministic', 'real', 'real-hybrid'])
     assert.equal(validateSuiteMatrix('codex', 'approved-tools', mode), 'approved-tools')
   assert.equal(
@@ -791,9 +804,17 @@ test('the suite matrix admits only the three supported lanes and has no default'
     'model-step-retry'
   )
   assert.equal(validateSuiteMatrix('grok', 'model-step-retry', 'deterministic'), 'model-step-retry')
+  // The native workflow journey is the deterministic codex lane only.
+  assert.equal(
+    validateSuiteMatrix('codex', 'native-workflow', 'deterministic'),
+    'native-workflow'
+  )
   for (const [provider, suite, mode] of [
     ['codex', 'model-step-retry', 'real'],
     ['codex', 'model-step-retry', 'real-hybrid'],
+    ['codex', 'native-workflow', 'real'],
+    ['codex', 'native-workflow', 'real-hybrid'],
+    ['grok', 'native-workflow', 'deterministic'],
     ['grok', 'approved-tools', 'deterministic'],
     ['grok', 'model-step-retry', 'real'],
     ['codex', 'other', 'deterministic'],
@@ -805,6 +826,7 @@ test('the suite matrix admits only the three supported lanes and has no default'
       /APPROVED_TOOLS_SUITE_UNSUPPORTED|Invalid approved-tools provider/
     )
   assert.equal(validateSuite('approved-tools'), 'approved-tools')
+  assert.equal(validateSuite('native-workflow'), 'native-workflow')
   assert.throws(() => validateSuite(undefined), /APPROVED_TOOLS_SUITE_UNSUPPORTED/)
   assert.throws(() => validateSuite(''), /APPROVED_TOOLS_SUITE_UNSUPPORTED/)
 })
@@ -1060,3 +1082,338 @@ test('Grok running-image witness requires ready owned pods, resourceVersion and 
     assert.throws(() => observeGrokProxyPods(invalid, state), /Grok proxy pod/)
   }
 })
+
+// #1048 MS-NW: the suite decides the prepared fixtures. These are pure fixtures
+// (no cluster): the resources main() dry-runs and creates are the same arrays.
+test('the base suite prepares three catalogs and no workflow resource', () => {
+  const fixtures = makeSuiteFixtures({
+    run: 'approved-tools-a1b2c3d4e5f6',
+    suite: 'approved-tools',
+    ports: [43101, 43102, 43103],
+    probePort: 43104,
+  })
+  assert.equal(fixtures.scenarios.length, 3)
+  assert.equal(fixtures.workflowScenario, undefined)
+  assert.deepEqual(
+    fixtures.scenarios.map(row => row.catalogSize),
+    [83, 150, 250]
+  )
+  const kinds = fixtures.resources.map(resource => resource.kind)
+  assert.deepEqual(kinds, ['Context', 'Host', 'McpServer', 'Context', 'Host', 'McpServer', 'Context', 'Host', 'McpServer'])
+  assert.ok(!kinds.includes('WorkflowRecipe'))
+  const names = fixtures.resources.map(resource => resource.metadata.name)
+  assert.ok(!names.some(name => name.includes('-mcp-workflow')), names.join(','))
+  // Liveness: the base run still prepares a Host per catalog, each with a
+  // connector and no workflow control scope.
+  for (const host of fixtures.resources.filter(resource => resource.kind === 'Host'))
+    assert.equal(host.spec.workflowControl, undefined)
+  assert.equal(suitePortCount('approved-tools'), 4)
+})
+
+test('the native-workflow suite owns the workflow resource set and nothing else', () => {
+  const fixtures = makeSuiteFixtures({
+    run: 'approved-tools-a1b2c3d4e5f6',
+    suite: 'native-workflow',
+    ports: [43101],
+    probePort: 43102,
+  })
+  assert.deepEqual(fixtures.scenarios, [])
+  assert.equal(fixtures.allScenarios.length, 1)
+  assert.equal(fixtures.workflowScenario.workflowName, 'approved-tools-a1b2c3d4e5f6-recipe')
+  const kinds = fixtures.resources.map(resource => resource.kind)
+  assert.ok(kinds.includes('WorkflowRecipe'))
+  assert.equal(kinds.filter(kind => kind === 'WorkflowRecipe').length, 1)
+  const names = fixtures.resources.map(resource => resource.metadata.name)
+  assert.ok(names.includes('approved-tools-a1b2c3d4e5f6-mcp-workflow'))
+  assert.ok(names.includes('approved-tools-a1b2c3d4e5f6-recipe'))
+  // The workflow Host is the only agent and it carries the trigger scopes.
+  const hosts = fixtures.resources.filter(resource => resource.kind === 'Host')
+  assert.equal(hosts.length, 1)
+  assert.deepEqual(hosts[0].spec.workflowControl.scopes, [
+    'workflow:list',
+    'workflow:read',
+    'workflow:trigger',
+    'workflow:approval:resolve',
+    'workflow:approval:decide',
+  ])
+  // The receipt connector the workflow calls is the workflow row's own backend.
+  assert.ok(names.includes('approved-tools-a1b2c3d4e5f6-mcp-workflow'))
+  assert.equal(suitePortCount('native-workflow'), 2)
+})
+
+test('the prepare matrix refuses a fixture set that does not match its suite', () => {
+  const run = 'approved-tools-a1b2c3d4e5f6'
+  assert.throws(
+    () => makeSuiteFixtures({ run, suite: 'approved-tools', ports: [43101], probePort: 43102 }),
+    /approved-tools needs 3 fixture ports/
+  )
+  assert.throws(
+    () =>
+      makeSuiteFixtures({
+        run,
+        suite: 'native-workflow',
+        ports: [43101, 43102],
+        probePort: 43103,
+      }),
+    /native-workflow needs 1 fixture ports/
+  )
+  assert.throws(
+    () => makeSuiteFixtures({ run, suite: 'other', ports: [43101], probePort: 43102 }),
+    /APPROVED_TOOLS_SUITE_UNSUPPORTED/
+  )
+  assert.throws(
+    () =>
+      makeSuiteFixtures({
+        run,
+        suite: 'native-workflow',
+        ports: [43101],
+        probePort: 43101,
+      }),
+    /Invalid workflow fixture identity or ports/
+  )
+})
+
+// #1048 MS-SUB: the read-only subscription gate. The Grok half is tested against
+// a fake database (the same shape the identity lifecycle queries), never against
+// a fake kubectl.
+function fakeGrokDatabase(connections, models) {
+  const queries = []
+  return {
+    queries,
+    async query(sql, params) {
+      queries.push({ sql, params })
+      if (sql.includes('FROM grok_subscription_connections')) return { rows: connections }
+      if (sql.includes('FROM grok_catalog_models')) return { rows: models }
+      throw new Error(`unexpected statement: ${sql}`)
+    },
+  }
+}
+
+const connectedGrokRow = {
+  connection_key: 'alfredo-grok',
+  display_name: 'Alfredo Grok',
+  status: 'connected',
+  revoked_at: null,
+  catalog_status: 'ready',
+}
+
+test('the Grok gate passes one connected, addressable connection and names it', async () => {
+  const db = fakeGrokDatabase([connectedGrokRow], [{ model: 'grok-4.6', enabled: true, stale: false }])
+  const receipt = await evaluateGrokSubscription(db, {
+    connectionName: 'alfredo-grok',
+    modelName: 'grok-4.6',
+  })
+  assert.deepEqual(receipt, {
+    connectionKey: 'alfredo-grok',
+    displayName: 'Alfredo Grok',
+    status: 'connected',
+    catalogStatus: 'ready',
+    model: 'grok-4.6',
+    modelEnabled: true,
+  })
+  assert.equal(db.queries.length, 2)
+  assert.match(db.queries[1].sql, /SELECT m\.model, m\.enabled, m\.stale\s+FROM/)
+  for (const { sql, params } of db.queries) {
+    // Read-only by construction: no statement may write, and neither names a
+    // ciphertext or secret column.
+    assert.match(sql.trim(), /^SELECT /)
+    assert.ok(!/ciphertext|encrypted|access_token|refresh_token/i.test(sql), sql)
+    assert.deepEqual(params, ['alfredo-grok'])
+  }
+})
+
+test('the Grok gate requires a ready catalog and an enabled, non-stale model', async () => {
+  const model = { model: 'grok-4.6', enabled: true, stale: false }
+  for (const [connection, candidate, token] of [
+    [{ ...connectedGrokRow, catalog_status: 'syncing' }, model, 'GROK_CONNECTION_CATALOG_NOT_READY'],
+    [connectedGrokRow, { ...model, enabled: false }, 'GROK_CONNECTION_MODEL_UNAVAILABLE'],
+    [connectedGrokRow, { ...model, stale: true }, 'GROK_CONNECTION_MODEL_UNAVAILABLE'],
+  ]) {
+    await assert.rejects(
+      evaluateGrokSubscription(fakeGrokDatabase([connection], [candidate]), {
+        connectionName: 'alfredo-grok',
+        modelName: 'grok-4.6',
+      }),
+      new RegExp(`^Error: ${token}:`)
+    )
+  }
+  const receipt = await evaluateGrokSubscription(fakeGrokDatabase([connectedGrokRow], [model]), {
+    connectionName: 'alfredo-grok',
+    modelName: 'grok-4.6',
+  })
+  assert.equal(receipt.model, 'grok-4.6')
+  assert.equal(receipt.modelEnabled, true)
+  assert.equal(receipt.catalogStatus, 'ready')
+})
+
+test('each Grok refusal has its own token and never passes', async () => {
+  const cases = [
+    ['GROK_CONNECTION_MISSING', [], []],
+    [
+      'GROK_CONNECTION_AMBIGUOUS',
+      [connectedGrokRow, { ...connectedGrokRow, connection_key: 'grok-other' }],
+      [{ model: 'grok-4.6', enabled: true }],
+    ],
+    [
+      'GROK_CONNECTION_REVOKED',
+      [{ ...connectedGrokRow, status: 'revoked', revoked_at: '2026-10-30T00:00:00.000Z' }],
+      [{ model: 'grok-4.6', enabled: true }],
+    ],
+    [
+      'GROK_CONNECTION_NOT_CONNECTED',
+      [{ ...connectedGrokRow, status: 'reauth_required' }],
+      [{ model: 'grok-4.6', enabled: true }],
+    ],
+    [
+      'GROK_CONNECTION_NOT_ADDRESSABLE',
+      [{ ...connectedGrokRow, connection_key: 'alfredo-grok~revoked~12' }],
+      [{ model: 'grok-4.6', enabled: true }],
+    ],
+    [
+      'GROK_CONNECTION_MODEL_MISSING',
+      [connectedGrokRow],
+      [{ model: 'grok-4.5', enabled: true }],
+    ],
+  ]
+  for (const [token, connections, models] of cases) {
+    await assert.rejects(
+      evaluateGrokSubscription(fakeGrokDatabase(connections, models), {
+        connectionName: 'alfredo-grok',
+        modelName: 'grok-4.6',
+      }),
+      new RegExp(`^Error: ${token}:`)
+    )
+  }
+  // Vacuity: an empty result set is the MISSING token, never a pass.
+  await assert.rejects(
+    evaluateGrokSubscription(fakeGrokDatabase([], []), {
+      connectionName: 'alfredo-grok',
+      modelName: 'grok-4.6',
+    }),
+    /GROK_CONNECTION_MISSING/
+  )
+  await assert.rejects(
+    evaluateGrokSubscription(fakeGrokDatabase([connectedGrokRow], []), {
+      connectionName: 'alfredo-grok',
+      modelName: 'grok-4.6',
+    }),
+    /GROK_CONNECTION_MODEL_MISSING: grok-4.6/
+  )
+})
+
+test('the flag gate names the exact disabled flag and admits the enabled set', () => {
+  const codexHost = { data: { MCP_HOST_CODEX_SUBSCRIPTION_ENABLED: 'true' } }
+  const probes = []
+  const execFlags = (deploymentName, keys) => {
+    probes.push([deploymentName, keys])
+    return Object.fromEntries(keys.map(key => [key, true]))
+  }
+  assert.deepEqual(checkSubscriptionGates({ provider: 'codex', execFlags, hostConfig: codexHost }), {
+    provider: 'codex',
+    checked: [
+      'CONTROL_API_CODEX_SUBSCRIPTION_ENABLED',
+      'CODEX_LLM_PROXY_EXECUTION_ENABLED',
+      'CODEX_LLM_PROXY_EXECUTION_ENABLED',
+      'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED',
+    ],
+  })
+  assert.deepEqual(
+    probes.map(([deploymentName]) => deploymentName),
+    ['control-api', 'codex-llm-proxy']
+  )
+  assert.throws(
+    () =>
+      checkSubscriptionGates({
+        provider: 'codex',
+        execFlags: (deploymentName, keys) =>
+          Object.fromEntries(keys.map(key => [key, key !== 'CODEX_LLM_PROXY_EXECUTION_ENABLED'])),
+        hostConfig: codexHost,
+      }),
+    /^Error: CODEX_SUBSCRIPTION_GATE_DISABLED: CODEX_LLM_PROXY_EXECUTION_ENABLED$/
+  )
+  assert.throws(
+    () =>
+      checkSubscriptionGates({
+        provider: 'grok',
+        execFlags: () => ({}),
+        hostConfig: { data: {} },
+      }),
+    /GROK_SUBSCRIPTION_GATE_DISABLED: CONTROL_API_GROK_SUBSCRIPTION_ENABLED/
+  )
+  assert.throws(
+    () =>
+      checkSubscriptionGates({
+        provider: 'codex',
+        execFlags: (deploymentName, keys) => Object.fromEntries(keys.map(key => [key, true])),
+        hostConfig: { data: { MCP_HOST_CODEX_SUBSCRIPTION_ENABLED: 'false' } },
+      }),
+    /CODEX_SUBSCRIPTION_GATE_DISABLED: MCP_HOST_CODEX_SUBSCRIPTION_ENABLED/
+  )
+  // The probe program is a closed shape: no flag name can be interpolated.
+  assert.throws(() => flagProbeScript(['lower_case_flag']), /Invalid feature probe/)
+  assert.throws(() => flagProbeScript([]), /Invalid feature probe/)
+  assert.equal(
+    flagProbeScript(['CODEX_LLM_PROXY_EXECUTION_ENABLED']),
+    `process.stdout.write(JSON.stringify(Object.fromEntries(["CODEX_LLM_PROXY_EXECUTION_ENABLED"].map(key => [key, process.env[key] === 'true']))))`
+  )
+})
+
+test('the Grok probe output is parsed strictly and replayed through one evaluator', async () => {
+  const probe = parseGrokSubscriptionProbe(
+    JSON.stringify({
+      connections: [connectedGrokRow],
+      models: [{ model: 'grok-4.6', enabled: true, stale: false }],
+    })
+  )
+  assert.equal(providerModelName('grok'), 'grok-4.6')
+  const receipt = await evaluateGrokSubscription(replayedGrokSubscriptionDatabase(probe), {
+    connectionName: 'alfredo-grok',
+    modelName: providerModelName('grok'),
+  })
+  assert.equal(receipt.connectionKey, 'alfredo-grok')
+  // An unexpected column (a ciphertext, a credential) is refused before use.
+  assert.throws(
+    () =>
+      parseGrokSubscriptionProbe(
+        JSON.stringify({
+          connections: [{ ...connectedGrokRow, access_token_ciphertext: 'x' }],
+          models: [],
+        })
+      ),
+    /unexpected connection column/
+  )
+  assert.throws(
+    () =>
+      parseGrokSubscriptionProbe(
+        JSON.stringify({ connections: [], models: [{ model: 'grok-4.6' }] })
+      ),
+    /invalid catalog row/
+  )
+  for (const model of [
+    { model: 'grok-4.6', enabled: true },
+    { model: 'grok-4.6', enabled: true, stale: 'false' },
+    { model: 'grok-4.6', enabled: true, stale: false, extra: true },
+  ]) {
+    assert.throws(
+      () => parseGrokSubscriptionProbe(JSON.stringify({ connections: [], models: [model] })),
+      /invalid catalog row/
+    )
+  }
+})
+
+test('the probe program is a fixed read-only script with the name as an argument', () => {
+  // No interpolation: the connection name travels as argv, not inside the program.
+  assert.ok(grokProbeProgram().includes('process.argv[1]'))
+  assert.ok(grokProbeProgram().includes("BEGIN READ ONLY"))
+  assert.ok(grokProbeProgram().includes('ROLLBACK'))
+  assert.ok(!grokProbeProgram().includes('INSERT'))
+  assert.ok(!grokProbeProgram().includes('UPDATE'))
+  assert.ok(!grokProbeProgram().includes('DELETE'))
+  assert.ok(grokProbeProgram().includes('WHERE connection_key = $1 OR display_name = $1'))
+})
+
+function grokProbeProgram() {
+  // Imported through the module's public surface so the program cannot drift
+  // from what validateKubectlArgs admits.
+  return prepareModule.grokSubscriptionProbeScript
+}

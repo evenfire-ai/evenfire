@@ -28,6 +28,8 @@
 import { IMAGES, localRef } from '../release/images-manifest.mjs'
 
 export const ACQUIRE_COMMAND = 'make minikube-build-codex-approved-tools-fixtures'
+export const NATIVE_WORKFLOW_ACQUIRE_COMMAND =
+  'make minikube-build-codex-approved-tools-native-workflow-fixtures'
 
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/
 const HEAD_PATTERN = /^[0-9a-f]{40}$/
@@ -57,6 +59,45 @@ export const BASE_IMAGES = Object.freeze([
 ])
 
 export const EXPECTED_IMAGES = Object.freeze([...FIXTURE_IMAGES, ...BASE_IMAGES])
+
+// The workflow images belong to the native-workflow suite only (#1048 MS-NW).
+// A lane that prepares no `WorkflowRecipe` must not require them, or the base
+// lane stops before its first mutation because an image it never uses is
+// missing. `approved-tools` is the base journey suite; `model-step-retry` runs
+// the retry cases alone and reads no workflow backend either.
+const WORKFLOW_IMAGES = Object.freeze([
+  localImageRef('codex-approved-tools-workflow-e2e'),
+  localImageRef('workflow-custom-sdk-e2e'),
+])
+
+const CODEX_SUITE_IMAGES = Object.freeze({
+  'approved-tools': EXPECTED_IMAGES.filter(ref => !WORKFLOW_IMAGES.includes(ref)),
+  'native-workflow': EXPECTED_IMAGES,
+  'model-step-retry': EXPECTED_IMAGES.filter(ref => !WORKFLOW_IMAGES.includes(ref)),
+})
+
+export const GROK_IMAGES = Object.freeze([
+  localImageRef('codex-approved-tools-mcp-e2e'),
+  localImageRef('grok-approved-tools-proxy-e2e'),
+  localImageRef('codex-approved-tools-control-api-e2e'),
+  localImageRef('grok-llm-proxy'),
+  localImageRef('control-api'),
+])
+
+export function expectedImages(provider = 'codex', suite = 'approved-tools') {
+  if (!['codex', 'grok'].includes(provider)) throw new Error('Invalid approved-tools provider')
+  if (provider === 'grok') {
+    if (suite !== 'model-step-retry')
+      throw new Error('The Grok lane runs only the model-step-retry suite')
+    return GROK_IMAGES
+  }
+  const images = CODEX_SUITE_IMAGES[suite]
+  if (!images)
+    throw new Error(
+      'APPROVED_TOOLS_SUITE_UNSUPPORTED: expected approved-tools, native-workflow or model-step-retry'
+    )
+  return images
+}
 
 // Fixtures whose Dockerfile builds FROM another image this profile holds. The
 // manifest records that base and the digest it resolved to; a fixture built
@@ -159,20 +200,26 @@ function indexRecordedRevisions(revisions) {
 // Certify the fixture images this profile holds against the commit under
 // review. Returns the record the caller stores with the fixture run state:
 // { profile, sourceHead, images, sourceRevisions, derivedFrom }.
-export function buildApprovedToolsImageProof({ profile, sourceHead, manifest, images, provider = 'codex' } = {}) {
+export function buildApprovedToolsImageProof({
+  profile,
+  sourceHead,
+  manifest,
+  images,
+  provider = 'codex',
+  suite = 'approved-tools',
+} = {}) {
   if (!['codex', 'grok'].includes(provider)) throw new Error('Invalid approved-tools provider')
-  const acquireCommand = provider === 'codex' ? ACQUIRE_COMMAND : 'make minikube-build-grok-model-step-fixtures'
-  const expectedImages = provider === 'codex' ? EXPECTED_IMAGES : [
-    localImageRef('codex-approved-tools-mcp-e2e'),
-    localImageRef('grok-approved-tools-proxy-e2e'),
-    localImageRef('codex-approved-tools-control-api-e2e'),
-    localImageRef('grok-llm-proxy'),
-    localImageRef('control-api'),
-  ]
-  const derivedFixtures = provider === 'codex' ? DERIVED_FIXTURES : [
+  const acquireCommand =
+    provider === 'grok'
+      ? 'make minikube-build-grok-model-step-fixtures'
+      : suite === 'native-workflow'
+        ? `${ACQUIRE_COMMAND} and ${NATIVE_WORKFLOW_ACQUIRE_COMMAND}`
+        : ACQUIRE_COMMAND
+  const expectedImagesForRun = expectedImages(provider, suite)
+  const derivedFixtures = (provider === 'codex' ? DERIVED_FIXTURES : [
     { ref: localImageRef('grok-approved-tools-proxy-e2e'), base: localImageRef('grok-llm-proxy') },
     { ref: localImageRef('codex-approved-tools-control-api-e2e'), base: localImageRef('control-api') },
-  ]
+  ]).filter(({ ref }) => expectedImagesForRun.includes(ref))
   if (typeof profile !== 'string' || !PROFILE_PATTERN.test(profile))
     throw new Error(
       `IMAGE_PROOF_PROFILE_MISMATCH: '${profile ?? ''}' is not a usable Minikube profile`
@@ -201,7 +248,7 @@ export function buildApprovedToolsImageProof({ profile, sourceHead, manifest, im
 
   const proofImages = {}
   const proofRevisions = {}
-  for (const ref of expectedImages) {
+  for (const ref of expectedImagesForRun) {
     const record = recorded.get(canonicalImageRef(ref))
     if (!record)
       throw new Error(
