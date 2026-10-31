@@ -29,6 +29,7 @@ export type GfsImagePreviewProps = {
    * attachment), so it is required rather than defaulted.
    */
   recordOpen: boolean
+  onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
 } & GfsImagePreviewSource
 
 /**
@@ -45,7 +46,9 @@ export type GfsImagePreviewBodyProps = {
   onDownloadError?: (error: unknown) => void
   /** True only when this fetch is the user opening the file. */
   recordOpen: boolean
+  onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
   titleId?: string
+  titleActions?: ReactNode
   headerActions?: ReactNode
   headingLevel?: 2 | 3
 } & GfsImagePreviewSource

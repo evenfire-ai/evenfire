@@ -1,10 +1,20 @@
-import { useCallback, useEffect, useState } from 'react'
-import { EmptyState } from '@components/Common'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { Button, EmptyState, StatusBanner } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
+import { GfsResourceMenu } from '@components/GfsResourceMenu'
+import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
+import {
+  desktopQueryKeys,
+  isGfsSessionAuthorityCurrent,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
+import { useFilePreviewResourceActions } from './useFilePreviewResourceActions'
 
 function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -58,7 +68,12 @@ export function FilePreviewPage({
   byteLength,
   reloadVersion,
   unavailable = false,
+  pushToast,
+  onOpenRoute,
+  onRenameCommitted,
+  titlebarLeadingTarget,
 }: FilePreviewPageProps) {
+  const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController()
   const [reloadToken, setReloadToken] = useState(0)
   // The reload generation this tab was OPENED at. A tab remount after a reload
@@ -67,7 +82,43 @@ export function FilePreviewPage({
   // preview tab are all fetches of an already-opened file.
   const [openedAtReloadVersion] = useState(reloadVersion ?? 0)
   const [denied, setDenied] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [copyContentReady, setCopyContentReady] = useState(false)
+  const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
   const accessRevoked = ctrl.accessState === 'revoked'
+  const liveAuthorityRef = useRef({
+    sessionScope: ctrl.sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
+  })
+  const refreshRequestRef = useRef(0)
+  liveAuthorityRef.current = {
+    sessionScope: ctrl.sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
+  }
+  const capturedSessionScope = ctrl.sessionScope
+  const capturedSessionGeneration = ctrl.sessionGeneration
+  const handlePreviewAuthorityFailure = useCallback(
+    (
+      message: string,
+      scope: string | null = capturedSessionScope,
+      generation: number | null = capturedSessionGeneration
+    ) => ctrl.handleAuthorityFailure(message, 'operation', scope, generation),
+    [ctrl.handleAuthorityFailure, capturedSessionGeneration, capturedSessionScope]
+  )
+
+  const previewResourceActions = useFilePreviewResourceActions({
+    gfsUri,
+    fileName,
+    home: ctrl.home,
+    sessionScope: ctrl.sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
+    principalScope: ctrl.principalScope,
+    canResolve: !denied && !unavailable && !accessRevoked && !ctrl.authorityPending,
+    onAuthorityFailure: handlePreviewAuthorityFailure,
+    onDeleted: () => setDenied('The file was deleted.'),
+    onRenameCommitted,
+    pushToast,
+  })
 
   // Each previewed resource starts from a clean per-resource verdict.
   useEffect(() => {
@@ -85,26 +136,214 @@ export function FilePreviewPage({
     if (accessRevoked) setReloadToken(token => token + 1)
   }, [accessRevoked])
 
+  useEffect(() => {
+    refreshRequestRef.current += 1
+    setRefreshing(false)
+  }, [capturedSessionGeneration, capturedSessionScope, gfsUri])
+
   const handleDownloadError = useCallback(
     (error: unknown) => {
-      ctrl.handleAuthorityFailure(toMessage(error), 'operation')
+      if (
+        !isGfsSessionAuthorityCurrent(
+          capturedSessionScope,
+          capturedSessionGeneration,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        return
+      ctrl.handleAuthorityFailure(
+        toMessage(error),
+        'operation',
+        capturedSessionScope,
+        capturedSessionGeneration
+      )
     },
-    [ctrl]
+    [capturedSessionGeneration, capturedSessionScope, ctrl.handleAuthorityFailure]
+  )
+
+  const handleRefresh = useCallback(async () => {
+    const scope = capturedSessionScope
+    const generation = capturedSessionGeneration
+    if (refreshing || denied || unavailable || accessRevoked || !isGfsSessionGeneration(generation))
+      return
+    const requestId = ++refreshRequestRef.current
+    setRefreshing(true)
+    try {
+      await window.clerum.gfs.resolve(gfsUri)
+      if (
+        !isGfsSessionAuthorityCurrent(
+          scope,
+          generation,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        return
+      setDenied(null)
+      setReloadToken(token => token + 1)
+      pushToast?.('EvenDrive refreshed', 'success')
+    } catch (error) {
+      const message = toMessage(error)
+      if (
+        !isGfsSessionAuthorityCurrent(
+          scope,
+          generation,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        return
+      if (
+        !ctrl.handleAuthorityFailure(message, 'operation', scope, generation) &&
+        isPerResourceAccessDenial(message)
+      ) {
+        setDenied(message)
+      }
+      pushToast?.(`Could not refresh EvenDrive: ${message}`, 'error')
+    } finally {
+      if (
+        refreshRequestRef.current === requestId &&
+        isGfsSessionAuthorityCurrent(
+          scope,
+          generation,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        setRefreshing(false)
+    }
+  }, [
+    accessRevoked,
+    capturedSessionGeneration,
+    capturedSessionScope,
+    ctrl,
+    denied,
+    gfsUri,
+    pushToast,
+    refreshing,
+    unavailable,
+  ])
+
+  const handleCopyLink = useCallback(async () => {
+    try {
+      const result = await window.clerum.gfs.copyDeepLink?.(gfsUri)
+      if (!result?.url) throw new Error('Shareable EvenDrive links are unavailable in this version')
+      pushToast?.('Shareable EvenDrive link copied', 'success')
+    } catch (error) {
+      pushToast?.(`Could not copy the EvenDrive link: ${toMessage(error)}`, 'error')
+    }
+  }, [gfsUri, pushToast])
+
+  const handleCopyRoute = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(gfsUri)
+      pushToast?.('File ID copied', 'success')
+    } catch (error) {
+      pushToast?.(`Could not copy the file ID: ${toMessage(error)}`, 'error')
+    }
+  }, [gfsUri, pushToast])
+
+  const handleCopyContent = useCallback(async () => {
+    const copy = copyContentRef.current
+    if (!copy) return
+    const copied = await copy()
+    pushToast?.(
+      copied ? 'EvenDrive content copied' : 'Could not copy the EvenDrive content',
+      copied ? 'success' : 'error'
+    )
+  }, [pushToast])
+
+  const handleCopyContentReady = useCallback((copy: (() => Promise<boolean>) | null) => {
+    copyContentRef.current = copy
+    setCopyContentReady(Boolean(copy))
+  }, [])
+
+  const resourceActions = buildGfsResourceActions({
+    kind: 'file',
+    uri: gfsUri,
+    handlers: {
+      refresh: !denied && !unavailable && !accessRevoked ? () => void handleRefresh() : undefined,
+      'copy-link': () => void handleCopyLink(),
+      'copy-route': () => void handleCopyRoute(),
+      'open-route': onOpenRoute,
+      'copy-content':
+        !denied &&
+        !unavailable &&
+        !accessRevoked &&
+        (fileKind === 'image' || fileKind === 'markdown')
+          ? () => void handleCopyContent()
+          : undefined,
+      ...previewResourceActions.handlers,
+    },
+    canShare: previewResourceActions.canShare,
+    canRename: previewResourceActions.canRename,
+    canMove: previewResourceActions.canMove,
+    canDownload: previewResourceActions.canDownload,
+    canDelete: previewResourceActions.canDelete,
+    mutating: previewResourceActions.mutating,
+    canCopyContent: copyContentReady,
+    refreshing,
+  })
+  const menuResourceName = denied || unavailable || accessRevoked ? 'unavailable file' : fileName
+  const fileActionsMenu = (
+    <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={menuResourceName} />
   )
 
   const revalidateAccess = useCallback(async () => {
-    if (denied || accessRevoked) return
+    if (denied || accessRevoked || !isGfsSessionGeneration(ctrl.sessionGeneration)) return
+    const capturedScope = ctrl.sessionScope
+    const capturedGeneration = ctrl.sessionGeneration
+    const resourceQueryKey = [
+      ...desktopQueryKeys.gfsRoot,
+      ctrl.sessionScope,
+      'preview-resource',
+      gfsUri,
+      { sessionGeneration: ctrl.sessionGeneration },
+    ] as const
     try {
-      await window.clerum.gfs.resolve(gfsUri)
+      // Use the mounted resource query so React Query's own focus refetch and
+      // this access check share one in-flight resolver request.
+      await queryClient.refetchQueries(
+        { queryKey: resourceQueryKey, exact: true },
+        { throwOnError: true }
+      )
+      if (
+        !isGfsSessionAuthorityCurrent(
+          capturedScope,
+          capturedGeneration,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        return
     } catch (error) {
       const message = toMessage(error)
+      if (
+        !isGfsSessionAuthorityCurrent(
+          capturedScope,
+          capturedGeneration,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        return
       // A session-authority failure revokes the shared session (H2 path); the
       // body then remounts and fails closed. A per-resource 403 is local to this
       // preview — drop its bytes here without touching the session.
-      if (ctrl.handleAuthorityFailure(message, 'operation')) return
+      if (ctrl.handleAuthorityFailure(message, 'operation', capturedScope, capturedGeneration))
+        return
       if (isPerResourceAccessDenial(message)) setDenied(message)
     }
-  }, [accessRevoked, ctrl, denied, gfsUri])
+  }, [
+    accessRevoked,
+    ctrl.handleAuthorityFailure,
+    ctrl.sessionGeneration,
+    ctrl.sessionScope,
+    denied,
+    gfsUri,
+    queryClient,
+  ])
 
   useEffect(() => {
     const onFocus = () => {
@@ -121,48 +360,86 @@ export function FilePreviewPage({
 
   return (
     <section className="page">
+      <GfsResourceTitlebarActions
+        target={titlebarLeadingTarget}
+        onRefresh={
+          !denied && !unavailable && !accessRevoked ? () => void handleRefresh() : undefined
+        }
+        refreshing={refreshing}
+        onCopyLink={() => void handleCopyLink()}
+        onOpenLink={onOpenRoute}
+      />
       <div className="da-gfs-preview-page">
-        {denied || unavailable || accessRevoked ? (
-          <EmptyState title="File unavailable" body="This item is no longer available." />
-        ) : (
-          <>
-            {fileKind === 'image' ? (
-              <GfsImagePreviewBody
-                key={bodyKey}
-                byteLength={byteLength}
-                fileName={fileName}
-                gfsUri={gfsUri}
-                mimeType={mimeType ?? ''}
-                onDownloadError={handleDownloadError}
-                recordOpen={recordOpen}
-                headingLevel={2}
-              />
+        {previewResourceActions.dialogs}
+        {previewResourceActions.permissionNotices.map(notice => (
+          <div key={notice.id} role={notice.pending ? 'status' : 'alert'}>
+            <StatusBanner tone={notice.pending ? 'info' : 'error'} text={notice.message} />
+            {!notice.pending ? (
+              <Button
+                onClick={() =>
+                  void Promise.resolve()
+                    .then(notice.retry)
+                    .catch(() => undefined)
+                }
+                size="sm"
+                variant="outline"
+              >
+                Retry permission check
+              </Button>
             ) : null}
-            {fileKind === 'markdown' ? (
-              <GfsMarkdownPreviewBody
-                key={bodyKey}
-                byteLength={byteLength}
-                fileName={fileName}
-                gfsUri={gfsUri}
-                onDownloadError={handleDownloadError}
-                recordOpen={recordOpen}
-                headingLevel={2}
-              />
-            ) : null}
-            {fileKind === 'video' ? (
-              <GfsVideoPreviewBody
-                key={bodyKey}
-                byteLength={byteLength}
-                fileName={fileName}
-                gfsUri={gfsUri}
-                mimeType={mimeType ?? ''}
-                onDownloadError={handleDownloadError}
-                recordOpen={recordOpen}
-                headingLevel={2}
-              />
-            ) : null}
-          </>
-        )}
+          </div>
+        ))}
+        <div className="da-gfs-preview-content">
+          {denied || unavailable || accessRevoked ? (
+            <>
+              <div className="da-gfs-preview-unavailable-actions">{fileActionsMenu}</div>
+              <EmptyState title="File unavailable" body="This item is no longer available." />
+            </>
+          ) : (
+            <>
+              {fileKind === 'image' ? (
+                <GfsImagePreviewBody
+                  key={bodyKey}
+                  byteLength={byteLength}
+                  fileName={fileName}
+                  gfsUri={gfsUri}
+                  mimeType={mimeType ?? ''}
+                  onDownloadError={handleDownloadError}
+                  recordOpen={recordOpen}
+                  onCopyContentReady={handleCopyContentReady}
+                  titleActions={fileActionsMenu}
+                  headingLevel={2}
+                />
+              ) : null}
+              {fileKind === 'markdown' ? (
+                <GfsMarkdownPreviewBody
+                  key={bodyKey}
+                  byteLength={byteLength}
+                  fileName={fileName}
+                  gfsUri={gfsUri}
+                  onDownloadError={handleDownloadError}
+                  recordOpen={recordOpen}
+                  onCopyContentReady={handleCopyContentReady}
+                  titleActions={fileActionsMenu}
+                  headingLevel={2}
+                />
+              ) : null}
+              {fileKind === 'video' ? (
+                <GfsVideoPreviewBody
+                  key={bodyKey}
+                  byteLength={byteLength}
+                  fileName={fileName}
+                  gfsUri={gfsUri}
+                  mimeType={mimeType ?? ''}
+                  onDownloadError={handleDownloadError}
+                  recordOpen={recordOpen}
+                  titleActions={fileActionsMenu}
+                  headingLevel={2}
+                />
+              ) : null}
+            </>
+          )}
+        </div>
       </div>
     </section>
   )

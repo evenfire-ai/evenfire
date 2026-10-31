@@ -1,3 +1,41 @@
+export function isGfsSessionGeneration(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+export function hasGfsSessionGeneration(
+  key: readonly unknown[],
+  generation: number | null
+): boolean {
+  const qualifier = key[key.length - 1]
+  return Boolean(
+    qualifier &&
+    typeof qualifier === 'object' &&
+    !Array.isArray(qualifier) &&
+    (qualifier as { sessionGeneration?: unknown }).sessionGeneration === generation
+  )
+}
+
+export function isGfsSessionAuthorityCurrent(
+  capturedScope: string | null,
+  capturedGeneration: number | null,
+  liveScope: string | null,
+  liveGeneration: number | null
+): boolean {
+  return Boolean(
+    capturedScope &&
+    capturedScope === liveScope &&
+    isGfsSessionGeneration(capturedGeneration) &&
+    capturedGeneration === liveGeneration
+  )
+}
+
+function withGfsSessionGeneration<T extends readonly unknown[]>(
+  key: T,
+  sessionGeneration?: number | null
+) {
+  return sessionGeneration === undefined ? key : ([...key, { sessionGeneration }] as const)
+}
+
 export const desktopQueryKeys = {
   all: ['desktop-app'] as const,
   accessCatalog: ['desktop-app', 'access-catalog'] as const,
@@ -17,30 +55,75 @@ export const desktopQueryKeys = {
   sharedFilesDirectory: (contextId: string, filesystemName: string, path: string) =>
     ['desktop-app', 'shared-files', 'directory', contextId, filesystemName, path] as const,
   gfsRoot: ['desktop-app', 'gfs'] as const,
-  gfsHome: (sessionScope: string) => ['desktop-app', 'gfs', sessionScope, 'home'] as const,
+  gfsHome: (sessionScope: string, generation?: number | null) =>
+    withGfsSessionGeneration(['desktop-app', 'gfs', sessionScope, 'home'] as const, generation),
   // Session-authority revoked flag, SHARED across every GFS controller mount
   // (sidebar tree, FilesPage, FilePreviewPage) via the query cache. Kept OUTSIDE
   // the `gfsRoot` prefix on purpose: the fail-closed purge removes everything
   // under `gfsRoot`, and the revoked flag must survive that purge (it is set in
   // the same turn). Keyed by sessionScope so a user/team/env switch reads fresh.
-  gfsAccessState: (sessionScope: string) => ['desktop-app', 'gfs-access', sessionScope] as const,
-  gfsAccessible: (sessionScope: string, drive: string) =>
-    ['desktop-app', 'gfs', sessionScope, 'accessible', drive] as const,
-  // The caller's own recent files. Scoped by session so one user's cached list
-  // is never read under another user's scope, and purged with `gfsRoot` on a
-  // revoke.
-  gfsRecentFiles: (sessionScope: string, drive: string) =>
-    ['desktop-app', 'gfs', sessionScope, 'recent', drive] as const,
-  gfsChildren: (sessionScope: string, resourceId: string, drive: string) =>
-    ['desktop-app', 'gfs', sessionScope, 'children', drive, resourceId] as const,
-  gfsAffordances: (sessionScope: string, resourceId: string, drive: string) =>
-    ['desktop-app', 'gfs', sessionScope, 'affordances', drive, resourceId] as const,
-  gfsGrants: (sessionScope: string, resourceId: string, drive: string) =>
-    ['desktop-app', 'gfs', sessionScope, 'grants', drive, resourceId] as const,
-  gfsShares: (sessionScope: string, resourceId: string, drive: string) =>
-    ['desktop-app', 'gfs', sessionScope, 'shares', drive, resourceId] as const,
-  gfsInheritedAccess: (sessionScope: string, resourceId: string, drive: string) =>
-    ['desktop-app', 'gfs', sessionScope, 'inherited-access', drive, resourceId] as const,
+  gfsAccessState: (sessionScope: string, generation?: number | null) =>
+    withGfsSessionGeneration(['desktop-app', 'gfs-access', sessionScope] as const, generation),
+  gfsAccessible: (sessionScope: string, drive: string, generation?: number | null) =>
+    withGfsSessionGeneration(
+      ['desktop-app', 'gfs', sessionScope, 'accessible', drive] as const,
+      generation
+    ),
+  gfsRecentFiles: (sessionScope: string, drive: string, generation?: number | null) =>
+    withGfsSessionGeneration(
+      ['desktop-app', 'gfs', sessionScope, 'recent', drive] as const,
+      generation
+    ),
+  gfsChildren: (
+    sessionScope: string,
+    resourceId: string,
+    drive: string,
+    generation?: number | null
+  ) =>
+    withGfsSessionGeneration(
+      ['desktop-app', 'gfs', sessionScope, 'children', drive, resourceId] as const,
+      generation
+    ),
+  gfsAffordances: (
+    sessionScope: string,
+    resourceId: string,
+    drive: string,
+    generation?: number | null
+  ) =>
+    withGfsSessionGeneration(
+      ['desktop-app', 'gfs', sessionScope, 'affordances', drive, resourceId] as const,
+      generation
+    ),
+  gfsGrants: (
+    sessionScope: string,
+    resourceId: string,
+    drive: string,
+    generation?: number | null
+  ) =>
+    withGfsSessionGeneration(
+      ['desktop-app', 'gfs', sessionScope, 'grants', drive, resourceId] as const,
+      generation
+    ),
+  gfsShares: (
+    sessionScope: string,
+    resourceId: string,
+    drive: string,
+    generation?: number | null
+  ) =>
+    withGfsSessionGeneration(
+      ['desktop-app', 'gfs', sessionScope, 'shares', drive, resourceId] as const,
+      generation
+    ),
+  gfsInheritedAccess: (
+    sessionScope: string,
+    resourceId: string,
+    drive: string,
+    generation?: number | null
+  ) =>
+    withGfsSessionGeneration(
+      ['desktop-app', 'gfs', sessionScope, 'inherited-access', drive, resourceId] as const,
+      generation
+    ),
   // Open GFS locations, SHARED across every controller mount (the sidebar
   // tree, FilesPage, FilePreviewPage) via the query cache: each mount
   // publishes the resource it has open together with the ancestry it

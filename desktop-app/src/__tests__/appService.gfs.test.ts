@@ -43,6 +43,7 @@ function gfsService() {
     moveGfsResource: (
       resourceId: string,
       destinationId: string,
+      expectedSessionGeneration: number,
       drive?: string,
       ifMatch?: number
     ) => Promise<{ resourceId: string; version: number }>
@@ -63,7 +64,7 @@ describe('AppService GFS delegation subject boundary', () => {
     const service = gfsService()
     const destinationId = '33333333-3333-4333-8333-333333333333'
 
-    await service.moveGfsResource(RESOURCE_ID, destinationId, 'main', 8)
+    await service.moveGfsResource(RESOURCE_ID, destinationId, 0, 'main', 8)
 
     expect(service.gfsClient.moveResource).toHaveBeenCalledTimes(1)
     expect(service.gfsClient.moveResource).toHaveBeenCalledWith(
@@ -350,6 +351,19 @@ function authenticatedUploadService(statePath: string): UploadScopeTestService {
 }
 
 describe('AppService GFS upload security scope', () => {
+  it('uses the main drive for a new upload when no drive is supplied', async () => {
+    const service = authenticatedUploadService('unused-state-path')
+    const receipt = { uploadId: 'upload-1' }
+    service.startDesktopGfsUpload.mockResolvedValue(receipt)
+
+    await expect(
+      service.startGfsFileUpload('parent-rid', 'file.txt', '/local/file.txt')
+    ).resolves.toBe(receipt)
+    expect(service.startDesktopGfsUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ drive: 'main', parentRid: 'parent-rid', operation: 'create' })
+    )
+  })
+
   it('falls back to the bounded legacy create path for a fresh start when v2 is disabled', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-start-fallback-'))
     try {
@@ -969,7 +983,11 @@ describe('AppService GFS upload security scope', () => {
         releaseAbort()
 
         await expect(pendingOutcome).resolves.toContain('authentication fence')
-        await expect(login).resolves.toEqual({ authenticated: true, me: nextMe })
+        await expect(login).resolves.toMatchObject({
+          authenticated: true,
+          me: nextMe,
+          sessionGeneration: expect.any(Number),
+        })
         expect(service.sessionToken).toBe('token-b')
         expect(service.me).toEqual(nextMe)
         expect(service.gfsDispatchBlocked).toBe(false)

@@ -47,12 +47,13 @@ const RATE_LIMITED_IPC_MESSAGE =
   "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
   'Too Many Requests retryAfterSeconds=7'
 
-// The controller reads exactly three fields off this context — isAuthenticated,
-// me and runtimeConfigState — and FilesPage reads none. The cast keeps the
-// double to those three rather than restating forty unrelated auth-screen
+// The controller reads these four authority fields — isAuthenticated, me,
+// runtimeConfigState and sessionGeneration — and FilesPage reads none. The cast
+// keeps the double narrow rather than restating forty unrelated auth-screen
 // fields that no code under test touches.
 const authValue = {
   isAuthenticated: true,
+  sessionGeneration: 1,
   me: {
     id: 'user-a',
     email: 'a@example.test',
@@ -66,7 +67,7 @@ const authValue = {
 } as unknown as AuthContextValue
 
 const testQueryClients: QueryClient[] = []
-const ACCESSIBLE_KEY = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main')
+const ACCESSIBLE_KEY = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main', 1)
 const GFS_ACCESSIBLE = 'fixture-session-token'
 
 function installGfsBridge(
@@ -136,6 +137,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => 1) },
         gfs: {
           getHome: vi.fn(async () => homeView()),
           listAccessible,
@@ -191,6 +193,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => 1) },
         gfs: {
           getHome: vi.fn(async () => homeView()),
           listAccessible,
@@ -578,7 +581,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     await screen.findByRole('button', { name: 'Open Folder A' })
     fireEvent.click(screen.getByRole('button', { name: 'Folder A' }))
     const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
-    const folderAKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder-a', 'main')
+    const folderAKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder-a', 'main', 1)
 
     await waitFor(() => {
       expect(listChildren).toHaveBeenCalledTimes(1)
@@ -628,7 +631,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Shared with me' }))
     await screen.findByRole('button', { name: 'Open Folder B' })
     fireEvent.click(screen.getByRole('button', { name: 'Folder B' }))
-    const folderBKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder-b', 'main')
+    const folderBKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder-b', 'main', 1)
     await waitFor(() => {
       expect(listChildren).toHaveBeenCalledTimes(4)
       expect(queryClient.getQueryState(folderBKey)?.fetchStatus).toBe('fetching')
@@ -845,7 +848,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Folder B' }))
     await screen.findByText('This folder is empty')
 
-    const folderBKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder-b', 'main')
+    const folderBKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder-b', 'main', 1)
     await waitFor(() => {
       expect(queryClient.getQueryState(folderBKey)?.status).toBe('success')
       expect(queryClient.getQueryState(folderBKey)?.fetchStatus).toBe('idle')
@@ -981,7 +984,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     await screen.findByRole('button', { name: 'Share Folder A' })
     fireEvent.click(screen.getByRole('button', { name: 'Share Folder A' }))
     const dialog = await screen.findByRole('dialog', { name: 'Share folder Folder A' })
-    const affordancesKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'folder-a', 'main')
+    const affordancesKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'folder-a', 'main', 1)
     await waitFor(() => {
       expect(queryClient.getQueryState(affordancesKey)?.status).toBe('success')
       expect(queryClient.getQueryState(affordancesKey)?.fetchStatus).toBe('idle')

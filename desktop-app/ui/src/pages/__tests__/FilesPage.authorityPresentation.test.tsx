@@ -28,10 +28,12 @@ import { delegationAffordances } from '../../../../src/gfs/delegation'
 import { FilesPage } from '../FilesPage'
 
 const SESSION_SCOPE = ':user-a:team-a'
+const SESSION_GENERATION = 1
 const SESSION_TOKEN = 'fixture-session-token'
-const ACCESSIBLE_KEY = desktopQueryKeys.gfsAccessible(SESSION_SCOPE, 'main')
+const ACCESSIBLE_KEY = desktopQueryKeys.gfsAccessible(SESSION_SCOPE, 'main', SESSION_GENERATION)
 const authValue = {
   isAuthenticated: true,
+  sessionGeneration: SESSION_GENERATION,
   me: {
     id: 'user-a',
     email: 'a@example.test',
@@ -148,7 +150,12 @@ describe('FilesPage authority-gated loading presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Folder B' }))
     await screen.findByText('This folder is empty')
 
-    const folderBKey = desktopQueryKeys.gfsChildren(SESSION_SCOPE, 'folder-b', 'main')
+    const folderBKey = desktopQueryKeys.gfsChildren(
+      SESSION_SCOPE,
+      'folder-b',
+      'main',
+      SESSION_GENERATION
+    )
     await waitFor(() => {
       expect(queryClient.getQueryState(folderBKey)?.status).toBe('success')
       expect(queryClient.getQueryState(folderBKey)?.fetchStatus).toBe('idle')
@@ -249,7 +256,12 @@ describe('FilesPage authority-gated loading presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Folder B' }))
     await screen.findByText('This folder is empty')
 
-    const folderBKey = desktopQueryKeys.gfsChildren(SESSION_SCOPE, 'folder-b', 'main')
+    const folderBKey = desktopQueryKeys.gfsChildren(
+      SESSION_SCOPE,
+      'folder-b',
+      'main',
+      SESSION_GENERATION
+    )
     await waitFor(() => {
       expect(queryClient.getQueryState(folderBKey)?.status).toBe('success')
       expect(queryClient.getQueryState(folderBKey)?.fetchStatus).toBe('idle')

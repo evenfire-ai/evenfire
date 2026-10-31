@@ -304,13 +304,18 @@ describe('AppService invitation configuration lookup', () => {
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
-      await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+      await expect(service.initialize()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+        sessionGeneration: 0,
+      })
 
       expect(clearSessionToken).not.toHaveBeenCalled()
 
       await expect(service.getSessionState()).resolves.toEqual({
         authenticated: false,
         me: null,
+        sessionGeneration: 0,
       })
       expect(getSessionToken).toHaveBeenCalledTimes(1)
       expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
@@ -356,6 +361,7 @@ describe('AppService invitation configuration lookup', () => {
       await expect(service.getSessionState()).resolves.toEqual({
         authenticated: false,
         me: null,
+        sessionGeneration: 0,
       })
     } finally {
       warn.mockRestore()
@@ -420,7 +426,11 @@ describe('AppService invitation configuration lookup', () => {
     expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
       legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()],
     })
-    await expect(service.getSessionState()).resolves.toEqual({ authenticated: true, me })
+    await expect(service.getSessionState()).resolves.toEqual({
+      authenticated: true,
+      me,
+      sessionGeneration: 3,
+    })
     expect(service.getCachedUserId()).toBe('user-1')
     expect(getSessionToken).not.toHaveBeenCalled()
     expect(getMe).not.toHaveBeenCalled()
@@ -493,8 +503,8 @@ describe('AppService invitation configuration lookup', () => {
     resolveMe(me)
 
     await expect(Promise.all([first, second])).resolves.toEqual([
-      { authenticated: true, me },
-      { authenticated: true, me },
+      { authenticated: true, me, sessionGeneration: 1 },
+      { authenticated: true, me, sessionGeneration: 1 },
     ])
     expect(getSessionToken).toHaveBeenCalledTimes(1)
     expect(getMe).toHaveBeenCalledTimes(1)
@@ -539,7 +549,11 @@ describe('AppService invitation configuration lookup', () => {
     service.savedSessionRestoreAttemptedEnvKey = getActiveEnvKey()
     service.savedSessionRestoreAttemptedAtMs = 0
 
-    await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
+    await expect(service.getSessionState()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: logoutGeneration,
+    })
     expect(service.getSessionGeneration()).toBe(logoutGeneration)
     expect(service.tokenStore.getSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
       legacyEnvKeys: expect.any(Array),
@@ -589,7 +603,11 @@ describe('AppService invitation configuration lookup', () => {
       clear: vi.fn(),
     } as never
 
-    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    await expect(service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: 0,
+    })
 
     expect(clearSessionToken).toHaveBeenCalledWith(
       resolveEnvKey('https://api.example.com', 'https://rpc.example.com'),
@@ -641,7 +659,11 @@ describe('AppService invitation configuration lookup', () => {
       clear: vi.fn(),
     } as never
 
-    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    await expect(service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: 0,
+    })
 
     expect(clearSessionToken).toHaveBeenCalled()
   })

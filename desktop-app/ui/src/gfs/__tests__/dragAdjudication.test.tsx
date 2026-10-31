@@ -16,6 +16,7 @@ import { useGfsDragAdjudication } from '../dragAdjudication'
 import type { GfsDragSource, GfsDropTargetFact } from '../dragSession.types'
 
 const SCOPE = 'test:user-1:team-1'
+const SESSION_GENERATION = 7
 
 function dragSource(overrides: Partial<GfsDragSource> = {}): GfsDragSource {
   return {
@@ -72,7 +73,9 @@ function installClerumGfsBridge() {
   })
 }
 
-function renderAdjudication(handleAuthorityFailure?: (message: string) => boolean) {
+function renderAdjudication(
+  handleAuthorityFailure?: (message: string, scope: string, generation: number) => boolean
+) {
   const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
@@ -81,6 +84,8 @@ function renderAdjudication(handleAuthorityFailure?: (message: string) => boolea
     () =>
       useGfsDragAdjudication({
         scope: SCOPE,
+        sessionGeneration: SESSION_GENERATION,
+        drive: 'main',
         resolve: resolve as unknown as (gfsUri: string) => Promise<{
           resourceId: string
           parentResourceId: string | null
@@ -116,6 +121,46 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+})
+
+describe('useGfsDragAdjudication — unknown session generation', () => {
+  it('does not resolve or read permission when published generation is unknown', async () => {
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    )
+    const affordances = vi.fn(async () => ({ held: ['write', 'delete'] }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    const unresolved = vi.fn(resolve) as unknown as (gfsUri: string) => Promise<{
+      resourceId: string
+      parentResourceId: string | null
+      name: string
+      version: number
+    }>
+    const hook = renderHook(
+      () =>
+        useGfsDragAdjudication({
+          scope: SCOPE,
+          sessionGeneration: null,
+          drive: 'main',
+          resolve: unresolved,
+        }),
+      { wrapper }
+    )
+
+    const decision = await hook.result.current.adjudicateDrop(dragSource(), dropTarget())
+
+    expect(decision).toEqual({
+      allowed: false,
+      reason: 'unavailable',
+      message: 'Could not verify permissions for this move.',
+    })
+    expect(unresolved).not.toHaveBeenCalled()
+    expect(affordances).not.toHaveBeenCalled()
+  })
 })
 
 describe('useGfsDragAdjudication — required-probe drop admission (R1-H1)', () => {
@@ -303,7 +348,7 @@ describe('useGfsDragAdjudication — the rename probe reads a fresh observation 
     })
     probes = await grantedProbes({ 'src-1': { error: new Error(message) } })
     const { result, queryClient } = renderAdjudication()
-    const key = desktopQueryKeys.gfsAffordances(SCOPE, 'src-1', 'main')
+    const key = desktopQueryKeys.gfsAffordances(SCOPE, 'src-1', 'main', SESSION_GENERATION)
 
     // A minute-old observation of "write": stale, so it may not decide.
     queryClient.setQueryData(key, { held: ['write'] }, { updatedAt: Date.now() - 60_000 })
@@ -329,7 +374,7 @@ describe('useGfsDragAdjudication — probe 401 revokes the session', () => {
     const decision = await result.current.adjudicateDrop(dragSource(), dropTarget())
 
     expect(decision).toEqual({ allowed: false, reason: 'session-lost' })
-    expect(handleAuthorityFailure).toHaveBeenCalledWith(message)
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(message, SCOPE, SESSION_GENERATION)
   })
 
   it('reports a 401 from the direct source resolve to the fail-closed classifier', async () => {
@@ -349,7 +394,7 @@ describe('useGfsDragAdjudication — probe 401 revokes the session', () => {
     )
 
     expect(decision).toEqual({ allowed: false, reason: 'session-lost' })
-    expect(handleAuthorityFailure).toHaveBeenCalledWith(message)
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(message, SCOPE, SESSION_GENERATION)
   })
 
   it('reports a 401 from the ancestor resolve to the fail-closed classifier', async () => {
@@ -367,7 +412,7 @@ describe('useGfsDragAdjudication — probe 401 revokes the session', () => {
       { ...dropTarget(), ancestorIds: ['root-1'] }
     )
 
-    expect(handleAuthorityFailure).toHaveBeenCalledWith(message)
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(message, SCOPE, SESSION_GENERATION)
     // A session failure is TERMINAL for the gesture: the ancestry read died
     // with the session, so the adjudication must not continue into the later
     // probes and answer "allowed" over a dead session (RP-002).

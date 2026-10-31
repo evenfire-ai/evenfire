@@ -218,7 +218,7 @@ describe('GfsClient.listChildren', () => {
     expect(out.items[1]?.updatedAt).toBeUndefined()
   })
 
-  it('omits the drive query when none is given and still refuses an empty drive', async () => {
+  it('omits the drive query when none is given and forwards an explicit empty drive', async () => {
     // `drive` is documented as optional (docs/reference/plugin-ui-sdk.md): the
     // server applies its own default, exactly as `listAccessible` already does.
     const requestJson = vi.fn(async () => ({
@@ -235,9 +235,11 @@ describe('GfsClient.listChildren', () => {
     expect(url).toBe(`https://api.example/api/v1/me/gfs/resources/${RID}/children`)
     expect(url).not.toContain('drive=')
 
-    // An explicitly empty drive is still a caller error, never "no drive".
-    await expect(client.listChildren(RID, 'tok', { drive: '' })).rejects.toThrow('drive_required')
-    expect(requestJson).toHaveBeenCalledTimes(1)
+    await expect(client.listChildren(RID, 'tok', { drive: '' })).resolves.toEqual({
+      items: [CHILD],
+      nextCursor: null,
+    })
+    expect(requestJson).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -346,7 +348,7 @@ describe('GfsClient.listRecent', () => {
     )
   })
 
-  it('omits the drive query when none is given and still refuses an empty drive', async () => {
+  it('omits the drive query when none is given and forwards an explicit empty drive', async () => {
     const requestJson = vi.fn(async () => ({
       ok: true,
       data: { items: [] },
@@ -358,9 +360,8 @@ describe('GfsClient.listRecent', () => {
     expect(url).toBe('https://api.example/api/v1/me/gfs/recent')
     expect(url).not.toContain('drive=')
 
-    // An explicitly empty drive is still a caller error, never "no drive".
-    await expect(client.listRecent('tok', { drive: '' })).rejects.toThrow('drive_required')
-    expect(requestJson).toHaveBeenCalledTimes(1)
+    await expect(client.listRecent('tok', { drive: '' })).resolves.toEqual({ items: [] })
+    expect(requestJson).toHaveBeenCalledTimes(2)
   })
 
   it('surfaces a revoked-session envelope as a GfsUriError', async () => {
@@ -543,12 +544,9 @@ describe('GfsClient.listGrants', () => {
     )
   })
 
-  it('requires a drive and uses the supplied one', async () => {
+  it('defaults the drive when omitted and uses the supplied one', async () => {
     const requestJson = vi.fn(async () => ({ items: [] })) as GfsTransport['requestJson']
-    await expect(
-      new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
-    ).rejects.toThrow('drive_required')
-    expect(requestJson).not.toHaveBeenCalled()
+    await new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
     await new GfsClient(transport({ requestJson })).listGrants(
       { resourceId: RID, drive: 'main' },
       'tok'
@@ -732,6 +730,22 @@ describe('GfsClient.createShare', () => {
 })
 
 describe('GfsClient resource mutations', () => {
+  it('uses the main drive for resource mutations when drive is omitted', async () => {
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: CHILD,
+    })) as GfsTransport['requestJson']
+    const client = new GfsClient(transport({ requestJson }))
+    await client.createResource({ parentResourceId: RID, name: 'docs', kind: 'directory' }, 'tok')
+    await client.replaceFile({ resourceId: RID, encodedData: 'aGVsbG8=' }, 'tok')
+    await client.renameResource({ resourceId: RID, newName: 'renamed.md' }, 'tok')
+    await client.deleteResource({ resourceId: RID }, 'tok')
+    await client.moveResource({ resourceId: RID, destinationId: RID }, 'tok')
+    const urls = (requestJson as ReturnType<typeof vi.fn>).mock.calls.map(call => call[1])
+    expect(urls).toHaveLength(5)
+    expect(urls.every(url => new URL(url).searchParams.get('drive') === 'main')).toBe(true)
+  })
+
   it('creates folders and files through the user plane', async () => {
     const requestJson = vi.fn(async () => ({
       ok: true,

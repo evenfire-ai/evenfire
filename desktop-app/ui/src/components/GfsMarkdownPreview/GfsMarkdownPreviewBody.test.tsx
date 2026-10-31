@@ -62,7 +62,7 @@ describe('GfsMarkdownPreviewBody', () => {
     expect(pre.textContent).toContain('line two\twith tab')
   })
 
-  it('copies the source to the clipboard from the header button', async () => {
+  it('exposes source copying to the owning preview toolbar', async () => {
     const writeText = vi.fn(async () => undefined)
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -70,6 +70,7 @@ describe('GfsMarkdownPreviewBody', () => {
     })
     const markdown = '# Hello\n\nGreetings.'
     stubDownload(markdown)
+    const copyContent: { current: (() => Promise<boolean>) | null } = { current: null }
 
     render(
       <GfsMarkdownPreviewBody
@@ -77,13 +78,16 @@ describe('GfsMarkdownPreviewBody', () => {
         byteLength={markdown.length}
         fileName="README.md"
         gfsUri="gfs://main/markdown-2"
+        onCopyContentReady={copy => {
+          copyContent.current = copy
+        }}
       />
     )
-    const copyButton = await screen.findByRole('button', {
-      name: /Copy preview contents to clipboard/i,
-    })
-    fireEvent.click(copyButton)
+    await screen.findByRole('heading', { name: 'Hello' })
+    await waitFor(() => expect(copyContent.current).toEqual(expect.any(Function)))
+    expect(await copyContent.current?.()).toBe(true)
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
+    expect(screen.queryByRole('button', { name: /Copy preview contents/i })).toBeNull()
   })
 
   it('rejects an oversized markdown file from metadata before downloading', async () => {

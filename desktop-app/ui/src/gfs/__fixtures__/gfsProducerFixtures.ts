@@ -155,6 +155,20 @@ export async function listAccessiblePage(
   return structuredClone(page)
 }
 
+/** Run a successful PATCH receipt through the real GfsClient and IPC clone. */
+export async function moveResourceReceipt(
+  resourceId: string,
+  destinationId: string,
+  version: number
+): Promise<Awaited<ReturnType<typeof window.clerum.gfs.moveResource>>> {
+  const client = new GfsClient(stubTransport({ ok: true, data: { resourceId, version } }))
+  const receipt = await client.moveResource(
+    { resourceId, destinationId, drive: 'main', ifMatch: version },
+    SESSION_TOKEN
+  )
+  return structuredClone(receipt)
+}
+
 /** Run a resolve + byte fetch through the real `GfsClient.download` — the
  *  `{ resource, bytes }` shape the download consumer (`saveGfsFileToDisk`)
  *  reads. `bytes` survives the structured-clone IPC boundary as an ArrayBuffer. */

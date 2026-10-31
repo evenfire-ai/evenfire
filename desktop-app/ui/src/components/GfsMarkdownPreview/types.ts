@@ -12,7 +12,9 @@ export type GfsMarkdownPreviewBodyProps = {
   onDownloadError?: (error: unknown) => void
   /** True only when this fetch is the user opening the file. */
   recordOpen: boolean
+  onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
   titleId?: string
+  titleActions?: ReactNode
   headerActions?: ReactNode
   headingLevel?: 2 | 3
 }

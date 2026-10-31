@@ -34,6 +34,7 @@ function authValue(): AuthContextValue {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 1,
     me: user,
     email: user.email,
     password: '',

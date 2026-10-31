@@ -5,6 +5,7 @@ import {
   nextAvailableGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
 import { describeGfsReadError, parseHttpStatus, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
+import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 
 /** Server truth from a commit-time resolve of the source. */
 export interface MoveCommitSourceSnapshot {
@@ -17,13 +18,20 @@ export interface MoveCommitSourceSnapshot {
   parentResourceId: string | null
 }
 
+export type MoveCommitExpectedSourceSnapshot = Pick<
+  MoveCommitSourceSnapshot,
+  'resourceId' | 'version' | 'parentResourceId'
+>
+
 export interface MoveCommitPlan {
   source: { resourceId: string; gfsUri: string; kind: 'file' | 'directory'; name: string }
   destination: { resourceId: string; name: string }
-  /** Pre-approved numbered-name conflict policy (rev-2 §5). */
-  allowNumberedRename: boolean
+  /** Explicit Move only: the target shown by the dialog, before its fresh resolve. */
+  expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot
   /** Names already known to be taken in the destination, when cached. */
   occupiedDestinationNames?: ReadonlySet<string>
+  /** Main-process authenticated session identity captured when this operation began. */
+  sessionGeneration?: number
 }
 
 export type MoveCommitOutcome =
@@ -52,7 +60,7 @@ export type MoveCommitOutcome =
   | { status: 'source-unavailable'; message: string }
   | { status: 'target-unavailable'; message: string }
   | { status: 'rate-limited'; message: string; retryAfterSeconds?: number }
-  | { status: 'unconfirmed'; message: string }
+  | { status: 'unconfirmed'; message: string; retryPermissionCheck?: true }
   | { status: 'session-lost' }
   /** The gesture that asked for this move is gone; nothing was dispatched. */
   | { status: 'gesture-lost' }
@@ -71,10 +79,19 @@ export interface MoveCommitDeps {
     destinationId: string,
     ifMatch: number,
     newName?: string,
-    oldParentId?: string | null
+    oldParentId?: string | null,
+    expectedSessionGeneration?: number
   ) => Promise<{ resourceId: string; version: number }>
   /** Central fail-closed classifier; returns true when the session died. */
   isSessionAuthorityFailure: (error: unknown) => boolean
+  /** Compare with main-process session authority after asynchronous boundaries. */
+  isSessionGenerationCurrent?: (expected: number) => Promise<boolean>
+  /**
+   * Called only for the first producer-derived 409. The surface must obtain
+   * explicit consent and fresh authority for this exact numbered name before
+   * returning true. No callback means the surface never retries a conflict.
+   */
+  authorizeNumberedRename?: (proposedName: string) => Promise<boolean>
   /**
    * Gesture-ownership predicate, absent on paths that own no gesture (the
    * explicit Move dialog). A drag can be superseded WHILE the commit-time
@@ -89,6 +106,9 @@ export interface MoveCommitDeps {
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
+
+const CONFLICT_STOPPED_MESSAGE =
+  'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
 
 /**
  * The server's governed-root verdict: the drive root, `Users`, or a user's home
@@ -137,9 +157,20 @@ export async function commitGfsMove(
   deps: MoveCommitDeps,
   plan: MoveCommitPlan
 ): Promise<MoveCommitOutcome> {
+  const isSessionCurrent = async (): Promise<boolean> => {
+    if (plan.sessionGeneration === undefined || !deps.isSessionGenerationCurrent) return true
+    try {
+      return await deps.isSessionGenerationCurrent(plan.sessionGeneration)
+    } catch {
+      return false
+    }
+  }
+  if (!(await isSessionCurrent())) return { status: 'session-lost' }
+
   let snapshot: MoveCommitSourceSnapshot
   try {
     const resolved = await deps.resolveSource(plan.source.gfsUri)
+    if (!(await isSessionCurrent())) return { status: 'session-lost' }
     snapshot = {
       resourceId: resolved.resourceId,
       gfsUri: plan.source.gfsUri,
@@ -149,6 +180,7 @@ export async function commitGfsMove(
       parentResourceId: resolved.parentResourceId,
     }
   } catch (error) {
+    if (!(await isSessionCurrent())) return { status: 'session-lost' }
     if (deps.isSessionAuthorityFailure(error)) return { status: 'session-lost' }
     const status = parseHttpStatus(messageOf(error))
     if (status === 404) {
@@ -157,7 +189,31 @@ export async function commitGfsMove(
         message: 'EvenDrive cannot verify this item’s current location. Refresh and try again.',
       }
     }
+    if (status === 403) {
+      return {
+        status: 'unconfirmed',
+        message: 'EvenDrive could not confirm permission for this move. Refresh and try again.',
+      }
+    }
     return { status: 'unconfirmed', message: describeGfsReadError(error).message }
+  }
+
+  // An explicit Move dialog is consent for the exact resource snapshot it
+  // showed. A same-URI resolve may find a newer version or parent; do not let
+  // that retarget the user's confirmation. Drag callers omit this guard and
+  // keep their commit-time snapshot/convergence behavior.
+  const expectedSource = plan.expectedSourceSnapshot
+  if (
+    expectedSource &&
+    (snapshot.resourceId !== expectedSource.resourceId ||
+      snapshot.version !== expectedSource.version ||
+      snapshot.parentResourceId !== expectedSource.parentResourceId)
+  ) {
+    return {
+      status: 'changed',
+      message:
+        'This item changed while you were moving it. Review its current location and try again.',
+    }
   }
 
   // Fresh-parent no-op guard before any request (a concurrent move may have
@@ -175,7 +231,16 @@ export async function commitGfsMove(
     // attempt — was in flight. A PATCH dispatched after that would move the
     // item under a session the user no longer owns, so the gesture is
     // re-validated at the dispatch boundary instead of only at admission.
-    if (deps.isCurrent?.() === false) return { status: 'gesture-lost' }
+    if (!(await isSessionCurrent())) return { status: 'session-lost' }
+    if (deps.isCurrent?.() === false) {
+      // Every later attempt is a numbered retry after a dispatched 409. Keep
+      // that server outcome when the owner disappears instead of erasing it
+      // as a generic gesture loss; the surface still gates presentation.
+      if (attempt > 0) {
+        return { status: 'conflict-stopped', message: CONFLICT_STOPPED_MESSAGE }
+      }
+      return { status: 'gesture-lost' }
+    }
     let error: unknown
     try {
       const receipt = await deps.moveResource(
@@ -186,8 +251,10 @@ export async function commitGfsMove(
         // The commit-time parent, so the convergence drops the item from the
         // folder it really left (the drag-start parent can be stale, or
         // unknown — and an unknown parent is not the physical root).
-        snapshot.parentResourceId
+        snapshot.parentResourceId,
+        plan.sessionGeneration
       )
+      if (!(await isSessionCurrent())) return { status: 'session-lost' }
       return {
         status: 'committed',
         version: receipt.version,
@@ -197,6 +264,7 @@ export async function commitGfsMove(
     } catch (attemptError) {
       error = attemptError
     }
+    if (!(await isSessionCurrent())) return { status: 'session-lost' }
     if (deps.isSessionAuthorityFailure(error)) return { status: 'session-lost' }
 
     const message = messageOf(error)
@@ -224,6 +292,7 @@ export async function commitGfsMove(
       // (RP-027).
       try {
         const resolvedSource = await deps.resolveSource(plan.source.gfsUri)
+        if (!(await isSessionCurrent())) return { status: 'session-lost' }
         if (resolvedSource.parentResourceId === plan.destination.resourceId) {
           // The move landed after all; the 404 answered about something else.
           return {
@@ -238,6 +307,8 @@ export async function commitGfsMove(
           message: 'This folder is no longer available.',
         }
       } catch (resolveError) {
+        if (!(await isSessionCurrent())) return { status: 'session-lost' }
+        if (deps.isSessionAuthorityFailure(resolveError)) return { status: 'session-lost' }
         const resolveStatus = parseHttpStatus(messageOf(resolveError))
         if (resolveStatus === 404 || resolveStatus === 410) {
           return {
@@ -261,6 +332,7 @@ export async function commitGfsMove(
       return {
         status: 'unconfirmed',
         message: 'EvenDrive could not confirm permission for this move. Refresh and try again.',
+        retryPermissionCheck: true,
       }
     }
     if (status === 429 || (!status && /too many/i.test(message))) {
@@ -279,6 +351,7 @@ export async function commitGfsMove(
       // Transport loss after dispatch: verify the outcome by identity; never
       // repeat a possibly committed move.
       const verified = await verifyOutcomeByResolve(deps, plan, snapshot)
+      if (!(await isSessionCurrent())) return { status: 'session-lost' }
       if (verified) return verified
       return {
         status: 'unconfirmed',
@@ -286,20 +359,44 @@ export async function commitGfsMove(
       }
     }
 
-    // 409 name conflict.
-    if (!plan.allowNumberedRename) {
+    // 409 name conflict. Only the first real 409 can offer a consent-gated
+    // numbered retry; a repeated conflict is terminal.
+    if (attempt > 0) {
       return {
         status: 'conflict-stopped',
-        message:
-          'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.',
+        message: 'The destination changed. Refresh it or choose another folder.',
+      }
+    }
+    if (!deps.authorizeNumberedRename) {
+      return {
+        status: 'conflict-stopped',
+        message: CONFLICT_STOPPED_MESSAGE,
       }
     }
     occupied.add(moveName)
     if (attempt + 1 >= GFS_MOVE_MAX_NETWORK_ATTEMPTS) break
-    moveName = nextAvailableGfsResourceName(snapshot.name, occupied)
+    const proposedName = nextAvailableGfsResourceName(snapshot.name, occupied)
+    let authorized = false
+    try {
+      authorized = await deps.authorizeNumberedRename(proposedName)
+    } catch (authorizationError) {
+      if (!(await isSessionCurrent())) return { status: 'session-lost' }
+      if (deps.isSessionAuthorityFailure(authorizationError)) return { status: 'session-lost' }
+      return {
+        status: 'conflict-stopped',
+        message: CONFLICT_STOPPED_MESSAGE,
+      }
+    }
+    if (!(await isSessionCurrent())) return { status: 'session-lost' }
+    if (!authorized || deps.isCurrent?.() === false) {
+      return {
+        status: 'conflict-stopped',
+        message: CONFLICT_STOPPED_MESSAGE,
+      }
+    }
+    moveName = proposedName
   }
-  // Bounded attempts exhausted under an approved rename policy: a concurrent
-  // naming storm, not "all numbered names used".
+  // The one consented retry also conflicted. Do not offer or dispatch another.
   return {
     status: 'conflict-stopped',
     message: 'The destination changed. Refresh it or choose another folder.',
@@ -315,9 +412,16 @@ async function verifyOutcomeByResolve(
   deps: MoveCommitDeps,
   plan: MoveCommitPlan,
   before: MoveCommitSourceSnapshot
-): Promise<MoveCommitOutcome | null> {
+): Promise<Extract<MoveCommitOutcome, { status: 'committed' | 'session-lost' }> | null> {
   try {
     const resolved = await deps.resolveSource(plan.source.gfsUri)
+    if (
+      plan.sessionGeneration !== undefined &&
+      deps.isSessionGenerationCurrent &&
+      !(await deps.isSessionGenerationCurrent(plan.sessionGeneration))
+    ) {
+      return { status: 'session-lost' }
+    }
     if (resolved.parentResourceId === plan.destination.resourceId) {
       return {
         status: 'committed',
@@ -330,7 +434,15 @@ async function verifyOutcomeByResolve(
       }
     }
     return null
-  } catch {
+  } catch (error) {
+    if (
+      plan.sessionGeneration !== undefined &&
+      deps.isSessionGenerationCurrent &&
+      !(await deps.isSessionGenerationCurrent(plan.sessionGeneration).catch(() => false))
+    ) {
+      return { status: 'session-lost' }
+    }
+    if (deps.isSessionAuthorityFailure(error)) return { status: 'session-lost' }
     return null
   }
 }
@@ -357,12 +469,14 @@ export function toastMoveOutcome(
   destinationName: string,
   sourceKind: 'file' | 'directory'
 ): void {
+  const displayedSourceName = sanitizeAppTabTitle(sourceName) || 'Unnamed'
+  const displayedDestinationName = sanitizeAppTabTitle(destinationName) || 'Unnamed'
   switch (outcome.status) {
     case 'committed':
       pushToast?.(
         outcome.renamedTo
-          ? `Moved ${sourceName} to ${destinationName} as ${outcome.renamedTo}`
-          : `Moved ${sourceName} to ${destinationName}`,
+          ? `Moved ${displayedSourceName} to ${displayedDestinationName} as ${sanitizeAppTabTitle(outcome.renamedTo) || 'Unnamed'}`
+          : `Moved ${displayedSourceName} to ${displayedDestinationName}`,
         'success'
       )
       if (sourceKind === 'directory') {
@@ -373,14 +487,20 @@ export function toastMoveOutcome(
       }
       break
     case 'no-op':
-      pushToast?.(outcome.message, 'info')
+      pushToast?.(
+        `${displayedSourceName} → ${displayedDestinationName}: ${outcome.message}`,
+        'info'
+      )
       break
     case 'unconfirmed':
     // The dispatch's outcome is unknown: verify-by-identity already ran and
     // could not settle it. Warn — do not report a failure that was not shown.
     case 'rate-limited':
       // A metered refusal is a "try again" verdict, not a failed move.
-      pushToast?.(outcome.message, 'warn')
+      pushToast?.(
+        `${displayedSourceName} → ${displayedDestinationName}: ${outcome.message}`,
+        'warn'
+      )
       break
     case 'session-lost':
     // A superseded gesture never reached the server: there is nothing to
@@ -388,6 +508,9 @@ export function toastMoveOutcome(
     case 'gesture-lost':
       break
     default:
-      pushToast?.(outcome.message, 'error')
+      pushToast?.(
+        `${displayedSourceName} → ${displayedDestinationName}: ${outcome.message}`,
+        'error'
+      )
   }
 }

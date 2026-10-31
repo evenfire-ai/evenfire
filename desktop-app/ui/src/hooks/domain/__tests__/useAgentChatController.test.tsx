@@ -1280,6 +1280,109 @@ describe('useAgentChatController — characterization (D.0)', () => {
       })
       await sendPromise
     })
+
+    it('ignores an old activity callback after the team stream is torn down', async () => {
+      const activityCallbacks: Array<(event: unknown) => void> = []
+      const unsubscribeCalls: number[] = []
+      let taskIndex = 0
+      clerum.rpc.subscribeHostActivity.mockImplementation(
+        async (_hostRef, _hostRefs, onEvent: (event: unknown) => void) => {
+          const subscriptionIndex = activityCallbacks.length
+          activityCallbacks.push(onEvent)
+          unsubscribeCalls.push(0)
+          return async () => {
+            const calls = unsubscribeCalls[subscriptionIndex]
+            if (calls === undefined) throw new Error('the activity subscription was not recorded')
+            unsubscribeCalls[subscriptionIndex] = calls + 1
+          }
+        }
+      )
+      clerum.rpc.invokeHostMessage.mockImplementation(async () => ({
+        taskId: `task-${++taskIndex}`,
+      }))
+
+      const controller = renderController({ currentTeamId: 'team-before' })
+      await settleMount()
+
+      let oldSend!: Promise<void>
+      act(() => {
+        oldSend = controller.result.current.handleSendAgentMessage('team A message')
+      })
+      await waitForProgressHandler('task-1')
+      await act(async () => oldSend)
+      expect(activityCallbacks).toHaveLength(1)
+
+      await act(async () => {
+        await controller.result.current.teardownTeamActivity()
+      })
+      expect(unsubscribeCalls[0]).toBe(1)
+
+      controller.rerender({ currentTeamId: 'team-after', chatAuthorityTeamId: 'team-after' })
+      let newSend!: Promise<void>
+      act(() => {
+        newSend = controller.result.current.handleSendAgentMessage('team B message')
+      })
+      await waitForProgressHandler('task-2')
+      await act(async () => newSend)
+      expect(activityCallbacks).toHaveLength(2)
+      expect(Object.values(controller.result.current.activityByMessageId ?? {})[0]?.status).toBe(
+        'streaming'
+      )
+
+      const staleActivityCallback = activityCallbacks[0]
+      if (!staleActivityCallback) throw new Error('the Team A activity callback was not retained')
+      await act(async () => {
+        staleActivityCallback({ type: 'error', message: 'stale Team A activity stream' })
+      })
+
+      const currentActivity = Object.values(controller.result.current.activityByMessageId ?? {})[0]
+      expect(currentActivity?.status).toBe('streaming')
+      expect(currentActivity?.errorMessage).toBeUndefined()
+
+      await act(async () => {
+        clerum.emitTaskProgress('task-2', {
+          type: 'terminal',
+          data: { taskId: 'task-2', status: 'completed' },
+        })
+      })
+    })
+
+    it('unsubscribes an activity subscription that resolves after session teardown', async () => {
+      const pendingSubscription = deferred<() => Promise<void>>()
+      let activityCallback: ((event: unknown) => void) | null = null
+      let unsubscribeCalls = 0
+      clerum.rpc.subscribeHostActivity.mockImplementation(
+        async (_hostRef, _hostRefs, onEvent: (event: unknown) => void) => {
+          activityCallback = onEvent
+          return pendingSubscription.promise
+        }
+      )
+
+      const controller = renderController()
+      await settleMount()
+
+      let sendPromise!: Promise<void>
+      act(() => {
+        sendPromise = controller.result.current.handleSendAgentMessage('pending session message')
+      })
+      await waitFor(() => expect(clerum.rpc.subscribeHostActivity).toHaveBeenCalledTimes(1))
+
+      await act(async () => {
+        await controller.result.current.stopAllActivityStreams()
+      })
+      controller.rerender({ isAuthenticated: false, currentTeamId: '', chatAuthorityTeamId: '' })
+
+      await act(async () => {
+        pendingSubscription.resolve(async () => {
+          unsubscribeCalls += 1
+        })
+        await sendPromise
+      })
+
+      expect(activityCallback).toEqual(expect.any(Function))
+      expect(unsubscribeCalls).toBe(1)
+      expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+    })
   })
 
   /**

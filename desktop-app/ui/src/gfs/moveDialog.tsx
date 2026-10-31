@@ -1,14 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, IconButton, StatusBanner } from '@components/Common'
 import { IconCheck, IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
 import { GFS_MY_HOME_LABEL } from '@constants/gfsBrowser'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  desktopQueryKeys,
+  isGfsSessionAuthorityCurrent,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { callerHomeRootNode, isCallerHomeRoot } from './callerHome'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from './deniedChildren'
-import type { GfsMoveDialogProps } from './moveDialog.types'
+import type { GfsMoveDialogProps, GfsNumberedNameConsent } from './moveDialog.types'
 
 type SelectedDestination = Pick<GfsBrowserChild, 'resourceId' | 'name'>
 
@@ -37,11 +41,12 @@ type GfsMoveTreeFolderProps = {
   ancestors: ReadonlySet<string>
   targetResourceId: string
   scope: string
+  sessionGeneration: number | null
   expandedFolderIds: ReadonlySet<string>
   selectedDestination: SelectedDestination | null
   onToggle: (resourceId: string) => void
   onSelect: (folder: GfsBrowserChild) => void
-  onAuthorityFailure?: (message: string) => boolean
+  onAuthorityFailure?: (message: string, scope: string, sessionGeneration: number) => boolean
 }
 
 function GfsMoveTreeFolder({
@@ -50,6 +55,7 @@ function GfsMoveTreeFolder({
   ancestors,
   targetResourceId,
   scope,
+  sessionGeneration,
   expandedFolderIds,
   selectedDestination,
   onToggle,
@@ -58,12 +64,17 @@ function GfsMoveTreeFolder({
 }: GfsMoveTreeFolderProps) {
   const queryClient = useQueryClient()
   const isExpanded = expandedFolderIds.has(folder.resourceId)
-  const childQueryKey = desktopQueryKeys.gfsChildren(scope, folder.resourceId, folder.drive)
+  const childQueryKey = desktopQueryKeys.gfsChildren(
+    scope,
+    folder.resourceId,
+    folder.drive,
+    sessionGeneration
+  )
   const childQuery = useInfiniteQuery({
     queryKey: childQueryKey,
     queryFn: ({ pageParam }) =>
       window.clerum.gfs.listChildren(folder.resourceId, folder.drive, pageParam),
-    enabled: isExpanded,
+    enabled: Boolean(scope) && isExpanded && isGfsSessionGeneration(sessionGeneration),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -82,10 +93,32 @@ function GfsMoveTreeFolder({
     [ancestors, childDenied, childQuery.data, targetResourceId]
   )
 
+  const authorityRef = useRef({ scope, generation: sessionGeneration })
+  authorityRef.current = { scope, generation: sessionGeneration }
+  const isAuthorityCurrent = () =>
+    isGfsSessionGeneration(sessionGeneration) &&
+    isGfsSessionAuthorityCurrent(
+      scope,
+      sessionGeneration,
+      authorityRef.current.scope,
+      authorityRef.current.generation
+    )
+
   useEffect(() => {
+    if (!isAuthorityCurrent()) return
     if (childQuery.error) purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError) onAuthorityFailure?.(childError)
-  }, [childError, childQuery.error, childQueryKey, onAuthorityFailure, queryClient])
+    if (childError && isGfsSessionGeneration(sessionGeneration)) {
+      onAuthorityFailure?.(childError, scope, sessionGeneration)
+    }
+  }, [
+    childError,
+    childQuery.error,
+    childQueryKey,
+    onAuthorityFailure,
+    queryClient,
+    scope,
+    sessionGeneration,
+  ])
 
   const loadingChildren = Boolean(isExpanded && childQuery.isFetching && !childQuery.data)
   const hasMoreChildren = Boolean(childQuery.hasNextPage)
@@ -155,6 +188,7 @@ function GfsMoveTreeFolder({
               onSelect={onSelect}
               onToggle={onToggle}
               scope={scope}
+              sessionGeneration={sessionGeneration}
               selectedDestination={selectedDestination}
               targetResourceId={targetResourceId}
             />
@@ -197,10 +231,14 @@ export function GfsMoveDialog({
   sessionScope,
   drive,
   home,
+  sessionGeneration,
   initialCrumbs,
   onMove,
+  onMoveWithOwnership,
+  onRetryPermissionCheck,
   onClose,
   busy = false,
+  permissionStatus = null,
   onAuthorityFailure,
 }: GfsMoveDialogProps) {
   /** One label source for the caller's home root: "My home", never the storage
@@ -223,6 +261,17 @@ export function GfsMoveDialog({
     initialDestination && initialDestination.resourceId === currentParentId
       ? destinationLabel(currentParentId, initialDestination.name)
       : null
+  const scope = sessionScope ?? ''
+  const authorityRef = useRef({ scope, generation: sessionGeneration })
+  authorityRef.current = { scope, generation: sessionGeneration }
+  const isAuthorityCurrent = () =>
+    Boolean(sessionScope) &&
+    isGfsSessionAuthorityCurrent(
+      sessionScope ?? null,
+      sessionGeneration,
+      authorityRef.current.scope,
+      authorityRef.current.generation
+    )
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(
     () => new Set(initialCrumbs.map(crumb => crumb.resourceId))
   )
@@ -241,16 +290,70 @@ export function GfsMoveDialog({
         : null
   )
   const [error, setError] = useState<string | null>(null)
-  const scope = sessionScope ?? 'anonymous'
-
+  const [permissionCheckSucceeded, setPermissionCheckSucceeded] = useState(false)
+  const [numberedNameProposal, setNumberedNameProposal] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  const numberedNameConsentRef = useRef<((accepted: boolean) => void) | null>(null)
+  const selectedDestinationRef = useRef(selectedDestination)
+  selectedDestinationRef.current = selectedDestination
+  const dialogIdentity = {
+    scope,
+    sessionGeneration,
+    resourceId: target.resourceId,
+    name: target.name,
+    kind: target.kind,
+  }
+  const dialogIdentityRef = useRef(dialogIdentity)
+  const previousDialogIdentityRef = useRef(dialogIdentity)
+  dialogIdentityRef.current = dialogIdentity
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      numberedNameConsentRef.current?.(false)
+      numberedNameConsentRef.current = null
+    }
+  }, [])
+  const settleNumberedNameConsent = useCallback((accepted: boolean) => {
+    const resolve = numberedNameConsentRef.current
+    numberedNameConsentRef.current = null
+    setNumberedNameProposal(null)
+    resolve?.(accepted)
+  }, [])
+  const closeDialog = () => {
+    settleNumberedNameConsent(false)
+    onClose()
+  }
+  useEffect(() => {
+    const previousIdentity = previousDialogIdentityRef.current
+    const currentIdentity = dialogIdentityRef.current
+    if (
+      previousIdentity.scope !== currentIdentity.scope ||
+      previousIdentity.sessionGeneration !== currentIdentity.sessionGeneration ||
+      previousIdentity.resourceId !== currentIdentity.resourceId ||
+      previousIdentity.name !== currentIdentity.name ||
+      previousIdentity.kind !== currentIdentity.kind
+    ) {
+      settleNumberedNameConsent(false)
+    }
+    previousDialogIdentityRef.current = currentIdentity
+  }, [
+    scope,
+    sessionGeneration,
+    target.kind,
+    target.name,
+    target.resourceId,
+    settleNumberedNameConsent,
+  ])
   const accessibleQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsAccessible(scope, drive),
+    queryKey: desktopQueryKeys.gfsAccessible(scope, drive, sessionGeneration),
     queryFn: ({ pageParam }) => {
       const listAccessible = window.clerum?.gfs?.listAccessible
       return typeof listAccessible === 'function'
         ? listAccessible(drive, pageParam)
         : Promise.resolve({ items: [], nextCursor: null })
     },
+    enabled: Boolean(sessionScope) && isGfsSessionGeneration(sessionGeneration),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -303,8 +406,15 @@ export function GfsMoveDialog({
   // page then closes this dialog via its revocation effect). Policy errors
   // return false and render as the dialog's in-place banner below.
   useEffect(() => {
-    if (listError) onAuthorityFailure?.(listError)
-  }, [listError, onAuthorityFailure])
+    if (
+      listError &&
+      isAuthorityCurrent() &&
+      isGfsSessionGeneration(sessionGeneration) &&
+      sessionScope
+    ) {
+      onAuthorityFailure?.(listError, sessionScope, sessionGeneration)
+    }
+  }, [listError, onAuthorityFailure, sessionGeneration, sessionScope])
 
   const toggleFolder = (resourceId: string) => {
     setError(null)
@@ -317,7 +427,9 @@ export function GfsMoveDialog({
   }
 
   const selectFolder = (folder: GfsBrowserChild) => {
+    settleNumberedNameConsent(false)
     setError(null)
+    setPermissionCheckSucceeded(false)
     setSelectedDestination({
       resourceId: folder.resourceId,
       name: destinationLabel(folder.resourceId, folder.name),
@@ -328,16 +440,74 @@ export function GfsMoveDialog({
     })
   }
 
-  const commit = async () => {
-    if (!selectedDestination) return
-    setError(null)
-    try {
-      await onMove(
-        selectedDestination.resourceId,
-        destinationLabel(selectedDestination.resourceId, selectedDestination.name)
+  const isCurrentDestination = (destination: SelectedDestination) => {
+    const expectedIdentity = dialogIdentityRef.current
+    return () => {
+      const currentIdentity = dialogIdentityRef.current
+      return (
+        mountedRef.current &&
+        Boolean(sessionScope) &&
+        isGfsSessionGeneration(sessionGeneration) &&
+        isAuthorityCurrent() &&
+        selectedDestinationRef.current?.resourceId === destination.resourceId &&
+        selectedDestinationRef.current.name === destination.name &&
+        currentIdentity.scope === expectedIdentity.scope &&
+        currentIdentity.sessionGeneration === expectedIdentity.sessionGeneration &&
+        currentIdentity.resourceId === expectedIdentity.resourceId &&
+        currentIdentity.name === expectedIdentity.name &&
+        currentIdentity.kind === expectedIdentity.kind
       )
+    }
+  }
+
+  const commit = async () => {
+    const destination = selectedDestination
+    if (!destination) return
+    const isCurrent = isCurrentDestination(destination)
+    const requestNumberedNameConsent: GfsNumberedNameConsent = proposedName =>
+      new Promise(resolve => {
+        if (!isCurrent()) {
+          resolve(false)
+          return
+        }
+        numberedNameConsentRef.current?.(false)
+        numberedNameConsentRef.current = resolve
+        setError(null)
+        setNumberedNameProposal(proposedName)
+      })
+    if (!isCurrent()) return
+    setError(null)
+    setPermissionCheckSucceeded(false)
+    try {
+      if (onMoveWithOwnership) {
+        await onMoveWithOwnership(
+          destination.resourceId,
+          destination.name,
+          isCurrent,
+          requestNumberedNameConsent
+        )
+      } else if (onMove) {
+        await onMove(destination.resourceId, destination.name)
+      } else {
+        throw new Error('Move dialog requires a commit handler')
+      }
     } catch (moveError) {
-      setError(errorMessage(moveError))
+      if (isCurrent()) setError(errorMessage(moveError))
+    }
+  }
+
+  const retryPermissionCheck = async () => {
+    const destination = selectedDestination
+    if (!destination) return
+    const isCurrent = isCurrentDestination(destination)
+    if (!isCurrent()) return
+    setError(null)
+    setPermissionCheckSucceeded(false)
+    try {
+      await onRetryPermissionCheck(destination.resourceId, destination.name, isCurrent)
+      if (isCurrent()) setPermissionCheckSucceeded(true)
+    } catch (retryError) {
+      if (isCurrent()) setError(errorMessage(retryError))
     }
   }
 
@@ -346,7 +516,7 @@ export function GfsMoveDialog({
       className="da-gfs-manage-modal"
       role="presentation"
       onMouseDown={event => {
-        if (event.target === event.currentTarget) onClose()
+        if (event.target === event.currentTarget) closeDialog()
       }}
     >
       <section
@@ -363,13 +533,57 @@ export function GfsMoveDialog({
             <h3>Move “{target.name}”</h3>
           </span>
           <span className="da-gfs-manage-dialog__top-actions">
-            <IconButton label="Close move dialog" onClick={onClose} size="sm" variant="ghost">
+            <IconButton label="Close move dialog" onClick={closeDialog} size="sm" variant="ghost">
               <IconClose />
             </IconButton>
           </span>
         </header>
         <div className="da-gfs-manage-dialog__body">
+          {permissionStatus === 'checking' ? (
+            <p className="muted" role="status">
+              Checking permissions…
+            </p>
+          ) : null}
           {error ? <StatusBanner tone="error" text={error} /> : null}
+          {permissionCheckSucceeded ? (
+            <p className="muted" role="status">
+              Permissions verified. Select Move to confirm.
+            </p>
+          ) : null}
+          {permissionStatus === 'failed' ? (
+            <Button
+              disabled={busy || !selectedDestination || !isAuthorityCurrent()}
+              onClick={() => void retryPermissionCheck()}
+              size="sm"
+              variant="outline"
+            >
+              Retry permission check
+            </Button>
+          ) : null}
+          {numberedNameProposal ? (
+            <div
+              aria-label="Confirm numbered name for Move"
+              className="da-gfs-move-dialog__numbered-name-consent"
+              role="group"
+            >
+              <p role="status">
+                This name already exists in {selectedDestination?.name}. Move it as{' '}
+                <strong>{numberedNameProposal}</strong>?
+              </p>
+              <div className="da-gfs-move-dialog__action-buttons">
+                <Button onClick={() => settleNumberedNameConsent(true)} type="button">
+                  Move as {numberedNameProposal}
+                </Button>
+                <Button
+                  onClick={() => settleNumberedNameConsent(false)}
+                  type="button"
+                  variant="outline"
+                >
+                  Keep current name
+                </Button>
+              </div>
+            </div>
+          ) : null}
           {listError ? <StatusBanner tone="error" text={listError} /> : null}
           <div className="da-gfs-move-dialog__current-location">
             <span>Current location:</span>
@@ -404,6 +618,7 @@ export function GfsMoveDialog({
                     onSelect={selectFolder}
                     onToggle={toggleFolder}
                     scope={scope}
+                    sessionGeneration={sessionGeneration}
                     selectedDestination={selectedDestination}
                     targetResourceId={target.resourceId}
                   />
@@ -447,6 +662,7 @@ export function GfsMoveDialog({
                     onSelect={selectFolder}
                     onToggle={toggleFolder}
                     scope={scope}
+                    sessionGeneration={sessionGeneration}
                     selectedDestination={selectedDestination}
                     targetResourceId={target.resourceId}
                   />
@@ -477,14 +693,21 @@ export function GfsMoveDialog({
               )}
             </span>
             <span className="da-gfs-move-dialog__action-buttons">
-              <Button onClick={onClose} type="button" variant="ghost">
+              <Button onClick={closeDialog} type="button" variant="ghost">
                 Cancel
               </Button>
               <Button
                 aria-label={
                   selectedDestination ? `Move here (${selectedDestination.name})` : 'Move'
                 }
-                disabled={!selectedDestination || pathPassesThroughTarget || isNoOpDestination}
+                disabled={
+                  busy ||
+                  !isAuthorityCurrent() ||
+                  numberedNameProposal !== null ||
+                  !selectedDestination ||
+                  pathPassesThroughTarget ||
+                  isNoOpDestination
+                }
                 loading={busy}
                 onClick={() => void commit()}
                 type="button"

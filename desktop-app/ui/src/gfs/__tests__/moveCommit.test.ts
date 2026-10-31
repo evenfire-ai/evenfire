@@ -28,7 +28,6 @@ function plan(overrides: Partial<MoveCommitPlan> = {}): MoveCommitPlan {
   return {
     source: { resourceId: 'r-1', gfsUri: 'gfs://main/r1', kind: 'file', name: 'report.md' },
     destination: { resourceId: 'dest-1', name: 'Dest' },
-    allowNumberedRename: false,
     ...overrides,
   }
 }
@@ -39,7 +38,14 @@ describe('commitGfsMove — commit-time source refresh', () => {
     const outcome = await commitGfsMove(deps({ moveResource }), plan())
     expect(outcome).toEqual({ status: 'committed', version: 8, previousParentId: 'old-parent' })
     expect(moveResource).toHaveBeenCalledTimes(1)
-    expect(moveResource).toHaveBeenCalledWith('r-1', 'dest-1', 7, undefined, 'old-parent')
+    expect(moveResource).toHaveBeenCalledWith(
+      'r-1',
+      'dest-1',
+      7,
+      undefined,
+      'old-parent',
+      undefined
+    )
   })
 
   it('refuses without a request when the fresh parent already IS the destination (no-op)', async () => {
@@ -101,14 +107,15 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
 
-  it('with an approved policy it retries numbered names, whole-resource, capped at 3 attempts', async () => {
+  it('retries one numbered name only after explicit authorization', async () => {
     const moveResource = vi
       .fn()
       .mockImplementation(async (_id: string, _dest: string, _v: number, newName?: string) => {
         if (newName === undefined || newName === 'report.md') throw conflictError()
         return { resourceId: 'r-1', version: 9 }
       })
-    const outcome = await commitGfsMove(deps({ moveResource }), plan({ allowNumberedRename: true }))
+    const authorizeNumberedRename = vi.fn(async () => true)
+    const outcome = await commitGfsMove(deps({ moveResource, authorizeNumberedRename }), plan())
     expect(outcome).toEqual({
       status: 'committed',
       version: 9,
@@ -116,7 +123,16 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
       previousParentId: 'old-parent',
     })
     expect(moveResource).toHaveBeenCalledTimes(2)
-    expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (1).md', 'old-parent')
+    expect(authorizeNumberedRename).toHaveBeenCalledTimes(1)
+    expect(authorizeNumberedRename).toHaveBeenCalledWith('report (1).md')
+    expect(moveResource).toHaveBeenLastCalledWith(
+      'r-1',
+      'dest-1',
+      7,
+      'report (1).md',
+      'old-parent',
+      undefined
+    )
   })
 
   it('seeds the ladder from plan.occupiedDestinationNames so known-taken names are skipped', async () => {
@@ -137,9 +153,8 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
         return { resourceId: 'r-1', version: 10 }
       })
     const outcome = await commitGfsMove(
-      deps({ moveResource }),
+      deps({ moveResource, authorizeNumberedRename: async () => true }),
       plan({
-        allowNumberedRename: true,
         occupiedDestinationNames: new Set(['report.md', 'report (1).md', 'report (2).md']),
       })
     )
@@ -150,21 +165,30 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
       previousParentId: 'old-parent',
     })
     expect(moveResource).toHaveBeenCalledTimes(2)
-    expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (3).md', 'old-parent')
+    expect(moveResource).toHaveBeenLastCalledWith(
+      'r-1',
+      'dest-1',
+      7,
+      'report (3).md',
+      'old-parent',
+      undefined
+    )
   })
 
-  it('a concurrent-name storm stops after the attempt cap with the destination-changed copy', async () => {
+  it('a repeated 409 stops after one explicitly consented numbered retry', async () => {
     const moveResource = vi.fn(async () => {
       throw conflictError()
     })
-    const outcome = await commitGfsMove(deps({ moveResource }), plan({ allowNumberedRename: true }))
+    const authorizeNumberedRename = vi.fn(async () => true)
+    const outcome = await commitGfsMove(deps({ moveResource, authorizeNumberedRename }), plan())
     expect(outcome.status).toBe('conflict-stopped')
     if (outcome.status === 'conflict-stopped') {
-      expect(outcome.message).toContain('The destination changed')
-      // Never claim all numbered names were used.
+      expect(outcome.message).toContain('choose another folder')
       expect(outcome.message).not.toContain('all numbered names')
     }
-    expect(moveResource).toHaveBeenCalledTimes(3)
+    expect(authorizeNumberedRename).toHaveBeenCalledTimes(1)
+    expect(authorizeNumberedRename).toHaveBeenCalledWith('report (1).md')
+    expect(moveResource).toHaveBeenCalledTimes(2)
   })
 
   it('stops on governed_root_immutable without a numbered retry', async () => {
@@ -183,7 +207,8 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
         )
       }
     )
-    const outcome = await commitGfsMove(deps({ moveResource }), plan({ allowNumberedRename: true }))
+    const authorizeNumberedRename = vi.fn(async () => true)
+    const outcome = await commitGfsMove(deps({ moveResource, authorizeNumberedRename }), plan())
 
     expect(outcome).toEqual({
       status: 'refused',
@@ -191,6 +216,7 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
     })
     // Witness: one dispatch only, and never a numbered newName.
     expect(moveResource).toHaveBeenCalledTimes(1)
+    expect(authorizeNumberedRename).not.toHaveBeenCalled()
     expect(moveResource.mock.calls[0]![3]).toBeUndefined()
   })
 })
@@ -333,7 +359,7 @@ describe('commitGfsMove — server verdicts', () => {
         'Error invoking remote method: Error: 500 Internal Server Error: a resource with this name already exists httpStatus=500'
       )
     })
-    const outcome = await commitGfsMove(deps({ moveResource }), plan({ allowNumberedRename: true }))
+    const outcome = await commitGfsMove(deps({ moveResource }), plan())
     expect(outcome.status).toBe('unconfirmed')
     // No numbered-name retry: the move was never a collision.
     expect(moveResource).toHaveBeenCalledTimes(1)
@@ -349,10 +375,7 @@ describe('commitGfsMove — server verdicts', () => {
       .fn()
       .mockResolvedValueOnce(resolved())
       .mockResolvedValueOnce(resolved({ parentResourceId: 'dest-1', version: 12 }))
-    const outcome = await commitGfsMove(
-      deps({ moveResource, resolveSource }),
-      plan({ allowNumberedRename: true })
-    )
+    const outcome = await commitGfsMove(deps({ moveResource, resolveSource }), plan())
     // The move actually landed: the outcome is verified, not retried.
     expect(outcome).toEqual({
       status: 'committed',
@@ -368,7 +391,7 @@ describe('commitGfsMove — server verdicts', () => {
     const moveResource = vi.fn(async () => {
       throw new Error('500 Internal Server Error: a resource with this name already exists')
     })
-    const outcome = await commitGfsMove(deps({ moveResource }), plan({ allowNumberedRename: true }))
+    const outcome = await commitGfsMove(deps({ moveResource }), plan())
     expect(outcome.status).toBe('unconfirmed')
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
@@ -395,14 +418,18 @@ describe('commitGfsMove — gesture ownership (rev-2 §4.1)', () => {
     const outcome = await commitGfsMove(
       deps({
         moveResource,
+        authorizeNumberedRename: async () => true,
         isCurrent: () => {
           checks += 1
           return checks === 1
         },
       }),
-      plan({ allowNumberedRename: true })
+      plan()
     )
-    expect(outcome).toEqual({ status: 'gesture-lost' })
+    expect(outcome.status).toBe('conflict-stopped')
+    if (outcome.status === 'conflict-stopped') {
+      expect(outcome.message).toContain('already exists')
+    }
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
 
@@ -418,7 +445,14 @@ describe('commitGfsMove — gesture ownership (rev-2 §4.1)', () => {
       }),
       plan()
     )
-    expect(moveResource).toHaveBeenCalledWith('r-1', 'dest-1', 7, undefined, 'fresh-parent')
+    expect(moveResource).toHaveBeenCalledWith(
+      'r-1',
+      'dest-1',
+      7,
+      undefined,
+      'fresh-parent',
+      undefined
+    )
   })
 
   it('dispatches every retry with the commit-time parent', async () => {
@@ -435,18 +469,28 @@ describe('commitGfsMove — gesture ownership (rev-2 §4.1)', () => {
     await commitGfsMove(
       deps({
         moveResource,
+        authorizeNumberedRename: async () => true,
         resolveSource: vi.fn(async () => resolved({ parentResourceId: 'fresh-parent' })),
       }),
-      plan({ allowNumberedRename: true })
+      plan()
     )
-    expect(moveResource).toHaveBeenNthCalledWith(1, 'r-1', 'dest-1', 7, undefined, 'fresh-parent')
+    expect(moveResource).toHaveBeenNthCalledWith(
+      1,
+      'r-1',
+      'dest-1',
+      7,
+      undefined,
+      'fresh-parent',
+      undefined
+    )
     expect(moveResource).toHaveBeenNthCalledWith(
       2,
       'r-1',
       'dest-1',
       7,
       'report (1).md',
-      'fresh-parent'
+      'fresh-parent',
+      undefined
     )
   })
 
@@ -480,7 +524,9 @@ describe('toastMoveOutcome — unknown outcomes warn, definite negatives error (
       status: 'unconfirmed',
       message: 'Couldn’t confirm the move. Refresh before trying again.',
     })
-    expect(calls).toEqual([['Couldn’t confirm the move. Refresh before trying again.', 'warn']])
+    expect(calls).toEqual([
+      ['report.md → Dest: Couldn’t confirm the move. Refresh before trying again.', 'warn'],
+    ])
   })
 
   it('a rate-limited outcome warns', () => {
@@ -489,17 +535,40 @@ describe('toastMoveOutcome — unknown outcomes warn, definite negatives error (
       message: 'Too many file requests — try again in 7s.',
       retryAfterSeconds: 7,
     })
-    expect(calls).toEqual([['Too many file requests — try again in 7s.', 'warn']])
+    expect(calls).toEqual([['report.md → Dest: Too many file requests — try again in 7s.', 'warn']])
   })
 
   it('definite negatives stay errors and successes stay successes', () => {
     expect(present({ status: 'conflict-stopped', message: 'blocked' })).toEqual([
-      ['blocked', 'error'],
+      ['report.md → Dest: blocked', 'error'],
     ])
-    expect(present({ status: 'target-unavailable', message: 'gone' })).toEqual([['gone', 'error']])
+    expect(present({ status: 'target-unavailable', message: 'gone' })).toEqual([
+      ['report.md → Dest: gone', 'error'],
+    ])
     expect(present({ status: 'committed', version: 8, previousParentId: 'p' })).toEqual([
       ['Moved report.md to Dest', 'success'],
     ])
+  })
+
+  it('sanitizes captured names and the renamed-to label before toast interpolation', () => {
+    const pushToast = vi.fn()
+    toastMoveOutcome(
+      pushToast,
+      {
+        status: 'committed',
+        version: 8,
+        previousParentId: 'p',
+        renamedTo: 'report\u202e (1).txt',
+      },
+      'report\u202e.txt',
+      'Archive\u200b',
+      'file'
+    )
+
+    expect(pushToast).toHaveBeenCalledWith(
+      'Moved report.txt to Archive as report (1).txt',
+      'success'
+    )
   })
 
   it('a dead or superseded gesture stays silent', () => {

@@ -180,8 +180,9 @@ describe('GfsImagePreviewBody', () => {
     await waitFor(() => expect(onDownloadError).toHaveBeenCalled())
   })
 
-  it('renders the copy affordance in the header', async () => {
+  it('exposes loaded image copying to the owning preview toolbar', async () => {
     stubDownload(new Uint8Array([1, 2, 3]).buffer)
+    const onCopyContentReady = vi.fn()
     render(
       <GfsImagePreviewBody
         recordOpen={false}
@@ -189,9 +190,11 @@ describe('GfsImagePreviewBody', () => {
         fileName="diagram.PNG"
         gfsUri="gfs://main/image-1"
         mimeType="image/png"
+        onCopyContentReady={onCopyContentReady}
       />
     )
-    const copyButton = await screen.findByRole('button', { name: /Copy image to clipboard/i })
-    expect(copyButton.textContent).toContain('Copy')
+    await screen.findByAltText('Preview of diagram.PNG')
+    await waitFor(() => expect(onCopyContentReady).toHaveBeenLastCalledWith(expect.any(Function)))
+    expect(screen.queryByRole('button', { name: /Copy image to clipboard/i })).toBeNull()
   })
 })

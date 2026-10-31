@@ -564,7 +564,7 @@ function desktopGfsUploadIdentity(me: SessionMe): DesktopGfsUploadIdentity {
 }
 
 function normalizeDesktopUploadDrive(value: string | undefined): string {
-  const drive = String(value ?? '').trim()
+  const drive = String(value ?? 'main').trim()
   if (!drive) throw new Error('drive_required: GFS uploads require a canonical drive')
   return drive
 }
@@ -863,6 +863,7 @@ export function migrateDesktopGfsUploadState(value: unknown): {
 
 export interface AppServiceOptions {
   tokenStore?: TokenStore
+  onSandboxUiSessionInvalidated?: () => void
 }
 
 export class AppService {
@@ -879,6 +880,7 @@ export class AppService {
     fetchByteStream: (url, token, opts, onChunk) => streamBoundedBytes(url, token, opts, onChunk),
   })
   private readonly tokenStore: TokenStore
+  private readonly onSandboxUiSessionInvalidated?: () => void
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -981,6 +983,7 @@ export class AppService {
 
   constructor(options: AppServiceOptions = {}) {
     this.tokenStore = options.tokenStore ?? new TokenStore()
+    this.onSandboxUiSessionInvalidated = options.onSandboxUiSessionInvalidated
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1574,6 +1577,7 @@ export class AppService {
   /** Retires the sandbox-ui work of a session that is being cleared or replaced. */
   private invalidateSandboxUiSession(): void {
     this.sandboxUiSessionEpoch += 1
+    this.onSandboxUiSessionInvalidated?.()
     // The embed and its refresh loop run on the outgoing session. Queued rather
     // than awaited: callers must not wait on a pending open's mint; the serial
     // queue still tears down whatever that open mounts.
@@ -1744,6 +1748,7 @@ export class AppService {
       return this.withNativeAuthEnvironmentCommit(async () => ({
         authenticated: Boolean(this.sessionToken && this.me),
         me: this.me,
+        sessionGeneration: this.sessionGeneration,
       }))
     }
 
@@ -1761,13 +1766,14 @@ export class AppService {
     const currentSession = () => ({
       authenticated: Boolean(this.sessionToken && this.me),
       me: this.me,
+      sessionGeneration: this.sessionGeneration,
     })
 
     if (reservation.tokenReadFailed) {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
 
@@ -1776,7 +1782,7 @@ export class AppService {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
 
@@ -1826,7 +1832,7 @@ export class AppService {
         // setup and other work prepared against the signed-out generation only
         // after the restored session and its GFS scope are coherent.
         this.sessionGeneration += 1
-        return { authenticated: true, me: restoredMe }
+        return { authenticated: true, me: restoredMe, sessionGeneration: this.sessionGeneration }
       })
       if (session.authenticated && options.runLaunchMaintenance) {
         // Launch-time sandbox-ui partition GC is best-effort and must not delay
@@ -1843,7 +1849,7 @@ export class AppService {
             legacyEnvKeys: getActiveLegacyEnvKeys(),
           })
         }
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
   }
@@ -1927,7 +1933,7 @@ export class AppService {
           getActiveLegacyEnvKeys()
         ).catch(() => undefined)
       }
-      return { authenticated: true, me: result.me }
+      return { authenticated: true, me: result.me, sessionGeneration: this.sessionGeneration }
     } finally {
       releasePrewarm()
     }
@@ -3456,14 +3462,32 @@ export class AppService {
   async moveGfsResource(
     resourceId: string,
     destinationId: string,
+    expectedSessionGeneration: number,
     drive?: string,
     ifMatch?: number,
     newName?: string
   ) {
-    return this.gfsClient.moveResource(
-      { resourceId, drive, destinationId, ifMatch, ...(newName !== undefined ? { newName } : {}) },
-      this.requireSessionToken()
-    )
+    if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+      throw new Error('invalid_session_generation')
+    }
+    this.assertSessionGeneration(expectedSessionGeneration)
+    try {
+      const receipt = await this.gfsClient.moveResource(
+        {
+          resourceId,
+          drive,
+          destinationId,
+          ifMatch,
+          ...(newName !== undefined ? { newName } : {}),
+        },
+        this.requireSessionToken()
+      )
+      this.assertSessionGeneration(expectedSessionGeneration)
+      return receipt
+    } catch (error) {
+      this.assertSessionGeneration(expectedSessionGeneration)
+      throw error
+    }
   }
 
   async deleteGfsResource(resourceId: string, drive?: string, ifMatch?: number) {
@@ -3479,7 +3503,10 @@ export class AppService {
 
   async getSessionState(): Promise<SessionState> {
     if (!this.sessionToken || !this.me) {
-      if (this.restoreSavedSessionInFlight) return this.restoreSavedSession()
+      if (this.restoreSavedSessionInFlight) {
+        const restored = await this.restoreSavedSession()
+        return { ...restored, sessionGeneration: this.sessionGeneration }
+      }
       // createWindow() already performs the saved-token restore before showing
       // the renderer. Do not immediately repeat a failed 60-second network
       // attempt from the renderer bootstrap; a new app launch or environment
@@ -3488,11 +3515,12 @@ export class AppService {
         this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey() &&
         Date.now() - this.savedSessionRestoreAttemptedAtMs < SAVED_SESSION_RESTORE_RETRY_DELAY_MS
       ) {
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       }
-      return this.restoreSavedSession()
+      const restored = await this.restoreSavedSession()
+      return { ...restored, sessionGeneration: this.sessionGeneration }
     }
-    return { authenticated: true, me: this.me }
+    return { authenticated: true, me: this.me, sessionGeneration: this.sessionGeneration }
   }
 
   /**
@@ -4168,7 +4196,7 @@ export class AppService {
         // cached org/agents/contexts answer is now about the wrong team. Drop the
         // cache and tell mounted plugins to refetch.
         tryGetPluginSdkRuntime()?.notifySessionChanged(true)
-        return { authenticated: true, me: this.me }
+        return { authenticated: true, me: this.me, sessionGeneration: this.sessionGeneration }
       })
     } finally {
       releasePrewarm()
@@ -6170,6 +6198,16 @@ export class AppService {
         teamId: String(teamId || '').trim() || undefined,
       }),
     }
+  }
+
+  async createGfsResourceDeepLink(uri: string): Promise<{ url: string }> {
+    const { buildGfsResourceWebLink, normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
+    const canonicalUri = normalizeGfsResourceUri(uri)
+    if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
+    return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
   }
 
   async setSandboxUiBounds(bounds: import('./sandboxUiDriver.js').SandboxUiBounds): Promise<void> {
