@@ -40,6 +40,8 @@ type StoredAttempt = {
 export class OidcR5MemoryAttemptDb {
   readonly rows = new Map<string, StoredAttempt>()
   failFinishStatus?: 'completed' | 'failed'
+  failCancellation = false
+  failAfterClaim = false
   readonly client: Pick<DbClient, 'query'> = {
     query: async (sql: string, values: unknown[] = []) => {
       if (
@@ -104,6 +106,10 @@ export class OidcR5MemoryAttemptDb {
         row.status = 'redeeming'
         row.verifierEncrypted = null
         row.nonceEncrypted = null
+        if (this.failAfterClaim) {
+          this.failAfterClaim = false
+          throw new Error('controlled claim response loss after consume')
+        }
         return {
           rows: [
             {
@@ -124,6 +130,9 @@ export class OidcR5MemoryAttemptDb {
         }
       }
       if (sql.includes("SET status = 'cancelled'")) {
+        if (this.failCancellation) {
+          throw new Error('controlled cancellation persistence failure')
+        }
         const row = [...this.rows.values()].find(
           candidate =>
             candidate.stateHash === values[0] && candidate.browserBindingHash === values[1]
@@ -170,6 +179,7 @@ export function createRsaPublicJwk(publicKey: KeyObject, kid: string): Record<st
 }
 
 export type OidcR5FixtureOptions = {
+  db?: Pick<DbClient, 'query'>
   hostPrefix?: string
   redirectUri?: string
   clientAuthenticationMethod?: 'client_secret_basic' | 'client_secret_post'
@@ -273,7 +283,7 @@ export function createOidcR5ProtocolFixture(options: OidcR5FixtureOptions = {}) 
   const db = new OidcR5MemoryAttemptDb()
   const browserBindings = new Map<string, string>()
   const engine = new OidcProtocolEngine(provider, {
-    db: db.client,
+    db: options.db ?? db.client,
     getClientSecret: () => CLIENT_SECRET,
     encryptionKeyHex: ENCRYPTION_KEY,
     now: () => Date.now(),

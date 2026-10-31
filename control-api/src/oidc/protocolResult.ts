@@ -21,7 +21,10 @@ export type OidcProtocolOutcome =
 export class OidcProviderUnavailableError extends Error {
   readonly category: OidcProtocolOutcome = 'provider-unavailable'
 
-  constructor(readonly reason = 'transport') {
+  constructor(
+    readonly reason = 'transport',
+    readonly retrySameAttempt = true
+  ) {
     super('Configured OIDC provider is temporarily unavailable')
     this.name = 'OidcProviderUnavailableError'
   }
@@ -77,7 +80,8 @@ export class OidcPersistenceFailure extends Error {
   constructor(
     readonly operation: OidcPersistenceOperation,
     readonly primaryOutcome?: OidcProtocolOutcome,
-    readonly priorPersistenceOperation?: OidcPersistenceOperation
+    readonly priorPersistenceOperation?: OidcPersistenceOperation,
+    readonly retrySameAttempt = operation === 'insert' || operation === 'preflight'
   ) {
     super('OIDC protocol-attempt persistence failed')
     this.name = 'OidcPersistenceFailure'

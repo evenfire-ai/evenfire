@@ -41,7 +41,7 @@ function defaultEngine(provider: Provider): OidcProtocolEngine {
   })
 }
 
-function safeFailure(error: unknown, res: Response): void {
+function safeFailure(error: unknown, res: Response, includeRetryability = false): void {
   if (error instanceof OidcAttemptRejectedError) {
     res.status(400).json({ error: 'oidc_attempt_rejected' })
     return
@@ -51,7 +51,10 @@ function safeFailure(error: unknown, res: Response): void {
     return
   }
   if (error instanceof OidcProviderUnavailableError) {
-    res.status(503).json({ error: 'oidc_provider_unavailable' })
+    res.status(503).json({
+      error: 'oidc_provider_unavailable',
+      ...(includeRetryability ? { retrySameAttempt: error.retrySameAttempt } : {}),
+    })
     return
   }
   if (error instanceof OidcProviderIncompatibleError) {
@@ -59,7 +62,10 @@ function safeFailure(error: unknown, res: Response): void {
     return
   }
   if (error instanceof OidcPersistenceFailure) {
-    res.status(503).json({ error: 'oidc_storage_unavailable' })
+    res.status(503).json({
+      error: 'oidc_storage_unavailable',
+      ...(includeRetryability ? { retrySameAttempt: error.retrySameAttempt } : {}),
+    })
     return
   }
   if (error instanceof OidcCallerCancelledError) {
@@ -158,7 +164,7 @@ export function createExternalOidcProfileFlowRouter(
         memberAuthenticationActivated: false,
       })
     } catch (error) {
-      safeFailure(error, res)
+      safeFailure(error, res, true)
     }
   })
 
@@ -182,7 +188,7 @@ export function createExternalOidcProfileFlowRouter(
       if (!cancelled) return res.status(400).json({ error: 'oidc_attempt_rejected' })
       return res.status(200).json({ outcome: 'attempt_cancelled' })
     } catch (error) {
-      safeFailure(error, res)
+      safeFailure(error, res, true)
     }
   })
 

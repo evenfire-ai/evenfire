@@ -64,6 +64,8 @@ function externalUrl(path: string): string {
 }
 
 async function requestExternal<T>(path: string, init?: RequestInit): Promise<T> {
+  const operationMayConsumeAttempt = path.endsWith('/complete') || path.endsWith('/cancel')
+  const retryWhenOutcomeIsUnknown = !operationMayConsumeAttempt
   let response: Response
   try {
     response = await fetch(externalUrl(path), {
@@ -77,14 +79,14 @@ async function requestExternal<T>(path: string, init?: RequestInit): Promise<T> 
       },
     })
   } catch {
-    throw new OidcProfileFlowError(503, 'oidc_unavailable', true)
+    throw new OidcProfileFlowError(503, 'oidc_unavailable', retryWhenOutcomeIsUnknown)
   }
 
   let body: unknown
   try {
     body = await response.json()
   } catch {
-    throw new OidcProfileFlowError(503, 'oidc_unavailable', true)
+    throw new OidcProfileFlowError(503, 'oidc_unavailable', retryWhenOutcomeIsUnknown)
   }
   if (!response.ok) {
     const error =
@@ -99,10 +101,17 @@ async function requestExternal<T>(path: string, init?: RequestInit): Promise<T> 
       error === 'oidc_provider_unavailable' ||
       error === 'oidc_storage_unavailable' ||
       error === 'oidc_unavailable'
+    const retrySameAttempt =
+      body &&
+      typeof body === 'object' &&
+      'retrySameAttempt' in body &&
+      typeof body.retrySameAttempt === 'boolean'
+        ? body.retrySameAttempt
+        : retryWhenOutcomeIsUnknown
     throw new OidcProfileFlowError(
       [400, 404, 503].includes(response.status) ? response.status : 503,
       error,
-      retryable
+      retryable && retrySameAttempt !== false
     )
   }
   return body as T

@@ -80,4 +80,24 @@ describe('External REST OIDC Profile UI bridge', () => {
     expect(response.status).toBe(503)
     expect(response.body).toEqual({ error: 'oidc_unavailable' })
   })
+
+  it('forwards only the safe attempt retryability signal for provider failures', async () => {
+    requestSpy.mockRejectedValue(
+      new controlApiClient.ControlApiError('private upstream detail', 503, {
+        error: 'oidc_provider_unavailable',
+        retrySameAttempt: false,
+        providerUrl: 'https://private.example.test/token',
+      })
+    )
+    const response = await request(app())
+      .post('/oidc/profile-flow/complete')
+      .send({ state: 'S'.repeat(43), code: 'provider-code', browserBinding: 'B'.repeat(43) })
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({
+      error: 'oidc_provider_unavailable',
+      retrySameAttempt: false,
+    })
+    expect(JSON.stringify(response.body)).not.toContain('private.example.test')
+  })
 })

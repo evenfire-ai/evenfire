@@ -219,7 +219,10 @@ test('provider cancellation cancels only the state with the matching browser coo
 test('provider outage during completion preserves the browser cookie for retry', async () => {
   const restore = mockExternalApi(url => {
     if (url.pathname.endsWith('/configuration')) return configurationResponse()
-    return Response.json({ error: 'oidc_provider_unavailable' }, { status: 503 })
+    return Response.json(
+      { error: 'oidc_provider_unavailable', retrySameAttempt: true },
+      { status: 503 }
+    )
   })
   try {
     const response = await GET(
@@ -230,6 +233,93 @@ test('provider outage during completion preserves the browser cookie for retry',
     assert.equal(response.status, 503)
     assert.equal(response.headers.get('set-cookie'), null)
     assert.match(await response.text(), /temporarily unavailable/)
+  } finally {
+    restore()
+  }
+})
+
+test('an unknown completion outcome does not claim the attempt can be retried', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return configurationResponse()
+    throw new Error('upstream outcome unavailable')
+  })
+  try {
+    const response = await GET(
+      new Request(`${callbackUri}?state=${state}&code=provider-code`, {
+        headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+      })
+    )
+    const text = await response.text()
+    assert.equal(response.status, 503)
+    assert.doesNotMatch(text, /retry this attempt/i)
+    assert.match(text, /start a new sign-in attempt/i)
+    assert.match(response.headers.get('set-cookie') ?? '', /Max-Age=0/)
+  } finally {
+    restore()
+  }
+})
+
+test('a consumed provider failure clears its cookie and requires a new attempt', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return configurationResponse()
+    return Response.json(
+      { error: 'oidc_provider_unavailable', retrySameAttempt: false },
+      { status: 503 }
+    )
+  })
+  try {
+    const response = await GET(
+      new Request(`${callbackUri}?state=${state}&code=provider-code`, {
+        headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+      })
+    )
+    const text = await response.text()
+    assert.equal(response.status, 503)
+    assert.doesNotMatch(text, /retry this attempt/i)
+    assert.match(text, /start a new sign-in attempt/i)
+    assert.match(response.headers.get('set-cookie') ?? '', /Max-Age=0/)
+  } finally {
+    restore()
+  }
+})
+
+test('a malformed completion response clears the cookie and requires a new attempt', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return configurationResponse()
+    return Response.json({ outcome: 'unexpected' })
+  })
+  try {
+    const response = await GET(
+      new Request(`${callbackUri}?state=${state}&code=provider-code`, {
+        headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+      })
+    )
+    const text = await response.text()
+    assert.equal(response.status, 503)
+    assert.doesNotMatch(text, /retry this attempt/i)
+    assert.match(text, /start a new sign-in attempt/i)
+    assert.match(response.headers.get('set-cookie') ?? '', /Max-Age=0/)
+  } finally {
+    restore()
+  }
+})
+
+test('a malformed cancellation response clears the cookie and requires a new attempt', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return configurationResponse()
+    return Response.json({ outcome: 'unexpected' })
+  })
+  try {
+    const response = await GET(
+      new Request(`${callbackUri}?state=${state}&error=access_denied`, {
+        headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+      })
+    )
+    const text = await response.text()
+    assert.equal(response.status, 503)
+    assert.doesNotMatch(text, /retry this attempt/i)
+    assert.match(text, /start a new sign-in attempt/i)
+    assert.match(response.headers.get('set-cookie') ?? '', /Max-Age=0/)
   } finally {
     restore()
   }

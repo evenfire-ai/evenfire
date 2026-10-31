@@ -51,6 +51,13 @@ beforeEach(() => {
 })
 
 describe('typed OIDC operation outcomes', () => {
+  it('defaults retryability only for non-consuming persistence operations', () => {
+    expect(new OidcPersistenceFailure('insert').retrySameAttempt).toBe(true)
+    expect(new OidcPersistenceFailure('preflight').retrySameAttempt).toBe(true)
+    expect(new OidcPersistenceFailure('claim').retrySameAttempt).toBe(false)
+    expect(new OidcPersistenceFailure('finalize').retrySameAttempt).toBe(false)
+  })
+
   it('marks a consumed or replayed attempt as an attempt rejection', async () => {
     const fixture = createOidcR5ProtocolFixture({ hostPrefix: 'typed-replay' })
     registerFixture(fixture)
@@ -77,6 +84,49 @@ describe('typed OIDC operation outcomes', () => {
       fixture.engine.validateProvider({ signal: controller.signal })
     ).rejects.toBeInstanceOf(OidcCallerCancelledError)
     expect(network.transport).not.toHaveBeenCalled()
+  })
+
+  it('does not permit retrying an attempt when cancellation persistence is ambiguous', async () => {
+    const fixture = createOidcR5ProtocolFixture({ hostPrefix: 'typed-cancel-persist-failure' })
+    registerFixture(fixture)
+    const attempt = await fixture.begin()
+    fixture.db.failCancellation = true
+
+    const error = await fixture.engine
+      .cancelIdentityProofAttempt({
+        state: attempt.state,
+        browserBinding: attempt.browserBinding,
+      })
+      .catch(value => value)
+
+    expect(error).toBeInstanceOf(OidcPersistenceFailure)
+    expect(error).toMatchObject({
+      category: 'persistence-failure',
+      operation: 'finalize',
+      retrySameAttempt: false,
+    })
+    expect([...fixture.db.rows.values()][0]?.status).toBe('pending')
+  })
+
+  it('does not permit retrying an attempt when the successful claim reply is lost', async () => {
+    const fixture = createOidcR5ProtocolFixture({ hostPrefix: 'typed-claim-reply-loss' })
+    registerFixture(fixture)
+    const attempt = await fixture.begin()
+    fixture.db.failAfterClaim = true
+
+    const error = await fixture.complete(attempt.state).catch(value => value)
+
+    expect(error).toBeInstanceOf(OidcPersistenceFailure)
+    expect(error).toMatchObject({
+      category: 'persistence-failure',
+      operation: 'claim',
+      retrySameAttempt: false,
+    })
+    const row = [...fixture.db.rows.values()][0]
+    expect(row?.status).toBe('redeeming')
+    expect(row?.verifierEncrypted).toBeNull()
+    expect(row?.nonceEncrypted).toBeNull()
+    expect(fixture.tokenRequests).toHaveLength(0)
   })
 
   it('preserves the safe primary cause when failed-attempt persistence also fails', async () => {
@@ -117,7 +167,13 @@ describe('typed OIDC operation outcomes', () => {
     const primaryAttempt = await primaryFixture.begin()
     await expect(primaryFixture.complete(primaryAttempt.state)).rejects.toMatchObject({
       category: 'provider-unavailable',
+      retrySameAttempt: false,
     })
+    expect([...primaryFixture.db.rows.values()][0]?.status).toBe('failed')
+    await expect(primaryFixture.complete(primaryAttempt.state)).rejects.toMatchObject({
+      category: 'attempt-rejected',
+    })
+    expect(primaryFixture.tokenRequests).toHaveLength(1)
 
     const fixture = createOidcR5ProtocolFixture({
       hostPrefix: 'typed-finalize-unavailable',
@@ -134,6 +190,7 @@ describe('typed OIDC operation outcomes', () => {
       category: 'persistence-failure',
       operation: 'finalize',
       primaryOutcome: 'provider-unavailable',
+      retrySameAttempt: false,
     })
     expect([...fixture.db.rows.values()][0]?.status).toBe('redeeming')
     expect(fixture.tokenRequests).toHaveLength(1)
@@ -148,7 +205,11 @@ describe('typed OIDC operation outcomes', () => {
     const error = await fixture.complete(attempt.state).catch(value => value)
 
     expect(error).toBeInstanceOf(OidcPersistenceFailure)
-    expect(error).toMatchObject({ category: 'persistence-failure', operation: 'finalize' })
+    expect(error).toMatchObject({
+      category: 'persistence-failure',
+      operation: 'finalize',
+      retrySameAttempt: false,
+    })
     const row = [...fixture.db.rows.values()][0]
     expect(row?.status).toBe('failed')
     expect(row?.verifierEncrypted).toBeNull()

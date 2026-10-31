@@ -53,12 +53,25 @@ export async function GET(request: Request): Promise<Response> {
         browserBinding,
       })
       if (result?.outcome !== 'attempt_cancelled') {
-        throw new OidcProfileFlowError(503, 'oidc_unavailable', true)
+        throw new OidcProfileFlowError(503, 'oidc_unavailable', false)
       }
       return terminalFailure('Sign-in was cancelled.', 400, callback.state)
     } catch (error) {
       if (error instanceof OidcProfileFlowError && error.retryable) {
         return noStoreText('The cancellation could not be confirmed. Retry this attempt.', 503)
+      }
+      if (
+        error instanceof OidcProfileFlowError &&
+        !error.retryable &&
+        (error.code === 'oidc_provider_unavailable' ||
+          error.code === 'oidc_storage_unavailable' ||
+          error.code === 'oidc_unavailable')
+      ) {
+        return terminalFailure(
+          'This sign-in attempt cannot be reused. Start a new sign-in attempt.',
+          error.status,
+          callback.state
+        )
       }
       return terminalFailure(
         'Identity proof could not be verified.',
@@ -76,7 +89,7 @@ export async function GET(request: Request): Promise<Response> {
       ...(callback.issuer !== undefined ? { issuer: callback.issuer } : {}),
     })
     if (result?.outcome !== 'identity_proof_verified') {
-      throw new OidcProfileFlowError(503, 'oidc_unavailable', true)
+      throw new OidcProfileFlowError(503, 'oidc_unavailable', false)
     }
     return terminalFailure(
       'Identity proof was verified. Member sign-in is not enabled.',
@@ -88,6 +101,19 @@ export async function GET(request: Request): Promise<Response> {
       return noStoreText(
         'The identity provider is temporarily unavailable. Retry this attempt.',
         503
+      )
+    }
+    if (
+      error instanceof OidcProfileFlowError &&
+      !error.retryable &&
+      (error.code === 'oidc_provider_unavailable' ||
+        error.code === 'oidc_storage_unavailable' ||
+        error.code === 'oidc_unavailable')
+    ) {
+      return terminalFailure(
+        'This sign-in attempt cannot be reused. Start a new sign-in attempt.',
+        error.status,
+        callback.state
       )
     }
     return terminalFailure(

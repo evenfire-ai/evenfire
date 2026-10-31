@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { OidcPersistenceFailure, OidcProviderUnavailableError } from '../src/oidc/protocolResult.js'
 import { createExternalOidcProfileFlowRouter } from '../src/routes/external/oidcProfileFlow.js'
 import { createOidcR5ProtocolFixture } from './helpers/oidcR5ProtocolFixture.js'
 
@@ -93,5 +94,42 @@ describe('Control API OIDC Profile UI foundation boundary', () => {
     expect(response.status).toBe(400)
     expect(response.body).toEqual({ error: 'invalid_oidc_attempt' })
     expect(beginIdentityProofAttempt).not.toHaveBeenCalled()
+  })
+
+  it('returns bounded retryability for an unavailable consumed attempt', async () => {
+    const error = Object.assign(new OidcProviderUnavailableError(), { retrySameAttempt: false })
+    const completeIdentityProofAttempt = vi.fn().mockRejectedValue(error)
+    const app = appFor({ completeIdentityProofAttempt })
+    const response = await request(app)
+      .post('/external/oidc/profile-flow/complete')
+      .send({
+        state: 'S'.repeat(43),
+        code: 'provider-code',
+        browserBinding: 'B'.repeat(43),
+        issuer: provider.issuer,
+      })
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({
+      error: 'oidc_provider_unavailable',
+      retrySameAttempt: false,
+    })
+  })
+
+  it('returns non-retryable status when cancellation persistence has an unknown outcome', async () => {
+    const cancelIdentityProofAttempt = vi
+      .fn()
+      .mockRejectedValue(new OidcPersistenceFailure('finalize', undefined, undefined, false))
+    const app = appFor({ cancelIdentityProofAttempt })
+    const response = await request(app)
+      .post('/external/oidc/profile-flow/cancel')
+      .send({ state: 'S'.repeat(43), browserBinding: 'B'.repeat(43) })
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({
+      error: 'oidc_storage_unavailable',
+      retrySameAttempt: false,
+    })
+    expect(JSON.stringify(response.body)).not.toContain('finalize')
   })
 })

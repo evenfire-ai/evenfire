@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
+import type { PinnedFetchOptions } from '../src/http/pinnedFetch.js'
 import {
   type OidcProtocolAttemptBinding,
   applyOidcProtocolAttemptExpiryIndexMigration,
@@ -12,8 +13,32 @@ import {
   insertOidcProtocolAttempt,
   preflightOidcProtocolAttempt,
 } from '../src/oidc/protocolAttemptStore.js'
+import { OidcAttemptRejectedError, OidcPersistenceFailure } from '../src/oidc/protocolResult.js'
+import { OIDC_R5_PUBLIC_IP, createOidcR5ProtocolFixture } from './helpers/oidcR5ProtocolFixture.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.js'
+
+const oidcNetwork = vi.hoisted(() => ({
+  routes: new Map<string, (input: unknown) => Promise<unknown>>(),
+  lookup: vi.fn(),
+  transport: vi.fn(),
+}))
+
+vi.mock('node:dns/promises', () => ({
+  lookup: (hostname: string) => oidcNetwork.lookup(hostname),
+}))
+
+vi.mock('../src/http/pinnedFetch.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/http/pinnedFetch.js')>()
+  return {
+    ...actual,
+    pinnedFetch: (url: string, field: string, options: PinnedFetchOptions = {}) =>
+      actual.pinnedFetch(url, field, {
+        ...options,
+        transport: input => oidcNetwork.transport(input),
+      }),
+  }
+})
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -38,6 +63,17 @@ function databaseUrl(baseUrl: string, database: string): string {
 
 function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
+}
+
+function registerOidcFixture(fixture: ReturnType<typeof createOidcR5ProtocolFixture>): void {
+  for (const endpoint of [
+    fixture.issuer,
+    fixture.authorizationEndpoint,
+    fixture.tokenEndpoint,
+    fixture.jwksUri,
+  ]) {
+    oidcNetwork.routes.set(new URL(endpoint).hostname, input => fixture.transport(input as never))
+  }
 }
 
 async function waitForBlockedClaimers(
@@ -206,6 +242,57 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
     expect(
       await claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, expiredState, BROWSER_BINDING, BINDING)
     ).toBeNull()
+  })
+
+  it('does not allow retry after PostgreSQL commits a claim but its reply is lost', async () => {
+    oidcNetwork.routes.clear()
+    oidcNetwork.lookup.mockReset().mockResolvedValue([{ address: OIDC_R5_PUBLIC_IP, family: 4 }])
+    oidcNetwork.transport.mockReset().mockImplementation((input: { url: string }) => {
+      const route = oidcNetwork.routes.get(new URL(input.url).hostname)
+      if (!route) throw new Error('Unexpected real-Postgres OIDC fixture request')
+      return route(input)
+    })
+
+    let claimReplyLost = false
+    const protocolDb = {
+      query: async (sql: string, values?: unknown[]) => {
+        const result = await pool!.query(sql, values)
+        if (sql.includes('WITH candidate AS') && !claimReplyLost) {
+          claimReplyLost = true
+          throw new Error('controlled response loss after committed PostgreSQL claim')
+        }
+        return result
+      },
+    }
+    const fixture = createOidcR5ProtocolFixture({
+      hostPrefix: 'r6-claim-reply-loss',
+      db: protocolDb,
+    })
+    registerOidcFixture(fixture)
+
+    const attempt = await fixture.begin()
+    const error = await fixture.complete(attempt.state).catch(value => value)
+
+    expect(claimReplyLost).toBe(true)
+    expect(error).toBeInstanceOf(OidcPersistenceFailure)
+    expect(error).toMatchObject({ operation: 'claim', retrySameAttempt: false })
+    const row = await pool!.query<{
+      status: string
+      pkce_verifier_encrypted: string | null
+      nonce_encrypted: string | null
+    }>(
+      `SELECT status, pkce_verifier_encrypted, nonce_encrypted
+         FROM oidc_protocol_attempts
+        WHERE state_hash = $1`,
+      [createHash('sha256').update(attempt.state, 'utf8').digest('hex')]
+    )
+    expect(row.rows).toEqual([
+      { status: 'redeeming', pkce_verifier_encrypted: null, nonce_encrypted: null },
+    ])
+    expect(fixture.tokenRequests).toHaveLength(0)
+    await expect(fixture.complete(attempt.state)).rejects.toBeInstanceOf(OidcAttemptRejectedError)
+    expect(fixture.tokenRequests).toHaveLength(0)
+    oidcNetwork.routes.clear()
   })
 
   it('does not consume an attempt when only its configuration generation is stale', async () => {

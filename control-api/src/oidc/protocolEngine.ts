@@ -386,7 +386,7 @@ export class OidcProtocolEngine {
         this.binding(trusted.profile)
       )
     } catch {
-      throw new OidcPersistenceFailure('claim')
+      throw new OidcPersistenceFailure('claim', undefined, undefined, false)
     }
     if (!claimed)
       throw new OidcAttemptRejectedError(
@@ -417,9 +417,9 @@ export class OidcProtocolEngine {
       try {
         finalized = await finishOidcProtocolAttempt(this.dependencies.db, claimed.id, 'completed')
       } catch {
-        throw new OidcPersistenceFailure('finalize')
+        throw new OidcPersistenceFailure('finalize', undefined, undefined, false)
       }
-      if (!finalized) throw new OidcPersistenceFailure('finalize')
+      if (!finalized) throw new OidcPersistenceFailure('finalize', undefined, undefined, false)
       return proof
     } catch (error) {
       const transportFailure = this.operationContext.getStore()?.transportFailure
@@ -430,7 +430,8 @@ export class OidcProtocolEngine {
         throw new OidcPersistenceFailure(
           'finalize',
           safePrimaryOutcome(error, transportFailure),
-          error instanceof OidcPersistenceFailure ? error.operation : undefined
+          error instanceof OidcPersistenceFailure ? error.operation : undefined,
+          false
         )
       }
       if (error instanceof OidcPersistenceFailure) throw error
@@ -439,7 +440,7 @@ export class OidcProtocolEngine {
         error instanceof OidcProviderUnavailableError ||
         transportFailure?.kind === 'unavailable'
       ) {
-        throw new OidcProviderUnavailableError()
+        throw new OidcProviderUnavailableError('transport', false)
       }
       if (error instanceof OidcProviderIncompatibleError) throw error
       if (transportFailure?.kind === 'incompatible') {
@@ -474,7 +475,7 @@ export class OidcProtocolEngine {
         this.configuredBinding()
       )
     } catch {
-      throw new OidcPersistenceFailure('finalize')
+      throw new OidcPersistenceFailure('finalize', undefined, undefined, false)
     }
   }
 

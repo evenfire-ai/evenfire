@@ -17,7 +17,7 @@ const SAFE_ERRORS = new Set([
   'oidc_unavailable',
 ])
 
-type SafeFailure = Readonly<{ error: string }>
+type SafeFailure = Readonly<{ error: string; retrySameAttempt?: boolean }>
 
 function forwardFailure(error: unknown, res: Response, next: NextFunction): void {
   if (error instanceof ControlApiError) {
@@ -27,7 +27,14 @@ function forwardFailure(error: unknown, res: Response, next: NextFunction): void
         ? body.error
         : 'oidc_unavailable'
     const status = [400, 404, 503].includes(error.status) ? error.status : 503
-    res.status(status).json({ error: safeCode })
+    const retryabilityCode =
+      safeCode === 'oidc_provider_unavailable' || safeCode === 'oidc_storage_unavailable'
+    res.status(status).json({
+      error: safeCode,
+      ...(retryabilityCode && typeof body?.retrySameAttempt === 'boolean'
+        ? { retrySameAttempt: body.retrySameAttempt }
+        : {}),
+    })
     return
   }
   next(error)
