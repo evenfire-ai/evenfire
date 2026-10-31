@@ -9,6 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
+import type { RetainedSendSnapshot } from '@lib/retainedSendStore'
 import type { ModelStepCheckpointView } from '../../../../../src/types'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
@@ -27,6 +28,38 @@ import {
   checkpointView as view,
 } from './__fixtures__/modelStepCheckpoint'
 
+type RetainedSendStore = ReturnType<
+  (typeof import('@lib/retainedSendStore'))['createRetainedSendStore']
+>
+
+/**
+ * The retained store lives inside the controller, so this file wraps the real
+ * factory (#654 M6 pattern) to read back what the mounted controller holds.
+ * `failedAgentSend` only surfaces snapshots that carry a failure, so the store
+ * read is what proves a superseded failure is gone rather than merely masked.
+ */
+const retainedCapture = vi.hoisted(() => ({
+  stores: [] as RetainedSendStore[],
+  retained: [] as RetainedSendSnapshot[],
+}))
+
+vi.mock('@lib/retainedSendStore', async importOriginal => {
+  const actual = await importOriginal<typeof import('@lib/retainedSendStore')>()
+  return {
+    ...actual,
+    createRetainedSendStore: (changed: () => void) => {
+      const store = actual.createRetainedSendStore(changed)
+      const retainSendSnapshot = (snapshot: RetainedSendSnapshot) => {
+        retainedCapture.retained.push(snapshot)
+        store.retainSendSnapshot(snapshot)
+      }
+      const wrapped = { ...store, retainSendSnapshot }
+      retainedCapture.stores.push(wrapped)
+      return wrapped
+    },
+  }
+})
+
 let clerum: MockClerum
 let uuidCounter = 0
 
@@ -34,6 +67,8 @@ let uuidCounter = 0
 
 beforeEach(() => {
   uuidCounter = 0
+  retainedCapture.stores.length = 0
+  retainedCapture.retained.length = 0
   vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(
     () => `uuid-${++uuidCounter}` as `${string}-${string}-${string}-${string}-${string}`
   )
@@ -52,6 +87,17 @@ async function settleMount() {
 
 const sendAndFail = (checkpoint: ModelStepCheckpointView | undefined) =>
   sendAndFailWith(clerum, checkpoint)
+
+/** Failed snapshots the mounted controller's retained store still holds. */
+function heldFailures(): RetainedSendSnapshot[] {
+  expect(retainedCapture.stores).toHaveLength(1)
+  const [store] = retainedCapture.stores
+  return retainedCapture.retained
+    .map(retained =>
+      store!.getRetainedSendSnapshot(retained.agentRef, retained.chatId, retained.userMessageId)
+    )
+    .filter((snapshot): snapshot is RetainedSendSnapshot => Boolean(snapshot?.failure))
+}
 
 describe('model-step checkpoint in the controller (#1044)', () => {
   it('offers a resumable checkpoint instead of Resend after a failed terminal', async () => {
@@ -420,5 +466,48 @@ describe('model-step checkpoint in the controller (#1044)', () => {
     // failed turn without a checkpoint: its Resend stays available.
     expect(result.current.failedAgentSend?.content).toBe(ORIGIN_PROMPT)
     expect(result.current.agentError).toBe('The provider is unavailable.')
+  })
+
+  // #1043 / MS-7 (D3) — a later send that succeeds supersedes an earlier failed
+  // send of the same chat, whatever ended the earlier turn. The in-flight case
+  // above pins the state before that success; this one pins the final state.
+  it('clears the earlier failed send once a later send in the chat succeeds', async () => {
+    const { result } = await sendAndFail(view('session-view.resumable.json'))
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-next' })
+    clerum.rpc.getTaskResult.mockResolvedValue({
+      status: 'completed',
+      response: 'answered after starting over',
+    })
+
+    await act(async () => {
+      await result.current.handleSendAgentMessage('start over')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler('task-next')).toBe(true))
+    // Contrast for the final assertion: while the follow-up is in flight the
+    // abandoned turn is still the visible failed send, Resend included.
+    expect(result.current.failedAgentSend?.content).toBe(ORIGIN_PROMPT)
+    expect(heldFailures().map(snapshot => snapshot.content)).toEqual([ORIGIN_PROMPT])
+
+    await act(async () => {
+      clerum.emitTaskProgress('task-next', {
+        type: 'terminal',
+        data: { taskId: 'task-next', status: 'completed' },
+      })
+    })
+
+    // Liveness: the follow-up reached its durable reply and is in the transcript.
+    await waitFor(() =>
+      expect(
+        result.current.chatMessages.some(
+          message =>
+            message.role === 'assistant' && message.content === 'answered after starting over'
+        )
+      ).toBe(true)
+    )
+    // The success supersedes the earlier failure: no Resend is offered for it
+    // and the store no longer holds it.
+    expect(result.current.failedAgentSend).toBeNull()
+    expect(result.current.agentError).toBeNull()
+    expect(heldFailures()).toEqual([])
   })
 })
