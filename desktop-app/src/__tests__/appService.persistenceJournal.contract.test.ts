@@ -192,6 +192,7 @@ describe('actual AppService write-ahead acceptance and migration', () => {
     await expect(passwordLogin(h, freshToken, freshMe)).resolves.toEqual({
       authenticated: true,
       me: freshMe,
+      sessionGeneration: expect.any(Number),
     })
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
@@ -387,6 +388,7 @@ describe('actual AppService write-ahead acceptance and migration', () => {
     await expect(passwordLogin(h, freshToken, freshMe)).resolves.toEqual({
       authenticated: true,
       me: freshMe,
+      sessionGeneration: expect.any(Number),
     })
 
     expect(h.service.getCachedUserId()).toBe(freshMe.id)
@@ -422,6 +424,7 @@ describe('actual AppService write-ahead acceptance and migration', () => {
     await expect(h.service.switchTeam('fixture-team')).resolves.toEqual({
       authenticated: true,
       me: userFor(teamToken),
+      sessionGeneration: expect.any(Number),
     })
 
     expect(boundary.notifySessionChanged).toHaveBeenCalledWith(true)
@@ -483,6 +486,7 @@ describe('actual AppService write-ahead acceptance and migration', () => {
     await expect(passwordLogin(h, freshToken, freshMe)).resolves.toEqual({
       authenticated: true,
       me: freshMe,
+      sessionGeneration: expect.any(Number),
     })
 
     expect(boundary.setPassword).toHaveBeenCalledTimes(1)
@@ -522,6 +526,7 @@ describe('actual AppService write-ahead acceptance and migration', () => {
     await expect(passwordLogin(beforeLogoutRestart, freshToken, freshMe)).resolves.toEqual({
       authenticated: true,
       me: freshMe,
+      sessionGeneration: expect.any(Number),
     })
     expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)?.pending).toEqual(
       previousDenials

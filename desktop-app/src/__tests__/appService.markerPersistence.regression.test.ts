@@ -421,6 +421,7 @@ describe('team persistence preserves the existing secure session on transient fa
     await expect(h.service.passwordLogin(freshMe.email, 'fixture-password')).resolves.toEqual({
       authenticated: true,
       me: freshMe,
+      sessionGeneration: expect.any(Number),
     })
     await expectV2AcceptanceMarker(h)
     expect(await h.tokenStore.getSafeStorageSessionToken(h.envKey)).toBe(oldToken)

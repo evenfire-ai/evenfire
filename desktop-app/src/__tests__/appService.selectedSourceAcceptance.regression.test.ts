@@ -245,6 +245,7 @@ describe('R21-M13 selected-source ownership after asynchronous cleanup', () => {
       await expect(loginWithPassword(newest, freshToken, freshMe)).resolves.toEqual({
         authenticated: true,
         me: freshMe,
+        sessionGeneration: expect.any(Number),
       })
       const newestRecord = await expectSelectedSession(newest, freshToken)
       expect(newestRecord.frame.source?.sourceRef).not.toBe(
@@ -256,6 +257,7 @@ describe('R21-M13 selected-source ownership after asynchronous cleanup', () => {
     await expect(replacementLogin).resolves.toEqual({
       authenticated: true,
       me: replacementMe,
+      sessionGeneration: expect.any(Number),
     })
 
     const restart = await harness()
@@ -291,7 +293,11 @@ describe('R21-M13 original publication cannot adopt a newer identical accepted s
     )
     await entered(preparedEntered.promise, oldLogin)
     const newLogin = await loginWithPassword(fresh, homeToken, homeMe)
-    expect(newLogin).toEqual({ authenticated: true, me: homeMe })
+    expect(newLogin).toEqual({
+      authenticated: true,
+      me: homeMe,
+      sessionGeneration: expect.any(Number),
+    })
     const freshRecord = await expectSelectedSession(fresh, homeToken)
     releasePrepared.resolve()
     const rejected = await oldOutcome

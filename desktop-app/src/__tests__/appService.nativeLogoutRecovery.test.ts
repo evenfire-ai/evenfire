@@ -130,7 +130,11 @@ describe('AppService logout recovery ownership', () => {
     expect(readPendingExternalLogoutIntent(userDataDir, runtimeConfig.getActiveEnvKey())).toEqual({
       intent: 'logout-pending',
     })
-    await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
+    await expect(service.getSessionState()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: expect.any(Number),
+    })
     expect(getMe).not.toHaveBeenCalled()
   })
 })

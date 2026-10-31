@@ -167,6 +167,7 @@ describe('AppService RPC discovery restore boundary', () => {
     await expect(service.passwordLogin('user@example.test', 'test-password')).resolves.toEqual({
       authenticated: true,
       me,
+      sessionGeneration: expect.any(Number),
     })
     expect(passwordLogin).toHaveBeenCalledOnce()
     expect(writeCandidate).toHaveBeenCalledOnce()

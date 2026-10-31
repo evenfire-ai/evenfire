@@ -267,7 +267,11 @@ describe('source persistence mutation-sensitive contracts', () => {
     } finally {
       cleanupRelease.resolve()
     }
-    await expect(freshLogin).resolves.toEqual({ authenticated: true, me: freshMe })
+    await expect(freshLogin).resolves.toEqual({
+      authenticated: true,
+      me: freshMe,
+      sessionGeneration: expect.any(Number),
+    })
     await logoutCleanup
     expect(h.reportFailure).not.toHaveBeenCalled()
     await vi.waitFor(() =>
@@ -352,6 +356,7 @@ describe('source persistence mutation-sensitive contracts', () => {
     await expect(h.service.switchTeam('fixture-other')).resolves.toEqual({
       authenticated: true,
       me: { ...homeMe, teamId: 'fixture-other' },
+      sessionGeneration: expect.any(Number),
     })
     expect(h.state.sessionToken).toBe(otherToken)
     const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
@@ -494,7 +499,11 @@ describe('source persistence mutation-sensitive contracts', () => {
       )
       await expect(
         freshProducer.state.installAuthenticatedLogin({ token: freshToken, me: freshMe })
-      ).resolves.toEqual({ authenticated: true, me: freshMe })
+      ).resolves.toEqual({
+        authenticated: true,
+        me: freshMe,
+        sessionGeneration: expect.any(Number),
+      })
       const restarted = await harness()
       vi.mocked(restarted.state.authClient.getMe).mockResolvedValue(freshMe)
       await expect(restarted.service.initialize()).resolves.toEqual({
@@ -566,7 +575,11 @@ describe('source persistence mutation-sensitive contracts', () => {
       )
       staleNativeRelease.resolve()
       await entered(freshNativeEntered.promise, freshLogin, 'newer login candidate setter')
-      await expect(freshLogin).resolves.toEqual({ authenticated: true, me: freshMe })
+      await expect(freshLogin).resolves.toEqual({
+        authenticated: true,
+        me: freshMe,
+        sessionGeneration: expect.any(Number),
+      })
     } finally {
       staleNativeRelease.resolve()
     }

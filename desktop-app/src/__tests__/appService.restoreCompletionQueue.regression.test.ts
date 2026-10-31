@@ -381,7 +381,11 @@ describe('R21-M12 admitted login survives older asynchronous restore completion'
       })
       expect(loginOutcome).toEqual({
         status: 'fulfilled',
-        result: { authenticated: true, me: freshMe },
+        result: {
+          authenticated: true,
+          me: freshMe,
+          sessionGeneration: expect.any(Number),
+        },
       })
       expect(h.state.sessionToken).toBe(fresh)
       expect(h.state.me).toEqual(freshMe)

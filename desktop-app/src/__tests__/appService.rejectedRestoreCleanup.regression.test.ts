@@ -273,7 +273,11 @@ describe('R9-M2 rejected restore cleanup preserves independent accepted producer
 
       vi.mocked(newer.state.authClient.getMe).mockResolvedValue(freshMe)
       login = loginWithPassword(newer, fresh, freshMe)
-      await expect(login).resolves.toEqual({ authenticated: true, me: freshMe })
+      await expect(login).resolves.toEqual({
+        authenticated: true,
+        me: freshMe,
+        sessionGeneration: expect.any(Number),
+      })
       const expectedWinningMarker = await expectSelectedSession(newer, fresh)
       await expect(newer.tokenStore.getSafeStorageSessionToken(newer.envKey)).resolves.toBeNull()
       expect(newer.state.sessionToken).toBe(fresh)
@@ -344,7 +348,11 @@ describe('R9-M2 rejected restore cleanup preserves independent accepted producer
       await enteredWithin(started.promise, 'old stored-session getMe rejection')
       vi.mocked(newer.state.authClient.getMe).mockResolvedValue(freshMe)
       login = loginWithPassword(newer, fresh, freshMe)
-      await expect(login).resolves.toEqual({ authenticated: true, me: freshMe })
+      await expect(login).resolves.toEqual({
+        authenticated: true,
+        me: freshMe,
+        sessionGeneration: expect.any(Number),
+      })
       const expectedWinningMarker = await expectSelectedSession(newer, fresh)
       expect(
         newer.markers.readPendingExternalLogoutMarker(runtime.directory, newer.envKey)
@@ -392,7 +400,11 @@ describe('R9-M2 identical-value publication still has a newer owner', () => {
     try {
       await enteredWithin(started.promise, 'older same-value getMe')
       login = loginWithPassword(newer, homeToken, homeMe)
-      await expect(login).resolves.toEqual({ authenticated: true, me: homeMe })
+      await expect(login).resolves.toEqual({
+        authenticated: true,
+        me: homeMe,
+        sessionGeneration: expect.any(Number),
+      })
       const expectedWinningMarker = await expectSelectedSession(newer, homeToken)
       expect(
         newer.markers.readPendingExternalLogoutMarker(runtime.directory, newer.envKey)

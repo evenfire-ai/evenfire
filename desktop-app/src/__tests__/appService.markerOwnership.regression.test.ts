@@ -354,6 +354,7 @@ describe('R21-M2 newer independent source authority during logout cleanup', () =
     expect(await h.service.passwordLogin('fresh@example.test', 'fixture-password')).toEqual({
       authenticated: true,
       me: freshMe,
+      sessionGeneration: expect.any(Number),
     })
     const selected = await readAcceptedSession(h.tokenStore, h.envKey)
     expect(selected.token).toBe(freshToken)
@@ -934,7 +935,11 @@ describe('R21-M2 stale native producer fencing', () => {
     )
     await expect(
       h.service.passwordLogin('fresh@example.test', 'fixture-password')
-    ).resolves.toEqual({ authenticated: true, me: freshMe })
+    ).resolves.toEqual({
+      authenticated: true,
+      me: freshMe,
+      sessionGeneration: expect.any(Number),
+    })
     expect(passwordLogin).toHaveBeenCalledTimes(1)
     expect(h.state.sessionToken).toBe(rejected)
     expect(h.service.getCachedUserId()).toBe(freshMe.id)
@@ -960,7 +965,11 @@ describe('R21-M2 stale native producer fencing', () => {
     boundary.setPassword.mockClear()
     await expect(
       h.service.passwordLogin('fresh@example.test', 'fixture-password')
-    ).resolves.toEqual({ authenticated: true, me: freshMe })
+    ).resolves.toEqual({
+      authenticated: true,
+      me: freshMe,
+      sessionGeneration: expect.any(Number),
+    })
     const selected = await readSessionAuthoritySourceSelection({
       tokenStore: h.tokenStore,
       envKey: h.envKey,

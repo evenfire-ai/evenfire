@@ -148,6 +148,7 @@ describe('R21-L1 complete stale fallback authority', () => {
     await expect(h.service.passwordLogin(freshMe.email, 'fixture-password')).resolves.toEqual({
       authenticated: true,
       me: freshMe,
+      sessionGeneration: expect.any(Number),
     })
     expect(getMe).toHaveBeenCalledWith(freshToken)
     expect(h.state.sessionToken).toBe(freshToken)

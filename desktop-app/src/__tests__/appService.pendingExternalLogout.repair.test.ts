@@ -644,7 +644,11 @@ describe('durable logout failure policy', () => {
     }
 
     const nextToken = sessionToken('fixture-session-after-logout')
-    await expect(harness.login(nextToken)).resolves.toEqual({ authenticated: true, me })
+    await expect(harness.login(nextToken)).resolves.toEqual({
+      authenticated: true,
+      me,
+      sessionGeneration: expect.any(Number),
+    })
     const restarted = await createService()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
