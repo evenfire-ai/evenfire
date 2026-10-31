@@ -675,6 +675,16 @@ describe('FilePreviewPage', () => {
 
       controllerState.sessionGeneration = 2
       view.rerender(<FilePreviewPage {...props} />)
+      // A new generation is allowed to refresh its own resource and parent permissions.
+      await waitFor(() => {
+        expect(affordances.mock.calls.slice(permissionReadsBeforeReplacement)).toEqual(
+          expect.arrayContaining([
+            ['0123456789abcdef0123456789abcdef', 'main'],
+            ['preview-parent', 'main'],
+          ])
+        )
+      })
+      const permissionReadsAfterReplacement = affordances.mock.calls.length
       await act(async () => releaseDigest(new ArrayBuffer(0)))
       await act(async () => {
         await Promise.resolve()
@@ -682,7 +692,7 @@ describe('FilePreviewPage', () => {
       })
 
       expect(renameResource).not.toHaveBeenCalled()
-      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeReplacement)
+      expect(affordances.mock.calls.length).toBe(permissionReadsAfterReplacement)
     } finally {
       releaseDigest(new ArrayBuffer(0))
       digestSpy.mockRestore()
