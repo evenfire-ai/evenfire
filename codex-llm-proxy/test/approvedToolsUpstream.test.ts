@@ -736,6 +736,96 @@ describe('approved-tools model-step retry probe (#1044)', () => {
     })
   })
 
+  it('accepts the numeric JSON-RPC call id the real MCP client sends, and still rejects non-id values', async () => {
+    // The fixture MCP server copies the JSON-RPC request id into the business
+    // record's callId verbatim, and the Host's MCP SDK client sends numeric
+    // ids (`_requestMessageId++`). receipt() must accept that real shape; the
+    // fabricated UUID callIds in the other tests hid this for a full lane.
+    async function approvalFlow(callId: unknown) {
+      const simulator = createApprovedToolsUpstream()
+      const approval = { role: 'user', content: `model step retry approval ${marker}` }
+      const first = await request(simulator, [approval])
+      const keptCall = first.event.item as Entry
+      const history: Entry[] = [
+        approval,
+        keptCall,
+        { type: 'function_call_output', call_id: keptCall.call_id, output: searchResult },
+      ]
+      for (const outage of OUTAGES) {
+        expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+      }
+      const outputs = [
+        { found: 1, returned: 1, results: [{ name: target, server: 'fixture' }] },
+        { found: true, name: target, parameters: { type: 'object', properties: {} } },
+        {
+          runId: 'fixture-run',
+          tool: 'workitem_read_receipt',
+          callId,
+          businessId: randomUUID(),
+        },
+      ]
+      for (let index = 0; index < outputs.length; index++) {
+        const step = await request(simulator, history)
+        expect(step.response.status).toBe(200)
+        expect(step.event.item.name).toBe(bridges[index])
+        history.push(step.event.item, {
+          type: 'function_call_output',
+          call_id: step.event.item.call_id,
+          output: JSON.stringify(outputs[index]),
+        })
+      }
+      return { simulator, history, businessId: outputs[2]!.businessId }
+    }
+
+    const numeric = await approvalFlow(3)
+    const final = await request(numeric.simulator, numeric.history)
+    expect(final.response.status).toBe(200)
+    expect(final.event.delta).toBe(
+      `approved ${marker} businessId=${numeric.businessId} toolResults=1`
+    )
+    expect(numeric.simulator.evidence().modelStepRetry.approvalFinals).toBe(1)
+
+    // Liveness witness for the negatives below: the same simulator shape with
+    // a real id reached the final above, so these 422s are the receipt()
+    // predicate firing, not a dead flow.
+    for (const bad of [true, null, { id: 3 }, 1.5]) {
+      const flow = await approvalFlow(bad)
+      const rejectedBefore = flow.simulator.evidence().rejected
+      const result = await request(flow.simulator, flow.history)
+      expect(result.response.status, `callId ${JSON.stringify(bad)}`).toBe(422)
+      expect(flow.simulator.evidence().rejected).toBe(rejectedBefore + 1)
+      expect(flow.simulator.evidence().modelStepRetry.approvalFinals).toBe(0)
+    }
+  })
+
+  it('counts rejections by their bounded fixture error name without touching the stage list', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const invalid = () =>
+      simulator.fetchFn(URL, {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'gpt-5.3-codex',
+          stream: false,
+          store: false,
+          input: [{ role: 'user', content: `model step retry probe ${marker}` }],
+          tools,
+        }),
+      })
+    expect((await invalid()).status).toBe(422)
+    expect((await invalid()).status).toBe(422)
+    // Liveness witness: the same simulator still serves a valid turn, so the
+    // counters below came from live rejections, not a dead fixture.
+    const valid = await request(simulator, [
+      { role: 'user', content: `model step retry probe ${marker}` },
+    ])
+    expect(valid.response.status).toBe(200)
+    expect(valid.event.item.name).toBe(bridges[0])
+    const evidence = simulator.evidence()
+    expect(evidence.rejected).toBe(2)
+    expect(evidence.rejections).toEqual({ invalid_stream_contract: 2 })
+    expect(evidence.requests.map(entry => entry.stage)).toEqual(['model_step_search'])
+  })
+
   it('answers a new message after an approval is denied or cancelled locally', async () => {
     const simulator = createApprovedToolsUpstream()
     const approval = { role: 'user', content: `model step retry approval ${marker}` }

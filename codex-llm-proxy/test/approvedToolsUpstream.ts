@@ -190,11 +190,15 @@ function receipt(exchange: Exchange, candidate: string): Row {
   )
     throw new Error('invocation_target_mismatch')
   const value = exchange.result
+  // callId is the MCP request id the fixture server copies verbatim into the
+  // business record. JSON-RPC ids are strings or numbers, and the Host's MCP
+  // SDK client sends numbers, so both are the real shape; anything else is
+  // not an id the fixture server could have recorded.
   if (
     typeof value.businessId !== 'string' ||
     !value.businessId ||
     typeof value.runId !== 'string' ||
-    typeof value.callId !== 'string' ||
+    (typeof value.callId !== 'string' && !Number.isSafeInteger(value.callId)) ||
     typeof value.tool !== 'string' ||
     !candidate.endsWith(`__${value.tool}`)
   )
@@ -376,6 +380,10 @@ export function createApprovedToolsUpstream(provider: 'codex' | 'grok' = 'codex'
   const evidence = {
     catalogRequests: 0,
     rejected: 0,
+    // Rejection counts by bounded fixture-internal error name, so a 422 in a
+    // lane evidence file names its exact throw instead of only counting it.
+    // Names are fixture constants; no request or result content is recorded.
+    rejections: {} as Record<string, number>,
     completions: 0,
     searchCalls: 0,
     describeCalls: 0,
@@ -939,18 +947,16 @@ export function createApprovedToolsUpstream(provider: 'codex' | 'grok' = 'codex'
       // evidence counters are final when the call arrived.
       if (init?.signal?.aborted && error === init.signal.reason) throw error
       evidence.rejected++
-      // TEMP-DIAG #1044 repro: record the bounded fixture-internal rejection
-      // name as a stage so retry-layer evidence names the exact throw.
       const rejectionName = error instanceof Error ? error.message : 'unknown'
-      evidence.requests.push({
-        definitionCount: 0,
-        explicitNonStrictCount: 0,
-        definitionBytes: 0,
-        inputBytes: 0,
-        connectorDefinitionCount: 0,
-        leakedSchema: false,
-        stage: `fixture_rejected:${/^[a-z0-9_]{1,80}$/.test(rejectionName) ? rejectionName : 'unnamed'}`,
-      })
+      const rejectionKey = /^[a-z0-9_]{1,80}$/.test(rejectionName) ? rejectionName : 'unnamed'
+      if (
+        evidence.rejections[rejectionKey] === undefined &&
+        Object.keys(evidence.rejections).length >= 32
+      ) {
+        evidence.rejections.other = (evidence.rejections.other ?? 0) + 1
+      } else {
+        evidence.rejections[rejectionKey] = (evidence.rejections[rejectionKey] ?? 0) + 1
+      }
       return Response.json({ error: { code: 'fixture_protocol_rejected' } }, { status: 422 })
     }
   }
