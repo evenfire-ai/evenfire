@@ -46,6 +46,7 @@ const accessFoundationDefinerSignatures = [
   'authorization_bump_user_revision(pg_catalog.uuid)',
   'authorization_bump_team_revision(pg_catalog.uuid)',
   'authorization_bump_subject_revision(pg_catalog.text, pg_catalog.text)',
+  'authorization_prelock_user_retirement_revisions(pg_catalog.uuid[])',
   'authorization_prelock_workflow_run_revisions(pg_catalog.uuid[])',
   'authorization_prelock_workflow_approval_revisions(pg_catalog.uuid[])',
   'authorization_prelock_workflow_approval_trigger_revisions(pg_catalog.uuid)',
@@ -904,6 +905,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
          ORDER BY routine.proname
       `)
       expect(revisionExecute.rows).toEqual([
+        { function_name: 'authorization_prelock_user_retirement_revisions' },
         { function_name: 'authorization_prelock_workflow_approval_revisions' },
         { function_name: 'authorization_prelock_workflow_approval_trigger_revisions' },
         { function_name: 'authorization_prelock_workflow_run_revisions' },
@@ -913,6 +915,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
           FROM pg_proc routine
           CROSS JOIN LATERAL aclexplode(routine.proacl) privilege
          WHERE routine.oid IN (
+                 'public.authorization_prelock_user_retirement_revisions(uuid[])'::regprocedure,
                  'public.authorization_prelock_workflow_run_revisions(uuid[])'::regprocedure,
                  'public.authorization_prelock_workflow_approval_revisions(uuid[])'::regprocedure,
                  'public.authorization_prelock_workflow_approval_trigger_revisions(uuid)'::regprocedure,
@@ -923,6 +926,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
          ORDER BY grantee, function_name
       `)
       expect(prelockGrants.rows).toEqual([
+        {
+          function_name: 'authorization_prelock_user_retirement_revisions',
+          grantee: 'control_api_runtime',
+        },
         {
           function_name: 'authorization_prelock_workflow_approval_revisions',
           grantee: 'control_api_runtime',

@@ -1114,11 +1114,27 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       SELECT id, 1, clock_timestamp() FROM public.users ORDER BY id
       ON CONFLICT (user_id) DO NOTHING;
 
+      -- Catch gfs_resources inserted between the early backfill and trigger creation.
+      INSERT INTO public.authorization_resource_revisions(
+          environment_id, resource_type, resource_id, revision, updated_at
+        )
+        SELECT env.environment_id, 'gfs_resource', g.resource_id::text, 1, clock_timestamp()
+          FROM public.gfs_resources g
+          CROSS JOIN public.authorization_catalog_environment env
+         WHERE env.singleton = TRUE
+        ON CONFLICT (environment_id, resource_type, resource_id) DO NOTHING;
+
       IF EXISTS (SELECT 1 FROM public.users u LEFT JOIN public.authorization_user_revisions r
                    ON r.user_id = u.id WHERE r.user_id IS NULL)
          OR EXISTS (SELECT 1 FROM public.teams t LEFT JOIN public.authorization_team_revisions r
-                      ON r.team_id = t.id WHERE r.team_id IS NULL) THEN
-        RAISE EXCEPTION '0134 revision backfill left uncovered users or teams';
+                      ON r.team_id = t.id WHERE r.team_id IS NULL)
+         OR EXISTS (SELECT 1 FROM public.gfs_resources g
+                      LEFT JOIN public.authorization_resource_revisions r
+                        ON r.environment_id = (SELECT environment_id FROM public.authorization_catalog_environment WHERE singleton)
+                       AND r.resource_type = 'gfs_resource'
+                       AND r.resource_id = g.resource_id::text
+                      WHERE r.resource_id IS NULL) THEN
+        RAISE EXCEPTION '0134 revision backfill left uncovered users, teams, or gfs resources';
       END IF;
       IF NOT EXISTS (
         SELECT 1 FROM pg_proc p
