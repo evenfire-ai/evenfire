@@ -8,8 +8,17 @@ import { humanRecordedPause } from '../helpers/humanPause'
 export class DesktopResourceView {
   constructor(private readonly page: Page) {}
 
+  /** Open the current folder's three-dot menu and choose a visible action. */
+  private async openCurrentFolderMenuAction(action: string): Promise<void> {
+    await this.page.getByRole('button', { name: /Options for / }).click()
+    await this.page
+      .getByRole('menu', { name: /Actions for / })
+      .getByRole('menuitem', { name: action, exact: true })
+      .click()
+  }
+
   async createFolder(name: string): Promise<void> {
-    await this.page.getByRole('button', { name: 'New folder' }).click()
+    await this.openCurrentFolderMenuAction('New folder')
     const dialog = this.page.getByRole('dialog', { name: 'New folder' })
     await expect(dialog).toBeVisible()
     await dialog.getByLabel('Folder name').fill(name)
@@ -29,7 +38,10 @@ export class DesktopResourceView {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-home-upload-'))
     const filePath = path.join(dir, name)
     fs.writeFileSync(filePath, bytes)
-    await this.page.getByLabel('Upload file', { exact: true }).setInputFiles(filePath)
+    const fileChooser = this.page.waitForEvent('filechooser')
+    await this.openCurrentFolderMenuAction('Upload file')
+    const chooser = await fileChooser
+    await chooser.setFiles(filePath)
     await expect(this.page.getByRole('button', { name: `Open ${name}` })).toBeVisible({
       timeout: 120_000,
     })
@@ -94,7 +106,7 @@ export class DesktopResourceView {
   /** The open folder accepts writes: its header offers New folder only with write access. */
   async expectWritable(): Promise<void> {
     const browser = this.page.getByRole('region', { name: 'EvenDrive browser' })
-    await expect(browser.getByRole('button', { name: 'New folder' })).toBeVisible()
+    await expect(browser.getByRole('button', { name: /Options for / })).toBeVisible()
   }
 
   async expectRefused(code: string): Promise<void> {
