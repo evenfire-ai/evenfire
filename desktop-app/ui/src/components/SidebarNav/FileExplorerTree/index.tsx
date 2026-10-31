@@ -1210,8 +1210,7 @@ export function FileExplorerTree({
         setMovePermissionStatus(null)
         return
       }
-      const message = errorMessage(retryError) ?? String(retryError)
-      if (ctrl.handleAuthorityFailure(message, 'operation', scope, expectedGeneration)) {
+      if (ctrl.handleAuthorityFailure(retryError, 'operation', scope, expectedGeneration)) {
         closeMoveDialog()
         return
       }
