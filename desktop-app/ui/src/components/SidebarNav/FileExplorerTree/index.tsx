@@ -257,7 +257,7 @@ function FileExplorerNode({
   useEffect(() => {
     if (!childQuery.error || !isGfsSessionGeneration(sessionGeneration)) return
     purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError) onAuthorityFailure(childError, scope, sessionGeneration)
+    if (childError) onAuthorityFailure(childQuery.error, scope, sessionGeneration)
   }, [
     childError,
     childQuery.error,
