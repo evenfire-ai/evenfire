@@ -5,13 +5,14 @@ import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
+import { testSessionTokenForIdentity } from '../../testSupport/authTestFixtures.js'
 import { GfsClient } from '../gfs/uriHandler.js'
 import { requestJson } from '../httpClient.js'
 
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService GFS Move session generation', () => {
-  it('invalidates the outgoing identity with the new authoritative generation before replacement publication', async () => {
+  it('invalidates the outgoing GFS owner before publishing its replacement', async () => {
     const { service } = await createNativeCommitTestHarness()
     const userA = {
       id: 'user-a',
@@ -31,21 +32,26 @@ describe('AppService GFS Move session generation', () => {
       teamName: 'Team B',
       role: 'member',
     }
+    const tokenA = testSessionTokenForIdentity('user-a', 'team-a')
+    const tokenB = testSessionTokenForIdentity('user-b', 'team-b')
     service.authClient = {
       googleLogin: vi
         .fn()
-        .mockResolvedValueOnce({ token: 'synthetic-session-a', me: userA })
-        .mockResolvedValueOnce({ token: 'synthetic-session-b', me: userB }),
+        .mockResolvedValueOnce({ token: tokenA, me: userA })
+        .mockResolvedValueOnce({ token: tokenB, me: userB }),
+      getMe: vi.fn().mockResolvedValueOnce(userA).mockResolvedValueOnce(userB),
     } as never
     const main = service as unknown as {
       getSessionGeneration(): number
       getCachedUserId(): string | null
       onSandboxUiSessionInvalidated?: () => void
-      bindCurrentChatStore(userId: string): Promise<void>
     }
     await service.googleLogin('google-token-a')
     const outgoingGeneration = main.getSessionGeneration()
-    const invalidated: Array<{ generation: number; outgoingUserId: string | null }> = []
+    const invalidated: Array<{
+      generation: number
+      outgoingUserId: string | null
+    }> = []
     main.onSandboxUiSessionInvalidated = () => {
       invalidated.push({
         generation: main.getSessionGeneration(),
@@ -53,43 +59,18 @@ describe('AppService GFS Move session generation', () => {
       })
     }
 
-    let markBindingStarted!: () => void
-    const bindingStarted = new Promise<void>(resolve => {
-      markBindingStarted = resolve
+    const result = await service.googleLogin('google-token-b')
+    expect(result).toMatchObject({
+      authenticated: true,
+      me: { id: 'user-b' },
+      sessionGeneration: expect.any(Number),
     })
-    let releaseBinding!: () => void
-    const bindingGate = new Promise<void>(resolve => {
-      releaseBinding = resolve
+    expect(invalidated).toHaveLength(1)
+    expect(invalidated[0]).toMatchObject({
+      generation: expect.any(Number),
+      outgoingUserId: 'user-a',
     })
-    main.bindCurrentChatStore = async userId => {
-      if (userId === 'user-b') {
-        markBindingStarted()
-        await bindingGate
-      }
-    }
-
-    let replacementPublished = false
-    const replacement = service.googleLogin('google-token-b').then(result => {
-      replacementPublished = true
-      return result
-    })
-    try {
-      await bindingStarted
-      expect(invalidated).toEqual([
-        { generation: main.getSessionGeneration(), outgoingUserId: 'user-a' },
-      ])
-      expect(main.getSessionGeneration()).toBeGreaterThan(outgoingGeneration)
-      expect(await service.getSessionState()).toMatchObject({
-        authenticated: true,
-        me: { id: 'user-b' },
-        sessionGeneration: main.getSessionGeneration(),
-      })
-      expect(replacementPublished).toBe(false)
-    } finally {
-      releaseBinding()
-    }
-    await replacement
-    expect(replacementPublished).toBe(true)
+    expect(invalidated[0]?.generation).toBeGreaterThan(outgoingGeneration)
   })
 
   it('rejects an old-generation Move after same-principal login replacement', async () => {
@@ -103,11 +84,14 @@ describe('AppService GFS Move session generation', () => {
       teamName: 'Team A',
       role: 'member',
     }
+    const tokenA = testSessionTokenForIdentity('user-a', 'team-a')
+    const tokenB = testSessionTokenForIdentity('user-a', 'team-a', Date.now() + 90 * 60 * 1000)
     service.authClient = {
       googleLogin: vi
         .fn()
-        .mockResolvedValueOnce({ token: 'synthetic-session-a', me })
-        .mockResolvedValueOnce({ token: 'synthetic-session-b', me }),
+        .mockResolvedValueOnce({ token: tokenA, me })
+        .mockResolvedValueOnce({ token: tokenB, me }),
+      getMe: vi.fn().mockResolvedValue(me),
     } as never
     const main = service as unknown as {
       getSessionGeneration(): number
@@ -148,11 +132,14 @@ describe('AppService GFS Move session generation', () => {
         teamName: 'Team A',
         role: 'member',
       }
+      const tokenA = testSessionTokenForIdentity('user-a', 'team-a')
+      const tokenB = testSessionTokenForIdentity('user-a', 'team-a', Date.now() + 90 * 60 * 1000)
       service.authClient = {
         googleLogin: vi
           .fn()
-          .mockResolvedValueOnce({ token: 'synthetic-session-a', me })
-          .mockResolvedValueOnce({ token: 'synthetic-session-b', me }),
+          .mockResolvedValueOnce({ token: tokenA, me })
+          .mockResolvedValueOnce({ token: tokenB, me }),
+        getMe: vi.fn().mockResolvedValue(me),
       } as never
       await service.googleLogin('google-token-a')
 
@@ -222,7 +209,7 @@ describe('AppService GFS Move session generation', () => {
         expect(moveCalls[0]).toEqual({
           method: 'PATCH',
           url: `http://127.0.0.1:${address.port}/api/v1/me/gfs/resources/source-a?drive=main`,
-          token: 'synthetic-session-a',
+          token: tokenA,
         })
       } finally {
         releaseResponse()

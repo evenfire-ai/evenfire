@@ -232,4 +232,76 @@ describe('useAppController desktop environment handoff', () => {
       "Logout failed: Error invoking remote method 'auth:logout': Error: secure storage unavailable"
     )
   })
+
+  it('rejects a linked environment while authenticated until the user logs out', async () => {
+    const { app, handle, native } = await openAuthenticatedApp()
+
+    await act(async () =>
+      handle.emitDesktopEnvironmentSetup({
+        appName: 'Environment B',
+        externalRestApiBaseUrl: native.restB,
+      })
+    )
+
+    expect(handle.logout).not.toHaveBeenCalled()
+    expect(handle.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
+    expect(app.result.current.isAuthenticated).toBe(true)
+    expect(native.runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).toBe(
+      native.optionA.id
+    )
+    expect(app.result.current.statusText).toContain('Log out before selecting another desktop')
+  })
+
+  it('shows signed-out UI while GFS resource cleanup remains pending', async () => {
+    const { app, handle, native } = await openAuthenticatedApp()
+    let releaseCleanup!: () => void
+    const cleanup = new Promise<void>(resolve => {
+      releaseCleanup = resolve
+    })
+    const producer = native.service as unknown as {
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+    }
+    vi.mocked(producer.suspendDesktopGfsUploadsForAuthBoundary).mockReturnValue(cleanup)
+
+    let logout!: Promise<void>
+    try {
+      await act(async () => {
+        logout = app.result.current.handleLogout()
+      })
+
+      await waitFor(() => expect(app.result.current.isAuthenticated).toBe(false))
+      expect(handle.logout).toHaveBeenCalledOnce()
+      await act(async () => {
+        await expect(handle.logout.mock.results[0]?.value).resolves.toMatchObject({
+          kind: 'committed',
+        })
+      })
+      expect(app.result.current.isAuthenticated).toBe(false)
+    } finally {
+      await act(async () => {
+        releaseCleanup()
+        await cleanup
+      })
+    }
+
+    await act(async () => logout)
+  })
+
+  it('clears protected controller and query state when expiry reload fails', async () => {
+    const { app, handle, native } = await openAuthenticatedApp()
+    const protectedQueryKey = ['protected-expiry-cache']
+    app.queryClient.setQueryData(protectedQueryKey, { value: 'fixture-protected-cache' })
+    const expiredGeneration = native.service.getSessionGeneration()
+    handle.setSessionStateError(new Error('fixture session-state IPC unavailable'))
+
+    await act(async () => {
+      handle.emitSessionExpired(expiredGeneration)
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(false))
+    expect(app.result.current.me).toBeNull()
+    expect(app.queryClient.getQueryData(protectedQueryKey)).toBeUndefined()
+    expect(app.result.current.statusText).toContain('Your temporary session ended')
+  })
 })

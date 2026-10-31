@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import {
   Fragment,
+  type InputHTMLAttributes,
   type ReactElement,
   type ReactNode,
   createElement,
@@ -11,7 +12,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import fc, { type AsyncCommand } from 'fast-check'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
@@ -198,6 +199,10 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     localSearchRequestId?: number
   },
 }))
+const authSurfaceHarness = vi.hoisted(() => ({
+  renderActualAuthPage: false,
+  renderNativeButtons: false,
+}))
 const filesPageHarness = vi.hoisted(() => ({
   showAuthorityProbe: false,
   showMoveSidebarProbe: false,
@@ -251,18 +256,31 @@ vi.mock('@components/Common', async () => {
   return {
     ...actual,
     Button: (props: Parameters<typeof actual.Button>[0]) =>
-      commonHarness.renderActualButtons
-        ? createElement(actual.Button, props)
-        : createElement(
-            'button',
-            {
-              disabled: props.disabled,
-              onClick: props.onClick,
-              type: props.type ?? 'button',
-            },
-            props.children
-          ),
+      authSurfaceHarness.renderNativeButtons
+        ? createElement('button', { type: props.type ?? 'button' }, props.children)
+        : commonHarness.renderActualButtons
+          ? createElement(actual.Button, props)
+          : createElement(
+              'button',
+              {
+                disabled: props.disabled,
+                onClick: props.onClick,
+                type: props.type ?? 'button',
+              },
+              props.children
+            ),
     IconButton: () => null,
+    Field: ({
+      label,
+      htmlFor,
+      children,
+    }: {
+      label: string
+      htmlFor: string
+      children: ReactNode
+    }) => createElement('label', { htmlFor }, label, children),
+    StatusBanner: ({ children }: { children: ReactNode }) => createElement('div', null, children),
+    TextInput: (props: InputHTMLAttributes<HTMLInputElement>) => createElement('input', props),
     ToastStack: (props: Parameters<typeof actual.ToastStack>[0]) =>
       commonHarness.renderActualToastStack ? createElement(actual.ToastStack, props) : null,
   }
@@ -314,9 +332,17 @@ vi.mock('@components/SidebarNav', () => ({
   },
 }))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
-vi.mock('@pages/AuthPage', () => ({
-  AuthPage: () => (commonHarness.renderWorkspaceSurfaces ? <div data-testid="auth-page" /> : null),
-}))
+vi.mock('@pages/AuthPage', async importOriginal => {
+  const actual = await importOriginal<typeof import('@pages/AuthPage')>()
+  return {
+    AuthPage: () =>
+      authSurfaceHarness.renderActualAuthPage ? (
+        <actual.AuthPage />
+      ) : commonHarness.renderWorkspaceSurfaces ? (
+        <div data-testid="auth-page" />
+      ) : null,
+  }
+})
 vi.mock('@pages/ChatPage', async () => {
   const { getComposerDraft } =
     await vi.importActual<typeof import('@lib/composerDraftStore')>('@lib/composerDraftStore')
@@ -577,6 +603,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    temporarySessionExpiresAt: null,
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     availableTeamIds: ['team-a', 'team-b'],
     teamDirectoryHydrated: true,
@@ -810,6 +837,8 @@ describe('App deep-link orchestration', () => {
 
   function resetAppDeepLinkHarness(): void {
     vi.clearAllMocks()
+    authSurfaceHarness.renderActualAuthPage = false
+    authSurfaceHarness.renderNativeButtons = false
     confirmDialogHarness.props = null
     confirmDialogHarness.mountedCount = 0
     appHeaderHarness.props = null
@@ -7893,5 +7922,43 @@ describe('App deep-link orchestration', () => {
     )
     expect(tokens).toHaveLength(1)
     queryClient.clear()
+  })
+
+  it('discloses when the authenticated session is temporary', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      temporarySessionExpiresAt: Date.now() + 60_000,
+    })
+
+    renderApp(<App />)
+
+    expect(screen.getByRole('status').textContent).toContain(
+      'This session is temporary. You’ll need to sign in again after quitting Evenfire.'
+    )
+  })
+
+  it('routes the App workspace tab out and renders the real login page after sign-out', () => {
+    authSurfaceHarness.renderActualAuthPage = true
+    authSurfaceHarness.renderNativeButtons = true
+    currentController = makeController({
+      initialExperienceLoading: false,
+      isAuthenticated: true,
+      email: 'user@example.test',
+      password: 'fixture-password',
+      runtimeConfigSetupName: '',
+      runtimeConfigSetupExternalRestApiBaseUrl: '',
+    })
+
+    const rendered = renderApp(<App />)
+
+    expect(within(rendered.container).getByRole('button', { name: 'New chat' })).toBeTruthy()
+    act(() => {
+      currentController.isAuthenticated = false
+      forceControllerRender()
+    })
+
+    expect(within(rendered.container).queryByRole('button', { name: 'New chat' })).toBeNull()
+    expect(within(rendered.container).getByLabelText('Email')).toBeTruthy()
+    expect(within(rendered.container).getByLabelText('Password')).toBeTruthy()
   })
 })
