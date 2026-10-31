@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import { CONTROL_API_MIGRATIONS, assertDbReady, initDb } from '../src/db.js'
@@ -21,9 +21,12 @@ describeRealPostgres('0134 GFS backfill bound on real PostgreSQL', () => {
   let adminPool: Pool
   let databasePool: Pool
 
+  beforeAll(() => {
+    adminPool = new Pool({ connectionString: adminUrl })
+  })
+
   beforeEach(async () => {
     database = `control_api_gfs_bound_${randomBytes(6).toString('hex')}`
-    adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE "${database}"`)
     databasePool = new Pool({ connectionString: databaseUrl(adminUrl!, database) })
 
@@ -50,8 +53,16 @@ describeRealPostgres('0134 GFS backfill bound on real PostgreSQL', () => {
   })
 
   afterEach(async () => {
+    await endPoolAndWaitForClients(databasePool)
+    if (adminPool && database) {
+      await adminPool.query(`DROP DATABASE IF EXISTS "${database}"`)
+      database = ''
+    }
+  })
+
+  afterAll(async () => {
     try {
-      await endPoolAndWaitForClients(databasePool)
+      // Retry the last database cleanup if a per-test teardown failed.
       if (adminPool && database) {
         await adminPool.query(`DROP DATABASE IF EXISTS "${database}"`)
       }

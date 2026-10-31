@@ -925,7 +925,7 @@ describeRealPostgres('user retirement revision lock order on real PostgreSQL 16'
       await endPoolAndWaitForClients(databasePool)
       if (adminPool) await adminPool.query(`DROP DATABASE IF EXISTS "${database}"`)
     } finally {
-      await endPoolAndWaitForClients(adminPool)
+      await adminPool?.end()
     }
   })
   for (const spec of [

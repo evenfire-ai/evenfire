@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { CONTROL_API_MIGRATIONS, assertDbReady, initDb } from '../src/db.js'
@@ -17,10 +17,13 @@ describeRealPostgres('0134 user retirement revision coverage on PostgreSQL 16', 
     retired = randomUUID(),
     team = randomUUID()
 
+  beforeAll(() => {
+    admin = new Pool({ connectionString: adminUrl })
+  })
+
   beforeEach(async () => {
     expect(process.version).toMatch(/^v24\./)
     database = `retirement_migration_${randomBytes(6).toString('hex')}`
-    admin = new Pool({ connectionString: adminUrl })
     const version = Number(
       (await admin.query('SHOW server_version_num')).rows[0].server_version_num
     )
@@ -70,11 +73,18 @@ describeRealPostgres('0134 user retirement revision coverage on PostgreSQL 16', 
     await db.query('DELETE FROM authorization_team_revisions')
   })
   afterEach(async () => {
+    await endPoolAndWaitForClients(db)
+    if (admin && database) {
+      await admin.query(`DROP DATABASE IF EXISTS "${database}"`)
+      database = ''
+    }
+  })
+  afterAll(async () => {
     try {
-      await endPoolAndWaitForClients(db)
+      // Retry the last database cleanup if a per-test teardown failed.
       if (admin && database) await admin.query(`DROP DATABASE IF EXISTS "${database}"`)
     } finally {
-      await endPoolAndWaitForClients(admin)
+      await admin?.end()
     }
   })
   async function coverage() {
