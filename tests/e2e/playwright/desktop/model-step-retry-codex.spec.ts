@@ -54,8 +54,13 @@ import {
   scenarios,
 } from '../helpers/approved-tools-scenarios'
 import { prepareSubscriptionVisible } from '../helpers/approved-tools-subscription'
+import {
+  RETRY_LAYER,
+  c12TestBudgetMs,
+  clickRetryModelStep as clickRetryModelStepOutcome,
+} from '../helpers/desktop-diagnostics.mjs'
 import { attachDesktopBeforeTeardown, signOutDesktop } from '../helpers/desktop-session'
-import { launchDesktopApp } from '../helpers/launch-desktop'
+import { desktopMainLogLines, launchDesktopApp } from '../helpers/launch-desktop'
 import { loginControlUiVisible } from '../helpers/visible-login'
 import { AgentListPage, AgentModelPage, ControlUiShell } from '../pages/codex-subscription'
 
@@ -97,6 +102,9 @@ type Checkpoint = {
   version: number
   status: 'resumable' | 'claimed' | 'blocked'
   retryAvailable: boolean
+  // Present only while `status` is `claimed` (modelStepCheckpointContract.ts): the
+  // Host's own witness that it started the continuation task.
+  continuationTaskId?: string
   tools: { confirmed: number }
 }
 type SessionRead = {
@@ -221,13 +229,44 @@ async function expectResumable(desktop: Page, confirmed = 1): Promise<Locator> {
 /** Waits for the continuation's answer and checks the chat settled on it. */
 async function expectContinued(desktop: Page, responses: Locator, value: string) {
   const reply = responses.filter({ hasText: `continued ${value} toolResults=1` })
-  await expect(reply).toHaveCount(1, { timeout: TURN_TIMEOUT })
+  // MS-1 (g): the click already proved the continuation reached the upstream
+  // (`clickRetryModelStep` polls its first stage), so a reply that never renders
+  // is the renderer, and the failure says so instead of only "count 0".
+  await expect
+    .poll(async () => reply.count(), {
+      timeout: TURN_TIMEOUT,
+      message: `${RETRY_LAYER.noReply}: the continuation answered upstream but no reply rendered`,
+    })
+    .toBe(1)
   // The reply is the witness for both absences: no progress stepper is left in
   // it, and the notice is gone once the continuation finished.
   await expect(reply.getByTestId('progress-stepper')).toHaveCount(0)
   await expect(notice(desktop)).toHaveCount(0)
   await expect(resendButton(desktop)).toHaveCount(0)
   await expectIdle(desktop)
+}
+
+/**
+ * MS-1: one Retry click through the shared outcome helper, wired to this spec's
+ * own readers. The session read is the positive witness that the Host claimed the
+ * checkpoint and started the continuation task; the fixture evidence is the
+ * positive witness that the continuation reached the model. Whatever stops in
+ * between therefore fails with the layer that stopped it, not with a UI timeout.
+ */
+async function clickRetryModelStep(
+  desktop: Page,
+  prompt: string,
+  firstContinuationStage: string,
+  options: { click?: (locator: Locator) => Promise<void> } = {}
+) {
+  return clickRetryModelStepOutcome(desktop, {
+    ...options,
+    readCheckpoint: async () => (await readCurrentSession(desktop, prompt)).modelStepCheckpoint,
+    readStages: async () => (await snapshot()).stages,
+    firstContinuationStage,
+    diagnosticLines: () => desktopMainLogLines(),
+    stageBudgetMs: TURN_TIMEOUT,
+  })
 }
 
 /** One signed-in Desktop chat with the scenario's agent, signed out on exit. */
@@ -419,7 +458,7 @@ test('model step retry C1: a 503 after a confirmed tool continues once without r
       )
       await test.step('Retry model step continues from the kept tool result', async () => {
         const responses = await newAgentResponses(desktop)
-        await notice(desktop).getByTestId('model-step-retry-btn').click()
+        await clickRetryModelStep(desktop, prompt, 'model_step_continued')
         await expectContinued(desktop, responses, value)
       })
       const completed = await expectSessionState(desktop, prompt, 'idle')
@@ -510,11 +549,14 @@ test('model step retry C3: a new message instead of the retry abandons the check
         timeout: TURN_TIMEOUT,
       })
       await expectIdle(desktop)
-      // The answered follow-up is the witness for both absences.
+      // The answered follow-up is the witness for these absences.
       await expect(notice(desktop)).toHaveCount(0)
       await expect(desktop.getByTestId('model-step-retry-btn')).toHaveCount(0)
-      // The abandoned turn falls back to the ordinary failed-send state.
-      await expect(resendButton(desktop)).toBeEnabled()
+      // #1048 A29 H2 / MS-7: a later successful send in the chat releases the
+      // abandoned turn's retained failure, so "Retry last send" is gone. This
+      // used to expect the ordinary failed-send state; the release has existed
+      // since #669 (`releaseSucceededRetainedSendsForTask`).
+      await expect(resendButton(desktop)).toHaveCount(0)
     })
     // The Host retired the checkpoint: the session serves none, not a claimed or
     // blocked one (`docs/contracts/model-step-checkpoint.md:81-82`).
@@ -528,9 +570,10 @@ test('model step retry C3: a new message instead of the retry abandons the check
 test('model step retry C4: a double click on Retry model step runs one continuation', async () => {
   await withDesktopChat(async desktop => {
     const value = marker('c4')
+    const prompt = `model step retry probe ${value}`
     const start = await snapshot()
-    await sendUntilUnavailable(desktop, `model step retry probe ${value}`)
-    const retry = await expectResumable(desktop)
+    await sendUntilUnavailable(desktop, prompt)
+    await expectResumable(desktop)
     const failed = await expectDelta(
       start,
       { turns: 1, markerSearches: 1, unavailableResponses: NOTICE_OUTAGES },
@@ -538,7 +581,9 @@ test('model step retry C4: a double click on Retry model step runs one continuat
     )
     await test.step('Both clicks land; only one continuation runs', async () => {
       const responses = await newAgentResponses(desktop)
-      await retry.dblclick()
+      await clickRetryModelStep(desktop, prompt, 'model_step_continued', {
+        click: locator => locator.dblclick(),
+      })
       await expectContinued(desktop, responses, value)
       // One new reply after the 503: the continuation's, and no second one.
       await expect(responses).toHaveCount(1)
@@ -568,7 +613,7 @@ test('model step retry C5: a continuation that meets a 503 again is offered for 
     )
     const failedAgain = await test.step('The first continuation meets a 503 too', async () => {
       const responses = await newAgentResponses(desktop)
-      await notice(desktop).getByTestId('model-step-retry-btn').click()
+      await clickRetryModelStep(desktop, prompt, 'model_step_continuation_unavailable')
       // The continuation's own error reply is the witness that the notice
       // below is the Host's new view, not the one shown before the click.
       await expect(responses.filter({ hasText: failureLabel() })).toHaveCount(1, {
@@ -588,7 +633,7 @@ test('model step retry C5: a continuation that meets a 503 again is offered for 
     expect(second.modelStepCheckpoint).toMatchObject({ status: 'resumable', retryAvailable: true })
     await test.step('The second Retry model step completes the turn', async () => {
       const responses = await newAgentResponses(desktop)
-      await notice(desktop).getByTestId('model-step-retry-btn').click()
+      await clickRetryModelStep(desktop, prompt, 'model_step_continued')
       await expectContinued(desktop, responses, value)
     })
     const completed = await expectSessionState(desktop, prompt, 'idle')
@@ -646,7 +691,7 @@ test('model step retry C7: approval inside a continuation executes the receipt o
         ['model_step_search', ...repeatedStage(NOTICE_OUTAGES, 'model_step_unavailable')]
       )
       await test.step('Retry discovers the receipt and waits for the user decision', async () => {
-        await notice(desktop).getByTestId('model-step-retry-btn').click()
+        await clickRetryModelStep(desktop, prompt, 'model_step_approval_tool')
         const pending = desktop.getByTestId('progress-stepper').filter({
           has: desktop.getByTestId('approval-approve-btn'),
         })
@@ -729,7 +774,7 @@ async function decisionJourney(decision: 'deny' | 'cancel') {
         { turns: 1, markerSearches: 1, unavailableResponses: NOTICE_OUTAGES },
         ['model_step_search', ...repeatedStage(NOTICE_OUTAGES, 'model_step_unavailable')]
       )
-      await notice(desktop).getByTestId('model-step-retry-btn').click()
+      await clickRetryModelStep(desktop, prompt, 'model_step_approval_tool')
       const pending = desktop.getByTestId('progress-stepper').filter({
         has: desktop.getByTestId(decision === 'deny' ? 'approval-deny-btn' : 'progress-cancel-btn'),
       })
@@ -836,8 +881,8 @@ test('model step retry C8: the checkpoint survives a Host restart between the 50
     })
     await test.step('Retry model step continues on the new Host process', async () => {
       const responses = await newAgentResponses(desktop)
-      const retry = await expectResumable(desktop)
-      await retry.click()
+      await expectResumable(desktop)
+      await clickRetryModelStep(desktop, prompt, 'model_step_continued')
       await expectContinued(desktop, responses, value)
     })
     const completed = await expectSessionState(desktop, prompt, 'idle')
@@ -895,9 +940,12 @@ test('model step retry C11: three 503s after a confirmed search are absorbed by 
 // cap to 600 s → the held call answers at 120 s, the next retry gets the final
 // text and no notice ever appears, red.
 test('model step retry C12: the 60 s cap ends a held retry and Retry model step completes the turn', async () => {
-  // One send, the 60 s cap and the continuation: 150 s is the floor, and the
-  // per-test default of 480 s stays above it.
-  test.setTimeout(180_000)
+  // MS-C12: the budget is the sum of this case's own waits — the sign-in it
+  // performs, the cap notice, the continuation and the capture/sign-out — so a
+  // field drift moves it too. run16's 180 s literal expired before the capture.
+  test.setTimeout(
+    c12TestBudgetMs({ capNoticeMaxMs: CAP_NOTICE_MAX_MS, turnTimeoutMs: TURN_TIMEOUT })
+  )
   await withDesktopChat(async desktop => {
     const value = marker('c12')
     const prompt = `model step retry capped ${value}`
@@ -925,7 +973,7 @@ test('model step retry C12: the 60 s cap ends a held retry and Retry model step 
       ['model_step_search', 'model_step_unavailable', 'model_step_capped_held']
     )
     await test.step('Retry model step answers from the kept search', async () => {
-      await notice(desktop).getByTestId('model-step-retry-btn').click()
+      await clickRetryModelStep(desktop, prompt, 'model_step_continued')
       await expectContinued(desktop, responses, value)
     })
     const completed = await expectSessionState(desktop, prompt, 'idle')

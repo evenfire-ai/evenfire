@@ -24,7 +24,20 @@ const READ_INTERVAL_MS = 2_000
  * so the row updates on its own.
  */
 export async function expectAgentConnectorRunning(desktop: Page, scenario: Scenario) {
+  // Agents, Connectors and Plugins are Settings items, rendered only while that
+  // submenu is open (`SidebarNav` maps its `routeItems` under `settingsMenuOpen`),
+  // so the journey opens the menu the way a user does (MS-A). A direct route
+  // jump would skip the path this witness exists to exercise, and the Desktop
+  // does not offer one.
+  const settingsMenu = desktop.getByTestId('nav-settings-menu')
+  await expect(settingsMenu).toHaveAttribute('aria-expanded', 'false')
+  await settingsMenu.click()
+  await expect(settingsMenu).toHaveAttribute('aria-expanded', 'true')
   await desktop.getByTestId('nav-mcp-servers').click()
+  // The Connectors page is the witness that the menu item navigated, and its
+  // card (`pages/McpServersPage.tsx`) is the one the rows below live in.
+  await expect(desktop.getByRole('heading', { name: 'Connectors', exact: true })).toBeVisible()
+  await expect(desktop.getByRole('region', { name: 'Connectors', exact: true })).toBeVisible()
   // The connectors rail lists one row per (connector, agent); the row's
   // aria-label is the deep link into this agent's own Connectors panel.
   await desktop

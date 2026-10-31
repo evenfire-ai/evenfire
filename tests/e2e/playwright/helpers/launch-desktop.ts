@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
+import { createMainOutputBuffer } from './desktop-diagnostics.mjs'
 
 // E2E_GUARDIAN_IPC_FLOW: the Desktop app and its session live in the main
 // process; this helper starts and inspects it through Playwright's Electron
@@ -73,6 +74,38 @@ const DEV_ISOLATION_ENV = {
   appPath: 'EVENFIRE_DEV_ISOLATION_APP_PATH',
 } as const
 
+// MS-1 item 1 (#1048): run16's ten failed Retry clicks left no trace of where the
+// continuation stopped, because the Desktop main process output was discarded.
+// Every launch keeps the tail of it for the failure capture to filter. The bound
+// is a memory guard, not a policy: the filter in `desktop-diagnostics.mjs` is what
+// decides what leaves the helper.
+const MAIN_OUTPUT_LINE_LIMIT = 5_000
+let mainOutput = createMainOutputBuffer(MAIN_OUTPUT_LINE_LIMIT)
+
+/**
+ * Pipes the main process's stdout and stderr into this launch's buffer. Called
+ * before the first window exists, so nothing the app prints on startup is lost.
+ */
+function captureMainOutput(app: ElectronApplication): void {
+  const buffer = createMainOutputBuffer(MAIN_OUTPUT_LINE_LIMIT)
+  mainOutput = buffer
+  for (const stream of [app.process().stdout, app.process().stderr]) {
+    if (!stream) continue
+    stream.setEncoding('utf8')
+    stream.on('data', (chunk: string) => buffer.push(chunk))
+    stream.on('end', () => buffer.flush())
+  }
+}
+
+/**
+ * Everything the current launch's main process wrote, oldest first. The caller
+ * filters it against the closed set of retry-layer patterns
+ * (`helpers/desktop-diagnostics.mjs`); this raw buffer is never attached.
+ */
+export function desktopMainLogLines(): string[] {
+  return mainOutput.lines()
+}
+
 export async function launchDesktopApp(): Promise<ElectronApplication> {
   const { externalApiUrl, rpcProxyUrl } = profileOwnedEndpoints()
   const runDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-approved-tools-')))
@@ -115,6 +148,9 @@ export async function launchDesktopApp(): Promise<ElectronApplication> {
     throw error
   }
   app.on('close', () => fs.rmSync(runDir, { recursive: true, force: true }))
+  // Before the first window: the retry layer's own errors are printed while the
+  // continuation POST runs, which can be before any window query.
+  captureMainOutput(app)
 
   // Public process identities only. The app refuses a mismatched isolated
   // launch on its own; these checks prove isolation is on at all, that this

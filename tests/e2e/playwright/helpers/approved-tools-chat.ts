@@ -1,6 +1,13 @@
 import { type Page, expect } from '@playwright/test'
 import { type Scenario, required } from './approved-tools-scenarios'
+import {
+  SIGN_IN_RESULT_TIMEOUT_MS,
+  assertUntamperedInputs,
+  loginRefusedMessage,
+} from './desktop-diagnostics.mjs'
 import { expectSignedOutLaunch } from './desktop-session'
+import { desktopMainLogLines } from './launch-desktop'
+import { loginLedgerRootFromEnv, recordPasswordLogin, waitForLoginPace } from './login-ledger.mjs'
 
 // E2E_GUARDIAN_IPC_FLOW: Desktop chat helpers drive the real main-process login
 // and chat IPC; completed messages replace renderer response waits.
@@ -27,13 +34,65 @@ export async function newAgentResponses(page: Page) {
   return responses.and(page.locator(`[data-chat-message-id]${exclusions}`))
 }
 
-/** Signs the isolated Desktop app in; the session stays open for the caller. */
+/**
+ * Waits for the sign-in's outcome: the signed-in nav, or the auth status toast.
+ * A refusal names its own message instead of timing out on a locator, so a login
+ * held back by control-api's password admission policy reads as that and not as
+ * a product defect (MS-B1 item 3, issue #1273).
+ */
+async function expectSignedInOrRefused(desktop: Page): Promise<void> {
+  const signedIn = desktop.getByTestId('nav-chat')
+  // Error toasts are `role="alert"` (`components/Common/ToastStack`); nothing
+  // else on the login form carries that role. `count`/`allTextContents` are used
+  // instead of a combined locator so a second toast cannot turn this into a
+  // strict-mode failure.
+  const refusal = desktop.getByRole('alert')
+  const outcome = async (): Promise<'signed-in' | 'refused' | 'pending'> => {
+    if (await signedIn.isVisible()) return 'signed-in'
+    return (await refusal.count()) > 0 ? 'refused' : 'pending'
+  }
+  await expect
+    .poll(outcome, {
+      timeout: SIGN_IN_RESULT_TIMEOUT_MS,
+      message: 'the Desktop sign-in must show the signed-in navigation or an auth status toast',
+    })
+    .not.toBe('pending')
+  if ((await outcome()) === 'signed-in') {
+    await expect(signedIn).toBeVisible()
+    return
+  }
+  const [toastText = null] = await refusal.allTextContents()
+  throw new Error(loginRefusedMessage(toastText, desktopMainLogLines()))
+}
+
+/**
+ * Signs the isolated Desktop app in; the session stays open for the caller.
+ *
+ * Two lane hazards run around the click (MS-B1, MS-B2):
+ * control-api verifies one password per 7.5 s across every identity, so a lane of
+ * short tests waits on its own ledger before logging in; and a headed window
+ * accepts keystrokes from the operator's desktop, so both filled values are
+ * compared with the expected ones immediately before the click.
+ */
 export async function signInDesktop(desktop: Page) {
   await expectSignedOutLaunch(desktop)
-  await desktop.getByLabel('Email', { exact: true }).fill(required('TEST_USER_EMAIL'))
-  await desktop.getByLabel('Password', { exact: true }).fill(required('TEST_USER_PASSWORD'))
+  const email = required('TEST_USER_EMAIL')
+  const password = required('TEST_USER_PASSWORD')
+  const emailField = desktop.getByLabel('Email', { exact: true })
+  const passwordField = desktop.getByLabel('Password', { exact: true })
+  await emailField.fill(email)
+  await passwordField.fill(password)
+  const ledgerRoot = loginLedgerRootFromEnv()
+  await waitForLoginPace(ledgerRoot)
+  const inputChecks = assertUntamperedInputs({
+    email: { expected: email, actual: await emailField.inputValue() },
+    password: { expected: password, actual: await passwordField.inputValue() },
+  })
+  // Recorded before the click, so a login that dies mid-flight still paces the
+  // next one.
+  recordPasswordLogin(ledgerRoot, { surface: 'desktop', inputChecks })
   await desktop.getByRole('button', { name: 'Sign in', exact: true }).click()
-  await expect(desktop.getByTestId('nav-chat')).toBeVisible()
+  await expectSignedInOrRefused(desktop)
 }
 
 /**
