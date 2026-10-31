@@ -100,7 +100,20 @@ export function fakeCustomObjectsApiserver(
     deleteNamespacedCustomObject: vi.fn(async (args: CallArgs) => {
       await hooks.beforeCall?.('delete', args)
       const k = key(args.plural, args.namespace, args.name!)
-      if (!store.delete(k)) throw apiError(404, `${args.plural} "${args.name}" not found`)
+      const existing = store.get(k)
+      if (!existing) throw apiError(404, `${args.plural} "${args.name}" not found`)
+      // The apiserver refuses a delete whose preconditions name another object (a
+      // same-name recreate) or another version, with 409.
+      const pre = (args.body as { preconditions?: { uid?: string; resourceVersion?: string } })
+        ?.preconditions
+      if (
+        (pre?.uid !== undefined && pre.uid !== existing.metadata.uid) ||
+        (pre?.resourceVersion !== undefined &&
+          pre.resourceVersion !== existing.metadata.resourceVersion)
+      ) {
+        throw apiError(409, `Precondition failed on ${args.plural} "${args.name}"`)
+      }
+      store.delete(k)
       return { status: 'Success' }
     }),
   }
