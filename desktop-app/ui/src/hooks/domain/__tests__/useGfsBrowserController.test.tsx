@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { type ReactNode, useState } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import {
   QueryClient,
@@ -4899,4 +4899,16 @@ describe('denied-location cleanup ownership', () => {
     ).toBeUndefined()
     client.clear()
   })
+})
+
+afterAll(async () => {
+  // The suite can queue one final React scheduler Immediate after the last
+  // test resolves its fire-and-forget actions. Drain the event loop while the
+  // jsdom environment still exists; otherwise performWorkUntilDeadline runs
+  // after teardown and Vitest reports an unhandled `window is not defined`.
+  for (let drain = 0; drain < 2; drain += 1) {
+    await act(async () => {
+      await new Promise<void>(resolve => setImmediate(resolve))
+    })
+  }
 })
