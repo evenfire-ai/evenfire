@@ -94,6 +94,12 @@ const allowlistWriterStub =
 const kubernetesStub =
   'export class KubeConfig { loadFromCluster() {} makeApiClient() { return {} } }\n' +
   'export class CoreV1Api {}\n'
+// The seed imports bcryptjs from control-api's installed tree, which the
+// mcp-host CI job never installs; stub it like @kubernetes/client-node so the
+// subprocess stays hermetic in every job that registers this file.
+const bcryptStub =
+  'export async function hash(value) { return `stub-hash:${value.length}` }\n' +
+  'export default { hash }\n'
 
 const hookModule = `
 import { registerHooks } from 'node:module'
@@ -142,6 +148,7 @@ function runSeed({ retireSqlstate } = {}) {
       'export async function rebuildLiveCodexUnionAllowlist() {}\n'
     )
     const kubernetes = write(root, 'kubernetes.mjs', kubernetesStub)
+    const bcrypt = write(root, 'bcrypt.mjs', bcryptStub)
     const hook = write(root, 'hook.mjs', hookModule)
     const input = cleanupInput()
     const journal = createFixtureIdentityJournal(input, { env })
@@ -163,6 +170,7 @@ function runSeed({ retireSqlstate } = {}) {
           ...(retireSqlstate ? { E2E_SEED_RETIREMENT_SQLSTATE: retireSqlstate } : {}),
           E2E_SEED_RESOLVE_MAP: JSON.stringify({
             '/app/control-api/node_modules/@kubernetes/client-node/dist/index.js': kubernetes,
+            '/app/control-api/node_modules/bcryptjs/index.js': bcrypt,
             '/app/approved-tools-setup/': here + path.sep,
             '/app/control-api/node_modules/':
               path.join(repo, 'control-api/node_modules') + path.sep,
