@@ -248,21 +248,22 @@ async function agentIsRefusedRead(
   await expectNoDisclosureDenial(turn, [sentinel])
 }
 
-/** Opens a gfs:// link through the visible "Open EvenDrive link" entry. */
+/** Opens a gfs:// link through the visible EvenDrive titlebar action. */
 async function openEvenDriveLink(page: Page, uri: string): Promise<void> {
   await new DesktopFilesNav(page).openFiles()
-  await page.getByRole('button', { name: 'Options for Shared with me' }).click()
-  await page.getByRole('menuitem', { name: 'Open EvenDrive link' }).click()
-  const dialog = page.getByRole('dialog', { name: 'Open EvenDrive link' })
+  await page
+    .getByRole('toolbar', { name: 'EvenDrive actions' })
+    .getByRole('button', { name: 'Open link', exact: true })
+    .click()
+  const dialog = page.getByRole('dialog', { name: 'Open from link' })
   await expect(dialog).toBeVisible()
-  // By role: a label substring also matches the "Close EvenDrive link dialog" button.
-  await dialog.getByRole('textbox', { name: 'EvenDrive link' }).fill(uri)
+  await dialog.getByRole('textbox', { name: 'URL', exact: true }).fill(uri)
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
   await humanRecordedPause([600, 1200])
 }
 
 async function expectRefusedLinkAndClose(page: Page): Promise<void> {
-  const dialog = page.getByRole('dialog', { name: 'Open EvenDrive link' })
+  const dialog = page.getByRole('dialog', { name: 'Open from link' })
   await expect(
     dialog.getByText('403 Forbidden: forbidden: not authorized to read this resource', {
       exact: true,
@@ -1768,7 +1769,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
           ownerS.page,
           `gfs://${otherHome.drive}/${ridOf(otherHome.resourceId!)}`
         )
-        const dialog = ownerS.page.getByRole('dialog', { name: 'Open EvenDrive link' })
+        const dialog = ownerS.page.getByRole('dialog', { name: 'Open from link' })
         await expectRefusedLinkAndClose(ownerS.page)
         await openEvenDriveLink(ownerS.page, `gfs://${home.drive}/${ridOf(home.resourceId!)}`)
         await expect(dialog).toBeHidden()

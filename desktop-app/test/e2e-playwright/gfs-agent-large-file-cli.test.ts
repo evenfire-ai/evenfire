@@ -50,7 +50,9 @@ import {
   hasCsvDataRecordCount,
   resolveGfsLargeCsvFixture,
 } from './helpers/gfsLargeFileCsvFixture'
-import { openAgentsPage, openResourcesNavItem } from './navigationHelpers'
+import { openAgentsPage } from './navigationHelpers'
+import { DesktopFilesNav } from './pages/DesktopFilesNav'
+import { DesktopResourceView } from './pages/DesktopResourceView'
 import { launchAndLogin } from './workflowUi'
 
 // The seeded Desktop user of the profile (admin@evenfire.local on the minimal
@@ -413,8 +415,9 @@ test.describe('GFS large-file business analysis with attended approval', () => {
   async function uploadCsvThroughFiles(
     page: Page
   ): Promise<NonNullable<ReturnType<typeof getGfsChildResourceSummary>>> {
-    await openResourcesNavItem(page, 'nav-files')
-    await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible()
+    const nav = new DesktopFilesNav(page)
+    await nav.openFiles()
+    await nav.openSharedWithMe()
     const browser = page.getByRole('region', { name: 'EvenDrive browser' })
     await expect(browser).toBeVisible({ timeout: 30_000 })
     await browser
@@ -423,16 +426,7 @@ test.describe('GFS large-file business analysis with attended approval', () => {
     await expect(
       browser.getByRole('button', { name: `Open ${fixtures.granted.childName}`, exact: true })
     ).toBeVisible({ timeout: 30_000 })
-    const upload = browser.getByRole('button').filter({ hasText: /^Upload file$/ })
-    await expect(upload).toBeVisible({ timeout: 30_000 })
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser', { timeout: 30_000 }),
-      upload.click(),
-    ])
-    await chooser.setFiles(csvUploadPath)
-    await expect(page.getByText(`Uploaded ${csv.fileName}`)).toBeVisible({
-      timeout: 30_000,
-    })
+    await new DesktopResourceView(page).uploadFileFromPath(csv.fileName, csvUploadPath)
     await expect(
       browser.getByRole('button', { name: `Open ${csv.fileName}`, exact: true })
     ).toBeVisible({ timeout: 30_000 })
@@ -684,7 +678,9 @@ test.describe('GFS large-file business analysis with attended approval', () => {
         })
 
         await test.step('source remains visible after read-only processing', async () => {
-          await openResourcesNavItem(page, 'nav-files')
+          const nav = new DesktopFilesNav(page)
+          await nav.openFiles()
+          await nav.openSharedWithMe()
           const browser = page.getByRole('region', { name: 'EvenDrive browser' })
           await browser
             .getByRole('button', { name: `Open ${fixtures.granted.name}`, exact: true })

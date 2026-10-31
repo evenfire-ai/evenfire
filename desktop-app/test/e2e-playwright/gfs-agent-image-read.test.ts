@@ -23,7 +23,8 @@ import {
 } from '../../../tests/e2e/gfsUiFixtures'
 import { createGfsVisualImageFixture } from '../../../tests/e2e/gfsVisualImageFixture.ts'
 import { assertGfsInfraHealthy, discoverManagedGfsAgent } from './helpers/gfsFixtures'
-import { openResourcesNavItem } from './navigationHelpers'
+import { DesktopFilesNav } from './pages/DesktopFilesNav'
+import { DesktopResourceView } from './pages/DesktopResourceView'
 import { E2E_DESKTOP_PASSWORD, E2E_EMAIL, seedPasswordForEmail } from './workflowUi'
 
 test.describe.configure({ mode: 'serial' })
@@ -194,35 +195,19 @@ async function uploadAndPreview(
   width: number,
   height: number
 ): Promise<void> {
-  await openResourcesNavItem(page, 'nav-files')
-  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible()
-  const browser = page.getByRole('region', { name: 'Global File System browser' })
-  const root = browser
-    .getByRole('navigation', { name: 'File location' })
-    .getByRole('button', { name: 'Shared with me', exact: true })
-  if (await root.isEnabled()) await root.click()
+  const nav = new DesktopFilesNav(page)
+  await nav.openFiles()
+  await nav.openSharedWithMe()
+  const browser = page.getByRole('region', { name: 'EvenDrive browser' })
   await browser.getByRole('button', { name: `Open ${folder.name}`, exact: true }).click()
   await expect(
     browser.getByRole('button', { name: `Open ${folder.childName}`, exact: true })
   ).toBeVisible()
-  // Chromium exposes the visually-hidden file input as a second button with
-  // the same accessible name. Visible text identifies the actual user action.
-  const upload = browser.getByRole('button').filter({ hasText: /^Upload file$/ })
-  await expect(upload).toBeVisible()
-  const [chooser] = await Promise.all([
-    page.waitForEvent('filechooser', { timeout: 15_000 }),
-    upload.click(),
-  ])
-  await chooser.setFiles(filePath)
-  await expect(page.getByText(`Uploaded ${fileName}`, { exact: true })).toBeVisible({
-    timeout: 60_000,
-  })
+  await new DesktopResourceView(page).uploadFileFromPath(fileName, filePath)
   const row = browser.getByRole('button', { name: `Open ${fileName}`, exact: true })
   await expect(row).toBeVisible()
   await row.click()
-  const preview = page.getByRole('dialog', { name: fileName, exact: true })
-  await expect(preview).toBeVisible()
-  const picture = preview.getByRole('img', { name: `Preview of ${fileName}`, exact: true })
+  const picture = page.getByRole('img', { name: `Preview of ${fileName}`, exact: true })
   await expect(picture).toBeVisible()
   await expect
     .poll(() =>
@@ -237,8 +222,11 @@ async function uploadAndPreview(
       })
     )
     .toEqual({ width, height })
-  await preview.getByRole('button', { name: 'Close image preview' }).click()
-  await expect(preview).toBeHidden()
+  await page
+    .getByRole('toolbar', { name: 'Workspace tabs' })
+    .getByRole('button', { name: `Close ${fileName}`, exact: true })
+    .click()
+  await expect(picture).toHaveCount(0)
 }
 
 async function freshChat(page: Page, agentName: string): Promise<void> {

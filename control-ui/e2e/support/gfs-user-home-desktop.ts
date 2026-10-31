@@ -149,20 +149,17 @@ export async function launchHomeDesktop(
   }
 }
 
-export async function openDesktopHome(page: Page, folderName: string): Promise<void> {
+export async function openDesktopHome(page: Page, _folderName: string): Promise<void> {
   await openResourcesNavItem(page, 'nav-files')
-  await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
   const home = page.getByRole('treeitem', { name: 'My home', exact: true })
   await expect(home).toBeVisible({ timeout: 150_000 })
-  await expect(async () => {
-    await home.click()
-    await expect(page.getByRole('navigation', { name: 'File location' })).toContainText(
-      folderName,
-      {
-        timeout: 1_000,
-      }
-    )
-  }).toPass({ timeout: 150_000, intervals: [2_000, 5_000] })
+  await expect(home).toHaveAttribute('aria-expanded', 'true', { timeout: 150_000 })
+  await home.getByRole('button', { name: 'My home', exact: true }).click()
+  await expect(
+    page
+      .getByRole('navigation', { name: 'File location' })
+      .getByRole('button', { name: 'My home', exact: true })
+  ).toHaveAttribute('aria-current', 'page')
   await humanRecordedPause([600, 1200])
 }
 
@@ -170,11 +167,24 @@ export async function uploadDesktopFile(page: Page, name: string, content: strin
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-home-upload-'))
   const filePath = path.join(dir, name)
   fs.writeFileSync(filePath, content)
-  await page.getByLabel('Upload file', { exact: true }).setInputFiles(filePath)
-  await expect(page.getByRole('button', { name: `Open ${name}` })).toBeVisible({
-    timeout: 120_000,
-  })
-  fs.rmSync(dir, { recursive: true, force: true })
+  try {
+    const chooser = page.waitForEvent('filechooser')
+    await page
+      .getByRole('navigation', { name: 'File location' })
+      .locator('..')
+      .getByRole('button', { name: /^Options for / })
+      .click()
+    await page
+      .getByRole('menu', { name: /^Actions for / })
+      .getByRole('menuitem', { name: 'Upload file', exact: true })
+      .click()
+    await (await chooser).setFiles(filePath)
+    await expect(page.getByRole('button', { name: `Open ${name}` })).toBeVisible({
+      timeout: 120_000,
+    })
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
   await humanRecordedPause([600, 1200])
 }
 
@@ -212,19 +222,13 @@ export async function shareDesktopFolder(
 
 export async function openDesktopLink(page: Page, uri: string): Promise<void> {
   await openResourcesNavItem(page, 'nav-files')
-  const root = page
-    .getByRole('navigation', { name: 'File location' })
-    .getByRole('button', { name: 'Shared with me' })
-  if (await root.isEnabled()) await root.click()
-  await expect(root).toBeDisabled()
-  await page.getByRole('button', { name: 'Options for Shared with me' }).click()
   await page
-    .getByRole('menu', { name: 'Actions for Shared with me' })
-    .getByRole('menuitem', { name: 'Open EvenDrive link' })
+    .getByRole('toolbar', { name: 'EvenDrive actions' })
+    .getByRole('button', { name: 'Open link', exact: true })
     .click()
-  const dialog = page.getByRole('dialog', { name: 'Open EvenDrive link' })
-  // By role: a label substring also matches the "Close EvenDrive link dialog" button.
-  await dialog.getByRole('textbox', { name: 'EvenDrive link' }).fill(uri)
+  const dialog = page.getByRole('dialog', { name: 'Open from link' })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('textbox', { name: 'URL', exact: true }).fill(uri)
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
   await humanRecordedPause([600, 1200])
 }

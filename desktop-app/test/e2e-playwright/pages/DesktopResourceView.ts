@@ -44,7 +44,16 @@ export class DesktopResourceView {
     // createFileFromPathMutation), so the file is no longer read once it shows.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-home-upload-'))
     const filePath = path.join(dir, name)
-    fs.writeFileSync(filePath, bytes)
+    try {
+      fs.writeFileSync(filePath, bytes)
+      await this.uploadFileFromPath(name, filePath)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  /** Upload an existing local file through the current folder's visible menu. */
+  async uploadFileFromPath(name: string, filePath: string): Promise<void> {
     const fileChooser = this.page.waitForEvent('filechooser')
     await this.openCurrentFolderMenuAction('Upload file')
     const chooser = await fileChooser
@@ -52,7 +61,6 @@ export class DesktopResourceView {
     await expect(this.page.getByRole('button', { name: `Open ${name}` })).toBeVisible({
       timeout: 120_000,
     })
-    fs.rmSync(dir, { recursive: true, force: true })
     await humanRecordedPause([600, 1200])
   }
 
@@ -72,12 +80,12 @@ export class DesktopResourceView {
     await humanRecordedPause([600, 1200])
   }
 
-  /** Open the row's Move dialog through its visible menu entry (Move to…). */
+  /** Open the row's Move dialog through its visible menu entry. */
   async openMove(name: string): Promise<void> {
     await this.page.getByRole('button', { name: `Options for ${name}` }).click()
     await this.page
       .getByRole('menu', { name: `Actions for ${name}` })
-      .getByRole('menuitem', { name: 'Move to…' })
+      .getByRole('menuitem', { name: 'Move to', exact: true })
       .click()
     await expect(
       this.page.getByRole('dialog', { name: new RegExp(`^Move (folder|file) `) })
