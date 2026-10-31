@@ -6715,6 +6715,7 @@ h3 {
 }
 
 .desktop-update-dialog__dismiss {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -6727,6 +6728,14 @@ h3 {
   background: var(--surface-strong);
   color: var(--text-muted);
   cursor: pointer;
+  line-height: 0;
+}
+
+.desktop-update-dialog__dismiss > svg {
+  position: absolute;
+  inset: 0;
+  display: block;
+  margin: auto;
 }
 
 .desktop-update-dialog__dismiss:hover {
