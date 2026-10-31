@@ -1419,6 +1419,8 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await enterFolder(page, folder)
         await expect(page.getByRole('button', { name: `Open ${f1}` })).toBeVisible()
         await nav.expectNoRecentFiles()
+        await nav.openSharedWithMe()
+        await enterFolder(page, folder)
         await page.getByRole('button', { name: `Open ${f1}` }).click()
         await expect(page.getByRole('article', { name: `Text preview of ${f1}` })).toBeVisible({
           timeout: 60_000,
@@ -1440,7 +1442,6 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
 
       await test.step('J7a-7 D9 agent read: f2 becomes recent for A only, and the binding names the namespace', async () => {
         const page = aS!.page
-        await page.getByRole('navigation', { name: 'Main navigation' }).getByText('Chat').click()
         await openExactAgent(page, getManagedAgentDisplayName(agent))
         const { stepper, responseText } = await sendAgentTurn(page, readPrompt(f2Uri))
         assertNoInfraFailureShape(responseText)
@@ -1698,7 +1699,13 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         const zipPath = testInfo.outputPath('j7b.zip')
         await stubSaveDialog(aS!.app, zipPath)
         await nav.openSharedWithMe()
-        await new DesktopResourceView(aPage).downloadZip(folder)
+        const view = new DesktopResourceView(aPage)
+        await view.downloadZip(folder)
+        await expect(aPage.getByTestId('gfs-zip-progress')).toBeVisible()
+        await aPage.getByRole('button', { name: 'Stop preparing zip' }).click()
+        await expect(aPage.getByTestId('gfs-zip-progress')).toHaveCount(0)
+        expect(fs.existsSync(zipPath)).toBe(false)
+        await view.downloadZip(folder)
         await expect(aPage.getByText(/^Downloaded .*\(24 files\)$/)).toBeVisible({
           timeout: 120_000,
         })

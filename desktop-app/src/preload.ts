@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import type { GfsAbortRegistration } from './gfs/abortTypes.js'
 import type { GfsShareOptions } from './gfs/uriHandler.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
@@ -81,26 +82,31 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
 
 /**
  * Producer-side cancellation wiring (folder-zip Stop, R1-M1): a cancellable
- * invoke carries a requestId; if the caller's signal aborts, main aborts the
- * in-flight request. An already-aborted signal never starts producer work —
- * no invoke, no gfs:abort event (R2-L3). Kept INLINE: the sandboxed preload
- * must stay free of relative value imports (self-containment contract).
+ * invoke carries a requestId; the renderer registers an abort callback because
+ * AbortSignal itself cannot retain its methods across contextBridge. An
+ * already-aborted request starts no producer work (R2-L3). Kept INLINE: the
+ * sandboxed preload must stay free of relative value imports.
  */
 function cancellableGfsInvoke<T>(
   channel: string,
   payload: Record<string, unknown>,
-  signal?: AbortSignal
+  registerAbort?: GfsAbortRegistration
 ): Promise<T> {
-  if (!signal) return ipcRenderer.invoke(channel, payload) as Promise<T>
-  if (signal.aborted) {
+  if (!registerAbort) return ipcRenderer.invoke(channel, payload) as Promise<T>
+  const requestId = crypto.randomUUID()
+  let aborted = false
+  let started = false
+  const unregister = registerAbort(() => {
+    if (aborted) return
+    aborted = true
+    if (started) ipcRenderer.send('gfs:abort', { requestId })
+  })
+  if (aborted) {
+    unregister()
     return Promise.reject(new DOMException('Request was stopped before it started.', 'AbortError'))
   }
-  const requestId = crypto.randomUUID()
-  const onAbort = () => ipcRenderer.send('gfs:abort', { requestId })
-  signal.addEventListener('abort', onAbort, { once: true })
-  return ipcRenderer
-    .invoke(channel, { ...payload, requestId })
-    .finally(() => signal.removeEventListener('abort', onAbort)) as Promise<T>
+  started = true
+  return ipcRenderer.invoke(channel, { ...payload, requestId }).finally(unregister) as Promise<T>
 }
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
@@ -229,12 +235,12 @@ const clerum = Object.freeze({
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
     download: (
       uri: string,
-      options: { maxBytes?: number; signal?: AbortSignal; recordOpen: boolean }
+      options: { maxBytes?: number; registerAbort?: GfsAbortRegistration; recordOpen: boolean }
     ) =>
       cancellableGfsInvoke(
         'gfs:download',
         { uri, maxBytes: options.maxBytes, recordOpen: options.recordOpen },
-        options.signal
+        options.registerAbort
       ),
     downloadPreview: (uri: string, maxBytes: number, recordOpen: boolean) =>
       ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes, recordOpen }),
@@ -245,8 +251,13 @@ const clerum = Object.freeze({
       resourceId: string,
       drive?: string,
       cursor?: string,
-      options?: { signal?: AbortSignal }
-    ) => cancellableGfsInvoke('gfs:listChildren', { resourceId, drive, cursor }, options?.signal),
+      options?: { registerAbort?: GfsAbortRegistration }
+    ) =>
+      cancellableGfsInvoke(
+        'gfs:listChildren',
+        { resourceId, drive, cursor },
+        options?.registerAbort
+      ),
     affordances: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
     zipStream: {
@@ -261,12 +272,12 @@ const clerum = Object.freeze({
         jobId: string,
         name: string,
         uri: string,
-        options?: { maxBytes?: number; signal?: AbortSignal }
+        options?: { maxBytes?: number; registerAbort?: GfsAbortRegistration }
       ) =>
         cancellableGfsInvoke(
           'gfs:zipStream:appendFromUri',
           { jobId, name, uri, maxBytes: options?.maxBytes },
-          options?.signal
+          options?.registerAbort
         ),
       finish: (jobId: string, suggestedName: string) =>
         ipcRenderer.invoke('gfs:zipStream:finish', { jobId, suggestedName }),

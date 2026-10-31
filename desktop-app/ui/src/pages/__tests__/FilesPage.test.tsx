@@ -4842,7 +4842,7 @@ describe('FilesPage', () => {
     expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
 
     expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
-      signal: expect.any(AbortSignal),
+      registerAbort: expect.any(Function),
     })
     // The payload never reaches the renderer: the walk hands the main
     // process a name and a URI, and the main process does the transfer.
@@ -4852,7 +4852,7 @@ describe('FilesPage', () => {
       'gfs://main/doc-1',
       {
         maxBytes: 512 * 1024 * 1024,
-        signal: expect.any(AbortSignal),
+        registerAbort: expect.any(Function),
       }
     )
     // The streamed save path: the entry reached the main-process writer and
@@ -4974,7 +4974,7 @@ describe('FilesPage', () => {
     expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
 
     expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
-      signal: expect.any(AbortSignal),
+      registerAbort: expect.any(Function),
     })
     expect(appendFromUri).not.toHaveBeenCalled()
     expect(click).not.toHaveBeenCalled()
@@ -5248,7 +5248,7 @@ describe('FilesPage', () => {
 
     expect(listChildren).toHaveBeenCalledTimes(1)
     expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
-      signal: expect.any(AbortSignal),
+      registerAbort: expect.any(Function),
     })
     expect(listChildren).not.toHaveBeenCalledWith('folder-p', 'main', undefined)
   })

@@ -11,6 +11,7 @@
  * behaviour broke".
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import type { GfsAbortRegistration } from '../gfs/abortTypes.js'
 
 const electron = vi.hoisted(() => {
   const exposed = new Map<string, unknown>()
@@ -41,11 +42,11 @@ type ClerumBridge = {
       resourceId: string,
       drive?: string,
       cursor?: string,
-      options?: { signal?: AbortSignal }
+      options?: { registerAbort?: GfsAbortRegistration }
     ) => Promise<unknown>
     download: (
       uri: string,
-      options?: { maxBytes?: number; signal?: AbortSignal }
+      options?: { maxBytes?: number; registerAbort?: GfsAbortRegistration; recordOpen?: boolean }
     ) => Promise<unknown>
     zipStream: {
       start: () => Promise<{ jobId: string }>
@@ -53,13 +54,24 @@ type ClerumBridge = {
         jobId: string,
         name: string,
         uri: string,
-        options?: { maxBytes?: number; signal?: AbortSignal }
+        options?: { maxBytes?: number; registerAbort?: GfsAbortRegistration }
       ) => Promise<unknown>
     }
   }
 }
 
 let bridge: ClerumBridge
+
+function register(signal: AbortSignal): GfsAbortRegistration {
+  return onAbort => {
+    if (signal.aborted) {
+      onAbort()
+      return () => undefined
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    return () => signal.removeEventListener('abort', onAbort)
+  }
+}
 
 /**
  * Settles a promise within `ms`, reporting a TIMEOUT instead of hanging. The
@@ -97,10 +109,12 @@ describe('preload cancellable GFS bridge (R2-L3)', () => {
     // ("the bridge did not reject") rather than hang until the runner's
     // timeout.
     const listing = await settleWithin(
-      bridge.gfs.listChildren('folder-1', 'main', undefined, { signal: controller.signal }).then(
-        () => ({ settled: 'resolved' as const }),
-        error => ({ settled: 'rejected' as const, error })
-      )
+      bridge.gfs
+        .listChildren('folder-1', 'main', undefined, { registerAbort: register(controller.signal) })
+        .then(
+          () => ({ settled: 'resolved' as const }),
+          error => ({ settled: 'rejected' as const, error })
+        )
     )
     expect(listing).not.toBe(TIMEOUT)
     expect(listing).toMatchObject({
@@ -109,7 +123,7 @@ describe('preload cancellable GFS bridge (R2-L3)', () => {
     })
 
     const download = await settleWithin(
-      bridge.gfs.download('gfs://main/x', { signal: controller.signal }).then(
+      bridge.gfs.download('gfs://main/x', { registerAbort: register(controller.signal) }).then(
         () => ({ settled: 'resolved' as const }),
         error => ({ settled: 'rejected' as const, error })
       )
@@ -126,8 +140,14 @@ describe('preload cancellable GFS bridge (R2-L3)', () => {
 
   it('carries a requestId, fires gfs:abort once on abort, and detaches on settle', async () => {
     const controller = new AbortController()
+    let finish!: (value: unknown) => void
+    electron.ipcRenderer.invoke.mockReturnValueOnce(
+      new Promise(resolve => {
+        finish = resolve
+      })
+    )
     const pending = bridge.gfs.listChildren('folder-1', 'main', undefined, {
-      signal: controller.signal,
+      registerAbort: register(controller.signal),
     })
     pending.catch(() => undefined)
 
@@ -144,6 +164,8 @@ describe('preload cancellable GFS bridge (R2-L3)', () => {
     expect(electron.ipcRenderer.send).toHaveBeenCalledWith('gfs:abort', {
       requestId: payload.requestId,
     })
+    finish({})
+    await pending
     // A late synthetic abort event must not re-send after cleanup.
     controller.signal.dispatchEvent(new Event('abort'))
     expect(electron.ipcRenderer.send).toHaveBeenCalledTimes(1)
@@ -160,13 +182,23 @@ describe('preload cancellable GFS bridge (R2-L3)', () => {
     })
   })
 
+  it('removes the renderer callback after a successful request', async () => {
+    const controller = new AbortController()
+    electron.ipcRenderer.invoke.mockResolvedValueOnce({ items: [] })
+    await bridge.gfs.listChildren('folder-1', 'main', undefined, {
+      registerAbort: register(controller.signal),
+    })
+    controller.abort()
+    expect(electron.ipcRenderer.send).not.toHaveBeenCalled()
+  })
+
   it('cancels the folder-zip transfer through the same requestId channel (R1-H2)', async () => {
     // The zip transfer runs in the MAIN process, so the walk's stop has to
     // reach it: the preload attaches the requestId and fires gfs:abort.
     const controller = new AbortController()
     const pending = bridge.gfs.zipStream.appendFromUri('job-1', 'a/b.txt', 'gfs://main/b', {
       maxBytes: 1024,
-      signal: controller.signal,
+      registerAbort: register(controller.signal),
     })
     pending.catch(() => undefined)
 
@@ -194,7 +226,9 @@ describe('preload cancellable GFS bridge (R2-L3)', () => {
     controller.abort()
     const outcome = await settleWithin(
       bridge.gfs.zipStream
-        .appendFromUri('job-1', 'a/b.txt', 'gfs://main/b', { signal: controller.signal })
+        .appendFromUri('job-1', 'a/b.txt', 'gfs://main/b', {
+          registerAbort: register(controller.signal),
+        })
         .then(
           () => ({ settled: 'resolved' as const }),
           error => ({ settled: 'rejected' as const, error })

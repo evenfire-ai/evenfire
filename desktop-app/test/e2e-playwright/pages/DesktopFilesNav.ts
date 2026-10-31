@@ -13,6 +13,7 @@ export class DesktopFilesNav {
   }
 
   async openMyHome(): Promise<void> {
+    await this.ensureExplorerOpen()
     // Only the ready home is a section listing its folders (aria-expanded
     // true); like "Shared with me", one click on its label opens it in Files.
     const home = this.page.getByRole('treeitem', { name: 'My home' })
@@ -149,6 +150,7 @@ export class DesktopFilesNav {
   }
 
   async openSharedWithMe(): Promise<void> {
+    await this.ensureExplorerOpen()
     await this.page.getByRole('treeitem', { name: 'Shared with me' }).click()
     await expect(
       this.page
@@ -156,5 +158,11 @@ export class DesktopFilesNav {
         .getByRole('button', { name: 'Shared with me' })
     ).toHaveAttribute('aria-current', 'page')
     await humanRecordedPause([600, 1200])
+  }
+
+  private async ensureExplorerOpen(): Promise<void> {
+    const toggle = this.page.getByTestId('nav-files-explorer-toggle')
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
   }
 }

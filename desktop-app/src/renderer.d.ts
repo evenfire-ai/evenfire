@@ -1,4 +1,5 @@
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import type { GfsAbortRegistration } from './gfs/abortTypes.js'
 import type { GfsShareOptions } from './gfs/uriHandler.js'
 import type {
   PluginAuditEntryView,
@@ -164,7 +165,7 @@ declare global {
         }>
         download: (
           uri: string,
-          options: { maxBytes?: number; signal?: AbortSignal; recordOpen: boolean }
+          options: { maxBytes?: number; registerAbort?: GfsAbortRegistration; recordOpen: boolean }
         ) => Promise<{
           resource: {
             drive: string
@@ -242,7 +243,7 @@ declare global {
           resourceId: string,
           drive?: string,
           cursor?: string,
-          options?: { signal?: AbortSignal }
+          options?: { registerAbort?: GfsAbortRegistration }
         ) => Promise<{
           items: Array<{
             resourceId: string
@@ -280,7 +281,7 @@ declare global {
             jobId: string,
             name: string,
             uri: string,
-            options?: { maxBytes?: number; signal?: AbortSignal }
+            options?: { maxBytes?: number; registerAbort?: GfsAbortRegistration }
           ) => Promise<{ name: string; bytes: number }>
           finish: (
             jobId: string,
