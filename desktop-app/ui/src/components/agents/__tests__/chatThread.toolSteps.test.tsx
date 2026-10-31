@@ -139,7 +139,7 @@ describe('ChatThread local-search highlighting', () => {
       messageId: assistant.id,
       occurrence: 0,
     }
-    const { container } = render(<ChatThread />)
+    render(<ChatThread />)
 
     const renderedMatches = document.querySelectorAll('.chat-search-match')
     expect(renderedMatches).toHaveLength(2)
