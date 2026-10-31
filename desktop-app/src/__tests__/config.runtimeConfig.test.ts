@@ -6,6 +6,7 @@ import path from 'node:path'
 describe('desktop runtime config', () => {
   const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
   const originalExternalRestApiBaseUrl = process.env.EXTERNAL_REST_API_BASE_URL
+  const originalProfileUiBaseUrl = process.env.PROFILE_UI_BASE_URL
   const originalRpcProxyBaseUrl = process.env.RPC_PROXY_BASE_URL
   const originalDesktopAppName = process.env.DESKTOP_APP_NAME
   const originalArgv = [...process.argv]
@@ -27,6 +28,11 @@ describe('desktop runtime config', () => {
       delete process.env.EXTERNAL_REST_API_BASE_URL
     } else {
       process.env.EXTERNAL_REST_API_BASE_URL = originalExternalRestApiBaseUrl
+    }
+    if (originalProfileUiBaseUrl === undefined) {
+      delete process.env.PROFILE_UI_BASE_URL
+    } else {
+      process.env.PROFILE_UI_BASE_URL = originalProfileUiBaseUrl
     }
     if (originalRpcProxyBaseUrl === undefined) {
       delete process.env.RPC_PROXY_BASE_URL
@@ -52,6 +58,46 @@ describe('desktop runtime config', () => {
 
     vi.doUnmock('electron')
     vi.resetModules()
+  })
+
+  it('resolves shareable Profile origins from the active deployment across transitions', async () => {
+    process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.dev.evenfire.test'
+    process.env.PROFILE_UI_BASE_URL = 'https://profile.prod.evenfire.test'
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: () => '/tmp/evenfire',
+        isPackaged: false,
+        isReady: () => false,
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+    const runtime = await import('../config.js')
+
+    expect(runtime.config.desktopProfileUiBaseUrl).toBe('https://profile.prod.evenfire.test')
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('https://profile.dev.evenfire.test')
+
+    runtime.config.externalRestApiBaseUrl = 'https://api.prod.evenfire.test'
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('https://profile.prod.evenfire.test')
+  })
+
+  it('refuses an unknown active deployment instead of using a configured fallback origin', async () => {
+    process.env.EXTERNAL_REST_API_BASE_URL = 'https://customer.example'
+    process.env.PROFILE_UI_BASE_URL = 'https://profile.prod.evenfire.test'
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: () => '/tmp/evenfire',
+        isPackaged: false,
+        isReady: () => false,
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+    const runtime = await import('../config.js')
+
+    expect(() => runtime.getActiveDeploymentProfileUiBaseUrl()).toThrow(
+      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+    )
   })
 
   it('keeps same-named profiles independent when saved in the same millisecond', async () => {
