@@ -100,12 +100,12 @@ const appService = new AppService({
       mainWindow.webContents.send('auth:sessionExpired', sessionGeneration)
     }
   },
-  onSandboxUiSessionInvalidated: () => {
+  onSandboxUiSessionInvalidated: sessionGeneration => {
     const appDeepLinkMinimumId = sandboxUiDeepLinkQueue.clear()
     const gfsDeepLinkMinimumId = gfsResourceDeepLinkQueue.clear()
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('sandboxUi:sessionInvalidated', {
-        sessionGeneration: appService.getSessionGeneration(),
+        sessionGeneration,
         appDeepLinkMinimumId,
         gfsDeepLinkMinimumId,
       })

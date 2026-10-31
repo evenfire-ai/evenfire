@@ -46,6 +46,7 @@ export type RealMain = {
   invoke(channel: string, payload: unknown): Promise<unknown>
   /** What a logout or a login over the live session does to the embed. */
   invalidateSession(sessionGeneration?: number): void
+  setSessionGenerationForTest(sessionGeneration: number): void
 }
 
 // rpc-proxy's mint contract: 204 + a Path-scoped Set-Cookie on success, any
@@ -111,8 +112,8 @@ export function startRealMain(options: RealMainOptions): RealMain {
   if (current) throw new Error('a main process is already running: await resetRealMain() first')
   let service!: AppService
   service = new AppService({
-    onSandboxUiSessionInvalidated: () =>
-      options.onSessionInvalidated?.(service.getSessionGeneration()),
+    onSandboxUiSessionInvalidated: sessionGeneration =>
+      options.onSessionInvalidated?.(sessionGeneration),
   })
   ;(service as unknown as { sessionToken: string }).sessionToken = 'fake-session-token'
   ;(service as unknown as { me: unknown }).me = { id: 'fake-user', teamId: 'team-1' }
@@ -139,9 +140,14 @@ export function startRealMain(options: RealMainOptions): RealMain {
     },
     invalidateSession(sessionGeneration) {
       if (sessionGeneration !== undefined) {
-        ;(service as unknown as { sessionGeneration: number }).sessionGeneration = sessionGeneration
+        main.setSessionGenerationForTest(sessionGeneration)
       }
       ;(service as unknown as { invalidateSandboxUiSession(): void }).invalidateSandboxUiSession()
+    },
+    setSessionGenerationForTest(sessionGeneration) {
+      const authority = (service as unknown as { sessionAuthority: { generation: number } })
+        .sessionAuthority
+      authority.generation = sessionGeneration
     },
   }
   initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir: options.userDataDir })

@@ -19,7 +19,7 @@ const harness = vi.hoisted(() => {
     initialize: vi.fn().mockResolvedValue(undefined),
     logout: vi.fn(async () => 7),
     sessionGeneration: 0,
-    invalidateSandboxUiSession: null as null | (() => void),
+    invalidateSandboxUiSession: null as null | ((sessionGeneration: number) => void),
     parseSandboxUiDeepLink: vi.fn(() => null),
     registeredLogout: null as null | (() => Promise<unknown>),
     createWindow: null as null | (() => Record<string, any>),
@@ -106,7 +106,7 @@ vi.mock('electron', () => ({
 
 vi.mock('../appService.js', () => ({
   AppService: class {
-    constructor(options?: { onSandboxUiSessionInvalidated?: () => void }) {
+    constructor(options?: { onSandboxUiSessionInvalidated?: (sessionGeneration: number) => void }) {
       harness.invalidateSandboxUiSession = options?.onSandboxUiSessionInvalidated ?? null
     }
     initialize = harness.initialize
@@ -288,7 +288,7 @@ describe('main.ts GFS navigation-generation composition', () => {
     )
 
     harness.sessionGeneration = 23
-    harness.invalidateSandboxUiSession?.()
+    harness.invalidateSandboxUiSession?.(23)
 
     expect(listAppLinks(ipcEvent(ownContents)).links).toEqual([])
     expect(listGfsLinks(ipcEvent(ownContents)).links).toEqual([])
@@ -324,6 +324,15 @@ describe('main.ts GFS navigation-generation composition', () => {
     expect(postApp[0]?.id).toBe(reset?.appDeepLinkMinimumId)
     expect(postApp[0]).toMatchObject({ userNavigationGenerationAtActivation: 1 })
     expect(postGfs[0]?.id).toBe(reset?.gfsDeepLinkMinimumId)
+
+    ownContents.send.mockImplementationOnce(() => {
+      throw new Error('renderer invalidation delivery unavailable')
+    })
+    expect(() => harness.invalidateSandboxUiSession?.(24)).toThrow(
+      'renderer invalidation delivery unavailable'
+    )
+    expect(listAppLinks(ipcEvent(ownContents)).links).toEqual([])
+    expect(listGfsLinks(ipcEvent(ownContents)).links).toEqual([])
   })
   it.each(['sandboxUi', 'gfs'] as const)(
     'atomically guards %s exact-ID retirement with current session and navigation authority',

@@ -986,7 +986,7 @@ export interface AppServiceOptions {
   getUserDataDirectory?: () => string
   reportDeferredLogoutFailure?: (error: unknown) => void
   notifySessionExpired?: (sessionGeneration: number) => void
-  onSandboxUiSessionInvalidated?: () => void
+  onSandboxUiSessionInvalidated?: (sessionGeneration: number) => void
 }
 
 type ActiveTeamContextHop = {
@@ -1033,7 +1033,7 @@ export class AppService {
   private readonly getUserDataDirectory: () => string
   private readonly reportDeferredLogoutFailure: (error: unknown) => void
   private readonly notifySessionExpired: (sessionGeneration: number) => void
-  private readonly onSandboxUiSessionInvalidated?: () => void
+  private readonly onSandboxUiSessionInvalidated?: (sessionGeneration: number) => void
   private readonly pendingCredentialProducers = new Set<Promise<unknown>>()
   private quitPreparationStarted = false
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
@@ -3128,10 +3128,10 @@ export class AppService {
   }
 
   /** Retires the sandbox-ui work of a session that is being cleared or replaced. */
-  private invalidateSandboxUiSession(): void {
+  private invalidateSandboxUiSession(sessionGeneration = this.sessionGeneration): void {
     this.sandboxUiSessionEpoch += 1
     try {
-      this.onSandboxUiSessionInvalidated?.()
+      this.onSandboxUiSessionInvalidated?.(sessionGeneration)
     } catch (error) {
       // Queue retirement is best-effort notification; it must not interrupt the
       // synchronous session-generation fence or physical teardown scheduling.
@@ -4830,8 +4830,8 @@ export class AppService {
 
           const publish = () => {
             if (retireDesktopWindowOwner) this.scheduleDesktopWindowTeardown()
+            if (retireSandboxOwner) this.invalidateSandboxUiSession(nextGeneration)
             publishChat()
-            if (retireSandboxOwner) this.sandboxUiSessionEpoch += 1
             runtimeOwnerPublication.publish()
             this.sessionAuthority.clearRpcCredentialOwnerRecords()
             this.rpcTokenManager.clear()
@@ -4865,7 +4865,6 @@ export class AppService {
         },
         afterAcceptance: async (_accepted, _user, preparedChat) => {
           preparedChat.afterPublication()
-          if (retireSandboxOwner) this.scheduleSandboxUiTeardown()
           for (const controller of previousPrewarmControllers) {
             try {
               controller.abort()
