@@ -3075,9 +3075,18 @@ export function FilesPage({
         : callerHomeRootNode(ctrl.home, accessibleResources),
     [accessibleResources, ctrl.home, current, rootView]
   )
+  const openingResourceSeed =
+    !current &&
+    Boolean(
+      (pendingGfsUri &&
+        pendingGfsUri !== GFS_SHARED_WITH_ME_LOCATION &&
+        pendingGfsUri !== GFS_RECENT_FILES_LOCATION) ||
+      (seedPendingRef.current && resolving)
+    )
   const showHomeSection =
     !current &&
     rootView === 'overview' &&
+    !openingResourceSeed &&
     !accessRevoked &&
     ctrl.home?.state !== 'retired' &&
     Boolean(
@@ -3266,10 +3275,11 @@ export function FilesPage({
     void handleDownload(resource.gfsUri, resource.name)
   }
 
-  const recentOnly = !current && rootView === 'recent'
-  const overviewOnly = !current && rootView === 'overview'
+  const recentOnly = !current && rootView === 'recent' && !openingResourceSeed
+  const overviewOnly = !current && rootView === 'overview' && !openingResourceSeed
   const showRecentFiles =
     !current &&
+    !openingResourceSeed &&
     rootView !== 'shared' &&
     !accessRevoked &&
     !(rootView === 'overview' && ctrl.authorityPending && ctrl.discoveryFailure)
@@ -3291,6 +3301,8 @@ export function FilesPage({
     discoveryFailure: ctrl.discoveryFailure,
     accessibleNotice,
     visibleError: visibleError ? describeGfsReadError(visibleError).message : null,
+    pendingGfsDeepLinkFailure,
+    unavailableLocation,
   })
   const overviewLimit = useRecentOverviewLimit(
     overviewLayoutRef,
@@ -3409,6 +3421,30 @@ export function FilesPage({
       </div>
 
       <div className="page-layout da-gfs-layout" ref={overviewLayoutRef}>
+        {pendingGfsDeepLinkFailure ? (
+          <div role="alert">
+            <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
+            {pendingGfsDeepLinkFailure.retryable ? (
+              <Button
+                color="secondary"
+                onClick={() => {
+                  setPendingGfsDeepLinkFailure(null)
+                  setGfsDeepLinkRetry(current => ({
+                    id: pendingGfsDeepLinkFailure.id,
+                    request: current?.id === pendingGfsDeepLinkFailure.id ? current.request + 1 : 1,
+                  }))
+                }}
+                size="sm"
+                variant="outline"
+              >
+                Retry opening link
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+        {unavailableLocation ? (
+          <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
+        ) : null}
         {showRecentFiles ? (
           <GfsRecentFilesCard
             expandable={recentOnly}
@@ -3736,31 +3772,6 @@ export function FilesPage({
               </div>
             )
           })}
-          {pendingGfsDeepLinkFailure ? (
-            <div role="alert">
-              <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
-              {pendingGfsDeepLinkFailure.retryable ? (
-                <Button
-                  color="secondary"
-                  onClick={() => {
-                    setPendingGfsDeepLinkFailure(null)
-                    setGfsDeepLinkRetry(current => ({
-                      id: pendingGfsDeepLinkFailure.id,
-                      request:
-                        current?.id === pendingGfsDeepLinkFailure.id ? current.request + 1 : 1,
-                    }))
-                  }}
-                  size="sm"
-                  variant="outline"
-                >
-                  Retry opening link
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-          {unavailableLocation ? (
-            <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
-          ) : null}
           {visibleError && !accessRevoked && !blockingFailure ? (
             // Presented, not raw. The banner is the non-blocking half of the
             // same read-plane failure the card shows, so it must not be the one

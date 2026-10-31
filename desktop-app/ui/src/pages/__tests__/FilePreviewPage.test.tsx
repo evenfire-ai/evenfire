@@ -667,7 +667,10 @@ describe('FilePreviewPage', () => {
 
     try {
       expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
-      await waitFor(() => expect(affordances).toHaveBeenCalled())
+      await waitFor(() => {
+        expect(affordances).toHaveBeenCalledWith('0123456789abcdef0123456789abcdef', 'main')
+        expect(affordances).toHaveBeenCalledWith('preview-parent', 'main')
+      })
       clickPreviewAction('diagram.png', 'Rename')
       const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
       fireEvent.change(within(dialog).getByLabelText('New name'), {
@@ -679,6 +682,14 @@ describe('FilePreviewPage', () => {
 
       controllerState.sessionGeneration = 2
       view.rerender(<FilePreviewPage {...props} />)
+      // The new session legitimately reloads the file and parent permissions.
+      // Settle those reads while the old rename digest is still blocked.
+      await waitFor(() =>
+        expect(affordances.mock.calls.length).toBeGreaterThanOrEqual(
+          permissionReadsBeforeReplacement + 2
+        )
+      )
+      const permissionReadsAfterReplacement = affordances.mock.calls.length
       await act(async () => releaseDigest(new ArrayBuffer(0)))
       await act(async () => {
         await Promise.resolve()
@@ -686,7 +697,7 @@ describe('FilePreviewPage', () => {
       })
 
       expect(renameResource).not.toHaveBeenCalled()
-      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeReplacement)
+      expect(affordances.mock.calls.length).toBe(permissionReadsAfterReplacement)
     } finally {
       releaseDigest(new ArrayBuffer(0))
       digestSpy.mockRestore()

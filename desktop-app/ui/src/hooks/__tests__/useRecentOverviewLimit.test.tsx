@@ -25,15 +25,17 @@ function Overview({
   count = 12,
   showHome = true,
   active = true,
+  notice = false,
 }: {
   count?: number
   showHome?: boolean
   active?: boolean
+  notice?: boolean
 }) {
   const ref = useRef<HTMLDivElement | null>(null)
-  const limit = useRecentOverviewLimit(ref, active, count, `${count}-${showHome}`)
+  const limit = useRecentOverviewLimit(ref, active, count, `${count}-${showHome}-${notice}`)
   return (
-    <div ref={ref} data-testid="layout" data-limit={limit}>
+    <div ref={ref} data-testid="layout" data-limit={limit} data-notice={notice}>
       <output>{limit}</output>
       {showHome && <button data-gfs-overview-destination="home">My home</button>}
       <button data-gfs-overview-destination="shared">Shared with me</button>
@@ -57,11 +59,12 @@ beforeEach(() => {
     const layout = this.closest<HTMLElement>('[data-testid="layout"]')
     const expanded = layout?.dataset.limit === '10'
     const scrollTop = layout?.scrollTop ?? 0
+    const noticeHeight = layout?.dataset.notice === 'true' ? 60 : 0
     if (this.dataset.gfsOverviewDestination === 'home') {
-      return rectangle((expanded ? 480 : 280) - scrollTop, 40)
+      return rectangle((expanded ? 480 : 280) + noticeHeight - scrollTop, 40)
     }
     if (this.dataset.gfsOverviewDestination === 'shared') {
-      return rectangle((expanded ? 540 : 340) - scrollTop, 40)
+      return rectangle((expanded ? 540 : 340) + noticeHeight - scrollTop, 40)
     }
     return rectangle(0, 0)
   })
@@ -107,6 +110,16 @@ describe('useRecentOverviewLimit', () => {
     const { rerender } = render(<Overview count={5} />)
     screen.getByTestId('layout').scrollTop = 150
     rerender(<Overview count={12} />)
+    expect(screen.getByText('10')).toBeTruthy()
+  })
+
+  it('accounts for a notice appearing and disappearing above the destinations', () => {
+    viewportHeight = 500
+    const { rerender } = render(<Overview />)
+    expect(screen.getByText('10')).toBeTruthy()
+    rerender(<Overview notice />)
+    expect(screen.getByText('5')).toBeTruthy()
+    rerender(<Overview />)
     expect(screen.getByText('10')).toBeTruthy()
   })
 

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { FileExplorerTree } from '@components/SidebarNav/FileExplorerTree'
+import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { FilesPage } from '@/pages/FilesPage'
 import {
   accessibleResource,
@@ -239,7 +240,7 @@ for (const surface of ['sidebar', 'files'] as const) {
             {!mounted ? null : surface === 'sidebar' ? (
               <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={toast} />
             ) : (
-              <FilesPage pushToast={toast} />
+              <FilesPage pushToast={toast} pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
             )}
             <SessionProbe
               onApi={value => {
@@ -626,7 +627,7 @@ describe('files surface drop admission (RP-002)', () => {
     render(
       <QueryClientProvider client={queryClient}>
         <GfsDragSessionProvider>
-          <FilesPage pushToast={toast} />
+          <FilesPage pushToast={toast} pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
         </GfsDragSessionProvider>
       </QueryClientProvider>
     )
