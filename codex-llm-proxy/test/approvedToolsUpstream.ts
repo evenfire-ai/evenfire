@@ -939,6 +939,18 @@ export function createApprovedToolsUpstream(provider: 'codex' | 'grok' = 'codex'
       // evidence counters are final when the call arrived.
       if (init?.signal?.aborted && error === init.signal.reason) throw error
       evidence.rejected++
+      // TEMP-DIAG #1044 repro: record the bounded fixture-internal rejection
+      // name as a stage so retry-layer evidence names the exact throw.
+      const rejectionName = error instanceof Error ? error.message : 'unknown'
+      evidence.requests.push({
+        definitionCount: 0,
+        explicitNonStrictCount: 0,
+        definitionBytes: 0,
+        inputBytes: 0,
+        connectorDefinitionCount: 0,
+        leakedSchema: false,
+        stage: `fixture_rejected:${/^[a-z0-9_]{1,80}$/.test(rejectionName) ? rejectionName : 'unnamed'}`,
+      })
       return Response.json({ error: { code: 'fixture_protocol_rejected' } }, { status: 422 })
     }
   }
