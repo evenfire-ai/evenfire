@@ -124,6 +124,10 @@ export type McpServerMutationOptions = {
 // Kubernetes performs a rolling restart on its own. Same mechanism the per-Host
 // channel-readers use in hostReconciler.ts.
 const CREDENTIALS_REVISION_ANNOTATION = 'clerum.io/credentials-revision'
+// Remote NGINX templates are rendered once at container start. Carrying the
+// template digest on the PodTemplate makes a ConfigMap-only URL change roll the
+// container instead of leaving the already-running NGINX process stale.
+const NGINX_CONFIG_REVISION_ANNOTATION = 'clerum.io/nginx-config-revision'
 
 // Codex P0 fix (PR #101): sanitization constants for remote.authHeaders.
 // Only standard HTTP header token chars — letters, digits, and '-'. Rejecting
@@ -131,6 +135,10 @@ const CREDENTIALS_REVISION_ANNOTATION = 'clerum.io/credentials-revision'
 const HEADER_NAME_RE = /^[A-Za-z0-9-]+$/
 // Bound the value length so a pathological CRD cannot blow up the ConfigMap.
 const MAX_AUTH_HEADER_VALUE_LENGTH = 2048
+// Query placeholders are expanded by the image entrypoint after HCC has built
+// the ConfigMap. Restrict them to uppercase environment-variable names so an
+// unresolved value cannot become an arbitrary NGINX variable.
+const QUERY_PLACEHOLDER_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g
 const WRC_OWNED_RUNTIME_READY_REASON = 'WrcOwnedRuntimeRegistered'
 // Keep fleet admission aligned with the external-egress convergence lane:
 // enough parallelism for independent servers without allocating one pending
@@ -916,7 +924,12 @@ export class McpServerReconciler {
    * Validate and sanitize remote baseUrl to prevent SSRF and nginx.conf injection.
    * Returns safe URL reconstructed from parsed components.
    */
-  private sanitizeRemoteUrl(rawUrl: string): { safeUrl: string; host: string; path: string } {
+  private sanitizeRemoteUrl(rawUrl: string): {
+    safeUrl: string
+    host: string
+    path: string
+    search: string
+  } {
     const parsed = new URL(rawUrl) // throws on malformed — no silent fallback
     if (parsed.protocol !== 'https:') {
       throw new Error(`remote.baseUrl must use HTTPS (got ${parsed.protocol})`)
@@ -941,10 +954,34 @@ export class McpServerReconciler {
     if (PRIVATE_IP.test(host)) {
       throw new Error(`remote.baseUrl must not point to private/reserved IP ranges: ${host}`)
     }
+    // Defense in depth for the generated NGINX directive: the query is rendered
+    // unquoted in `proxy_pass`, so only complete, uppercase
+    // placeholders may remain dynamic. The URL parser strips TAB/CR/LF and
+    // percent-encodes spaces and other control characters, so in practice this
+    // rejects `$`, braces, `\` and `;` outside a complete placeholder; undeclared
+    // names are rejected below. The error does not echo the query.
+    const queryWithoutPlaceholders = parsed.search.replace(QUERY_PLACEHOLDER_RE, '')
+    if (/[\\;{}$\u0000-\u0020]/.test(queryWithoutPlaceholders)) {
+      throw new Error(
+        'remote.baseUrl query contains an invalid placeholder or forbidden character; ' +
+          'query placeholders must use ${NAME} with NAME matching [A-Z_][A-Z0-9_]*'
+      )
+    }
+    // The path is rendered unquoted in `location` and `proxy_pass`,
+    // where NGINX expands `$name` as a variable and a `;`
+    // ends the directive. The URL parser percent-encodes spaces and braces in
+    // the path and turns `\` into `/`, so in practice this rejects `$` and `;`;
+    // the rest of the class matches the query check. The error does not echo
+    // the path.
+    if (/[\\;{}$\u0000-\u0020]/.test(parsed.pathname)) {
+      throw new Error(
+        'remote.baseUrl path contains a forbidden character ($, ;, \\, braces or whitespace)'
+      )
+    }
     // Reconstruct safe URL from parsed components (strips injected chars like newlines)
     const path = parsed.pathname
     const safeUrl = parsed.origin + path + parsed.search
-    return { safeUrl, host: parsed.host, path }
+    return { safeUrl, host: parsed.host, path, search: parsed.search }
   }
 
   /**
@@ -986,7 +1023,25 @@ export class McpServerReconciler {
       safeUrl,
       host: upstreamHost,
       path: upstreamPath,
+      search: upstreamSearch,
     } = this.sanitizeRemoteUrl(server.spec.remote!.baseUrl)
+    // A declared query placeholder is the only dynamic name envsubst can fill.
+    // An undeclared name survives into the rendered config, where NGINX resolves
+    // it case-insensitively as one of its own variables (for example
+    // ${HTTP_AUTHORIZATION}); reject it here, with an error that never echoes the
+    // query. The comparison is exact and case-sensitive, like envsubst's.
+    // Declared means present in the env this reconcile gives the egress-proxy
+    // container: envMapping, spec.env after the forbidden names are stripped,
+    // spec.envSecret, the authHeaders backfill and the platform entries.
+    const declaredEnvNames = this.egressProxyEnvNames(server)
+    for (const match of upstreamSearch.matchAll(QUERY_PLACEHOLDER_RE)) {
+      if (!declaredEnvNames.has(match[1])) {
+        throw new Error(
+          `remote.baseUrl query placeholder \${${match[1]}} is not declared in spec.env or ` +
+            'spec.envSecret, or its env entry was stripped as forbidden'
+        )
+      }
+    }
     const transportPort = server.spec.transport.port || 3000
 
     // Codex P1 fix (PR #101): forward credential secrets as upstream auth headers.
@@ -1076,6 +1131,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolved) ──\n' + authHeaderLines + '\n' : ''}${authorizationBlock}
+        # An upstream must not drive internal redirects or charset overrides:
+        # NGINX logs the X-Accel-Redirect target and the X-Accel-Charset value
+        # it received, outside the messages egress-proxy-log-filter redacts (#1240).
+        proxy_ignore_headers X-Accel-Redirect X-Accel-Charset;
+
         # SSE/streaming support
         proxy_buffering off;
         proxy_cache off;
@@ -1142,13 +1202,19 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
   }
 
+  private nginxConfigRevision(configMap: k8s.V1ConfigMap): string {
+    return createHash('sha256')
+      .update(configMap.data?.['default.conf.template'] ?? '')
+      .digest('hex')
+  }
+
   /**
    * Ensure ConfigMap exists and is up to date (create or replace).
    */
   private async ensureConfigMap(
     server: McpServerCRD,
     isCurrent: () => boolean = () => true
-  ): Promise<void> {
+  ): Promise<string> {
     const cm = this.buildNginxConfigMap(server)
     const name = `${server.name}-nginx-conf`
     const namespace = server.namespace
@@ -1181,6 +1247,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         }),
       onSkipped: () => createsTotal.inc({ kind: 'ConfigMap', outcome: 'skipped' }),
     })
+
+    return this.nginxConfigRevision(cm)
   }
 
   /**
@@ -1277,7 +1345,27 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
   }
 
-  private buildDeployment(server: McpServerCRD, credentialsRevision = ''): k8s.V1Deployment {
+  /**
+   * Names of the env vars the egress-proxy container of a remote server
+   * receives, read from the Deployment this reconcile writes: buildDeployment
+   * strips the forbidden spec.env names and appends the authHeaders backfill
+   * and the platform entries, so no second copy of those rules exists here.
+   */
+  private egressProxyEnvNames(server: McpServerCRD): Set<string> {
+    const egressProxy = this.buildDeployment(server).spec?.template.spec?.containers.find(
+      container => container.name === 'egress-proxy'
+    )
+    if (!egressProxy) {
+      throw new Error(`remote MCP server "${server.name}" renders no egress-proxy container`)
+    }
+    return new Set((egressProxy.env ?? []).map(entry => entry.name))
+  }
+
+  private buildDeployment(
+    server: McpServerCRD,
+    credentialsRevision = '',
+    nginxConfigRevision = ''
+  ): k8s.V1Deployment {
     // ── Platform hardening: sanitize an ephemeral copy before building PodSpec ──
     // The caller retains this object as the LIST -> WATCH desired-state cache.
     // Mutating it here makes a later status-only watch event look like a
@@ -1366,6 +1454,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       }
     }
 
+    if (isRemote) {
+      // 20-envsubst-on-templates.sh substitutes only the names matching
+      // NGINX_ENVSUBST_FILTER. A CRD- or Secret-supplied filter that excludes a
+      // declared placeholder would leave ${NAME} in the rendered config, where
+      // NGINX resolves it as one of its own variables. An empty filter means
+      // every defined name, and appending it last wins over every env source.
+      env.push({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
+    }
+
     // --- Ports ---
     const ports: k8s.V1ContainerPort[] = [
       { name: 'http', containerPort: transportPort, protocol: 'TCP' },
@@ -1405,6 +1502,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
     const runAsUser = server.spec.security?.runAsUser ?? 1000
     const runAsGroup = server.spec.security?.runAsGroup ?? runAsUser
+    const podAnnotations: Record<string, string> = {}
+    if (credentialsRevision) {
+      podAnnotations[CREDENTIALS_REVISION_ANNOTATION] = credentialsRevision
+    }
+    if (this.isRemote(server) && nginxConfigRevision) {
+      podAnnotations[NGINX_CONFIG_REVISION_ANNOTATION] = nginxConfigRevision
+    }
     const hardenedContainerSecurityContext: k8s.V1SecurityContext = {
       allowPrivilegeEscalation: false,
       runAsNonRoot: true,
@@ -1443,14 +1547,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         template: {
           metadata: {
             labels,
-            // Issue #223: rotating a credential changes this digest, which
-            // changes the pod template, which is what makes Kubernetes roll the
-            // pod. Omitted when there is no envSecret — an annotation with an
-            // empty value would be one more field to drift on for connectors
-            // that have no credentials at all.
-            ...(credentialsRevision && {
-              annotations: { [CREDENTIALS_REVISION_ANNOTATION]: credentialsRevision },
-            }),
+            // Issue #223: rotating a credential changes its digest, while a
+            // remote template change changes the NGINX digest. Either change
+            // alters the PodTemplate and rolls the container. Empty revisions
+            // are omitted so they cannot become drift fields.
+            ...(Object.keys(podAnnotations).length > 0 && { annotations: podAnnotations }),
           },
           spec: {
             automountServiceAccountToken: false,
@@ -1510,9 +1611,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
                         { name: 'nginx-conf', mountPath: '/etc/nginx/templates', readOnly: true },
                       ],
                       livenessProbe: {
-                        httpGet: { path: '/health', port: transportPort as unknown as IntOrString },
+                        exec: {
+                          command: ['/usr/local/bin/egress-proxy-liveness', String(transportPort)],
+                        },
                         initialDelaySeconds: 5,
                         periodSeconds: 15,
+                        timeoutSeconds: 5,
+                        failureThreshold: 3,
                       },
                       readinessProbe: {
                         httpGet: { path: '/health', port: transportPort as unknown as IntOrString },
@@ -1682,9 +1787,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   private async ensureDeployment(
     server: McpServerCRD,
     credentialsRevision = '',
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    nginxConfigRevision = ''
   ): Promise<void> {
-    const deployment = this.buildDeployment(server, credentialsRevision)
+    let resolvedNginxConfigRevision = nginxConfigRevision
+    if (this.isRemote(server) && !resolvedNginxConfigRevision) {
+      resolvedNginxConfigRevision = this.nginxConfigRevision(this.buildNginxConfigMap(server))
+    }
+    const deployment = this.buildDeployment(
+      server,
+      credentialsRevision,
+      resolvedNginxConfigRevision
+    )
 
     await ensureResource({
       mutationAllowed: isCurrent,
@@ -2551,12 +2665,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // Ensure resources exist and are up to date
     try {
       // Remote egress proxy: create nginx ConfigMap before Deployment
+      let nginxConfigRevision = ''
       if (this.isRemote(server)) {
         // The CRD image remains desired-state input owned by its author. Remote
         // workloads use the platform-owned proxy image selected in
         // buildDeployment(); rewriting spec.image here would bump generation
         // and retire this reconcile before it can create the runtime resources.
-        await this.ensureConfigMap(server, isCurrent)
+        nginxConfigRevision = await this.ensureConfigMap(server, isCurrent)
       } else {
         // Phase 2.3: plugin image-host allowlist. Audit mode (default) logs a
         // would-be denial and still builds; enforce mode blocks the workload.
@@ -2590,7 +2705,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       if (!isCurrent()) return false
       await this.ensureService(server, isCurrent)
       if (!isCurrent()) return false
-      await this.ensureDeployment(server, secretResult.revision, isCurrent)
+      await this.ensureDeployment(server, secretResult.revision, isCurrent, nginxConfigRevision)
     } catch (err) {
       if (!isCurrent()) return false
       this.setStatus(server.name, {

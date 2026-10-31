@@ -1,0 +1,88 @@
+#!/bin/sh
+# Start wrapper for the Clerum remote MCP egress proxy.
+#
+# NGINX must stay PID 1: the kubelet's STOPSIGNAL (SIGQUIT) and a SIGTERM have
+# to reach the NGINX master directly, and the container's exit code has to be
+# NGINX's. So this wrapper does its three jobs and then execs the official
+# entrypoint, which execs `nginx -g 'daemon off;'`:
+#
+#   0. It checks, synchronously and before anything else starts, that no value
+#      envsubst is about to insert into a template would change the NGINX
+#      syntax around it, or that a query value is outside the class the
+#      upstream reads unchanged (egress-proxy-template-check), and exits 1
+#      otherwise.
+#   1. It keeps the official /docker-entrypoint.sh, so the template envsubst
+#      (20-envsubst-on-templates.sh) and the image's other
+#      /docker-entrypoint.d scripts still run. A script that exports a
+#      variable for envsubst (15-local-resolvers.envsh, when
+#      NGINX_ENTRYPOINT_LOCAL_RESOLVERS is set) runs after job 0, so the
+#      check never sees that value; the export reaches only the entrypoint's
+#      script loop, where envsubst reads it.
+#   2. It routes only NGINX's stderr through the log filter (#1240). The remote
+#      baseUrl query may carry a credential and NGINX prints the full upstream
+#      URL in every upstream error line; NGINX also quotes the upstream's
+#      response-header bytes in four upstream messages, where an upstream can
+#      echo any credential the proxy forwarded, the per-user OAuth Bearer
+#      included. stdout keeps the access log unfiltered: it records the
+#      client's request line, to which the proxy never adds the remote query.
+#
+# The filter is a child of NGINX after the exec, so the master reaps it. If it
+# dies after NGINX has opened its error log, NGINX keeps serving (it ignores
+# SIGPIPE, the FIFO writes fail with EPIPE and no unfiltered line is ever
+# written) and every error line is dropped. If it dies before that, NGINX
+# blocks opening the FIFO: no listener, so readiness fails, and the filter's
+# own error is on the container stderr. In both cases
+# /usr/local/bin/egress-proxy-liveness, the exec liveness probe, fails and the
+# kubelet restarts the container.
+set -eu
+
+# An empty command would make /docker-entrypoint.sh exec nothing and exit 0,
+# which looks like a clean shutdown instead of a broken image.
+if [ "$#" -eq 0 ]; then
+  echo "egress-proxy-entrypoint: no command to run" >&2
+  exit 1
+fi
+
+FIFO=/tmp/egress-proxy-error.fifo
+FILTER=/usr/local/bin/egress-proxy-log-filter
+TEMPLATE_CHECK=/usr/local/bin/egress-proxy-template-check
+TEMPLATE_DIR=/etc/nginx/templates
+
+# The official entrypoint substitutes every defined environment variable into
+# the templates. Refuse to start when a value would change the NGINX syntax
+# around it (a Secret value with `;` would otherwise end proxy_pass and add
+# directives). This runs before the filter exists, so its messages go straight
+# to the container stderr; they name the variable, never the value. Files are
+# listed the way 20-envsubst-on-templates.sh lists them.
+if [ -d "$TEMPLATE_DIR" ]; then
+  templates="$(find "$TEMPLATE_DIR" -follow -type f -name '*.template')"
+  if [ -n "$templates" ]; then
+    if ! (
+      set -f
+      IFS='
+'
+      # shellcheck disable=SC2086 # split on newlines only, with globbing off
+      exec awk -f "$TEMPLATE_CHECK" $templates
+    ) >&2; then
+      echo "egress-proxy-entrypoint: refusing to start: a template value would change the NGINX configuration" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# A fresh FIFO per container: a stale one from an earlier run would keep a
+# writer blocked on a reader that never comes.
+rm -f "$FIFO"
+mkfifo -m 0600 "$FIFO"
+
+# The filter reads the FIFO and writes the redacted lines to the container's
+# stderr. Its fd 1 is the wrapper's current fd 2, taken before the redirection
+# below replaces fd 2 for the exec'd process, so the access log on stdout is
+# never routed through the filter. The open for reading and the open for
+# writing below rendezvous on the FIFO.
+awk -f "$FILTER" <"$FIFO" >&2 &
+
+# The official entrypoint only runs the /docker-entrypoint.d scripts when the
+# command is nginx; the image CMD is `nginx -g daemon off;`. exec keeps the
+# process as PID 1 and opens the FIFO for writing as NGINX's stderr.
+exec /docker-entrypoint.sh "$@" 2>"$FIFO"

@@ -167,6 +167,11 @@ function cloneServer(
   }
 }
 
+function remoteConfig(reconciler: McpServerReconciler, server: McpServerCRD): string {
+  const cm = (reconciler as any).buildNginxConfigMap(server) as k8s.V1ConfigMap
+  return cm.data?.['default.conf.template'] ?? ''
+}
+
 function conditionsFromStatusPatch(patch: unknown): any[] {
   const statusAdd = Array.isArray(patch)
     ? patch.find(
@@ -227,6 +232,155 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(cm.metadata.namespace).toBe('mcp-server')
     })
 
+    it('keeps a query placeholder, never a value, in proxy_pass (Q1)', () => {
+      const queryName = ['api', 'key'].join('')
+      const placeholder = '$' + '{ALPHA_KEY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?${queryName}=${placeholder}` },
+        envSecret: {
+          name: 'sentry-credentials',
+          keys: [
+            { secretKey: 'SENTRY_AUTH_TOKEN', envVar: 'SENTRY_AUTH_TOKEN' },
+            { secretKey: 'alpha', envVar: 'ALPHA_KEY' },
+          ],
+        },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain(`proxy_pass https://api.example.com/mcp?${queryName}=${placeholder};`)
+    })
+
+    it('renders the Alpha Vantage shape: a query placeholder declared by envSecret (A1.1)', () => {
+      const placeholder = '$' + '{ALPHAVANTAGE_API_KEY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: {
+          baseUrl: `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&apikey=${placeholder}`,
+        },
+        envSecret: {
+          name: 'alphavantage-credentials',
+          keys: [{ secretKey: 'ALPHAVANTAGE_API_KEY', envVar: 'ALPHAVANTAGE_API_KEY' }],
+        },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain(
+        `proxy_pass https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&apikey=${placeholder};`
+      )
+    })
+
+    it('renders a query placeholder declared by spec.env (A1.1)', () => {
+      const placeholder = '$' + '{ALPHA_KEY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?apikey=${placeholder}` },
+        env: [{ name: 'ALPHA_KEY', value: '' }],
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain(`proxy_pass https://api.example.com/mcp?apikey=${placeholder};`)
+    })
+
+    it('rejects an undeclared query placeholder without echoing the query (A1.1)', () => {
+      const marker = 'zz-undeclared-marker'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: {
+          baseUrl: `https://api.example.com/mcp?m=${marker}&apikey=` + '$' + '{UNDECLARED_KEY}',
+        },
+      })
+
+      let error: unknown
+      try {
+        remoteConfig(reconciler, server)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain('${UNDECLARED_KEY}')
+      expect(message).not.toContain(marker)
+      expect(message).not.toContain('?m=')
+    })
+
+    it('rejects a placeholder declared in a different case (A1.1)', () => {
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?apikey=` + '$' + '{ALPHA_KEY}' },
+        env: [{ name: 'alpha_key', value: '' }],
+      })
+
+      expect(() => remoteConfig(reconciler, server)).toThrow(
+        'query placeholder ${ALPHA_KEY} is not declared'
+      )
+    })
+
+    it('accepts a query placeholder the authHeaders backfill declares (BR-1271-2)', () => {
+      const placeholder = '$' + '{QUERY_ONLY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: {
+          baseUrl: `https://api.example.com/mcp?k=${placeholder}`,
+          authHeaders: [{ header: 'X-Api-Key', valueTemplate: `Bearer ${placeholder}` }],
+        },
+      })
+      const conf = remoteConfig(reconciler, server)
+      const deployment = (reconciler as any).buildDeployment(server)
+      const egressProxy = deployment.spec.template.spec.containers.find(
+        (candidate: any) => candidate.name === 'egress-proxy'
+      )
+
+      // Witness: the backfill put the name in the container env.
+      expect(egressProxy.env).toContainEqual({ name: 'QUERY_ONLY', value: '' })
+      // The rendered proxy_pass keeps the placeholder for envsubst to fill.
+      expect(conf).toContain(`proxy_pass https://api.example.com/mcp?k=${placeholder};`)
+    })
+
+    it('accepts a query placeholder declared by envMapping (BR-1271-2)', () => {
+      const placeholder = '$' + '{QUERY_ONLY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?k=${placeholder}` },
+        envMapping: { loggers: 'QUERY_ONLY' },
+        serverConfig: { loggers: 'debug' },
+      })
+      const conf = remoteConfig(reconciler, server)
+      const deployment = (reconciler as any).buildDeployment(server)
+      const egressProxy = deployment.spec.template.spec.containers.find(
+        (candidate: any) => candidate.name === 'egress-proxy'
+      )
+
+      // Witness: the mapped name is in the egress-proxy container env.
+      expect(egressProxy.env).toContainEqual({ name: 'QUERY_ONLY', value: 'debug' })
+      expect(conf).toContain(`proxy_pass https://api.example.com/mcp?k=${placeholder};`)
+    })
+
+    it('rejects a forbidden spec.env name used as a query placeholder (BR-1271-3)', () => {
+      const placeholder = '$' + '{KUBECONFIG}'
+      const withoutPlaceholder = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: 'https://api.example.com/mcp' },
+        env: [{ name: 'KUBECONFIG', value: '/tmp/kubeconfig' }],
+      })
+      const forbidden = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?k=${placeholder}` },
+        env: [{ name: 'KUBECONFIG', value: '/tmp/kubeconfig' }],
+      })
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        // Witness: the same CRD renders once the placeholder is gone.
+        expect(remoteConfig(reconciler, withoutPlaceholder)).toContain(
+          'proxy_pass https://api.example.com/mcp;'
+        )
+        const deployment = (reconciler as any).buildDeployment(withoutPlaceholder)
+        const egressProxy = deployment.spec.template.spec.containers.find(
+          (candidate: any) => candidate.name === 'egress-proxy'
+        )
+        // Witness: the strip ran, so the name never reaches the container.
+        const names = (egressProxy.env ?? []).map((entry: any) => entry.name)
+        expect(names).not.toContain('KUBECONFIG')
+        expect(() => remoteConfig(reconciler, forbidden)).toThrow(
+          'query placeholder ${KUBECONFIG} is not declared'
+        )
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
     it('should contain proxy_pass directive pointing to the remote baseUrl', () => {
       const cm = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER)
       const conf = cm.data['default.conf.template']
@@ -284,6 +438,32 @@ describe('McpServerReconciler remote egress proxy', () => {
 
       expect(conf).toContain('listen 3000')
     })
+
+    it.each([
+      ['a static remote', () => REMOTE_SERVER],
+      [
+        'an oauth remote',
+        () =>
+          cloneServer(REMOTE_SERVER, {
+            auth: { type: 'oauth' },
+            remote: { baseUrl: 'https://mcp.sentry.io/sse' },
+          }),
+      ],
+    ])(
+      'ignores upstream X-Accel-Redirect and X-Accel-Charset once inside the proxied location for %s (#1240)',
+      (_label, server) => {
+        const conf = remoteConfig(reconciler, server())
+        const directive = 'proxy_ignore_headers X-Accel-Redirect X-Accel-Charset;'
+
+        expect(conf.split(directive)).toHaveLength(2)
+        const location = conf.indexOf('location /')
+        const health = conf.indexOf('location /health')
+        const at = conf.indexOf(directive)
+        expect(location).toBeGreaterThanOrEqual(0)
+        expect(at).toBeGreaterThan(location)
+        expect(at).toBeLessThan(health)
+      }
+    )
 
     it('should disable proxy_buffering for SSE streaming support', () => {
       const cm = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER)
@@ -686,12 +866,18 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(bridgeContainer).toBeUndefined()
     })
 
-    it('should set liveness probe on /health endpoint', () => {
+    it('should set an exec liveness probe with bounded timing (A2.2)', () => {
       const deployment = (reconciler as any).buildDeployment(REMOTE_SERVER)
       const containers = deployment.spec.template.spec.containers
 
       const egressContainer = containers.find((c: any) => c.name === 'egress-proxy')
-      expect(egressContainer.livenessProbe.httpGet.path).toBe('/health')
+      expect(egressContainer.livenessProbe).toEqual({
+        exec: { command: ['/usr/local/bin/egress-proxy-liveness', '3000'] },
+        initialDelaySeconds: 5,
+        periodSeconds: 15,
+        timeoutSeconds: 5,
+        failureThreshold: 3,
+      })
     })
 
     it('should set readiness probe on /health endpoint', () => {
@@ -725,17 +911,40 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(egressContainer.securityContext.allowPrivilegeEscalation).toBe(false)
     })
 
-    it('should inject envSecret as env vars in the egress-proxy container', () => {
-      const deployment = (reconciler as any).buildDeployment(REMOTE_SERVER)
+    it('appends the envsubst filter reset after every CRD env source (U6 for #1240)', () => {
+      // The filter name arrives from three CRD sources (envMapping, spec.env and
+      // a Secret mapping). The platform entry must still come last: a CRD-supplied
+      // filter that excludes a declared placeholder would otherwise leave ${NAME}
+      // in the rendered config for NGINX to expand.
+      const server = cloneServer(REMOTE_SERVER, {
+        envMapping: { loggers: 'NGINX_ENVSUBST_FILTER' },
+        serverConfig: { loggers: 'debug' },
+        env: [{ name: 'NGINX_ENVSUBST_FILTER', value: '^X$' }],
+        envSecret: {
+          name: 'sentry-credentials',
+          keys: [
+            { secretKey: 'SENTRY_AUTH_TOKEN', envVar: 'SENTRY_AUTH_TOKEN' },
+            { secretKey: 'filter', envVar: 'NGINX_ENVSUBST_FILTER' },
+          ],
+        },
+      })
+      const deployment = (reconciler as any).buildDeployment(server)
       const containers = deployment.spec.template.spec.containers
 
       const egressContainer = containers.find((c: any) => c.name === 'egress-proxy')
-      const sentryEnv = egressContainer.env.find((e: any) => e.name === 'SENTRY_AUTH_TOKEN')
-      expect(sentryEnv).toBeDefined()
-      expect(sentryEnv.valueFrom.secretKeyRef).toEqual({
-        name: 'sentry-credentials',
-        key: 'SENTRY_AUTH_TOKEN',
+      // Secret-mapping witness: the mapped key still produces its entry.
+      expect(egressContainer.env).toContainEqual({
+        name: 'SENTRY_AUTH_TOKEN',
+        valueFrom: { secretKeyRef: { name: 'sentry-credentials', key: 'SENTRY_AUTH_TOKEN' } },
       })
+      // envMapping, spec.env and the Secret mapping each declare the filter; the
+      // platform reset is the fourth entry and comes after every one of them.
+      expect(egressContainer.env.at(-1)).toEqual({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
+      const filterEntries = egressContainer.env.filter(
+        (e: any) => e.name === 'NGINX_ENVSUBST_FILTER'
+      )
+      expect(filterEntries).toHaveLength(4)
+      expect(filterEntries.slice(0, -1).every((e: any) => e.value !== '')).toBe(true)
     })
 
     it('should backfill empty env vars for auth header placeholders when envSecret is absent', () => {
@@ -1458,6 +1667,53 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(result.host).toBe('api.example.com:8443')
     })
 
+    it('should return the parsed query for a URL with search components (U8)', () => {
+      const result = (reconciler as any).sanitizeRemoteUrl('https://api.example.com/mcp?a=1')
+      expect(result.search).toBe('?a=1')
+    })
+
+    it.each([
+      ['a lowercase placeholder', '?k=$' + '{alpha_key}'],
+      ['a placeholder starting with a digit', '?k=$' + '{1A}'],
+      ['a bare dollar', '?k=$ALPHA'],
+      ['an unterminated placeholder', '?k=$' + '{ALPHA'],
+      ['a brace expression', '?k={x}'],
+      ['a backslash', '?k=a' + String.fromCharCode(92) + 'b'],
+      ['a semicolon', '?k=a;b'],
+    ])('rejects %s in a remote URL query (Q2)', (_label, query) => {
+      let error: unknown
+      try {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://api.example.com/mcp${query}`)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toMatch(/invalid placeholder|forbidden character/)
+      expect(message).toMatch(/\[A-Z_\]\[A-Z0-9_\]\*/)
+      expect(message).not.toContain(query)
+      // The value alone must not be echoed either (it may be the credential).
+      expect(message).not.toContain(query.slice(query.indexOf('=') + 1))
+    })
+
+    it.each([
+      ['a dollar sign', '/a$b/mcp'],
+      ['a semicolon', '/mcp;return'],
+    ])('rejects %s in the remote URL path without echoing the path (A1.2)', (_label, path) => {
+      let error: unknown
+      try {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://api.example.com${path}`)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain('remote.baseUrl path contains a forbidden character')
+      expect(message).not.toContain(path)
+    })
+
     it('should reject all IP addresses including non-private ones', () => {
       // All IP-literal URLs are blocked — only DNS hostnames allowed
       expect(() => {
@@ -1473,6 +1729,128 @@ describe('McpServerReconciler remote egress proxy', () => {
   })
 
   describe('reconcile failure modes for remote servers', () => {
+    it('fails the reconcile without writing when the baseUrl query is invalid (Q3)', async () => {
+      const marker = 'zz-q-marker-query'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?q=${marker}$` + '{ALPHA' },
+      })
+
+      await reconciler.reconcile(server)
+
+      const status = reconciler.getStatus(server.name)
+      // Witness: the reconcile reached the resource sync (it read the Secret).
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
+      expect(status.message).toContain('Resource sync failed')
+      expect(status.message).toMatch(/invalid placeholder|forbidden character/)
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(status.message).not.toContain(marker)
+    })
+
+    it('fails the reconcile without writing when the baseUrl path has a dollar sign (A1.2)', async () => {
+      const marker = 'zz-p-marker-path'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/${marker}$scheme/mcp` },
+      })
+
+      await reconciler.reconcile(server)
+
+      const status = reconciler.getStatus(server.name)
+      // Witness: the reconcile reached the resource sync (it read the Secret).
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
+      expect(status.message).toContain('Resource sync failed')
+      expect(status.message).toContain('remote.baseUrl path contains a forbidden character')
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(status.message).not.toContain(marker)
+    })
+
+    it('fails the reconcile before any write when a query placeholder is undeclared (A1.1)', async () => {
+      const marker = 'zz-q-marker-undeclared'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: {
+          baseUrl: `https://api.example.com/mcp?m=${marker}&q=` + '$' + '{UNDECLARED_KEY}',
+        },
+      })
+
+      await reconciler.reconcile(server)
+
+      const status = reconciler.getStatus(server.name)
+      // Witness: the reconcile reached the resource sync (it read the Secret).
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
+      expect(status.message).toContain('Resource sync failed')
+      expect(status.message).toContain('query placeholder ${UNDECLARED_KEY} is not declared')
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(status.message).not.toContain(marker)
+    })
+
+    it('fails the reconcile before any write when a stripped spec.env name is the placeholder (BR-1271-3)', async () => {
+      const marker = 'zz-q-marker-stripped'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: {
+          baseUrl: `https://api.example.com/mcp?m=${marker}&q=` + '$' + '{KUBECONFIG}',
+        },
+        env: [{ name: 'KUBECONFIG', value: '/tmp/kubeconfig' }],
+      })
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        await reconciler.reconcile(server)
+      } finally {
+        warn.mockRestore()
+      }
+
+      const status = reconciler.getStatus(server.name)
+      // Witness: the reconcile reached the resource sync (it read the Secret).
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
+      expect(status.message).toContain('Resource sync failed')
+      expect(status.message).toContain('query placeholder ${KUBECONFIG} is not declared')
+      // The status the operator reads names the strip, not just the absence.
+      expect(status.message).toContain('stripped as forbidden')
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(status.message).not.toContain(marker)
+    })
+
+    it('never copies the Secret value into the ConfigMap or Deployment (Q4)', async () => {
+      const marker = ['q4', 'secret', 'value', 'marker'].join('-')
+      const encodedMarker = Buffer.from(marker, 'utf8').toString('base64')
+      const placeholder = '$' + '{ALPHA_KEY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?q=${placeholder}` },
+        envSecret: {
+          name: 'query-credentials',
+          keys: [{ secretKey: 'k', envVar: 'ALPHA_KEY' }],
+        },
+      })
+      coreApi.readNamespacedSecret.mockResolvedValueOnce({
+        data: { k: encodedMarker },
+      })
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
+      appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+
+      await reconciler.reconcile(server)
+
+      expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledTimes(1)
+      const configMap = coreApi.createNamespacedConfigMap.mock.calls[0][0].body
+      expect(configMap.data['default.conf.template']).toContain(
+        `proxy_pass https://api.example.com/mcp?q=${placeholder};`
+      )
+      expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+      const deployment = appsApi.createNamespacedDeployment.mock.calls[0][0].body
+      const alphaEnv = deployment.spec.template.spec.containers[0].env.find(
+        (entry: any) => entry.name === 'ALPHA_KEY'
+      )
+      expect(alphaEnv.valueFrom.secretKeyRef).toEqual({
+        name: 'query-credentials',
+        key: 'k',
+      })
+      expect(JSON.stringify(configMap)).not.toContain(marker)
+      expect(JSON.stringify(deployment)).not.toContain(marker)
+      expect(JSON.stringify(configMap)).not.toContain(encodedMarker)
+      expect(JSON.stringify(deployment)).not.toContain(encodedMarker)
+    })
+
     it('should set status deployed:false when ConfigMap creation fails', async () => {
       coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       const err = new Error('Quota exceeded') as Error & { code?: number }

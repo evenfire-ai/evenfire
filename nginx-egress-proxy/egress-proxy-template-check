@@ -1,0 +1,150 @@
+# egress-proxy-template-check: awk program run by egress-proxy-entrypoint on the
+# NGINX templates before the official entrypoint substitutes them.
+#
+# 20-envsubst-on-templates.sh replaces both $NAME and ${NAME} for every defined
+# environment variable, inside the NGINX syntax, after HCC has validated the
+# template. A Secret value can therefore end a directive or start a new one.
+# This program finds every reference to a defined variable and checks its value
+# against the NGINX context the reference sits in, following the tokenizer of
+# NGINX 1.30 (ngx_conf_read_token):
+#
+#   inside "..."                  control characters, ", $ and \ are rejected
+#   inside an unquoted argument   anything outside [A-Za-z0-9._~-] is rejected,
+#                                 except a % in a complete %XX escape: + is read
+#                                 as a space by a form-decoding upstream, & starts
+#                                 a new parameter and # ends the value
+#   anywhere else                 any defined value is rejected: at the start of
+#                                 an argument, inside '...', in a comment, or
+#                                 after a \ the value itself changes the syntax
+#
+# Undefined names are left alone, as envsubst leaves them. Values are only
+# compared with index(), constant classes and a constant gsub() pattern: never
+# used as a regex or as an output format. On a rejection it prints the file, the
+# variable name and the context, never the value or the template line, and
+# exits 1.
+
+function has_any(value, chars,    i) {
+  for (i = 1; i <= length(chars); i++) {
+    if (index(value, substr(chars, i, 1))) return 1
+  }
+  return 0
+}
+
+function reject(name, where,    key) {
+  bad = 1
+  key = FILENAME SUBSEP name SUBSEP where
+  if (key in reported) return
+  reported[key] = 1
+  print "egress-proxy-entrypoint: " FILENAME ": the value of " name " is not allowed in " where
+}
+
+function check(name, context,    value, rest) {
+  if (!(name in ENVIRON)) return
+  value = ENVIRON[name]
+  if (context == "quoted") {
+    if (value ~ /[[:cntrl:]]/ || has_any(value, "\"$\\")) reject(name, "a quoted string")
+  } else if (context == "unquoted") {
+    rest = value
+    gsub(/%[0-9A-Fa-f][0-9A-Fa-f]/, "", rest)
+    if (rest !~ /^[A-Za-z0-9._~-]*$/) reject(name, "an unquoted argument")
+  } else {
+    reject(name, context)
+  }
+}
+
+# The envsubst reference that starts at the "$" at position i of text: sets
+# ref_name ("" when the "$" does not start one) and ref_len (characters used).
+function reference_at(text, i,    rest) {
+  rest = substr(text, i + 1)
+  ref_name = ""
+  ref_len = 1
+  if (match(rest, /^\{[A-Za-z_][A-Za-z0-9_]*\}/)) {
+    ref_name = substr(rest, 2, RLENGTH - 2)
+    ref_len = RLENGTH + 1
+  } else if (match(rest, /^[A-Za-z_][A-Za-z0-9_]*/)) {
+    ref_name = substr(rest, 1, RLENGTH)
+    ref_len = RLENGTH + 1
+  }
+}
+
+FNR == 1 {
+  quote = ""
+  token_start = 1
+  comment = 0
+  escaped = 0
+}
+
+{
+  line = $0
+  n = length(line)
+  for (i = 1; i <= n + 1; i++) {
+    c = (i <= n) ? substr(line, i, 1) : "\n"
+    if (comment) {
+      if (c == "\n") {
+        comment = 0
+        token_start = 1
+      } else if (c == "$") {
+        # envsubst also substitutes inside comments; a newline in the value
+        # would end the comment and start a directive.
+        reference_at(line, i)
+        if (ref_name != "") check(ref_name, "a comment")
+        i += ref_len - 1
+      }
+      continue
+    }
+    if (escaped) {
+      escaped = 0
+      if (c == "$") {
+        reference_at(line, i)
+        if (ref_name != "") check(ref_name, "an escaped position")
+        i += ref_len - 1
+      }
+      continue
+    }
+    if (c == "\\") {
+      escaped = 1
+      if (quote == "") token_start = 0
+      continue
+    }
+    if (quote != "") {
+      if (c == quote) {
+        quote = ""
+        token_start = 1
+      } else if (c == "$") {
+        reference_at(line, i)
+        if (ref_name != "") check(ref_name, quote == "\"" ? "quoted" : "a single-quoted string")
+        i += ref_len - 1
+      }
+      continue
+    }
+    if (c == " " || c == "\t" || c == "\r" || c == "\n" || c == ";" || c == "{") {
+      token_start = 1
+      continue
+    }
+    if (token_start) {
+      if (c == "}") continue
+      if (c == "#") {
+        comment = 1
+        continue
+      }
+      token_start = 0
+      if (c == "\"" || c == "'") {
+        quote = c
+        continue
+      }
+      if (c == "$") {
+        reference_at(line, i)
+        if (ref_name != "") check(ref_name, "an argument start")
+        i += ref_len - 1
+      }
+      continue
+    }
+    if (c == "$") {
+      reference_at(line, i)
+      if (ref_name != "") check(ref_name, "unquoted")
+      i += ref_len - 1
+    }
+  }
+}
+
+END { exit bad ? 1 : 0 }
