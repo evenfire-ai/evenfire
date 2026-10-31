@@ -14,6 +14,7 @@ import {
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { GfsDragSessionProvider } from '@/gfs/dragSession'
 import { delegationAffordances } from '../../../src/gfs/delegation.js'
 import { GfsClient } from '../../../src/gfs/uriHandler.js'
 import { requestJson } from '../../../src/httpClient.js'
@@ -154,7 +155,8 @@ async function mountMoveRetryScenario(
     code: string
     message: string
   },
-  raceCommit = false
+  raceCommit = false,
+  dragMode = false
 ) {
   const retryGate = deferred<void>()
   const commitGate = deferred<void>()
@@ -168,6 +170,7 @@ async function mountMoveRetryScenario(
   })
   let retryPhase = false
   let staleResponseServed = false
+  let moveRequests = 0
   let currentAffordanceReads = 0
   const source = accessibleResource('move-report', 'Report.txt', 'file', {
     parentResourceId: 'source-parent',
@@ -229,6 +232,7 @@ async function mountMoveRetryScenario(
       return
     }
     if (request.method === 'PATCH' && url.pathname.endsWith('/move-report')) {
+      moveRequests += 1
       if (raceCommit) {
         markMoveStarted()
         await commitGate.promise
@@ -279,12 +283,14 @@ async function mountMoveRetryScenario(
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const surface = () => (
     <QueryClientProvider client={queryClient}>
-      <FileExplorerTree
-        onOpenFolder={vi.fn()}
-        onOpenPreview={vi.fn()}
-        onResourceAction={vi.fn()}
-        pushToast={vi.fn()}
-      />
+      <GfsDragSessionProvider>
+        <FileExplorerTree
+          onOpenFolder={vi.fn()}
+          onOpenPreview={vi.fn()}
+          onResourceAction={vi.fn()}
+          pushToast={vi.fn()}
+        />
+      </GfsDragSessionProvider>
       <FilesLocationProbe />
     </QueryClientProvider>
   )
@@ -296,6 +302,43 @@ async function mountMoveRetryScenario(
       throw new Error(`Files location did not open; IPC errors: ${JSON.stringify(electron.errors)}`)
     }
   )
+  if (dragMode) {
+    await screen.findByRole('button', { name: 'Archive' })
+    return {
+      queryClient,
+      get moveRequests() {
+        return moveRequests
+      },
+      get currentAffordanceReads() {
+        return currentAffordanceReads
+      },
+      beginDrag: async () => {
+        retryPhase = true
+        const sourceButton = screen.getByRole('button', { name: 'Report.txt' })
+        const targetButton = screen.getByRole('button', { name: 'Archive' })
+        const targetRow = targetButton
+          .closest('[role="treeitem"]')!
+          .querySelector('.da-file-explorer__row')!
+        const dataTransfer = {
+          types: ['application/x-evenfire-gfs-resource'],
+          files: [],
+          effectAllowed: 'move',
+          dropEffect: 'none',
+          setData: vi.fn(),
+        }
+        fireEvent.dragStart(sourceButton, { dataTransfer })
+        fireEvent.dragEnter(targetRow, { dataTransfer })
+        fireEvent.dragOver(targetRow, { dataTransfer })
+        fireEvent.drop(targetRow, { dataTransfer })
+        await retryStarted
+      },
+      publishRenewedGeneration: () => {
+        generation = 8
+        auth.generation = 8
+        view.rerender(surface())
+      },
+    }
+  }
   fireEvent.keyDown(screen.getByRole('button', { name: 'Report.txt' }), {
     key: 'F10',
     shiftKey: true,
@@ -432,6 +475,32 @@ async function mount(status: number, code: string, message: string) {
 }
 
 describe('FileExplorerTree expanded-folder authority handoff', () => {
+  it('preserves sibling Files after a stale drag affordance 401', async () => {
+    const mounted = await mountMoveRetryScenario(
+      { status: 401, code: 'unauthenticated', message: 'unauthenticated' },
+      false,
+      true
+    )
+    await mounted.beginDrag?.()
+    generation = 8
+    releaseMoveRetryResponse?.()
+    await waitFor(() =>
+      expect(
+        electron.errors.some(
+          message =>
+            message.includes('gfs:affordances') &&
+            message.includes('__CLERUM_GFS_STALE_AUTHORITY_V1__:stale:')
+        )
+      ).toBe(true)
+    )
+    expect(screen.getByTestId('access').textContent).toBe('active')
+    expect(screen.getByTestId('location').textContent).toBe(currentUri)
+    expect(mounted.moveRequests).toBe(0)
+    await mounted.publishRenewedGeneration()
+    expect(screen.getByTestId('access').textContent).toBe('active')
+    expect(screen.getByTestId('location').textContent).toBe(currentUri)
+  })
+
   it('preserves a sibling Files location when an in-flight child 401 is stale after renewal', async () => {
     const mounted = await mount(401, 'unauthenticated', 'The previous session expired.')
     generation = 8

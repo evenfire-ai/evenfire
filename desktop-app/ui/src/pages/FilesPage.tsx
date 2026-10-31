@@ -638,8 +638,8 @@ export function FilesPage({
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
     handleAuthorityFailure: useCallback(
-      (message: string, scope: string, generation: number) =>
-        ctrl.handleAuthorityFailure(message, 'operation', scope, generation),
+      (error: unknown, scope: string, generation: number) =>
+        ctrl.handleAuthorityFailure(error, 'operation', scope, generation),
       [ctrl.handleAuthorityFailure]
     ),
   })
