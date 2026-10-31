@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
@@ -389,8 +390,9 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
 
     renderHarness()
     await waitFor(() => expect(sourceCalls).toBe(1))
+    const notesOptions = await screen.findByRole('button', { name: 'Options for notes.txt' })
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+      fireEvent.click(notesOptions)
     })
     fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
@@ -541,7 +543,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       },
     })
 
-    const { client } = renderHarness({ pendingGfsUri: null })
+    const { client } = renderHarness({ pendingGfsUri: GFS_SHARED_WITH_ME_LOCATION })
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Options for Shared folder' })).toBeTruthy()
     )
@@ -747,7 +749,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       },
     })
 
-    const { client } = renderHarness({ pendingGfsUri: null })
+    const { client } = renderHarness({ pendingGfsUri: GFS_SHARED_WITH_ME_LOCATION })
     await screen.findByText('shared.txt')
     await waitFor(() => expect(listCalls).toBe(1))
     expect(screen.getByRole('button', { name: 'Share shared.txt' })).toBeTruthy()
@@ -965,7 +967,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       },
     })
 
-    const { client } = renderHarness({ pendingGfsUri: null })
+    const { client } = renderHarness({ pendingGfsUri: GFS_SHARED_WITH_ME_LOCATION })
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Share notes.bin' })).toBeTruthy()
     )
@@ -1232,7 +1234,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       screen.getByRole('button', { name: 'Shared with me' }).click()
     })
     expect(await screen.findByText('No shared files yet')).toBeTruthy()
-    expect(tab()).toBe('null|Files')
+    expect(tab()).toBe('evendrive:shared-with-me|Shared with me')
     await waitFor(() => expect(reportOutcome).toHaveBeenCalledWith(1090, 'superseded'))
 
     await act(async () => {
@@ -1257,7 +1259,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       resolvePending(pendingFile)
       await Promise.resolve()
     })
-    expect(tab()).toBe('null|Files')
+    expect(tab()).toBe('evendrive:shared-with-me|Shared with me')
     expect(reportExplicitIntent).toHaveBeenCalledOnce()
     expect(reportOutcome).toHaveBeenCalledTimes(1)
     expect(reportOutcome).toHaveBeenCalledWith(1090, 'superseded')
@@ -1608,9 +1610,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     })
 
     await waitFor(() => {
-      expect(screen.getByRole('navigation', { name: 'File location' }).textContent).toBe(
-        'Shared with me'
-      )
+      expect(screen.getByRole('region', { name: 'Shared with me' })).toBeTruthy()
       expect(screen.queryByText('private-notes.md')).toBeNull()
     })
   })

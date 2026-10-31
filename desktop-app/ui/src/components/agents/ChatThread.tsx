@@ -267,6 +267,9 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
           dataBase64={previewAttachment.dataBase64}
           mimeType={previewAttachment.mimeType || 'image/png'}
           onClose={() => setPreviewAttachmentId(null)}
+          // Inline base64: the bytes are already in the transcript, so no GFS
+          // read happens and nothing is recorded.
+          recordOpen={false}
         />
       ) : null}
     </span>

@@ -54,6 +54,10 @@ export interface GfsGrantListProps {
   agents: GfsAgentSubjectOption[]
   /** Label source for `user`/`team` subjects (the visible team directory). */
   subjects: GfsDelegationSubjectOption[]
+  /** True for the caller's own ready home root on this drive. A home-owner row on that
+   *  root is the caller's own grant: it stays listed (as "Owner") even when the caller's
+   *  team directory does not name the caller (U1). Absent: the caller has no home here. */
+  isOwnHomeRoot?: (resourceId: string) => boolean
   onRevoke: (item: GfsGrantListItem, label: string) => void | Promise<void>
   onChangeRole?: (
     item: GfsGrantListItem,
@@ -69,6 +73,7 @@ export interface GfsGrantListProps {
   /** Removal requested on a merged row that carries an inherited floor. */
   onRemoveInherited?: (row: GfsMergedAccessRow, label: string) => void | Promise<void>
   onRevokeShare?: (item: GfsShareListItem, label: string) => void | Promise<void>
+  onLowerShare?: (item: GfsShareListItem, label: string) => void | Promise<void>
   revoking?: boolean
   revokingShare?: boolean
   updatingRole?: boolean

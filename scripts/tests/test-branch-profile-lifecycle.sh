@@ -816,6 +816,37 @@ for name in control-ui control-api external-rest-api rpc-proxy; do
 done
 assert_dead "${control_ui_pid}" 'stop-pf terminates the verified control-ui forward'
 
+# Every forward pf-all-stack.sh (pre-gate-sync) starts uses a record name that
+# stop-pf verifies, so the two tools clear each other's record for one port.
+pf_stack_names="$(sed -nE 's/^[[:space:]]*start_(optional_(deployment_)?)?pf[[:space:]]+([a-z][a-z-]*).*/\3/p' \
+  "${ROOT}/scripts/minikube/pf-all-stack.sh" | sort -u)"
+[[ -n "${pf_stack_names}" ]] || fail 'no forward names found in pf-all-stack.sh'
+while IFS= read -r name; do
+  grep -Eq "^[[:space:]]+(${name}|[a-z-]+ \| ${name}|${name} \| [a-z-]+)\)$" \
+    "${ROOT}/scripts/minikube-profiles/branch-profile.sh" ||
+    fail "pf-all-stack.sh records '${name}', which branch-profile stop-pf does not verify"
+  ok
+done <<<"${pf_stack_names}"
+
+# Records written by earlier pre-gate-sync runs under the service name
+# workflow-approval-request-reader.pid stay on disk; stop-pf must clear them.
+reset_state
+printf '%s\n' control-plane/control-ui control-plane/control-api profiles/external-rest-api \
+  rpc-proxy/rpc-proxy channels/workflow-approval-request-reader >"${state}/services"
+bp pf-approval-reader pf
+assert_rc 0 'pf with the approval reader present'
+mv "${pids_dir}/workflow-approval-reader.pid" "${pids_dir}/workflow-approval-request-reader.pid"
+pf_owner_read_record "${pids_dir}/workflow-approval-request-reader.pid" ||
+  fail 'workflow-approval-request-reader record is unreadable'
+approval_reader_pid="${PF_OWNER_RECORD_PID}"
+assert_alive "${approval_reader_pid}" 'the approval reader forward is live before stop-pf'
+bp stop-pf-pre-gate-name stop-pf
+assert_rc 0 'stop-pf of a record named by pf-all-stack'
+assert_output_has 'stopped or cleared verified workflow-approval-request-reader record' \
+  'stop-pf verifies the pf-all-stack approval reader record'
+assert_no_file "${pids_dir}/workflow-approval-request-reader.pid" 'stop-pf removes the pf-all-stack record'
+assert_dead "${approval_reader_pid}" 'stop-pf terminates the pf-all-stack approval reader forward'
+
 reset_state
 printf '%s\n' control-plane/control-ui control-plane/control-api profiles/external-rest-api >"${state}/services"
 bp pf-required-absent pf

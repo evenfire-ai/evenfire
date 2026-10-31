@@ -169,6 +169,30 @@ export interface GfsAccessibleResourcesPage {
   view?: 'operator'
 }
 
+/**
+ * One row of the caller's "Recent files" list (control-api gfs/recentFiles.ts).
+ * There is no `path`: the card is a flat list of files, so the renderer never
+ * prints a location.
+ */
+export interface GfsRecentFile {
+  resourceId: string
+  gfsUri: string
+  drive: string
+  name: string
+  version: number
+  bytes: number
+  /** When this user (or an agent run bound to this user) last opened or changed the file, ISO 8601 UTC. */
+  lastActivityAt: string
+}
+
+/**
+ * The whole recent list in one response: the server caps it per user and the
+ * card pages client-side, so there is no cursor (D20).
+ */
+export interface GfsRecentFilesPage {
+  items: GfsRecentFile[]
+}
+
 /** Grant/share subject grammar (control-api routes/gfs/grants.ts parseSubject). */
 export type GfsSubject =
   | { type: 'user'; id: string }
@@ -197,6 +221,11 @@ export interface GfsGrantInput {
   inherit?: boolean
 }
 
+export interface GfsShareOptions {
+  permissions: string[]
+  includeDescendants: boolean
+}
+
 export interface GfsShareInput {
   resourceId: string
   drive?: string
@@ -217,6 +246,7 @@ export interface GfsGrantListItem {
   drive: string
   resourceId: string
   subject: { type: string; id?: string }
+  homeOwner?: true
   permissions: string[]
   inherit: boolean
 }
@@ -278,6 +308,15 @@ export interface GfsDeleteInput {
   resourceId: string
   drive?: string
   ifMatch?: number
+}
+
+export interface GfsHome {
+  state: 'ready' | 'pending' | 'conflict' | 'retired'
+  drive: string | null
+  path: string | null
+  resourceId: string | null
+  conflictCode?: string | null
+  heldPermissions: string[]
 }
 
 const DEFAULT_DRIVE = 'main'
@@ -438,6 +477,18 @@ async function deleteGfsResource(
 export class GfsClient {
   constructor(private readonly transport: GfsTransport) {}
 
+  async getHome(token: string): Promise<GfsHome> {
+    try {
+      return await this.transport.requestJson<GfsHome>(
+        'GET',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/home'),
+        { token }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+  }
+
   /** Resolve a gfs:// URI to its current resource (validates the URI locally first). */
   async resolveUri(uri: string, token: string, signal?: AbortSignal): Promise<ResolvedGfsResource> {
     parseGfsUri(uri) // fail fast on a malformed URI before a round-trip
@@ -458,28 +509,35 @@ export class GfsClient {
    * `opts.maxBytes` bounds the download (preview path); omitting it reads the
    * full body (save-to-disk). The unbounded call keeps the exact 2-arg
    * `fetchBytes` signature so existing callers are byte-for-byte unchanged.
+   *
+   * `opts.recordOpen` is REQUIRED: a user opening a file records their own
+   * activity, so every caller states its intent. A true value appends
+   * `intent=open` and the API records the open after the read is authorized;
+   * false sends no intent at all (a plugin read, a reload, or a revocation
+   * retry must not surface the file as recently opened).
    */
   async download(
     uri: string,
     token: string,
-    opts?: { maxBytes?: number; signal?: AbortSignal }
+    opts: { maxBytes?: number; signal?: AbortSignal; recordOpen: boolean }
   ): Promise<{ resource: ResolvedGfsResource; bytes: ArrayBuffer }> {
     // resolveUri runs first and already surfaces its own verdict, so a 429 on the
     // resolve leg reaches the renderer with the resolve message, not this one.
-    const resource = await this.resolveUri(uri, token, opts?.signal)
+    const resource = await this.resolveUri(uri, token, opts.signal)
+    const intent = opts.recordOpen ? '&intent=open' : ''
     const proxyUrl = joinUrl(
       this.transport.baseUrl,
-      `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
+      `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}${intent}`
     )
     try {
       // The unbounded call keeps the exact 2-arg `fetchBytes` signature so
       // existing callers stay byte-for-byte unchanged; any bound or
       // cancellable call passes the opts object.
       const bytes =
-        opts?.maxBytes !== undefined || opts?.signal !== undefined
+        opts.maxBytes !== undefined || opts.signal !== undefined
           ? await this.transport.fetchBytes(proxyUrl, token, {
-              maxBytes: opts?.maxBytes,
-              signal: opts?.signal,
+              maxBytes: opts.maxBytes,
+              signal: opts.signal,
             })
           : await this.transport.fetchBytes(proxyUrl, token)
       return { resource, bytes }
@@ -535,14 +593,17 @@ export class GfsClient {
     opts?: { drive?: string; cursor?: string; signal?: AbortSignal }
   ): Promise<GfsChildrenPage> {
     const q = new URLSearchParams()
-    q.set('drive', opts?.drive ?? DEFAULT_DRIVE)
+    // An omitted drive lets the server apply its documented default.
+    if (opts?.drive !== undefined) q.set('drive', opts.drive)
     if (opts?.cursor) q.set('cursor', opts.cursor)
+    const query = q.toString()
     try {
       const payload = await this.transport.requestJson<GfsEnvelope<GfsChildrenPage>>(
         'GET',
         joinUrl(
           this.transport.baseUrl,
-          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children?${q.toString()}`
+          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children` +
+            (query ? `?${query}` : '')
         ),
         { token, signal: opts?.signal }
       )
@@ -557,12 +618,35 @@ export class GfsClient {
     opts?: { drive?: string; cursor?: string }
   ): Promise<GfsAccessibleResourcesPage> {
     const q = new URLSearchParams()
-    q.set('drive', opts?.drive ?? DEFAULT_DRIVE)
+    if (opts?.drive !== undefined) q.set('drive', opts.drive)
     if (opts?.cursor) q.set('cursor', opts.cursor)
+    const query = q.toString()
     try {
       const payload = await this.transport.requestJson<GfsEnvelope<GfsAccessibleResourcesPage>>(
         'GET',
-        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/resources?' + q.toString()),
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/resources' + (query ? `?${query}` : '')),
+        { ['token']: session }
+      )
+      return unwrap(payload)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+  }
+
+  /**
+   * The caller's own recent files, newest first. No cursor: the server returns
+   * the whole (capped) list and the card pages client-side. Entries the caller
+   * can no longer read are already filtered out server-side, so this is not a
+   * second authorization point.
+   */
+  async listRecent(session: string, opts?: { drive?: string }): Promise<GfsRecentFilesPage> {
+    const q = new URLSearchParams()
+    if (opts?.drive !== undefined) q.set('drive', opts.drive)
+    const query = q.toString()
+    try {
+      const payload = await this.transport.requestJson<GfsEnvelope<GfsRecentFilesPage>>(
+        'GET',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/recent' + (query ? `?${query}` : '')),
         { ['token']: session }
       )
       return unwrap(payload)
@@ -579,14 +663,14 @@ export class GfsClient {
   async affordances(
     resourceId: string,
     token: string,
-    drive: string = DEFAULT_DRIVE
+    drive?: string
   ): Promise<GfsHeldAffordances> {
     try {
       return await this.transport.requestJson<GfsHeldAffordances>(
         'GET',
         joinUrl(
           this.transport.baseUrl,
-          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/affordances?drive=${encodeURIComponent(drive)}`
+          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/affordances?drive=${encodeURIComponent(drive ?? DEFAULT_DRIVE)}`
         ),
         { token }
       )

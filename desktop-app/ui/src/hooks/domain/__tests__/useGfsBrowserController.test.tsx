@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { type ReactNode, useState } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import {
   QueryClient,
@@ -19,6 +19,7 @@ import {
   gfsRouteFailureMessage,
   grantsListPage,
   heldAffordances,
+  homeView,
   listAccessiblePage,
   listChildrenPage,
   listGrantsFailureMessage,
@@ -136,6 +137,8 @@ function Probe() {
       <div data-testid="access-state">{ctrl.accessState}</div>
       <div data-testid="authority-pending">{ctrl.authorityPending ? 'pending' : 'ready'}</div>
       <div data-testid="accessible-count">{ctrl.accessibleResources.length}</div>
+      <div data-testid="home-state">{ctrl.home?.state ?? 'none'}</div>
+      <div data-testid="home-error">{ctrl.homeError ?? 'none'}</div>
       <div data-testid="items-count">{ctrl.items.length}</div>
       <div data-testid="children-error">{ctrl.error ?? 'none'}</div>
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
@@ -242,6 +245,7 @@ function Probe() {
                 ctrl.renameResource(
                   ctrl.current.resourceId,
                   'Renamed report.md',
+                  ctrl.drive,
                   ctrl.current.version
                 )
               )
@@ -281,7 +285,12 @@ function Probe() {
         onClick={() =>
           ctrl.current
             ? swallow(
-                ctrl.moveResource(ctrl.current.resourceId, 'destination-1', ctrl.current.version)
+                ctrl.moveResource(
+                  ctrl.current.resourceId,
+                  'destination-1',
+                  ctrl.drive,
+                  ctrl.current.version
+                )
               )
             : undefined
         }
@@ -290,6 +299,55 @@ function Probe() {
       </button>
       <button type="button" onClick={() => ctrl.retryAccess()}>
         retry access
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.retryDiscovery())}>
+        retry discovery
+      </button>
+    </>
+  )
+}
+
+/** Row mutations called with an explicit drive, as the Files page and the
+ *  sidebar do — no open location is needed to name the drive. */
+function DriveMutationProbe() {
+  const ctrl = useGfsBrowserController()
+  return (
+    <>
+      <div data-testid="drive">{ctrl.drive}</div>
+      <div data-testid="home-state">{ctrl.home?.state ?? 'none'}</div>
+      <button type="button" onClick={() => swallow(ctrl.renameResource('f1', 'x.md', 'main', 1))}>
+        rename row
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.deleteResource('f1', 'main', 1))}>
+        delete row
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.moveResource('f1', 'dest-1', 'main', 1))}>
+        move row
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.moveResource('f1', 'dest-1'))}>
+        move row with default drive
+      </button>
+    </>
+  )
+}
+
+/** Root-vs-folder gate for the selected-row affordances observer. */
+function RowAffordancesProbe() {
+  const ctrl = useGfsBrowserController()
+  return (
+    <>
+      <div data-testid="drive">{ctrl.drive}</div>
+      <div data-testid="row-affordances">{ctrl.rowAffordances?.held.join(',') ?? 'none'}</div>
+      {ctrl.accessibleResources.map(resource => (
+        <div data-testid={`root-${resource.resourceId}`} key={resource.resourceId}>
+          {resource.name}
+        </div>
+      ))}
+      <button type="button" onClick={() => ctrl.setRowAffordancesResourceId('f1')}>
+        select root row
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/folder-1'))}>
+        open folder
       </button>
     </>
   )
@@ -467,6 +525,318 @@ describe('useGfsBrowserController', () => {
     await act(async () => resolveChildrenRefresh(emptyChildrenPage))
   })
 
+  it('lists shared resources while the home request is still in flight', async () => {
+    const page = await listAccessiblePage([
+      accessibleResource('shared', 'Shared folder', 'directory'),
+    ])
+    const listAccessible = vi.fn(async () => page)
+    const getHome = vi.fn(() => new Promise<Awaited<ReturnType<typeof homeView>>>(() => {}))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { getHome, listAccessible } },
+    })
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(getHome).toHaveBeenCalledOnce()
+    expect(listAccessible).toHaveBeenCalledWith(undefined, undefined)
+    expect(screen.getByRole('button', { name: 'open Shared folder' })).toBeTruthy()
+  })
+
+  it('lists shared resources while a pending home has no drive', async () => {
+    const home = await homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+    const page = await listAccessiblePage([
+      accessibleResource('shared', 'Shared folder', 'directory'),
+    ])
+    const listAccessible = vi.fn(async () => page)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { getHome: vi.fn(async () => home), listAccessible } },
+    })
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(listAccessible).toHaveBeenCalledWith(undefined, undefined)
+    expect(screen.getByTestId('home-state').textContent).toBe('pending')
+    expect(screen.getByTestId('loading-accessible').textContent).toBe('idle')
+    expect(screen.getByRole('button', { name: 'open Shared folder' })).toBeTruthy()
+  })
+
+  it('lists shared resources independently of a home 404 and retries the failed home', async () => {
+    const page = await listAccessiblePage([
+      accessibleResource('shared', 'Shared folder', 'directory'),
+    ])
+    const home = await homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+    const getHome = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('404 Not Found: home_not_found'))
+      .mockResolvedValue(home)
+    const listAccessible = vi.fn(async () => page)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { getHome, listAccessible } },
+    })
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('home-error').textContent).not.toBe('none'))
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(listAccessible).toHaveBeenCalledWith(undefined, undefined)
+    expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('none')
+    expect(screen.getByTestId('accessible-notice').textContent).toBe('none')
+    expect(screen.getByTestId('accessible-error').textContent).toBe('none')
+    expect(screen.getByRole('button', { name: 'open Shared folder' })).toBeTruthy()
+
+    await act(async () => screen.getByRole('button', { name: 'retry discovery' }).click())
+    await waitFor(() => expect(screen.getByTestId('home-state').textContent).toBe('pending'))
+    expect(getHome).toHaveBeenCalledTimes(2)
+    expect(listAccessible).toHaveBeenCalledTimes(2)
+  })
+
+  it("sends the caller's drive on rename/delete/move while the home is pending", async () => {
+    const renameResource = vi.fn(async () => ({ resourceId: 'f1', version: 2 }))
+    const deleteResource = vi.fn(async () => ({}))
+    const moveResource = vi.fn(async () => ({ resourceId: 'f1', version: 3 }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 1) },
+        gfs: {
+          getHome: vi.fn(async () =>
+            homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+          ),
+          listAccessible: vi.fn(async () => listAccessiblePage([])),
+          renameResource,
+          deleteResource,
+          moveResource,
+        },
+      },
+    })
+    render(<DriveMutationProbe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('home-state').textContent).toBe('pending'))
+    // The open location has no drive at all, so the caller's argument is the
+    // only drive the IPC call may carry.
+    expect(screen.getByTestId('drive').textContent).toBe('')
+
+    await act(async () => screen.getByRole('button', { name: 'rename row' }).click())
+    await act(async () => screen.getByRole('button', { name: 'delete row' }).click())
+    await act(async () => screen.getByRole('button', { name: 'move row' }).click())
+
+    await waitFor(() => expect(renameResource).toHaveBeenCalledWith('f1', 'x.md', 'main', 1))
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledWith('f1', 'main', 1))
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith('f1', 'dest-1', 'main', 1, undefined, 1)
+    )
+    await act(async () =>
+      screen.getByRole('button', { name: 'move row with default drive' }).click()
+    )
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith('f1', 'dest-1', 'main', undefined, undefined, 1)
+    )
+  })
+
+  it("sends the caller's drive on rename/delete/move when the home is missing", async () => {
+    const renameResource = vi.fn(async () => ({ resourceId: 'f1', version: 2 }))
+    const deleteResource = vi.fn(async () => ({}))
+    const moveResource = vi.fn(async () => ({ resourceId: 'f1', version: 3 }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 1) },
+        gfs: {
+          getHome: vi.fn(async () => {
+            throw new Error('404 Not Found: home_not_found')
+          }),
+          listAccessible: vi.fn(async () => listAccessiblePage([])),
+          renameResource,
+          deleteResource,
+          moveResource,
+        },
+      },
+    })
+    render(<DriveMutationProbe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('home-state').textContent).toBe('none'))
+    expect(screen.getByTestId('drive').textContent).toBe('')
+
+    await act(async () => screen.getByRole('button', { name: 'rename row' }).click())
+    await act(async () => screen.getByRole('button', { name: 'delete row' }).click())
+    await act(async () => screen.getByRole('button', { name: 'move row' }).click())
+
+    await waitFor(() => expect(renameResource).toHaveBeenCalledWith('f1', 'x.md', 'main', 1))
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledWith('f1', 'main', 1))
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith('f1', 'dest-1', 'main', 1, undefined, 1)
+    )
+  })
+
+  it('uses the default drive for selected-row affordances at the root', async () => {
+    const affordances = vi.fn(async () => heldAffordances(['read', 'write']))
+    const listAccessible = vi.fn(async () =>
+      listAccessiblePage([accessibleResource('f1', 'Shared folder', 'directory')])
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () =>
+            homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+          ),
+          listAccessible,
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances,
+          resolve: vi.fn(async () => resolveResource(resolvedDirectory('folder-1', 'Folder'))),
+        },
+      },
+    })
+    render(<RowAffordancesProbe />, { wrapper: Harness })
+
+    // Witness: discovery landed and the root row is rendered.
+    await waitFor(() => expect(screen.getByTestId('root-f1').textContent).toBe('Shared folder'))
+    expect(listAccessible).toHaveBeenCalled()
+    expect(screen.getByTestId('drive').textContent).toBe('')
+
+    await act(async () => screen.getByRole('button', { name: 'select root row' }).click())
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('f1', 'main'))
+
+    // The same selection remains valid inside an open folder.
+    await act(async () => screen.getByRole('button', { name: 'open folder' }).click())
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('f1', 'main'))
+  })
+
+  it('keeps a known home drive on discovery requests', async () => {
+    const page = await listAccessiblePage([
+      accessibleResource('shared', 'Shared folder', 'directory'),
+    ])
+    const listAccessible = vi.fn(async () => page)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { getHome: vi.fn(async () => homeView()), listAccessible } },
+    })
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('home-state').textContent).toBe('ready'))
+    await act(async () => screen.getByRole('button', { name: 'retry discovery' }).click())
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledWith('main', undefined))
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(screen.getByRole('button', { name: 'open Shared folder' })).toBeTruthy()
+  })
+
+  it('withholds discovery until authority is revalidated without a home drive', async () => {
+    const page = await listAccessiblePage([
+      accessibleResource('shared', 'Shared folder', 'directory'),
+    ])
+    let resolveDiscovery!: (value: typeof page) => void
+    const listAccessible = vi.fn(
+      () =>
+        new Promise<typeof page>(resolve => {
+          resolveDiscovery = resolve
+        })
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () =>
+            homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+          ),
+          listAccessible,
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    client.setQueryData(
+      desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main'),
+      { pages: [page], pageParams: [undefined] },
+      { updatedAt: Date.now() - 1_000 }
+    )
+    render(
+      <AuthContext.Provider value={authValue(userA)}>
+        <QueryClientProvider client={client}>
+          <Probe />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledWith(undefined, undefined))
+    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
+    expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+    await act(async () => resolveDiscovery(page))
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(screen.getByTestId('authority-pending').textContent).toBe('ready')
+  })
+
+  it('carries a non-main home drive through discovery, children, affordances, uploads and grants', async () => {
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'write', 'manage_acl'],
+      canDelegate: true,
+      grantableBits: ['read', 'write', 'manage_acl'],
+      canCreateShare: false,
+    }))
+    const createFile = vi.fn(async () => ({}))
+    const grant = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () => homeView({ drive: 'private' })),
+          listAccessible,
+          listChildren,
+          affordances,
+          createFile,
+          grant,
+          resolve: vi.fn(async () => ({
+            resourceId: 'home',
+            parentResourceId: null,
+            gfsUri: 'gfs://private/home',
+            drive: 'private',
+            name: 'Home',
+            kind: 'directory',
+            version: 1,
+            bytes: 0,
+          })),
+        },
+      },
+    })
+    function DriveProbe() {
+      const ctrl = useGfsBrowserController()
+      return (
+        <>
+          <button onClick={() => swallow(ctrl.openUri('gfs://private/home'))}>open home</button>
+          <button onClick={() => swallow(ctrl.createFile('home', 'file.txt', 'ZmlsZQ=='))}>
+            upload
+          </button>
+          <button onClick={() => swallow(ctrl.grant(['user:other'], ['read'], true))}>share</button>
+        </>
+      )
+    }
+    render(<DriveProbe />, { wrapper: Harness })
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledWith('private', undefined))
+    await act(async () => screen.getByRole('button', { name: 'open home' }).click())
+    await waitFor(() => expect(listChildren).toHaveBeenCalledWith('home', 'private', undefined))
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('home', 'private'))
+    await act(async () => screen.getByRole('button', { name: 'upload' }).click())
+    await waitFor(() =>
+      expect(createFile).toHaveBeenCalledWith('home', 'file.txt', 'ZmlsZQ==', 'private')
+    )
+    await act(async () => screen.getByRole('button', { name: 'share' }).click())
+    await waitFor(() =>
+      expect(grant).toHaveBeenCalledWith('home', ['user:other'], ['read'], 'private', true)
+    )
+    expect(
+      lastHarnessQueryClient?.getQueryData(
+        desktopQueryKeys.gfsChildren(':user-a:team-a', 'home', 'private', 1)
+      )
+    ).toBeTruthy()
+    expect(
+      lastHarnessQueryClient?.getQueryData(
+        desktopQueryKeys.gfsChildren(':user-a:team-a', 'home', 'main', 1)
+      )
+    ).toBeUndefined()
+  })
+
   it('keeps loaded pages and avoids per-row reads during a scope revalidation', async () => {
     const root = await resolveResource(
       resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
@@ -501,7 +871,13 @@ describe('useGfsBrowserController', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
-        gfs: { listAccessible, resolve: vi.fn(async () => root), listChildren, affordances },
+        gfs: {
+          getHome: vi.fn(async () => homeView()),
+          listAccessible,
+          resolve: vi.fn(async () => root),
+          listChildren,
+          affordances,
+        },
       },
     })
 
@@ -548,9 +924,17 @@ describe('useGfsBrowserController', () => {
     expect(shouldRevalidateGfsQuery(affordanceKey)).toBe(false)
   })
 
-  afterEach(() => {
-    cleanup()
+  afterEach(async () => {
+    const client = lastHarnessQueryClient
     lastHarnessQueryClient = null
+    cleanup()
+    // Settle in-flight query observers while jsdom still exists. Otherwise a
+    // late resolution schedules React work through setImmediate, the scheduler
+    // callback runs after environment teardown, and Vitest reports an unhandled
+    // `window is not defined` error even though every test passed.
+    await client?.cancelQueries()
+    await client?.clear()
+    await act(async () => {})
     onlineManager.setOnline(true)
     focusManager.setFocused(undefined)
     vi.restoreAllMocks()
@@ -562,6 +946,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({
             items: [],
             nextCursor: null,
@@ -879,6 +1264,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -933,6 +1319,7 @@ describe('useGfsBrowserController', () => {
         configurable: true,
         value: {
           gfs: {
+            getHome: vi.fn(async () => homeView()),
             resolve,
             listChildren: vi.fn(async (resourceId: string) =>
               resourceId === 'folder-a' ? folderAChildren : { items: [], nextCursor: null }
@@ -992,6 +1379,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
@@ -1040,6 +1428,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -1082,6 +1471,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -1126,6 +1516,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -1171,6 +1562,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -1272,6 +1664,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [parent], nextCursor: null })),
           listChildren,
           affordances,
@@ -1352,6 +1745,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [parent], nextCursor: null })),
           listChildren,
           affordances,
@@ -1430,6 +1824,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({
             items: [
               {
@@ -1493,6 +1888,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({
             items: [
               {
@@ -1633,6 +2029,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({
             items: [marketingFolder, financeFolder],
             nextCursor: null,
@@ -1748,6 +2145,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve,
           listChildren,
@@ -1797,6 +2195,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [fileResource], nextCursor: null })),
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -1850,6 +2249,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
             gfsUri: 'gfs://main/root',
@@ -1889,6 +2289,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => {
             throw new Error('404 Not Found: Not Found')
           }),
@@ -1934,6 +2335,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => {
             throw new Error(
               '500 Internal Server Error: render failed for /docs/404 Not Found.md - upstream'
@@ -1977,6 +2379,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -2034,6 +2437,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -2141,6 +2545,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => {
             throw new Error(
               "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
@@ -2208,6 +2613,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -2280,6 +2686,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -2394,6 +2801,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           listChildren,
           resolve: vi.fn(async () => ({
@@ -2545,6 +2953,7 @@ describe('useGfsBrowserController', () => {
       value: {
         auth: { getSessionGeneration: vi.fn(async () => sessionGeneration) },
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({
             items: [
               {
@@ -2656,6 +3065,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -2715,6 +3125,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [accessibleRoot], nextCursor: null })),
           resolve: vi.fn(async () => root),
           listChildren,
@@ -2774,6 +3185,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve,
           listChildren,
@@ -2829,6 +3241,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
@@ -2876,6 +3289,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
@@ -2909,6 +3323,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -3022,6 +3437,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(async () => ({
             resourceId: 'folder-x',
@@ -3088,6 +3504,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3190,6 +3607,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3264,6 +3682,7 @@ function ManageProbe() {
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
       <div data-testid="grants-count">{ctrl.grants.length}</div>
       <div data-testid="shares-count">{ctrl.shares.length}</div>
+      <div data-testid="share-permissions">{ctrl.shares[0]?.permissions.join(',') ?? 'none'}</div>
       <div data-testid="inherited-error">{ctrl.inheritedAccessError ?? 'none'}</div>
       <div data-testid="inherited-coverage">{ctrl.inheritedCoverage ?? 'none'}</div>
       <div data-testid="access-state">{ctrl.accessState}</div>
@@ -3301,6 +3720,7 @@ function ManageProbe() {
               {
                 resourceId: ctrl.crumbs[0]?.resourceId ?? '',
                 destinationId: 'destination-1',
+                drive: 'main',
                 oldParentId: null,
               },
               { version: 2 }
@@ -3318,6 +3738,21 @@ function ManageProbe() {
         onClick={() => swallow(ctrl.createShare(['user:bob']).then(() => ctrl.refreshShares()))}
       >
         create share
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          swallow(
+            ctrl
+              .createShare(['user:bob'], {
+                permissions: ['read', 'share'],
+                includeDescendants: false,
+              })
+              .then(() => ctrl.refreshShares())
+          )
+        }
+      >
+        lower share
       </button>
     </>
   )
@@ -3351,6 +3786,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3396,6 +3832,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3449,6 +3886,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3495,6 +3933,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3552,6 +3991,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3609,6 +4049,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3651,6 +4092,71 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     await waitFor(() => expect(listShares).toHaveBeenCalledTimes(2))
   })
 
+  it('forwards a lowered share and reloads its list when the caller refreshes shares', async () => {
+    let permissions = ['read', 'write', 'share']
+    const listShares = vi.fn(async () => [
+      {
+        id: 'share-42',
+        drive: 'main',
+        resourceId: 'root',
+        subject: { type: 'user', id: 'bob' },
+        permissions,
+        includeDescendants: false,
+      },
+    ])
+    const createShare = vi.fn(async () => {
+      permissions = ['read', 'share']
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () => homeView()),
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'share', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read', 'share'],
+            canCreateShare: true,
+          })),
+          listGrants: vi.fn(async () => []),
+          listShares,
+          createShare,
+        },
+      },
+    })
+    render(<ManageProbe />, { wrapper: Harness })
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('share-permissions').textContent).toBe('read,write,share')
+    )
+    await act(async () => {
+      screen.getByRole('button', { name: 'lower share' }).click()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('share-permissions').textContent).toBe('read,share')
+    )
+    expect(createShare).toHaveBeenCalledTimes(1)
+    expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main', {
+      permissions: ['read', 'share'],
+      includeDescendants: false,
+    })
+    expect(listShares).toHaveBeenCalledTimes(2)
+  })
+
   it('shows a newly created share without remounting (create → refreshShares)', async () => {
     const created: unknown[] = []
     const listShares = vi.fn(async () =>
@@ -3674,6 +4180,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3711,7 +4218,9 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       screen.getByRole('button', { name: 'create share' }).click()
     })
 
-    await waitFor(() => expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main'))
+    await waitFor(() =>
+      expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main', undefined)
+    )
     await waitFor(() => expect(screen.getByTestId('shares-count').textContent).toBe('1'))
   })
 
@@ -3727,6 +4236,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           // The navigation resolve succeeds; the derivation's own resolve of
           // the same file then fails outright.
@@ -3794,6 +4304,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -3845,6 +4356,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async (uri: string) => {
             const id = uri.split('/').pop()!
@@ -3965,6 +4477,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
           configurable: true,
           value: {
             gfs: {
+              getHome: vi.fn(async () => homeView()),
               listAccessible: vi.fn(async () => accessible),
               resolve: vi.fn(async (uri: string) => {
                 if (uri.endsWith(parentId.replace(/-/g, '')) || uri.endsWith(parentId))
@@ -4058,6 +4571,7 @@ function TwoSurfaceProbe() {
               {
                 resourceId: 'ancestor-1',
                 destinationId: 'destination-1',
+                drive: 'main',
                 oldParentId: null,
               },
               { version: 2 }
@@ -4085,6 +4599,7 @@ describe('useGfsBrowserController — cross-surface move convergence (RP-005)', 
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async (uri: string) => {
             const id = uri.split('/').pop()!
@@ -4170,6 +4685,7 @@ describe('useGfsBrowserController — cross-surface move convergence (RP-005)', 
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async (uri: string) => {
             const id = uri.split('/').pop()!
@@ -4383,4 +4899,19 @@ describe('denied-location cleanup ownership', () => {
     ).toBeUndefined()
     client.clear()
   })
+})
+
+afterAll(async () => {
+  // The suite can queue one final React scheduler Immediate after the last
+  // test resolves its fire-and-forget actions. Those chains can pass through
+  // timer and Immediate phases, so drain both while the jsdom environment
+  // still exists; otherwise performWorkUntilDeadline runs after teardown and
+  // Vitest reports an unhandled `window is not defined`.
+  for (let drain = 0; drain < 3; drain += 1) {
+    await act(async () => {
+      await new Promise<void>(resolve => setTimeout(resolve, 25))
+      await new Promise<void>(resolve => setImmediate(resolve))
+    })
+    await act(async () => {})
+  }
 })

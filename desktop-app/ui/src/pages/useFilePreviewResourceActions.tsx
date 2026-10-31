@@ -5,7 +5,7 @@ import { normalizeGfsResourceName } from '@clerum/gfs-interaction-policy'
 import { Button, IconButton, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { IconClose, IconShare } from '@components/SidebarNav/icons'
-import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
+import { GFS_DEFAULT_DISCOVERY_DRIVE } from '@constants/gfsBrowser'
 import {
   desktopQueryKeys,
   hasGfsSessionGeneration,
@@ -27,6 +27,7 @@ import {
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
+import type { GfsCallerHome } from '@/gfs/callerHome.types'
 import {
   type GfsAgentSubjectOption,
   GfsDelegationPanel,
@@ -44,6 +45,7 @@ type ResourceAffordances = Awaited<ReturnType<typeof window.clerum.gfs.affordanc
 type FilePreviewResourceActionsProps = {
   gfsUri: string
   fileName: string
+  home: GfsCallerHome
   sessionScope: string
   sessionGeneration: number | null
   principalScope: string | null
@@ -130,6 +132,7 @@ function subjectOptions(
 export function useFilePreviewResourceActions({
   gfsUri,
   fileName,
+  home,
   sessionScope,
   sessionGeneration,
   principalScope,
@@ -185,7 +188,7 @@ export function useFilePreviewResourceActions({
   })
   const resource = resourceQuery.isError ? undefined : resourceQuery.data
   const resourceId = resource?.resourceId ?? ''
-  const drive = resource?.drive ?? GFS_DRIVE_MAIN
+  const drive = resource?.drive ?? GFS_DEFAULT_DISCOVERY_DRIVE
   const affordancesQuery = useQuery({
     queryKey: desktopQueryKeys.gfsAffordances(
       sessionScope,
@@ -215,7 +218,7 @@ export function useFilePreviewResourceActions({
     principalScope,
     resourceId: resource?.resourceId ?? null,
     parentResourceId: sourceParentId,
-    drive: resource?.drive ?? GFS_DRIVE_MAIN,
+    drive,
     version: resource?.version ?? null,
   })
   moveContextRef.current = {
@@ -225,7 +228,7 @@ export function useFilePreviewResourceActions({
     principalScope,
     resourceId: resource?.resourceId ?? null,
     parentResourceId: sourceParentId,
-    drive: resource?.drive ?? GFS_DRIVE_MAIN,
+    drive,
     version: resource?.version ?? null,
   }
   const sourceParentAffordancesQuery = useQuery({
@@ -810,8 +813,16 @@ export function useFilePreviewResourceActions({
                 moveContextRef.current.sessionScope,
                 moveContextRef.current.sessionGeneration
               )
-            )
+            ) {
+              void queryClient.invalidateQueries({
+                queryKey: desktopQueryKeys.gfsRoot,
+                predicate: query =>
+                  query.queryKey[2] === captured.sessionScope &&
+                  query.queryKey[3] === 'recent' &&
+                  hasGfsSessionGeneration(query.queryKey, captured.sessionGeneration),
+              })
               pushToast?.(`Downloaded ${resource.name}`, 'success')
+            }
           })
           .catch(error => {
             if (
@@ -1697,6 +1708,8 @@ export function useFilePreviewResourceActions({
       ) : null}
       {canResolve && moveOpen && resource?.kind === 'file' ? (
         <GfsMoveDialog
+          drive={drive}
+          home={home}
           target={{
             resourceId: resource.resourceId,
             name: resource.name,

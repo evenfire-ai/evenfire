@@ -5,7 +5,7 @@ import type { GfsPermission } from "../authz/resolve";
 import { checkTokenCeiling } from "../authz/tokenCeiling";
 import type { DeadlineBudget } from "../db/deadlineQuery";
 import type { CopyQueryBudget, PgResourceStore } from "../db/resourceStore";
-import type { GfsWriteService } from "../db/writeStore";
+import type { GfsWriteService, TxClient } from "../db/writeStore";
 import { normalizeResourceId, PathError } from "../storage/paths";
 import { preflightCopy } from "./copy";
 import { GfsError } from "./errors";
@@ -31,6 +31,12 @@ export interface CopyRouteInput {
   admittedAtMs: number;
   signal: AbortSignal;
   now: () => number;
+  /**
+   * Runs inside the copy transaction, after the INSERT and before the commit,
+   * with exactly the file ids the copy created (D16). Absent when the copy is
+   * not attributable.
+   */
+  onPublished?: (client: TxClient, fileResourceIds: string[]) => Promise<void>;
   deps: CopyRouteDeps;
 }
 
@@ -170,6 +176,7 @@ export async function executeCopyRoute(input: CopyRouteInput): Promise<Record<st
     const published = await input.deps.writes.copy({
       requestId: input.requestId, subject: input.context.primarySubject, audit: input.deps.audit,
       ...auditAttribution(input.context),
+      ...(input.onPublished ? { onPublished: input.onPublished } : {}),
       drive: input.claims.drive, destinationParentId, plan, destination, deadlineAtMs,
       signal: input.signal, now: relativeNow,
       authzEpoch: { captured: authzEpochCaptured, current: input.deps.permissionEpoch },

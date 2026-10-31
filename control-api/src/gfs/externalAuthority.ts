@@ -149,6 +149,20 @@ export type RequestWithExternalGfsAuthority = Request & {
   gfsAuthority?: ExternalGfsAuthority
 }
 
+/** The selector can only reduce a session's effective authority. */
+export function validateExternalGfsAuthoritySelector(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  const selector = req.header('x-evenfire-gfs-authority')
+  if (selector !== undefined && selector !== 'user') {
+    res.status(400).json({ error: 'invalid_gfs_authority' })
+    return
+  }
+  next()
+}
+
 export async function attachExternalGfsAuthority(
   req: Request,
   res: Response,
@@ -161,7 +175,13 @@ export async function attachExternalGfsAuthority(
     return
   }
   try {
-    const authority = await resolveExternalGfsAuthority(desktopUserId)
+    let authority: ExternalGfsAuthority
+    if (req.header('x-evenfire-gfs-authority') === 'user') {
+      await assertExternalGfsUserActive(desktopUserId)
+      authority = userAuthority(desktopUserId)
+    } else {
+      authority = await resolveExternalGfsAuthority(desktopUserId)
+    }
     if (authority.kind === 'user-session') {
       const generation = (req as Request & { externalAuth?: { authGeneration?: number } })
         .externalAuth?.authGeneration

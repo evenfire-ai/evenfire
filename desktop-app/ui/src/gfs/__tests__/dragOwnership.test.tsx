@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { FileExplorerTree } from '@components/SidebarNav/FileExplorerTree'
+import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { FilesPage } from '@/pages/FilesPage'
 import {
   accessibleResource,
@@ -35,6 +36,7 @@ vi.mock('@contexts/AuthContext', () => ({ useAuthContext: () => mocks.auth }))
 
 function baseController() {
   return {
+    drive: 'main',
     current: null,
     crumbs: [],
     sessionScope: 'env-1:user-1:team-1',
@@ -53,6 +55,12 @@ function baseController() {
     loading: false,
     accessibleError: null,
     accessibleNotice: null,
+    recentFiles: [],
+    loadingRecentFiles: false,
+    fetchingRecentFiles: false,
+    recentFilesFailure: null,
+    retryRecentFiles: vi.fn(),
+    refreshRecentFiles: vi.fn(),
     error: null,
     openError: null,
     resolving: false,
@@ -232,7 +240,7 @@ for (const surface of ['sidebar', 'files'] as const) {
             {!mounted ? null : surface === 'sidebar' ? (
               <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={toast} />
             ) : (
-              <FilesPage pushToast={toast} />
+              <FilesPage pushToast={toast} pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
             )}
             <SessionProbe
               onApi={value => {
@@ -511,6 +519,7 @@ for (const surface of ['sidebar', 'files'] as const) {
       expect(h.moveResource).toHaveBeenCalledWith(
         'source',
         'target',
+        'main',
         expect.any(Number),
         undefined,
         'other-parent',
@@ -568,6 +577,7 @@ for (const surface of ['sidebar', 'files'] as const) {
         {
           resourceId: 'source',
           destinationId: 'target',
+          drive: 'main',
           oldParentId: 'grand',
           expectedSessionGeneration: 0,
         },
@@ -617,7 +627,7 @@ describe('files surface drop admission (RP-002)', () => {
     render(
       <QueryClientProvider client={queryClient}>
         <GfsDragSessionProvider>
-          <FilesPage pushToast={toast} />
+          <FilesPage pushToast={toast} pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
         </GfsDragSessionProvider>
       </QueryClientProvider>
     )

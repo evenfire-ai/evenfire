@@ -1,11 +1,17 @@
 /**
+ * E2E_GUARDIAN_IPC_FLOW: Desktop GFS/chat cross IPC; the spec asserts persisted results.
  * Issue #797 T2: real Desktop login -> exact Agent A -> native Copy/Rename ->
  * exact Agent B denial -> audited revoke -> same-runtime Agent A denial.
  * SQL/PVC and grant operations are named preconditions/assertions only; no
  * fixture helper performs the agent mutations under test.
  */
 import { type Locator, type Page, expect, test } from '@playwright/test'
-import { exactNameFilter } from './helpers/agentLocators'
+import {
+  SENSITIVE_OUTPUT,
+  openExactAgent,
+  sendAgentTurn as sendGfsAgentTurn,
+  toolRow,
+} from './helpers/gfsAgentChat'
 import { getManagedAgentDisplayName, getManagedAgentPodIdentity } from './helpers/gfsAgentDiscovery'
 import {
   type AgentGfsCopyFixtures,
@@ -19,141 +25,12 @@ import {
   revokeGfsGrantViaControlApi,
   seedAgentGfsCopyFixtures,
 } from './helpers/gfsFixtures'
-import { openAgentsPage, openResourcesNavItem } from './navigationHelpers'
+import { DesktopFilesNav } from './pages/DesktopFilesNav'
 import { launchAndLogin } from './workflowUi'
 
 const OWNER_EMAIL = 'test@clerum.io'
-// Multi-tool turns (rename + recursive list + read-every-file) on the local
-// glm profile routinely exceed the 180s single-turn calibration.
-const RESPONSE_TIMEOUT_MS = 300_000
-const SENSITIVE_OUTPUT =
-  /\/data\/gfs|\/mnt\/|\.generations|blob_key|blobKey|\bSQL\b|internal (?:path|error)|stack trace/i
-
-async function openExactAgent(
-  page: Page,
-  // The rendered label (Host `spec.host`), not the CRD name.
-  agentName: string,
-  opts: { reuseThread?: boolean } = {}
-): Promise<void> {
-  await openAgentsPage(page)
-  await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
-  const row = page.getByLabel(`Open agent ${agentName}`, { exact: true })
-  await expect(row).toBeVisible({ timeout: 30_000 })
-  await row.click()
-  await expect(page.getByText(agentName, { exact: true }).first()).toBeVisible({ timeout: 15_000 })
-  await page.getByTestId('nav-chat').click()
-  await expect(page.getByTestId('chat-input')).toBeVisible({ timeout: 30_000 })
-  // Starting a new chat can reset the composer to the DEFAULT agent, so it
-  // must happen BEFORE the agent switch — never after, or the turn silently
-  // goes to the wrong agent.
-  if (!opts.reuseThread) {
-    const fresh = page.getByRole('button', { name: /new (?:chat|thread)/i }).first()
-    if (await fresh.isVisible().catch(() => false)) await fresh.click()
-  }
-  // The product binds the composer to an agent ONLY through the chat view's
-  // "Switch chat agent" selector — opening another agent's details page
-  // deliberately does not switch the chat. Drive exactly that user flow.
-  const switcher = page.getByRole('button', { name: 'Switch chat agent' })
-  const boundSwitcher = switcher.filter(exactNameFilter(agentName))
-  const breadcrumb = page
-    .getByRole('navigation', { name: 'Chat breadcrumb' })
-    .getByText(agentName, { exact: true })
-  if (
-    !(await boundSwitcher
-      .or(breadcrumb)
-      .first()
-      .isVisible()
-      .catch(() => false))
-  ) {
-    await switcher.first().click()
-    await page.getByRole('menuitem', { name: agentName, exact: true }).click()
-  }
-  // A stateless agent suspended at idle wakes through the rpc-proxy
-  // wake-and-hold path (up to ~90s of scale-up) before its chat shell binds;
-  // the binding element itself remains mandatory and is the LAST gate before
-  // any turn is sent.
-  await expect(boundSwitcher.or(breadcrumb).first()).toBeVisible({ timeout: 120_000 })
-  if (opts.reuseThread) {
-    // reuseThread continues the agent's MOST-RECENT session. Callers must drive
-    // purely by visible NAMES here (never resource identifiers), because which
-    // of the agent's threads is most-recent is not guaranteed: any earlier step
-    // that opens a fresh thread for this agent becomes the newest one, so the
-    // reused prompt must not presume a specific prior conversation history.
-    await page.locator('.agent-dedicated-session-title-btn').first().click()
-    await expect(page.getByTestId('agent-response').first()).toBeVisible({ timeout: 15_000 })
-  } else {
-    await expect(page.getByTestId('agent-response')).toHaveCount(0, { timeout: 10_000 })
-  }
-}
-
 async function sendAgentTurn(page: Page, prompt: string): Promise<Locator> {
-  const responseIndex = await page.getByTestId('agent-response').count()
-  const approvalIndex = await page.getByTestId('approval-approve-btn').count()
-  const progressIndex = await page.getByTestId('progress-expand-btn').count()
-  await expect(page.getByTestId('chat-input')).toBeEnabled()
-  await page.getByTestId('chat-input').fill(prompt)
-  await page.getByTestId('send-button').click()
-
-  const response = page.getByTestId('agent-response').nth(responseIndex)
-  const retrySend = page.getByRole('button', { name: 'Retry last send' })
-  let approvals = 0
-  let sendRetries = 0
-  const deadline = Date.now() + RESPONSE_TIMEOUT_MS
-  for (;;) {
-    const remaining = deadline - Date.now()
-    if (remaining <= 0) throw new Error('timed out waiting for the issue #797 agent turn')
-    // A just-restarted runtime can drop the send with a visible "Temporary
-    // connection issue" banner; a real user presses the product's own
-    // "Retry last send". Bounded — a persistent failure still fails the turn.
-    if (await retrySend.isVisible().catch(() => false)) {
-      if (sendRetries >= 3) throw new Error('agent send kept failing after 3 product retries')
-      sendRetries += 1
-      // An absorbed retry must be LOUD in a green run: warn on the console
-      // and annotate the test report, without changing pass/fail semantics.
-      const turnLabel = prompt.slice(0, 80)
-      console.warn(
-        `[gfs-agent-copy] "Retry last send" pressed (attempt ${sendRetries}/3) for turn: ${turnLabel}`
-      )
-      test.info().annotations.push({
-        type: 'retry-last-send',
-        description: `attempt ${sendRetries}/3 for turn: ${turnLabel}`,
-      })
-      await retrySend.click()
-      continue
-    }
-    const approval = page.getByTestId('approval-approve-btn').nth(approvalIndex + approvals)
-    const approvalWait = approval
-      .waitFor({ state: 'visible', timeout: Math.min(remaining, 10_000) })
-      .then(() => 'approval' as const)
-    const responseWait = response
-      .waitFor({ state: 'visible', timeout: Math.min(remaining, 10_000) })
-      .then(() => 'response' as const)
-    // The losing waitFor keeps its timer; silence its eventual rejection so a
-    // settled turn cannot surface a late "Target closed" unhandled rejection.
-    // .catch() returns a NEW promise, so the originals still race unchanged.
-    void approvalWait.catch(() => undefined)
-    void responseWait.catch(() => undefined)
-    let visible: 'approval' | 'response'
-    try {
-      visible = await Promise.race([approvalWait, responseWait])
-    } catch {
-      // Neither appeared within this slice; loop to re-check the retry banner
-      // and the overall deadline.
-      continue
-    }
-    if (visible === 'response') break
-    await approval.click()
-    approvals += 1
-  }
-  await expect(response).toBeVisible({ timeout: RESPONSE_TIMEOUT_MS })
-  const expand = page.getByTestId('progress-expand-btn').nth(progressIndex)
-  await expect(expand).toBeVisible({ timeout: 30_000 })
-  await expand.click()
-  return expand.locator('..')
-}
-
-function toolRow(stepper: Locator, name: string): Locator {
-  return stepper.locator('.stepper-step').filter({ hasText: name }).last()
+  return (await sendGfsAgentTurn(page, prompt, 'gfs-agent-copy')).stepper
 }
 
 async function expectToolSuccess(stepper: Locator, name: string): Promise<void> {
@@ -220,7 +97,9 @@ function comparableTree(root: ReturnType<typeof getGfsTreeSnapshot>) {
 }
 
 async function openFilesBrowser(page: Page): Promise<Locator> {
-  await openResourcesNavItem(page, 'nav-files')
+  const nav = new DesktopFilesNav(page)
+  await nav.openFiles()
+  await nav.openSharedWithMe()
   const browser = page.getByRole('region', { name: 'EvenDrive browser' })
   await expect(browser).toBeVisible({ timeout: 20_000 })
   return browser
@@ -228,28 +107,34 @@ async function openFilesBrowser(page: Page): Promise<Locator> {
 
 async function browseSourceTree(page: Page, fixtures: AgentGfsCopyFixtures): Promise<void> {
   const browser = await openFilesBrowser(page)
-  await browser.getByRole('button', { name: fixtures.tree.sourceName, exact: true }).click()
+  await browser
+    .getByRole('button', { name: `Open ${fixtures.tree.sourceName}`, exact: true })
+    .click()
   await expect(
-    browser.getByRole('button', { name: fixtures.tree.standaloneFileName, exact: true })
+    browser.getByRole('button', { name: `Open ${fixtures.tree.standaloneFileName}`, exact: true })
   ).toBeVisible()
-  await browser.getByRole('button', { name: 'nested', exact: true }).click()
-  await expect(browser.getByRole('button', { name: 'alpha.txt', exact: true })).toBeVisible()
-  await browser.getByRole('button', { name: 'empty', exact: true }).click()
+  await browser.getByRole('button', { name: 'Open nested', exact: true }).click()
+  await expect(browser.getByRole('button', { name: 'Open alpha.txt', exact: true })).toBeVisible()
+  await browser.getByRole('button', { name: 'Open empty', exact: true }).click()
   await expect(browser.getByText('This folder is empty', { exact: true })).toBeVisible()
 }
 
 async function browseDestinationTree(page: Page, fixtures: AgentGfsCopyFixtures): Promise<void> {
   const browser = await openFilesBrowser(page)
-  await browser.getByRole('button', { name: fixtures.tree.destinationName, exact: true }).click()
+  await browser
+    .getByRole('button', { name: `Open ${fixtures.tree.destinationName}`, exact: true })
+    .click()
   await expect(
-    browser.getByRole('button', { name: fixtures.fileCopyName, exact: true })
+    browser.getByRole('button', { name: `Open ${fixtures.fileCopyName}`, exact: true })
   ).toBeVisible()
-  await browser.getByRole('button', { name: fixtures.renamedFolderName, exact: true }).click()
-  await expect(browser.getByRole('button', { name: 'nested', exact: true })).toBeVisible()
-  await browser.getByRole('button', { name: 'nested', exact: true }).click()
-  await expect(browser.getByRole('button', { name: 'alpha.txt', exact: true })).toBeVisible()
-  await expect(browser.getByRole('button', { name: 'deeper', exact: true })).toBeVisible()
-  await browser.getByRole('button', { name: 'empty', exact: true }).click()
+  await browser
+    .getByRole('button', { name: `Open ${fixtures.renamedFolderName}`, exact: true })
+    .click()
+  await expect(browser.getByRole('button', { name: 'Open nested', exact: true })).toBeVisible()
+  await browser.getByRole('button', { name: 'Open nested', exact: true }).click()
+  await expect(browser.getByRole('button', { name: 'Open alpha.txt', exact: true })).toBeVisible()
+  await expect(browser.getByRole('button', { name: 'Open deeper', exact: true })).toBeVisible()
+  await browser.getByRole('button', { name: 'Open empty', exact: true }).click()
   await expect(browser.getByText('This folder is empty', { exact: true })).toBeVisible()
 }
 
@@ -463,7 +348,7 @@ test.describe('GFS per-agent native Copy and immediate grant enforcement (issue 
         const deniedGfsRow = steps
           .locator('.stepper-step-duration.state-error')
           .filter({ hasText: /gfsc 40[34]/ })
-        await expect(deniedGfsRow.first()).toBeVisible({ timeout: 15_000 })
+        await expect.poll(() => deniedGfsRow.count(), { timeout: 15_000 }).toBeGreaterThan(0)
         const successfulCopy = steps
           .locator('.stepper-step')
           .filter({ has: page.locator('.stepper-step-fn', { hasText: 'gfs_copy' }) })

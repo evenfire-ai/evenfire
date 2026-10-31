@@ -48,6 +48,7 @@ import {
   handleControlUIUnauthorized,
   isSilentApiError,
 } from '@lib/api'
+import type { ApiRequestError } from '@lib/api.types'
 import { createCoalescedRevalidation } from '@lib/coalescedRevalidation'
 import {
   ENTITY_CHANGE_MAX_FRAME_CHARS,
@@ -233,6 +234,12 @@ type TrailReconstructionOutcome = 'applied' | 'failed' | 'superseded'
 const DRIVE = 'main'
 const PENDING_GFS_UPLOAD_KEY = 'evenfire:gfs-upload-v2:pending'
 const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
+const GOVERNED_ROOT_MESSAGE =
+  'The Users folder and home folders cannot be moved, renamed or deleted.'
+
+function isGovernedRoot(error: unknown): boolean {
+  return (error as ApiRequestError | null)?.code === 'governed_root_immutable'
+}
 
 interface PendingGfsUpload {
   uploadId?: string
@@ -1999,6 +2006,12 @@ export function GfsBrowser(): React.JSX.Element {
           moved = true
           break
         } catch (error) {
+          // A governed root is a fixed location like the drive root, so it
+          // refuses without the numbered-name ladder; the message is the one
+          // operators need to understand why.
+          if (isGovernedRoot(error)) {
+            throw new GfsMoveRefusalError('root-source', GOVERNED_ROOT_MESSAGE)
+          }
           if (!isGfsNameConflict(error)) {
             // A 401 from the PATCH itself is session loss (A11), not a
             // transient failure: raise the persistent sign-in alert and stop
@@ -2714,7 +2727,13 @@ export function GfsBrowser(): React.JSX.Element {
     } catch (err) {
       // The rename dialog stays open with the draft and the failure reason —
       // a toast alone gave the operator no retry path.
-      setRenameError(err instanceof Error ? err.message : 'Could not rename resource.')
+      setRenameError(
+        isGovernedRoot(err)
+          ? GOVERNED_ROOT_MESSAGE
+          : err instanceof Error
+            ? err.message
+            : 'Could not rename resource.'
+      )
     } finally {
       setRenaming(false)
     }
@@ -2831,9 +2850,14 @@ export function GfsBrowser(): React.JSX.Element {
       }
       await refreshCurrent()
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Could not delete resource.', {
-        tone: 'error',
-      })
+      showToast(
+        isGovernedRoot(err)
+          ? GOVERNED_ROOT_MESSAGE
+          : err instanceof Error
+            ? err.message
+            : 'Could not delete resource.',
+        { tone: 'error' }
+      )
     }
   }
 

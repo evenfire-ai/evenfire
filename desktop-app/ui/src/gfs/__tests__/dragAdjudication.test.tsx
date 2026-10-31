@@ -352,12 +352,12 @@ describe('useGfsDragAdjudication — the rename probe reads a fresh observation 
 
     // A minute-old observation of "write": stale, so it may not decide.
     queryClient.setQueryData(key, { held: ['write'] }, { updatedAt: Date.now() - 60_000 })
-    expect(await result.current.probeSourceWrite('src-1')).toBe(false)
+    expect(await result.current.probeSourceWrite('src-1', 'main')).toBe(false)
 
     // A current observation still answers without a network read: the probe
     // fixture would fail if one were made.
     queryClient.setQueryData(key, { held: ['write'] })
-    expect(await result.current.probeSourceWrite('src-1')).toBe(true)
+    expect(await result.current.probeSourceWrite('src-1', 'main')).toBe(true)
   })
 })
 

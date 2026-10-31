@@ -257,6 +257,10 @@ export function createRpcAccessUsersRouter(
           {
             ...binding,
             hostRef,
+            // D14: store the namespace control-api just verified the Host CR in,
+            // so gfsc can require `<namespace>/<name>` when it attributes the
+            // run's file activity to this user.
+            hostNamespace: config.hostsNamespace,
             identityIssuer: config.rpcJwtIssuer,
             actorHumanSub: claims.sub,
             userId: claims.sub,

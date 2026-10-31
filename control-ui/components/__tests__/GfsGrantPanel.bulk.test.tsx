@@ -720,6 +720,27 @@ describe('GfsGrantPanel bulk access', () => {
     expect(screen.queryByRole('button', { name: 'Access role for selected recipients' })).toBeNull()
   })
 
+  it('explains that only operators can access the drive root or /Users', async () => {
+    mockPutGfsGrant.mockRejectedValueOnce(
+      Object.assign(new Error('409 ancestor_home_exposure'), {
+        code: 'ancestor_home_exposure',
+        serverMessage: 'ancestor_home_exposure',
+      })
+    )
+    renderPanel()
+    await chooseSubjects('Ada Lovelace')
+    selectPermission('Read')
+    await submit('Share')
+
+    await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(1))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'Only operators can have access on the drive root or /Users. Choose a sub-folder for this access.'
+    )
+    expect(alert).not.toHaveTextContent('ancestor_home_exposure')
+    expect(screen.getByRole('button', { name: 'Remove Ada Lovelace' })).toBeTruthy()
+  })
+
   it('does not duplicate the machine code when the server message matches it', async () => {
     mockPutGfsGrant.mockRejectedValue(
       Object.assign(new Error('400 subjects_invalid'), {

@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
+import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import { retireUserHomeForInactiveUser } from '../../gfs/userHomeProvisioner.js'
 import {
   type GfsDesktopOperatorLifecycleActor,
   GfsDesktopOperatorLinkError,
@@ -503,6 +505,14 @@ export async function retireDesktopUser(
     const hasLinkHistory =
       (history.rows[0] as { has_link_history?: unknown } | undefined)?.has_link_history === true
 
+    await retireUserHomeForInactiveUser(
+      db,
+      targetUserId,
+      config.gfsHomeDrive,
+      actor.kind === 'control_admin' ? 'operator:' : `user:${actor.desktopUserId}`,
+      actor.kind === 'control_admin' ? actor.controlAdminId : undefined
+    )
+
     if (!hasLinkHistory && options.retainWithoutLinkHistory !== true) {
       await disableWorkflowApprovalMedium(db, targetUserId)
       const deleted = await db.query(
@@ -671,7 +681,7 @@ export async function retireDesktopUserInTransaction(
  */
 export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserResult> {
   return withTransaction(async db => {
-    const exists = await db.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [userId])
+    const exists = await db.query(`SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, [userId])
     if ((exists.rowCount ?? 0) === 0) {
       return { error: 'not_found' }
     }
@@ -709,6 +719,7 @@ export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserRe
       [userId]
     )
 
+    await retireUserHomeForInactiveUser(db, userId, config.gfsHomeDrive, 'operator:')
     const del = await db.query(`DELETE FROM users WHERE id = $1 RETURNING id`, [userId])
     if ((del.rowCount ?? 0) === 0) {
       return { error: 'not_found' }

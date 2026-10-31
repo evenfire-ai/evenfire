@@ -429,14 +429,14 @@ describe('createGfsFolderZip', () => {
     expect(deps.zipStreamRecord.deps.appendFromUri).not.toHaveBeenCalled()
   })
 
-  it('forwards the stop signal to the producer bridge on both call kinds (R1-M1)', async () => {
+  it('registers cancellation for an in-flight folder listing (R1-M1)', async () => {
     const controller = new AbortController()
     const listChildren = vi.fn(
       (
         _resourceId: string,
         _drive?: string,
         _cursor?: string,
-        _options?: { signal?: AbortSignal }
+        _options?: { registerAbort?: (onAbort: () => void) => () => void }
       ) => new Promise<GfsZipChildrenPage>(() => undefined)
     )
     const appendFromUri = vi.fn(
@@ -455,14 +455,68 @@ describe('createGfsFolderZip', () => {
       const rejection = expect(walk).rejects.toMatchObject({ name: 'AbortError' })
       for (let index = 0; index < 200 && listChildren.mock.calls.length === 0; index += 1)
         await Promise.resolve()
-      const bridgeOptions = listChildren.mock.calls[0]?.[3] as { signal?: AbortSignal } | undefined
-      // The default wiring hands the walk's signal to the bridge, so the
-      // producer fetch dies with the walk instead of outliving the Stop.
-      expect(bridgeOptions?.signal).toBeInstanceOf(AbortSignal)
-      expect(bridgeOptions?.signal?.aborted).toBe(false)
+      const bridgeOptions = listChildren.mock.calls[0]?.[3]
+      const stopProducer = vi.fn()
+      const unregister = bridgeOptions?.registerAbort?.(stopProducer)
+      expect(unregister).toBeTypeOf('function')
+      expect(stopProducer).not.toHaveBeenCalled()
       controller.abort()
       await rejection
-      expect(bridgeOptions?.signal?.aborted).toBe(true)
+      expect(stopProducer).toHaveBeenCalledOnce()
+      unregister?.()
+    } finally {
+      ;(window as { clerum?: unknown }).clerum = previousClerum
+    }
+  })
+
+  it('registers cancellation for an in-flight streamed ZIP entry', async () => {
+    const controller = new AbortController()
+    const stopProducer = vi.fn()
+    const listChildren = vi.fn(async () => ({
+      items: [
+        {
+          resourceId: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          name: 'one.txt',
+          kind: 'file' as const,
+        },
+      ],
+      nextCursor: null,
+    }))
+    const appendFromUri = vi.fn(
+      (
+        _jobId: string,
+        _name: string,
+        _uri: string,
+        _options?: {
+          maxBytes?: number
+          registerAbort?: (onAbort: () => void) => () => void
+        }
+      ) => new Promise<{ name: string; bytes: number }>(() => undefined)
+    )
+    const abort = vi.fn(async () => ({ aborted: true }))
+    const previousClerum = (window as { clerum?: unknown }).clerum
+    ;(window as { clerum?: unknown }).clerum = {
+      gfs: {
+        listChildren,
+        zipStream: { start: async () => ({ jobId: 'job-1' }), appendFromUri, abort },
+      },
+    }
+    try {
+      const walk = createGfsFolderZip(
+        { resourceId: 'root', drive: 'main', name: 'Bridge' },
+        { signal: controller.signal, deps: { throttle: { acquire: async () => undefined } } }
+      )
+      const rejection = expect(walk).rejects.toMatchObject({ name: 'AbortError' })
+      for (let index = 0; index < 200 && appendFromUri.mock.calls.length === 0; index += 1)
+        await Promise.resolve()
+      const unregister = appendFromUri.mock.calls[0]?.[3]?.registerAbort?.(stopProducer)
+      expect(unregister).toBeTypeOf('function')
+      controller.abort()
+      await rejection
+      expect(stopProducer).toHaveBeenCalledOnce()
+      expect(abort).toHaveBeenCalledWith('job-1')
+      unregister?.()
     } finally {
       ;(window as { clerum?: unknown }).clerum = previousClerum
     }

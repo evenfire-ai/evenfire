@@ -10,7 +10,7 @@
 set -eo pipefail
 
 DEFAULT_CONTEXT="$(
-  kubectl config current-context 2>/dev/null || true
+  kubectl --context "${KUBECONTEXT:-${E2E_K8S_CONTEXT:-clerum-test}}" config current-context 2>/dev/null || true
 )"
 if [[ -z "$DEFAULT_CONTEXT" ]]; then
   DEFAULT_CONTEXT="clerum-test"

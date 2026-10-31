@@ -129,7 +129,7 @@ if [[ -n "$CALLER_MCP_HOST_BASE_URL" ]]; then
   export MCP_HOST_BASE_URL="$CALLER_MCP_HOST_BASE_URL"
 fi
 
-DEFAULT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+DEFAULT_CONTEXT="$(kubectl --context "${KUBECONTEXT:-${E2E_K8S_CONTEXT:-clerum-test}}" config current-context 2>/dev/null || true)"
 DEFAULT_CONTEXT="${DEFAULT_CONTEXT:-clerum-test}"
 KCTX="${KUBECONTEXT:-${E2E_K8S_CONTEXT:-$DEFAULT_CONTEXT}}"
 

@@ -42,6 +42,9 @@ describe('mcp-host provider trace binding', () => {
     expect(bind).toHaveBeenCalledWith({
       ...binding,
       hostRef: 'chatllm',
+      // D19: a channel run is never recorded as user file activity, so the
+      // channel writer stores no Host namespace.
+      hostNamespace: null,
       identityIssuer: 'https://identity.example.test',
       actorHumanSub: '00000000-0000-4000-8000-000000000001',
       userId: '00000000-0000-4000-8000-000000000001',

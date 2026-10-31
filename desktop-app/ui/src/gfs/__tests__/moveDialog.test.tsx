@@ -68,6 +68,10 @@ function renderDialog(
     <QueryClientProvider client={queryClient}>
       <GfsMoveDialog
         target={target}
+        drive="main"
+        // No caller home unless a test supplies one: the pre-existing
+        // pagination and no-op cases exercise the shared roots only.
+        home={null}
         sessionScope="anonymous"
         sessionGeneration={SESSION_GENERATION}
         initialCrumbs={[]}
@@ -342,5 +346,179 @@ describe('GfsMoveDialog no-op destination guard', () => {
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
     expect(onMove).toHaveBeenCalledWith('arch-1', 'Archive')
     expect(onMove).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * R3-M2 (plan §5.3, M2-U1..U6) — the Move dialog offers the caller's own home
+ * as a "My home" destination and never lists it under "Shared with me". The
+ * server names the home row after its storage folder; only the resource id and
+ * drive identify it, so every label here comes from `isCallerHomeRoot`.
+ */
+
+const readyHome = {
+  state: 'ready',
+  drive: 'main',
+  resourceId: 'home-1',
+  path: '/Users/fixture',
+}
+
+const pendingHome = {
+  // Deliberately carries the bound root: the server returns `state` and
+  // `resource_id` independently, so a retrying home can be pending with a
+  // resource id. The only reason the section is absent is the non-ready state.
+  state: 'pending',
+  drive: 'main',
+  resourceId: 'home-1',
+  path: '/Users/fixture',
+}
+
+/** Discovery row of the caller's home root, named after the storage folder. */
+const homeRootRow: GfsBrowserChild = {
+  ...folder('home-1', 'fixture'),
+  path: '/Users/fixture',
+}
+
+const homeCrumb: GfsCrumb = {
+  resourceId: 'home-1',
+  gfsUri: 'gfs://main/home-1',
+  name: 'fixture',
+  kind: 'directory',
+  version: 1,
+  bytes: 0,
+}
+
+const sharedRootRow = folder('team-1', 'Team Docs')
+
+describe('GfsMoveDialog My home destination', () => {
+  it('lists the caller home as a My home destination apart from Shared with me', async () => {
+    const listAccessible = vi.fn(async () => ({
+      items: [homeRootRow, sharedRootRow],
+      nextCursor: null,
+    }))
+
+    renderDialog({ listAccessible }, { home: readyHome })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    const homeTree = within(dialog).getByRole('tree', { name: 'My home destination' })
+    expect(within(homeTree).getByRole('treeitem', { name: 'My home' })).toBeTruthy()
+
+    const sharedTree = within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })
+    // Witness: what others share is still a destination.
+    expect(await within(sharedTree).findByRole('treeitem', { name: 'Team Docs' })).toBeTruthy()
+    // The home is offered once, under My home — neither relabelled into the
+    // shared roots nor leaked under its storage folder name.
+    expect(within(sharedTree).queryByRole('treeitem', { name: 'My home' })).toBeNull()
+    expect(within(sharedTree).queryByText('fixture')).toBeNull()
+  })
+
+  it('moves into My home and commits the destination as My home', async () => {
+    const onMove = vi.fn(async () => undefined)
+    const listAccessible = vi.fn(async () => ({
+      items: [homeRootRow, sharedRootRow],
+      nextCursor: null,
+    }))
+
+    renderDialog({ listAccessible }, { home: readyHome, onMove })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    const homeTree = within(dialog).getByRole('tree', { name: 'My home destination' })
+    // Witness: the destination really rendered before it is selected, so the
+    // call count below cannot pass on a dialog that never offered it.
+    expect(within(homeTree).getByRole('treeitem', { name: 'My home' })).toBeTruthy()
+    await fireEvent.click(within(homeTree).getByRole('button', { name: 'My home' }))
+
+    const moveHere = within(dialog).getByRole('button', { name: 'Move here (My home)' })
+    expect(moveHere).toBeTruthy()
+    await fireEvent.click(moveHere)
+
+    expect(onMove).toHaveBeenCalledTimes(1)
+    expect(onMove).toHaveBeenCalledWith('home-1', 'My home')
+  })
+
+  it('names the current location My home when the target sits at the home root', async () => {
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+
+    renderDialog({ listAccessible }, { home: readyHome, initialCrumbs: [homeCrumb] })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    // Witness: the location pill rendered for this target at all. Scope the
+    // label to that row: the ready home's section heading also says My home.
+    const currentLocation = within(dialog)
+      .getByText('Current location:')
+      .closest('.da-gfs-move-dialog__current-location') as HTMLElement | null
+    expect(currentLocation).not.toBeNull()
+    expect(
+      within(currentLocation as HTMLElement).getByText('My home', { selector: 'strong' })
+    ).toBeTruthy()
+    expect(currentLocation?.textContent).not.toContain('fixture')
+    expect(within(dialog).queryByText('fixture')).toBeNull()
+  })
+
+  it('lists the home under My home when discovery does not list it', async () => {
+    const listAccessible = vi.fn(async () => ({
+      items: [sharedRootRow],
+      nextCursor: null,
+    }))
+    const insideHome: GfsCrumb = {
+      resourceId: 'folder-2',
+      gfsUri: 'gfs://main/folder-2',
+      name: 'Projects',
+      kind: 'directory',
+      version: 1,
+      bytes: 0,
+    }
+
+    renderDialog({ listAccessible }, { home: readyHome, initialCrumbs: [homeCrumb, insideHome] })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    // Discovery never names the home root; the current path supplies it, and
+    // the home must still land in the My home section. Here the home root is
+    // expanded (the crumbs start on it), so its treeitem's accessible name is
+    // its label plus the child group's text ("My home No subfolders."); the
+    // label prefix is what identifies it.
+    const homeTree = within(dialog).getByRole('tree', { name: 'My home destination' })
+    expect(await within(homeTree).findByRole('treeitem', { name: /^My home/ })).toBeTruthy()
+
+    const sharedTree = within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })
+    expect(await within(sharedTree).findByRole('treeitem', { name: 'Team Docs' })).toBeTruthy()
+    expect(within(sharedTree).queryByRole('treeitem', { name: 'My home' })).toBeNull()
+    expect(within(sharedTree).queryByText('fixture')).toBeNull()
+  })
+
+  it('omits the My home destination while the home is pending', async () => {
+    const listAccessible = vi.fn(async () => ({
+      items: [sharedRootRow],
+      nextCursor: null,
+    }))
+
+    renderDialog({ listAccessible }, { home: pendingHome })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    const sharedTree = within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })
+    // Witness: the shared roots are unaffected by the unusable home.
+    expect(await within(sharedTree).findByRole('treeitem', { name: 'Team Docs' })).toBeTruthy()
+    expect(within(dialog).queryByRole('tree', { name: 'My home destination' })).toBeNull()
+    expect(within(dialog).queryByText('My home')).toBeNull()
+  })
+
+  it('shows the Shared with me empty state when the home is the only listed root', async () => {
+    const listAccessible = vi.fn(async () => ({
+      items: [homeRootRow],
+      nextCursor: null,
+    }))
+
+    renderDialog({ listAccessible }, { home: readyHome })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    const homeTree = within(dialog).getByRole('tree', { name: 'My home destination' })
+    // Witness: the home really is offered, so the notice below describes only
+    // the remaining Shared with me section. The notice can only render once
+    // the discovery query settled (a pending query shows "Loading folders…").
+    expect(await within(homeTree).findByRole('treeitem', { name: 'My home' })).toBeTruthy()
+
+    const sharedTree = within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })
+    expect(await within(sharedTree).findByText('No folders here.')).toBeTruthy()
+    expect(within(sharedTree).queryByText('fixture')).toBeNull()
   })
 })

@@ -1,12 +1,14 @@
 import type { Request, Router } from 'express'
-import { createHash } from 'node:crypto'
 import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import { auditMutation } from '../../gfs/audit.js'
 import type { ExternalGfsAuthority } from '../../gfs/externalAuthority.js'
 import { isValidHostSubjectId } from '../../gfs/hostSubject.js'
+import { lockUserHome, restoreUserHomeOwnerGrant } from '../../gfs/userHomeOwnerRestore.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { rootLogger } from '../../observability/logger.js'
 import {
   type ControlApiPermissionSubject,
   appendControlApiPermissionEventsInTransaction,
@@ -28,6 +30,8 @@ import {
  * lockstep; any divergence is a security bug.
  */
 
+export { auditMutation } from '../../gfs/audit.js'
+
 /** Minimal query surface — a pg client/pool satisfies this; tests inject a fake. */
 export interface GrantsDb {
   query(text: string, values?: unknown[]): Promise<{ rows: unknown[]; rowCount?: number | null }>
@@ -38,6 +42,7 @@ export const PERMISSIONS = ['read', 'write', 'delete', 'manage_acl', 'share'] as
 export type GfsPermission = (typeof PERMISSIONS)[number]
 const MANAGED_FIRST_PARTY_HOST_PERMISSIONS = new Set<GfsPermission>(['read', 'write'])
 const LEGACY_STANDALONE_HOST_SUBJECT_ID = '1st:mcp-host/standalone'
+const homeLog = rootLogger.child({ service: 'gfs_user_home_provisioner' })
 const SUBJECT_TYPES = ['operator', 'user', 'team', 'host', 'context'] as const
 export type GfsSubjectType = (typeof SUBJECT_TYPES)[number]
 export const UUID_RE =
@@ -80,6 +85,89 @@ export interface GfsCaller {
   authoritySource?: 'user-session' | 'linked-admin'
   /** Persisted legacy/effective actor_on_behalf_of value. */
   actorOnBehalfOf?: string | null
+}
+
+export async function acquireStructureLock(db: GrantsDb, drive: string): Promise<void> {
+  await db.query("SELECT pg_advisory_xact_lock(hashtext('gfs:structure:' || $1)::bigint)", [drive])
+}
+
+type LockedHome = { user_id: string; state: string; conflict_code?: string | null }
+
+export async function lockHomeForResource(
+  db: GrantsDb,
+  resourceId: string
+): Promise<LockedHome | undefined> {
+  const result = await db.query(
+    'SELECT user_id::text, state, conflict_code FROM gfs_user_homes WHERE resource_id = $1::uuid FOR UPDATE',
+    [resourceId]
+  )
+  return result.rows[0] as LockedHome | undefined
+}
+
+export async function assertNoAncestorHomeExposure(
+  db: GrantsDb,
+  drive: string,
+  resourceId: string,
+  subjects: readonly GfsSubject[]
+): Promise<void> {
+  if (subjects.every(subject => subject.type === 'operator')) return
+  const result = await db.query(
+    `SELECT EXISTS (
+       SELECT 1 FROM gfs_resources r
+        WHERE r.drive = $1 AND r.resource_id = $2::uuid AND r.deleted_at IS NULL
+          AND (r.parent_resource_id IS NULL OR (r.name = 'Users' AND r.kind = 'directory'
+            AND EXISTS (SELECT 1 FROM gfs_resources p WHERE p.resource_id = r.parent_resource_id
+              AND p.drive = r.drive AND p.parent_resource_id IS NULL AND p.deleted_at IS NULL)))
+     ) AS protected`,
+    [drive, resourceId]
+  )
+  if ((result.rows[0] as { protected: boolean } | undefined)?.protected) {
+    throw new GfsGrantError(409, 'ancestor_home_exposure')
+  }
+}
+
+function isHomeOwner(home: LockedHome | undefined, subject: GfsSubject): boolean {
+  return home !== undefined && subject.type === 'user' && subject.id === home.user_id
+}
+
+function hasCompleteOwnerGrant(permissions: readonly GfsPermission[], inherit: boolean): boolean {
+  return inherit && PERMISSIONS.every(permission => permissions.includes(permission))
+}
+
+export async function recordOwnerGrantConflict(
+  db: GrantsDb,
+  home: LockedHome | undefined,
+  drive: string,
+  resourceId: string,
+  caller: GfsCaller
+): Promise<void> {
+  if (!home || home.state !== 'ready') return
+  const detail = { resourceIds: [resourceId] }
+  await db.query(
+    `UPDATE gfs_user_homes SET state = 'conflict', conflict_code = 'ownership_conflict',
+       conflict_detail = $2::jsonb, last_error = NULL, updated_at = now()
+     WHERE user_id = $1::uuid AND state = 'ready'`,
+    [home.user_id, JSON.stringify(detail)]
+  )
+  await auditMutation(db, {
+    actorKey: caller.actorKey,
+    ...callerAuditFields(caller),
+    targetKey: `user:${home.user_id}`,
+    op: 'user_home.conflict.ownership_conflict',
+    drive,
+    resourceId,
+    outcome: 'allowed',
+  })
+  homeLog.info(
+    {
+      event: 'user_home.conflict',
+      userId: home.user_id,
+      drive,
+      conflictCode: 'ownership_conflict',
+      conflictDetail: detail,
+    },
+    'User-home conflict recorded'
+  )
 }
 
 export function callerAuditFields(caller: GfsCaller): {
@@ -192,6 +280,40 @@ export async function ancestorsOf(
     SELECT resource_id FROM chain ORDER BY depth ASC`
   const result = await db.query(sql, [drive, resourceId])
   return (result.rows as { resource_id: string }[]).map(row => String(row.resource_id))
+}
+
+/**
+ * The ancestor chain of every candidate id in ONE recursive query, keyed by the
+ * candidate it belongs to. A candidate with no live row (or whose chain does not
+ * reach it) is absent from the map — unreadable, exactly as `ancestorsOf`
+ * returns an empty list for a missing resource.
+ */
+async function ancestorChainsOf(
+  db: GrantsDb,
+  drive: string,
+  resourceIds: readonly string[]
+): Promise<Map<string, Set<string>>> {
+  const sql = `
+    WITH RECURSIVE chain AS (
+      SELECT resource_id, parent_resource_id, resource_id AS candidate_id, 0 AS depth
+        FROM gfs_resources
+       WHERE drive = $1 AND resource_id = ANY($2::uuid[]) AND deleted_at IS NULL
+      UNION ALL
+      SELECT r.resource_id, r.parent_resource_id, c.candidate_id, c.depth + 1
+        FROM gfs_resources r
+        JOIN chain c ON r.resource_id = c.parent_resource_id
+       WHERE r.drive = $1 AND r.deleted_at IS NULL
+    )
+    SELECT candidate_id, resource_id FROM chain ORDER BY candidate_id, depth ASC`
+  const result = await db.query(sql, [drive, [...resourceIds]])
+  const chains = new Map<string, Set<string>>()
+  for (const row of result.rows as { candidate_id: string; resource_id: string }[]) {
+    const candidateId = String(row.candidate_id)
+    const chain = chains.get(candidateId)
+    if (chain) chain.add(String(row.resource_id))
+    else chains.set(candidateId, new Set([String(row.resource_id)]))
+  }
+  return chains
 }
 
 async function loadGrants(db: GrantsDb, drive: string, subjects: Set<string>): Promise<GrantRow[]> {
@@ -528,62 +650,31 @@ export async function heldPermissions(
 }
 
 /**
- * Append one INSERT-only audit row. Mirrors gfsc DbAuditSink content hashing;
- * the full prev_hash→row_hash chaining is completed in P4-S02, so prev_hash is
- * left null here (each row still carries a tamper-evident content row_hash).
+ * The subset of `resourceIds` the caller holds `read` on. The caller's grants
+ * and shares are loaded ONCE and one recursive query yields every candidate's
+ * ancestor chain, so a list of N recent files costs 3 queries instead of 3×N.
+ * Operator is intrinsic (as in `heldPermissions`); a candidate with no live
+ * chain is unreadable (as there); everything else is the same `holds('read')`
+ * predicate the rest of the authority engine uses.
  */
-export async function auditMutation(
+export async function readableResourceIds(
   db: GrantsDb,
-  params: {
-    actorKey: string
-    targetKey: string
-    op: string
-    drive: string
-    resourceId: string
-    outcome: 'allowed' | 'denied'
-    requestId?: string
-    sourceIp?: string
-    actorOnBehalfOf?: string | null
-    desktopUserId?: string
-    authoritySource?: 'user-session' | 'linked-admin'
+  caller: GfsCaller,
+  drive: string,
+  resourceIds: readonly string[]
+): Promise<Set<string>> {
+  if (resourceIds.length === 0) return new Set()
+  if (caller.isOperator) return new Set(resourceIds)
+  const [grants, shares, chains] = await Promise.all([
+    loadGrants(db, drive, caller.subjects),
+    loadShares(db, drive, caller.subjects),
+    ancestorChainsOf(db, drive, resourceIds),
+  ])
+  const readable = new Set<string>()
+  for (const [candidateId, ancestors] of chains) {
+    if (holds('read', candidateId, ancestors, grants, shares)) readable.add(candidateId)
   }
-): Promise<string | null> {
-  const gfsUri = `gfs://${params.drive}/${params.resourceId}`
-  const rowHash = createHash('sha256')
-    .update(
-      [
-        params.targetKey,
-        params.op,
-        gfsUri,
-        params.outcome,
-        params.actorOnBehalfOf === undefined ? params.actorKey : (params.actorOnBehalfOf ?? ''),
-        params.desktopUserId ?? '',
-        params.authoritySource ?? '',
-        params.requestId ?? '',
-      ].join(' ')
-    )
-    .digest('hex')
-  const result = await db.query(
-    `INSERT INTO gfs_audit
-       (subject, actor_on_behalf_of, op, gfs_uri, outcome, source_ip, request_id,
-        row_hash, desktop_user_id, authority_source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, $10)
-     RETURNING sequence_no::text AS id`,
-    [
-      params.targetKey,
-      params.actorOnBehalfOf === undefined ? params.actorKey : params.actorOnBehalfOf,
-      params.op,
-      gfsUri,
-      params.outcome,
-      params.sourceIp ?? null,
-      params.requestId ?? null,
-      rowHash,
-      params.desktopUserId ?? null,
-      params.authoritySource ?? null,
-    ]
-  )
-  const row = result.rows[0] as { id?: unknown } | undefined
-  return row?.id === null || row?.id === undefined ? null : String(row.id)
+  return readable
 }
 
 export function parseSubject(value: unknown): GfsSubject {
@@ -812,10 +903,43 @@ export async function writeGfsGrantBatchInTransaction(
     inherit: boolean
   }
 ): Promise<{ error: GfsGrantError | null }> {
+  // Any target user could become the bound home owner while this transaction
+  // waits. Lock candidate users in UUID order before the drive structure lock.
+  if (params.caller.isOperator && hasCompleteOwnerGrant(params.permissions, params.inherit)) {
+    const userIds = [
+      ...new Set(
+        params.subjects
+          .filter(subject => subject.type === 'user' && subject.id)
+          .map(subject => subject.id!)
+      ),
+    ].sort()
+    for (const userId of userIds) await lockUserHome(db, userId)
+  }
+  await acquireStructureLock(db, params.drive)
+  const home = await lockHomeForResource(db, params.resourceId)
   const auditIds: Array<string | null> = []
   let outcome: 'allowed' | 'denied' = 'allowed'
   let policyError: GfsGrantError | null = null
   try {
+    const ownerSubject = params.subjects.find(subject => isHomeOwner(home, subject))
+    if (
+      !params.caller.isOperator &&
+      ownerSubject &&
+      !hasCompleteOwnerGrant(params.permissions, params.inherit)
+    ) {
+      // A manager must receive the owner-protection error even when the
+      // owner's existing grant contains bits the manager cannot delegate.
+      await assertMayGrantBatch(
+        db,
+        params.caller,
+        params.drive,
+        params.resourceId,
+        ['manage_acl'],
+        [ownerSubject],
+        { isShare: false }
+      )
+      throw new GfsGrantError(403, 'home_owner_grant_protected')
+    }
     await assertMayGrantBatch(
       db,
       params.caller,
@@ -825,6 +949,20 @@ export async function writeGfsGrantBatchInTransaction(
       params.subjects,
       { isShare: false }
     )
+    await assertNoAncestorHomeExposure(db, params.drive, params.resourceId, params.subjects)
+    if (!params.caller.isOperator && ownerSubject) {
+      const existing = await db.query(
+        `SELECT permissions, inherit FROM gfs_grants WHERE drive = $1 AND resource_id = $2::uuid
+           AND subject_type = 'user' AND subject_id = $3 FOR UPDATE`,
+        [params.drive, params.resourceId, home!.user_id]
+      )
+      const grant = existing.rows[0] as
+        | { permissions: GfsPermission[]; inherit: boolean }
+        | undefined
+      if (!grant || !hasCompleteOwnerGrant(grant.permissions, grant.inherit)) {
+        throw new GfsGrantError(403, 'home_owner_grant_protected')
+      }
+    }
   } catch (error) {
     if (!(error instanceof GfsGrantError)) throw error
     outcome = 'denied'
@@ -834,24 +972,69 @@ export async function writeGfsGrantBatchInTransaction(
   if (!policyError) {
     const types = params.subjects.map(subject => subject.type)
     const ids = params.subjects.map(subject => subject.id ?? '')
-    await db.query(
-      `INSERT INTO gfs_grants
-         (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
-       SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7
-         FROM unnest($3::text[], $4::text[]) AS input(subject_type, subject_id)
-       ON CONFLICT (drive, resource_id, subject_type, subject_id)
-       DO UPDATE SET permissions = EXCLUDED.permissions, inherit = EXCLUDED.inherit,
-                     granted_by = EXCLUDED.granted_by, updated_at = now()`,
-      [
-        params.drive,
-        params.resourceId,
-        types,
-        ids,
-        params.permissions,
-        params.inherit,
-        params.caller.actorKey,
-      ]
-    )
+    const writeGrants = async () => {
+      await db.query(
+        `INSERT INTO gfs_grants
+           (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
+         SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7
+           FROM unnest($3::text[], $4::text[]) AS input(subject_type, subject_id)
+         ON CONFLICT (drive, resource_id, subject_type, subject_id)
+         DO UPDATE SET permissions = EXCLUDED.permissions, inherit = EXCLUDED.inherit,
+                       granted_by = EXCLUDED.granted_by, updated_at = now()`,
+        [
+          params.drive,
+          params.resourceId,
+          types,
+          ids,
+          params.permissions,
+          params.inherit,
+          params.caller.actorKey,
+        ]
+      )
+    }
+    const targetsOwner = params.subjects.some(subject => isHomeOwner(home, subject))
+    const restoresOwner =
+      params.caller.isOperator &&
+      targetsOwner &&
+      home?.state === 'conflict' &&
+      home.conflict_code === 'ownership_conflict' &&
+      hasCompleteOwnerGrant(params.permissions, params.inherit)
+    if (restoresOwner) {
+      const adminId =
+        params.caller.effectiveControlAdminId ??
+        (params.req as Request & { adminAuth?: { sub?: string } }).adminAuth?.sub
+      if (!adminId) throw new Error('home_owner_restore_actor_missing')
+      const restored = await restoreUserHomeOwnerGrant(
+        db,
+        home.user_id,
+        {
+          actorKey: params.caller.actorKey,
+          actorOnBehalfOf: adminId,
+          ...(params.caller.desktopUserId ? { desktopUserId: params.caller.desktopUserId } : {}),
+          ...(params.caller.authoritySource
+            ? { authoritySource: params.caller.authoritySource }
+            : {}),
+          requestId: requestIdOf(params.req),
+          sourceIp: params.req.ip,
+        },
+        async binding => {
+          if (binding.drive !== params.drive || binding.resourceId !== params.resourceId) {
+            throw new Error('home_owner_binding_invalid')
+          }
+          await writeGrants()
+        }
+      )
+      if (restored !== 'restored') throw new Error('home_owner_restore_state_changed')
+    } else {
+      await writeGrants()
+    }
+    if (
+      params.caller.isOperator &&
+      !hasCompleteOwnerGrant(params.permissions, params.inherit) &&
+      targetsOwner
+    ) {
+      await recordOwnerGrantConflict(db, home, params.drive, params.resourceId, params.caller)
+    }
   }
 
   for (const subject of params.subjects) {
@@ -921,6 +1104,7 @@ export interface GfsGrantListItem {
   subject: { type: string; id?: string }
   permissions: string[]
   inherit: boolean
+  homeOwner?: true
 }
 
 /** One resource's grant rows in the canonical list shape (`id` powers revoke). */
@@ -929,8 +1113,14 @@ export async function queryGrantItems(
   resourceId: string
 ): Promise<GfsGrantListItem[]> {
   const result = await pool.query(
-    `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit
-       FROM gfs_grants
+    `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit,
+            EXISTS (
+              SELECT 1 FROM gfs_user_homes h
+               WHERE h.resource_id = g.resource_id
+                 AND g.subject_type = 'user'
+                 AND h.user_id::text = g.subject_id
+            ) AS home_owner
+       FROM gfs_grants g
       WHERE drive = $1 AND resource_id = $2::uuid
       ORDER BY created_at ASC, id ASC`,
     [drive, resourceId]
@@ -947,6 +1137,7 @@ export async function queryGrantItems(
       },
       permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
       inherit: Boolean(row.inherit),
+      ...(row.home_owner === true ? { homeOwner: true as const } : {}),
     }
   })
 }
@@ -1050,6 +1241,15 @@ export async function handleGrantDelete(
       return
     }
     const result = await withTransaction(async db => {
+      const identity = await db.query(
+        'SELECT drive, resource_id FROM gfs_grants WHERE id = $1::uuid',
+        [id]
+      )
+      const target = identity.rows[0] as { drive: string; resource_id: string } | undefined
+      if (!target)
+        return caller.isOperator ? { kind: 'not_found' as const } : { kind: 'hidden' as const }
+      await acquireStructureLock(db, target.drive)
+      const home = await lockHomeForResource(db, target.resource_id)
       const existing = await db.query(
         `SELECT drive, resource_id, subject_type, subject_id, permissions
            FROM gfs_grants WHERE id = $1::uuid
@@ -1073,6 +1273,18 @@ export async function handleGrantDelete(
       // Revoking uses the same no-escalation gate as granting. A lower authority
       // cannot remove access that was seeded with permissions it does not hold.
       try {
+        if (!caller.isOperator && isHomeOwner(home, subject)) {
+          await assertMayGrant(
+            db,
+            caller,
+            row.drive,
+            String(row.resource_id),
+            ['manage_acl'],
+            subject,
+            { isShare: false, allowLegacyRetirement: true }
+          )
+          throw new GfsGrantError(403, 'home_owner_grant_protected')
+        }
         await assertMayGrant(
           db,
           caller,
@@ -1110,6 +1322,9 @@ export async function handleGrantDelete(
         return { kind: 'denied' as const, error }
       }
       await db.query(`DELETE FROM gfs_grants WHERE id = $1::uuid`, [id])
+      if (caller.isOperator && isHomeOwner(home, subject)) {
+        await recordOwnerGrantConflict(db, home, row.drive, String(row.resource_id), caller)
+      }
       const auditId = await auditMutation(db, {
         actorKey: caller.actorKey,
         ...callerAuditFields(caller),

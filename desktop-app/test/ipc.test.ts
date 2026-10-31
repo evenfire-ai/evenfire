@@ -8,8 +8,24 @@ import {
   requireChatStore,
   unbindChatStore,
 } from '../src/chatStoreBinding.js'
+import { GfsClient, type GfsTransport } from '../src/gfs/uriHandler.js'
 import { registerIpcHandlers, sanitizeChatLoadWindow } from '../src/ipc.js'
 import type { HostStatusStreamEvent } from '../src/types.js'
+
+/** One gfs resource as the resolve route returns it (used by the ZIP wiring test). */
+const GFS_RID = '0123456789abcdef0123456789abcdef'
+const GFS_RESOURCE = {
+  drive: 'main',
+  resourceId: GFS_RID,
+  parentResourceId: null,
+  rid: GFS_RID,
+  gfsUri: `gfs://main/${GFS_RID}`,
+  name: 'report.md',
+  kind: 'file',
+  pathCache: '/report.md',
+  version: 1,
+  bytes: 9,
+}
 
 const testState = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
@@ -27,7 +43,9 @@ const testState = vi.hoisted(() => {
 
 vi.mock('electron', () => ({
   ipcMain: testState.ipcMainMock,
-  app: { getPath: () => testState.downloadsDir },
+  // `isReady: false` keeps config.ts on its pre-Electron fallback path, the
+  // same one the other main-process suites get without an Electron runtime.
+  app: { isReady: () => false, getPath: () => testState.downloadsDir },
 }))
 
 function makeTrustedEvent(senderId = 77) {
@@ -122,7 +140,9 @@ describe('ipc host status stream handlers', () => {
     downloadWorkflowRunArtifact: vi.fn(),
     resolveGfsUri: vi.fn(),
     downloadGfsUri: vi.fn(),
+    downloadGfsUriInto: vi.fn(),
     listAccessibleGfsResources: vi.fn(),
+    listRecentGfsFiles: vi.fn(),
     listGfsChildren: vi.fn(),
     gfsAffordances: vi.fn(),
     grantGfs: vi.fn(),
@@ -686,6 +706,78 @@ describe('ipc host status stream handlers', () => {
     )
   })
 
+  it('forwards a read share with its exact descendant scope and rejects Editor permissions', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:createShare')
+    const payload = {
+      resourceId: ' resource-1 ',
+      subjectKeys: [' user:user-1 '],
+      drive: ' main ',
+      options: { permissions: [' read ', ' share '], includeDescendants: false },
+    }
+    await Promise.resolve(handler?.(event, payload))
+    expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
+      permissions: ['read', 'share'],
+      includeDescendants: false,
+    })
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          ...payload,
+          options: { permissions: ['read', 'write'], includeDescendants: false },
+        })
+      )
+    ).rejects.toThrow('Invalid read share options')
+  })
+
+  it('forwards a share-only read role', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:createShare')
+    await Promise.resolve(
+      handler?.(event, {
+        resourceId: 'resource-1',
+        subjectKeys: ['user:user-1'],
+        drive: 'main',
+        options: { permissions: ['share'], includeDescendants: false },
+      })
+    )
+    expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
+      permissions: ['share'],
+      includeDescendants: false,
+    })
+  })
+
+  it('rejects an empty read-role intersection before creating the share', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:createShare')
+    const payload = {
+      resourceId: 'resource-1',
+      subjectKeys: ['user:user-1'],
+      drive: 'main',
+      options: { permissions: [], includeDescendants: false },
+    }
+    // The server refuses an empty permission set (`permissions_invalid`), so
+    // the IPC boundary must not dispatch it.
+    await expect(Promise.resolve(handler?.(event, payload))).rejects.toThrow(
+      'Invalid read share options'
+    )
+    expect(service.createGfsShare).not.toHaveBeenCalled()
+
+    // Witness: the same handler and service accept the neighbouring read role,
+    // so the refusal above is the empty set and not a broken call path.
+    await Promise.resolve(
+      handler?.(event, {
+        ...payload,
+        options: { permissions: ['read'], includeDescendants: false },
+      })
+    )
+    expect(service.createGfsShare).toHaveBeenCalledTimes(1)
+    expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
+      permissions: ['read'],
+      includeDescendants: false,
+    })
+  })
+
   it('rejects an empty or non-array subjectKeys payload before calling AppService', async () => {
     const { event } = makeTrustedEvent()
     const handler = testState.handlers.get('gfs:grant')
@@ -784,6 +876,118 @@ describe('ipc host status stream handlers', () => {
       revokeHandler?.(event, { shareId: ' 22222222-2222-4222-8222-222222222222 ' })
     )
     expect(service.revokeGfsShare).toHaveBeenCalledWith('22222222-2222-4222-8222-222222222222')
+  })
+
+  it('downloads a ZIP entry without an open intent (a ZIP export records nothing)', async () => {
+    // The folder-ZIP walk streams through `downloadGfsUriInto`, whose URL is
+    // built without `intent`. A real client behind the mocked service makes the
+    // URL the transport receives observable, and the witness that it was built
+    // is `drive` (present in both spellings).
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: GFS_RESOURCE,
+    })) as GfsTransport['requestJson']
+    const fetchBytes = vi.fn(
+      async () => new TextEncoder().encode('zip-bytes').buffer
+    ) as GfsTransport['fetchBytes']
+    const client = new GfsClient({ baseUrl: 'https://api.example/', requestJson, fetchBytes })
+    service.downloadGfsUriInto.mockImplementation(
+      async (
+        uri: string,
+        maxBytes: number,
+        signal: AbortSignal | undefined,
+        onChunk: (chunk: Uint8Array) => Promise<void>
+      ) => client.downloadInto(uri, 'tok', signal ? { maxBytes, signal } : { maxBytes }, onChunk)
+    )
+
+    const { event } = makeTrustedEvent()
+    const startHandler = testState.handlers.get('gfs:zipStream:start')
+    const { jobId } = (await Promise.resolve(startHandler?.(event))) as { jobId: string }
+    const appendHandler = testState.handlers.get('gfs:zipStream:appendFromUri')
+    const appended = (await Promise.resolve(
+      appendHandler?.(event, {
+        jobId,
+        name: 'report.md',
+        uri: `gfs://main/${GFS_RID}`,
+        maxBytes: 4096,
+      })
+    )) as { name: string; bytes: number }
+
+    expect(appended).toEqual({ name: 'report.md', bytes: 9 })
+    const [url] = (fetchBytes as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [string]
+    expect(url).toContain('drive=main')
+    expect(url).not.toContain('intent')
+
+    await Promise.resolve(testState.handlers.get('gfs:zipStream:abort')?.(event, { jobId }))
+  })
+
+  it('rejects a missing or non-boolean recordOpen on gfs:download', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:download')
+    const uri = `gfs://main/${GFS_RID}`
+
+    await expect(Promise.resolve(handler?.(event, { uri }))).rejects.toThrow(
+      'recordOpen must be a boolean'
+    )
+    await expect(Promise.resolve(handler?.(event, { uri, recordOpen: 'true' }))).rejects.toThrow(
+      'recordOpen must be a boolean'
+    )
+    expect(service.downloadGfsUri).not.toHaveBeenCalled()
+
+    // Witness: the same handler with a boolean reaches the service.
+    service.downloadGfsUri.mockResolvedValue({ resource: GFS_RESOURCE, bytes: new ArrayBuffer(0) })
+    await Promise.resolve(handler?.(event, { uri, recordOpen: true }))
+    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, {
+      maxBytes: undefined,
+      signal: undefined,
+      recordOpen: true,
+    })
+  })
+
+  it('rejects a missing or non-boolean recordOpen on gfs:downloadPreview', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:downloadPreview')
+    const uri = `gfs://main/${GFS_RID}`
+
+    await expect(Promise.resolve(handler?.(event, { uri, maxBytes: 1024 }))).rejects.toThrow(
+      'recordOpen must be a boolean'
+    )
+    await expect(
+      Promise.resolve(handler?.(event, { uri, maxBytes: 1024, recordOpen: 1 }))
+    ).rejects.toThrow('recordOpen must be a boolean')
+    expect(service.downloadGfsUri).not.toHaveBeenCalled()
+
+    // Witness: the same handler with a boolean reaches the service untouched.
+    service.downloadGfsUri.mockResolvedValue({ resource: GFS_RESOURCE, bytes: new ArrayBuffer(0) })
+    await Promise.resolve(handler?.(event, { uri, maxBytes: 1024, recordOpen: false }))
+    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, {
+      maxBytes: 1024,
+      recordOpen: false,
+    })
+  })
+
+  it('rejects an untrusted sender for gfs:listRecent', async () => {
+    const handler = testState.handlers.get('gfs:listRecent')
+    await expect(
+      Promise.resolve(
+        handler?.(
+          {
+            senderFrame: { url: 'https://evil.example.com' },
+            sender: { id: 1, send: vi.fn(), once: vi.fn() },
+          },
+          { drive: 'main' }
+        )
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    expect(service.listRecentGfsFiles).not.toHaveBeenCalled()
+
+    // Witness: the same handler from the trusted renderer reaches the service.
+    service.listRecentGfsFiles.mockResolvedValue({ items: [] })
+    const { event } = makeTrustedEvent()
+    await expect(Promise.resolve(handler?.(event, { drive: ' main ' }))).resolves.toEqual({
+      items: [],
+    })
+    expect(service.listRecentGfsFiles).toHaveBeenCalledWith('main')
   })
 
   it('lists my agents through the dedicated channel (not the cached catalog)', async () => {

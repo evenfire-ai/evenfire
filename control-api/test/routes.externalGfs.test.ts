@@ -1441,6 +1441,92 @@ describe('indexed upload relay canonical drive', () => {
   })
 })
 
+describe('ancestor home exposure through both GFS authority planes', () => {
+  it.each(['user', 'operator'] as const)(
+    'rejects grants and shares on protected ancestors for %s regardless of inheritance',
+    async authority => {
+      auth()
+      dbReturning([
+        {
+          subject_type: 'user',
+          subject_id: U1,
+          resource_id: R,
+          permissions: ['manage_acl', 'share', 'read'],
+          inherit: false,
+        },
+      ])
+      const originalQuery = mockQuery.getMockImplementation()!
+      mockQuery.mockImplementation(async (sql: string, values?: unknown[]) => {
+        if (sql.includes('AS protected')) return { rows: [{ protected: true }] }
+        return originalQuery(sql, values)
+      })
+      const userPlane = authority === 'user'
+      const grantApp = userPlane ? await buildApp() : await buildAdminGrantsApp(CONTROL_ADMIN_ID)
+      const shareApp = userPlane ? grantApp : await buildOperatorShareApp()
+      const grantPath = userPlane ? '/external/gfs/grants' : '/gfs/grants'
+      const sharePath = userPlane ? '/external/gfs/shares' : '/gfs/shares'
+      const body = { resourceId: R, subject: { type: 'user', id: U2 }, permissions: ['read'] }
+      const grantWrite = (inherit: boolean) =>
+        request(grantApp)
+          .put(grantPath)
+          .set('x-user-session-token', 'sess')
+          .send({ ...body, inherit })
+      const shareWrite = (includeDescendants: boolean) =>
+        request(shareApp)
+          .post(sharePath)
+          .set('x-user-session-token', 'sess')
+          .send({ ...body, includeDescendants })
+      for (const inherit of [false, true]) {
+        await grantWrite(inherit)
+          .expect(409)
+          .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+        await shareWrite(inherit)
+          .expect(409)
+          .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+      }
+    }
+  )
+})
+
+describe('ancestor grants for user agents', () => {
+  it('rejects a foreign agent first and applies ancestor exposure to an owned agent', async () => {
+    auth()
+    dbReturning(
+      [
+        {
+          subject_type: 'user',
+          subject_id: U1,
+          resource_id: R,
+          permissions: ['manage_acl', 'read'],
+          inherit: false,
+        },
+      ],
+      { callerAgentNames: ['agent-a'] }
+    )
+    const originalQuery = mockQuery.getMockImplementation()!
+    mockQuery.mockImplementation(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('AS protected')) return { rows: [{ protected: true }] }
+      return originalQuery(sql, values)
+    })
+    const app = await buildApp()
+    const body = { resourceId: R, permissions: ['read'] }
+    for (const inherit of [false, true]) {
+      await request(app)
+        .put('/external/gfs/grants')
+        .set('x-user-session-token', 'sess')
+        .send({ ...body, subject: { type: 'host', id: H1 }, inherit })
+        .expect(409)
+        .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+      await request(app)
+        .put('/external/gfs/grants')
+        .set('x-user-session-token', 'sess')
+        .send({ ...body, subject: { type: 'host', id: '1st:mcp-host/foreign-agent' }, inherit })
+        .expect(403)
+        .expect(({ body: result }) => expect(result.error).toBe('foreign_agent_forbidden'))
+    }
+  })
+})
+
 describe('PUT /external/gfs/grants (user delegation via existing engine)', () => {
   it('honors a user-session grant and preserves false when inherit is omitted', async () => {
     auth()
@@ -2423,6 +2509,7 @@ describe('GET /external/gfs/resources', () => {
       if (lifecycle) return lifecycle
       if (text.includes('FROM team_members')) return { rows: [{ team_id: T1 }] }
       if (text.includes('FROM gfs_grants') && text.includes('JOIN requested_subjects')) {
+        expect(values?.[0]).toBe('main')
         expect(values?.[1]).toEqual(['user', 'team'])
         expect(values?.[2]).toEqual([U1, T1])
         return {
@@ -2581,6 +2668,97 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
         },
       ],
     })
+  })
+
+  it('marks only the home owner grant for the owner, a manager, and an operator', async () => {
+    const ownerGrant = {
+      id: 'aaaa1111-0000-4000-8000-000000000001',
+      drive: 'main',
+      resource_id: R,
+      subject_type: 'user',
+      subject_id: U1,
+      permissions: ['read', 'manage_acl'],
+      inherit: true,
+      home_owner: true,
+    }
+    const managerGrant = {
+      ...ownerGrant,
+      id: 'aaaa1111-0000-4000-8000-000000000002',
+      subject_id: U2,
+      home_owner: false,
+    }
+    const hostGrant = {
+      ...ownerGrant,
+      id: 'aaaa1111-0000-4000-8000-000000000003',
+      subject_type: 'host',
+      subject_id: H1,
+      home_owner: false,
+    }
+    dbReturning([ownerGrant, managerGrant], {
+      grantListRows: [ownerGrant, managerGrant, hostGrant],
+    })
+    const app = await buildApp()
+    const adminApp = await buildAdminGrantsApp('operator')
+    const expected = [
+      {
+        id: ownerGrant.id,
+        drive: 'main',
+        resourceId: R,
+        subject: { type: 'user', id: U1 },
+        permissions: ownerGrant.permissions,
+        inherit: true,
+        homeOwner: true,
+      },
+      {
+        id: managerGrant.id,
+        drive: 'main',
+        resourceId: R,
+        subject: { type: 'user', id: U2 },
+        permissions: managerGrant.permissions,
+        inherit: true,
+      },
+      {
+        id: hostGrant.id,
+        drive: 'main',
+        resourceId: R,
+        subject: { type: 'host', id: H1 },
+        permissions: hostGrant.permissions,
+        inherit: true,
+      },
+    ]
+    for (const callerId of [U1, U2]) {
+      mockVerifyExternalSessionToken.mockReturnValue({ ...SESSION, userId: callerId })
+      const response = await request(app)
+        .get('/external/gfs/grants')
+        .query({ drive: 'main', resourceId: R })
+        .set('x-user-session-token', 'sess')
+      expect(response.status).toBe(200)
+      expect(response.body.items).toEqual(expected)
+    }
+    const operator = await request(adminApp)
+      .get('/gfs/grants')
+      .query({ drive: 'main', resourceId: R })
+    expect(operator.status).toBe(200)
+    expect(operator.body.items).toEqual(expected)
+
+    const folderGrant = { ...ownerGrant, resource_id: R2, home_owner: false }
+    dbReturning([folderGrant], { grantListRows: [folderGrant] })
+    mockVerifyExternalSessionToken.mockReturnValue(SESSION)
+    const folder = await request(app)
+      .get('/external/gfs/grants')
+      .query({ drive: 'main', resourceId: R2 })
+      .set('x-user-session-token', 'sess')
+    expect(folder.status).toBe(200)
+    expect(folder.body.items).toEqual([
+      {
+        id: folderGrant.id,
+        drive: 'main',
+        resourceId: R2,
+        subject: { type: 'user', id: U1 },
+        permissions: folderGrant.permissions,
+        inherit: true,
+      },
+    ])
   })
 
   it('denies the grants list to a caller without manage_acl', async () => {
@@ -2781,5 +2959,322 @@ describe('user read proxy via gfsc (GET /external/gfs/proxy/:rid)', () => {
 
     expect(res.status).toBe(500)
     expect(res.body).toEqual({ ok: false, error: { code: 'internal', message: 'boom' } })
+  })
+})
+
+describe('proxy content read intent (GET /external/gfs/proxy/:rid)', () => {
+  const readPath = `/external/gfs/proxy/${R}`
+
+  /** The router behind a write-recording middleware, so a record can be ordered
+   * against the first body byte of the response. */
+  async function buildAppRecordingWrites(events: string[]) {
+    const { createExternalGfsRouter } = await import('../src/routes/external/gfs.js')
+    const { correlationIdMiddleware } = await import('../src/middleware/correlationId.js')
+    const app = express()
+    app.use(express.json())
+    app.use(correlationIdMiddleware)
+    app.use((_req, res, next) => {
+      const original = res.write.bind(res)
+      res.write = ((...args: Parameters<typeof original>) => {
+        events.push('write')
+        return original(...args)
+      }) as typeof res.write
+      next()
+    })
+    app.use(createExternalGfsRouter())
+    return app
+  }
+
+  /** Tag the activity statement in the event list; `fail` makes it throw. */
+  function watchActivityStatement(events: string[], fail = false): void {
+    const base = mockQuery.getMockImplementation()!
+    mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
+      if (String(text).includes('gfs_record_user_file_activity')) {
+        events.push('record')
+        if (fail) throw new Error('activity statement failed')
+      }
+      return base(text, values)
+    })
+  }
+
+  function activityCalls() {
+    return mockQuery.mock.calls.filter(call =>
+      String(call[0]).includes('gfs_record_user_file_activity')
+    )
+  }
+
+  it('records exactly one open for the Desktop actor before the first body byte', async () => {
+    auth()
+    const events: string[] = []
+    watchActivityStatement(events)
+    const fetchMock = vi.fn(
+      async () =>
+        new Response('file-bytes-here', {
+          status: 200,
+          headers: { 'content-type': 'text/plain', 'content-length': '15' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildAppRecordingWrites(events)
+
+    const res = await request(app)
+      .get(readPath)
+      .query({ intent: 'open' })
+      .set('x-user-session-token', 'sess')
+
+    expect(res.status).toBe(200)
+    expect(res.text).toBe('file-bytes-here')
+    expect(activityCalls()).toHaveLength(1)
+    const [, values] = activityCalls()[0]!
+    expect(values).toEqual([U1, [R]])
+    // Ordering witness: the record ran before the first byte of the body.
+    expect(events[0]).toBe('record')
+    expect(events).toContain('write')
+  })
+
+  it('records nothing without an intent but still streams the file', async () => {
+    auth()
+    const events: string[] = []
+    watchActivityStatement(events)
+    const fetchMock = vi.fn(
+      async () =>
+        new Response('file-bytes-here', { status: 200, headers: { 'content-type': 'text/plain' } })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildAppRecordingWrites(events)
+
+    const res = await request(app).get(readPath).set('x-user-session-token', 'sess')
+
+    // Witness: the read really happened, so the missing record is a decision.
+    expect(res.status).toBe(200)
+    expect(res.text).toBe('file-bytes-here')
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(activityCalls()).toHaveLength(0)
+  })
+
+  it('records nothing when gfsc refuses the read', async () => {
+    auth()
+    const events: string[] = []
+    watchActivityStatement(events)
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: false, error: { code: 'forbidden', message: 'no' } }), {
+          status: 403,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildAppRecordingWrites(events)
+
+    const res = await request(app)
+      .get(readPath)
+      .query({ intent: 'open' })
+      .set('x-user-session-token', 'sess')
+
+    // Witness: the 403 envelope was forwarded, so the read path ran to the
+    // branch under test.
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ ok: false, error: { code: 'forbidden', message: 'no' } })
+    expect(activityCalls()).toHaveLength(0)
+  })
+
+  it('fails the read with 500 and no file byte when the record fails', async () => {
+    auth()
+    const events: string[] = []
+    watchActivityStatement(events, true)
+    let cancelled = false
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('file-bytes-here'))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const fetchMock = vi.fn(
+      async () => new Response(body, { status: 200, headers: { 'content-type': 'text/plain' } })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildAppRecordingWrites(events)
+
+    const res = await request(app)
+      .get(readPath)
+      .query({ intent: 'open' })
+      .set('x-user-session-token', 'sess')
+
+    // Witness: the upstream read happened and the record was attempted.
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(activityCalls()).toHaveLength(1)
+    expect(res.status).toBe(500)
+    expect(res.text).not.toContain('file-bytes-here')
+    expect(cancelled).toBe(true)
+  })
+
+  it.each([
+    ['an unknown intent', 'foo'],
+    ['a repeated intent', 'open&intent=open'],
+  ])('rejects %s with 400 before any gfsc call', async (_label, query) => {
+    auth()
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+
+    const res = await request(app)
+      .get(`${readPath}?intent=${query}`)
+      .set('x-user-session-token', 'sess')
+
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'intent_invalid' })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(activityCalls()).toHaveLength(0)
+  })
+
+  it('keys a linked admin open by the Desktop actor, never the Control admin id', async () => {
+    auth()
+    ;(config as { desktopGfsOperatorLinkingEnabled: boolean }).desktopGfsOperatorLinkingEnabled =
+      true
+    mockResolveActiveLink.mockResolvedValue(ACTIVE_LINK)
+    const events: string[] = []
+    watchActivityStatement(events)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response('x', { status: 200, headers: { 'content-type': 'text/plain' } })
+      )
+    )
+    const app = await buildAppRecordingWrites(events)
+
+    const res = await request(app)
+      .get(readPath)
+      .query({ intent: 'open' })
+      .set('x-user-session-token', 'sess')
+
+    expect(res.status).toBe(200)
+    const [, values] = activityCalls()[0]!
+    expect(values).toEqual([U1, [R]])
+    expect(values).not.toContain(CONTROL_ADMIN_ID)
+  })
+})
+
+describe('GET /external/gfs/recent', () => {
+  it('returns the caller rows in one response and is guarded by the resource read ceiling', async () => {
+    const previousReadLimit = config.externalGfsResourceReadRlPerMin
+    config.externalGfsResourceReadRlPerMin = 2
+    try {
+      auth()
+      mockQuery.mockImplementation(async (text: string) => {
+        if (text.includes('SELECT lifecycle_state, lifecycle_version')) {
+          return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }] }
+        }
+        if (text.includes('rate_limit_buckets')) return { rows: [{ count: 1 }] }
+        if (text.includes('FROM gfs_user_file_activity')) {
+          return {
+            rows: [
+              {
+                resource_id: R2,
+                drive: 'main',
+                name: 'newer.txt',
+                version: 2,
+                bytes: 12,
+                last_activity_at: new Date('2026-10-30T10:00:00.000Z'),
+              },
+              {
+                resource_id: R,
+                drive: 'main',
+                name: 'older.txt',
+                version: 1,
+                bytes: 3,
+                last_activity_at: new Date('2026-10-29T10:00:00.000Z'),
+              },
+            ],
+          }
+        }
+        if (text.includes('FROM gfs_grants g')) {
+          // The caller's own grants on the two candidates; the route's filter is
+          // what this test exercises, so both must be readable.
+          return {
+            rows: [
+              {
+                subject_type: 'user',
+                subject_id: U1,
+                resource_id: R2,
+                permissions: ['read'],
+                inherit: false,
+              },
+              {
+                subject_type: 'user',
+                subject_id: U1,
+                resource_id: R,
+                permissions: ['read'],
+                inherit: false,
+              },
+            ],
+          }
+        }
+        if (text.includes('FROM gfs_shares')) return { rows: [] }
+        if (text.includes('SELECT candidate_id, resource_id')) {
+          return {
+            rows: [
+              { candidate_id: R2, resource_id: R2 },
+              { candidate_id: R, resource_id: R },
+            ],
+          }
+        }
+        return { rows: [] }
+      })
+      const app = await buildApp()
+
+      const first = await request(app)
+        .get('/external/gfs/recent')
+        .query({ drive: 'main' })
+        .set('x-user-session-token', 'read-session')
+      expect(first.status).toBe(200)
+      expect(first.body).toEqual({
+        ok: true,
+        data: {
+          items: [
+            {
+              resourceId: R2,
+              gfsUri: `gfs://main/${R2.replace(/-/g, '')}`,
+              drive: 'main',
+              name: 'newer.txt',
+              version: 2,
+              bytes: 12,
+              lastActivityAt: '2026-10-30T10:00:00.000Z',
+            },
+            {
+              resourceId: R,
+              gfsUri: `gfs://main/${R_RID}`,
+              drive: 'main',
+              name: 'older.txt',
+              version: 1,
+              bytes: 3,
+              lastActivityAt: '2026-10-29T10:00:00.000Z',
+            },
+          ],
+        },
+      })
+
+      await request(app)
+        .get('/external/gfs/recent')
+        .set('x-user-session-token', 'read-session')
+        .expect(200)
+      const exhausted = await request(app)
+        .get('/external/gfs/recent')
+        .set('x-user-session-token', 'read-session')
+      expect(exhausted.status).toBe(429)
+      expect(exhausted.headers['ratelimit-limit'] ?? exhausted.headers['x-ratelimit-limit']).toBe(
+        '2'
+      )
+    } finally {
+      config.externalGfsResourceReadRlPerMin = previousReadLimit
+    }
+  })
+
+  it('answers 401 without a session and never serves another user id', async () => {
+    const app = await buildApp()
+    const res = await request(app).get('/external/gfs/recent').query({ userId: U2 })
+    expect(res.status).toBe(401)
+    expect(mockQuery).not.toHaveBeenCalled()
   })
 })

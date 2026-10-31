@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { ComposerGlobalFilesModal } from '../ComposerGlobalFilesModal'
 
 const hookMock = vi.hoisted(() => ({
@@ -96,6 +96,58 @@ describe('ComposerGlobalFilesModal', () => {
     expect(screen.getByText('notes.txt')).toBeTruthy()
     expect(screen.queryByText('No shared files yet')).toBeNull()
     expect(screen.queryByRole('button', { name: /retry file listing/i })).toBeNull()
+  })
+
+  it('shows the caller home once, as My home, and names it My home in the path', () => {
+    const homeRow = {
+      resourceId: 'home-1',
+      rid: 'home-1',
+      gfsUri: 'gfs://main/home-1',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'fixture',
+      kind: 'directory' as const,
+      path: '/Users/fixture',
+      version: 1,
+      bytes: 0,
+    }
+    const notes = {
+      ...homeRow,
+      resourceId: 'file-1',
+      rid: 'file-1',
+      gfsUri: 'gfs://main/file-1',
+      name: 'notes.txt',
+      kind: 'file' as const,
+      path: '/notes.txt',
+      bytes: 12,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      drive: 'main',
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1', path: '/Users/fixture' },
+      accessibleResources: [homeRow, notes],
+    })
+    renderModal()
+    // Witness: a file shared with the caller is still listed.
+    expect(screen.getByText('notes.txt')).toBeTruthy()
+    expect(screen.getByText('My home')).toBeTruthy()
+    expect(screen.queryByText('fixture')).toBeNull()
+    cleanup()
+
+    // Inside the home, the path names its root My home.
+    const homeCrumb = { ...homeRow }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      drive: 'main',
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1', path: '/Users/fixture' },
+      current: homeCrumb,
+      crumbs: [homeCrumb],
+    })
+    renderModal()
+    const path = screen.getByRole('navigation', { name: 'Global file path' })
+    expect(within(path).getByRole('button', { name: 'My home' })).toBeTruthy()
+    expect(within(path).getByRole('button', { name: 'Shared files' })).toBeTruthy()
+    expect(within(path).queryByRole('button', { name: 'fixture' })).toBeNull()
   })
 
   it('stops selecting at the shared ten-file message limit', () => {
@@ -194,6 +246,25 @@ describe('ComposerGlobalFilesModal', () => {
     expect(onAdd.mock.calls[0]![0].map((file: { id: string }) => file.id)).toEqual([
       'global-file:main:file-1',
     ])
+  })
+
+  it('keeps the discovery retry card when only My home is listed', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      drive: 'main',
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1', path: '/Users/fixture' },
+      accessibleError: RATE_LIMITED_DISCOVERY,
+      discoveryFailure: {
+        kind: 'rate-limited',
+        message: RATE_LIMITED_DISCOVERY,
+        retryAvailableAt: Date.now() + 7_000,
+      },
+    })
+    renderModal()
+    // The home row is not a row discovery returned, so the refused read still
+    // gets its card instead of a listing that hides the failure.
+    expect(screen.getByText('Too many file requests')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /retry file listing/i })).toBeTruthy()
   })
 
   it('answers a rate-limited discovery with a retry, not "No shared files yet"', async () => {

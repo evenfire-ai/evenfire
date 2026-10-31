@@ -10,15 +10,18 @@ import {
   type GfsSubject,
   type GfsSubjectType,
   UUID_RE,
+  acquireStructureLock,
   appendGfsPermissionEvent,
   appendGfsPermissionEvents,
   assertMayGrant,
   assertMayGrantBatch,
   assertMutationSubjectTransport,
+  assertNoAncestorHomeExposure,
   auditMutation,
   callerAuditFields,
   driveOf,
   heldPermissions,
+  lockHomeForResource,
   normalizeMutationSubjects,
   parsePermissions,
   permissionReadFilter,
@@ -137,6 +140,8 @@ export async function writeGfsShareBatchInTransaction(
     includeDescendants: boolean
   }
 ): Promise<{ error: GfsGrantError | null }> {
+  await acquireStructureLock(db, params.drive)
+  await lockHomeForResource(db, params.resourceId)
   const auditIds: Array<string | null> = []
   let outcome: 'allowed' | 'denied' = 'allowed'
   let policyError: GfsGrantError | null = null
@@ -150,6 +155,7 @@ export async function writeGfsShareBatchInTransaction(
       params.subjects,
       { isShare: true }
     )
+    await assertNoAncestorHomeExposure(db, params.drive, params.resourceId, params.subjects)
   } catch (error) {
     if (!(error instanceof GfsGrantError)) throw error
     outcome = 'denied'
@@ -258,6 +264,16 @@ export async function handleShareDelete(req: Request, res: Response): Promise<vo
       return
     }
     const result = await withTransaction(async db => {
+      // Read the drive without a row lock so the structure lock always precedes
+      // the share row lock, as grant DELETE does. A writer that authorized from
+      // this share while the DELETE committed would otherwise decide on revoked
+      // authority.
+      const identity = await db.query('SELECT drive FROM gfs_shares WHERE id = $1::uuid', [id])
+      const target = identity.rows[0] as { drive: string } | undefined
+      if (!target) {
+        return caller.isOperator ? { kind: 'not_found' as const } : { kind: 'hidden' as const }
+      }
+      await acquireStructureLock(db, target.drive)
       const existing = await db.query(
         `SELECT drive, resource_id, subject_type, subject_id, permissions
            FROM gfs_shares WHERE id = $1::uuid

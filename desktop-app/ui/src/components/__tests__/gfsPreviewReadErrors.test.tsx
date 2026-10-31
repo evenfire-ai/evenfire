@@ -31,6 +31,7 @@ const PREVIEWS = [
     'image',
     () => (
       <GfsImagePreviewBody
+        recordOpen={false}
         byteLength={3}
         fileName="diagram.png"
         gfsUri="gfs://main/image-1"
@@ -42,6 +43,7 @@ const PREVIEWS = [
     'video',
     () => (
       <GfsVideoPreviewBody
+        recordOpen={false}
         byteLength={3}
         fileName="clip.mp4"
         gfsUri="gfs://main/video-1"
@@ -51,7 +53,14 @@ const PREVIEWS = [
   ],
   [
     'markdown',
-    () => <GfsMarkdownPreviewBody byteLength={3} fileName="notes.md" gfsUri="gfs://main/md-1" />,
+    () => (
+      <GfsMarkdownPreviewBody
+        recordOpen={false}
+        byteLength={3}
+        fileName="notes.md"
+        gfsUri="gfs://main/md-1"
+      />
+    ),
   ],
 ] as const
 

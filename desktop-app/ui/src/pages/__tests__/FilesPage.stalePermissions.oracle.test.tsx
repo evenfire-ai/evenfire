@@ -4,12 +4,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
   affordancesFailureMessage,
   childView,
+  homeView,
   listAccessiblePage,
   listChildrenPage,
   resolveResource,
@@ -450,7 +452,7 @@ describe('FilesPage stale permission action oracle', () => {
     })
 
     const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
-    render(<FilesPage />, { wrapper: wrapper(client) })
+    render(<FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />, { wrapper: wrapper(client) })
     await screen.findByRole('button', { name: 'Reports' })
     fireEvent.click(screen.getByRole('button', { name: 'Reports' }))
     await screen.findByRole('button', { name: 'Subfolder' })
@@ -1416,7 +1418,7 @@ describe('FilesPage stale permission action oracle', () => {
     })
 
     const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
-    render(<FilesPage pendingGfsUri={null} />, { wrapper: wrapper(client) })
+    render(<FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />, { wrapper: wrapper(client) })
     await screen.findByRole('button', { name: 'Options for Shared folder' })
     await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(1))
     expect(screen.getByRole('button', { name: 'Rename Shared folder' })).toBeTruthy()
@@ -1469,6 +1471,7 @@ describe('FilesPage stale permission action oracle', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => sharedFiles),
           resolve: vi.fn(),
           listChildren: vi.fn(async () => listChildrenPage([])),
@@ -1480,7 +1483,9 @@ describe('FilesPage stale permission action oracle', () => {
 
     const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
     try {
-      render(<FilesPage pendingGfsUri={null} />, { wrapper: wrapper(client) })
+      render(<FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />, {
+        wrapper: wrapper(client),
+      })
       await screen.findByRole('button', { name: 'Options for Shared A.txt' })
       await screen.findByRole('button', { name: 'Options for Shared B.txt' })
       fireEvent.click(screen.getByRole('button', { name: 'Options for Shared A.txt' }))

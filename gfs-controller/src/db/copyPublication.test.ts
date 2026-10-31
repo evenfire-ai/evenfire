@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { copyFixture, DEST, FILE, SOURCE, sourceNodes } from "../../test/copyPublicationTestKit";
+import { describe, expect, it, vi } from "vitest";
+import { copyFixture, DEST, EMPTY, FILE, SOURCE, UNICODE, sourceNodes } from "../../test/copyPublicationTestKit";
 
 describe("transactional recursive copy publication", () => {
   it("publishes a nested tree with new identities in one metadata insert", async () => {
@@ -245,5 +245,76 @@ describe("copy permission-epoch re-check (TOCTOU close)", () => {
     // `current()` is invoked during revalidate (inside the tx), proving the
     // re-check reads the LIVE epoch rather than trusting the captured snapshot.
     expect(epochReads).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("copy publication activity hook (D16)", () => {
+  const insertedNodes = (db: { calls: Array<{ sql: string; values: unknown[] }> }) => {
+    const insert = db.calls.find(call => call.sql.includes("INSERT INTO gfs_resources"));
+    if (!insert) throw new Error("the copy INSERT never ran");
+    return JSON.parse(String(insert.values[0])) as Array<{ resource_id: string; kind: string }>;
+  };
+
+  it("runs once with exactly the new file ids, after the INSERT and before the success audit", async () => {
+    const fixture = copyFixture();
+    const seen: string[][] = [];
+    await expect(
+      fixture.writes.copy({
+        ...fixture.input,
+        onPublished: async (_client, fileIds) => {
+          seen.push([...fileIds]);
+        },
+      }),
+    ).resolves.toMatchObject({ objectCount: 4, fileCount: 2 });
+
+    expect(seen).toHaveLength(1);
+    const inserted = insertedNodes(fixture.db);
+    const files = inserted.filter(node => node.kind === "file").map(node => node.resource_id);
+    // Exactly the copy's NEW file identities: no folder, and none of the sources.
+    expect([...seen[0]!].sort()).toEqual([...files].sort());
+    expect(files).toHaveLength(2);
+    for (const source of [SOURCE, FILE, EMPTY, UNICODE]) expect(seen[0]).not.toContain(source);
+
+    // The hook runs after the metadata INSERT and before the success audit, so
+    // its rows cannot commit without the copy or the copy without its rows.
+    expect(fixture.audit.records).toHaveLength(1);
+    expect(fixture.audit.records[0]).toMatchObject({
+      transactional: true,
+      event: { mutationOutcome: "succeeded", op: "copy" },
+    });
+  });
+
+  it("never runs for a folders-only copy", async () => {
+    const fixture = copyFixture({ nodes: [sourceNodes()[0]] });
+    const hook = vi.fn(async () => undefined);
+    await expect(
+      fixture.writes.copy({ ...fixture.input, onPublished: hook }),
+    ).resolves.toMatchObject({ objectCount: 1, fileCount: 0 });
+    expect(hook).not.toHaveBeenCalled();
+    // Witness: the INSERT ran, so the empty hook call is a decision.
+    expect(insertedNodes(fixture.db)).toHaveLength(1);
+  });
+
+  it("rolls the copy back and surfaces the error when the hook fails", async () => {
+    const fixture = copyFixture();
+    const before = new Map(fixture.db.resources);
+    await expect(
+      fixture.writes.copy({
+        ...fixture.input,
+        onPublished: async () => {
+          throw new Error("activity insert failed");
+        },
+      }),
+    ).rejects.toThrow("activity insert failed");
+
+    // Nothing of the copy was published...
+    expect(fixture.db.resources.size).toBe(before.size);
+    // ...no success audit was written, but the failure is on record.
+    expect(fixture.audit.records.some(record => record.event.mutationOutcome === "failed")).toBe(
+      true,
+    );
+    expect(fixture.audit.records.some(record => record.event.mutationOutcome === "succeeded")).toBe(
+      false,
+    );
   });
 });

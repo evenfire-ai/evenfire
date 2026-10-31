@@ -303,7 +303,7 @@ describe('AppService native auth and environment commit ordering', () => {
       authenticated: true,
       me: { id: 'user-b' },
     })
-    await expect(service.listGfsUploadSessions()).resolves.toEqual([])
+    await expect(service.listGfsUploadSessions('main')).resolves.toEqual([])
     expect(service.gfsScopeIdentity).toMatchObject({
       ownerId: 'user-b',
       environmentKey: runtimeConfig.getDesktopRuntimeConfigState().envKey,

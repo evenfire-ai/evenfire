@@ -8,7 +8,8 @@
  * handling.
  */
 export async function saveGfsFileToDisk(uri: string, name: string): Promise<void> {
-  const { bytes } = await window.clerum.gfs.download(uri)
+  // A save to disk is the user taking the file: control-api records the open.
+  const { bytes } = await window.clerum.gfs.download(uri, { recordOpen: true })
   const url = URL.createObjectURL(new Blob([bytes]))
   const anchor = document.createElement('a')
   anchor.href = url

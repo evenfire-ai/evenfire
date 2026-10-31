@@ -86,6 +86,7 @@ export function GfsMarkdownPreviewBody({
   fileName,
   gfsUri,
   onDownloadError,
+  recordOpen,
   onCopyContentReady,
   titleId,
   titleActions,
@@ -123,7 +124,8 @@ export function GfsMarkdownPreviewBody({
         assertGfsMarkdownPreviewSize(byteLength)
         const { bytes } = await window.clerum.gfs.downloadPreview(
           gfsUri,
-          GFS_MARKDOWN_PREVIEW_MAX_BYTES
+          GFS_MARKDOWN_PREVIEW_MAX_BYTES,
+          recordOpen
         )
         assertGfsMarkdownPreviewSize(bytes.byteLength)
         const markdown = new TextDecoder().decode(bytes)

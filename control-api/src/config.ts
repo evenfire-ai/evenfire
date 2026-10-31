@@ -233,6 +233,8 @@ type Config = {
   adminGfsGrantsPerMin: number
   adminGfsSharesPerMin: number
   adminGfsLegacyGrantReportPerMin: number
+  adminGfsUserHomesReadPerMin: number
+  adminGfsUserHomesWritePerMin: number
   approvalRlRefreshPerMin: number
   approvalRlExternalPerMin: number
   approvalRlExternalEdgePerMin: number
@@ -326,6 +328,8 @@ type Config = {
   // rpcJwtPrivateKey (the open core uses one platform keypair; per-tenant keys
   // are the managed edition, P6).
   gfsTokenAudience: string
+  // Explicitly configured drive for automatic user-home provisioning.
+  gfsHomeDrive: string | null
   // TTL for gfs access tokens minted by POST /api/v1/gfs/token.
   gfsTokenTtlSeconds: number
   // In-cluster base URL of the gfsc read ClusterIP Service (gfs namespace).
@@ -1109,6 +1113,14 @@ export const config: Config = {
     'CONTROL_API_ADMIN_GFS_LEGACY_GRANT_REPORT_PER_MIN',
     150
   ),
+  adminGfsUserHomesReadPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_GFS_USER_HOMES_READ_PER_MIN',
+    150
+  ),
+  adminGfsUserHomesWritePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_GFS_USER_HOMES_WRITE_PER_MIN',
+    150
+  ),
   approvalRlRequestPerMin: positiveIntegerFromEnv('APPROVAL_RL_REQUEST_PER_MIN', 600),
   approvalRlRefreshPerMin: positiveIntegerFromEnv('APPROVAL_RL_REFRESH_PER_MIN', 100),
   approvalRlExternalPerMin: externalRateLimitConfig.operation,
@@ -1366,6 +1378,7 @@ export const config: Config = {
   wfcJwtAudience: process.env.CONTROL_API_WFC_JWT_AUDIENCE || 'workspace-files-controller',
   wfcTokenTtlSeconds: Number(process.env.CONTROL_API_WFC_TOKEN_TTL_SECONDS || 300),
   gfsTokenAudience: process.env.CONTROL_API_GFS_JWT_AUDIENCE || 'gfs-controller',
+  gfsHomeDrive: process.env.GFS_HOME_DRIVE?.trim() || null,
   gfsTokenTtlSeconds: Number(process.env.CONTROL_API_GFS_TOKEN_TTL_SECONDS || 3600),
   gfscBaseUrl: process.env.CONTROL_API_GFSC_BASE_URL || 'http://gfsc.gfs.svc.cluster.local:8087',
   gfscWriteBaseUrl:

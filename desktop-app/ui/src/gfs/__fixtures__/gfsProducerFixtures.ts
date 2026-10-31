@@ -42,6 +42,7 @@ import {
   GfsClient,
   type GfsGrantListItem,
   type GfsHeldAffordances,
+  type GfsHome,
   type GfsShareListItem,
   type GfsTransport,
   type ResolvedGfsResource,
@@ -72,6 +73,20 @@ function stubTransport(jsonBody: unknown, bytes: ArrayBuffer = new ArrayBuffer(0
 }
 
 const SESSION_TOKEN = 'fixture-session-token'
+
+/** Home contract supplied by the server, through the Desktop producer and IPC clone. */
+export async function homeView(overrides: Partial<GfsHome> = {}): Promise<GfsHome> {
+  const home: GfsHome = {
+    state: 'ready',
+    drive: 'main',
+    path: '/Users/fixture',
+    resourceId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    heldPermissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+    ...overrides,
+  }
+  const client = new GfsClient(stubTransport(home))
+  return structuredClone(await client.getHome(SESSION_TOKEN))
+}
 
 /** A `GfsChildView` — the gfs-controller `toView` child shape as desktop-app
  *  declares it. Flows through the real producer below; never consumed directly. */
@@ -162,7 +177,7 @@ export async function downloadResult(
   bytes: ArrayBuffer = new ArrayBuffer(4)
 ): Promise<DownloadResult> {
   const client = new GfsClient(stubTransport({ ok: true, data: resource }, bytes))
-  const out = await client.download(resource.gfsUri, SESSION_TOKEN)
+  const out = await client.download(resource.gfsUri, SESSION_TOKEN, { recordOpen: false })
   return structuredClone(out)
 }
 
@@ -383,7 +398,9 @@ export async function grantsListPage(
   items: GfsGrantListItem[]
 ): Promise<Awaited<ReturnType<typeof window.clerum.gfs.listGrants>>> {
   const client = new GfsClient(stubTransport({ items }))
-  return structuredClone(await client.listGrants({ resourceId: 'fixture-parent' }, SESSION_TOKEN))
+  return structuredClone(
+    await client.listGrants({ resourceId: 'fixture-parent', drive: 'main' }, SESSION_TOKEN)
+  )
 }
 
 /** Same as `grantsListPage` for the shares list. */
@@ -391,7 +408,9 @@ export async function sharesListPage(
   items: GfsShareListItem[]
 ): Promise<Awaited<ReturnType<typeof window.clerum.gfs.listShares>>> {
   const client = new GfsClient(stubTransport({ items }))
-  return structuredClone(await client.listShares({ resourceId: 'fixture-parent' }, SESSION_TOKEN))
+  return structuredClone(
+    await client.listShares({ resourceId: 'fixture-parent', drive: 'main' }, SESSION_TOKEN)
+  )
 }
 
 /**
@@ -444,7 +463,7 @@ export async function listGrantsFailureMessage(
   }
 ): Promise<string> {
   return gfsRouteFailureMessage(
-    client => client.listGrants({ resourceId: 'fixture-parent' }, SESSION_TOKEN),
+    client => client.listGrants({ resourceId: 'fixture-parent', drive: 'main' }, SESSION_TOKEN),
     status,
     body
   )
@@ -459,7 +478,7 @@ export async function listSharesFailureMessage(
   }
 ): Promise<string> {
   return gfsRouteFailureMessage(
-    client => client.listShares({ resourceId: 'fixture-parent' }, SESSION_TOKEN),
+    client => client.listShares({ resourceId: 'fixture-parent', drive: 'main' }, SESSION_TOKEN),
     status,
     body
   )

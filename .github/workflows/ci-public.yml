@@ -549,6 +549,7 @@ jobs:
             services.grokProviderAttemptRedemption.realPostgres.integration.test.ts \
             services.controlAdminReplaceInviter.realPostgres.integration.test.ts \
             services.adminAuthDelete.realPostgres.integration.test.ts \
+            services.directory.managerRoles.realPostgres.integration.test.ts \
             services.grokProviderAttemptRedemption.refresh.realPostgres.integration.test.ts \
             services.codexSubscriptionLifecycle.realPostgres.integration.test.ts \
             db.llmProviderAttemptConnectionIntegrity.realPostgres.integration.test.ts \
@@ -562,6 +563,14 @@ jobs:
             services.adminSubscriptionRateLimitMigration.realPostgres.integration.test.ts \
             pluginWorkloadSdkSteplessQuota.realPostgres.integration.test.ts \
             entityChangeFeed.realPostgres.integration.test.ts \
+            gfs.governedRoots.realPostgres.integration.test.ts \
+            gfs.recentFiles.realPostgres.integration.test.ts \
+            gfs.userHomeAcl.realPostgres.integration.test.ts \
+            gfs.userHomeBackfill.realPostgres.integration.test.ts \
+            gfs.userHomeProvisioning.realPostgres.integration.test.ts \
+            gfs.userHomeRecovery.realPostgres.integration.test.ts \
+            gfs.userHomeRetirement.realPostgres.integration.test.ts \
+            gfs.userHomeStartupCost.realPostgres.integration.test.ts \
             routes.mcp-host.renewal.realPostgres.integration.test.ts \
             routes.mcpOauth.brokerBinding.realPostgres.integration.test.ts \
             oauth.contextGrant.scenarios.realPostgres.integration.test.ts \

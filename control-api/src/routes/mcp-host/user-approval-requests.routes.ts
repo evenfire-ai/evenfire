@@ -297,6 +297,9 @@ export async function bindVerifiedProviderTraceAttribution(input: {
   await input.service.bind({
     ...input.binding,
     hostRef: input.callerHostRef,
+    // Channel runs are never recorded as user file activity (D19): the writer
+    // verifies no Host namespace, so it stores none.
+    hostNamespace: null,
     identityIssuer: input.identityIssuer,
     actorHumanSub: input.accountUserId,
     userId: input.accountUserId,
