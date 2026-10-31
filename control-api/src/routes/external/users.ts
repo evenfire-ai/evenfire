@@ -140,9 +140,8 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         }
 
         const mapped = await mapWithConcurrencyLimit(teams, 4, async team => {
-          const canReadMembers = team.role === 'admin' || team.role === 'inviter'
           const [members, contexts, agents] = await Promise.allSettled([
-            canReadMembers ? listMembers(team.id) : Promise.resolve(null),
+            listMembers(team.id),
             getTeamContexts(team.id),
             getTeamAgents(team.id),
           ])
@@ -163,10 +162,7 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
           return {
             item: {
               team,
-              members:
-                canReadMembers && members.status === 'fulfilled'
-                  ? projectTeamMembers(members.value)
-                  : [],
+              members: members.status === 'fulfilled' ? projectTeamMembers(members.value) : [],
               contextIds:
                 contexts.status === 'fulfilled'
                   ? filterAccessValues(contexts.value?.contextIds, activeContextIds)

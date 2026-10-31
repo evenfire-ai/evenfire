@@ -487,7 +487,7 @@ describe('routes/profile', () => {
     expect(svc.renameTeam).not.toHaveBeenCalled()
   })
 
-  it('does not expose the member directory to an ordinary member', async () => {
+  it('exposes the member directory to an ordinary live member', async () => {
     svc.listMembers.mockResolvedValue([{ id: 'u2', email: 'peer@example.com', role: 'member' }])
     const app = express()
     app.use(express.json())
@@ -495,9 +495,14 @@ describe('routes/profile', () => {
 
     await withInternalServiceAuthAndUserSession(
       request(app).get('/external/teams/t1/members')
-    ).expect(403)
+    ).expect(200, { items: [{ id: 'u2', email: 'peer@example.com', role: 'member' }] })
 
-    expect(svc.listMembers).not.toHaveBeenCalled()
+    expect(svc.listMembers).toHaveBeenCalledWith('t1')
+    expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledWith(
+      'u1',
+      't1',
+      expect.objectContaining({ budget: expect.anything() })
+    )
   })
 
   it('does not allow an inviter to create an admin invitation', async () => {
@@ -605,7 +610,15 @@ describe('routes/profile', () => {
       items: [
         {
           team: { id: 't1', name: 'Alpha', role: 'member' },
-          members: [],
+          members: [
+            {
+              id: 'u1',
+              email: 'u@example.com',
+              name: 'User',
+              role: 'member',
+              status: 'active',
+            },
+          ],
           contextIds: ['ctx-a'],
           agentNames: ['agent-a'],
         },
@@ -628,7 +641,7 @@ describe('routes/profile', () => {
     expect(svc.getTeamContexts).toHaveBeenCalledWith('t2')
     expect(svc.getTeamAgents).toHaveBeenCalledWith('t2')
     expect(svc.listMembers).toHaveBeenCalledWith('t2')
-    expect(svc.listMembers).not.toHaveBeenCalledWith('t1')
+    expect(svc.listMembers).toHaveBeenCalledWith('t1')
   })
 
   it('logs team-directory partial failures through the structured request logger', async () => {
@@ -694,7 +707,8 @@ describe('routes/profile', () => {
     expect(res.body.partialErrors).toEqual([])
     expect(res.body.items).toHaveLength(50)
     expect(res.body.items.at(-1)?.team.id).toBe('t50')
-    expect(svc.listMembers).not.toHaveBeenCalled()
+    expect(svc.listMembers).toHaveBeenCalledTimes(50)
+    expect(svc.listMembers).not.toHaveBeenCalledWith('t51')
     expect(svc.getTeamContexts).toHaveBeenCalledTimes(50)
     expect(svc.getTeamAgents).toHaveBeenCalledTimes(50)
   })

@@ -114,7 +114,6 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.get(
     '/external/teams/:teamId/members',
     requireExternalTeamParamMatch(),
-    requireExternalRole(['admin', 'inviter']),
     async (req, res, next) => {
       try {
         return res.status(200).json({ items: await listMembers(req.params.teamId) })
@@ -193,7 +192,6 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.get(
     '/external/teams/:teamId/members/:userId/role',
     requireExternalTeamParamMatch(),
-    requireExternalRole(['admin', 'inviter']),
     async (req, res, next) => {
       try {
         const role = await findMemberRole(req.params.teamId, req.params.userId)
