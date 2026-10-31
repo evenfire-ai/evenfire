@@ -27,7 +27,7 @@ describe('db.initDb', () => {
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('holds one advisory lock while partitioning legacy and PR1 migration transactions', async () => {
+  it('holds one advisory lock while partitioning legacy and composed migration transactions', async () => {
     const { initDb } = await import('../src/db.js')
 
     await initDb()
@@ -69,8 +69,9 @@ describe('db.initDb', () => {
     // The committed password-admission rollout fence, one dev batch through
     // 0130_password_login_success_admission (as in dev), then five PR1 versions
     // plus the 0133 function transaction.
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(8)
-    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(8)
+    // PR2 adds eight versions, and 0137 builds its online index between the schema and receipt transactions.
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(17)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(17)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)

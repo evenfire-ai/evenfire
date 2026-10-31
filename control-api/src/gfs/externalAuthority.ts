@@ -1,5 +1,10 @@
 import type { NextFunction, Request, Response } from 'express'
-import { type GfsPathBinding, type GfsScope, signGfsToken } from '../auth/gfsToken.js'
+import {
+  type FilesystemActionAuthorityV2,
+  type GfsPathBinding,
+  type GfsScope,
+  signGfsToken,
+} from '../auth/gfsToken.js'
 import { config } from '../config.js'
 import { withTransaction } from '../db.js'
 import type { ExternalSessionAuthentication } from '../services/auth/externalSessionAuthentication.js'
@@ -46,6 +51,7 @@ export type ExternalGfsUserTokenInput = Readonly<{
   drive: string
   scopes: readonly GfsScope[]
   pathBindings?: readonly GfsPathBinding[]
+  actionAuthority?: FilesystemActionAuthorityV2
 }>
 
 /**
@@ -117,6 +123,9 @@ export async function signCurrentExternalGfsUserToken(
           drive: input.drive,
           scopes: input.scopes,
           ...(input.pathBindings === undefined ? {} : { pathBindings: input.pathBindings }),
+          ...(input.actionAuthority === undefined
+            ? {}
+            : { actionAuthority: input.actionAuthority }),
           authGeneration: generation,
           principalType: 'user',
         })

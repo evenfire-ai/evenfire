@@ -13,6 +13,10 @@ import {
   sendSanitizedControlApiPublicError,
 } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
+import {
+  sendWorkflowActionDelegationTransportError,
+  workflowActionDelegationHeaders,
+} from '../workflowActionDelegation.js'
 
 type GfsRouterOptions = {
   edgeRequestLimit?: number
@@ -135,6 +139,7 @@ function gfsControlApiRequest<T>(
 }
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
+  if (sendWorkflowActionDelegationTransportError(error, res)) return
   const statuses =
     error instanceof Error &&
     'status' in error &&
@@ -306,6 +311,7 @@ export function createGfsRouter(options: GfsRouterOptions = {}): Router {
       const data = await gfsControlApiRequest(req, 'POST', '/external/gfs/token', {
         userSessionToken: extractAuthToken(req),
         body: req.body ?? {},
+        extraHeaders: workflowActionDelegationHeaders(req),
       })
       res.status(200).json(data)
     } catch (error) {

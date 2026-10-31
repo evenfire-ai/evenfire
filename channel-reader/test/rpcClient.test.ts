@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { RPCClient } from '../src/rpcClient.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { RPCClient, RuntimeServiceAdmissionLimitedError } from '../src/rpcClient.js'
 import type { Message } from '../src/types.js'
 
 const mockCfg = vi.hoisted(() => ({
@@ -37,11 +37,12 @@ function mockOkResponse(body: object) {
   })
 }
 
-function mockErrorResponse(status: number, error?: string) {
+function mockErrorResponse(status: number, error?: string, headers: Record<string, string> = {}) {
   return Promise.resolve({
     ok: false,
     status,
     statusText: `Error ${status}`,
+    headers: new Headers(headers),
     json: () => Promise.resolve(error ? { error } : {}),
   })
 }
@@ -65,6 +66,10 @@ function expectChannelReaderEdgeHeaders(headers: Record<string, string>, source?
 beforeEach(() => {
   mockFetch.mockReset()
   mockCfg.hostRef = 'test-host'
+})
+
+afterEach(() => {
+  vi.useRealTimers()
 })
 
 describe('RPCClient - sendMessage()', () => {
@@ -461,6 +466,85 @@ describe('RPCClient - read-side direct mcp-host calls', () => {
       'Failed to get task result: 401'
     )
     expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves bounded admission retry timing for task-result fallback callers', async () => {
+    mockFetch.mockReturnValueOnce(mockErrorResponse(429, undefined, { 'retry-after': '12' }))
+
+    const client = new RPCClient('http://mcp-host:8080')
+    await expect(client.getTaskResult('task-1', makeMessage())).rejects.toBeInstanceOf(
+      RuntimeServiceAdmissionLimitedError
+    )
+  })
+
+  it('backs off notification claims until the bounded Retry-After expires', async () => {
+    vi.useFakeTimers()
+    mockFetch
+      .mockReturnValueOnce(mockErrorResponse(429, undefined, { 'retry-after': '12' }))
+      .mockReturnValueOnce(mockOkResponse({ deliveries: [] }))
+
+    const client = new RPCClient('http://mcp-host:8080')
+    const params = {
+      medium: 'slack' as const,
+      providerChannelIds: ['channel-1'],
+      hostRef: 'host-a',
+      limit: 10,
+    }
+
+    await expect(client.fetchDeliveries(params)).rejects.toMatchObject({
+      name: 'RuntimeServiceAdmissionLimitedError',
+      retryAfterSeconds: 12,
+    })
+    await expect(client.fetchDeliveries(params)).rejects.toMatchObject({
+      name: 'RuntimeServiceAdmissionLimitedError',
+      retryAfterSeconds: 12,
+    })
+    expect(mockFetch).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(12_000)
+    await expect(client.fetchDeliveries(params)).resolves.toEqual([])
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('backs off cron-result polls until the bounded Retry-After expires', async () => {
+    vi.useFakeTimers()
+    mockFetch
+      .mockReturnValueOnce(mockErrorResponse(429, undefined, { 'retry-after': '5' }))
+      .mockReturnValueOnce(mockOkResponse({ results: [] }))
+
+    const client = new RPCClient('http://mcp-host:8080')
+    await expect(client.getCronResults()).rejects.toMatchObject({
+      name: 'RuntimeServiceAdmissionLimitedError',
+      retryAfterSeconds: 5,
+    })
+    await expect(client.getCronResults()).rejects.toMatchObject({
+      name: 'RuntimeServiceAdmissionLimitedError',
+      retryAfterSeconds: 5,
+    })
+    expect(mockFetch).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await expect(client.getCronResults()).resolves.toEqual([])
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not report a denied cron acknowledgement as success or retry it early', async () => {
+    vi.useFakeTimers()
+    mockFetch.mockReturnValueOnce(mockErrorResponse(429, undefined, { 'retry-after': '5' }))
+
+    const client = new RPCClient('http://mcp-host:8080')
+    await expect(
+      client.acknowledgeCronResult('cron-result-1', makeMessage())
+    ).rejects.toMatchObject({
+      name: 'RuntimeServiceAdmissionLimitedError',
+      retryAfterSeconds: 5,
+    })
+    expect(mockFetch).toHaveBeenCalledOnce()
+
+    await expect(
+      client.acknowledgeCronResult('cron-result-1', makeMessage())
+    ).rejects.toBeInstanceOf(RuntimeServiceAdmissionLimitedError)
+    expect(mockFetch).toHaveBeenCalledOnce()
   })
 })
 

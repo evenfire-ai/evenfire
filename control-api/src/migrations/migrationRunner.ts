@@ -1,6 +1,6 @@
 import type { DbClient } from '../db.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
-import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
+import { hasPostSchemaOnlineIndexes, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0131_user_access_foundation',
@@ -11,8 +11,24 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
 ] as const)
 
 // Every migration up to and including dev's last migration runs in initDb's
-// single dev batch; this runner owns only the PR1 versions that follow it.
+// single dev batch; this runner owns only the PR1 and PR2 versions that follow it.
 const LAST_DEV_MIGRATION_VERSION = '0130_password_login_success_admission'
+
+export const PR2_MIGRATION_VERSIONS = Object.freeze([
+  '0137_workflow_authority_bindings',
+  '0138_gfs_upload_authority_bindings',
+  '0139_pr2_readiness_evidence',
+  '0140_pr2_runtime_privileges',
+  '0141_workflow_recipe_authority_entity',
+  '0142_workflow_run_failure_reason',
+  '0143_r31_runtime_behavior_sources',
+  '0145_workflow_authorization_pause',
+])
+
+export const RUNNER_MIGRATION_VERSIONS = Object.freeze([
+  ...PR1_MIGRATION_VERSIONS,
+  ...PR2_MIGRATION_VERSIONS,
+] as const)
 
 export type MigrationDescriptor = {
   version: string
@@ -70,7 +86,7 @@ export async function applyPendingPr1Migrations({
       aliasOwners.set(alias, migration.version)
     }
   }
-  const expected = new Set<string>(PR1_MIGRATION_VERSIONS)
+  const expected = new Set<string>(RUNNER_MIGRATION_VERSIONS)
   const unclassified = migrations.filter(
     migration => migration.version > LAST_DEV_MIGRATION_VERSION && !expected.has(migration.version)
   )
@@ -80,7 +96,7 @@ export async function applyPendingPr1Migrations({
     )
   }
 
-  for (const version of PR1_MIGRATION_VERSIONS) {
+  for (const version of RUNNER_MIGRATION_VERSIONS) {
     const migration = byVersion.get(version)
     if (!migration) throw new Error(`Missing registered PR1 migration: ${version}`)
     if (appliedVersions.has(version)) continue
@@ -89,6 +105,16 @@ export async function applyPendingPr1Migrations({
     )
     if (acceptedLegacyVersion) {
       await runBoundedTransaction(db, () => recordMigration(db, version))
+      appliedVersions.add(version)
+      continue
+    }
+
+    if (hasPostSchemaOnlineIndexes(version)) {
+      await runBoundedTransaction(db, async () => migration.apply(db))
+      await preparePr1Migration(db, version, 'after-schema')
+      await runBoundedTransaction(db, async () => {
+        await recordMigration(db, version)
+      })
       appliedVersions.add(version)
       continue
     }

@@ -254,11 +254,14 @@ describe('catalog producer protocol', () => {
     const query = vi.fn()
     const result = await requireCatalogProducer('host').listCanonicalKeys(
       context(query, [
+        { family: 'host', generation: '2', resourceVersion: null, status: 'relisting' },
+        { family: 'context', generation: '1', resourceVersion: '1', status: 'current' },
+        { family: 'mcp_server', generation: '1', resourceVersion: '1', status: 'current' },
         {
-          family: 'host',
-          generation: '2',
-          resourceVersion: null,
-          status: 'relisting',
+          family: 'shared_filesystem',
+          generation: '1',
+          resourceVersion: '1',
+          status: 'current',
         },
       ]),
       { afterKey: null, exhausted: false },

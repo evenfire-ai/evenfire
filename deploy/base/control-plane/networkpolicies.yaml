@@ -293,6 +293,21 @@ spec:
       podSelector:
         matchLabels:
           app.kubernetes.io/name: workflow-approval-request-reader
+    # Filesystem controllers call only the live action-authority checkpoint.
+    # Distinct service tokens remain the authentication boundary; these peers
+    # provide the matching least-privilege network path to port 8090.
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: gfs
+      podSelector:
+        matchLabels:
+          app: gfs-controller
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: mcp-host
+      podSelector:
+        matchLabels:
+          app: workspace-files-controller
     # Path B — background-OAuth workloads in sandbox-recipes reach the broker
     # route POST /api/v1/recipe-oauth/token. Restricted to opted-in workloads
     # via the matching egress NP `wf-<recipe>-oauth-broker-egress` that WRC

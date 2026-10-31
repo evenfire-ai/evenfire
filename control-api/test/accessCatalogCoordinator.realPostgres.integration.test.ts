@@ -15,11 +15,16 @@ import {
   AccessBudgetExceededError,
   AccessExecutionBudget,
 } from '../src/services/access/accessExecutionBudget.js'
-import { type CatalogRequestContext, catalogKey } from '../src/services/access/catalogContracts.js'
+import {
+  type CatalogOperationalSourceState,
+  type CatalogRequestContext,
+  catalogKey,
+} from '../src/services/access/catalogContracts.js'
 import { requireCatalogProducer } from '../src/services/access/catalogProducers.js'
 import { resolveLiveAuthorization } from '../src/services/access/liveAuthorizationResolver.js'
 import { OperationalAccessIndex } from '../src/services/access/operationalAccessIndex.js'
 import {
+  type OperationalSourceFamily,
   canonicalEnvironmentId,
   projectOperationalObject,
 } from '../src/services/access/operationalAccessProjection.js'
@@ -271,12 +276,14 @@ describeRealPostgres('aggregate catalog coordinator on real PostgreSQL', () => {
     )
 
     const index = new OperationalAccessIndex(databasePool, transaction(databasePool))
-    const indexBudget = AccessExecutionBudget.create('indexer')
-    try {
-      for (const [sourceFamily, projections] of [
-        ['context', contextProjections],
-        ['host', hostProjections],
-      ] as const) {
+    for (const [sourceFamily, projections] of [
+      ['context', contextProjections],
+      ['host', hostProjections],
+      ['mcp_server', []],
+      ['shared_filesystem', []],
+    ] as const) {
+      const indexBudget = AccessExecutionBudget.create('indexer')
+      try {
         const stagingGeneration = await index.beginRelist({
           environmentId,
           sourceFamily,
@@ -296,9 +303,9 @@ describeRealPostgres('aggregate catalog coordinator on real PostgreSQL', () => {
           resourceVersion: '1',
           budget: indexBudget,
         })
+      } finally {
+        indexBudget.close()
       }
-    } finally {
-      indexBudget.close()
     }
 
     let queryCount = 0
@@ -331,6 +338,29 @@ describeRealPostgres('aggregate catalog coordinator on real PostgreSQL', () => {
 
     const producerBudget = AccessExecutionBudget.create('catalog')
     try {
+      const sourceStateResult = await databasePool.query(
+        `SELECT source_family, generation, resource_version, status
+           FROM operational_catalog_source_state
+          WHERE environment_id = $1`,
+        [environmentId]
+      )
+      const sourceStates: CatalogRequestContext['sourceStates'] = new Map(
+        (sourceStateResult.rows as Record<string, unknown>[]).map(row => {
+          const family = String(row.source_family) as OperationalSourceFamily
+          return [
+            family,
+            Object.freeze({
+              family,
+              generation: String(row.generation),
+              resourceVersion:
+                row.resource_version === null || row.resource_version === undefined
+                  ? null
+                  : String(row.resource_version),
+              status: String(row.status) as CatalogOperationalSourceState['status'],
+            }),
+          ] as const
+        })
+      )
       const producerContext: CatalogRequestContext = {
         db: databasePool,
         budget: producerBudget,
@@ -343,17 +373,7 @@ describeRealPostgres('aggregate catalog coordinator on real PostgreSQL', () => {
           memberships: [],
         },
         environmentId,
-        sourceStates: new Map([
-          [
-            'host',
-            {
-              family: 'host',
-              generation: '1',
-              resourceVersion: '1',
-              status: 'current',
-            },
-          ],
-        ]),
+        sourceStates,
       }
       const producerResult = await requireCatalogProducer('host').hydrateCanonicalKeys(
         producerContext,
@@ -418,7 +438,8 @@ describeRealPostgres('aggregate catalog coordinator on real PostgreSQL', () => {
     expect(oneHostPage.items).toEqual([])
     expect(oneHostPage.nextCursor).not.toBe(firstHostPage.nextCursor)
     expect(queryCount).toBe(firstPageQueryCount)
-    expect(multiRootQueryCount).toBe(firstPageQueryCount)
+    // Context-bearing roots add one shared policy snapshot query, not one query per root.
+    expect(multiRootQueryCount).toBe(firstPageQueryCount + 1)
 
     await expect(
       buildAccessCatalog(

@@ -134,6 +134,7 @@ jobs:
           - packages/llm-providers
           - packages/grok-provider-attempt-contract
           - packages/codex-catalog-projection
+          - packages/action-context-contracts
           - codex-llm-proxy
           - grok-llm-proxy
         include:
@@ -177,6 +178,19 @@ jobs:
         if: matrix.service == 'workflow-recipes' || matrix.service == 'control-api' || matrix.service == 'packages/workflow-sdk'
         working-directory: packages/workflow-runtime-core
         run: npm run build
+
+      # Producer-backed suites execute real sibling source/tooling. Discover
+      # those dependencies from the test references so new consumers cannot
+      # silently fall outside a hand-maintained service matrix.
+      - name: Install producer-backed test dependencies
+        run: bash scripts/ci/install-test-producer-dependencies.sh "${{ matrix.service }}"
+
+      # This mounted Control API test also exercises rpc-proxy's real HTTP
+      # consumer, so service-only CI must materialize that producer package.
+      - name: Install RPC Proxy dependencies for Control API admission transport test
+        if: matrix.service == 'control-api'
+        working-directory: rpc-proxy
+        run: npm ci
 
       # keytar is a native Desktop dependency. When its prebuild is unavailable,
       # node-gyp requires libsecret development metadata on Linux.
@@ -427,7 +441,7 @@ jobs:
       # no tsconfig and no typescript dependency), so `npx tsc` there would fetch
       # the unrelated `tsc` package from the registry instead of typechecking.
       - name: Typecheck (tsc --noEmit)
-        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/gfs-interaction-policy' && matrix.service != 'packages/network-policy-core' && matrix.service != 'packages/jwt-key-policy' && matrix.service != 'packages/llm-provider-attempt-contract' && matrix.service != 'packages/grok-provider-attempt-contract' && matrix.service != 'packages/llm-providers' && matrix.service != 'packages/codex-catalog-projection'
+        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/gfs-interaction-policy' && matrix.service != 'packages/network-policy-core' && matrix.service != 'packages/jwt-key-policy' && matrix.service != 'packages/llm-provider-attempt-contract' && matrix.service != 'packages/grok-provider-attempt-contract' && matrix.service != 'packages/llm-providers' && matrix.service != 'packages/codex-catalog-projection' && matrix.service != 'packages/action-context-contracts'
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 
@@ -484,6 +498,11 @@ jobs:
           cache: npm
           cache-dependency-path: control-api/package-lock.json
 
+      - name: Verify R61-B1 pinned producer checkout contract
+        env:
+          R61_B1_PRODUCER_WORKSPACE: ${{ github.workspace }}
+        run: node --test scripts/tests/task106-r61-b1-producer-checkout-contract.cjs
+
       - name: Install dependencies
         working-directory: control-api
         run: npm ci
@@ -495,6 +514,9 @@ jobs:
       - name: Build workflow-runtime-core
         working-directory: packages/workflow-runtime-core
         run: npm run build
+
+      - name: Install producer-backed test dependencies
+        run: bash scripts/ci/install-test-producer-dependencies.sh control-api
 
       - name: Install observed DEV producer dependencies
         working-directory: r61-b1-producers/observed-dev/packages/workflow-runtime-core
@@ -653,9 +675,11 @@ jobs:
             migrationExecutionPolicy.realPostgres.integration.test.ts \
             migrationPreviousImageCompatibility.realPostgres.integration.test.ts \
             pr1MigrationLocks.realPostgres.integration.test.ts \
+            pr2ReadinessEvidence.realPostgres.integration.test.ts \
             routes.externalTeamsFinalAuthority.realPostgres.integration.test.ts \
             routes.externalTeamsLegacyAdminRevocation.realPostgres.integration.test.ts \
             userAccessRuntimeContract.realPostgres.integration.test.ts \
+            workflowAuthorityBindings.realPostgres.integration.test.ts \
             userSessionDatabaseClock.realPostgres.integration.test.ts \
             archiveRevisionLockOrder.realPostgres.integration.test.ts \
             revisionWritersLockOrder.realPostgres.integration.test.ts \
@@ -874,6 +898,9 @@ jobs:
           done < <(find deploy/scripts scripts -type f -name '*.sh' 2>/dev/null)
           exit $fail
 
+      - name: Test producer-backed dependency materialization
+        run: bash scripts/tests/test-ci-producer-dependency-materialization.sh
+
       - name: Verify Node security version policy
         run: node --test scripts/tests/node-runtime-version.test.mjs
 
@@ -974,6 +1001,9 @@ jobs:
       - name: Test release coordinates (writer, checker, floor decoupling)
         run: bash scripts/tests/test-release-coordinates.sh
 
+      - name: Test build-publish service version extraction
+        run: bash scripts/tests/test-build-publish-service-version.sh
+
       - name: Test precommit release-manifest exemption
         run: bash scripts/tests/test-precommit-release-manifest-ignore.sh
 
@@ -985,6 +1015,9 @@ jobs:
 
       - name: Test the image manifest
         run: bash scripts/tests/test-images-manifest.sh
+
+      - name: Test real-Postgres suite-list continuation
+        run: bash scripts/tests/test-ci-public-real-postgres-suite-list.sh
 
       - name: Test the ghcr-images kustomize component
         run: bash scripts/tests/test-ghcr-component.sh
@@ -1219,6 +1252,9 @@ jobs:
             minikube-no-uis=/tmp/clerum-minikube-no-uis.yaml \
             minikube-ghcr=/tmp/clerum-minikube-ghcr.yaml \
             minikube-no-uis-ghcr=/tmp/clerum-minikube-no-uis-ghcr.yaml
+
+      - name: Verify MCP Host action checkpoint gateway contract
+        run: bash scripts/tests/test-mcp-host-action-checkpoint-gateway.sh
 
       - name: Validate NP-08 caller-bound HCC contract
         run: |

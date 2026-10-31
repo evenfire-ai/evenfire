@@ -4,7 +4,7 @@
  * The handler delegates to an injected `SessionSearchHandler`. These tests
  * pin the bloqueante invariants from `T3.1-session-search.md §11.4`:
  *
- *   401  missing/invalid auth
+ *   401  missing trusted edge identity
  *   400  `q` missing
  *   200  results returned with auth.sub as the canonical user
  *   501  handler not wired (memory mode / feature OFF)
@@ -53,10 +53,20 @@ function makeRes(): CapturedRes {
   }
 }
 
-function makeReq(query: Record<string, string> = {}, auth?: { sub: string }): Request {
+function makeReq(query: Record<string, string> = {}, userId?: string): Request {
   const req = { query, body: {} } as unknown as Request
-  if (auth) {
-    ;(req as Request & { auth?: { sub: string } }).auth = auth
+  if (userId) {
+    ;(req as Request & { runtimeCaller?: unknown }).runtimeCaller = {
+      caller: 'rpc-proxy',
+      hostRef: 'chatllm',
+      userId,
+      actionContextV2: {
+        operationId: 'session.read',
+        userId,
+        accessPathId: `ap1_${'a'.repeat(43)}`,
+        target: { hostRef: 'mcp-host/chatllm' },
+      },
+    }
   }
   return req
 }
@@ -78,7 +88,7 @@ describe('handleSessionSearchRoute', () => {
     const sessionSearchHandler: SessionSearchHandler = vi.fn()
     const captured = makeRes()
     await handleSessionSearchRoute(
-      makeReq({}, { sub: 'alice@example.com' }),
+      makeReq({}, 'alice@example.com'),
       captured.res,
       makeHandlers({ sessionSearchHandler })
     )
@@ -86,14 +96,14 @@ describe('handleSessionSearchRoute', () => {
     expect(sessionSearchHandler).not.toHaveBeenCalled()
   })
 
-  it('#22 uses auth.sub even when ?user= is supplied (bypass attempt)', async () => {
+  it('#22 ignores caller user query and uses the trusted-edge v2 identity', async () => {
     const sessionSearchHandler: SessionSearchHandler = vi.fn().mockResolvedValue({
       results: [],
       total: 0,
     })
     const captured = makeRes()
     await handleSessionSearchRoute(
-      makeReq({ q: 'pineapples', user: 'victim@example.com' }, { sub: 'alice@example.com' }),
+      makeReq({ q: 'pineapples', user: 'victim@example.com' }, 'alice@example.com'),
       captured.res,
       makeHandlers({ sessionSearchHandler })
     )
@@ -119,7 +129,7 @@ describe('handleSessionSearchRoute', () => {
     })
     const captured = makeRes()
     await handleSessionSearchRoute(
-      makeReq({ q: 'foo' }, { sub: 'alice@example.com' }),
+      makeReq({ q: 'foo' }, 'alice@example.com'),
       captured.res,
       makeHandlers({ sessionSearchHandler })
     )
@@ -145,7 +155,7 @@ describe('handleSessionSearchRoute', () => {
           since: '2026-01-01T00:00:00Z',
           limit: '1000',
         },
-        { sub: 'alice@example.com' }
+        'alice@example.com'
       ),
       captured.res,
       makeHandlers({ sessionSearchHandler })
@@ -170,7 +180,7 @@ describe('handleSessionSearchRoute', () => {
     })
     const captured = makeRes()
     await handleSessionSearchRoute(
-      makeReq({ q: 'foo', scope: 'magic' }, { sub: 'alice@example.com' }),
+      makeReq({ q: 'foo', scope: 'magic' }, 'alice@example.com'),
       captured.res,
       makeHandlers({ sessionSearchHandler })
     )
@@ -183,7 +193,7 @@ describe('handleSessionSearchRoute', () => {
   it('returns 501 when the handler is not wired (memory mode / flag OFF)', async () => {
     const captured = makeRes()
     await handleSessionSearchRoute(
-      makeReq({ q: 'foo' }, { sub: 'alice@example.com' }),
+      makeReq({ q: 'foo' }, 'alice@example.com'),
       captured.res,
       makeHandlers({})
     )
@@ -196,7 +206,7 @@ describe('handleSessionSearchRoute', () => {
       .mockRejectedValue(new Error('FTS5 syntax error'))
     const captured = makeRes()
     await handleSessionSearchRoute(
-      makeReq({ q: 'foo' }, { sub: 'alice@example.com' }),
+      makeReq({ q: 'foo' }, 'alice@example.com'),
       captured.res,
       makeHandlers({ sessionSearchHandler })
     )

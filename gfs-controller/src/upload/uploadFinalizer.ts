@@ -6,6 +6,7 @@ import { Readable } from 'node:stream'
 import type { Pool } from 'pg'
 import { GfsError } from '../api/errors'
 import type { GfsResource } from '../api/read'
+import type { FilesystemActionAuthorityV2 } from '../auth/actionAuthority'
 import type { DbAuditSink, PermissionClient } from '../authz/permissionClient'
 import { resolveAuthzContext } from '../authz/subjectResolver'
 import { GfsWriteService, type TxClient } from '../db/writeStore'
@@ -68,6 +69,7 @@ export interface GfsUploadFinalizerDeps {
   permissions: PermissionClient
   writeService: Pick<GfsWriteService, 'create' | 'replace'>
   audit: DbAuditSink
+  checkpointAuthority?: (authority: FilesystemActionAuthorityV2) => Promise<void>
 }
 
 /**
@@ -123,6 +125,13 @@ export function createGfsUploadFinalizer(
         drive: session.drive,
         ownerSubject: session.ownerSubject,
         primarySubject: session.primarySubject,
+      }
+      if (reauthorizationPrincipal.actionAuthority) {
+        if (!deps.checkpointAuthority) {
+          throw new GfsError('not_mounted', 'live filesystem authority checkpoint is unavailable')
+        }
+        await deps.checkpointAuthority(reauthorizationPrincipal.actionAuthority)
+        publicationSignal?.throwIfAborted()
       }
       const targetContext = await resolveAuthzContext(deps.pool, {
         sub: reauthorizationPrincipal.ownerSubject,

@@ -3,16 +3,30 @@ import { query } from './accessAuthorityQuery.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import {
   type AuthorityCandidate,
+  type OperationalPathBinding,
   authorityCandidate,
   authorityCandidateFromGrantRow,
 } from './authorityCandidates.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
 import {
   type AccessCapability,
   capabilitiesForTeamRole,
   gfsPermissionsToCapabilities,
 } from './capabilityRegistry.js'
+import type { ValidatedOperationTarget } from './operationTarget.js'
+import {
+  type OperationalResourceGraphResult,
+  loadOperationalResourceGraph,
+  selectOperationalPathGraph,
+} from './operationalAccessReader.js'
+import { operationalBindingsForGraph } from './operationalAuthorityCandidates.js'
 import type { PrincipalAuthoritySnapshot } from './principalAuthoritySnapshot.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
+import {
+  assembleOperationalBehaviorDimensions,
+  budgetContextRefsForGraph,
+  loadRuntimeBehaviorPolicySnapshot,
+} from './runtimeBehaviorSource.js'
 
 export type ResourceAuthorityResult = Readonly<{
   exists: boolean
@@ -24,6 +38,17 @@ export type ResourceAuthorityResult = Readonly<{
   }>[]
   validUntil: Date | null
 }>
+
+function workflowRunResumeBindings(
+  graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
+): OperationalPathBinding[] {
+  // Resume changes the exact durable run row. Its current recipe and Context are
+  // exact-validated here; later MCP/provider/filesystem effects validate their
+  // own selected targets at their existing protected-effect boundaries.
+  return operationalBindingsForGraph(graph).filter(
+    binding => binding.resourceType === 'workflow_recipe' || binding.resourceType === 'context'
+  )
+}
 
 /**
  * The exact code points `String.prototype.trim` removes (ECMA-262 WhiteSpace
@@ -40,6 +65,7 @@ export async function loadDatabaseCandidates(input: {
   budget: AccessExecutionBudget
   snapshot: PrincipalAuthoritySnapshot
   resource: CanonicalResourceIdentity
+  operationTarget?: ValidatedOperationTarget
 }): Promise<ResourceAuthorityResult> {
   const { resource, snapshot } = input
   if (resource.type === 'user') {
@@ -121,6 +147,35 @@ export async function loadDatabaseCandidates(input: {
         WHERE $2::text = 'workflow_run' AND wr.run_id::text = $3
           AND (wr.actor_type IN ('scheduled', 'autonomous')
             OR (wr.actor_type = 'user' AND (wr.actor_id = $1 OR wr.actor_id IS NULL)))
+       UNION ALL
+       SELECT 'direct', 'workflow_artifacts:user:' || wr.run_id || ':' || $3,
+              NULL, NULL, NULL, wr.recipe_namespace, wr.recipe_name,
+              NULL, wr.team_id::text, wr.usage_team_id, NULL, NULL
+         FROM workflow_runs wr
+         JOIN user_workflow_triggers uwt
+           ON uwt.user_id = $1
+          AND uwt.recipe_namespace = wr.recipe_namespace
+          AND uwt.recipe_name = wr.recipe_name
+        WHERE $2::text = 'workflow_artifact'
+          AND wr.run_id::text = split_part($3, '/', 1)
+          AND split_part($3, '/', 2) <> ''
+          AND wr.actor_type = 'user' AND wr.actor_id = $1
+          AND wr.team_id IS NULL AND wr.usage_team_id IS NULL
+       UNION ALL
+       SELECT 'team', 'workflow_artifacts:team:' || tm.team_id || ':' || $3,
+              tm.team_id, tm.role, NULL, wr.recipe_namespace, wr.recipe_name,
+              NULL, wr.team_id::text, wr.usage_team_id, NULL, NULL
+         FROM workflow_runs wr
+         JOIN team_members tm
+           ON (tm.team_id = wr.team_id OR tm.team_id::text = wr.usage_team_id)
+          AND tm.user_id = $1 AND tm.status = 'active'
+         JOIN team_workflow_triggers twt
+           ON twt.team_id = tm.team_id
+          AND twt.recipe_namespace = wr.recipe_namespace
+          AND twt.recipe_name = wr.recipe_name
+        WHERE $2::text = 'workflow_artifact'
+          AND wr.run_id::text = split_part($3, '/', 1)
+          AND split_part($3, '/', 2) <> ''
        UNION ALL
        SELECT 'direct', 'workflow_approvals:user:' || war.id, NULL, NULL, NULL,
               war.recipe_namespace, war.recipe_name, war.expires_at, NULL, NULL, NULL, NULL
@@ -209,6 +264,49 @@ export async function loadDatabaseCandidates(input: {
     ]
   )
   const rows = result.rows as Record<string, unknown>[]
+  let workflowRunSource:
+    | Readonly<{
+        graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
+        policySnapshot: Awaited<ReturnType<typeof loadRuntimeBehaviorPolicySnapshot>>
+        runtimeRef: string
+      }>
+    | undefined
+  if (
+    resource.type === 'workflow_run' &&
+    snapshot.sessionContract === 'v2' &&
+    input.operationTarget?.runId === resource.logicalId &&
+    input.operationTarget.action === 'resume'
+  ) {
+    const firstRun = rows[0]
+    if (firstRun) {
+      const recipeGraph = await loadOperationalResourceGraph({
+        db: input.db,
+        budget: input.budget,
+        environmentId: resource.environmentId,
+        resourceType: 'workflow_recipe',
+        logicalId: `${String(firstRun.recipe_namespace)}/${String(firstRun.recipe_name)}`,
+      })
+      if (recipeGraph.status !== 'current') {
+        throw new Error('workflow_resume_operational_graph_unavailable')
+      }
+      const selectedGraph = selectOperationalPathGraph({ graph: recipeGraph })
+      if (!selectedGraph) throw new Error('workflow_resume_operational_graph_incomplete')
+      const policySnapshot = await loadRuntimeBehaviorPolicySnapshot({
+        db: input.db,
+        budget: input.budget,
+        contextRefs: budgetContextRefsForGraph(selectedGraph),
+      })
+      workflowRunSource = {
+        graph: selectedGraph,
+        policySnapshot,
+        runtimeRef: JSON.stringify(
+          selectedGraph.relationships
+            .map(relationship => relationship.relationshipInstanceId)
+            .sort(compareCanonicalUtf8Text)
+        ),
+      }
+    }
+  }
   const candidates = rows.flatMap(row => {
     const type = resource.type
     const capabilities: AccessCapability[] =
@@ -219,21 +317,36 @@ export async function loadDatabaseCandidates(input: {
             'workflow.artifact.read',
             'workflow.artifact.delete',
           ]
-        : type === 'workflow_approval'
-          ? ['workflow.approval.decide']
-          : type === 'gfs_resource'
-            ? gfsPermissionsToCapabilities(row.permissions)
-            : ['notification.read']
+        : type === 'workflow_artifact'
+          ? ['workflow.artifact.read', 'workflow.artifact.delete']
+          : type === 'workflow_approval'
+            ? ['workflow.approval.decide']
+            : type === 'gfs_resource'
+              ? gfsPermissionsToCapabilities(row.permissions)
+              : ['notification.read']
     const value = authorityCandidateFromGrantRow({
       row,
       userId: snapshot.userId,
       capabilities,
-      runtimeSensitive: type === 'workflow_run',
+      runtimeSensitive: type === 'workflow_run' || type === 'workflow_artifact',
       approvalRef: type === 'workflow_approval' ? `approval:${resource.logicalId}` : undefined,
       filesystemScope:
         type === 'gfs_resource'
           ? JSON.stringify({ drive: row.drive, resourceId: resource.logicalId })
           : undefined,
+      ...(type === 'workflow_run' && workflowRunSource
+        ? {
+            runtimeRef: workflowRunSource.runtimeRef,
+            behaviorDimensions: assembleOperationalBehaviorDimensions({
+              userId: snapshot.userId,
+              ...(row.team_id ? { teamId: String(row.team_id) } : {}),
+              graph: workflowRunSource.graph,
+              policySnapshot: workflowRunSource.policySnapshot,
+              runtimeRef: workflowRunSource.runtimeRef,
+            }),
+            operationalBindings: workflowRunResumeBindings(workflowRunSource.graph),
+          }
+        : {}),
     })
     return value ? [value] : []
   })
@@ -243,7 +356,11 @@ export async function loadDatabaseCandidates(input: {
     instanceId?: string
   }> = []
   for (const row of rows) {
-    if (resource.type === 'workflow_run' || resource.type === 'workflow_approval') {
+    if (
+      resource.type === 'workflow_run' ||
+      resource.type === 'workflow_artifact' ||
+      resource.type === 'workflow_approval'
+    ) {
       relationships.push(
         Object.freeze({
           type: 'recipe',

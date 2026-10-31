@@ -1,11 +1,13 @@
 import { Router } from 'express'
 import { config } from '../config.js'
+import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
   type AuthedRequest,
   extractAuthToken,
+  requireHostRpcPreflightScope,
   requireRpcAuth,
-  requireScope,
 } from '../middleware/auth.js'
+import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
 import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
 
@@ -44,13 +46,14 @@ function decrementCounter(map: Map<string, number>, key: string): void {
   else map.set(key, next)
 }
 
-function isWildcardOrInvalidHostRef(hostRef: string): boolean {
-  if (!hostRef.trim()) return true
-  return /[*%]/.test(hostRef)
-}
-
 function sanitizedStreamErrorMessage(): string {
   return 'Activity temporarily unavailable'
+}
+
+function maximumActivityFrameBytes(): number {
+  const configured = Number(process.env.MCP_HOST_ACTIVITY_MAX_EVENT_BYTES ?? '2048')
+  const eventBytes = Number.isSafeInteger(configured) && configured > 0 ? configured : 2_048
+  return eventBytes + Buffer.byteLength('event: activity\ndata: \n\n', 'utf8')
 }
 
 type ParsedSse = { event: string; data: unknown } | null
@@ -80,28 +83,25 @@ export function createRpcHostActivityStreamRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/activity/stream',
     requireRpcAuth,
-    requireScope('host:activity:read'),
+    requireHostRpcPreflightScope('host:activity:read'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef || isWildcardOrInvalidHostRef(hostRef)) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (Number(req.headers['content-length'] || 0) > 0) {
-          res
-            .status(400)
-            .json({ error: 'Activity stream is read-only and does not accept request bodies' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
 
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
 
@@ -133,14 +133,27 @@ export function createRpcHostActivityStreamRouter(): Router {
         let closed = false
         let eventId = 0
         let lastUpstreamActivityAt = Date.now()
+        let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | null = null
         let keepAliveId: NodeJS.Timeout | null = null
         let lifetimeId: NodeJS.Timeout | null = null
         let idleCheckId: NodeJS.Timeout | null = null
+        const maxFrameBytes = maximumActivityFrameBytes()
 
-        const cleanup = (reason: string) => {
+        const serializeEvent = (
+          event: 'open' | 'activity' | 'error' | 'closed',
+          payload: unknown
+        ) => {
+          eventId += 1
+          return `id: ${eventId}\nevent: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
+        }
+
+        const cleanup = (reason: string, emitClosed = true) => {
           if (closed) return
           closed = true
           abortController.abort()
+          const reader = upstreamReader
+          upstreamReader = null
+          void reader?.cancel().catch(() => undefined)
           if (keepAliveId) clearInterval(keepAliveId)
           if (lifetimeId) clearTimeout(lifetimeId)
           if (idleCheckId) clearInterval(idleCheckId)
@@ -148,18 +161,20 @@ export function createRpcHostActivityStreamRouter(): Router {
           decrementCounter(activeStreamCountsByUser, auth.sub)
           decrementCounter(activeStreamCountsByUserHost, userHostKey(auth.sub, hostRef))
           if (!res.writableEnded) {
-            res.write(`event: closed\n`)
-            res.write(`data: ${JSON.stringify({ reason })}\n\n`)
+            if (emitClosed) res.write(serializeEvent('closed', { reason }))
             res.end()
           }
         }
 
+        res.once('close', () => cleanup('client-disconnect', false))
+
         const writeEvent = (event: 'open' | 'activity' | 'error' | 'closed', payload: unknown) => {
-          if (closed || res.writableEnded) return
-          eventId += 1
-          res.write(`id: ${eventId}\n`)
-          res.write(`event: ${event}\n`)
-          res.write(`data: ${JSON.stringify(payload)}\n\n`)
+          if (closed || res.writableEnded) return false
+          if (!res.write(serializeEvent(event, payload))) {
+            cleanup('client_backpressure', false)
+            return false
+          }
+          return true
         }
 
         const allowedEvents = new Set(['open', 'activity', 'error', 'closed'])
@@ -172,15 +187,23 @@ export function createRpcHostActivityStreamRouter(): Router {
           },
           signal: abortController.signal,
         })
+        if (closed) {
+          await upstreamResponse.body?.cancel().catch(() => undefined)
+          return
+        }
         if (!upstreamResponse.ok || !upstreamResponse.body) {
           writeEvent('error', { message: sanitizedStreamErrorMessage() })
           cleanup('upstream_unavailable')
           return
         }
 
-        writeEvent('open', { hostRef, observedAt: new Date().toISOString() })
+        const reader = upstreamResponse.body.getReader()
+        upstreamReader = reader
+        if (!writeEvent('open', { hostRef, observedAt: new Date().toISOString() })) {
+          return
+        }
         keepAliveId = setInterval(() => {
-          if (!closed) res.write(': keepalive\n\n')
+          if (!closed && !res.write(': keepalive\n\n')) cleanup('client_backpressure', false)
         }, config.activityStreamKeepaliveMs)
         lifetimeId = setTimeout(() => {
           writeEvent('error', { message: 'Activity stream expired. Reconnect required.' })
@@ -193,7 +216,6 @@ export function createRpcHostActivityStreamRouter(): Router {
           }
         }, 1000)
 
-        const reader = upstreamResponse.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
         void (async () => {
@@ -204,16 +226,36 @@ export function createRpcHostActivityStreamRouter(): Router {
                 cleanup('upstream-closed')
                 break
               }
-              buffer += decoder.decode(readResult.value, { stream: true })
-              let splitAt = buffer.indexOf('\n\n')
-              while (splitAt >= 0) {
-                const block = buffer.slice(0, splitAt)
-                buffer = buffer.slice(splitAt + 2)
-                splitAt = buffer.indexOf('\n\n')
+              const decoded = decoder.decode(readResult.value, { stream: true })
+              let cursor = 0
+              while (!closed && cursor < decoded.length) {
+                const delimiterCrossesChunk = buffer.endsWith('\n') && decoded[cursor] === '\n'
+                const splitAt = delimiterCrossesChunk ? cursor : decoded.indexOf('\n\n', cursor)
+                if (!delimiterCrossesChunk && splitAt < 0) {
+                  const partial = buffer + decoded.slice(cursor)
+                  if (Buffer.byteLength(partial, 'utf8') > maxFrameBytes) {
+                    buffer = ''
+                    cleanup('upstream_frame_too_large', false)
+                    break
+                  }
+                  buffer = partial
+                  break
+                }
+                const block = delimiterCrossesChunk
+                  ? buffer.slice(0, -1)
+                  : buffer + decoded.slice(cursor, splitAt)
+                const frameBytes = Buffer.byteLength(`${block}\n\n`, 'utf8')
+                if (frameBytes > maxFrameBytes) {
+                  buffer = ''
+                  cleanup('upstream_frame_too_large', false)
+                  break
+                }
+                buffer = ''
+                cursor = delimiterCrossesChunk ? cursor + 1 : splitAt + 2
                 const parsed = parseSseBlock(block)
                 if (!parsed || !allowedEvents.has(parsed.event)) continue
                 if (parsed.event === 'activity') {
-                  writeEvent('activity', parsed.data)
+                  if (!writeEvent('activity', parsed.data)) break
                   lastUpstreamActivityAt = Date.now()
                 } else if (parsed.event === 'error') {
                   writeEvent('error', { message: sanitizedStreamErrorMessage() })
@@ -224,23 +266,16 @@ export function createRpcHostActivityStreamRouter(): Router {
             }
           } catch (error) {
             if (!closed) {
-              console.warn(
-                `[RPC_PROXY] host activity stream read failed host=${hostRef} user=${auth.sub} error=${
-                  error instanceof Error ? error.message : String(error)
-                }`
-              )
               writeEvent('error', { message: sanitizedStreamErrorMessage() })
               cleanup('upstream-failure')
             }
           } finally {
+            if (upstreamReader === reader) upstreamReader = null
             reader.releaseLock()
           }
         })()
-
-        req.on('close', () => {
-          cleanup('client-disconnect')
-        })
       } catch (error) {
+        if (res.destroyed || res.writableEnded) return
         if (!res.headersSent) {
           res.status(500).json({ error: 'Internal Server Error' })
           return

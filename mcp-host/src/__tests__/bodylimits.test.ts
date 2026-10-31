@@ -21,6 +21,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'net'
 import { createRequire } from 'node:module'
 import type { IncomingMessage } from '../server/types'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 const { declaredHeaderPngOfSize, jpegOfSize } = createRequire(__filename)(
   '../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
@@ -127,12 +128,12 @@ function imageAttachment(
 }
 
 function rpcProxyEdgeHeaders(): Record<string, string> {
-  return {
+  return withRpcProxyEdgeTestAuthentication({
     'content-type': 'application/json',
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': 'chatllm',
     'x-clerum-edge-user-id': 'user-1',
-  }
+  })
 }
 
 function messagePayload(attachments: unknown) {

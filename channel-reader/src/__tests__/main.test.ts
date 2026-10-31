@@ -82,6 +82,58 @@ describe('ChannelReader provider event idempotency', () => {
     expect(rpc.sendMessage).not.toHaveBeenCalled()
   })
 
+  it('does not retry Telegram on an authorization error without canonical admission proof', async () => {
+    const rpc = rpcClient()
+    rpc.authorizeProviderMessage = vi
+      .fn()
+      .mockResolvedValueOnce({ authorized: false, reason: 'error', retryAfterSeconds: 2 })
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map(),
+    })
+    const message = telegramMessage()
+
+    await reader.handleMessages([message, message])
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
+    await reader.handleMessages([message])
+
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
+    expect(rpc.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('keeps non-Telegram provider events retryable after direct admission rejects them', async () => {
+    vi.useFakeTimers()
+    const rpc = rpcClient()
+    rpc.sendMessage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        success: false,
+        error: {
+          code: 'RUNTIME_SERVICE_ADMISSION_LIMITED',
+          message: 'temporarily limited',
+          retryable: true,
+          provider: 'mcp-host',
+          retryAfterSeconds: 5,
+        },
+      })
+      .mockResolvedValueOnce(completedResponse)
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map(),
+    })
+    const message = telegramMessage({ channelType: 'slack', providerIdentity: undefined })
+
+    await reader.handleMessages([message, message])
+    expect(rpc.sendMessage).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await reader.handleMessages([message])
+
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
+  })
+
   it('records denied provider events so duplicate redelivery does not reauthorize', async () => {
     const rpc = rpcClient()
     rpc.authorizeProviderMessage = vi

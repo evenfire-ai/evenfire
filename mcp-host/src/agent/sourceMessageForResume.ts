@@ -11,6 +11,7 @@ import type { IncomingMessage } from '../server'
  * - `content`: the provider-workflow access gate and the tool registry.
  * - `hostRef`, `messageId`, `timestamp`: Host attribution and the pins' identity.
  * - `imageModel`: the visual model the turn was pinned to.
+ * - `authorityV2`: the non-bearer binding needed to revalidate a resumed v2 action.
  * - file attachments (metadata) and `fileReferenceResolutions`: the version pins
  *   and attachment lines. Image attachments are dropped (their content lives in
  *   the frozen snapshot) and inline bytes (dataBase64) never persist.
@@ -41,6 +42,7 @@ export function sourceMessageForResume(
     ...(message.fileReferenceResolutions
       ? { fileReferenceResolutions: message.fileReferenceResolutions }
       : {}),
+    ...(message.authorityV2 ? { authorityV2: message.authorityV2 } : {}),
   }
 }
 

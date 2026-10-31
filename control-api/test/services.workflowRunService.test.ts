@@ -4,6 +4,7 @@ import {
   WorkflowRunIdempotencyConflictError,
   computeWorkflowRunPayloadHash,
   createApprovedRun,
+  createRun,
   listRunsByRecipe,
 } from '../src/services/workflowRunService.js'
 
@@ -142,6 +143,54 @@ describe('services/workflowRunService.createApprovedRun', () => {
     expect(query.mock.calls.some(call => String(call[0]).includes("SET status = 'consumed'"))).toBe(
       false
     )
+  })
+
+  it('treats an absent legacy authority binding as SQL NULL on an approved-run retry', async () => {
+    const { query } = makeClient()
+    const existing = {
+      run_id: 'legacy-approved-run',
+      recipe_namespace: input.recipe_namespace,
+      recipe_name: input.recipe_name,
+      actor_id: input.actor_id,
+      approval_request_id: input.approval_request_id,
+      idempotency_payload_hash: input.idempotency_payload_hash,
+      initiating_authority_binding_id: null,
+    }
+    query
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({ rows: [existing], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+
+    await expect(createApprovedRun(input)).resolves.toEqual({ row: existing, created: false })
+    expect(mockedConsumeApprovalForTrigger).not.toHaveBeenCalled()
+  })
+
+  it('keeps non-null v2 authority binding mismatches strict on approved-run retries', async () => {
+    const { query } = makeClient()
+    query
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            actor_id: input.actor_id,
+            approval_request_id: input.approval_request_id,
+            idempotency_payload_hash: input.idempotency_payload_hash,
+            initiating_authority_binding_id: 'persisted-v2-binding',
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+
+    await expect(createApprovedRun(input)).rejects.toBeInstanceOf(
+      WorkflowRunIdempotencyConflictError
+    )
+    expect(mockedConsumeApprovalForTrigger).not.toHaveBeenCalled()
+    expect(query).toHaveBeenLastCalledWith('ROLLBACK')
   })
 
   it('rejects idempotency reuse with a different payload hash', async () => {
@@ -306,5 +355,85 @@ describe('services/workflowRunService.computeWorkflowRunPayloadHash', () => {
 
     expect(a).toBe(b)
     expect(a).not.toBe(c)
+  })
+})
+
+describe('services/workflowRunService.createRun authority idempotency', () => {
+  const input = {
+    recipe_namespace: 'sandbox-recipes',
+    recipe_name: 'demo',
+    actor_type: 'user' as const,
+    actor_id: '00000000-0000-4000-8000-000000000001',
+    idempotency_key: 'same-key',
+    trigger_source: 'onDemand' as const,
+  }
+  const authority = {
+    binding: {
+      version: 2 as const,
+      userId: input.actor_id,
+      sid: '00000000-0000-4000-8000-000000000002',
+      sessionVersion: 1,
+      delegationJti: '00000000-0000-4000-8000-000000000003',
+      operationId: 'workflow.trigger' as const,
+      resource: {
+        environmentId: 'local',
+        type: 'workflow_recipe' as const,
+        canonicalId: 'workflow_recipe:local:sandbox-recipes/demo',
+        logicalId: 'sandbox-recipes/demo',
+        displayName: 'sandbox-recipes/demo',
+      },
+      target: { recipeNamespace: 'sandbox-recipes', recipeName: 'demo' },
+      targetHash: `ath2_${'a'.repeat(43)}`,
+      accessPathId: `ap1_${'b'.repeat(43)}`,
+      authorizationRevision: `ar1_${'c'.repeat(43)}`,
+      pathKind: 'direct' as const,
+      effectiveTeamId: null,
+      behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
+    },
+    sourceIssuedAt: 1_700_000_000,
+    sourceExpiresAt: 1_700_000_300,
+    bindingHash: 'e'.repeat(64),
+  }
+
+  it('rejects a v2 retry of an existing legacy run', async () => {
+    const db = { query: vi.fn() }
+    db.query.mockResolvedValueOnce({ rows: [], rowCount: 1 }).mockResolvedValueOnce({
+      rows: [{ ...input, initiating_authority_binding_id: null, authorityBindingHash: null }],
+      rowCount: 1,
+    })
+
+    await expect(createRun({ ...input, authority }, db as never)).rejects.toBeInstanceOf(
+      WorkflowRunIdempotencyConflictError
+    )
+  })
+
+  it('rejects a legacy retry of an existing v2 run', async () => {
+    const db = { query: vi.fn() }
+    db.query.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
+      rows: [{ ...input, initiating_authority_binding_id: 'binding-1' }],
+      rowCount: 1,
+    })
+
+    await expect(createRun(input, db as never)).rejects.toBeInstanceOf(
+      WorkflowRunIdempotencyConflictError
+    )
+  })
+
+  it('does not persist a run when the final authority fence is unavailable', async () => {
+    const db = { query: vi.fn() }
+    db.query
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    const validateCurrentInTransaction = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('authority_unavailable'), { code: 'authority_unavailable' })
+      )
+
+    await expect(
+      createRun({ ...input, authority, validateCurrentInTransaction }, db as never)
+    ).rejects.toMatchObject({ code: 'authority_unavailable' })
+    expect(db.query).toHaveBeenCalledTimes(2)
+    expect(validateCurrentInTransaction).toHaveBeenCalledTimes(1)
   })
 })

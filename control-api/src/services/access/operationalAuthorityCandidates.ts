@@ -9,8 +9,12 @@ import {
 import { compareCanonicalUtf8Text } from './canonicalText.js'
 import type { AccessCapability } from './capabilityRegistry.js'
 import { canonicalContextLogicalIdSql } from './contextIdentitySql.js'
-import type { OperationalResourceGraphResult } from './operationalAccessReader.js'
+import {
+  type OperationalResourceGraphResult,
+  selectOperationalPathGraph,
+} from './operationalAccessReader.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
+import { assembleOperationalBehaviorDimensions } from './runtimeBehaviorSource.js'
 import { workflowTriggerGrantIdentitySql } from './workflowTriggerGrantIdentity.js'
 
 function scopedName(logicalId: string): { namespace: string; name: string } | null {
@@ -19,10 +23,46 @@ function scopedName(logicalId: string): { namespace: string; name: string } | nu
   return { namespace: logicalId.slice(0, separator), name: logicalId.slice(separator + 1) }
 }
 
+export function operationalBindingsForGraph(
+  graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
+): OperationalPathBinding[] {
+  const supported = new Set([
+    'host',
+    'context',
+    'mcp_server',
+    'workflow_recipe',
+    'shared_filesystem',
+  ])
+  return graph.resources
+    .filter(resource => supported.has(resource.resourceType))
+    .map(resource => ({
+      resourceType: resource.resourceType as OperationalPathBinding['resourceType'],
+      logicalId: resource.logicalId,
+      providerUid: resource.providerUid,
+      providerResourceVersion: resource.providerResourceVersion,
+      behaviorSources: resource.behaviorSources,
+      relationships: graph.relationships
+        .filter(
+          relationship =>
+            relationship.sourceType === resource.resourceType &&
+            relationship.sourceId === resource.logicalId
+        )
+        .map(relationship => ({
+          instanceId: relationship.relationshipInstanceId,
+          behaviorAttributes: relationship.behaviorAttributes,
+        })),
+    }))
+}
+
 export async function loadSimpleOperationalGrantCandidates(input: {
   db: Pick<DbClient, 'query'>
   budget: AccessExecutionBudget
   userId: string
+  behaviorDimensions: (
+    graph: Extract<OperationalResourceGraphResult, { status: 'current' }>,
+    runtimeRef: string | null,
+    teamId?: string
+  ) => ReturnType<typeof assembleOperationalBehaviorDimensions>
   resource: CanonicalResourceIdentity
   graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
 }): Promise<AuthorityCandidate[]> {
@@ -131,22 +171,13 @@ export async function loadSimpleOperationalGrantCandidates(input: {
       : input.resource.type === 'sandbox_app'
         ? ['sandbox_app.read', 'sandbox_app.use', 'sandbox_oauth.vend']
         : ['workflow.read', 'workflow.trigger']
-  const relevantRelationships = input.graph.relationships.filter(
-    relationship => relationship.sourceType === input.resource.type || isRecipe
-  )
+  const selectedGraph = selectOperationalPathGraph({ graph: input.graph })
+  if (!selectedGraph) return []
   const runtimeRef = JSON.stringify(
-    relevantRelationships
+    selectedGraph.relationships
       .map(relationship => relationship.relationshipInstanceId)
       .sort(compareCanonicalUtf8Text)
   )
-  const bindingType =
-    input.resource.type === 'sandbox_app' ? 'workflow_recipe' : input.resource.type
-  const bindingProviderUid =
-    input.resource.type === 'sandbox_app'
-      ? relevantRelationships.find(relationship => relationship.sourceType === 'workflow_recipe')
-          ?.sourceProviderUid
-      : input.graph.resource.providerUid
-  if (!bindingProviderUid) return []
   return (result.rows as Record<string, unknown>[]).flatMap(row => {
     const value = authorityCandidateFromGrantRow({
       row,
@@ -154,17 +185,12 @@ export async function loadSimpleOperationalGrantCandidates(input: {
       capabilities,
       runtimeSensitive: true,
       runtimeRef,
-      operationalBindings: [
-        {
-          resourceType: bindingType as OperationalPathBinding['resourceType'],
-          logicalId: input.resource.logicalId,
-          providerUid: bindingProviderUid,
-          relationships: relevantRelationships.map(relationship => ({
-            instanceId: relationship.relationshipInstanceId,
-            behaviorAttributes: relationship.behaviorAttributes,
-          })),
-        },
-      ],
+      behaviorDimensions: input.behaviorDimensions(
+        selectedGraph,
+        runtimeRef,
+        row.team_id ? String(row.team_id) : undefined
+      ),
+      operationalBindings: operationalBindingsForGraph(selectedGraph),
     })
     return value ? [value] : []
   })
@@ -174,13 +200,17 @@ export async function loadDerivedOperationalCandidates(input: {
   db: Pick<DbClient, 'query'>
   budget: AccessExecutionBudget
   userId: string
+  behaviorDimensions: (
+    graph: Extract<OperationalResourceGraphResult, { status: 'current' }>,
+    runtimeRef: string | null,
+    teamId?: string
+  ) => ReturnType<typeof assembleOperationalBehaviorDimensions>
   resource: CanonicalResourceIdentity
   graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
 }): Promise<AuthorityCandidate[]> {
   if (input.resource.type !== 'mcp_server' && input.resource.type !== 'shared_filesystem') {
     return []
   }
-  const derivedResourceType = input.resource.type
   const directEdges = input.graph.relationships.filter(relationship => {
     if (input.resource.type === 'mcp_server') {
       return (
@@ -286,6 +316,11 @@ export async function loadDerivedOperationalCandidates(input: {
       const contextId = contextIds.find(value => value === sourceName)
       if (!contextId) continue
       for (const edge of directEdges.filter(value => value.sourceId === contextId)) {
+        const selectedGraph = selectOperationalPathGraph({
+          graph: input.graph,
+          contextId,
+        })
+        if (!selectedGraph) continue
         const filesystemScope =
           input.resource.type === 'shared_filesystem'
             ? JSON.stringify({
@@ -307,26 +342,13 @@ export async function loadDerivedOperationalCandidates(input: {
               : ['shared_filesystem.read'],
           runtimeSensitive: input.resource.type === 'mcp_server',
           runtimeRef: edge.relationshipInstanceId,
+          behaviorDimensions: input.behaviorDimensions(
+            selectedGraph,
+            edge.relationshipInstanceId,
+            row.team_id ? String(row.team_id) : undefined
+          ),
           filesystemScope,
-          operationalBindings: [
-            {
-              resourceType: 'context',
-              logicalId: contextId,
-              providerUid: edge.sourceProviderUid,
-              relationships: [
-                {
-                  instanceId: edge.relationshipInstanceId,
-                  behaviorAttributes: edge.behaviorAttributes,
-                },
-              ],
-            },
-            {
-              resourceType: derivedResourceType,
-              logicalId: input.resource.logicalId,
-              providerUid: input.graph.resource.providerUid,
-              relationships: [],
-            },
-          ],
+          operationalBindings: operationalBindingsForGraph(selectedGraph),
         })
         if (value) output.push(value)
       }
@@ -337,6 +359,12 @@ export async function loadDerivedOperationalCandidates(input: {
     for (const hostEdge of hostEdges.filter(value => value.sourceId === hostId)) {
       const contextEdge = directEdges.find(value => value.sourceId === hostEdge.targetId)
       if (!contextEdge) continue
+      const selectedGraph = selectOperationalPathGraph({
+        graph: input.graph,
+        contextId: hostEdge.targetId,
+        hostId,
+      })
+      if (!selectedGraph) continue
       const value = authorityCandidateFromGrantRow({
         row: {
           ...row,
@@ -349,36 +377,12 @@ export async function loadDerivedOperationalCandidates(input: {
           hostEdge.relationshipInstanceId,
           contextEdge.relationshipInstanceId,
         ]),
-        operationalBindings: [
-          {
-            resourceType: 'host',
-            logicalId: hostId,
-            providerUid: hostEdge.sourceProviderUid,
-            relationships: [
-              {
-                instanceId: hostEdge.relationshipInstanceId,
-                behaviorAttributes: hostEdge.behaviorAttributes,
-              },
-            ],
-          },
-          {
-            resourceType: 'context',
-            logicalId: hostEdge.targetId,
-            providerUid: contextEdge.sourceProviderUid,
-            relationships: [
-              {
-                instanceId: contextEdge.relationshipInstanceId,
-                behaviorAttributes: contextEdge.behaviorAttributes,
-              },
-            ],
-          },
-          {
-            resourceType: 'mcp_server',
-            logicalId: input.resource.logicalId,
-            providerUid: input.graph.resource.providerUid,
-            relationships: [],
-          },
-        ],
+        behaviorDimensions: input.behaviorDimensions(
+          selectedGraph,
+          JSON.stringify([hostEdge.relationshipInstanceId, contextEdge.relationshipInstanceId]),
+          row.team_id ? String(row.team_id) : undefined
+        ),
+        operationalBindings: operationalBindingsForGraph(selectedGraph),
       })
       if (value) output.push(value)
     }

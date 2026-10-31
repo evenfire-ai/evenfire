@@ -272,6 +272,8 @@ type Config = {
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
   // coalescence window for the wake-annotation projection.
   hostWakeRlPerMin: number
+  hostMessageRlPerMin: number
+  hostRpcAdmissionRlPerMin: number
   hostWakeCoalesceWindowMs: number
   approvalMediumChallengeTtlSec: number
   telegramProviderEventChallengeTtlSec: number
@@ -1250,6 +1252,11 @@ export const config: Config = {
   // bursts from a few concurrent devices (4 x 3 = 12) plus a real message.
   // Derivation is regression-guarded by test/config.hostWakeRateLimit.test.ts.
   hostWakeRlPerMin: positiveIntegerFromEnv('CONTROL_API_HOST_WAKE_RL_PER_MIN', 150),
+  hostMessageRlPerMin: positiveIntegerFromEnv('CONTROL_API_HOST_MESSAGE_RL_PER_MIN', 60),
+  hostRpcAdmissionRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_HOST_RPC_ADMISSION_RL_PER_MIN',
+    300
+  ),
   hostWakeCoalesceWindowMs: Number(process.env.CONTROL_API_HOST_WAKE_COALESCE_WINDOW_MS || 2000),
   approvalMediumChallengeTtlSec: Number(
     process.env.WORKFLOW_APPROVAL_MEDIUM_CHALLENGE_TTL_SEC || 60 * 60

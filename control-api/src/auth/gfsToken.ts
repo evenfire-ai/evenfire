@@ -1,6 +1,8 @@
 import jwt from 'jsonwebtoken'
 import { createHash, createPublicKey } from 'node:crypto'
+import type { AuthorityBindingV2 } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
+import { boundedActionAuthorityTokenLifetime } from '../utils/auth/actionAuthorityLifetime.js'
 
 /**
  * gfs (Global File System) access token.
@@ -50,6 +52,13 @@ export interface GfsTokenClaims extends jwt.JwtPayload {
   authGeneration?: number
   brokeredAuthority?: GfsBrokeredAuthority
   principalType?: 'user' | 'control-admin'
+  actionAuthority?: FilesystemActionAuthorityV2
+}
+
+export interface FilesystemActionAuthorityV2 {
+  binding: AuthorityBindingV2
+  sourceIssuedAt: number
+  sourceExpiresAt: number
 }
 
 export interface GfsBrokeredAuthority {
@@ -97,7 +106,12 @@ export function signGfsToken(input: {
   authGeneration?: number
   brokeredAuthority?: GfsBrokeredAuthority
   principalType?: 'user' | 'control-admin'
+  actionAuthority?: FilesystemActionAuthorityV2
 }): { token: string; expiresInSeconds: number } {
+  const lifetime = boundedActionAuthorityTokenLifetime(
+    config.gfsTokenTtlSeconds,
+    input.actionAuthority
+  )
   const claims: Omit<GfsTokenClaims, 'iat' | 'exp'> = {
     sub: input.subject,
     drive: input.drive,
@@ -106,13 +120,26 @@ export function signGfsToken(input: {
     ...(input.authGeneration === undefined ? {} : { authGeneration: input.authGeneration }),
     ...(input.brokeredAuthority ? { brokeredAuthority: { ...input.brokeredAuthority } } : {}),
     ...(input.principalType ? { principalType: input.principalType } : {}),
+    ...(input.actionAuthority
+      ? {
+          actionAuthority: {
+            binding: input.actionAuthority.binding,
+            sourceIssuedAt: input.actionAuthority.sourceIssuedAt,
+            sourceExpiresAt: input.actionAuthority.sourceExpiresAt,
+          },
+        }
+      : {}),
   }
-  const token = jwt.sign(claims, config.rpcJwtPrivateKey, {
-    algorithm: 'RS256',
-    issuer: config.rpcJwtIssuer,
-    audience: config.gfsTokenAudience,
-    expiresIn: config.gfsTokenTtlSeconds,
-    keyid: gfsSigningKeyId(),
-  })
-  return { token, expiresInSeconds: config.gfsTokenTtlSeconds }
+  const token = jwt.sign(
+    { ...claims, ...(lifetime.issuedAt === undefined ? {} : { iat: lifetime.issuedAt }) },
+    config.rpcJwtPrivateKey,
+    {
+      algorithm: 'RS256',
+      issuer: config.rpcJwtIssuer,
+      audience: config.gfsTokenAudience,
+      expiresIn: lifetime.expiresInSeconds,
+      keyid: gfsSigningKeyId(),
+    }
+  )
+  return { token, expiresInSeconds: lifetime.expiresInSeconds }
 }

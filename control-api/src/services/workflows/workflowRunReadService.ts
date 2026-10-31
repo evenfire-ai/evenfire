@@ -309,7 +309,7 @@ export function mapDbRun(row: WorkflowRunRow): CanonicalRunDto {
     triggeredAt: toIso(row.created_at),
     startedAt: toIso(row.started_at),
     completedAt: toIso(row.completed_at),
-    message: null,
+    message: row.failure_reason ?? null,
     actor: actorFromDbRow(row),
     executionRef,
   }
@@ -468,7 +468,7 @@ export async function getWorkflowHealth(
       run => !liveRunIds.has(run.id)
     ) ?? null
   const activeRuns = liveRows.filter(
-    row => row.phase === 'Pending' || row.phase === 'Running'
+    row => row.phase === 'Pending' || row.phase === 'Running' || row.phase === 'AuthorizationPaused'
   ).length
   const lastRun =
     [liveRuns[0], latestAuditRun]

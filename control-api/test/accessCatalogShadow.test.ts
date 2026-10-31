@@ -136,4 +136,36 @@ describe('aggregate access shadow comparison', () => {
       budget.close()
     }
   })
+
+  it.each([
+    ['host', 12],
+    ['context', 11],
+    ['mcp_server', 11],
+    ['workflow_recipe', 11],
+    ['sandbox_app', 11],
+    ['shared_filesystem', 11],
+  ] as const)('reserves the measured operational plan for %s', async (family, producerCalls) => {
+    const budget = AccessExecutionBudget.create('catalog', { limits: { producerCalls } })
+    const observedChildLimits: number[] = []
+    try {
+      await expect(
+        compareAccessCatalogShadow(
+          { session, family, legacyLogicalIds: [], legacyComplete: true },
+          {
+            enabled: true,
+            budget,
+            buildCatalog: async (_input, options) => {
+              observedChildLimits.push(options.budget!.limits.producerCalls)
+              options.budget!.charge({ kind: 'producerCalls', amount: producerCalls })
+              return catalog([])
+            },
+          }
+        )
+      ).resolves.toBe('match')
+      expect(observedChildLimits).toEqual([producerCalls])
+      expect(budget.remaining('producerCalls')).toBe(0)
+    } finally {
+      budget.close()
+    }
+  })
 })

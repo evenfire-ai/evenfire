@@ -15,10 +15,20 @@ import {
   type TeamsMessageHandoff,
   createChannelReaderHandoffServer,
 } from './handoffServer'
+import { logTelegramRetryDisposition } from './logger'
 import type { NotificationDeliveryClient } from './notificationDeliveryClient'
 import { createProgressStream } from './progressClient'
 import { formatFinalMessage, formatProgressUpdate } from './progressFormatter'
-import { type ChannelReaderRuntimeSource, MessageResponse, RPCClient } from './rpcClient'
+import {
+  type ChannelReaderRuntimeSource,
+  MessageResponse,
+  RPCClient,
+  RuntimeServiceAdmissionLimitedError,
+} from './rpcClient'
+import {
+  type PendingTelegramAdmissionRetry,
+  TelegramAdmissionRetryQueue,
+} from './telegramAdmissionRetryQueue'
 import { type TraceContextV1, mintChannelTraceContext } from './traceContext'
 import {
   Attachment,
@@ -89,6 +99,7 @@ interface PendingApprovalState {
 
 interface ProcessedProviderEvent {
   seenAt: number
+  retryAfterAt?: number
 }
 
 /** Stale approval entries are cleaned up after this interval. */
@@ -312,6 +323,8 @@ type ChannelReaderRpcClient = Pick<
   confirmTeamsLinkSession?: RPCClient['confirmTeamsLinkSession']
 }
 
+type ProviderMessageAuthorizationResult = Awaited<ReturnType<RPCClient['authorizeProviderMessage']>>
+
 type ChannelType = ChannelAdapter['channelType']
 type CommunicationChannelRef = {
   namespace: string
@@ -332,6 +345,7 @@ export class ChannelReader {
   private adapters: Map<string, ChannelAdapter> = new Map()
   private channels: CommunicationChannelCRD[] = []
   private running: boolean = false
+  private stopRequested: boolean = false
   private needsRestart: boolean = false
   private rpcClient: ChannelReaderRpcClient
   private notificationDeliveryClient: NotificationDeliveryClient | null
@@ -343,6 +357,8 @@ export class ChannelReader {
   private pendingApprovals: Map<string, PendingApprovalState> = new Map()
   /** Recently processed provider events keyed by stable provider or channel message identity. */
   private processedProviderEvents: Map<string, ProcessedProviderEvent> = new Map()
+  /** Volatile, bounded R66-M1 retries and same-conversation FIFO followers. */
+  private telegramAdmissionRetries = new TelegramAdmissionRetryQueue()
   /** Unresolved-sender notices already sent, keyed by workspace + user + channel. */
   private unresolvedNoticesSent: Map<string, { seenAt: number }> = new Map()
   /**
@@ -1433,17 +1449,21 @@ export class ChannelReader {
       }
     }
 
-    if (allMessages.length > 0) {
-      console.log(`[Main] Received ${allMessages.length} message(s)`)
-      await this.handleMessages(allMessages)
-    }
-
     // Deliver any pending cron task results
     await this.pollCronResults()
 
     // Deliver workflow approval notifications via mcp-host, which is the
     // authenticated control-plane caller for the control-api hop.
     await this.workflowApprovalCoordinator.pollNotifications()
+
+    if (allMessages.length > 0) {
+      console.log(`[Main] Received ${allMessages.length} message(s)`)
+      await this.handleMessages(allMessages)
+    }
+
+    // A due Telegram retry is started in the background after fresh batch work. It never holds
+    // this poll cycle, and the queue permits at most one retry dispatch per cycle.
+    this.dispatchDueTelegramAdmissionRetry()
 
     // Clean up stale pending approvals and provider event dedupe keys.
     this.cleanupStaleApprovals()
@@ -1455,8 +1475,12 @@ export class ChannelReader {
    * Handle received messages by forwarding them to mcp-host and replying with LLM response.
    * Intercepts /approve and /deny commands when an approval is pending.
    */
-  async handleMessages(messages: Message[]): Promise<void> {
+  async handleMessages(
+    messages: Message[],
+    pendingRetry?: PendingTelegramAdmissionRetry
+  ): Promise<void> {
     for (const msg of messages) {
+      if (this.stopRequested) return
       console.log('\n' + '-'.repeat(50))
       console.log(`[Main] New message from ${msg.channelType}`)
       console.log(`[Main]   Channel: ${msg.channelType} (${msg.channelId})`)
@@ -1466,19 +1490,61 @@ export class ChannelReader {
         console.log(`[Main]   Provider Event: ${msg.providerIdentity.providerEventId}`)
       }
       console.log(`[Main]   Time: ${msg.timestamp.toISOString()}`)
-      console.log(
-        `[Main]   Content: ${msg.content.substring(0, 100)}${msg.content.length > 100 ? '...' : ''}`
-      )
       console.log('-'.repeat(50))
 
       const providerEventKey = this.providerEventDedupeKey(msg)
-      if (providerEventKey && this.processedProviderEvents.has(providerEventKey)) {
-        console.warn(`[Main] Duplicate provider message ignored: ${providerEventKey}`)
+      const isPendingRetry =
+        pendingRetry !== undefined && providerEventKey === pendingRetry.eventKey
+      if (
+        providerEventKey &&
+        this.telegramAdmissionRetries.hasEvent(providerEventKey) &&
+        !isPendingRetry
+      ) {
+        continue
+      }
+      if (providerEventKey && !isPendingRetry) {
+        const processedEvent = this.processedProviderEvents.get(providerEventKey)
+        if (processedEvent?.retryAfterAt && Date.now() >= processedEvent.retryAfterAt) {
+          this.processedProviderEvents.delete(providerEventKey)
+        } else if (processedEvent) {
+          console.warn(`[Main] Duplicate provider message ignored: ${providerEventKey}`)
+          continue
+        }
+      }
+      if (
+        msg.channelType === 'telegram' &&
+        providerEventKey &&
+        !isPendingRetry &&
+        this.telegramAdmissionRetries.hasStream(this.telegramRetryStreamKey(msg))
+      ) {
+        this.retainTelegramRetryFollower(msg, providerEventKey)
         continue
       }
       if (msg.providerIdentity && this.rpcClient.authorizeProviderMessage) {
         const authorization = await this.rpcClient.authorizeProviderMessage(msg.providerIdentity)
+        if (this.stopRequested) return
         if (!authorization.authorized) {
+          if (authorization.reason === 'error') {
+            if (
+              msg.channelType === 'telegram' &&
+              authorization.directServiceAdmissionLimited === true &&
+              authorization.retryAfterSeconds !== undefined
+            ) {
+              this.retainTelegramAdmissionRetry(
+                msg,
+                pendingRetry?.traceContext ?? mintChannelTraceContext(msg),
+                authorization.retryAfterSeconds,
+                pendingRetry
+              )
+            } else if (msg.channelType !== 'telegram') {
+              this.deferProviderEvent(msg, authorization.retryAfterSeconds)
+            } else if (providerEventKey) {
+              // Noncanonical authorization failures are terminal for this provider event. They
+              // do not establish a safe retry time and must not replay a later POST.
+              this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+            }
+            continue
+          }
           if (providerEventKey) {
             this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
           }
@@ -1492,7 +1558,7 @@ export class ChannelReader {
         }
       }
 
-      const traceContext = mintChannelTraceContext(msg)
+      const traceContext = pendingRetry?.traceContext ?? mintChannelTraceContext(msg)
       if (providerEventKey) {
         this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
       }
@@ -1532,6 +1598,8 @@ export class ChannelReader {
         continue
       }
 
+      if (this.stopRequested) return
+
       // Forward to mcp-host
       console.log('[Main] Forwarding message to mcp-host...')
 
@@ -1539,11 +1607,17 @@ export class ChannelReader {
       if (adapter && msg.channelType !== 'email') {
         // Telegram, Slack, and Teams: use async progress flow with edit-in-place
         try {
-          await this.handleMessageWithProgress(runtimeMsg, adapter, traceContext)
+          await this.handleMessageWithProgress(runtimeMsg, adapter, traceContext, pendingRetry)
         } catch (err) {
           console.error(`[Main] Progress flow failed, falling back:`, err)
+          if (msg.channelType === 'telegram') {
+            // A progress failure may follow an accepted message POST. Never
+            // submit again without an acceptance receipt.
+            continue
+          }
           // Fall back to synchronous
           const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
+          this.releaseProviderEventAfterAdmissionLimit(msg, response)
           if (response.success && response.status === 'waiting_approval' && response.approval) {
             const { taskId, requestId, userId, notification } = response.approval
             console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
@@ -1584,6 +1658,7 @@ export class ChannelReader {
       } else {
         // Email: existing synchronous flow
         const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
+        this.releaseProviderEventAfterAdmissionLimit(msg, response)
 
         if (response.success && response.status === 'waiting_approval' && response.approval) {
           const { taskId, requestId, userId, notification } = response.approval
@@ -1637,6 +1712,181 @@ export class ChannelReader {
     }
 
     return ['message', msg.channelType, msg.channelId, msg.sender, messageId].join(':')
+  }
+
+  private deferProviderEvent(msg: Message, retryAfterSeconds = 1): void {
+    const eventKey = this.providerEventDedupeKey(msg)
+    if (eventKey) {
+      const boundedRetryAfterSeconds =
+        Number.isSafeInteger(retryAfterSeconds) && retryAfterSeconds >= 1 && retryAfterSeconds <= 60
+          ? retryAfterSeconds
+          : 1
+      this.processedProviderEvents.set(eventKey, {
+        seenAt: Date.now(),
+        retryAfterAt: Date.now() + boundedRetryAfterSeconds * 1000,
+      })
+    }
+  }
+
+  private releaseProviderEventAfterAdmissionLimit(msg: Message, response: MessageResponse): void {
+    if (msg.channelType === 'telegram') return
+    if (response.error?.code !== 'RUNTIME_SERVICE_ADMISSION_LIMITED') return
+    this.deferProviderEvent(msg, response.error.retryAfterSeconds)
+  }
+
+  private telegramRetryStreamKey(msg: Message): string {
+    const identity = msg.providerIdentity
+    const target = identity?.providerTarget
+    return JSON.stringify([
+      identity?.medium ?? msg.channelType,
+      identity?.providerWorkspaceId ?? '',
+      identity?.providerChannelId ?? msg.channelId,
+      target?.hostRef ?? '',
+      target?.communicationChannelNamespace ?? '',
+      target?.communicationChannelName ?? '',
+    ])
+  }
+
+  private hasRetryAuthority(msg: Message): boolean {
+    const identity = msg.providerIdentity
+    const target = identity?.providerTarget
+    return Boolean(
+      msg.channelType === 'telegram' &&
+      identity?.medium === 'telegram' &&
+      identity.providerUserId.trim() &&
+      identity.providerChannelId.trim() &&
+      identity.providerEventId.trim() &&
+      target?.hostRef.trim() &&
+      target.communicationChannelNamespace.trim() &&
+      target.communicationChannelName.trim() &&
+      this.rpcClient.authorizeProviderMessage
+    )
+  }
+
+  private retainTelegramAdmissionRetry(
+    msg: Message,
+    traceContext: TraceContextV1,
+    retryAfterSeconds: number,
+    pendingRetry?: PendingTelegramAdmissionRetry
+  ): void {
+    const snapshot = this.telegramAdmissionRetries.snapshot
+    if (this.stopRequested) {
+      logTelegramRetryDisposition('shutdown', snapshot.events, snapshot.accountedBytes)
+      return
+    }
+    if (pendingRetry?.retryUsed) {
+      logTelegramRetryDisposition('second_admission_429', snapshot.events, snapshot.accountedBytes)
+      return
+    }
+    if (
+      !Number.isSafeInteger(retryAfterSeconds) ||
+      retryAfterSeconds < 1 ||
+      retryAfterSeconds > 60
+    ) {
+      if (pendingRetry) pendingRetry.rescheduled = false
+      logTelegramRetryDisposition('ambiguous_post', snapshot.events, snapshot.accountedBytes)
+      return
+    }
+    if (!this.hasRetryAuthority(msg)) {
+      if (pendingRetry) pendingRetry.rescheduled = false
+      const eventKey = this.providerEventDedupeKey(msg)
+      if (eventKey) this.processedProviderEvents.set(eventKey, { seenAt: Date.now() })
+      logTelegramRetryDisposition('authorization_denied', snapshot.events, snapshot.accountedBytes)
+      return
+    }
+
+    const retryAt = Date.now() + retryAfterSeconds * 1000
+    if (pendingRetry) {
+      const result = this.telegramAdmissionRetries.scheduleRetry(pendingRetry, retryAt)
+      if (result === 'full') {
+        const after = this.telegramAdmissionRetries.snapshot
+        logTelegramRetryDisposition('retry_buffer_full', after.events, after.accountedBytes)
+      } else if (result !== 'scheduled') {
+        pendingRetry.rescheduled = false
+        logTelegramRetryDisposition(
+          'second_admission_429',
+          snapshot.events,
+          snapshot.accountedBytes
+        )
+      }
+      return
+    }
+
+    const eventKey = this.providerEventDedupeKey(msg)
+    if (!eventKey) {
+      logTelegramRetryDisposition(
+        'retry_buffer_unaccountable',
+        snapshot.events,
+        snapshot.accountedBytes
+      )
+      return
+    }
+    const result = this.telegramAdmissionRetries.enqueue({
+      message: msg,
+      traceContext,
+      eventKey,
+      streamKey: this.telegramRetryStreamKey(msg),
+      retryAt,
+      retryUsed: true,
+    })
+    this.processedProviderEvents.set(eventKey, { seenAt: Date.now() })
+    if (result.status === 'retained' || result.status === 'duplicate') return
+    const after = this.telegramAdmissionRetries.snapshot
+    logTelegramRetryDisposition(
+      result.status === 'full' ? 'retry_buffer_full' : 'retry_buffer_unaccountable',
+      after.events,
+      after.accountedBytes
+    )
+  }
+
+  private retainTelegramRetryFollower(msg: Message, eventKey: string): void {
+    const snapshot = this.telegramAdmissionRetries.snapshot
+    if (!this.hasRetryAuthority(msg)) {
+      this.processedProviderEvents.set(eventKey, { seenAt: Date.now() })
+      logTelegramRetryDisposition('authorization_denied', snapshot.events, snapshot.accountedBytes)
+      return
+    }
+    const result = this.telegramAdmissionRetries.enqueue({
+      message: msg,
+      traceContext: mintChannelTraceContext(msg),
+      eventKey,
+      streamKey: this.telegramRetryStreamKey(msg),
+      retryAt: Number.POSITIVE_INFINITY,
+      retryUsed: false,
+    })
+    this.processedProviderEvents.set(eventKey, { seenAt: Date.now() })
+    if (result.status === 'retained' || result.status === 'duplicate') return
+    const after = this.telegramAdmissionRetries.snapshot
+    logTelegramRetryDisposition(
+      result.status === 'full' ? 'retry_buffer_full' : 'retry_buffer_unaccountable',
+      after.events,
+      after.accountedBytes
+    )
+  }
+
+  private dispatchDueTelegramAdmissionRetry(): void {
+    if (this.stopRequested) return
+    const entry = this.telegramAdmissionRetries.takeDue(Date.now())
+    if (!entry) return
+
+    void this.handleMessages([entry.message], entry)
+      .catch(() => {
+        const snapshot = this.telegramAdmissionRetries.snapshot
+        logTelegramRetryDisposition('ambiguous_post', snapshot.events, snapshot.accountedBytes)
+      })
+      .finally(() => {
+        if (this.telegramAdmissionRetries.get(entry.eventKey) === entry) {
+          if (!entry.rescheduled) this.telegramAdmissionRetries.finish(entry, Date.now())
+          else entry.inFlight = false
+        }
+      })
+  }
+
+  private clearPendingTelegramAdmissionRetries(): void {
+    const snapshot = this.telegramAdmissionRetries.clear()
+    if (snapshot.events > 0) {
+      logTelegramRetryDisposition('shutdown', snapshot.events, snapshot.accountedBytes)
+    }
   }
 
   /**
@@ -1845,10 +2095,25 @@ export class ChannelReader {
   private async handleMessageWithProgress(
     msg: Message,
     adapter: ChannelAdapter,
-    traceContext: TraceContextV1
+    traceContext: TraceContextV1,
+    pendingRetry?: PendingTelegramAdmissionRetry
   ): Promise<void> {
     // 1. Send message with async=true
     const response = await this.rpcClient.sendMessage(msg, { async: true, traceContext })
+    if (
+      msg.channelType === 'telegram' &&
+      response.error?.code === 'RUNTIME_SERVICE_ADMISSION_LIMITED' &&
+      response.error.retryAfterSeconds !== undefined
+    ) {
+      this.retainTelegramAdmissionRetry(
+        msg,
+        traceContext,
+        response.error.retryAfterSeconds,
+        pendingRetry
+      )
+      return
+    }
+    this.releaseProviderEventAfterAdmissionLimit(msg, response)
 
     if (!response.taskId) {
       console.log('[Main] No taskId returned from async send, falling back to sync')
@@ -2068,9 +2333,14 @@ export class ChannelReader {
 
         void (async () => {
           const deadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
+          let retryDelayMs = RESULT_POLL_FALLBACK_INTERVAL_MS
           while (!finalDelivered && Date.now() < deadline) {
-            await new Promise(resolve => setTimeout(resolve, RESULT_POLL_FALLBACK_INTERVAL_MS))
+            await new Promise(resolve =>
+              setTimeout(resolve, Math.min(retryDelayMs, Math.max(0, deadline - Date.now())))
+            )
+            retryDelayMs = RESULT_POLL_FALLBACK_INTERVAL_MS
             if (finalDelivered) return
+            if (Date.now() >= deadline) return
             try {
               const delivered = await deliverFinalResult()
               if (delivered) {
@@ -2079,6 +2349,12 @@ export class ChannelReader {
                 return
               }
             } catch (err) {
+              if (err instanceof RuntimeServiceAdmissionLimitedError) {
+                retryDelayMs = Math.max(
+                  RESULT_POLL_FALLBACK_INTERVAL_MS,
+                  err.retryAfterSeconds * 1000
+                )
+              }
               console.error(`[Main] result polling fallback failed for task ${taskId}:`, err)
             }
           }
@@ -2404,6 +2680,9 @@ export class ChannelReader {
     if (config.devMode) return
 
     console.log('[Main] Restarting with new channel configurations...')
+    // Keep retry entries accounted while adapters/config are replaced. A dispatched worker may
+    // still hold the same Message in its async continuation; queued retries use the normal fresh
+    // authorization path before their next POST.
 
     // Shutdown existing adapters
     await this.shutdownAdapters()
@@ -2453,6 +2732,7 @@ export class ChannelReader {
    * channels appear.
    */
   async start(): Promise<void> {
+    this.stopRequested = false
     console.log('[Main] Starting Clerum Channel Reader...')
     console.log(`[Main] Mode: ${config.devMode ? 'DEV' : 'PRODUCTION'}`)
     console.log(`[Main] Host ref: "${config.hostRef}"`)
@@ -2530,7 +2810,9 @@ export class ChannelReader {
    */
   async stop(): Promise<void> {
     console.log('[Main] Stopping...')
+    this.stopRequested = true
     this.running = false
+    this.clearPendingTelegramAdmissionRetries()
     if (this.watcher) {
       this.watcher.stopWatch()
     }

@@ -1,6 +1,7 @@
 import { type Response as ExpressResponse, type NextFunction, type Request, Router } from 'express'
 import { type RateLimitInfo, ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash, randomUUID } from 'node:crypto'
+import type { ActionOperationId, CanonicalActionTarget } from '@clerum/action-context-contracts'
 import {
   GFS_DELETE_SCOPE,
   GFS_READ_SCOPE,
@@ -29,6 +30,8 @@ import {
   listChildrenPaged,
 } from '../../gfs/tree.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import type { K8sGateway } from '../../k8s.js'
+import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import {
   type ExternalGfsOperationClass,
   externalGfsClassRlPerMin,
@@ -52,6 +55,10 @@ import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
 import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { getUserAgents } from '../../services/directory/index.js'
+import {
+  WorkflowAuthorityError,
+  requireWorkflowActionAuthority,
+} from '../../services/workflows/workflowAuthorityBindingService.js'
 import {
   GfsGrantError,
   UUID_RE,
@@ -364,7 +371,7 @@ async function assertHostTargetsWithinCallerAgents(
  * This mirrors `routes/external/sharedFilesystems.ts` (user-session-gated proxy)
  * and `routes/external/auth.ts` `/external/rpc/token` (session → downstream token).
  */
-export function createExternalGfsRouter(): Router {
+export function createExternalGfsRouter(gateway?: Pick<K8sGateway, 'getResourceExact'>): Router {
   const router = Router()
 
   // The durable externalGfs* guards below are the authoritative distributed
@@ -498,6 +505,7 @@ export function createExternalGfsRouter(): Router {
   // Every gfs user route is on the Session-JWT plane: the user session token
   // (x-user-session-token, forwarded by external-rest-api) is required.
   router.use('/external/gfs', requireValidExternalSessionToken)
+  router.use('/external/gfs', attachAccessExecutionBudget)
   router.use('/external/gfs', attachExternalGfsRequestId)
   // This boundary deliberately precedes attachExternalGfsAuthority. A rate
   // rejection therefore performs no operator-link lookup or route-specific
@@ -557,13 +565,58 @@ export function createExternalGfsRouter(): Router {
     asyncHandler(attachExternalGfsUserLifecycle),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const claims = req.externalAuth!
-      const body = (req.body ?? {}) as { drive?: unknown; scopes?: unknown }
+      const body = (req.body ?? {}) as {
+        drive?: unknown
+        scopes?: unknown
+        operationId?: unknown
+        resourceId?: unknown
+        target?: unknown
+      }
       const drive =
         typeof body.drive === 'string' && body.drive.length > 0 ? body.drive : GFS_DEFAULT_DRIVE
       const scopes = parseRequestedGfsScopes(body.scopes)
       if (scopes === null) {
         res.status(400).json({ error: 'invalid_gfs_scopes' })
         return
+      }
+      let actionAuthority
+      if (req.externalSessionAuthority?.contract === 'v2') {
+        if (!gateway) {
+          res.status(503).json({ error: 'authority_unavailable' })
+          return
+        }
+        const operationId = String(body.operationId || '') as ActionOperationId
+        const resourceId = String(body.resourceId || '').trim()
+        const target = body.target as CanonicalActionTarget
+        if (
+          !['gfs.read', 'gfs.write', 'gfs.delete', 'gfs.manage_acl', 'gfs.share'].includes(
+            operationId
+          ) ||
+          !resourceId ||
+          !target
+        ) {
+          res.status(400).json({ error: 'invalid_action_delegation' })
+          return
+        }
+        try {
+          actionAuthority = await requireWorkflowActionAuthority({
+            req,
+            caller: {
+              kind: 'user-session',
+              claims,
+              session: req.externalSessionAuthority,
+            },
+            operationId,
+            resourceType: 'gfs_resource',
+            resourceLogicalId: resourceId,
+            target,
+            gateway,
+          })
+        } catch (error) {
+          if (!(error instanceof WorkflowAuthorityError)) throw error
+          res.status(error.status).json({ error: error.code })
+          return
+        }
       }
       // pathBindings: [] — the permission store is the source of truth; gfsc
       // re-checks it on every op (same as the operator/human mint).
@@ -572,11 +625,34 @@ export function createExternalGfsRouter(): Router {
         drive,
         scopes,
         pathBindings: [],
+        ...(actionAuthority
+          ? {
+              actionAuthority: {
+                binding: actionAuthority.binding,
+                sourceIssuedAt: actionAuthority.sourceIssuedAt,
+                sourceExpiresAt: actionAuthority.sourceExpiresAt,
+              },
+            }
+          : {}),
       })
       if (!issued) return
       res.status(200).json(issued)
     })
   )
+
+  // Only the token-mint route currently carries a selected filesystem action
+  // through delegation verification and into the signed GFSC token. Do not let
+  // V2 sessions use other mediated routes that mint unbound legacy child tokens
+  // or mutate grants/shares directly. This includes the capabilities relay,
+  // which currently mints an unbound GFS write token even though GFSC only
+  // returns protocol metadata. V1 remains on its existing path.
+  router.use('/external/gfs', (req: ExternalAuthedRequest, res, next) => {
+    if (req.externalSessionAuthority?.contract !== 'v2') {
+      next()
+      return
+    }
+    res.status(403).json({ error: 'action_delegation_required' })
+  })
 
   // Indexed upload-v2 relay. Part PUTs stay a Node stream all the way from
   // external-rest-api to the writer GFSC; lifecycle requests use the same

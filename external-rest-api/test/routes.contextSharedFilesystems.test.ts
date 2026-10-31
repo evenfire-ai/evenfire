@@ -137,7 +137,39 @@ describe('Method gating', () => {
     expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'GET',
       '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files',
-      { rawQueryString: '?download=1', userSessionToken: 'good-token', throwOnHttpError: false }
+      {
+        rawQueryString: '?download=1',
+        userSessionToken: 'good-token',
+        extraHeaders: {},
+        throwOnHttpError: false,
+      }
+    )
+  })
+
+  it('forwards the exact v2 action delegation to the shared-filesystem proxy', async () => {
+    authTokenMock.verifyToken.mockReturnValue({ ...claims, sessionContract: 'v2' })
+    controlApiClientMock.controlApiStreamRequest.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+
+    await request(buildApp())
+      .get('/me/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?path=docs')
+      .set('authorization', 'Bearer good-token')
+      .set('x-evenfire-action-delegation', 'delegation.fixture.value')
+      .expect(200)
+
+    expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files',
+      {
+        rawQueryString: '?path=docs',
+        userSessionToken: 'good-token',
+        extraHeaders: { 'x-evenfire-action-delegation': 'delegation.fixture.value' },
+        throwOnHttpError: false,
+      }
     )
   })
 
@@ -158,7 +190,12 @@ describe('Method gating', () => {
     expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'GET',
       '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files/a%3Fb.txt',
-      { rawQueryString: '?download=1', userSessionToken: 'good-token', throwOnHttpError: false }
+      {
+        rawQueryString: '?download=1',
+        userSessionToken: 'good-token',
+        extraHeaders: {},
+        throwOnHttpError: false,
+      }
     )
   })
 
@@ -209,7 +246,25 @@ describe('Method gating', () => {
     expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'HEAD',
       '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files',
-      { rawQueryString: '?download=1', userSessionToken: 'good-token', throwOnHttpError: false }
+      {
+        rawQueryString: '?download=1',
+        userSessionToken: 'good-token',
+        extraHeaders: {},
+        throwOnHttpError: false,
+      }
     )
+  })
+
+  it('returns the canonical client error for malformed v2 delegation transport', async () => {
+    authTokenMock.verifyToken.mockReturnValue({ ...claims, sessionContract: 'v2' })
+
+    const response = await request(buildApp())
+      .get('/me/contexts/ctx-a/shared-filesystems/team-mission/proxy/files')
+      .set('authorization', 'Bearer good-token')
+      .set('x-evenfire-action-delegation', 'first,second')
+      .expect(400)
+
+    expect(response.body).toEqual({ error: 'invalid_action_delegation' })
+    expect(controlApiClientMock.controlApiStreamRequest).not.toHaveBeenCalled()
   })
 })

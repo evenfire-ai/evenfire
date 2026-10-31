@@ -6,11 +6,14 @@ import {
   unknownBehavior,
 } from './accessPath.js'
 import { type AccessCapability, normalizeAccessCapabilities } from './capabilityRegistry.js'
+import type { OperationalBehaviorSources } from './operationalAccessProjection.js'
 
 export type OperationalPathBinding = Readonly<{
   resourceType: 'host' | 'context' | 'mcp_server' | 'workflow_recipe' | 'shared_filesystem'
   logicalId: string
   providerUid: string
+  providerResourceVersion: string
+  behaviorSources?: OperationalBehaviorSources
   relationships: readonly Readonly<{
     instanceId: string
     behaviorAttributes: Readonly<Record<string, string | number | boolean>>
@@ -29,6 +32,7 @@ function behavior(input: {
   runtimeRef?: string | null
   providerModelRef?: string | null
   approvalRef?: string | null
+  behaviorDimensions?: Partial<Omit<AccessPathBehavior, 'capabilities' | 'audit'>>
 }): AccessPathBehavior {
   const runtimeSensitive = input.runtimeSensitive === true
   return Object.freeze({
@@ -58,6 +62,7 @@ function behavior(input: {
           ? unknownBehavior()
           : knownBehavior(null),
     audit: knownBehavior(input.kind === 'team' ? `team:${input.teamId}` : `user:${input.userId}`),
+    ...input.behaviorDimensions,
   })
 }
 
@@ -73,6 +78,7 @@ export function authorityCandidate(input: {
   runtimeRef?: string | null
   providerModelRef?: string | null
   approvalRef?: string | null
+  behaviorDimensions?: Partial<Omit<AccessPathBehavior, 'capabilities' | 'audit'>>
   operationalBindings?: readonly OperationalPathBinding[]
 }): AuthorityCandidate {
   return Object.freeze({
@@ -98,6 +104,7 @@ export function authorityCandidateFromGrantRow(input: {
   runtimeRef?: string | null
   providerModelRef?: string | null
   approvalRef?: string | null
+  behaviorDimensions?: Partial<Omit<AccessPathBehavior, 'capabilities' | 'audit'>>
 }): AuthorityCandidate | null {
   const kind = input.row.kind === 'direct' ? 'direct' : input.row.kind === 'team' ? 'team' : null
   const grantId = String(input.row.grant_id ?? '')
@@ -120,5 +127,6 @@ export function authorityCandidateFromGrantRow(input: {
     runtimeRef: input.runtimeRef,
     providerModelRef: input.providerModelRef,
     approvalRef: input.approvalRef,
+    behaviorDimensions: input.behaviorDimensions,
   })
 }

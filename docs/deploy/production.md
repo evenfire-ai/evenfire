@@ -19,8 +19,9 @@ example to copy from.
 
 - All platform services run on a real cluster (not a single dev-mode `mcp-host`).
 - The JWT auth chain is on the external edges (desktop → rpc-proxy,
-  service → control-api). `mcp-host` runtime routes still use edge trust
-  headers, restricted by NetworkPolicy.
+  service → control-api). RPC Proxy → MCP Host runtime calls also require the
+  dedicated shared edge credential, caller/service markers, and existing
+  Host/action bindings; NetworkPolicies restrict that edge.
 - Default-deny NetworkPolicies are enforced by the CNI.
 - Secrets and LLM keys live in cluster Secrets.
 - Workloads run non-root with capabilities dropped. The connector-image
@@ -211,6 +212,14 @@ enforcement, see [`deploy/scripts/np-enforce-preflight.sh`](../../deploy/scripts
 It was written for GKE; read it before you run it elsewhere.
 
 ## Install order
+
+For the authenticated RPC Proxy → MCP Host protocol, production must upgrade
+compatible RPC Proxy replicas before strict HCC/Host behavior and roll HCC/Hosts
+back before rolling Proxy back. The in-repository executable barrier currently
+covers the supported Minikube path. Production GCP rollout/rollback orchestration
+is owned by `keyper-labs/evenfire-infra`; this OSS repository does not publish its
+exact workflow path. Do not enable the strict production Host protocol until that
+orchestrator enforces both directions of the barrier.
 
 [minikube.md](minikube.md) and `scripts/minikube/full-setup.sh` show the full
 dependency graph. The minikube scripts are bound to a minikube profile; the

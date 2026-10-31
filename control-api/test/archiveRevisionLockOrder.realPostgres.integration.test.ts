@@ -1946,7 +1946,7 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
   const stuckRunStatements = {
     find: `SELECT run_id, started_at, max_duration_seconds, approval_request_id
     FROM workflow_runs
-   WHERE phase = 'Running'
+   WHERE phase IN ('Running', 'AuthorizationPaused')
      AND owner_instance_id = $1
      AND max_duration_seconds IS NOT NULL
      AND started_at IS NOT NULL
@@ -1960,7 +1960,7 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
          last_reconciled_at = now(),
          updated_at = now()
    WHERE run_id = $1
-     AND phase = 'Running'
+     AND phase IN ('Running', 'AuthorizationPaused')
      AND owner_instance_id = $2`,
   } as const
 

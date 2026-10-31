@@ -11,6 +11,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'net'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 type LifecycleGateStub = {
   isIntakeFenced: () => boolean
@@ -43,12 +44,12 @@ async function startServer(gate?: LifecycleGateStub): Promise<StartResult> {
 }
 
 function rpcEdgeHeaders(): Record<string, string> {
-  return {
+  return withRpcProxyEdgeTestAuthentication({
     'Content-Type': 'application/json',
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': 'chatllm',
     'x-clerum-edge-user-id': 'user-1',
-  }
+  })
 }
 
 function runtimeMessageBody(): string {

@@ -17,6 +17,16 @@ describe('token-leak redaction', () => {
     expect(TOKEN_LEAK_REDACT_PATHS).toContain("req.headers['x-service-token']")
   })
 
+  it('redacts the workflow action delegation at request and outbound header sinks', () => {
+    for (const path of [
+      "req.headers['x-evenfire-action-delegation']",
+      "headers['x-evenfire-action-delegation']",
+    ]) {
+      expect(TOKEN_LEAK_REDACT_PATHS).toContain(path)
+      expect(REQUIRED_REDACT_PATHS).toContain(path)
+    }
+  })
+
   it('redact list covers JWT pair fields used by approval issuance', () => {
     expect(TOKEN_LEAK_REDACT_PATHS).toContain('accessToken')
     expect(TOKEN_LEAK_REDACT_PATHS).toContain('refreshToken')

@@ -1,5 +1,7 @@
 **
 !packages/
+!packages/action-context-contracts/
+!packages/action-context-contracts/**
 !packages/jwt-key-policy/
 !packages/jwt-key-policy/package.json
 !packages/jwt-key-policy/index.cjs

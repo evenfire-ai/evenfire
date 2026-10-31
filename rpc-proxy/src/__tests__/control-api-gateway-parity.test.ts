@@ -4,6 +4,12 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import request from 'supertest'
+import {
+  canonicalResourceIdentity,
+  hashActionTarget,
+  validateActionOperationTarget,
+} from '@clerum/action-context-contracts'
+import { authorizeActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { createMcpOauthRouter } from '../routes/mcpOauth.js'
 import { createSandboxUiSessionRouter } from '../routes/sandboxUi.js'
@@ -13,12 +19,14 @@ import {
   fetchUserConnectorsFromControlApi,
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
+import { startPr2ReadinessReporter } from '../services/pr2ReadinessReporter.js'
 import {
   _clearSandboxUiRegistryCache,
   listSandboxUiApps,
   lookupSandboxUiRegistry,
 } from '../services/sandboxUiRegistry.js'
 import { createSandboxUiSession } from '../services/sandboxUiSession.js'
+import type { UserDelegationV2Claims } from '../userDelegationV2.js'
 
 // rpc-proxy reaches control-api only through control-api-rpc-gateway, whose
 // nginx config ends in a default `return 403`. Every request this service
@@ -50,9 +58,11 @@ const RPC_CLAIMS = {
 // URL construction site. Any new use of the base URL, in any form, changes a
 // count: add its emitter to emittedRequests() and update this inventory.
 const CONTROL_API_BASE_URL_MENTIONS: Record<string, number> = {
+  'actionAuthorityV2.ts': 1,
   'routes/mcpOauth.ts': 2,
   'routes/sandboxUi.ts': 3,
-  'services/controlApiRestService.ts': 6,
+  'services/controlApiRestService.ts': 7,
+  'services/pr2ReadinessReporter.ts': 1,
   'services/sandboxUiRegistry.ts': 4,
 }
 
@@ -168,9 +178,109 @@ function hostConnectionBody(): Response {
   })
 }
 
-async function emittedRequests(): Promise<Array<{ method: string; path: string }>> {
-  const fetchMock = vi.fn(async (url: string | URL, _init?: RequestInit) => {
+const PR2_CHECKPOINT_PATH = '/api/v1/internal/action-authority/checkpoint'
+const PR2_RUNTIME_EVIDENCE_PATH = '/api/v1/internal/pr2-readiness/runtime-evidence'
+
+const PR2_RESOURCE = canonicalResourceIdentity({
+  environmentId: 'test',
+  type: 'host',
+  logicalId: 'mcp-host/chatllm',
+  displayName: 'Chat LLM',
+})
+const PR2_TARGET = validateActionOperationTarget({
+  operationId: 'host.status.read',
+  resource: PR2_RESOURCE,
+  operationTarget: { hostRef: 'mcp-host/chatllm' },
+})
+const PR2_BOUND = {
+  operationId: 'host.status.read' as const,
+  target: PR2_TARGET,
+  targetHash: hashActionTarget(PR2_TARGET),
+}
+const PR2_DELEGATION: UserDelegationV2Claims = {
+  typ: 'user_delegation',
+  ver: 2,
+  sub: USER,
+  sid: '00000000-0000-4000-8000-000000000002',
+  sv: 2,
+  jti: 'j1',
+  iat: 1,
+  exp: 9999999999,
+  operationIds: ['host.status.read'],
+  scopes: ['action:host.status.read'],
+  resource: PR2_RESOURCE,
+  targets: { 'host.status.read': PR2_TARGET },
+  targetHashes: { 'host.status.read': PR2_BOUND.targetHash },
+  accessPathId: `ap1_${'A'.repeat(43)}`,
+  authorizationRevision: `ar1_${'B'.repeat(43)}`,
+  behaviorBindingHash: `bh2_${'C'.repeat(43)}`,
+  pathKind: 'team',
+  effectiveTeamId: '00000000-0000-4000-8000-000000000003',
+}
+const PR2_BEHAVIOR = {
+  budget: { state: 'unknown' as const },
+  credentialPolicy: { state: 'unknown' as const },
+  approvalPolicy: { state: 'unknown' as const },
+  filesystemScope: { state: 'unknown' as const },
+  runtime: { state: 'unknown' as const },
+  providerModelPolicy: { state: 'unknown' as const },
+  audit: { state: 'unknown' as const },
+}
+
+function allowedCheckpointBody(): Response {
+  const checkedAt = new Date()
+  return Response.json({
+    version: 2,
+    status: 'allowed',
+    authorizationRevision: PR2_DELEGATION.authorizationRevision,
+    behaviorBindingHash: PR2_DELEGATION.behaviorBindingHash,
+    behavior: PR2_BEHAVIOR,
+    checkedAt: checkedAt.toISOString(),
+    validUntil: new Date(checkedAt.getTime() + 30_000).toISOString(),
+    attribution: {
+      userId: PR2_DELEGATION.sub,
+      sid: PR2_DELEGATION.sid,
+      sessionVersion: PR2_DELEGATION.sv,
+      accessPathId: PR2_DELEGATION.accessPathId,
+      pathKind: PR2_DELEGATION.pathKind,
+      effectiveTeamId: PR2_DELEGATION.effectiveTeamId,
+    },
+    destination: {
+      kind: 'host',
+      ref: 'mcp-host/chatllm',
+      url: 'http://chatllm.mcp-host.svc.cluster.local:3000',
+    },
+  })
+}
+
+const PR2_READINESS_ENVIRONMENT = {
+  EVENFIRE_SOURCE_REVISION: 'a'.repeat(40),
+  PR2_READINESS_ENVIRONMENT_ID: 'test.cluster',
+  EVENFIRE_SERVICE_VERSION: '0.1.0',
+  EVENFIRE_DEPLOYMENT_REVISION: 'deployment-a',
+  EVENFIRE_IMAGE_REVISION: 'a'.repeat(40),
+  PR2_READINESS_REPORT_INTERVAL_MS: '60000',
+} as const
+
+type EmittedRequest = { method: string; path: string }
+
+async function emittedRequests(): Promise<{
+  requests: EmittedRequest[]
+  gatewayRequests: EmittedRequest[]
+  readinessHops: string[]
+}> {
+  const readinessHops: string[] = []
+  const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
     const { pathname } = new URL(String(url))
+    // PR2 routes come first: the Host-RPC admission path also contains
+    // /mcp-hosts/, and the mock must not answer it with a Host binding.
+    if (pathname === PR2_RUNTIME_EVIDENCE_PATH) {
+      readinessHops.push(JSON.parse(String(init?.body)).hop)
+      return new Response(null, { status: 201 })
+    }
+    // The fake answers the checkpoint by prefix so a path mutation reaches the
+    // expected-list assertion instead of failing inside the response parser.
+    if (pathname.startsWith(PR2_CHECKPOINT_PATH)) return allowedCheckpointBody()
     if (pathname.includes('/mcp-hosts/')) return hostConnectionBody()
     if (pathname.endsWith('/wake')) return Response.json({ status: 'active', wakeGeneration: 1 })
     if (pathname.includes('/internal/sandbox-ui/registry/')) {
@@ -229,10 +339,41 @@ async function emittedRequests(): Promise<Array<{ method: string; path: string }
     .set('Cookie', sandboxCookie)
     .send({ oauthClientId: 'client-a' })
 
-  return fetchMock.mock.calls.map(([url, init]) => ({
+  // PR2 producers. The wake reuses the checked-in delegation so the V2 wake
+  // branch and the action-authority checkpoint run through their real paths.
+  const authorized = await authorizeActionV2(PR2_DELEGATION, PR2_BOUND)
+  const previousReadinessEnvironment = new Map(
+    Object.keys(PR2_READINESS_ENVIRONMENT).map(key => [key, process.env[key]])
+  )
+  let stopReadinessReporter: (() => void) | undefined
+  try {
+    Object.assign(process.env, PR2_READINESS_ENVIRONMENT)
+    stopReadinessReporter = startPr2ReadinessReporter(fetchImpl)
+    await vi.waitFor(() => expect(readinessHops).toHaveLength(2))
+  } finally {
+    stopReadinessReporter?.()
+    for (const [key, value] of previousReadinessEnvironment) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+  await requestHostWakeFromControlApi(HOST, 'jwt', { authorizedActionV2: authorized })
+
+  const gatewayRequests = fetchMock.mock.calls.map(([url, init]) => ({
     method: String((init as RequestInit | undefined)?.method ?? 'GET'),
     path: new URL(String(url)).pathname,
   }))
+  // The readiness reporter posts both of its owned hops to one endpoint: it is
+  // one gateway site, so one entry represents it below while readinessHops
+  // proves both hops ran. Every request still goes through the matcher.
+  const runtimeEvidenceIndexes = gatewayRequests
+    .map((request, index) => (request.path === PR2_RUNTIME_EVIDENCE_PATH ? index : -1))
+    .filter(index => index >= 0)
+  if (runtimeEvidenceIndexes.length !== 2) {
+    throw new Error(`expected two PR2 runtime-evidence hops, saw ${runtimeEvidenceIndexes.length}`)
+  }
+  const requests = gatewayRequests.filter((_request, index) => index !== runtimeEvidenceIndexes[1])
+  return { requests, gatewayRequests, readinessHops }
 }
 
 describe('control-api-rpc-gateway parity with the rpc-proxy emitter', () => {
@@ -241,10 +382,11 @@ describe('control-api-rpc-gateway parity with the rpc-proxy emitter', () => {
   })
 
   it('admits every request rpc-proxy sends to control-api', async () => {
-    const requests = await emittedRequests()
+    const { requests, gatewayRequests, readinessHops } = await emittedRequests()
     // Liveness witness: every emitter ran and produced its request. The
     // registry lookup appears twice: once called directly and once from the
-    // sandbox OAuth authorize-url route, which resolves the app first.
+    // sandbox OAuth authorize-url route, which resolves the app first. The 13
+    // dev sites are followed by one entry per PR2 URL site.
     expect(requests).toEqual([
       { method: 'GET', path: `/api/v1/rpc/access/users/${USER}/mcp-servers` },
       { method: 'GET', path: `/api/v1/rpc/access/users/${USER}/mcp-connectors` },
@@ -259,10 +401,17 @@ describe('control-api-rpc-gateway parity with the rpc-proxy emitter', () => {
       { method: 'POST', path: '/api/v1/internal/sandbox-ui/oauth/authorize-url' },
       { method: 'POST', path: '/api/v1/internal/sandbox-ui/oauth/token' },
       { method: 'DELETE', path: '/api/v1/internal/sandbox-ui/oauth/grant' },
+      { method: 'POST', path: PR2_CHECKPOINT_PATH },
+      { method: 'POST', path: PR2_RUNTIME_EVIDENCE_PATH },
+      { method: 'POST', path: `/api/v1/internal/action-authority/hosts/${HOST}/wake` },
     ])
+    // The readiness reporter reports both of its owned hops; the expected
+    // list above carries their shared endpoint once.
+    expect([...readinessHops].sort()).toEqual(['oauth_exact_target', 'rpc_proxy_trusted_edge'])
+    expect(gatewayRequests).toHaveLength(requests.length + 1)
 
     const locations = gatewayLocations(gatewayNginxConf())
-    const denied = requests.filter(r => !gatewayAdmits(locations, r.method, r.path))
+    const denied = gatewayRequests.filter(r => !gatewayAdmits(locations, r.method, r.path))
     expect(denied).toEqual([])
   })
 
