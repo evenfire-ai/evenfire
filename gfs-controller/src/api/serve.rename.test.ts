@@ -52,7 +52,7 @@ function fixture(options: { allowed?: boolean } = {}) {
       reads: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
       writes: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
     },
-    agentActivity: { record: async () => "recorded" as const },
+    agentActivity: { recordRead: async () => "recorded" as const },
   };
   return { deps, handler: new GfsServingHandler(deps), rename, operations };
 }

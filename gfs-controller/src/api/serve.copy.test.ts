@@ -93,7 +93,7 @@ function fixture(options: { child?: boolean; snapshotCount?: number; omitLastPar
       reads: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
       writes: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
     },
-    agentActivity: { record: async () => "recorded" as const },
+    agentActivity: { recordRead: async () => "recorded" as const },
   };
   const handler = new GfsServingHandler(deps);
   // The scripted times are for the request path. They are armed after the
@@ -344,6 +344,8 @@ describe("POST /v1/copy", () => {
 describe("copy attribution (D16)", () => {
   const RUN = "11111111-1111-4111-8111-111111111111";
   const HOST = "host:1st:mcp-host/chatllm";
+  const AGENT_ACTIVITY_SQL =
+    "SELECT public.gfs_record_agent_file_activity($1, $2::uuid, $3::uuid[])";
 
   function hostedRun(body: Record<string, unknown>) {
     const stream = Readable.from([Buffer.from(JSON.stringify(body))]) as Readable & {
@@ -364,11 +366,11 @@ describe("copy attribution (D16)", () => {
 
   it("hands the copy hook to the writer, which records every copied file in its transaction", async () => {
     const f = fixture();
-    const recorded: Array<{ hostSubject: string; runId: string; ids: string[] }> = [];
+    const reads: Array<{ hostSubject: string; runId: string; ids: string[] }> = [];
     const calls: Array<{ sql: string; values: unknown[] }> = [];
     f.deps.agentActivity = {
-      record: async (hostSubject, runId, ids) => {
-        recorded.push({ hostSubject, runId, ids });
+      recordRead: async (hostSubject, runId, ids) => {
+        reads.push({ hostSubject, runId, ids });
         return "recorded";
       },
     };
@@ -386,7 +388,13 @@ describe("copy attribution (D16)", () => {
     f.deps.writeService = {
       copy: async (input: { onPublished?: (client: unknown, ids: string[]) => Promise<void> }) => {
         expect(input.onPublished).toBeTypeOf("function");
-        await input.onPublished?.({ query: async (sql: string, values: unknown[] = []) => { calls.push({ sql, values }); return { rows: [] }; } }, [
+        const client = {
+          query: async (sql: string, values: unknown[] = []) => {
+            calls.push({ sql, values });
+            return { rows: [{ gfs_record_agent_file_activity: "recorded" }] };
+          },
+        };
+        await input.onPublished?.(client, [
           "10000000-0000-4000-8000-000000000001",
           "10000000-0000-4000-8000-000000000002",
         ]);
@@ -407,19 +415,31 @@ describe("copy attribution (D16)", () => {
     await handler.tryHandle(hostedRun(body) as never, res as never);
 
     expect(res.statusCode).toBe(201);
-    expect(recorded).toEqual([
-      { hostSubject: HOST, runId: RUN, ids: [
-        "10000000-0000-4000-8000-000000000001",
-        "10000000-0000-4000-8000-000000000002",
-      ] },
+    // One agent call, on the client the writer handed the hook, with exactly
+    // the file ids the copy created.
+    expect(calls).toEqual([
+      {
+        sql: AGENT_ACTIVITY_SQL,
+        values: [HOST, RUN, [
+          "10000000-0000-4000-8000-000000000001",
+          "10000000-0000-4000-8000-000000000002",
+        ]],
+      },
     ]);
-    expect(calls).toEqual([]);
+    // The pool-bound read dependency is not part of a write path.
+    expect(reads).toEqual([]);
   });
 
   it("refuses the copy with 403 when the run belongs to another Host", async () => {
     const f = fixture();
+    const reads: Array<{ hostSubject: string; runId: string; ids: string[] }> = [];
+    const calls: Array<{ sql: string; values: unknown[] }> = [];
+    const transactions: string[] = [];
     f.deps.agentActivity = {
-      record: async () => "host_mismatch",
+      recordRead: async (hostSubject, runId, ids) => {
+        reads.push({ hostSubject, runId, ids });
+        return "recorded";
+      },
     };
     f.deps.verifyToken = () => ({ ...claims, sub: HOST, scopes: ["gfs.read", "gfs.write"] });
     f.deps.resolveContext = async (_claims, requestId) => ({
@@ -430,9 +450,22 @@ describe("copy attribution (D16)", () => {
     });
     f.deps.writeService = {
       copy: async (input: { onPublished?: (client: unknown, ids: string[]) => Promise<void> }) => {
-        await input.onPublished?.({ query: async () => ({ rows: [] }) }, [
-          "10000000-0000-4000-8000-000000000001",
-        ]);
+        const client = {
+          query: async (sql: string, values: unknown[] = []) => {
+            calls.push({ sql, values });
+            return { rows: [{ gfs_record_agent_file_activity: "host_mismatch" }] };
+          },
+        };
+        transactions.push("BEGIN");
+        try {
+          await input.onPublished?.(client, [
+            "10000000-0000-4000-8000-000000000001",
+          ]);
+        } catch (error) {
+          transactions.push("ROLLBACK");
+          throw error;
+        }
+        transactions.push("COMMIT");
         throw new Error("unreachable: the hook must throw first");
       },
     } as unknown as ServingDeps["writeService"];
@@ -441,8 +474,18 @@ describe("copy attribution (D16)", () => {
 
     await handler.tryHandle(hostedRun(body) as never, res as never);
 
+    // The client answered host_mismatch: the 403 is that verdict, the hook
+    // recorded on the transaction client, and the copy rolled back.
     expect(res.statusCode).toBe(403);
     expect(res.body).not.toContain("unreachable");
+    expect(transactions).toEqual(["BEGIN", "ROLLBACK"]);
+    expect(calls).toEqual([
+      {
+        sql: AGENT_ACTIVITY_SQL,
+        values: [HOST, RUN, ["10000000-0000-4000-8000-000000000001"]],
+      },
+    ]);
+    expect(reads).toEqual([]);
   });
 
   it("copies without a hook when the request carries no run header", async () => {

@@ -124,7 +124,7 @@ function deps(over: Partial<ServingDeps> = {}): ServingDeps {
     },
     blobs: { read: async () => Readable.from(Buffer.from("hello world")) },
     rateLimit: unboundedRateLimit(),
-    agentActivity: { record: async () => "recorded" as const },
+    agentActivity: { recordRead: async () => "recorded" as const },
     ...over,
   };
 }

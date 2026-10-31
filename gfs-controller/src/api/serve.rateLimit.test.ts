@@ -133,7 +133,7 @@ function harness(opts: { reads?: number; writes?: number; windowMs?: number; all
     writeService,
     metrics,
     rateLimit,
-    agentActivity: { record: async () => "recorded" as const },
+    agentActivity: { recordRead: async () => "recorded" as const },
     now: () => clock.t,
   };
   const handler = new GfsServingHandler(deps);

@@ -7,7 +7,7 @@ import { type AuthzContext, auditAttribution } from "../authz/permissionClient";
 import type { GfsPermission } from "../authz/resolve";
 import { GfsSubjectResolutionDeniedError } from "../authz/subjectResolver";
 import { checkTokenCeiling } from "../authz/tokenCeiling";
-import { recordUserFileActivity } from "../db/userFileActivity";
+import { recordAgentFileActivity, recordUserFileActivity } from "../db/userFileActivity";
 import type { GfsWriteService, TxClient } from "../db/writeStore";
 import { LogThrottle } from "../logThrottle";
 import type { GfsMetrics } from "../metrics";
@@ -126,13 +126,16 @@ export interface ServingDeps {
   uploadCapabilities?: () => GfsUploadCapabilities;
   uploadService?: GfsUploadSessionService;
   /**
-   * Records an agent's content read, write or copy for the user its Desktop chat
-   * run is bound to (D9, D16). Required: a serving handler must be able to
-   * attribute agent activity, and a failing record must fail the request instead
-   * of silently dropping the row.
+   * Records an agent's content read for the user its Desktop chat run is bound
+   * to (D9). Reads have no transaction, so this runs as one autocommit statement
+   * on the pool and must never be called from inside a transaction. Writes and
+   * copies record on their own publication transaction client in this module
+   * (`recordAgentFileActivity(client, …)`) and need no wiring here. Required: a
+   * serving handler must be able to attribute agent activity, and a failing
+   * record must fail the request instead of silently dropping the row.
    */
   agentActivity: {
-    record(
+    recordRead(
       hostSubject: string,
       runId: string,
       resourceIds: string[],
@@ -636,7 +639,7 @@ export class GfsServingHandler {
       return;
     }
     if (runId === undefined) return;
-    const status = await this.deps.agentActivity.record(ctx.primarySubject, runId, [resourceId]);
+    const status = await recordAgentFileActivity(client, ctx.primarySubject, runId, [resourceId]);
     this.agentActivityReporter.report(status, ctx.requestId, runId);
   }
 
@@ -804,7 +807,7 @@ export class GfsServingHandler {
     if (runId !== undefined) {
       let status: AgentActivityStatus;
       try {
-        status = await this.deps.agentActivity.record(ctx.primarySubject, runId, [rid]);
+        status = await this.deps.agentActivity.recordRead(ctx.primarySubject, runId, [rid]);
       } catch (error) {
         stream.destroy();
         throw error;
@@ -883,7 +886,8 @@ export class GfsServingHandler {
         ? {}
         : {
             onPublished: async (client: TxClient, fileResourceIds: string[]) => {
-              const status = await this.deps.agentActivity.record(
+              const status = await recordAgentFileActivity(
+                client,
                 ctx.primarySubject,
                 runId,
                 fileResourceIds,

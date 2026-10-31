@@ -120,11 +120,21 @@ function bodyReq(
   return stream;
 }
 
-/** A tx client that records what the recorders were asked to do. */
-function txClient(calls: Array<{ sql: string; values: unknown[] }>) {
+const AGENT_ACTIVITY_SQL =
+  "SELECT public.gfs_record_agent_file_activity($1, $2::uuid, $3::uuid[])";
+
+/** A tx client that answers the recorder the way the database function does. */
+function txClient(
+  options: FixtureOptions,
+  calls: Array<{ sql: string; values: unknown[] }>,
+) {
   return {
     query: async (sql: string, values: unknown[] = []) => {
       calls.push({ sql, values });
+      if (sql === AGENT_ACTIVITY_SQL) {
+        if (options.recordError) throw options.recordError;
+        return { rows: [{ gfs_record_agent_file_activity: options.status ?? "recorded" }] };
+      }
       return { rows: [] };
     },
   };
@@ -141,16 +151,16 @@ interface FixtureOptions {
 }
 
 function fixture(options: FixtureOptions = {}) {
-  const records: Array<{ hostSubject: string; runId: string; resourceIds: string[] }> = [];
+  const reads: Array<{ hostSubject: string; runId: string; resourceIds: string[] }> = [];
   const txCalls: Array<{ sql: string; values: unknown[] }> = [];
   const transactions: string[] = [];
   const published: GfsResource[] = [];
-  const client = txClient(txCalls);
+  const client = txClient(options, txCalls);
   const resource = options.kind === "directory" ? DIR : FILE;
 
   const agentActivity: ServingDeps["agentActivity"] = {
-    record: async (hostSubject, runId, resourceIds) => {
-      records.push({ hostSubject, runId, resourceIds });
+    recordRead: async (hostSubject, runId, resourceIds) => {
+      reads.push({ hostSubject, runId, resourceIds });
       if (options.recordError) throw options.recordError;
       return options.status ?? "recorded";
     },
@@ -197,7 +207,7 @@ function fixture(options: FixtureOptions = {}) {
   return {
     handler: new GfsServingHandler(deps),
     deps,
-    records,
+    reads,
     txCalls,
     transactions,
     published,
@@ -220,7 +230,7 @@ describe("agent content read activity", () => {
     expect(res.body).toBe("hello world");
     // The read path passes the rid it authorized; PostgreSQL stores it as the
     // same uuid the resource has.
-    expect(f.records).toEqual([
+    expect(f.reads).toEqual([
       { hostSubject: HOST, runId: RUN, resourceIds: [RID_COMPACT] },
     ]);
   });
@@ -231,7 +241,7 @@ describe("agent content read activity", () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.body).toBe("hello world");
-    expect(f.records).toEqual([]);
+    expect(f.reads).toEqual([]);
   });
 
   it("rejects a header that is not a UUID before authorization", async () => {
@@ -242,7 +252,7 @@ describe("agent content read activity", () => {
     expect(res.statusCode).toBe(400);
     expect(res.json).toMatchObject({ error: { reason: "attribution_run_invalid" } });
     expect(authorize).not.toHaveBeenCalled();
-    expect(f.records).toEqual([]);
+    expect(f.reads).toEqual([]);
   });
 
   it("rejects the header on a user principal", async () => {
@@ -251,7 +261,7 @@ describe("agent content read activity", () => {
 
     expect(res.statusCode).toBe(400);
     expect(res.json).toMatchObject({ error: { reason: "attribution_run_not_allowed" } });
-    expect(f.records).toEqual([]);
+    expect(f.reads).toEqual([]);
   });
 
   it("refuses a run bound to another Host with 403 and no body", async () => {
@@ -259,7 +269,7 @@ describe("agent content read activity", () => {
     const res = await call(f.handler, getReq({ "x-gfs-attribution-run": RUN }));
 
     // Witness: the record was attempted, so the 403 is the record's verdict.
-    expect(f.records).toHaveLength(1);
+    expect(f.reads).toHaveLength(1);
     expect(res.statusCode).toBe(403);
     expect(res.body).not.toContain("hello world");
   });
@@ -304,7 +314,7 @@ describe("agent content read activity", () => {
       index = 1;
       await call(handler, getReq({ "x-gfs-attribution-run": RUN }));
       // Two reads happened; only one line was written.
-      expect(f.records).toHaveLength(2);
+      expect(f.reads).toHaveLength(2);
       expect(warn).toHaveBeenCalledTimes(1);
 
       index = 2;
@@ -320,7 +330,7 @@ describe("agent content read activity", () => {
     const f = fixture({ recordError: new Error("activity insert failed") });
     const res = await call(f.handler, getReq({ "x-gfs-attribution-run": RUN }));
 
-    expect(f.records).toHaveLength(1);
+    expect(f.reads).toHaveLength(1);
     expect(res.statusCode).toBe(500);
     expect(res.body).not.toContain("hello world");
   });
@@ -330,7 +340,7 @@ describe("agent content read activity", () => {
     const res = await call(f.handler, getReq({ "x-gfs-attribution-run": RUN }));
 
     expect(res.statusCode).toBe(403);
-    expect(f.records).toEqual([]);
+    expect(f.reads).toEqual([]);
   });
 
   it("records nothing when the blob cannot be opened", async () => {
@@ -338,7 +348,7 @@ describe("agent content read activity", () => {
     const res = await call(f.handler, getReq({ "x-gfs-attribution-run": RUN }));
 
     expect(res.statusCode).toBe(500);
-    expect(f.records).toEqual([]);
+    expect(f.reads).toEqual([]);
   });
 });
 
@@ -357,11 +367,10 @@ describe("agent and user content write activity", () => {
     );
 
     expect(res.statusCode).toBe(201);
-    expect(f.records).toEqual([{ hostSubject: HOST, runId: RUN, resourceIds: [RID] }]);
-    expect(f.txCalls).toEqual([
-      { sql: "SELECT gfs_record_user_file_activity($1::uuid, $2::uuid[])", values: [] },
-    ].slice(0, 0));
-    // The agent function runs on the same tx client, before the COMMIT.
+    // The tx call is the witness for the empty reads: exactly one agent call,
+    // on the transaction client, before the COMMIT.
+    expect(f.txCalls).toEqual([{ sql: AGENT_ACTIVITY_SQL, values: [HOST, RUN, [RID]] }]);
+    expect(f.reads).toEqual([]);
     expect(f.transactions).toEqual(["BEGIN", "COMMIT"]);
   });
 
@@ -375,7 +384,8 @@ describe("agent and user content write activity", () => {
     );
 
     expect(res.statusCode).toBe(201);
-    expect(f.records).toEqual([]);
+    expect(f.txCalls).toEqual([]);
+    expect(f.reads).toEqual([]);
     expect(f.transactions).toEqual(["BEGIN", "COMMIT"]);
   });
 
@@ -388,7 +398,10 @@ describe("agent and user content write activity", () => {
       }),
     );
 
-    expect(f.records).toHaveLength(1);
+    // The client answered host_mismatch, so the 403 is that verdict: the call
+    // is on the transaction client and the write rolls back with it.
+    expect(f.txCalls).toEqual([{ sql: AGENT_ACTIVITY_SQL, values: [HOST, RUN, [RID]] }]);
+    expect(f.reads).toEqual([]);
     expect(res.statusCode).toBe(403);
     expect(f.transactions).toEqual(["BEGIN", "ROLLBACK"]);
     expect(f.published).toEqual([]);
@@ -404,7 +417,8 @@ describe("agent and user content write activity", () => {
     );
 
     expect(res.statusCode).toBe(200);
-    expect(f.records).toEqual([{ hostSubject: HOST, runId: RUN, resourceIds: [RID] }]);
+    expect(f.txCalls).toEqual([{ sql: AGENT_ACTIVITY_SQL, values: [HOST, RUN, [RID]] }]);
+    expect(f.reads).toEqual([]);
   });
 
   it("records a Desktop user create and replace through the user function with the actor", async () => {
@@ -416,7 +430,7 @@ describe("agent and user content write activity", () => {
     expect(created.statusCode).toBe(201);
     await call(f.handler, bodyReq(contentUrl, "PUT", { content: "aGVsbG8=" }));
 
-    expect(f.records).toEqual([]);
+    expect(f.reads).toEqual([]);
     expect(f.txCalls).toEqual([
       { sql: "SELECT gfs_record_user_file_activity($1::uuid, $2::uuid[])", values: [USER, [RID]] },
       { sql: "SELECT gfs_record_user_file_activity($1::uuid, $2::uuid[])", values: [USER, [RID]] },
@@ -457,7 +471,7 @@ describe("agent and user content write activity", () => {
       );
       expect(res.statusCode).toBe(400);
       expect(res.json).toMatchObject({ error: { reason: "attribution_run_not_allowed" } });
-      expect(f.records).toEqual([]);
+      expect(f.reads).toEqual([]);
       expect(f.transactions).toEqual([]);
     }
   });

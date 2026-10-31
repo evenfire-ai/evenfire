@@ -229,11 +229,12 @@ async function main(): Promise<void> {
       } : {}),
       metrics,
       rateLimit,
-      // Agent content reads, writes and copies are recorded for the user the
-      // run is bound to. Reads run on the pool as one autocommit statement (the
-      // read path has no transaction); writes and copies pass their own client.
+      // Agent content reads are recorded for the user the run is bound to, on
+      // the pool as one autocommit statement: the read path has no transaction.
+      // Writes and copies record on their own publication transaction client in
+      // serve.ts, so they need no wiring here.
       agentActivity: {
-        record: (hostSubject, runId, resourceIds) =>
+        recordRead: (hostSubject, runId, resourceIds) =>
           recordAgentFileActivity(pool, hostSubject, runId, resourceIds),
       },
       // Upload mutation and capability advertisement are writer-only. Reader
