@@ -58,22 +58,31 @@ Set boolean switches to the lowercase string `true`. Some services also accept
 
 ## On by default
 
-| Switch                                            | Service                  | Note                                                                          |
-| ------------------------------------------------- | ------------------------ | ----------------------------------------------------------------------------- |
-| `CLERUM_ENABLE_APPROVAL`                          | mcp-host                 | Human approval gate ([Configure approvals](../how-to/configure-approvals.md)) |
-| `LLM_CATALOG_SYNC_CRON_ENABLED`                   | control-api              | models.dev catalog sync; enables eligible new models, capped per run (below)  |
-| `CLERUM_ENABLE_RESPONSE_ATTACHMENTS`              | channel-reader, mcp-host | Send generated files back to channels                                         |
-| `WRC_ENABLE_DETERMINISTIC`                        | workflow-recipes         | Deterministic workflow steps                                                  |
-| `WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED` | control-api              | Deliver workflow approval notifications                                       |
+| Switch                                            | Service                  | Note                                                                             |
+| ------------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------- |
+| `CLERUM_ENABLE_APPROVAL`                          | mcp-host                 | Human approval gate ([Configure approvals](../how-to/configure-approvals.md))    |
+| `LLM_CATALOG_SYNC_CRON_ENABLED`                   | control-api              | models.dev catalog sync; enables eligible new models, capped per run (below)     |
+| `LLM_CATALOG_BOOT_SYNC_ENABLED`                   | control-api              | One catalog sync at start when the cron is off, retried until models.dev answers |
+| `CLERUM_ENABLE_RESPONSE_ATTACHMENTS`              | channel-reader, mcp-host | Send generated files back to channels                                            |
+| `WRC_ENABLE_DETERMINISTIC`                        | workflow-recipes         | Deterministic workflow steps                                                     |
+| `WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED` | control-api              | Deliver workflow approval notifications                                          |
 
 The catalog sync enables a new model only when its provider's catalog policy is
 ON and the model is eligible. One run enables at most
-`LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` models per provider (default
-100) and `LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` in total (default 300); both
-accept 1–1000, and the rest wait for the next run. The newest releases of a
-provider go first, and the total is handed out in the fixed provider order of
-`PROVIDER_IDS`, so the providers further down wait for the ones ahead. See
+`LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` models per provider
+(default 100) and `LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` in total (default
+is 300); both accept 1–1000, and the rest wait for the next run. The newest
+releases of a provider go first, and the total is handed out in the fixed
+provider order of `PROVIDER_IDS`, so the providers further down wait for the
+ones ahead. See
 [the model allowlist](../deploy/llm-providers.md#5-the-model-allowlist).
+
+Every replica syncs once at start: as the cron's first tick, or, with the cron
+off, on its own unless `LLM_CATALOG_BOOT_SYNC_ENABLED=false` (code default
+`true`; only `true` or `false`). A boot sync that got no live, plausible catalog,
+or failed, probes models.dev again with backoff (30 s doubling up to 1 h) and
+reconciles once it does. `MODELS_DEV_API_URL` must be `https://` and must not
+point at an internal host; control-api refuses to start otherwise.
 
 ## Where every variable is documented
 

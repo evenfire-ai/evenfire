@@ -10,7 +10,6 @@
  */
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { isRunnableLlmModelId } from '@clerum/llm-providers'
 import { VENDORED_MODELS_DEV_SNAPSHOT } from '../src/data/modelsDevSnapshot.js'
 import {
   type DiscoveredModel,
@@ -20,6 +19,7 @@ import {
   isAutoEnableEligible,
   mapCatalogToProviders,
 } from '../src/services/modelsDevClient.js'
+import { referenceAutoEnableRules } from './helpers/autoEnableReference.js'
 import {
   LIVE_MODELS_DEV_CATALOG,
   type LiveCatalogEntry,
@@ -202,11 +202,20 @@ describe('mapCatalogToProviders — out-of-domain catalog values', () => {
   })
 
   it.each([['retired'], ['Deprecated'], [42], [null], [['deprecated']]])(
-    'stores an unknown status %j as null',
+    'stores an unknown status %j as null, and the entry is no longer eligible',
     status => {
-      expect(mapWith(ELIGIBLE, 'status', status).catalog_status).toBeNull()
+      const mapped = mapWith(ELIGIBLE, 'status', status)
+      expect(mapped.catalog_status).toBeNull()
+      expect(mapped.status_present).toBe(true)
+      expect(autoEnableRejection(mapped)).toBe('status')
     }
   )
+
+  it('keeps an entry without status eligible', () => {
+    const mapped = mapWith(ELIGIBLE, 'status', undefined)
+    expect(mapped.status_present).toBe(false)
+    expect(isAutoEnableEligible(mapped)).toBe(true)
+  })
 
   it.each([['\u0000'], ['\u0007'], ['\u007f'], ['\n']])(
     'drops a display_name containing control char %j but keeps the model',
@@ -243,19 +252,7 @@ describe('mapCatalogToProviders — out-of-domain catalog values', () => {
 describe('isAutoEnableEligible / autoEnableRejection', () => {
   const STATUSES = new Set(['deprecated', 'alpha', 'beta'])
 
-  // Independent reading of the rules straight off the raw entry.
-  function referenceRules(raw: RawModelsDevModel, modelId: string) {
-    const output = raw.modalities?.output
-    return {
-      textOutput:
-        Array.isArray(output) &&
-        output.every(v => typeof v === 'string') &&
-        output.includes('text'),
-      toolCall: raw.tool_call === true,
-      statusOk: !(typeof raw.status === 'string' && STATUSES.has(raw.status)),
-      runnable: isRunnableLlmModelId(modelId),
-    }
-  }
+  const referenceRules = referenceAutoEnableRules
 
   const liveIds = liveCatalogEntries().map(e => e.rawId)
   const anyJson = fc.oneof(

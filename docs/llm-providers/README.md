@@ -271,7 +271,7 @@ In short: it is **fail-closed** (a model needs an enabled row), models already
 deployed are never interrupted, and a missing ConfigMap degrades to "only the
 configured model". The catalog sync inserts new models and enables them when
 the provider's catalog policy is ON (direct vendors by default), the model is
-eligible (text output, `tool_call`, not `deprecated`/`alpha`/`beta`, an id the
+eligible (text output, `tool_call`, no catalog `status` of any kind, an id the
 runtime can execute) and the run fetched models.dev live; at most
 `LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` per provider and
 `LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` in total per run (newest releases first
@@ -340,7 +340,9 @@ family, or an "OpenAI-compatible" request shape.
   `LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` (default 100) new models
   per provider and `LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` (default 300) in total;
   both accept 1–1000 and the rest wait for the next run, the providers further
-  down `PROVIDER_IDS` after the ones ahead of them. Without the cron, run
+  down `PROVIDER_IDS` after the ones ahead of them. Without the cron, one boot
+  sync still runs a few seconds after start (`LLM_CATALOG_BOOT_SYNC_ENABLED`,
+  default `true`), so run
   `POST /admin/llm-models/discovery/sync` at least once per TTL (monthly at the
   default; every two weeks leaves margin). The endpoint runs the same code path
   as the cron.

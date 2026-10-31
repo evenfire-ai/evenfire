@@ -885,6 +885,21 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
     expect((await rows('claude')).size).toBe(discoveredOf(base, 'claude').length)
   })
 
+  it('an eligible model whose catalog status is unknown is inserted disabled, with no status stored', async () => {
+    const base = wholeLiveProviders(['claude'])
+    expect(PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT.claude).toBe(true)
+    const [target, witness] = discoveredOf(base, 'claude').filter(isAutoEnableEligible)
+    const altered = withEntryField(base, 'claude', rawIdOf(base, 'claude', target.model_id), {
+      status: 'preview',
+    })
+    await sync(altered)
+    const row = (await rowOf('claude', target.model_id))!
+    expect(row.enabled).toBe(false)
+    expect(row.catalog_status).toBeNull()
+    // The same run enabled an untouched eligible entry of the same provider.
+    expect((await rowOf('claude', witness.model_id))!.enabled).toBe(true)
+  })
+
   describe('attention feed', () => {
     it('T-H14 · an enabled model the catalog later deprecates is listed as deprecated_model_enabled', async () => {
       const base = wholeLiveProviders(['claude'])

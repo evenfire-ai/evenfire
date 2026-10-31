@@ -7,6 +7,7 @@ import {
 import { type DevJwtSlot, loadOrCreateDevJwtSigningMaterial } from './devSigningKeys.js'
 import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
 import { rootLogger } from './observability/logger.js'
+import { assertSafeCatalogUrl, resolveModelsDevApiUrl } from './services/modelsDevCatalogUrl.js'
 
 function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
   const parsed = Number(process.env[name])
@@ -129,6 +130,16 @@ type Config = {
   // seconds after start and then one every llmCatalogSyncIntervalMs (default
   // 24h), cross-replica-deduped by a session advisory lock inside the cron.
   llmCatalogSyncCronEnabled: boolean
+  // Default ON. With the cron off, still run one catalog sync shortly after
+  // start (retried with backoff until it decides): without seeded models a
+  // fresh installation has nothing to serve until a sync decides. With the cron
+  // on, its first tick is that boot sync whatever this says. Always validated
+  // at boot: only 'true' or 'false' are accepted.
+  llmCatalogBootSyncEnabled: boolean
+  // The models.dev catalog URL (MODELS_DEV_API_URL, default the public one).
+  // Refused at boot when it is not https or points at an internal host: a boot
+  // sync would otherwise keep retrying a URL that can never be fetched.
+  modelsDevApiUrl: string
   // How many models one catalog sync run may insert enabled, per provider and
   // in total. They bound what a single run adds to the allowlist ConfigMap,
   // whose 1 MiB limit makes every later publication fail once crossed. Models
@@ -608,6 +619,19 @@ const externalRateLimitConfig = (() => {
   }
 })()
 
+function modelsDevApiUrlFromEnv(): string {
+  const url = resolveModelsDevApiUrl()
+  assertSafeCatalogUrl(url)
+  return url
+}
+
+function defaultOnBooleanFromEnv(name: string): boolean {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '' || raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`${name} must be 'true' or 'false' (got '${raw}')`)
+}
+
 function failClosedBooleanFromEnv(name: string): boolean {
   const raw = process.env[name]
   if (raw === undefined || raw === '' || raw === 'false') return false
@@ -912,6 +936,8 @@ export const config: Config = {
   // idiom used by the other crons. This one stays dark until an operator turns
   // it on deliberately.
   llmCatalogSyncCronEnabled: process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
+  llmCatalogBootSyncEnabled: defaultOnBooleanFromEnv('LLM_CATALOG_BOOT_SYNC_ENABLED'),
+  modelsDevApiUrl: modelsDevApiUrlFromEnv(),
   // Default OFF. Absent or any value other than the exact token `true` keeps
   // Codex subscription management and admission dark.
   codexSubscriptionEnabled: process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true',

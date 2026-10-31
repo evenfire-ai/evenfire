@@ -50,6 +50,7 @@ const NO_AUTO_ENABLE_FIELDS = {
   text_output: false,
   tool_call: false,
   catalog_status: null,
+  status_present: false,
   cost: null,
 } as const
 

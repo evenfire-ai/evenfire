@@ -25,7 +25,11 @@ import {
   updateLlmAllowedModelSchema,
 } from '../../services/llmAllowedModels.js'
 import { computeAttention } from '../../services/llmAttention.js'
-import { getLastCatalogSyncRun, syncDiscoveredModels } from '../../services/llmCatalogSync.js'
+import {
+  CatalogPublishAfterCommitError,
+  getLastCatalogSyncRun,
+  syncDiscoveredModels,
+} from '../../services/llmCatalogSync.js'
 import {
   type ModelImpact,
   computeModelImpact,
@@ -223,9 +227,14 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   router.post(
     '/admin/llm-models/discovery/sync',
     asyncHandler(async (_req: Request, res: Response) => {
-      const result = await syncDiscoveredModels({
-        materializer: gateway.llmAllowedModelsConfigMap(),
-      })
+      let result: Awaited<ReturnType<typeof syncDiscoveredModels>>
+      try {
+        result = await syncDiscoveredModels({ materializer: gateway.llmAllowedModelsConfigMap() })
+      } catch (err) {
+        // The response maps the publish failure itself, as before the sync
+        // wrapped it to tell its re-running callers that the rows committed.
+        throw err instanceof CatalogPublishAfterCommitError ? err.cause : err
+      }
       res.status(200).json(result)
     })
   )

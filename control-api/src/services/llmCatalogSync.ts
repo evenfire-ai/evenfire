@@ -176,6 +176,13 @@ export interface CatalogSyncResult {
   /** True when this run wrote the ConfigMap (false: it already matched Postgres). */
   materialized: boolean
   /**
+   * Whether the run could decide which new models to enable: the catalog was
+   * live and passed the plausibility floor. When false, new models of providers
+   * whose policy is on were not inserted. Optional for consumers: added after
+   * the fields above.
+   */
+  decidable?: boolean
+  /**
    * Per-provider breakdown of the run, keyed by provider id; only providers
    * where something was counted appear. Optional for consumers: added after the
    * fields above.
@@ -209,6 +216,24 @@ export interface CatalogSyncProviderCount {
 }
 
 export type CatalogSyncProviderCounts = Partial<Record<LlmProviderId, CatalogSyncProviderCount>>
+
+/**
+ * The run committed, then publishing the allowlist ConfigMap failed. A publish
+ * retry is already scheduled for it. Re-running the sync would not help the
+ * publication and would apply the per-run auto-enable caps again.
+ */
+export class CatalogPublishAfterCommitError extends Error {
+  constructor(
+    readonly cause: unknown,
+    /** Whether the committed run could decide (see CatalogSyncResult.decidable). */
+    readonly decidable: boolean
+  ) {
+    // A fixed message: the cause may be a K8s ApiException whose message
+    // embeds apiserver headers, and this one can reach logs and error bodies.
+    super('catalog sync committed; allowlist ConfigMap publish failed')
+    this.name = 'CatalogPublishAfterCommitError'
+  }
+}
 
 /** The last persisted sync run, for the status endpoint. */
 export interface CatalogSyncRun {
@@ -690,6 +715,42 @@ async function reconcileProviderRows(
   counters.staled += staleRes.rowCount ?? 0
 }
 
+/** What a loaded catalog lets a run do, before any row is touched. */
+export interface CatalogAssessment {
+  byProvider: ReturnType<typeof mapCatalogToProviders>
+  /** Mapped models across our providers. */
+  totalLive: number
+  /**
+   * Live, but below the absolute plausibility floor: a truncated or flapping
+   * payload.
+   */
+  globallyImplausible: boolean
+  /**
+   * Live and plausible: the run may enable new models and mark vanished ones
+   * stale.
+   */
+  decidable: boolean
+}
+
+/**
+ * The absolute plausibility floor: the total mapped model count of a LIVE
+ * catalog against a config constant, with no baseline and no history, so a
+ * truncated payload cannot pass by resembling the last one. Shared by the run
+ * and by the boot sync's retry, which probes the catalog first and reconciles
+ * only once a run could decide.
+ */
+export function assessCatalog(
+  loaded: ModelsDevCatalogResult,
+  minPlausibleLiveTotal: number = config.modelsDevMinPlausibleLiveTotal
+): CatalogAssessment {
+  const byProvider = mapCatalogToProviders(loaded.catalog)
+  const totalLive = PROVIDER_IDS.reduce((n, p) => n + (byProvider[p]?.length ?? 0), 0)
+  const live = loaded.source === 'live'
+  const globallyImplausible = live && totalLive < minPlausibleLiveTotal
+  const decidable = live && !globallyImplausible
+  return { byProvider, totalLive, globallyImplausible, decidable }
+}
+
 /**
  * Run one catalog sync: load the models.dev catalog (live, else vendored), map
  * it to our providers, and source-guarded-reconcile into `llm_allowed_models`
@@ -729,26 +790,22 @@ export async function syncDiscoveredModels(
   const maxPerProvider =
     opts.autoEnableMaxPerProviderPerRun ?? config.llmCatalogAutoEnableMaxPerProviderPerRun
   const maxPerRun = opts.autoEnableMaxPerRun ?? config.llmCatalogAutoEnableMaxPerRun
-  const { source, fetchedAt, capturedAt, catalog } = await load({ fetchImpl: opts.fetchImpl })
-  const byProvider = mapCatalogToProviders(catalog)
+  const loaded = await load({ fetchImpl: opts.fetchImpl })
+  const { source, fetchedAt, capturedAt } = loaded
+  const { byProvider, totalLive, globallyImplausible, decidable } = assessCatalog(
+    loaded,
+    minPlausibleLiveTotal
+  )
   // Stamped with the SOURCE capture time (see discoveryImageInput); the payload
   // itself is built per row, because each model carries its own state now.
   const imageEvidence = { capturedAt, ttlMs: imageEvidenceTtlMs }
 
-  // §4.5 sanity guard, LAYER 3 — absolute global plausibility floor. Compared
-  // BEFORE touching any row, against a config constant, with NO baseline / no
-  // persisted history / no per-provider math. If a LIVE run's TOTAL mapped model
-  // count is implausibly small, we suppress the vanished→stale inference for the
-  // WHOLE run — a flappy/truncated external catalog must not mass-stale the
-  // allowlist. "Abort" here means skip the stale UPDATEs, and also mark the run
-  // unable to decide auto-enable: new models of providers whose policy is on are
-  // not inserted at all; every other new model is inserted disabled (see the
-  // module header). The stale part does not affect a cold start (empty DB): the
-  // stale UPDATE's universe (source='discovery' AND stale=false) is empty, so it
-  // marks 0 rows with or without this guard.
-  const totalLive = PROVIDER_IDS.reduce((n, p) => n + (byProvider[p]?.length ?? 0), 0)
-  const sourceIsLive = source === 'live'
-  const globallyImplausible = sourceIsLive && totalLive < minPlausibleLiveTotal
+  // Plausibility floor (see `assessCatalog`): an implausibly small
+  // live catalog suppresses the vanished→stale inference for the WHOLE run and
+  // cannot decide auto-enable, so new models of providers whose policy is on are
+  // not inserted at all; every other new model is inserted disabled. The stale
+  // part does not affect a cold start (empty DB): the stale UPDATE's universe
+  // (source='discovery' AND stale=false) is empty.
   if (globallyImplausible) {
     log.warn(
       {
@@ -762,11 +819,11 @@ export async function syncDiscoveredModels(
 
   const committed = await reconcileCatalogInTransaction(connector, {
     byProvider,
-    markStale: sourceIsLive && !globallyImplausible,
+    markStale: decidable,
     providerMinLive,
     imageEvidence,
     source,
-    canDecide: sourceIsLive && !globallyImplausible,
+    canDecide: decidable,
     maxPerProvider,
     maxPerRun,
   })
@@ -800,7 +857,6 @@ export async function syncDiscoveredModels(
   let materialized: boolean
   try {
     materialized = (await opts.materializer.materializeIfChanged()) === 'written'
-    publishRetry.succeeded(ticket)
   } catch (err) {
     llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'sync' })
     log.error(
@@ -812,10 +868,12 @@ export async function syncDiscoveredModels(
       'llm allowed-models ConfigMap write failed after catalog sync commit; publish retry scheduled'
     )
     publishRetry.failed(ticket, opts.materializer)
-    // The rows are committed either way; the caller still sees the run as
-    // failed (the on-demand route answers 500) while the retry converges.
-    throw err
+    // The rows are committed; only the publication failed, and the retry above
+    // owns it. Callers that re-run syncs must be able to tell this apart from a
+    // run that never committed.
+    throw new CatalogPublishAfterCommitError(err, decidable)
   }
+  publishRetry.succeeded(ticket)
 
   // `fetchedAt` is the catalog acquisition time (from the loader) — how fresh
   // the source data is; `ranAt` is the DB commit time of this run.
@@ -829,6 +887,7 @@ export async function syncDiscoveredModels(
     enabledImageInputChanged: counters.enabledImageInputChanged,
     materialized,
     providerCounts: counters.byProvider,
+    decidable,
   }
 }
 

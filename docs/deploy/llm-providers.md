@@ -28,14 +28,14 @@ per-Host environment variables managed under **Host → Environment**
 (`host-<ref>-env`, the `HostEnvTable` editor on the Host detail page). The
 secrets form only shows a hint linking there; it does not duplicate the editor.
 
-| Provider                    | Secret slots (in the LLM Secret)              | Non-secret env (Host → Environment)               |
-| --------------------------- | --------------------------------------------- | ------------------------------------------------- |
-| OpenAI                      | `openai-api-key`                              | —                                                 |
-| Anthropic (`claude`)        | `claude-api-key`                              | —                                                 |
-| Z.AI (`zai`)                | `zai-api-key`                                 | —                                                 |
-| Bailian                     | `bailian-api-key`                             | —                                                 |
-| Google Vertex AI (`vertex`) | `vertex-service-account-json`                 | `VERTEX_PROJECT_ID` (required), `VERTEX_LOCATION` |
-| Amazon Bedrock (`bedrock`)  | `aws-access-key-id` + `aws-secret-access-key` | `AWS_REGION` (required)                           |
+| Provider                    | Secret slots (in the LLM Secret)              | Non-secret env (Host → Environment)                            |
+| --------------------------- | --------------------------------------------- | -------------------------------------------------------------- |
+| OpenAI                      | `openai-api-key`                              | —                                                              |
+| Anthropic (`claude`)        | `claude-api-key`                              | —                                                              |
+| Z.AI (`zai`)                | `zai-api-key`                                 | —                                                              |
+| Bailian                     | `bailian-api-key`                             | —                                                              |
+| Google Vertex AI (`vertex`) | `vertex-service-account-json`                 | `VERTEX_PROJECT_ID` (required), `VERTEX_LOCATION`              |
+| Amazon Bedrock (`bedrock`)  | `aws-access-key-id` + `aws-secret-access-key` | `AWS_REGION` (required)                                        |
 | Azure OpenAI (`azure`)      | `azure-openai-api-key`                        | `AZURE_OPENAI_ENDPOINT` (required), `AZURE_OPENAI_API_VERSION` |
 
 Every other provider (the OpenAI-compatible additions — `openrouter`, `gemini`,
@@ -156,8 +156,9 @@ cannot decide (see "Offline installations"). Whether an inserted row starts
   decides for models inserted **after** the change; it never enables or disables
   an existing row.
 - **Eligibility.** The catalog must list text output and `tool_call: true`, the
-  model must not be marked `deprecated`, `alpha` or `beta`, and the id must be
-  one the runtime can execute. A model that fails any rule is inserted disabled.
+  model must carry no `status` at all (`deprecated`, `alpha`, `beta`, or any
+  value models.dev introduces later), and the id must be one the runtime can
+  execute. A model that fails any rule is inserted disabled.
 - **A live, plausible run.** Only a successful fetch of models.dev can enable a
   model; see "Offline installations" below.
 - **No earlier removal.** A model an operator deleted (or renamed away) comes
@@ -179,10 +180,25 @@ A model inserted by the sync also gets its catalog price (input, output and
 cache rates) when models.dev lists one and the pair has no price row yet. An
 existing price, even a disabled one, is never overwritten.
 
+**Boot sync.** Every replica runs one sync a few seconds after it starts. With
+`LLM_CATALOG_SYNC_CRON_ENABLED=true` that sync is the cron's first tick; with the
+cron off it runs on its own unless `LLM_CATALOG_BOOT_SYNC_ENABLED=false`
+(default `true`; only `true`/`false` are accepted). When that boot sync could
+not decide (the catalog was `vendored`, or live but implausibly small) or
+failed (for example the database was briefly unreachable), the replica keeps
+fetching models.dev with exponential backoff, from 30 seconds up to one hour
+between attempts, and runs the sync again only once it gets a live, plausible
+catalog. If another replica was already syncing at boot, there is no retry.
+control-api refuses to start when `MODELS_DEV_API_URL` is not `https://` or
+points at an internal host, so a misconfigured URL fails the rollout instead of
+being retried.
+
 **Offline installations.** Without egress to models.dev every run is
 `vendored` (the bundled snapshot). Such a run cannot decide, so it inserts
 **nothing** for providers whose policy is ON; providers whose policy is OFF still
-get their models, disabled, to curate from. Until a live run succeeds, create the
+get their models, disabled, to curate from. The boot sync's retry keeps probing
+models.dev (at most once an hour after the first attempts) without reconciling
+the snapshot again. Until a live run succeeds, create the
 models of an ON provider by hand, or switch the provider OFF, knowing that its
 models then arrive disabled and stay that way.
 
@@ -195,7 +211,7 @@ enabled):
    destination that does not resolve, such as
    `https://models.dev.invalid/api.json`, and restart control-api. Every run
    becomes `vendored`, which enables nothing. Do not use an internal or `http://`
-   address: the sync refuses those with an error instead of falling back.
+   address: control-api refuses to start with one.
 
 Neither step undoes what is already enabled: disable or delete those rows in
 `/llm-models`. Remove the override once the catalog is trusted again.

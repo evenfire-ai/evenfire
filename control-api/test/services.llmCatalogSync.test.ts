@@ -443,7 +443,10 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
         { materializer, publishRetry, loadCatalog: loadStub(catalog) },
         connector
       )
-    ).rejects.toThrow('apiserver unreachable')
+    ).rejects.toMatchObject({
+      name: 'CatalogPublishAfterCommitError',
+      cause: expect.objectContaining({ message: 'apiserver unreachable' }),
+    })
     // Only the publication is owed a retry; the run itself is not repeated.
     expect(publishRetry.isPending()).toBe(true)
     publishRetry.stop()

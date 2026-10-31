@@ -35,7 +35,10 @@ vi.mock('../src/services/adminAuthService.js', () => ({
 const mockSyncDiscoveredModels = vi.fn()
 const mockGetLastCatalogSyncRun = vi.fn()
 
-vi.mock('../src/services/llmCatalogSync.js', () => ({
+vi.mock('../src/services/llmCatalogSync.js', async importOriginal => ({
+  CatalogPublishAfterCommitError: (
+    await importOriginal<typeof import('../src/services/llmCatalogSync.js')>()
+  ).CatalogPublishAfterCommitError,
   syncDiscoveredModels: (...args: unknown[]) => mockSyncDiscoveredModels(...args),
   getLastCatalogSyncRun: (...args: unknown[]) => mockGetLastCatalogSyncRun(...args),
 }))
@@ -139,6 +142,26 @@ describe('admin llm-models routes', () => {
     await passed.materializer!.materialize()
     expect(materialize).toHaveBeenCalledTimes(1)
   })
+
+  it.each([
+    [409, 409],
+    [503, 500],
+  ])(
+    'POST /admin/llm-models/discovery/sync answers a committed run whose publish failed with %i like the publish error itself (%i)',
+    async (causeStatus, expected) => {
+      const { CatalogPublishAfterCommitError } = await import('../src/services/llmCatalogSync.js')
+      const cause = Object.assign(new Error('publish failed'), { statusCode: causeStatus })
+      mockSyncDiscoveredModels.mockRejectedValueOnce(
+        new CatalogPublishAfterCommitError(cause, true)
+      )
+      const res = await authed(
+        'post',
+        '/api/v1/admin/llm-models/discovery/sync',
+        new MockGateway('mcp-server')
+      )
+      expect(res.status).toBe(expected)
+    }
+  )
 
   it('POST /admin/llm-models/discovery/sync requires admin auth (401 unauthenticated)', async () => {
     await request(app()).post('/api/v1/admin/llm-models/discovery/sync').expect(401)

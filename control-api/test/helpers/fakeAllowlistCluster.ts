@@ -42,6 +42,11 @@ export class FakeConfigMapApi {
     for (let i = 0; i < n; i++) this.failures.push(err)
   }
 
+  /** Drop write failures armed by `failNextWrites` that no write consumed yet. */
+  clearPendingFailures(): void {
+    this.failures = []
+  }
+
   get data(): Record<string, string> | undefined {
     return this.current?.data
   }

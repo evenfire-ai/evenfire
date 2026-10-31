@@ -105,7 +105,10 @@ describe('catalog sync publication by state', () => {
     const retry = new AllowlistPublishRetry()
 
     db.cluster.failNextWrites(3)
-    await expect(runSync(db, retry)).rejects.toThrow(/apiserver unavailable/)
+    await expect(runSync(db, retry)).rejects.toMatchObject({
+      name: 'CatalogPublishAfterCommitError',
+      cause: expect.objectContaining({ message: expect.stringMatching(/apiserver unavailable/) }),
+    })
     // The run committed its change, and the CM does not show it.
     const served = await db.expectedConfigMap()
     expect(db.cluster.annotations?.['clerum.io/content-hash']).not.toBe(served.contentHash)
