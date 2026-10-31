@@ -114,11 +114,12 @@ describe('D34 migration execution policy', () => {
     // for delivery-state writes that keep its id, event type, audience and
     // expiry. B4.1 (PR #334 review r2) then granted the approval prelock to the
     // Workflow Recipes runtime, which holds the stuck-run sweep's approval
-    // subjects before its first run phase change.
+    // subjects before its first run phase change. DB-2 B0 now guards the GFS
+    // backfill at 100000 resources and runs it before trigger DDL.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        '406f41f6f056970ca1faa65e425e673aaea4dfea378b06b4512dc99321ee299d',
+        '23c041f3836530622ba43494e4978e6a79c57d9b33a83c3b536ef5c72423018c',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',

@@ -216,6 +216,31 @@ export async function applyCatalogUtf8OrderingSchema(db: DbClient): Promise<void
  * revision writers consumed by catalog reads.
  */
 export async function applyComposableCatalogRevisionSchema(db: DbClient): Promise<void> {
+  // Bound the backfill before trigger DDL takes writer-blocking locks. Larger
+  // datasets need a separately planned batched backfill, not a longer timeout.
+  await db.query(`
+    DO $$
+    DECLARE
+      resource_count BIGINT;
+      resource_limit CONSTANT BIGINT := 100000;
+    BEGIN
+      SELECT count(*) INTO resource_count FROM gfs_resources;
+      IF resource_count > resource_limit THEN
+        RAISE EXCEPTION '0134 gfs_resources backfill refused: count % exceeds supported limit %; a batched backfill is required',
+          resource_count, resource_limit;
+      END IF;
+    END;
+    $$;
+  `)
+  await db.query(
+    `INSERT INTO authorization_resource_revisions(
+       environment_id, resource_type, resource_id, revision, updated_at
+     )
+     SELECT $1, 'gfs_resource', resource_id::text, 1, clock_timestamp()
+       FROM gfs_resources
+     ON CONFLICT (environment_id, resource_type, resource_id) DO NOTHING`,
+    [canonicalEnvironmentId()]
+  )
   await db.query(`
     CREATE TABLE IF NOT EXISTS authorization_catalog_environment (
       singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
@@ -999,15 +1024,6 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     `INSERT INTO authorization_catalog_environment(singleton, environment_id)
      VALUES(TRUE, $1)
      ON CONFLICT (singleton) DO UPDATE SET environment_id = EXCLUDED.environment_id`,
-    [canonicalEnvironmentId()]
-  )
-  await db.query(
-    `INSERT INTO authorization_resource_revisions(
-       environment_id, resource_type, resource_id, revision, updated_at
-     )
-     SELECT $1, 'gfs_resource', resource_id::text, 1, clock_timestamp()
-       FROM gfs_resources
-     ON CONFLICT (environment_id, resource_type, resource_id) DO NOTHING`,
     [canonicalEnvironmentId()]
   )
 }
