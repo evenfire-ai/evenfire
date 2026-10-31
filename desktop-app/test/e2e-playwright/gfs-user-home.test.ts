@@ -57,7 +57,11 @@ import {
 } from './helpers/gfsAgentChat'
 import { type ManagedGfsAgent, getManagedAgentDisplayName } from './helpers/gfsAgentDiscovery'
 import type { GfsAuditRow } from './helpers/gfsDesktopOperatorParityFixtures'
-import { assertGfsInfraHealthy, discoverManagedGfsAgents } from './helpers/gfsFixtures'
+import {
+  assertGfsInfraHealthy,
+  discoverManagedGfsAgent,
+  discoverManagedGfsAgents,
+} from './helpers/gfsFixtures'
 import { type HomeTestUser, UserHomeFixtures } from './helpers/gfsUserHomeFixtures'
 import { humanRecordedPause } from './helpers/humanPause'
 import { awaitPasswordPace } from './helpers/passwordPace'
@@ -1312,7 +1316,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
   test('J7a Recent files are per user: own opens, agent reads, writes and copies for that user only', async ({}, testInfo) => {
     test.setTimeout(5 * RESPONSE_TIMEOUT_MS + 45 * 60_000)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
-    const [agent] = discoverManagedGfsAgents()
+    const agent = discoverManagedGfsAgent()
     const owner = fx.createUser('j7a-owner')
     const a = fx.createUser('j7a-a')
     const b = fx.createUser('j7a-b')
