@@ -523,6 +523,15 @@ The boundary check fails if its base ref cannot be resolved, scans committed,
 staged, working-tree, and non-ignored untracked files, and rejects credentialed
 or private PostgreSQL URLs as well as other sensitive runtime artifacts.
 
+Loopback fixture URLs inside test files are exempt from the private-runtime-URL
+rejection. The exemption recognizes test/spec suffixes across the repository's
+test stacks (`ts`, `tsx`, `js`, `mjs`, `cjs`); it originally omitted the
+JavaScript-module suffixes, so a Node test carrying loopback fixture URLs was
+rejected as public code and stopped a certification run at the end of its T0
+phase (2026-10-31). The exemption covers only that reason: credentials in a
+test file are still rejected. Run this contract as a cheap pre-check before
+launching `make minikube-t2`, not only inside it.
+
 If ownership, scope, or redaction cannot be proved, stop and preserve the
 reported code; do not widen the command to another cluster.
 
