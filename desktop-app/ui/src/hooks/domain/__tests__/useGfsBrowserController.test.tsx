@@ -4903,12 +4903,15 @@ describe('denied-location cleanup ownership', () => {
 
 afterAll(async () => {
   // The suite can queue one final React scheduler Immediate after the last
-  // test resolves its fire-and-forget actions. Drain the event loop while the
-  // jsdom environment still exists; otherwise performWorkUntilDeadline runs
-  // after teardown and Vitest reports an unhandled `window is not defined`.
-  for (let drain = 0; drain < 2; drain += 1) {
+  // test resolves its fire-and-forget actions. Those chains can pass through
+  // timer and Immediate phases, so drain both while the jsdom environment
+  // still exists; otherwise performWorkUntilDeadline runs after teardown and
+  // Vitest reports an unhandled `window is not defined`.
+  for (let drain = 0; drain < 3; drain += 1) {
     await act(async () => {
+      await new Promise<void>(resolve => setTimeout(resolve, 25))
       await new Promise<void>(resolve => setImmediate(resolve))
     })
+    await act(async () => {})
   }
 })
