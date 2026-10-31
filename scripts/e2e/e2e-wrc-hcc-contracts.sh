@@ -488,27 +488,10 @@ else
   exit 1
 fi
 
-if printf '%s\n' "$nginx_conf" | grep -Fq 'server mcp.api.coingecko.com:443 resolve;'; then
-  ok "remote proxy re-resolves the upstream host at runtime (TTL-driven)"
-else
-  fail "remote proxy is missing upstream host re-resolution"
-  printf '%s\n' "$nginx_conf"
-  exit 1
-fi
-
-if printf '%s\n' "$nginx_conf" | grep -Fq 'proxy_pass https://remote_upstream/mcp;'; then
+if printf '%s\n' "$nginx_conf" | grep -Fq 'proxy_pass https://mcp.api.coingecko.com/mcp;'; then
   ok "remote proxy keeps upstream CoinGecko /mcp baseUrl"
 else
   fail "remote proxy is missing upstream CoinGecko /mcp proxy_pass"
-  printf '%s\n' "$nginx_conf"
-  exit 1
-fi
-
-# shellcheck disable=SC2016  # NGINX_LOCAL_RESOLVERS is a template placeholder.
-if printf '%s\n' "$nginx_conf" | grep -Fq 'resolver ${NGINX_LOCAL_RESOLVERS} ipv6=off;'; then
-  ok "remote proxy uses the platform resolver literal"
-else
-  fail "remote proxy is missing the platform resolver literal"
   printf '%s\n' "$nginx_conf"
   exit 1
 fi

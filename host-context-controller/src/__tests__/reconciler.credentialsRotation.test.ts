@@ -8,7 +8,6 @@ import {
   createMockCoreApi,
   createMockCustomApi,
 } from '../../test/__fixtures__/testMocks'
-import { hccLogger } from '../logger'
 import { McpServerReconciler, RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE } from '../reconciler'
 import { McpServerCRD } from '../types'
 
@@ -810,7 +809,7 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     await vi.advanceTimersByTimeAsync(5000)
     expect(appsApi.readNamespacedDeployment.mock.calls.length).toBeGreaterThan(readsBeforeTick)
 
-    const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
       await reconcileFailClosed(reconciler, coreApi)
       const lastAfterRetirement = deploymentReadyWrites(customApi).at(-1)
@@ -828,11 +827,9 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
         )
       ).toBe(false)
       expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
-      expect(
-        warn.mock.calls
-          .slice(warnsAfterRetirement)
-          .some(([message]) => message.includes('not ready after'))
-      ).toBe(false)
+      expect(warn.mock.calls.slice(warnsAfterRetirement).flat().join('\n')).not.toContain(
+        'not ready after'
+      )
     } finally {
       warn.mockRestore()
     }
@@ -957,17 +954,12 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     await reconciler.reconcile(makeServer())
     await vi.advanceTimersByTimeAsync(23 * 5000)
 
-    const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
       const held = holdNextStatusRead(customApi)
       await vi.advanceTimersByTimeAsync(5000)
       expect(held.isHeld()).toBe(true)
-      expect(warn).toHaveBeenCalledWith('McpServer not ready after polls — giving up', {
-        scope: '[Reconciler]',
-        name: 'linear',
-        maxAttempts: 24,
-        detail: expect.any(String),
-      })
+      expect(warn.mock.calls.flat().join('\n')).toContain('not ready after 24 polls')
 
       await reconcileFailClosed(reconciler, coreApi)
       const afterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length

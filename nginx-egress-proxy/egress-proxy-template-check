@@ -9,16 +9,19 @@
 # NGINX 1.30 (ngx_conf_read_token):
 #
 #   inside "..."                  control characters, ", $ and \ are rejected
-#   inside an unquoted argument   control characters, space, ;, {, }, $ and \
-#                                 are rejected (a " mid-argument is literal)
+#   inside an unquoted argument   anything outside [A-Za-z0-9._~-] is rejected,
+#                                 except a % in a complete %XX escape: + is read
+#                                 as a space by a form-decoding upstream, & starts
+#                                 a new parameter and # ends the value
 #   anywhere else                 any defined value is rejected: at the start of
 #                                 an argument, inside '...', in a comment, or
 #                                 after a \ the value itself changes the syntax
 #
 # Undefined names are left alone, as envsubst leaves them. Values are only
-# compared with index() and one constant class: never used as a regex or as an
-# output format. On a rejection it prints the file, the variable name and the
-# context, never the value or the template line, and exits 1.
+# compared with index(), constant classes and a constant gsub() pattern: never
+# used as a regex or as an output format. On a rejection it prints the file, the
+# variable name and the context, never the value or the template line, and
+# exits 1.
 
 function has_any(value, chars,    i) {
   for (i = 1; i <= length(chars); i++) {
@@ -35,13 +38,15 @@ function reject(name, where,    key) {
   print "egress-proxy-entrypoint: " FILENAME ": the value of " name " is not allowed in " where
 }
 
-function check(name, context,    value) {
+function check(name, context,    value, rest) {
   if (!(name in ENVIRON)) return
   value = ENVIRON[name]
   if (context == "quoted") {
     if (value ~ /[[:cntrl:]]/ || has_any(value, "\"$\\")) reject(name, "a quoted string")
   } else if (context == "unquoted") {
-    if (value ~ /[[:cntrl:]]/ || has_any(value, " ;{}$\\")) reject(name, "an unquoted argument")
+    rest = value
+    gsub(/%[0-9A-Fa-f][0-9A-Fa-f]/, "", rest)
+    if (rest !~ /^[A-Za-z0-9._~-]*$/) reject(name, "an unquoted argument")
   } else {
     reject(name, context)
   }

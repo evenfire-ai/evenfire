@@ -12,7 +12,8 @@ FROM nginx:1.30.6-alpine@sha256:c59d1f8b1e0e42da75be973424cd72e23f7f8adfb54e982f
 # only stderr through egress-proxy-log-filter; egress-proxy-liveness is the exec
 # liveness probe that makes a dead filter a visible container restart.
 # egress-proxy-template-check refuses to start when a value that envsubst will
-# insert into a template would change the NGINX syntax around it.
+# insert into a template would change the NGINX syntax around it, or when a
+# query value is outside the class the upstream reads unchanged.
 COPY egress-proxy-entrypoint /usr/local/bin/egress-proxy-entrypoint
 COPY egress-proxy-log-filter /usr/local/bin/egress-proxy-log-filter
 COPY egress-proxy-liveness /usr/local/bin/egress-proxy-liveness

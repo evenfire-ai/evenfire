@@ -8,13 +8,16 @@
 #
 #   0. It checks, synchronously and before anything else starts, that no value
 #      envsubst is about to insert into a template would change the NGINX
-#      syntax around it (egress-proxy-template-check), and exits 1 otherwise.
+#      syntax around it, or that a query value is outside the class the
+#      upstream reads unchanged (egress-proxy-template-check), and exits 1
+#      otherwise.
 #   1. It keeps the official /docker-entrypoint.sh, so the template envsubst
-#      (20-envsubst-on-templates.sh) and the resolv.conf export used by the
-#      rendered `resolver ${NGINX_LOCAL_RESOLVERS}` line
-#      (15-local-resolvers.envsh) still run. The export only reaches the
-#      entrypoint's script loop, which is where envsubst reads it; the NGINX
-#      process does not need it and does not have it.
+#      (20-envsubst-on-templates.sh) and the image's other
+#      /docker-entrypoint.d scripts still run. A script that exports a
+#      variable for envsubst (15-local-resolvers.envsh, when
+#      NGINX_ENTRYPOINT_LOCAL_RESOLVERS is set) runs after job 0, so the
+#      check never sees that value; the export reaches only the entrypoint's
+#      script loop, where envsubst reads it.
 #   2. It routes only NGINX's stderr through the log filter (#1240). The remote
 #      baseUrl query may carry a credential and NGINX prints the full upstream
 #      URL in every upstream error line; NGINX also quotes the upstream's

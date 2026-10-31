@@ -177,10 +177,7 @@ describe('McpServer ensureDeployment no-op gate', () => {
     )
 
     expect(egressProxy).toBeDefined()
-    expect(egressProxy?.env).toContainEqual({
-      name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
-      value: '1',
-    })
+    expect(egressProxy?.env).toContainEqual({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
     expect(egressProxy?.livenessProbe?.exec?.command).toEqual([
       '/usr/local/bin/egress-proxy-liveness',
       '3000',

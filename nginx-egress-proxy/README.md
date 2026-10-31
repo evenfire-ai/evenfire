@@ -35,21 +35,22 @@ For each remote McpServer, host-context-controller:
    Query placeholders must be complete `${NAME}` values where `NAME` matches
    `[A-Z_][A-Z0-9_]*`; bare dollars, malformed braces, backslashes, and
    semicolons are rejected. The URL parser strips TAB/CR/LF and percent-encodes
-   other control characters and spaces before that check. A placeholder name
-   that is a forbidden container variable (`PATH`, `LD_PRELOAD`, …) or starts
-   with `NGINX_` is rejected, because the placeholder is backfilled into the
-   container env. The path takes no placeholders and must not contain `$` (or
-   the other characters the query check rejects: `\`, `;`, `{`, `}`, control
-   characters and space), because it is rendered into the NGINX template
-   unquoted.
-2. **Renders a per-server `default.conf.template` ConfigMap** that resolves and
-   re-resolves the external base URL with NGINX. The resolver comes from the
-   pod's `/etc/resolv.conf`, and the upstream `server ... resolve` directive
-   follows DNS TTL changes without restarting NGINX or opening an upstream
-   keepalive pool. TLS to the upstream remains mandatory
-   (`proxy_ssl_verify on`, SNI, system CA bundle), along with SSE-friendly
-   settings (buffering/cache off, long read timeouts) and a local `/health`
-   endpoint.
+   other control characters and spaces before that check. A placeholder name is
+   set in the egress-proxy container env (`spec.env`, except the names HCC
+   strips as forbidden; `spec.envSecret`; `envMapping`; or a placeholder of
+   `spec.remote.authHeaders`); an undeclared name is rejected, because it would
+   otherwise survive into the rendered config, where NGINX resolves it as one of
+   its own variables. The path takes no placeholders and must not contain `$`
+   (or the other characters the query check rejects: `\`, `;`, `{`, `}`,
+   control characters and space), because it is rendered into the NGINX
+   template unquoted. The value of a query placeholder must use only
+   `[A-Za-z0-9._~-]` and complete `%XX` escapes; store any other character
+   percent-encoded. The proxy never encodes a value, and an already
+   percent-encoded value is passed through unchanged.
+2. **Renders a per-server `default.conf.template` ConfigMap** pinning
+   `proxy_pass` to that single external base URL, with TLS to the upstream
+   (`proxy_ssl_verify on`, SNI, system CA bundle), SSE-friendly settings
+   (buffering/cache off, long read timeouts), and a local `/health` endpoint.
 3. **Sanitizes each `spec.remote.authHeaders` entry** (`sanitizeAuthHeader`):
    header names restricted to `[A-Za-z0-9-]`, values capped at 2048 chars,
    CR/LF/NUL rejected (HTTP request smuggling / nginx directive-injection
@@ -58,9 +59,11 @@ For each remote McpServer, host-context-controller:
    per-server Deployment. The ConfigMap mounts at `/etc/nginx/templates`, so
    `envsubst` resolves `${VAR}` placeholders in auth headers at pod start from
    env vars sourced from `spec.envSecret`. Query placeholders use the same
-   runtime mechanism. With placeholders, credentials never appear in the
-   ConfigMap or Deployment; a literal value inlined in the CRD would still be
-   emitted into the ConfigMap — always use placeholders.
+   runtime mechanism. With `${VAR}` placeholders, credentials never appear in
+   the ConfigMap itself, and `spec.envSecret` keeps them out of the Deployment
+   env too. A literal value inlined in the CRD would still be emitted (escaped)
+   into the ConfigMap, and a literal `spec.env` value is visible in the
+   Deployment env, so neither may carry a credential.
 
 Before NGINX starts, `egress-proxy-entrypoint` runs `egress-proxy-template-check`
 over the templates. envsubst substitutes every defined variable (`$NAME` and
@@ -71,19 +74,20 @@ change the syntax there:
 | Where the reference sits                               | Rejected in the value                              |
 | ------------------------------------------------------ | -------------------------------------------------- |
 | inside `"..."` (auth headers)                          | control characters (TAB, CR, LF, …), `"`, `$`, `\` |
-| inside an unquoted argument (query, path)              | control characters, space, `;`, `{`, `}`, `$`, `\` |
+| inside an unquoted argument (the baseUrl query)        | anything outside `[A-Za-z0-9._~-]`, or a `%` that is not a complete `%XX` escape |
 | argument start, inside `'...'`, a comment, after a `\` | any value                                          |
 
 A rejected value stops the container before NGINX starts (CrashLoopBackOff,
 readiness never passes). The log names the template file, the variable and the
 context, never the value. This includes a credential pasted with a trailing
 TAB or newline. Undefined variables are left untouched, as envsubst leaves them.
+A `+` reaches a form-decoding upstream as a space, `&` starts a new parameter
+and `#` ends the value, so such a value is refused instead of being sent as
+something else.
 
-HCC appends `NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1` after CRD-provided env,
-`spec.envSecret`, and empty-placeholder backfill. Kubernetes uses the last
-duplicate, so the platform resolver setting cannot be disabled by the CRD. The
-image exports the pod's local nameservers into `NGINX_LOCAL_RESOLVERS`, which
-the generated `resolver` directive uses.
+HCC appends an empty `NGINX_ENVSUBST_FILTER` after CRD-provided env and
+`spec.envSecret` entries. Kubernetes uses the last duplicate, so a CRD cannot
+restrict which declared names `envsubst` substitutes.
 
 NGINX's stderr (the error log) goes through `egress-proxy-log-filter`, which
 applies two rules to every line:
@@ -134,6 +138,9 @@ Residuals:
   SCGI, gRPC, HTTP/2 proxying, memcached, mail).
 - A literal credential written into `baseUrl` instead of a placeholder is still
   stored in the ConfigMap. Use placeholders.
+- A query value may carry a percent-encoded control byte (`%0A`, `%00`): the
+  check rejects the raw byte, not the escape, and an upstream that decodes the
+  query receives that byte.
 
 There is deliberately no short-value, percent-encoding or whitespace-trimming
 residual: the redaction is positional, so whatever bytes NGINX quotes, trimmed
@@ -163,12 +170,10 @@ desired state owned by the CRD author. Deployment rendering always stamps the
 configured platform image for remote egress proxies, so a remote CRD's
 `spec.image` is never what runs.
 
-HCC and this image must be upgraded together. The HCC template needs
-`server ... resolve` (NGINX ≥ 1.27.3) and the base image's
-`15-local-resolvers.envsh`, both provided by the pinned base; the HCC liveness
-probe needs this layer's `egress-proxy-liveness` script, and the stderr filter
-exists only in this layer. An older image is expected to fail visibly (the
-exec probe fails and the container restarts) rather than silently fall back.
+HCC and this image must be upgraded together: the HCC liveness probe needs this
+layer's `egress-proxy-liveness` script, and the stderr filter exists only in this
+layer. An older image is expected to fail visibly (the exec probe fails and the
+container restarts) rather than silently fall back.
 
 ## Ports
 
@@ -195,17 +200,12 @@ builds this image, renders the template through the HCC reconciler, and runs it
 against a local TLS upstream: a trusted chain (direct and with two
 intermediates) is accepted; an untrusted CA, an expired certificate, a hostname
 mismatch, and the test CA without the mounted trust store are rejected.
-The harness also covers the DNS switch (`H7 dns-switch`), query placeholder
-resolution (`H8 query-accept`), stderr query redaction (`H9 redact`), credential
-echoes from an upstream (`H13 echo`), the filter program on fixed NGINX lines
-behind the audited-release gate (`H14 filter-lines`), signal delivery
-(`H10 signals`), filter-death detection (`H11 filter-death`), and the template
-value check (`H12 value-reject`).
-
-The CDN answer-set rotation is proven end to end on a branch-owned minikube
-profile by [scripts/e2e/e2e-egress-cdn-rotation.sh](../scripts/e2e/e2e-egress-cdn-rotation.sh);
-see [docs/testing/egress-cdn-rotation.md](../docs/testing/egress-cdn-rotation.md)
-for the operator steps and the test-only overrides it restores.
+The harness also covers query placeholder resolution (`H8 query-accept`),
+stderr query redaction (`H9 redact`), credential echoes (`H13 echo`), the filter
+program behind the audited-release gate (`H14 filter-lines`), signal delivery
+(`H10 signals`), filter-death detection (`H11 filter-death`), the template value
+check (`H12 value-reject`) and the template check's verdicts against NGINX
+(`H15 template-check`).
 
 ## Updating NGINX
 
