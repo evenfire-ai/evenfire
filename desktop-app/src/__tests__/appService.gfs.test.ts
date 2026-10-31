@@ -886,6 +886,7 @@ describe('AppService GFS upload security scope', () => {
       await expect(service.passwordLogin(nextOwner.email, 'fixture-password')).resolves.toEqual({
         authenticated: true,
         me: nextOwner,
+        sessionGeneration: expect.any(Number),
       })
       await expect(service.listGfsUploadSessions('main')).resolves.toEqual([])
       await expect(service.resumeGfsUpload(exact.uploadId, 'main')).rejects.toThrow(
@@ -911,6 +912,7 @@ describe('AppService GFS upload security scope', () => {
         {
           authenticated: true,
           me: originalOwner,
+          sessionGeneration: expect.any(Number),
         }
       )
       service.startDesktopGfsUpload.mockResolvedValue({ ...exact.session, state: 'uploading' })

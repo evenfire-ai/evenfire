@@ -29,7 +29,12 @@ export function appServiceAffordanceProducer(
   const service = Object.create(AppService.prototype) as AppService
   Object.assign(service, {
     gfsClient: new GfsClient(transport),
-    sessionToken: 'fixture-session-token',
+    sessionAuthority: {
+      sessionToken: 'fixture-session-token',
+      memoryOnlySession: undefined,
+      captureSessionRequestContext: (token: string) =>
+        Object.freeze({ kind: 'accepted-session', owner: { token } }),
+    },
   })
   return (resourceId: string, drive = 'main') => service.gfsAffordances(resourceId, drive)
 }

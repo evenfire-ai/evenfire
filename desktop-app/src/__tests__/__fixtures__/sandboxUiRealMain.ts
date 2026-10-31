@@ -6,6 +6,7 @@ import { _resetPluginSdkRuntimeForTests, initPluginSdkRuntime } from '../../plug
 import { _resetPluginSurfacesForTests } from '../../pluginSurfaceRegistry.js'
 import { unmountSandboxUiView } from '../../sandboxUiDriver.js'
 import { _resetSandboxUiRefreshForTests } from '../../sandboxUiSessionRefresh.js'
+import { TokenStore } from '../../tokenStore.js'
 import { FakeParentWindow, type FakeWebContents, electronMocks } from './sandboxUiElectronFakes.js'
 
 // The REAL sandbox-ui main process — AppService lifecycle queue, sandbox-ui
@@ -22,6 +23,8 @@ import { FakeParentWindow, type FakeWebContents, electronMocks } from './sandbox
 export type RealMainOptions = {
   /** Plugin SDK state directory; the suite owns it. */
   userDataDir: string
+  /** The suite-owned credential producer; defaults to the module's TokenStore implementation. */
+  tokenStore?: TokenStore
   /** rpc-proxy's answer to a session mint for `recipeNs/recipeName`. */
   mint(recipeName: string, recipeNs: string): Response | Promise<Response>
   /** Everything main sends to the window the embed lives in. */
@@ -112,6 +115,7 @@ export function startRealMain(options: RealMainOptions): RealMain {
   if (current) throw new Error('a main process is already running: await resetRealMain() first')
   let service!: AppService
   service = new AppService({
+    tokenStore: options.tokenStore ?? new TokenStore(),
     onSandboxUiSessionInvalidated: sessionGeneration =>
       options.onSessionInvalidated?.(sessionGeneration),
   })

@@ -60,6 +60,7 @@ function authFor(teamId: string, userId = 'user-a'): AuthContextValue {
     statusTone: 'info',
     isAuthenticated: true,
     sessionGeneration: authoritativeSessionGeneration,
+    temporarySessionExpiresAt: null,
     me: member(teamId, userId),
     email: `${userId}@example.test`,
     password: '',

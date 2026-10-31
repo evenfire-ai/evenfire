@@ -68,9 +68,11 @@ import {
   GfsResourceDeepLinkQueue,
   GfsUserNavigationGeneration,
 } from '../../../src/gfsResourceDeepLinkQueue'
+import { runWithSessionRequestContext } from '../../../src/httpClient'
 import { SandboxUiDeepLinkQueue } from '../../../src/sandboxUiDeepLinkQueue'
 import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '../../../src/sandboxUiDeepLinks'
 import type { DeepLinkAcknowledgmentAuthority } from '../../../src/types'
+import { testSessionTokenForIdentity } from '../../../testSupport/authTestFixtures'
 import { installAppControllerClerum } from '../hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
@@ -83,7 +85,9 @@ vi.mock(
 )
 vi.mock('../../../src/config', async () => ({
   ...(await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).configModule,
+  getActiveEnvKey: () => 'test_env-000000000000',
   getActiveRuntimeConfigOptionId: () => null,
+  getActiveLegacyEnvKeyInventory: () => ({ keys: [], complete: true }),
 }))
 vi.mock(
   '../../../src/sandboxUiPartitionGc',
@@ -101,11 +105,7 @@ vi.mock(
   async () =>
     (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).authClientModule
 )
-vi.mock(
-  '../../../src/tokenStore',
-  async () =>
-    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).tokenStoreModule
-)
+vi.mock('../../../src/tokenStore', async importOriginal => importOriginal())
 
 // The universal tab store lives inside the controller; the mock reproduces that
 // contract — `navItem` is DERIVED from the store, the store is reactive, and nav
@@ -279,7 +279,8 @@ vi.mock('@components/Common', async () => {
       htmlFor: string
       children: ReactNode
     }) => createElement('label', { htmlFor }, label, children),
-    StatusBanner: ({ children }: { children: ReactNode }) => createElement('div', null, children),
+    StatusBanner: ({ children, text }: { children?: ReactNode; text?: string }) =>
+      createElement('div', null, children ?? text),
     TextInput: (props: InputHTMLAttributes<HTMLInputElement>) => createElement('input', props),
     ToastStack: (props: Parameters<typeof actual.ToastStack>[0]) =>
       commonHarness.renderActualToastStack ? createElement(actual.ToastStack, props) : null,
@@ -803,9 +804,7 @@ describe('App deep-link orchestration', () => {
     expect(dialogBody).not.toContain('https://rpc.example.test')
   })
 
-  it('wires environment switch confirmation actions to the controller', () => {
-    const cancelSwitch = vi.fn()
-    const confirmSwitch = vi.fn()
+  it('does not offer authenticated environment switching', () => {
     const linkProvidedName = 'Tenant from profile link '.repeat(5)
     currentController = makeController({
       initialExperienceLoading: false,
@@ -815,28 +814,16 @@ describe('App deep-link orchestration', () => {
         targetEnvironmentName: linkProvidedName,
         targetExternalRestApiBaseUrl: 'https://target-api.example.test/api/v1',
       },
-      handleCancelDesktopEnvironmentSwitchConfirmation: cancelSwitch,
-      handleConfirmDesktopEnvironmentSwitchConfirmation: confirmSwitch,
     } as Partial<AppController>)
 
     renderApp(<App />)
 
-    expect(confirmDialogHarness.props?.title).toBe('Switch desktop environment?')
-    expect(confirmDialogHarness.props?.confirmLabel).toBe('Sign out and switch')
-    const dialogBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
-    expect(dialogBody).toContain('<strong>current-api.example.test</strong>')
-    expect(dialogBody).toContain('<strong>target-api.example.test</strong>')
-    expect(dialogBody).toContain('Profile link label (unverified):')
-    expect(dialogBody).toContain(`${linkProvidedName.slice(0, 63)}…`)
-    expect(dialogBody).not.toContain(linkProvidedName.slice(64))
-    act(() => confirmDialogHarness.props?.onCancel())
-    expect(cancelSwitch).toHaveBeenCalledOnce()
-    act(() => confirmDialogHarness.props?.onConfirm())
-    expect(confirmSwitch).toHaveBeenCalledOnce()
+    expect(confirmDialogHarness.props).toBeNull()
   })
 
   function resetAppDeepLinkHarness(): void {
     vi.clearAllMocks()
+    window.localStorage.removeItem(SIDEBAR_COLLAPSED_KEY)
     authSurfaceHarness.renderActualAuthPage = false
     authSurfaceHarness.renderNativeButtons = false
     confirmDialogHarness.props = null
@@ -871,7 +858,7 @@ describe('App deep-link orchestration', () => {
     acknowledgeGfsDeepLink.mockImplementation(async id => gfsQueue.acknowledge(id))
     listPendingGfsDeepLinks.mockClear()
     listPendingGfsDeepLinks.mockImplementation(async () => ({ links: gfsQueue.list() }))
-    main = createSandboxUiMainFake()
+    main = createSandboxUiMainFake({ useRealTokenStore: true })
     emitDeepLink = null
     emitGfsDeepLink = null
     emitCommand = null
@@ -992,7 +979,10 @@ describe('App deep-link orchestration', () => {
     }
     const service = main.service
     const transportBoundaries = service as unknown as {
-      authClient: { googleLogin: ReturnType<typeof vi.fn> }
+      authClient: {
+        googleLogin: ReturnType<typeof vi.fn>
+        getMe: ReturnType<typeof vi.fn>
+      }
       gfsClient: GfsClient
       bindCurrentChatStore: () => Promise<void>
       updateDesktopGfsUploadState: () => Promise<void>
@@ -1000,17 +990,20 @@ describe('App deep-link orchestration', () => {
       updateEntityChangeSessionToken: () => void
       restartEntityChangeStreamForSessionReplacement: () => void
     }
+    const tokenA = testSessionTokenForIdentity(userA.id, userA.teamId, Date.now() + 60 * 60 * 1000)
+    const tokenB = testSessionTokenForIdentity(userA.id, userA.teamId, Date.now() + 90 * 60 * 1000)
     transportBoundaries.authClient.googleLogin = vi
       .fn()
-      .mockResolvedValueOnce({ token: 'synthetic-session-permission-A', me: userA })
-      .mockResolvedValueOnce({ token: 'synthetic-session-permission-B', me: userA })
+      .mockResolvedValueOnce({ token: tokenA, me: userA })
+      .mockResolvedValueOnce({ token: tokenB, me: userA })
+    transportBoundaries.authClient.getMe = vi.fn().mockResolvedValue(userA)
     // Keep public login, generation publication and the production controller real.
     transportBoundaries.bindCurrentChatStore = vi.fn(async () => undefined)
     transportBoundaries.updateDesktopGfsUploadState = vi.fn(async () => undefined)
     transportBoundaries.migrateLegacyDesktopGfsUploadScopes = vi.fn(async () => undefined)
     transportBoundaries.updateEntityChangeSessionToken = vi.fn()
     transportBoundaries.restartEntityChangeStreamForSessionReplacement = vi.fn()
-    return { userA, service, transportBoundaries }
+    return { userA, service, transportBoundaries, tokenA, tokenB }
   }
 
   // An app launched the way the sidebar does, into a new app tab. The stubbed
@@ -2382,7 +2375,7 @@ describe('App deep-link orchestration', () => {
         getSessionState(): ReturnType<typeof main.service.getSessionState>
         getSessionGeneration(): number
       }
-      sessionAuthority.sessionGeneration = 1
+      main.setSessionGenerationForTest(1)
       sessionAuthority.sessionToken = 'session-a'
       sessionAuthority.me = {
         id: 'user-1',
@@ -4851,7 +4844,7 @@ describe('App deep-link orchestration', () => {
         me: typeof userA | null
       }>
     }
-    sessionAuthority.sessionGeneration = 7
+    main.setSessionGenerationForTest(7)
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
     listApps.mockResolvedValue({
@@ -4983,7 +4976,7 @@ describe('App deep-link orchestration', () => {
       sessionToken: string | null
       me: typeof userA | null
     }
-    sessionAuthority.sessionGeneration = 7
+    main.setSessionGenerationForTest(7)
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
     const appQueue = new SandboxUiDeepLinkQueue()
@@ -5112,7 +5105,7 @@ describe('App deep-link orchestration', () => {
       sessionToken: string | null
       me: typeof userA | null
     }
-    sessionAuthority.sessionGeneration = 7
+    main.setSessionGenerationForTest(7)
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
     const appQueue = new SandboxUiDeepLinkQueue()
@@ -5208,7 +5201,7 @@ describe('App deep-link orchestration', () => {
       sessionToken: string | null
       me: typeof userA | null
     }
-    sessionAuthority.sessionGeneration = 7
+    main.setSessionGenerationForTest(7)
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
     const appQueue = new SandboxUiDeepLinkQueue()
@@ -5300,8 +5293,21 @@ describe('App deep-link orchestration', () => {
         role: 'member',
       }
       const service = main.service
+      const tokenA = testSessionTokenForIdentity(
+        userA.id,
+        userA.teamId,
+        Date.now() + 60 * 60 * 1000
+      )
+      const tokenB = testSessionTokenForIdentity(
+        userA.id,
+        userA.teamId,
+        Date.now() + 90 * 60 * 1000
+      )
       const transports = service as unknown as {
-        authClient: { googleLogin: ReturnType<typeof vi.fn> }
+        authClient: {
+          googleLogin: ReturnType<typeof vi.fn>
+          getMe: ReturnType<typeof vi.fn>
+        }
         gfsClient: GfsClient
         bindCurrentChatStore: () => Promise<void>
         updateDesktopGfsUploadState: () => Promise<void>
@@ -5311,8 +5317,9 @@ describe('App deep-link orchestration', () => {
       }
       transports.authClient.googleLogin = vi
         .fn()
-        .mockResolvedValueOnce({ token: 'synthetic-lag-session-A', me: userA })
-        .mockResolvedValueOnce({ token: 'synthetic-lag-session-B', me: userA })
+        .mockResolvedValueOnce({ token: tokenA, me: userA })
+        .mockResolvedValueOnce({ token: tokenB, me: userA })
+      transports.authClient.getMe = vi.fn().mockResolvedValue(userA)
       transports.bindCurrentChatStore = vi.fn(async () => undefined)
       transports.updateDesktopGfsUploadState = vi.fn(async () => undefined)
       transports.migrateLegacyDesktopGfsUploadScopes = vi.fn(async () => undefined)
@@ -5471,7 +5478,7 @@ describe('App deep-link orchestration', () => {
         await gesture(true)
         await waitFor(() => expect(patches).toHaveLength(1))
         expect(patches[0]).toEqual({
-          token: 'synthetic-lag-session-B',
+          token: tokenB,
           path: `/api/v1/me/gfs/resources/${sourceId}`,
           body: { newParentId: destinationId, ifMatch: source.version },
         })
@@ -5484,7 +5491,7 @@ describe('App deep-link orchestration', () => {
   )
 
   it('R6-M4 ignores an outgoing preview refresh 401 after replacement publication', async () => {
-    const { userA, service } = installSameIdentityLoginFixture()
+    const { userA, service, tokenB } = installSameIdentityLoginFixture()
     await service.googleLogin('fixture-google-A')
     let dispatch: ((event: unknown) => void) | null = null
     window.clerum.entityChanges = {
@@ -5538,10 +5545,16 @@ describe('App deep-link orchestration', () => {
     queryClient.setQueryData(key, { held: ['read'] })
     const remove = vi.spyOn(queryClient, 'removeQueries')
     remove.mockClear()
-    const message = await permissionRouteFailureMessage(
-      client => client.resolveUri(uri, 'fixture-token'),
-      401,
-      { code: 'unauthorized', message: 'outgoing preview session expired' }
+    const sessionAuthority = service as unknown as {
+      sessionAuthority: { captureSessionRequestContext(token: string): unknown }
+    }
+    const message = await runWithSessionRequestContext(
+      sessionAuthority.sessionAuthority.captureSessionRequestContext(tokenB),
+      () =>
+        permissionRouteFailureMessage(client => client.resolveUri(uri, tokenB), 401, {
+          code: 'unauthorized',
+          message: 'outgoing preview session expired',
+        })
     )
     expect(message).toContain('httpStatus=401')
     await act(async () => {
@@ -5561,18 +5574,56 @@ describe('App deep-link orchestration', () => {
     'R6-M4 isolates a pending permission read across actual same-identity login (current 401=%s)',
     async current401 => {
       const { userA, service, transportBoundaries } = installSameIdentityLoginFixture()
+      const expectedFirstToken = testSessionTokenForIdentity(
+        userA.id,
+        userA.teamId,
+        Date.now() + 60 * 60 * 1000
+      )
+      const tokenA = testSessionTokenForIdentity(
+        userA.id,
+        userA.teamId,
+        Date.now() + 90 * 60 * 1000
+      )
+      const tokenB = testSessionTokenForIdentity(
+        userA.id,
+        userA.teamId,
+        Date.now() + 120 * 60 * 1000
+      )
+      transportBoundaries.authClient.googleLogin = vi
+        .fn()
+        .mockResolvedValueOnce({ token: expectedFirstToken, me: userA })
+        .mockResolvedValueOnce({ token: tokenA, me: userA })
+        .mockResolvedValueOnce({ token: tokenB, me: userA })
+      transportBoundaries.authClient.getMe = vi.fn().mockResolvedValue(userA)
       const folderId = 'a'.repeat(32)
       const parentId = 'b'.repeat(32)
       const folder = resolvedDirectory(folderId, 'Generation Projects', {
         parentResourceId: parentId,
       })
       const parent = resolvedDirectory(parentId, 'Parent')
-      const oldFailure = await permissionRouteFailureMessage(
-        client => client.affordances(parentId, 'fixture-token', 'main'),
-        401,
-        { code: 'unauthorized', message: 'outgoing permission request denied' }
+      await service.googleLogin('fixture-google-401-owner')
+      const authority = service as unknown as {
+        sessionToken: string
+        sessionAuthority: { captureSessionRequestContext(token: string): unknown }
+      }
+      const firstAcceptedToken = authority.sessionToken
+      expect(firstAcceptedToken).toBe(expectedFirstToken)
+      const firstRequestContext =
+        authority.sessionAuthority.captureSessionRequestContext(firstAcceptedToken)
+      let unauthorizedResponderHits = 0
+      const oldFailure = await runWithSessionRequestContext(firstRequestContext, () =>
+        permissionRouteFailureMessage(
+          client => client.affordances(parentId, firstAcceptedToken, 'main'),
+          401,
+          { code: 'unauthorized', message: 'outgoing permission request denied' },
+          {},
+          () => {
+            unauthorizedResponderHits += 1
+          }
+        )
       )
       expect(oldFailure).toContain('httpStatus=401')
+      expect(unauthorizedResponderHits).toBe(1)
       let rejectOld!: (error: Error) => void
       const oldPermission = new Promise<unknown>((_resolve, reject) => {
         rejectOld = reject
@@ -5585,7 +5636,7 @@ describe('App deep-link orchestration', () => {
           if (url.pathname.endsWith('/affordances')) {
             if (url.pathname.includes('/' + parentId + '/')) {
               sourceParentTokens.push(options?.token ?? '')
-              if (options?.token === 'synthetic-session-permission-A') return oldPermission
+              if (options?.token === tokenA) return oldPermission
               if (failCurrentPermission) throw new Error(oldFailure)
             }
             return heldAffordances(['read', 'write', 'delete'])
@@ -5641,7 +5692,7 @@ describe('App deep-link orchestration', () => {
       queryClient.setQueryData(otherKey, { marker: 'unrelated retained cache' })
       let replacementPublication: Promise<void> | null = null
       try {
-        await waitFor(() => expect(sourceParentTokens).toEqual(['synthetic-session-permission-A']))
+        await waitFor(() => expect(sourceParentTokens).toEqual([tokenA]))
         expect(view.getByTestId('gfs-session-access').textContent).toBe('active')
         const replacement = await service.googleLogin('fixture-google-B')
         expect(replacement.me).toBe(userA)
@@ -5651,12 +5702,7 @@ describe('App deep-link orchestration', () => {
           replacementPublication = getController().loadSession({ preserveNav: true })
           await Promise.resolve()
         })
-        await waitFor(() =>
-          expect(sourceParentTokens).toEqual([
-            'synthetic-session-permission-A',
-            'synthetic-session-permission-B',
-          ])
-        )
+        await waitFor(() => expect(sourceParentTokens).toEqual([tokenA, tokenB]))
         await act(async () => {
           await replacementPublication
         })
@@ -5716,41 +5762,28 @@ describe('App deep-link orchestration', () => {
   )
 
   it('R6-M3 retains a held link when main authority changes after a negative listing', async () => {
-    const userA: NonNullable<AppController['me']> = {
-      id: 'user-a',
-      email: 'a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    }
+    const { userA, service, transportBoundaries } = installSameIdentityLoginFixture()
     const userInTeamB = { ...userA, teamId: 'team-b', teamName: 'Team B' }
-    const sessionAuthority = main.service as unknown as {
-      sessionGeneration: number
-      sessionToken: string | null
-      me: typeof userA | null
+    const sessionAuthority = service as unknown as {
       authClient: {
-        switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
-        getMe: (token: string) => Promise<typeof userA>
+        switchTeam: ReturnType<typeof vi.fn>
+        getMe: ReturnType<typeof vi.fn>
       }
-      tokenStore: { setSessionToken: (token: string, envKey: string) => Promise<void> }
-      switchTeam: (teamId: string) => ReturnType<typeof main.service.switchTeam>
+      switchTeam: (teamId: string) => ReturnType<typeof service.switchTeam>
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
       updateEntityChangeSessionToken: (token: string | null) => void
       restartEntityChangeStreamForSessionReplacement: () => void
     }
-    sessionAuthority.sessionGeneration = 7
-    sessionAuthority.sessionToken = 'session-a'
-    sessionAuthority.me = userA
-    sessionAuthority.authClient.switchTeam = vi.fn(async (_token, _teamId) => ({
-      token: 'synthetic-session-b-team-b',
-    }))
+    const teamToken = testSessionTokenForIdentity(userA.id, 'team-b', Date.now() + 120 * 60 * 1000)
+    sessionAuthority.authClient.switchTeam = vi.fn(async () => ({ token: teamToken }))
     sessionAuthority.authClient.getMe = vi.fn(async () => userInTeamB)
-    sessionAuthority.tokenStore.setSessionToken = vi.fn(async () => undefined)
     sessionAuthority.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => undefined)
     sessionAuthority.updateEntityChangeSessionToken = vi.fn()
     sessionAuthority.restartEntityChangeStreamForSessionReplacement = vi.fn()
+    await service.googleLogin('fixture-google-A')
+    const initialGeneration = service.getSessionGeneration()
+    const invalidatedGeneration = initialGeneration + 1
+    const replacementGeneration = invalidatedGeneration + 1
     const appQueue = new SandboxUiDeepLinkQueue()
     main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
     main.setSessionInvalidationCleanup(() => ({
@@ -5797,24 +5830,22 @@ describe('App deep-link orchestration', () => {
       })
     )
     if (!target) throw new Error('production parser rejected fixture')
-    main.endSession(8)
+    main.endSession(invalidatedGeneration)
     await main.settle()
-    sessionAuthority.sessionToken = 'session-b'
-    sessionAuthority.me = userA
     const link = appQueue.enqueue(target, window.clerum.gfs.getUserNavigationGeneration?.() ?? 0)
     act(() => emitDeepLink?.(link))
     await act(async () => {
       await getController().loadSession()
     })
     await queueSnapshotStarted
-    expect(getController().sessionGeneration).toBe(8)
+    expect(getController().sessionGeneration).toBe(invalidatedGeneration)
     expect(listApps).toHaveBeenCalledTimes(1)
     const invalidationCount = (main.reported('sandboxUi:sessionInvalidated') as unknown[]).length
     handle.switchTeam.mockImplementation(async teamId => sessionAuthority.switchTeam(teamId))
     await act(async () => {
       await window.clerum.team.switch('team-b')
     })
-    expect(main.service.getSessionGeneration()).toBe(9)
+    expect(main.service.getSessionGeneration()).toBe(replacementGeneration)
     expect((main.reported('sandboxUi:sessionInvalidated') as unknown[]).length).toBe(
       invalidationCount
     )
@@ -5825,7 +5856,7 @@ describe('App deep-link orchestration', () => {
     })
     await waitFor(() =>
       expect(acknowledgeHeldAppDeepLink).toHaveBeenCalledWith(link.id, {
-        sessionGeneration: 8,
+        sessionGeneration: invalidatedGeneration,
         userNavigationGeneration: link.userNavigationGenerationAtActivation,
       })
     )
@@ -5833,7 +5864,7 @@ describe('App deep-link orchestration', () => {
     expect(await acknowledgeHeldAppDeepLink.mock.results[0]!.value).toBe(false)
     expect(acceptedHeldAppIds).toEqual([])
     expect(appQueue.list()).toEqual([link])
-    expect(acknowledgmentsAtGeneration).not.toContain(9)
+    expect(acknowledgmentsAtGeneration).not.toContain(replacementGeneration)
     expect(openSandboxUi()).not.toHaveBeenCalled()
     await act(async () => {
       await getController().loadSession({ preserveNav: true })
@@ -5841,7 +5872,7 @@ describe('App deep-link orchestration', () => {
     await confirmPendingAppLink()
     await waitForAppOpen(1)
     await main.settle()
-    expect(getController().sessionGeneration).toBe(9)
+    expect(getController().sessionGeneration).toBe(replacementGeneration)
     expect(getController().getCurrentTeamId()).toBe('team-b')
     expect(main.live()).toMatchObject({ appRef: 'ns/app', routePath: '/new-session-eligible' })
     expect(embedState().owner).toBe(main.live()?.launchId)
@@ -5850,54 +5881,43 @@ describe('App deep-link orchestration', () => {
       app: { appRef: 'ns/app' },
     })
     expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === link.id)).toHaveLength(1)
-    expect(acknowledgmentsAtGeneration).toEqual([9])
+    expect(acknowledgmentsAtGeneration).toEqual([replacementGeneration])
     expect(appQueue.list()).toEqual([])
     queryClient.clear()
   })
 
   it('revalidates held links against a newer ordinary same-principal session', async () => {
-    const userA: NonNullable<AppController['me']> = {
-      id: 'user-a',
-      email: 'a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    }
+    const { userA, service } = installSameIdentityLoginFixture()
     const userInTeamB = { ...userA, teamId: 'team-b', teamName: 'Team B' }
-    const sessionAuthority = main.service as unknown as {
-      sessionGeneration: number
-      sessionToken: string | null
-      me: typeof userA | null
+    const sessionAuthority = service as unknown as {
       authClient: {
-        switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
-        getMe: (token: string) => Promise<typeof userA>
+        switchTeam: ReturnType<typeof vi.fn>
+        getMe: ReturnType<typeof vi.fn>
       }
-      tokenStore: { setSessionToken: (token: string, envKey: string) => Promise<void> }
-      switchTeam: (teamId: string) => ReturnType<typeof main.service.switchTeam>
+      switchTeam: (teamId: string) => ReturnType<typeof service.switchTeam>
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
       updateEntityChangeSessionToken: (token: string | null) => void
       restartEntityChangeStreamForSessionReplacement: () => void
     }
-    sessionAuthority.sessionGeneration = 7
-    sessionAuthority.sessionToken = 'session-a'
-    sessionAuthority.me = userA
-    sessionAuthority.authClient.switchTeam = vi.fn(async (_token, _teamId) => ({
-      token: 'synthetic-session-b-team-b',
-    }))
-    sessionAuthority.authClient.getMe = vi.fn(async () => userInTeamB)
-    sessionAuthority.tokenStore.setSessionToken = vi.fn(async () => undefined)
+    const teamToken = testSessionTokenForIdentity(userA.id, 'team-b', Date.now() + 120 * 60 * 1000)
+    sessionAuthority.authClient.switchTeam = vi.fn(async () => ({ token: teamToken }))
+    sessionAuthority.authClient.getMe = vi.fn(async () => userA)
     sessionAuthority.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => undefined)
     sessionAuthority.updateEntityChangeSessionToken = vi.fn()
     sessionAuthority.restartEntityChangeStreamForSessionReplacement = vi.fn()
+    await service.googleLogin('fixture-google-A')
     const appQueue = new SandboxUiDeepLinkQueue()
     main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
     main.setSessionInvalidationCleanup(() => ({
       appDeepLinkMinimumId: appQueue.clear(),
       gfsDeepLinkMinimumId: gfsQueue.clear(),
     }))
-    listPendingDeepLinks.mockImplementation(async () => ({ links: appQueue.list() }))
+    const appQueueSnapshots: Array<ReturnType<SandboxUiDeepLinkQueue['list']>> = []
+    listPendingDeepLinks.mockImplementation(async () => {
+      const links = appQueue.list()
+      appQueueSnapshots.push(links)
+      return { links }
+    })
     clearPendingDeepLinks.mockImplementation(async () => appQueue.clear())
     acknowledgeDeepLink.mockImplementation(async id => appQueue.acknowledge(id))
 
@@ -5936,22 +5956,59 @@ describe('App deep-link orchestration', () => {
     )
     if (!target) throw new Error('the production parser rejected the team-hop App link')
 
-    main.endSession(8)
+    await service.googleLogin('fixture-google-B')
+    const replacementGeneration = service.getSessionGeneration()
+    const teamSwitchGeneration = replacementGeneration + 1
+    main.endSession(replacementGeneration)
     await main.settle()
-    sessionAuthority.sessionToken = 'session-b'
-    sessionAuthority.me = userA
     const link = appQueue.enqueue(target, window.clerum.gfs.getUserNavigationGeneration?.() ?? 0)
     act(() => emitDeepLink?.(link))
+    const invalidation = (
+      main.reported('sandboxUi:sessionInvalidated') as Array<{
+        sessionGeneration: number
+        appDeepLinkMinimumId: number
+        gfsDeepLinkMinimumId: number
+      }>
+    ).at(-1)
+    expect(invalidation?.sessionGeneration).toBe(replacementGeneration)
+    expect(link.id).toBeGreaterThanOrEqual(invalidation?.appDeepLinkMinimumId ?? Infinity)
+    expect(link.userNavigationGenerationAtActivation).toBe(
+      window.clerum.gfs.getUserNavigationGeneration?.()
+    )
+    expect(appQueue.list()).toEqual([link])
     await act(async () => {
       await getController().loadSession()
     })
+    expect(getController().sessionGeneration).toBe(replacementGeneration)
+    expect(getController().isAuthenticated).toBe(true)
+    expect(getController().getCurrentTeamId()).toBe('team-a')
+    expect(getController().me).toMatchObject({ id: userA.id, email: userA.email, teamId: 'team-a' })
+    expect(await service.getSessionState()).toMatchObject({
+      authenticated: true,
+      sessionGeneration: replacementGeneration,
+      me: { id: userA.id, email: userA.email, teamId: 'team-a' },
+    })
+    expect(target.teamId).toBe('team-a')
+    expect(appQueue.list()).toEqual([link])
+    expect(
+      (main.reported('sandboxUi:sessionInvalidated') as Array<{ sessionGeneration: number }>).at(-1)
+        ?.sessionGeneration
+    ).toBe(replacementGeneration)
+    expect(link.userNavigationGenerationAtActivation).toBe(
+      window.clerum.gfs.getUserNavigationGeneration?.()
+    )
+    await waitFor(() => expect(listPendingDeepLinks).toHaveBeenCalled())
+    expect(appQueueSnapshots.some(snapshot => snapshot.some(item => item.id === link.id))).toBe(
+      true
+    )
     await waitFor(() => expect(listApps).toHaveBeenCalledTimes(1))
     await oldListingStarted
-    expect(getController().sessionGeneration).toBe(8)
+    expect(getController().sessionGeneration).toBe(replacementGeneration)
     expect(appQueue.list()).toEqual([link])
     expectNoAppAcknowledgment(link.id)
 
     const invalidationCount = (main.reported('sandboxUi:sessionInvalidated') as unknown[]).length
+    sessionAuthority.authClient.getMe.mockResolvedValue(userInTeamB)
     handle.switchTeam.mockImplementation(async teamId => sessionAuthority.switchTeam(teamId))
     await act(async () => {
       await window.clerum.team.switch('team-b')
@@ -5959,8 +6016,8 @@ describe('App deep-link orchestration', () => {
     })
     await main.settle()
     expect(getController().getCurrentTeamId()).toBe('team-b')
-    expect(getController().sessionGeneration).toBe(9)
-    expect(main.service.getSessionGeneration()).toBe(9)
+    expect(getController().sessionGeneration).toBe(teamSwitchGeneration)
+    expect(main.service.getSessionGeneration()).toBe(teamSwitchGeneration)
     expect((main.reported('sandboxUi:sessionInvalidated') as unknown[]).length).toBe(
       invalidationCount
     )
@@ -6004,7 +6061,7 @@ describe('App deep-link orchestration', () => {
         sessionToken: string | null
         me: typeof userA | null
       }
-      sessionAuthority.sessionGeneration = 7
+      main.setSessionGenerationForTest(7)
       sessionAuthority.sessionToken = 'session-a'
       sessionAuthority.me = userA
 
@@ -6106,7 +6163,7 @@ describe('App deep-link orchestration', () => {
       logout(): Promise<number>
       restoreSavedSession(): ReturnType<typeof main.service.getSessionState>
     }
-    sessionAuthority.sessionGeneration = 7
+    main.setSessionGenerationForTest(7)
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
     sessionAuthority.restoreSavedSession = async () => ({ authenticated: false, me: null })
@@ -6141,7 +6198,7 @@ describe('App deep-link orchestration', () => {
     }>
     const firstInvalidation = invalidationEvents.at(-1)
     if (!firstInvalidation) throw new Error('the logout did not publish main session invalidation')
-    expect(firstInvalidation.sessionGeneration).toBe(sessionAuthority.sessionGeneration)
+    expect(firstInvalidation.sessionGeneration).toBe(main.service.getSessionGeneration())
     const staleLink = appQueue.enqueue(
       target,
       window.clerum.gfs.getUserNavigationGeneration?.() ?? 0
@@ -6215,7 +6272,7 @@ describe('App deep-link orchestration', () => {
       sessionToken: string | null
       me: typeof userA | null
     }
-    sessionAuthority.sessionGeneration = 7
+    main.setSessionGenerationForTest(7)
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
 
@@ -6287,7 +6344,7 @@ describe('App deep-link orchestration', () => {
       sessionToken: string | null
       me: typeof userA | null
     }
-    sessionAuthority.sessionGeneration = 7
+    main.setSessionGenerationForTest(7)
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
 
@@ -6412,7 +6469,7 @@ describe('App deep-link orchestration', () => {
       resolveGfsUri(uri: string): Promise<Awaited<ReturnType<typeof window.clerum.gfs.resolve>>>
       gfsClient: { resolveUri: (uri: string, token: string) => Promise<unknown> }
     }
-    sessionAuthority.sessionGeneration = 7
+    main.setSessionGenerationForTest(7)
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
@@ -6490,7 +6547,7 @@ describe('App deep-link orchestration', () => {
       resolveGfsUri(uri: string): Promise<Awaited<ReturnType<typeof window.clerum.gfs.resolve>>>
       gfsClient: { resolveUri: (uri: string, token: string) => Promise<unknown> }
     }
-    sessionAuthority.sessionGeneration = 7
+    main.setSessionGenerationForTest(7)
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
@@ -7804,7 +7861,7 @@ describe('App deep-link orchestration', () => {
   })
 
   it('R7 actual main snapshot reply cannot settle an old Move into replacement GFS state', async () => {
-    const { userA, service, transportBoundaries } = installSameIdentityLoginFixture()
+    const { userA, service, transportBoundaries, tokenA } = installSameIdentityLoginFixture()
     const rootId = 'a'.repeat(32),
       destinationId = 'b'.repeat(32)
     const root = resolvedDirectory(rootId, 'Held root', { version: 3 })
@@ -7890,7 +7947,7 @@ describe('App deep-link orchestration', () => {
       await new Promise<void>(r => setImmediate(r))
     })
     await waitFor(() => expect(held).toBe(true))
-    expect(tokens).toEqual(['synthetic-session-permission-A'])
+    expect(tokens).toEqual([tokenA])
     expect(moves).toEqual([{ resourceId: rootId, destinationId, generation: issuedN }])
     expect(capturedSnapshot).toBe(issuedN)
     // A later server edit advances the resource after the old Move committed.
@@ -7940,6 +7997,7 @@ describe('App deep-link orchestration', () => {
   it('routes the App workspace tab out and renders the real login page after sign-out', () => {
     authSurfaceHarness.renderActualAuthPage = true
     authSurfaceHarness.renderNativeButtons = true
+    commonHarness.renderWorkspaceSurfaces = true
     currentController = makeController({
       initialExperienceLoading: false,
       isAuthenticated: true,

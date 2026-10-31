@@ -65,6 +65,7 @@ import {
 import type { DesktopCommandId } from '../../../src/desktopCommands'
 import { delegationAffordances } from '../../../src/gfs/delegation.js'
 import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
+import { runWithSessionRequestContext } from '../../../src/httpClient.js'
 import { SandboxUiDeepLinkQueue } from '../../../src/sandboxUiDeepLinkQueue'
 import type { AccessCatalog, WorkflowNotificationStreamEvent } from '../../../src/types'
 import {
@@ -82,6 +83,7 @@ import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/
 // The sandbox main fake installs a fetch stub for its token mint. The real
 // ApiError producer below needs Node's native fetch for its loopback fixture.
 const nativeFetch = globalThis.fetch
+let main: SandboxUiMainFake
 
 // App mounts GfsDragSessionProvider, which reads Query state. Keep the real
 // provider in every render with production cache defaults; manually wrapped
@@ -154,10 +156,26 @@ async function produceDeniedGfsMessage(
   const sandboxFetch = globalThis.fetch
   vi.stubGlobal('fetch', nativeFetch)
   try {
-    return await resolveDeniedMessage(...args)
+    const [gfsUri, errorBody, status] = args
+    return await withCurrentMainSessionRequest((sessionToken, context) =>
+      resolveDeniedMessage(gfsUri, errorBody, status, { sessionToken, context })
+    )
   } finally {
     vi.stubGlobal('fetch', sandboxFetch)
   }
+}
+
+async function withCurrentMainSessionRequest<T>(
+  operation: (sessionToken: string, context: unknown) => Promise<T>
+): Promise<T> {
+  const service = main.service as unknown as {
+    sessionToken: string | null
+    sessionAuthority: { captureSessionRequestContext(token: string): unknown }
+  }
+  const sessionToken = service.sessionToken
+  if (!sessionToken) throw new Error('The main fixture has no accepted session token')
+  const context = service.sessionAuthority.captureSessionRequestContext(sessionToken)
+  return runWithSessionRequestContext(context, () => operation(sessionToken, context))
 }
 
 async function produceSerializedAccessCatalogFetchFailure(): Promise<Error> {
@@ -169,7 +187,9 @@ async function produceSerializedAccessCatalogFetchFailure(): Promise<Error> {
     throw new TypeError('fetch failed')
   }) as typeof fetch
   try {
-    await new actual.AuthClient().getTeamAgents('catalog-proof-session')
+    await withCurrentMainSessionRequest(sessionToken =>
+      new actual.AuthClient().getTeamAgents(sessionToken)
+    )
   } catch (error) {
     producerError = error
   } finally {
@@ -190,16 +210,19 @@ async function produceSerializedAccessCatalogHttpFailure(status: number): Promis
   let producerError: unknown
   const statusText =
     status === 500 ? 'Internal Server Error' : status === 401 ? 'Unauthorized' : 'Forbidden'
-  globalThis.fetch = vi.fn(
+  const fetchResponder = vi.fn(
     async () =>
       new Response(JSON.stringify({ error: 'catalog request failed' }), {
         status,
         statusText,
         headers: { 'content-type': 'application/json' },
       })
-  ) as typeof fetch
+  )
+  globalThis.fetch = fetchResponder as typeof fetch
   try {
-    await new actual.AuthClient().getTeamAgents('catalog-proof-session')
+    await withCurrentMainSessionRequest(sessionToken =>
+      new actual.AuthClient().getTeamAgents(sessionToken)
+    )
   } catch (error) {
     producerError = error
   } finally {
@@ -213,6 +236,9 @@ async function produceSerializedAccessCatalogHttpFailure(status: number): Promis
       `The real AuthClient catalog producer lost HTTP ${status}: ${producerError.message}`
     )
   }
+  if (fetchResponder.mock.calls.length !== 1) {
+    throw new Error(`The real AuthClient HTTP ${status} responder was not reached exactly once`)
+  }
   return wrapLikeElectronIpc('access:refreshCatalog', producerError)
 }
 
@@ -221,12 +247,15 @@ async function produceSerializedAccessCatalogMalformedResponse(): Promise<Error>
   const actual =
     await vi.importActual<typeof import('../../../src/authClient')>('../../../src/authClient')
   let producerError: unknown
-  globalThis.fetch = vi.fn(
+  const fetchResponder = vi.fn(
     async () =>
       new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } })
-  ) as typeof fetch
+  )
+  globalThis.fetch = fetchResponder as typeof fetch
   try {
-    await new actual.AuthClient().getTeamAgents('catalog-proof-session')
+    await withCurrentMainSessionRequest(sessionToken =>
+      new actual.AuthClient().getTeamAgents(sessionToken)
+    )
   } catch (error) {
     producerError = error
   } finally {
@@ -234,6 +263,9 @@ async function produceSerializedAccessCatalogMalformedResponse(): Promise<Error>
   }
   if (!(producerError instanceof SyntaxError)) {
     throw new Error(`The real AuthClient catalog producer did not expose its malformed response`)
+  }
+  if (fetchResponder.mock.calls.length !== 1) {
+    throw new Error('The real AuthClient malformed-response fixture did not reach its responder')
   }
   return wrapLikeElectronIpc('access:refreshCatalog', producerError)
 }
@@ -1026,7 +1058,6 @@ describe('App deep-link orchestration', () => {
   const listPendingGfsDeepLinks = vi.fn().mockResolvedValue({ links: [] })
   const resolveGfsResource = vi.fn()
   const clearPendingGfsDeepLinks = vi.fn().mockResolvedValue(1)
-  let main: SandboxUiMainFake
   const closeSandboxUi = vi.fn((...args: Parameters<SandboxUiMainFake['bridge']['close']>) =>
     main.bridge.close(...args)
   )
@@ -1053,9 +1084,7 @@ describe('App deep-link orchestration', () => {
 
     render(<App />)
 
-    expect(screen.getByRole('status').textContent).toContain(
-      'You’re signed in, but this session has no active team.'
-    )
+    expect(screen.getByText('You’re signed in, but this session has no active team.')).toBeTruthy()
   })
 
   beforeEach(() => {
@@ -3784,7 +3813,13 @@ describe('App deep-link orchestration', () => {
     expect((composer as HTMLTextAreaElement).value).toBe(draft)
     expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
 
-    const sendDenial = await ipcGenericForbidden('rpc:invokeHostMessage')
+    // This renderer assertion consumes the IPC 403 classification; the accepted session
+    // credential satisfies the real final-dispatch guard before the fixture responds.
+    const sendDenial = await withCurrentMainSessionRequest((sessionToken, context) =>
+      runWithSessionRequestContext(context, () =>
+        ipcGenericForbidden('rpc:invokeHostMessage', sessionToken)
+      )
+    )
     expect(httpErrorStatus(sendDenial)).toBe(403)
     expect(isAuthorizationError(sendDenial)).toBe(true)
     clerum.rpc.invokeHostMessage.mockRejectedValueOnce(sendDenial)

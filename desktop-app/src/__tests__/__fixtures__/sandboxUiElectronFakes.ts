@@ -13,6 +13,14 @@ type Listener = (...args: unknown[]) => void
 
 let nextWebContentsId = 1
 const views: FakeWebContentsView[] = []
+let appReadyForTest = false
+let userDataPathForTest = tmpdir()
+
+/** Configure Electron's userData boundary for tests that use the real TokenStore. */
+export function configureElectronAppForTest(input?: { userDataPath: string }): void {
+  appReadyForTest = input !== undefined
+  userDataPathForTest = input?.userDataPath ?? tmpdir()
+}
 
 export class FakeWebContents {
   id = nextWebContentsId++
@@ -182,7 +190,11 @@ export const electronModule = {
       return false
     }
   },
-  app: { getPath: vi.fn(() => tmpdir()), isReady: () => false },
+  app: {
+    getPath: vi.fn(() => userDataPathForTest),
+    isReady: () => appReadyForTest,
+    isPackaged: false,
+  },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
     encryptString: vi.fn(),

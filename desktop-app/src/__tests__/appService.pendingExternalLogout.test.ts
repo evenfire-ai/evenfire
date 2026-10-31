@@ -690,6 +690,7 @@ describe('AppService pending external logout', () => {
     await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
       authenticated: true,
       me: loginResult.me,
+      sessionGeneration: expect.any(Number),
     })
     await expect(service.logout()).resolves.toMatchObject({ kind: 'committed' })
     await vi.waitFor(async () => {
@@ -706,6 +707,7 @@ describe('AppService pending external logout', () => {
     await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
       authenticated: true,
       me: loginResult.me,
+      sessionGeneration: expect.any(Number),
     })
 
     await expectAcceptedProjection(tokenStore, 'persistent')
@@ -736,6 +738,7 @@ describe('AppService pending external logout', () => {
     await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
       authenticated: true,
       me: loginResult.me,
+      sessionGeneration: expect.any(Number),
     })
 
     // Failed historical cleanup leaves the exact slot in place, but the new authority must select
@@ -964,6 +967,7 @@ describe('AppService pending external logout', () => {
       await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
         authenticated: true,
         me: loginResult.me,
+        sessionGeneration: expect.any(Number),
       })
 
       expect(writeCandidate).toHaveBeenCalledOnce()

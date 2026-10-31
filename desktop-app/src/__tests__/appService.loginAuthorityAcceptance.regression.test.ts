@@ -780,6 +780,7 @@ describe('Stage 4 public login candidate acceptance', () => {
     await expect(replacement).resolves.toEqual({
       authenticated: true,
       me: replacementUser,
+      sessionGeneration: expect.any(Number),
     })
     const selected = await h.acceptance.readSessionAuthoritySourceSelection({
       tokenStore: h.tokenStore,
@@ -1335,6 +1336,7 @@ describe('Stage 4 public login candidate acceptance', () => {
     ).resolves.toEqual({
       authenticated: true,
       me: replacementUser,
+      sessionGeneration: expect.any(Number),
     })
     releaseRestoreIdentity.resolve(homeUser)
 
@@ -1372,6 +1374,7 @@ describe('Stage 4 public login candidate acceptance', () => {
     await expect(h.service.googleLogin('fixture-google-id-token')).resolves.toEqual({
       authenticated: true,
       me: oauthUser,
+      sessionGeneration: expect.any(Number),
     })
     const accepted = await h.acceptance.readSessionAuthoritySourceSelection({
       tokenStore: h.tokenStore,
@@ -1625,6 +1628,7 @@ describe('Stage 4 public login candidate acceptance', () => {
     ).resolves.toEqual({
       authenticated: true,
       me: homeUser,
+      sessionGeneration: expect.any(Number),
     })
     const prior = await h.acceptance.readSessionAuthoritySourceSelection({
       tokenStore: h.tokenStore,
@@ -1740,6 +1744,7 @@ describe('Stage 4 public login candidate acceptance', () => {
     ).resolves.toEqual({
       authenticated: true,
       me: replacementUser,
+      sessionGeneration: expect.any(Number),
     })
 
     const accepted = await h.acceptance.readSessionAuthoritySourceSelection({
@@ -1854,6 +1859,12 @@ describe('Stage 4 public login candidate acceptance', () => {
   it('keeps the prior source and visible chat owner when replacement identity is rejected', async () => {
     const h = await harness()
     const priorSource = await h.bindHome()
+    const sandboxInvalidation = vi.fn()
+    ;(
+      h.service as unknown as {
+        onSandboxUiSessionInvalidated?: (sessionGeneration: number) => void
+      }
+    ).onSandboxUiSessionInvalidated = sandboxInvalidation
     const validation = deferred<typeof replacementUser>()
     const entered = deferred<void>()
     vi.spyOn(h.state.authClient, 'getMe').mockImplementation(token => {
@@ -1904,6 +1915,7 @@ describe('Stage 4 public login candidate acceptance', () => {
     expect(staged.session.accepted.record.frame.source).toEqual(priorSource)
     validation.resolve({ ...replacementUser, id: 'foreign-account' })
     await expect(login).rejects.toThrow('Authenticated candidate identity does not match')
+    expect(sandboxInvalidation).not.toHaveBeenCalled()
 
     expect(h.state.sessionToken).toBe(teamToken)
     expect(h.state.me).toEqual(teamUser)
@@ -1959,7 +1971,11 @@ describe('Stage 4 public login candidate acceptance', () => {
       teamId: teamUser.teamId,
     })
     validation.resolve(replacementUser)
-    await expect(login).resolves.toEqual({ authenticated: true, me: replacementUser })
+    await expect(login).resolves.toEqual({
+      authenticated: true,
+      me: replacementUser,
+      sessionGeneration: expect.any(Number),
+    })
     expect(h.state.sessionToken).toBe(replacementToken)
     expect(h.state.me).toEqual(replacementUser)
     expect(h.chatBinding.requireChatStore().getAuthorityScope()).toMatchObject({
@@ -2015,7 +2031,11 @@ describe('Stage 4 public login candidate acceptance', () => {
 
     await expect(
       h.service.passwordLogin('owner-a@example.test', 'fixture-password')
-    ).resolves.toEqual({ authenticated: true, me: homeUser })
+    ).resolves.toEqual({
+      authenticated: true,
+      me: homeUser,
+      sessionGeneration: expect.any(Number),
+    })
 
     expect(order).toEqual(['marker-projection', 'authority-acceptance-cas'])
     expect(markerCas).not.toHaveBeenCalled()
@@ -2337,7 +2357,11 @@ describe('Stage 4 public login candidate acceptance', () => {
     })
     await expect(
       h.service.passwordLogin('owner-a@example.test', 'fixture-password')
-    ).resolves.toEqual({ authenticated: true, me: homeUser })
+    ).resolves.toEqual({
+      authenticated: true,
+      me: homeUser,
+      sessionGeneration: expect.any(Number),
+    })
 
     const selectedA = await h.acceptance.readSessionAuthoritySourceSelection({
       tokenStore: h.tokenStore,
@@ -2365,7 +2389,11 @@ describe('Stage 4 public login candidate acceptance', () => {
       directorySyncRejected: true,
     })
     expect(outcome.error).toBeNull()
-    expect(outcome.value).toEqual({ authenticated: true, me: replacementUser })
+    expect(outcome.value).toEqual({
+      authenticated: true,
+      me: replacementUser,
+      sessionGeneration: expect.any(Number),
+    })
     expect(h.state.sessionToken).toBe(replacementToken)
     expect(h.state.me).toEqual(replacementUser)
     expect(h.service.getCachedUserId()).toBe(replacementUser.id)
@@ -2403,7 +2431,11 @@ describe('Stage 4 public login candidate acceptance', () => {
     })
     await expect(
       h.service.passwordLogin('owner-a@example.test', 'fixture-password')
-    ).resolves.toEqual({ authenticated: true, me: homeUser })
+    ).resolves.toEqual({
+      authenticated: true,
+      me: homeUser,
+      sessionGeneration: expect.any(Number),
+    })
     expect(h.state.sessionToken).toBe(homeToken)
     h.state.authClient.getMe.mockClear()
 

@@ -47,15 +47,21 @@ function createHarness() {
   const getSessionState = vi.fn(async () => ({ authenticated }))
   const reportLogoutFailure = vi.fn()
   const handleSandboxUiDeepLink = vi.fn<(rawUrl: string) => boolean>().mockReturnValue(true)
+  const handleGfsResourceDeepLink = vi.fn<(rawUrl: string) => boolean>().mockReturnValue(true)
   const shouldAcceptSandboxUiProtocolLink = vi
+    .fn<(rawUrl: string) => boolean>()
+    .mockReturnValue(true)
+  const shouldAcceptGfsResourceProtocolLink = vi
     .fn<(rawUrl: string) => boolean>()
     .mockReturnValue(true)
   const router = createEvenfireDeepLinkRouter<TestWindow>({
     appProtocol: 'evenfire',
     sandboxUiDeepLinkHost: 'app',
+    gfsResourceDeepLinkHost: 'files',
     focusMainWindow: focusWindow,
     getWindow: () => currentWindow,
     handleSandboxUiDeepLink,
+    handleGfsResourceDeepLink,
     isRendererReady: () => rendererReady,
     logout,
     deferLogout,
@@ -63,12 +69,14 @@ function createHarness() {
     reportLogoutFailure,
     requestMainWindow,
     shouldAcceptSandboxUiProtocolLink,
+    shouldAcceptGfsResourceProtocolLink,
   })
 
   return {
     currentWindow: () => currentWindow,
     focusWindow,
     handleSandboxUiDeepLink,
+    handleGfsResourceDeepLink,
     logout,
     deferLogout,
     getSessionState,
@@ -89,6 +97,7 @@ function createHarness() {
       currentWindow = window
     },
     shouldAcceptSandboxUiProtocolLink,
+    shouldAcceptGfsResourceProtocolLink,
   }
 }
 
