@@ -703,6 +703,11 @@ if (memberRegistrationMode === 'hosted') {
 // Computed once so every consumer below reads the exact same resolved value
 // (rather than re-parsing REGISTRY_CONNECTION_MODE a second time).
 const registryConnectionMode: 'managed' | 'self-hosted' = parseRegistryConnectionMode()
+const oauthEncryptionKey = requiredOrDevDefault(
+  'CONTROL_API_OAUTH_ENCRYPTION_KEY',
+  // 32-byte hex-encoded dev key (AES-256-GCM). Prod must override.
+  '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
+)
 
 // Computed as locals because the two values are coupled: image-input evidence
 // written by a sync expires TTL after the capture it came from, so a TTL shorter
@@ -1342,11 +1347,7 @@ export const config: Config = {
     'CONTROL_API_OAUTH_STATE_HMAC_SECRET',
     'dev-oauth-state-hmac-secret-32-bytes-pad'
   ),
-  oauthEncryptionKey: requiredOrDevDefault(
-    'CONTROL_API_OAUTH_ENCRYPTION_KEY',
-    // 32-byte hex-encoded dev key (AES-256-GCM). Prod must override.
-    '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
-  ),
+  oauthEncryptionKey,
   // Optional: when set, used verbatim as the origin of the public OAuth callback
   // URL (the redirect_uri). Empty → derive from the request Host (local dev).
   oauthCallbackBaseUrl: process.env.CONTROL_API_OAUTH_CALLBACK_BASE_URL ?? '',

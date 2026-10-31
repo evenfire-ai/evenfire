@@ -6,6 +6,11 @@ import {
 } from './boundedPgPool.js'
 import { config } from './config.js'
 import { rootLogger } from './observability/logger.js'
+import {
+  applyOidcProtocolAttemptBrowserBindingSchema,
+  applyOidcProtocolAttemptExpiryIndexMigration,
+  applyOidcProtocolAttemptSchema,
+} from './oidc/protocolAttemptStore.js'
 import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
 import {
   applyPasswordAdmissionSchema,
@@ -6385,6 +6390,21 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0130_password_login_success_admission',
     apply: applyPasswordSuccessAdmissionSchema,
+  },
+  {
+    version: '0131_oidc_protocol_attempts',
+    // The protocol-attempt migration was unpublished when dev assigned slot 0130.
+    // Preserve databases that recorded the original feature-branch identifier.
+    legacyVersions: ['0130_oidc_protocol_attempts'],
+    apply: applyOidcProtocolAttemptSchema,
+  },
+  {
+    version: '0132_oidc_protocol_attempt_expiry_index',
+    apply: applyOidcProtocolAttemptExpiryIndexMigration,
+  },
+  {
+    version: '0133_oidc_protocol_attempt_browser_binding',
+    apply: applyOidcProtocolAttemptBrowserBindingSchema,
   },
 ]
 

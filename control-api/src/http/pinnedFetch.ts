@@ -69,7 +69,17 @@ export type PinnedTransport = (input: PinnedTransportInput) => Promise<PinnedRaw
 
 export type PinnedFetchError =
   | { kind: 'kernel_rejected'; field: string; errors: ValidationError[] }
-  | { kind: 'transport_failed'; detail: string }
+  | {
+      kind: 'transport_failed'
+      detail: string
+      /** Machine-readable producer cause; `detail` remains diagnostic text only. */
+      cause?:
+        | 'caller_cancelled'
+        | 'request_deadline'
+        | 'transient_dns'
+        | 'resolver_failure'
+        | 'transport_error'
+    }
   | { kind: 'content_encoding_rejected'; encoding: string }
 
 export interface PinnedResponse {
@@ -92,6 +102,8 @@ export interface PinnedFetchOptions {
   transport?: PinnedTransport
   timeoutMs?: number
   maxBodyBytes?: number
+  /** Optional caller cancellation, combined with the bounded request deadline. */
+  signal?: AbortSignal
   /**
    * When false, the transport resolves on the response headers and discards the body
    * (see {@link PinnedTransportInput.readBody}). The returned `bodyText` is empty.
@@ -102,6 +114,15 @@ export interface PinnedFetchOptions {
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
+}
+
+function abortCause(
+  options: PinnedFetchOptions,
+  signal: AbortSignal
+): 'caller_cancelled' | 'request_deadline' | undefined {
+  if (options.signal?.aborted) return 'caller_cancelled'
+  if (signal.aborted) return 'request_deadline'
+  return undefined
 }
 
 function firstHeaderValue(value: string | string[] | undefined): string | undefined {
@@ -213,10 +234,57 @@ export async function pinnedFetch(
   field: string,
   options: PinnedFetchOptions = {}
 ): Promise<PinnedFetchResult> {
-  const resolved = await resolveValidatedOAuthEndpoint(url, field, {
-    resolveDns: options.resolveDns,
-  })
+  const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal
+  if (signal.aborted) {
+    return {
+      ok: false,
+      error: {
+        kind: 'transport_failed',
+        detail: options.signal?.aborted ? 'request cancelled' : 'request deadline exceeded',
+        cause: abortCause(options, signal),
+      },
+    }
+  }
+  let abortListener: (() => void) | undefined
+  let resolved: Awaited<ReturnType<typeof resolveValidatedOAuthEndpoint>>
+  try {
+    const aborted = new Promise<never>((_resolve, reject) => {
+      abortListener = () => reject(signal.reason ?? new Error('request aborted'))
+      if (signal.aborted) abortListener()
+      else signal.addEventListener('abort', abortListener, { once: true })
+    })
+    resolved = await Promise.race([
+      resolveValidatedOAuthEndpoint(url, field, { resolveDns: options.resolveDns }),
+      aborted,
+    ])
+  } catch {
+    return {
+      ok: false,
+      error: {
+        kind: 'transport_failed',
+        detail: signal.aborted
+          ? options.signal?.aborted
+            ? 'request cancelled'
+            : 'request deadline exceeded'
+          : 'endpoint resolution failed',
+        cause: abortCause(options, signal) ?? 'resolver_failure',
+      },
+    }
+  } finally {
+    if (abortListener) signal.removeEventListener('abort', abortListener)
+  }
   if (!resolved.ok) {
+    if (resolved.classification === 'transient_dns') {
+      return {
+        ok: false,
+        error: {
+          kind: 'transport_failed',
+          detail: 'endpoint resolution temporarily failed',
+          cause: 'transient_dns',
+        },
+      }
+    }
     return { ok: false, error: { kind: 'kernel_rejected', field, errors: resolved.errors } }
   }
 
@@ -227,8 +295,6 @@ export async function pinnedFetch(
     'accept-encoding': 'identity',
     ...options.headers,
   }
-  const signal = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
-
   let raw: PinnedRawResponse
   try {
     raw = await transport({
@@ -242,7 +308,14 @@ export async function pinnedFetch(
       ...(options.body !== undefined ? { body: options.body } : {}),
     })
   } catch (e) {
-    return { ok: false, error: { kind: 'transport_failed', detail: errMessage(e) } }
+    return {
+      ok: false,
+      error: {
+        kind: 'transport_failed',
+        detail: errMessage(e),
+        cause: abortCause(options, signal) ?? 'transport_error',
+      },
+    }
   }
 
   const encoding = firstHeaderValue(raw.headers['content-encoding'])
