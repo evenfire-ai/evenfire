@@ -279,6 +279,70 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     END;
     $$;
 
+    CREATE OR REPLACE FUNCTION public.authorization_prelock_user_retirement_revisions(target_user_ids UUID[])
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE
+      team_keys TEXT[];
+      team_key TEXT;
+    BEGIN
+      -- Lock the complete principal batch before discovering its affected teams.
+      -- Callers must not have locked a member of this batch out of UUID order.
+      PERFORM principal.id FROM public.users AS principal
+       WHERE principal.id = ANY(target_user_ids)
+       ORDER BY principal.id FOR UPDATE;
+
+      SELECT array_agg(subject_id ORDER BY subject_id) INTO team_keys
+        FROM (
+          SELECT member.team_id::TEXT AS subject_id
+            FROM public.team_members AS member
+           WHERE member.user_id = ANY(target_user_ids)
+          UNION
+          SELECT subjects.subject_id
+            FROM public.workflow_runs_audit AS audit
+            CROSS JOIN LATERAL (VALUES
+              (audit.triggerer_team_id::TEXT),
+              (CASE WHEN audit.usage_team_id = 'control-plane-admin-ui'
+                    THEN NULL ELSE audit.usage_team_id END)
+            ) AS subjects(subject_id)
+           WHERE audit.triggerer_user_id = ANY(target_user_ids)
+             AND subjects.subject_id IS NOT NULL AND subjects.subject_id <> ''
+        ) AS affected;
+
+      -- Match authorization_bump_subject_revision's validation and raw TEXT order.
+      -- Do not lowercase before sorting: usage_team_id is TEXT, not a UUID FK.
+      FOREACH team_key IN ARRAY COALESCE(team_keys, ARRAY[]::TEXT[]) LOOP
+        IF team_key !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+          RAISE EXCEPTION 'invalid catalog % subject identifier', 'team';
+        END IF;
+      END LOOP;
+
+      -- Parent locks before revision locks, as in the workflow prelock idiom.
+      PERFORM team.id FROM public.teams AS team
+       WHERE team.id IN (SELECT key::UUID FROM unnest(team_keys) AS keys(key))
+       ORDER BY team.id FOR KEY SHARE;
+
+      -- Child-row writers take their row before the AFTER ROW revision trigger.
+      -- Lock every status, including deleted, before taking any team revision.
+      PERFORM member.user_id FROM public.team_members AS member
+       WHERE member.user_id = ANY(target_user_ids)
+       ORDER BY member.user_id, member.team_id FOR UPDATE;
+
+      -- Residual pre-existing createRun risk: case variants of one UUID retain raw
+      -- TEXT keys; collation can invert physical team order. Inventory before rollout.
+      FOREACH team_key IN ARRAY COALESCE(team_keys, ARRAY[]::TEXT[]) LOOP
+        PERFORM revision.team_id FROM public.authorization_team_revisions AS revision
+         WHERE revision.team_id = team_key::UUID FOR UPDATE;
+      END LOOP;
+      -- No user-revision prelock: medium/row triggers acquire it after child rows.
+    END;
+    $$;
+    REVOKE ALL ON FUNCTION public.authorization_prelock_user_retirement_revisions(UUID[]) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION public.authorization_prelock_user_retirement_revisions(UUID[]) TO control_api_runtime;
+
     CREATE OR REPLACE FUNCTION authorization_prelock_workflow_run_revisions(target_run_ids UUID[])
     RETURNS VOID
     LANGUAGE plpgsql
@@ -1026,6 +1090,58 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
      ON CONFLICT (singleton) DO UPDATE SET environment_id = EXCLUDED.environment_id`,
     [canonicalEnvironmentId()]
   )
+  // Ship coverage and the definer atomically with the 0134 receipt. The DDL
+  // already fences writers; a bounded wait aborts the entire unit on contention.
+  // Rerunning initDb after rollback preserves existing revisions and fills gaps.
+  await db.query(`
+    DO $$
+    DECLARE
+      previous_lock_timeout TEXT := current_setting('lock_timeout');
+      lock_wait_ms INTEGER := floor(
+        extract(epoch FROM current_setting('deadlock_timeout')::interval) * 500
+      );
+    BEGIN
+      IF lock_wait_ms < 1 THEN
+        RAISE EXCEPTION '0134 revision backfill requires deadlock_timeout >= 2ms';
+      END IF;
+      PERFORM set_config('lock_timeout', LEAST(lock_wait_ms, 500)::TEXT, true);
+
+      -- Teams before users, all lifecycle states. Never reset a bumped revision.
+      INSERT INTO public.authorization_team_revisions(team_id, revision, updated_at)
+      SELECT id, 1, clock_timestamp() FROM public.teams ORDER BY id
+      ON CONFLICT (team_id) DO NOTHING;
+      INSERT INTO public.authorization_user_revisions(user_id, revision, updated_at)
+      SELECT id, 1, clock_timestamp() FROM public.users ORDER BY id
+      ON CONFLICT (user_id) DO NOTHING;
+
+      IF EXISTS (SELECT 1 FROM public.users u LEFT JOIN public.authorization_user_revisions r
+                   ON r.user_id = u.id WHERE r.user_id IS NULL)
+         OR EXISTS (SELECT 1 FROM public.teams t LEFT JOIN public.authorization_team_revisions r
+                      ON r.team_id = t.id WHERE r.team_id IS NULL) THEN
+        RAISE EXCEPTION '0134 revision backfill left uncovered users or teams';
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_proc p
+         WHERE p.oid = 'public.authorization_prelock_user_retirement_revisions(uuid[])'::regprocedure
+           AND p.prosecdef
+           AND p.proowner = (SELECT relowner FROM pg_class
+                              WHERE oid = 'public.authorization_user_revisions'::regclass)
+           AND p.proowner = (SELECT relowner FROM pg_class
+                              WHERE oid = 'public.authorization_team_revisions'::regclass)
+           AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp']
+           AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner)))
+                            WHERE grantee = 0)
+           AND has_function_privilege('control_api_runtime', p.oid, 'EXECUTE')
+      ) OR NOT has_table_privilege('control_api_runtime', 'public.authorization_user_revisions', 'SELECT')
+        OR NOT has_table_privilege('control_api_runtime', 'public.authorization_team_revisions', 'SELECT')
+        OR has_table_privilege('control_api_runtime', 'public.authorization_user_revisions', 'INSERT, UPDATE, DELETE, TRUNCATE')
+        OR has_table_privilege('control_api_runtime', 'public.authorization_team_revisions', 'INSERT, UPDATE, DELETE, TRUNCATE') THEN
+        RAISE EXCEPTION '0134 user retirement prelock owner or runtime privileges are invalid';
+      END IF;
+      PERFORM set_config('lock_timeout', previous_lock_timeout, true);
+    END;
+    $$;
+  `)
 }
 
 async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> {

@@ -495,6 +495,9 @@ export async function retireDesktopUser(
       )
     }
     const lifecycleVersion = requireLifecycleVersion(user.lifecycle_version)
+    await db.query('SELECT public.authorization_prelock_user_retirement_revisions($1::uuid[])', [
+      [targetUserId],
+    ])
     await options.authorize?.(db)
 
     const history = await db.query(
@@ -678,6 +681,9 @@ export async function adminDeleteUserInTransaction(
   db: DbClient,
   userId: string
 ): Promise<AdminDeleteUserResult> {
+  await db.query('SELECT public.authorization_prelock_user_retirement_revisions($1::uuid[])', [
+    [userId],
+  ])
   const exists = await db.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [userId])
   if ((exists.rowCount ?? 0) === 0) {
     return { error: 'not_found' }

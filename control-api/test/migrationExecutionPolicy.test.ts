@@ -115,11 +115,13 @@ describe('D34 migration execution policy', () => {
     // expiry. B4.1 (PR #334 review r2) then granted the approval prelock to the
     // Workflow Recipes runtime, which holds the stuck-run sweep's approval
     // subjects before its first run phase change. DB-2 B0 now guards the GFS
-    // backfill at 100000 resources and runs it before trigger DDL.
+    // backfill at 100000 resources and runs it before trigger DDL. DB-1
+    // (D-D1: no shared 0134 receipts) adds the retirement definer and atomic
+    // user/team coverage with fail-closed receipt postconditions in 0134.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        '23c041f3836530622ba43494e4978e6a79c57d9b33a83c3b536ef5c72423018c',
+        'd0245a5ac51ef2e782c91923db538466f6fce1ff4975043e3b5dd71c9fa06908',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',

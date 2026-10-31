@@ -1168,6 +1168,68 @@ export const CONTROL_ADMIN_REPLACED_REASON = 'control_admin_replaced'
 const TEAM_ROLE_RANK = (column: string) =>
   `(CASE ${column} WHEN 'admin' THEN 3 WHEN 'inviter' THEN 2 ELSE 1 END)`
 
+export class HandoverIdentityChangedError extends Error {
+  readonly code = 'handover_identity_changed'
+
+  constructor(phase: 'after-prelock' | 'pinned-sender-lookup' | 'before-membership-copy') {
+    super(`handover identity changed: ${phase}`)
+    this.name = 'HandoverIdentityChangedError'
+  }
+}
+
+type HandoverDesktopIdentity = { id: string; email: string | null; lifecycle_state: string }
+type HandoverLinkIdentity = HandoverDesktopIdentity & {
+  link_id: string
+  generation: number
+  state: string
+  row_version: string
+}
+
+// Discovery never locks desktop users. UNIQUE(email) is case-sensitive, so
+// every active case-insensitive receiver belongs to the batch, not just one.
+// Keep the complete latest-link mapping: even a same-user version change must
+// invalidate the snapshot that defined the ordered prelock.
+async function discoverHandover(db: DbClient, inviterId: string, receiverEmail: string) {
+  const inviter = (
+    await db.query('SELECT id::text AS id, email, status FROM control_admin_users WHERE id=$1', [
+      inviterId,
+    ])
+  ).rows[0] as { id: string; email: string | null; status: string } | undefined
+  const links = (
+    await db.query(
+      `SELECT link.id::text AS link_id, link.generation, link.state, link.row_version,
+            u.id::text AS id, u.email, u.lifecycle_state
+       FROM gfs_desktop_operator_links link JOIN users u ON u.id=link.user_id
+      WHERE link.control_admin_id=$1::uuid
+      ORDER BY link.generation DESC, link.created_at DESC LIMIT 1`,
+      [inviterId]
+    )
+  ).rows as HandoverLinkIdentity[]
+  let sender: HandoverDesktopIdentity | undefined =
+    links[0]?.lifecycle_state === 'active' ? links[0] : undefined
+  if (!links.length && inviter?.email) {
+    sender = (
+      await db.query(
+        `SELECT u.id::text AS id, u.email, u.lifecycle_state
+         FROM users u WHERE lower(u.email)=lower($1) AND u.lifecycle_state='active'
+          AND NOT EXISTS (SELECT 1 FROM gfs_desktop_operator_links l
+                           WHERE l.user_id=u.id AND l.control_admin_id<>$2::uuid)
+        ORDER BY u.id LIMIT 1`,
+        [inviter.email, inviterId]
+      )
+    ).rows[0] as HandoverDesktopIdentity | undefined
+  }
+  const receivers = (
+    await db.query(
+      `SELECT id::text AS id, email, lifecycle_state FROM users
+      WHERE lower(email)=lower($1) AND lifecycle_state='active'
+        AND id IS DISTINCT FROM $2::uuid ORDER BY id`,
+      [receiverEmail, sender?.id ?? null]
+    )
+  ).rows as HandoverDesktopIdentity[]
+  return { inviter, links, sender: sender ?? null, receivers }
+}
+
 /**
  * Hand the inviter's access to the invitee and retire the inviter, inside the
  * transaction that created the invitee's control admin.
@@ -1205,6 +1267,26 @@ async function replaceInviterInTransaction(
     return null
   }
 
+  // Lock the complete sender/receiver union before any membership copy or
+  // desktop-user lock. Repeated retirement prelocks then consume a held subset.
+  const newAdminEmail = input.newAdmin.email ?? ''
+  const handover = await discoverHandover(db, inviter.id, newAdminEmail)
+  const principalIds = [
+    ...new Set([
+      ...(handover.sender ? [handover.sender.id] : []),
+      ...handover.receivers.map(receiver => receiver.id),
+    ]),
+  ]
+  await db.query('SELECT public.authorization_prelock_user_retirement_revisions($1::uuid[])', [
+    principalIds,
+  ])
+  if (
+    JSON.stringify(handover) !==
+    JSON.stringify(await discoverHandover(db, inviter.id, newAdminEmail))
+  ) {
+    throw new HandoverIdentityChangedError('after-prelock')
+  }
+
   // The most recent operator link names this admin's desktop user, revoked or
   // not. An admin email change never updates users.email, and a revoked link
   // must not fall through to that email. Email is only the mapping for an
@@ -1215,10 +1297,10 @@ async function replaceInviterInTransaction(
        FROM gfs_desktop_operator_links link
        JOIN users u ON u.id = link.user_id
       WHERE link.control_admin_id = $1::uuid
+        AND u.id = $2::uuid
       ORDER BY link.generation DESC, link.created_at DESC
-      LIMIT 1
-      FOR UPDATE OF u`,
-    [inviter.id]
+      LIMIT 1`,
+    [inviter.id, handover.links[0]?.id ?? null]
   )
   const linked = linkHistory.rows[0] as
     | { id: string; email: string | null; lifecycle_state: string }
@@ -1238,17 +1320,18 @@ async function replaceInviterInTransaction(
              WHERE l.user_id = u.id
                AND l.control_admin_id <> $2::uuid
           )
+          AND u.id = $3::uuid
         ORDER BY u.id
-        LIMIT 1
-        FOR UPDATE OF u`,
-      [inviter.email, inviter.id]
+        LIMIT 1`,
+      [inviter.email, inviter.id, handover.sender?.id ?? null]
     )
     inviterDesktop = emailMatch.rows[0] as { id: string; email: string | null } | undefined
   }
   const inviterDesktopUserId = inviterDesktop?.id ?? null
   const inviterDesktopEmail = inviterDesktop?.email ?? null
-  // completeControlAdminInvitation always inserts the normalized invitation email.
-  const newAdminEmail = input.newAdmin.email ?? ''
+  if (inviterDesktopUserId !== (handover.sender?.id ?? null)) {
+    throw new HandoverIdentityChangedError('pinned-sender-lookup')
+  }
 
   if (inviterDesktopUserId) {
     // The invitee is the inviter's own desktop user. Copying roles onto that
@@ -1297,13 +1380,22 @@ async function replaceInviterInTransaction(
     }
     if (hasRoles && !hasReceiver) return 'replace_inviter_receiver_missing'
 
+    // Close identity drift after the initial revalidation, including link row
+    // versions. No copy may run on a changed batch; the caller rolls back admin
+    // creation and invitation acceptance as well. Never retry or enlarge it.
+    const verified = await discoverHandover(db, inviter.id, newAdminEmail)
+    if (JSON.stringify(handover) !== JSON.stringify(verified)) {
+      throw new HandoverIdentityChangedError('before-membership-copy')
+    }
+    const receiverIds = verified.receivers.map(receiver => receiver.id)
+
     // (1a) The invitee already has a desktop user: raise its memberships.
     await db.query(
       `INSERT INTO team_members(team_id, user_id, role, status)
        SELECT source.team_id, target.id, source.role, 'active'
          FROM team_members source
          JOIN users target
-           ON lower(target.email) = lower($2)
+           ON target.id = ANY($2::uuid[])
           AND target.lifecycle_state = 'active'
           AND target.id <> $1::uuid
         WHERE source.user_id = $1::uuid
@@ -1317,7 +1409,7 @@ async function replaceInviterInTransaction(
                      END,
               status = 'active',
               updated_at = NOW()`,
-      [inviterDesktopUserId, newAdminEmail]
+      [inviterDesktopUserId, receiverIds]
     )
     // (1b) The desktop invitation is accepted after this transaction commits
     // (POST /admin/auth/control-admin-invitations/complete) and upserts
@@ -1352,7 +1444,7 @@ async function replaceInviterInTransaction(
            ON source.user_id = $1::uuid
           AND source.status = 'active'
          LEFT JOIN users target
-           ON lower(target.email) = lower(i.email)
+           ON target.id = ANY($3::uuid[])
           AND target.lifecycle_state = 'active'
          LEFT JOIN team_members held
            ON held.user_id = target.id
@@ -1367,7 +1459,7 @@ async function replaceInviterInTransaction(
                          THEN EXCLUDED.role
                        ELSE invitation_teams.role
                      END`,
-      [inviterDesktopUserId, newAdminEmail]
+      [inviterDesktopUserId, newAdminEmail, receiverIds]
     )
 
     // (2) Retire, never hard-delete, the inviter's desktop identity.

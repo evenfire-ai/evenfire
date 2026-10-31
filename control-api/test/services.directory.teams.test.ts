@@ -295,11 +295,13 @@ describe('services/directory team management unit tests', () => {
   })
 
   it('adminDeleteUser returns not_found when user missing', async () => {
+    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     await expect(adminDeleteUser('u1')).resolves.toEqual({ error: 'not_found' })
   })
 
-  it('adminDeleteUser does not inspect team memberships before deleting the user row', async () => {
+  it('adminDeleteUser delegates ordered revision locking to the definer before deleting', async () => {
+    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ x: 1 }], rowCount: 1 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
@@ -307,11 +309,17 @@ describe('services/directory team management unit tests', () => {
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ id: 'u1' }], rowCount: 1 })
     await expect(adminDeleteUser('u1')).resolves.toEqual({ ok: true, id: 'u1' })
 
+    expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
+      1,
+      'SELECT public.authorization_prelock_user_retirement_revisions($1::uuid[])',
+      [['u1']]
+    )
     const sqls = dbMocks.txQuery.mock.calls.map(([sql]) => String(sql))
     expect(sqls.some(sql => sql.includes('FROM team_members'))).toBe(false)
   })
 
   it('adminDeleteUser disables approval mediums before deleting the user row', async () => {
+    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ x: 1 }], rowCount: 1 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
@@ -319,35 +327,36 @@ describe('services/directory team management unit tests', () => {
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ id: 'u1' }], rowCount: 1 })
     await expect(adminDeleteUser('u1')).resolves.toEqual({ ok: true, id: 'u1' })
     expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
-      2,
+      3,
       expect.stringContaining('FROM gfs_desktop_operator_links'),
       ['u1']
     )
     expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
-      3,
+      4,
       expect.stringContaining('UPDATE workflow_approval_medium_accounts'),
       ['u1']
     )
     expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
-      4,
+      5,
       expect.stringContaining('UPDATE workflow_approval_medium_challenges'),
       ['u1']
     )
     expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
-      5,
+      6,
       expect.stringContaining('DELETE FROM users'),
       ['u1']
     )
   })
 
   it('refuses the legacy hard-delete when operator-link history is retained', async () => {
+    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ x: 1 }], rowCount: 1 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 })
 
     await expect(adminDeleteUser('u1')).resolves.toEqual({
       error: 'gfs_operator_link_history_retained',
     })
-    expect(dbMocks.txQuery).toHaveBeenCalledTimes(2)
+    expect(dbMocks.txQuery).toHaveBeenCalledTimes(3)
     expect(dbMocks.txQuery).not.toHaveBeenCalledWith(expect.stringContaining('DELETE FROM users'), [
       'u1',
     ])
