@@ -651,7 +651,9 @@ jobs:
             legacyPasswordEpochBackfill.realPostgres.integration.test.ts \
             legacySessionExchangeRace.realPostgres.integration.test.ts \
             migrationExecutionPolicy.realPostgres.integration.test.ts \
+            migrationGfsBackfillBound.realPostgres.integration.test.ts \
             migrationPreviousImageCompatibility.realPostgres.integration.test.ts \
+            migrationUserRetirementRevisions.realPostgres.integration.test.ts \
             pr1MigrationLocks.realPostgres.integration.test.ts \
             routes.externalTeamsFinalAuthority.realPostgres.integration.test.ts \
             routes.externalTeamsLegacyAdminRevocation.realPostgres.integration.test.ts \
@@ -659,6 +661,7 @@ jobs:
             userSessionDatabaseClock.realPostgres.integration.test.ts \
             archiveRevisionLockOrder.realPostgres.integration.test.ts \
             revisionWritersLockOrder.realPostgres.integration.test.ts \
+            userRetirementRevisionLockOrder.realPostgres.integration.test.ts \
             workflowRunReadAndApprovalV1Compatibility.realPostgres.integration.test.ts
 
       - name: Install gfs-controller dependencies
