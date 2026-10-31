@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { useCallback, useEffect, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { GfsResourceDeepLinkQueue } from '../../../../../src/gfsResourceDeepLinkQueue'
 import { type GfsPreviewResource, resolveGfsPreview } from '../../../lib/gfsPreview'
@@ -162,6 +162,86 @@ function DeepLinkNavigationHarness({
     </>
   )
 }
+
+function FilesNavigationReceiptHarness({
+  initialTabs,
+  path,
+}: {
+  initialTabs: WorkspaceTabsState
+  path: string | null
+}) {
+  const nav = useNavigationController()
+  const [receipt, setReceipt] = useState<{
+    ownerTabId: string
+    intentSequence: number
+  } | null>(null)
+
+  useEffect(() => {
+    nav.setWorkspaceTabs(initialTabs)
+  }, [initialTabs, nav.setWorkspaceTabs])
+
+  const active = activeWorkspaceTab(nav.workspaceTabs)
+  return (
+    <>
+      <button type="button" onClick={() => setReceipt(nav.openFilesSection(path) ?? null)}>
+        Open destination
+      </button>
+      <output data-testid="receipt">
+        {receipt ? `${receipt.ownerTabId}|${receipt.intentSequence}` : 'none'}
+      </output>
+      <output data-testid="active-tab-id">{active?.id ?? 'none'}</output>
+      <output data-testid="active-route">{tabRoute(active)}</output>
+      <output data-testid="intent-sequence">{nav.navigationIntentSequence}</output>
+    </>
+  )
+}
+
+describe('useNavigationController — Files navigation receipts', () => {
+  it.each([
+    {
+      name: 'creates a new exact-path destination',
+      initialTabs: createWorkspaceTabsState('chat-tab-1'),
+      expectedOwnerTabId: 'ws-tab-2',
+    },
+    {
+      name: 'returns the inactive exact-path destination selected by deduplication',
+      initialTabs: selectWorkspaceTab(
+        openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+          id: 'existing-files',
+          path: 'gfs://main/abababababababababababababababab',
+          title: 'Existing destination',
+        }),
+        'chat-tab-1'
+      ),
+      expectedOwnerTabId: 'existing-files',
+    },
+    {
+      name: 'returns the already active exact-path destination',
+      initialTabs: openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'active-files',
+        path: 'gfs://main/abababababababababababababababab',
+        title: 'Active destination',
+      }),
+      expectedOwnerTabId: 'active-files',
+    },
+  ])('$name', async ({ initialTabs, expectedOwnerTabId }) => {
+    installMainNavigationGeneration()
+    const path = 'gfs://main/abababababababababababababababab'
+    render(<FilesNavigationReceiptHarness initialTabs={initialTabs} path={path} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open destination' }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('active-tab-id').textContent).toBe(expectedOwnerTabId)
+      expect(screen.getByTestId('active-route').textContent).toBe(path)
+    })
+    const intentSequence = Number(screen.getByTestId('intent-sequence').textContent)
+    expect(screen.getByTestId('receipt').textContent).toBe(
+      `${expectedOwnerTabId}|${intentSequence}`
+    )
+    expect(intentSequence).toBeGreaterThan(0)
+  })
+})
 
 describe('useNavigationController — GFS activation ordering', () => {
   it('keeps Chat selected when an older link is delivered after an explicit Chat selection', async () => {

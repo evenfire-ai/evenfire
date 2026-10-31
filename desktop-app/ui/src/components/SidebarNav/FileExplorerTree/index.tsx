@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
+import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
   GFS_DRIVE_MAIN,
@@ -13,14 +14,17 @@ import {
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
 import {
+  type GfsBrowserAffordances,
   type GfsBrowserChild,
   type GfsCrumb,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
+import { parseHttpStatus } from '@lib/gfsGrantErrors'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { resolveGfsPreview } from '@lib/gfsPreview'
+import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
@@ -51,6 +55,10 @@ const DOUBLE_CLICK_DELAY_MS = 250
 function errorMessage(error: unknown): string | null {
   if (!error) return null
   return error instanceof Error ? error.message : String(error)
+}
+
+function hasBit(affordances: GfsBrowserAffordances | undefined, bit: string): boolean {
+  return Boolean(affordances?.held.includes(bit))
 }
 
 // A GFS name is externally controlled (anyone who can write to a shared drive the
@@ -99,6 +107,7 @@ function FileExplorerNode({
   onToggle,
   onActivateFolder,
   onActivateFile,
+  onResourceAction,
   onAuthorityFailure,
   onNodeDragStart,
   onNodeDragEnd,
@@ -112,12 +121,104 @@ function FileExplorerNode({
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
   const label = displayName(node.name)
+  const [resourceMenuOpen, setResourceMenuOpen] = useState(false)
   // Server-computed: the row is visible but the session cannot read it (a
   // folder grant without inheritance; a file whose parent does not inherit).
   // Mark it so it does not look actionable, and let the activate handlers
   // refuse it with a toast instead of a later download/preview 403. Absent
   // (older servers) is treated as unknown, not unreadable.
   const isUnreadable = node.readable === false
+
+  const affordancesQuery = useQuery({
+    queryKey: desktopQueryKeys.gfsAffordances(
+      scope,
+      node.resourceId,
+      node.drive,
+      sessionGeneration
+    ),
+    queryFn: () => window.clerum.gfs.affordances(node.resourceId, node.drive),
+    enabled: resourceMenuOpen && accessActive && isGfsSessionGeneration(sessionGeneration),
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
+    staleTime: 0,
+  })
+  // Do not expose permission-gated operations from cached bits while a fresh
+  // menu-open/focus revalidation is in flight or after it fails. Move remains
+  // available because its authority is parent-relative and enforced by server.
+  const affordances =
+    affordancesQuery.isFetching || affordancesQuery.error ? undefined : affordancesQuery.data
+  useEffect(() => {
+    if (!affordancesQuery.error) return
+    if (isGfsSessionGeneration(sessionGeneration)) {
+      onAuthorityFailure(affordancesQuery.error, scope, sessionGeneration)
+    }
+  }, [affordancesQuery.error, onAuthorityFailure, scope, sessionGeneration])
+  const preview = useMemo(() => resolveGfsPreview(node), [node])
+  const canPreview = Boolean(preview && !isUnreadable)
+  const canCopyContent = Boolean(
+    canPreview && (preview?.kind === 'image' || preview?.kind === 'markdown')
+  )
+  const resourceActions = useMemo(
+    () =>
+      getGfsMenuActions(
+        buildGfsResourceActions({
+          kind: node.kind,
+          uri: node.gfsUri,
+          handlers: {
+            refresh:
+              accessActive && !isUnreadable ? () => onResourceAction(node, 'refresh') : undefined,
+            'copy-link': () => onResourceAction(node, 'copy-link'),
+            'copy-route': () => onResourceAction(node, 'copy-route'),
+            'open-route': () => onResourceAction(node, 'open-route'),
+            rename: () => onResourceAction(node, 'rename'),
+            move: () => onResourceAction(node, 'move'),
+            'new-folder': () => onResourceAction(node, 'new-folder'),
+            'upload-file': () => onResourceAction(node, 'upload-file'),
+            share: () => onResourceAction(node, 'share'),
+            'copy-content': canCopyContent
+              ? () => onResourceAction(node, 'copy-content')
+              : undefined,
+            preview: canPreview ? () => onActivateFile(node) : undefined,
+            download:
+              node.kind === 'file' && !isUnreadable
+                ? () => onResourceAction(node, 'download')
+                : undefined,
+            replace:
+              node.kind === 'file' && hasBit(affordances, 'write')
+                ? (file, context) => {
+                    if (file) onResourceAction(node, 'replace', file)
+                    else context?.requestFileSelection?.()
+                  }
+                : undefined,
+            'open-folder': isDirectory && !isUnreadable ? () => onActivateFolder(node) : undefined,
+            delete: () => onResourceAction(node, 'delete'),
+          },
+          canRename: hasBit(affordances, 'write'),
+          canMove: accessActive && node.parentResourceId != null,
+          canCreateFolder: isDirectory && hasBit(affordances, 'write'),
+          canUpload: isDirectory && hasBit(affordances, 'write'),
+          canShare: hasBit(affordances, 'manage_acl'),
+          canCopyContent,
+          canPreview,
+          canDownload: node.kind === 'file' && !isUnreadable,
+          canReplace: node.kind === 'file' && hasBit(affordances, 'write'),
+          canOpenFolder: isDirectory && !isUnreadable,
+          canDelete: hasBit(affordances, 'delete'),
+        })
+      ),
+    [
+      accessActive,
+      affordances,
+      canCopyContent,
+      canPreview,
+      isDirectory,
+      isUnreadable,
+      node,
+      onActivateFile,
+      onActivateFolder,
+      onResourceAction,
+    ]
+  )
 
   const childQueryKey = desktopQueryKeys.gfsChildren(
     scope,
@@ -145,9 +246,13 @@ function FileExplorerNode({
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
   const childDenied = isGfsChildrenDenied(childQuery.error, childQuery.data)
+  const childErrorMessage = errorMessage(childQuery.error)
+  const childHttpStatus = childErrorMessage ? parseHttpStatus(childErrorMessage) : null
   const childError = childDenied
     ? 'This folder is no longer available.'
-    : errorMessage(childQuery.error)
+    : childHttpStatus !== null
+      ? 'Unable to load folder contents.'
+      : childErrorMessage
   const childItems = useMemo(
     () =>
       childDenied ? [] : sortTreeItems((childQuery.data?.pages ?? []).flatMap(page => page.items)),
@@ -157,7 +262,7 @@ function FileExplorerNode({
   useEffect(() => {
     if (!childQuery.error || !isGfsSessionGeneration(sessionGeneration)) return
     purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError) onAuthorityFailure(childError, scope, sessionGeneration)
+    if (childError) onAuthorityFailure(childQuery.error, scope, sessionGeneration)
   }, [
     childError,
     childQuery.error,
@@ -400,6 +505,13 @@ function FileExplorerNode({
             </Badge>
           ) : null}
         </Button>
+        <span className="da-file-explorer__actions">
+          <GfsResourceMenu
+            actions={resourceActions}
+            onOpenChange={setResourceMenuOpen}
+            resourceName={label}
+          />
+        </span>
       </div>
       {isExpanded ? (
         <div className="da-file-explorer__group" role="group">
@@ -424,6 +536,7 @@ function FileExplorerNode({
               node={child}
               onActivateFile={onActivateFile}
               onActivateFolder={onActivateFolder}
+              onResourceAction={onResourceAction}
               onAuthorityFailure={onAuthorityFailure}
               onNodeDragEnd={onNodeDragEnd}
               onNodeDragLeave={onNodeDragLeave}
@@ -476,6 +589,7 @@ function FileExplorerNode({
 export function FileExplorerTree({
   onOpenFolder,
   onOpenPreview,
+  onResourceAction,
   pushToast,
 }: FileExplorerTreeProps) {
   const ctrl = useGfsBrowserController()
@@ -488,8 +602,8 @@ export function FileExplorerTree({
     resolve: (uri: string) => window.clerum.gfs.resolve(uri),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
-    handleAuthorityFailure: (message, scope, sessionGeneration) =>
-      ctrl.handleAuthorityFailure(message, 'operation', scope, sessionGeneration),
+    handleAuthorityFailure: (error, scope, sessionGeneration) =>
+      ctrl.handleAuthorityFailure(error, 'operation', scope, sessionGeneration),
   })
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -1096,8 +1210,7 @@ export function FileExplorerTree({
         setMovePermissionStatus(null)
         return
       }
-      const message = errorMessage(retryError) ?? String(retryError)
-      if (ctrl.handleAuthorityFailure(message, 'operation', scope, expectedGeneration)) {
+      if (ctrl.handleAuthorityFailure(retryError, 'operation', scope, expectedGeneration)) {
         closeMoveDialog()
         return
       }
@@ -1122,7 +1235,7 @@ export function FileExplorerTree({
 
   const authorityFailure = ctrl.handleAuthorityFailure
   const handleAuthorityFailure = useCallback(
-    (message: string, scope: string, sessionGeneration: number) =>
+    (message: unknown, scope: string, sessionGeneration: number) =>
       authorityFailure(message, 'operation', scope, sessionGeneration),
     [authorityFailure]
   )
@@ -1159,7 +1272,7 @@ export function FileExplorerTree({
           pushToast(`Downloaded ${displayName(node.name)}`, 'success')
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          if (authorityFailure(message, 'operation')) return
+          if (authorityFailure(error, 'operation')) return
           pushToast(message, 'error')
         } finally {
           downloadsInFlight.current.delete(node.gfsUri)
@@ -1231,6 +1344,7 @@ export function FileExplorerTree({
               node={node}
               onActivateFile={handleActivateFile}
               onActivateFolder={handleActivateFolder}
+              onResourceAction={onResourceAction}
               onAuthorityFailure={handleAuthorityFailure}
               onNodeDragEnd={clearDragState}
               onNodeDragLeave={handleNodeDragLeave}

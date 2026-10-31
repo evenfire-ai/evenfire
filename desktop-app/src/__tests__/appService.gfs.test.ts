@@ -18,7 +18,10 @@ const RESOURCE_ID = '11111111-1111-1111-1111-111111111111'
 function gfsService() {
   const service = new AppService() as unknown as {
     sessionToken: string | null
+    gfsAuthEpoch: number
+    gfsDispatchBlocked: boolean
     gfsClient: {
+      resolveUri: ReturnType<typeof vi.fn>
       grant: ReturnType<typeof vi.fn>
       createShare: ReturnType<typeof vi.fn>
       listShares: ReturnType<typeof vi.fn>
@@ -42,9 +45,12 @@ function gfsService() {
       drive?: string,
       ifMatch?: number
     ) => Promise<{ resourceId: string; version: number }>
+    resolveGfsUriInCurrentAuthScope: (uri: string) => Promise<unknown | null>
   }
   service.sessionToken = 'session-token'
+  service.gfsDispatchBlocked = false
   service.gfsClient = {
+    resolveUri: vi.fn(),
     grant: vi.fn().mockResolvedValue(undefined),
     createShare: vi.fn().mockResolvedValue(undefined),
     listShares: vi.fn().mockResolvedValue([]),
@@ -55,6 +61,24 @@ function gfsService() {
 }
 
 describe('AppService GFS delegation subject boundary', () => {
+  it('drops a plugin URI result when the GFS auth epoch changes during resolution', async () => {
+    const service = gfsService()
+    let finishResolve!: (resource: { resourceId: string }) => void
+    service.gfsClient.resolveUri.mockImplementation(
+      () => new Promise(resolve => (finishResolve = resolve))
+    )
+
+    const pending = service.resolveGfsUriInCurrentAuthScope('gfs://main/resource-a')
+    service.gfsAuthEpoch += 1
+    finishResolve({ resourceId: RESOURCE_ID })
+
+    await expect(pending).resolves.toBeNull()
+    expect(service.gfsClient.resolveUri).toHaveBeenCalledWith(
+      'gfs://main/resource-a',
+      'session-token'
+    )
+  })
+
   it('moves a resource into a destination folder through the user-plane GFS client', async () => {
     const service = gfsService()
     const destinationId = '33333333-3333-4333-8333-333333333333'
@@ -287,7 +311,7 @@ type UploadScopeTestService = {
   logout: AppService['logout']
   runScopedLegacyGfsUpload: <T>(
     scope: ReturnType<typeof scopedUploadRecord>['scope'],
-    operation: (token: string, signal: AbortSignal) => Promise<T>
+    operation: (signal: AbortSignal) => Promise<T>
   ) => Promise<T>
   startGfsFileUpload: AppService['startGfsFileUpload']
   startGfsFileReplace: AppService['startGfsFileReplace']
@@ -857,8 +881,7 @@ describe('AppService GFS upload security scope', () => {
         releaseAbort = resolve
       })
       let sawAbort = false
-      const pending = service.runScopedLegacyGfsUpload(scope, (token, signal) => {
-        expect(token).toBe('token-a')
+      const pending = service.runScopedLegacyGfsUpload(scope, signal => {
         return new Promise((_resolve, reject) => {
           signal.addEventListener('abort', () => {
             sawAbort = true
@@ -913,7 +936,7 @@ describe('AppService GFS upload security scope', () => {
         let sawAbort = false
         const pending = service.runScopedLegacyGfsUpload(
           scope,
-          (_token, signal) =>
+          signal =>
             new Promise((_resolve, reject) => {
               signal.addEventListener('abort', () => {
                 sawAbort = true

@@ -7,6 +7,10 @@ export type HeaderActionsProps = {
   notificationTrayLeft?: number | null
   onNotificationTrayOpenChange?: (open: boolean) => void
   onShellOverlayOpenChange?: (open: boolean) => void
+  /** Route a validated exact GFS resource through the App-owned navigation path. */
+  onOpenGfsResource?: (uri: string) => void
+  /** Invalidates visible GFS search labels after an authorization change. */
+  gfsAuthorizationChangeEpoch?: number
   /**
    * Chat-drawer toggle (mini-spec 04a §C, R3). The toggle lives between the
    * search (`.header-left`) and the notification bell (`.header-utilities`). It

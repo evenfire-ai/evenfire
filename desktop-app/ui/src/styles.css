@@ -1903,9 +1903,26 @@ h3 {
 .da-file-explorer__row {
   min-width: 0;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 22px minmax(0, 1fr) 28px;
   align-items: center;
   gap: var(--space-0-5);
+}
+
+.da-file-explorer__actions {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.da-file-explorer__actions .da-gfs-resource-menu__trigger.ui-icon-button {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
 }
 
 .da-file-explorer__toggle.ui-icon-button {
@@ -14176,6 +14193,64 @@ pre {
 
 .composer-reference-submenu::-webkit-scrollbar-thumb:hover {
   background: rgba(var(--edge-rgb), 0.6);
+}
+
+.composer-gfs-picker {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.composer-gfs-picker-path {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-1);
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--edge-subtle);
+}
+
+.composer-gfs-picker-current {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-gfs-picker-list {
+  display: grid;
+  gap: var(--space-0-5);
+}
+
+.composer-gfs-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-0-5);
+}
+
+.composer-gfs-picker-open {
+  min-width: 0;
+}
+
+.composer-gfs-picker-open .ui-menu-item__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-gfs-picker-insert {
+  white-space: nowrap;
+}
+
+.composer-gfs-picker-more {
+  justify-content: center;
+}
+
+.composer-gfs-picker-error {
+  color: var(--danger-text, var(--text-secondary));
 }
 
 .composer-inline .composer-reference-menu-panel {

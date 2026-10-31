@@ -16,6 +16,7 @@ const drafts = new Map<string, string>()
 let revision = 0
 const revisions = new Map<string, number>()
 const listenersByKey = new Map<string, Set<Listener>>()
+const automaticResourcePrefills = new Set<string>()
 const pendingResourcePrefillsByTab = new Map<string, ResourcePrefill>()
 const tabDrafts = new Map<string, Map<string, TabDraft>>()
 const tabRevisions = new Map<string, Map<string, number>>()
@@ -239,6 +240,7 @@ export function releaseComposerDraftForWorkspaceTab(workspaceTabId: string): voi
 
 /** Drop drafts and pending resource requests on logout or principal/team change. */
 export function clearAllComposerDrafts(): void {
+  automaticResourcePrefills.clear()
   const changedKeys = new Set(drafts.keys())
   const changedTabs = new Set([...pendingResourcePrefillsByTab.keys(), ...tabDrafts.keys()])
   for (const key of drafts.keys()) revisions.set(key, ++revision)
@@ -256,6 +258,13 @@ export function clearAllComposerDrafts(): void {
   tabDrafts.clear()
   for (const key of changedKeys) emit(key)
   for (const tabId of changedTabs) emit(tabListenerKey(tabId))
+}
+
+/** Claim one automatic resource prefill for a chat and exact context key. */
+export function claimAutomaticResourcePrefill(key: string): boolean {
+  if (automaticResourcePrefills.has(key)) return false
+  automaticResourcePrefills.add(key)
+  return true
 }
 
 export function subscribeComposerDraft(
@@ -291,6 +300,7 @@ export function resetComposerDraftStore(): void {
   drafts.clear()
   revisions.clear()
   listenersByKey.clear()
+  automaticResourcePrefills.clear()
   pendingResourcePrefillsByTab.clear()
   tabDrafts.clear()
   tabRevisions.clear()

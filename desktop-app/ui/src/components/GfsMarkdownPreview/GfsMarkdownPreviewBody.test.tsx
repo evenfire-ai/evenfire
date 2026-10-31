@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { GfsMarkdownPreviewBody } from './Body'
@@ -15,8 +15,19 @@ function stubDownload(text: string) {
 }
 
 describe('GfsMarkdownPreviewBody', () => {
+  let originalClipboardDescriptor: PropertyDescriptor | undefined
+
+  beforeEach(() => {
+    originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  })
+
   afterEach(() => {
     cleanup()
+    if (originalClipboardDescriptor) {
+      Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+    } else {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
     vi.restoreAllMocks()
   })
 
@@ -80,6 +91,35 @@ describe('GfsMarkdownPreviewBody', () => {
     expect(await copyContent.current?.()).toBe(true)
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
     expect(screen.queryByRole('button', { name: /Copy preview contents/i })).toBeNull()
+  })
+
+  it('does not invoke Markdown clipboard writing after its Preview scope changes', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { ...(navigator.clipboard ?? {}), writeText },
+    })
+    let scopeCurrent = true
+    const copyContent: { current: (() => Promise<boolean>) | null } = { current: null }
+    stubDownload('# Team A only')
+
+    render(
+      <GfsMarkdownPreviewBody
+        byteLength={14}
+        fileName="private.md"
+        gfsUri="gfs://main/private"
+        isScopeCurrent={() => scopeCurrent}
+        onCopyContentReady={copy => {
+          copyContent.current = copy
+        }}
+      />
+    )
+    await screen.findByRole('heading', { name: 'Team A only' })
+    await waitFor(() => expect(copyContent.current).toEqual(expect.any(Function)))
+
+    scopeCurrent = false
+    await expect(copyContent.current?.()).resolves.toBe(false)
+    expect(writeText).not.toHaveBeenCalled()
   })
 
   it('rejects an oversized markdown file from metadata before downloading', async () => {

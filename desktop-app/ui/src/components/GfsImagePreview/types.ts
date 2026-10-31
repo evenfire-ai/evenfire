@@ -24,6 +24,7 @@ export type GfsImagePreviewProps = {
   unavailable?: boolean
   onDownloadError?: (error: unknown) => void
   onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
+  isScopeCurrent?: () => boolean
 } & GfsImagePreviewSource
 
 /**
@@ -39,6 +40,7 @@ export type GfsImagePreviewBodyProps = {
   mimeType: string
   onDownloadError?: (error: unknown) => void
   onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
+  isScopeCurrent?: () => boolean
   titleId?: string
   titleActions?: ReactNode
   headerActions?: ReactNode

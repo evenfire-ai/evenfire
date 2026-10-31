@@ -73,6 +73,7 @@ const GFS_MARKDOWN_COMPONENTS: Components = {
 }
 
 const GFS_MARKDOWN_REMARK_PLUGINS = [remarkGfm]
+const ALWAYS_IN_SCOPE = () => true
 
 /**
  * De-modalized markdown/text preview body (spec 18 §3.B.2). Owns the byte fetch
@@ -87,6 +88,7 @@ export function GfsMarkdownPreviewBody({
   gfsUri,
   onDownloadError,
   onCopyContentReady,
+  isScopeCurrent = ALWAYS_IN_SCOPE,
   titleId,
   titleActions,
   headerActions,
@@ -127,9 +129,9 @@ export function GfsMarkdownPreviewBody({
         )
         assertGfsMarkdownPreviewSize(bytes.byteLength)
         const markdown = new TextDecoder().decode(bytes)
-        if (active) setSource(markdown)
+        if (active && isScopeCurrent()) setSource(markdown)
       } catch (error) {
-        if (!active) return
+        if (!active || !isScopeCurrent()) return
         onDownloadErrorRef.current?.(error)
         // Through the shared read-plane presenter, not raw — see the note in
         // `GfsImagePreview/Body.tsx`. A 429 crossing Electron IPC otherwise
@@ -148,26 +150,29 @@ export function GfsMarkdownPreviewBody({
     return () => {
       active = false
     }
-  }, [byteLength, gfsUri])
+  }, [byteLength, gfsUri, isScopeCurrent])
 
   const copySourceToClipboard = useCallback(async (): Promise<boolean> => {
-    if (source === null || !mountedRef.current || previewError) return false
+    if (source === null || !mountedRef.current || !isScopeCurrent() || previewError) return false
     try {
       if (navigator.clipboard?.writeText) {
+        if (!mountedRef.current || !isScopeCurrent()) return false
         await navigator.clipboard.writeText(source)
-        return mountedRef.current
+        return mountedRef.current && isScopeCurrent()
       } else {
         return false
       }
     } catch {
       return false
     }
-  }, [previewError, source])
+  }, [isScopeCurrent, previewError, source])
 
   useEffect(() => {
-    onCopyContentReady?.(source !== null && !previewError ? copySourceToClipboard : null)
+    onCopyContentReady?.(
+      source !== null && !previewError && isScopeCurrent() ? copySourceToClipboard : null
+    )
     return () => onCopyContentReady?.(null)
-  }, [copySourceToClipboard, onCopyContentReady, previewError, source])
+  }, [copySourceToClipboard, isScopeCurrent, onCopyContentReady, previewError, source])
 
   return (
     <>
@@ -182,12 +187,12 @@ export function GfsMarkdownPreviewBody({
       </header>
       <div className="da-gfs-markdown-preview-dialog__body">
         {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
-        {!previewError && source === null ? (
+        {!previewError && isScopeCurrent() && source === null ? (
           <div className="da-gfs-markdown-preview-dialog__loading" role="status">
             Loading preview…
           </div>
         ) : null}
-        {source !== null && !previewError ? (
+        {source !== null && !previewError && isScopeCurrent() ? (
           isPlainText ? (
             <article
               aria-label={`Text preview of ${fileName}`}

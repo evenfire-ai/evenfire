@@ -1,5 +1,9 @@
 import { type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../constants/navigation'
+import {
+  clearLatestGfsConversationContext,
+  recordLatestGfsConversationContext,
+} from '../../lib/gfsConversationPrefill'
 import type { GfsPreviewResource } from '../../lib/gfsPreview'
 import {
   type GfsResourceNavigationContext,
@@ -57,6 +61,24 @@ export function useNavigationController() {
     const current = workspaceTabsRef.current
     const next = typeof action === 'function' ? action(current) : action
     if (next === current) return
+    const previousActiveTab = activeWorkspaceTab(current)
+    const nextActiveTab = activeWorkspaceTab(next)
+    if (nextActiveTab?.kind === 'files' || nextActiveTab?.kind === 'preview') {
+      recordLatestGfsConversationContext(nextActiveTab)
+    } else if (
+      !(
+        (previousActiveTab?.kind === 'files' || previousActiveTab?.kind === 'preview') &&
+        nextActiveTab?.kind === 'chat'
+      ) &&
+      (previousActiveTab?.kind !== nextActiveTab?.kind ||
+        previousActiveTab?.id !== nextActiveTab?.id ||
+        (previousActiveTab?.kind === 'chat' &&
+          nextActiveTab?.kind === 'chat' &&
+          (previousActiveTab.chat?.agentRef !== nextActiveTab.chat?.agentRef ||
+            previousActiveTab.chat?.chatId !== nextActiveTab.chat?.chatId)))
+    ) {
+      clearLatestGfsConversationContext()
+    }
     workspaceTabsRef.current = next
     setWorkspaceTabsState(next)
   }, [])
@@ -196,6 +218,7 @@ export function useNavigationController() {
   // the Apps route.
   const showAppsPicker = useCallback(() => {
     beginUserNavigationIntent()
+    clearLatestGfsConversationContext()
     setAppsPickerActive(activeWorkspaceTab(workspaceTabsRef.current)?.kind !== 'app')
   }, [beginUserNavigationIntent])
 
@@ -211,24 +234,21 @@ export function useNavigationController() {
   // drift from the focused one (D4).
   const focusChatSection = useCallback(
     (
-      source: 'explicit' | 'programmatic' = 'explicit'
+      source: 'explicit' | 'programmatic' = 'explicit',
+      navigationIntentAlreadyStarted = false
     ): { agentRef: string; chatId: string } | null => {
       if (source === 'explicit') {
-        beginUserNavigationIntent()
+        if (!navigationIntentAlreadyStarted) beginUserNavigationIntent()
       } else if (navigationIntentSequenceRef.current > 0) {
-        // A session/bootstrap continuation may select the default Chat route
-        // only while no explicit navigation has happened in this renderer.
-        // In particular, it must not replace a tab selected while auth loads.
+        // Bootstrap must not replace a tab selected while authentication loads.
         return null
       }
-      setAppsPickerActive(false)
       const current = workspaceTabsRef.current
       const active = activeWorkspaceTab(current)
-      // Precedence (mini-spec 08 §1): the active chat wins (no re-homing); else
-      // RESUME the last active chat tab the user left — validated live against the
-      // store so a not-yet-reflected close cannot resurrect a stale id — rather than
-      // the last chat by array order; else the last chat by order (first boot, no
-      // last-active); else seed a blank.
+      if (active?.kind !== 'files' && active?.kind !== 'preview') {
+        clearLatestGfsConversationContext()
+      }
+      setAppsPickerActive(false)
       const lastActiveId = lastActiveChatTabIdRef.current
       const resumeTarget =
         lastActiveId !== null
@@ -303,19 +323,23 @@ export function useNavigationController() {
   // deep-link to a specific gfsUri both route here (mini-spec 06 §3).
   const openFilesSection = useCallback(
     (path: string | null = null) => {
-      beginUserNavigationIntent()
+      const intentSequence = beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
-      setWorkspaceTabs(current => openFilesTab(current, { id, path }))
+      const next = openFilesTab(workspaceTabsRef.current, { id, path })
+      const ownerTabId = next.activeTabId
+      if (!ownerTabId) return null
+      setWorkspaceTabs(next)
+      return { ownerTabId, intentSequence }
     },
-    [beginUserNavigationIntent, nextWorkspaceTabId]
+    [beginUserNavigationIntent, nextWorkspaceTabId, setWorkspaceTabs]
   )
 
   // Open/focus a preview tab for a previewable file (spec 18 §3.B.1). Dedupes by
   // gfsUri in the store: opening the same file twice focuses its existing tab
   // instead of stacking duplicates. A direct clone of `openFilesSection`.
   const openPreviewSection = useCallback(
-    (preview: GfsPreviewResource) => {
+    (preview: GfsPreviewResource, sessionScope?: string) => {
       beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
@@ -324,6 +348,7 @@ export function useNavigationController() {
           id,
           title: preview.name,
           gfsUri: preview.gfsUri,
+          ...(sessionScope !== undefined ? { sessionScope } : {}),
           fileKind: preview.kind,
           byteLength: preview.bytes,
           ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
@@ -415,7 +440,8 @@ export function useNavigationController() {
       request: GfsResourceNavigationRequest,
       preview: GfsPreviewResource,
       principalGeneration: number,
-      returnLocation: { gfsUri: string | null; name: string | null }
+      returnLocation: { gfsUri: string | null; name: string | null },
+      sessionScope?: string
     ): boolean => {
       if (!isGfsResourceNavigationCurrent(request, principalGeneration)) return false
       const id = nextWorkspaceTabId()
@@ -429,6 +455,7 @@ export function useNavigationController() {
         id,
         title: preview.name,
         gfsUri: preview.gfsUri,
+        ...(sessionScope !== undefined ? { sessionScope } : {}),
         fileKind: preview.kind,
         byteLength: preview.bytes,
         ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
@@ -472,7 +499,7 @@ export function useNavigationController() {
       if (item === DESKTOP_ROUTES.chat) {
         setSelectedAgent(null)
         setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
-        return focusChatSection(source)
+        return focusChatSection(source, options.navigationIntentAlreadyStarted)
       }
       if (item === DESKTOP_ROUTES.apps) {
         showAppsPicker()

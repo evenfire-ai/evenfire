@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
+import { previewDownloadDeniedMessage } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { GfsImagePreviewBody } from './Body'
 
 // The producer (`window.clerum.gfs.downloadPreview`) returns `{ bytes: ArrayBuffer }`
@@ -160,6 +161,36 @@ describe('GfsImagePreviewBody', () => {
     expect(await screen.findByText('403 Forbidden')).toBeTruthy()
     expect(screen.queryByAltText('Preview of secret.png')).toBeNull()
     await waitFor(() => expect(onDownloadError).toHaveBeenCalled())
+  })
+
+  it('forwards the real preview producer 401 to the shared authority owner', async () => {
+    const onDownloadError = vi.fn()
+    const errorMessage = await previewDownloadDeniedMessage(
+      'gfs://main/secret',
+      { code: 'session_expired', message: 'The previous session expired.' },
+      401
+    )
+    const downloadPreview = vi.fn(async () => {
+      throw new Error(errorMessage)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { downloadPreview } },
+    })
+
+    render(
+      <GfsImagePreviewBody
+        byteLength={3}
+        fileName="secret.png"
+        gfsUri="gfs://main/secret"
+        mimeType="image/png"
+        onDownloadError={onDownloadError}
+      />
+    )
+
+    expect(await screen.findByText(/401/)).toBeTruthy()
+    await waitFor(() => expect(onDownloadError).toHaveBeenCalledWith(new Error(errorMessage)))
+    expect(downloadPreview).toHaveBeenCalledWith('gfs://main/secret', expect.any(Number))
   })
 
   it('exposes loaded image copying to the owning preview toolbar', async () => {

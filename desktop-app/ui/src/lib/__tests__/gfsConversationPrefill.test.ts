@@ -4,30 +4,53 @@ import {
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
-import { getComposerDraft, resetComposerDraftStore, setComposerDraft } from '../composerDraftStore'
-import { prefillNewConversationWithGfsResource } from '../gfsConversationPrefill'
+import {
+  clearComposerDraft,
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '../composerDraftStore'
+import {
+  clearLatestGfsConversationContext,
+  getLatestGfsConversationContext,
+  prefillEmptyConversationWithGfsResource,
+  prefillNewConversationWithGfsResource,
+  recordLatestGfsConversationContext,
+} from '../gfsConversationPrefill'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
   openFilesTab,
   openPreviewTab,
 } from '../workspaceTabs'
+import type { WorkspaceTab } from '../workspaceTabs.types'
 
 const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
 const destinationTabId = 'chat-destination'
 
-afterEach(() => resetComposerDraftStore())
+function captureVisibleGfsContext(tab: WorkspaceTab | null | undefined): WorkspaceTab {
+  if (!tab) throw new Error('Expected a visible GFS context tab')
+  recordLatestGfsConversationContext(tab)
+  return tab
+}
+
+afterEach(() => {
+  resetComposerDraftStore()
+  clearLatestGfsConversationContext()
+})
 
 describe('prefillNewConversationWithGfsResource', () => {
   it('prefills a new chat from the active folder route', async () => {
     const folder = await resolveResource(
       resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
     )
-    const tab = activeWorkspaceTab(
-      openFilesTab(createWorkspaceTabsState('chat-tab'), {
-        id: 'files-tab',
-        path: folder.gfsUri,
-      })
+    const tab = captureVisibleGfsContext(
+      activeWorkspaceTab(
+        openFilesTab(createWorkspaceTabsState('chat-tab'), {
+          id: 'files-tab',
+          path: folder.gfsUri,
+        })
+      )
     )
     expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(true)
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(folder.gfsUri)
@@ -37,11 +60,13 @@ describe('prefillNewConversationWithGfsResource', () => {
     const folder = await resolveResource(
       resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
     )
-    const tab = activeWorkspaceTab(
-      openFilesTab(createWorkspaceTabsState('chat-tab'), {
-        id: 'files-tab',
-        path: folder.gfsUri,
-      })
+    const tab = captureVisibleGfsContext(
+      activeWorkspaceTab(
+        openFilesTab(createWorkspaceTabsState('chat-tab'), {
+          id: 'files-tab',
+          path: folder.gfsUri,
+        })
+      )
     )
 
     expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(true)
@@ -53,18 +78,64 @@ describe('prefillNewConversationWithGfsResource', () => {
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe('existing draft')
   })
 
-  it('keeps a resource prefill pending until ChatPage selects an agent', async () => {
+  it('rejects a stale Files tab after its visible resource context was invalidated', async () => {
     const folder = await resolveResource(
       resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
     )
-    const tab = activeWorkspaceTab(
+    const staleTab = activeWorkspaceTab(
       openFilesTab(createWorkspaceTabsState('chat-tab'), {
         id: 'files-tab',
         path: folder.gfsUri,
       })
     )
 
+    expect(prefillNewConversationWithGfsResource(staleTab, 'agent-1', destinationTabId)).toBe(false)
+    expect(getComposerDraft(null, 'agent-1')).toBe('')
+  })
+
+  it('does not carry a previous Files context into a new chat opened from Chat', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+    )
+    const filesTab = captureVisibleGfsContext(
+      activeWorkspaceTab(
+        openFilesTab(createWorkspaceTabsState('chat-tab'), {
+          id: 'files-tab',
+          path: folder.gfsUri,
+        })
+      )
+    )
+    const chatTab: WorkspaceTab = {
+      id: 'chat-tab',
+      kind: 'chat',
+      title: 'Chat',
+      chat: { agentRef: 'agent-1', chatId: null },
+    }
+
+    expect(prefillNewConversationWithGfsResource(filesTab, 'agent-1', destinationTabId)).toBe(true)
+    clearComposerDraft(null, 'agent-1', destinationTabId)
+    expect(prefillNewConversationWithGfsResource(chatTab, 'agent-1', destinationTabId)).toBe(false)
+    expect(getComposerDraft(null, 'agent-1')).toBe('')
+  })
+
+  it('keeps a resource prefill pending until ChatPage selects an agent', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+    )
+    const tab = captureVisibleGfsContext(
+      activeWorkspaceTab(
+        openFilesTab(createWorkspaceTabsState('chat-tab'), {
+          id: 'files-tab',
+          path: folder.gfsUri,
+        })
+      )
+    )
+
     expect(prefillNewConversationWithGfsResource(tab, null, destinationTabId)).toBe(true)
+    expect(getComposerDraft(null, undefined, destinationTabId)).toBe(folder.gfsUri)
+    expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(folder.gfsUri)
+
+    expect(prefillNewConversationWithGfsResource(tab, null, destinationTabId)).toBe(false)
     expect(getComposerDraft(null, undefined, destinationTabId)).toBe(folder.gfsUri)
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(folder.gfsUri)
     expect(getComposerDraft(null, 'agent-1', 'different-chat')).toBe('')
@@ -74,11 +145,13 @@ describe('prefillNewConversationWithGfsResource', () => {
     const file = await resolveResource(
       resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'Quarterly report.md')
     )
-    const tab = activeWorkspaceTab(
-      openFilesTab(createWorkspaceTabsState('chat-tab'), {
-        id: 'files-tab',
-        path: file.gfsUri,
-      })
+    const tab = captureVisibleGfsContext(
+      activeWorkspaceTab(
+        openFilesTab(createWorkspaceTabsState('chat-tab'), {
+          id: 'files-tab',
+          path: file.gfsUri,
+        })
+      )
     )
     expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(true)
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(file.gfsUri)
@@ -88,14 +161,16 @@ describe('prefillNewConversationWithGfsResource', () => {
     const file = await resolveResource(
       resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'README.md')
     )
-    const tab = activeWorkspaceTab(
-      openPreviewTab(createWorkspaceTabsState('chat-tab'), {
-        id: 'preview-tab',
-        title: 'README.md',
-        gfsUri: file.gfsUri,
-        fileKind: 'markdown',
-        byteLength: 4,
-      })
+    const tab = captureVisibleGfsContext(
+      activeWorkspaceTab(
+        openPreviewTab(createWorkspaceTabsState('chat-tab'), {
+          id: 'preview-tab',
+          title: 'README.md',
+          gfsUri: file.gfsUri,
+          fileKind: 'markdown',
+          byteLength: 4,
+        })
+      )
     )
     expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(true)
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(file.gfsUri)
@@ -103,14 +178,15 @@ describe('prefillNewConversationWithGfsResource', () => {
 
   it('keeps a legacy draft beside a valid Files prefill and ignores root or chat tabs', () => {
     setComposerDraft(null, 'keep this draft', 'agent-1')
-
-    expect(
-      prefillNewConversationWithGfsResource(
-        { id: 'files', kind: 'files', title: 'Files', files: { path: uri } },
-        'agent-1',
-        destinationTabId
+    const visibleTab = captureVisibleGfsContext(
+      activeWorkspaceTab(
+        openFilesTab(createWorkspaceTabsState('chat-tab'), { id: 'files', path: uri })
       )
-    ).toBe(true)
+    )
+
+    expect(prefillNewConversationWithGfsResource(visibleTab, 'agent-1', destinationTabId)).toBe(
+      true
+    )
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(uri)
     expect(getComposerDraft(null, 'agent-1')).toBe('keep this draft')
     expect(
@@ -142,5 +218,49 @@ describe('prefillNewConversationWithGfsResource', () => {
         destinationTabId
       )
     ).toBe(false)
+  })
+
+  it('prefills a persisted chat once from its exact visible GFS context', async () => {
+    const file = await resolveResource(
+      resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'Quarterly report.md')
+    )
+    const tab = activeWorkspaceTab(
+      openFilesTab(createWorkspaceTabsState('chat-tab'), {
+        id: 'files-tab',
+        path: file.gfsUri,
+      })
+    )
+    if (!tab) throw new Error('Expected the Files context tab to be active')
+    recordLatestGfsConversationContext(tab)
+
+    expect(getLatestGfsConversationContext()).toEqual({
+      uri: file.gfsUri,
+      sourceTabId: 'files-tab',
+    })
+    expect(prefillEmptyConversationWithGfsResource('chat-1', 'agent-1')).toBe(true)
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe(file.gfsUri)
+    expect(prefillEmptyConversationWithGfsResource('chat-1', 'agent-1')).toBe(false)
+  })
+
+  it('preserves whitespace and does not restore a cleared prefill on refocus', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+    )
+    const tab = activeWorkspaceTab(
+      openFilesTab(createWorkspaceTabsState('chat-tab'), {
+        id: 'files-tab',
+        path: folder.gfsUri,
+      })
+    )
+    if (!tab) throw new Error('Expected the Files context tab to be active')
+    recordLatestGfsConversationContext(tab)
+    setComposerDraft('chat-1', '   ', 'agent-1')
+
+    expect(prefillEmptyConversationWithGfsResource('chat-1', 'agent-1')).toBe(false)
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe('   ')
+
+    clearComposerDraft('chat-1', 'agent-1')
+    expect(prefillEmptyConversationWithGfsResource('chat-1', 'agent-1')).toBe(false)
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe('')
   })
 })

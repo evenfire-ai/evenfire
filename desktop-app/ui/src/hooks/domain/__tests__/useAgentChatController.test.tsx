@@ -14,10 +14,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { act, cleanup, waitFor as rtlWaitFor } from '@testing-library/react'
 import { classifyBytes } from '@clerum/gfs-interaction-policy'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import { base64Length, composerNonImageShareBytes } from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
+import { resolveResource, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { HostModelsResult } from '../../../../../src/types'
 import type {
   ComposerGlobalFileReference,
@@ -45,6 +51,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  resetComposerDraftStore()
   vi.restoreAllMocks()
   vi.useRealTimers()
   uninstallMockClerum()
@@ -443,6 +450,22 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(clerum.chat.appendMessages).toHaveBeenCalledTimes(1)
       expect(clerum.rpc.getTaskResult).toHaveBeenCalledWith('agent-x', 'task-abc', ['agent-x'])
       expect(spies.pushToast).toHaveBeenCalledWith('Message sent to agent-x.', 'success')
+    })
+
+    it('preserves authored and bare GFS links in the host message payload', async () => {
+      clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+      const { result } = renderController()
+      await settleMount()
+      const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+      const content = `Review [Project Plan](${uri}) and ${uri}.\nKeep the exact resource.`
+
+      await act(async () => {
+        await result.current.handleSendAgentMessage(content)
+      })
+
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce()
+      const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
+      expect(request.content).toBe(content)
     })
 
     it('4.4b auto-creates a chat when none is active before invoking the host', async () => {
@@ -2424,5 +2447,59 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
     expect(request.content).toHaveLength(Math.floor(2.9 * MIB))
+  })
+
+  it('sends and retries the stored composer Markdown source with its structured GFS reference', async () => {
+    const resource = await resolveResource(
+      resolvedFile('0123456789abcdef0123456789abcdef', 'Reference.md')
+    )
+    const reference: ComposerGlobalFileReference = {
+      id: `global-file:${resource.drive}:${resource.resourceId}`,
+      type: 'global_file',
+      resourceId: resource.resourceId,
+      drive: resource.drive,
+      gfsUri: resource.gfsUri,
+      label: resource.name,
+      version: resource.version,
+      bytes: resource.bytes ?? 0,
+    }
+    clerum.rpc.invokeHostMessage
+      .mockRejectedValueOnce(new Error('temporary connection failure'))
+      .mockResolvedValueOnce({ response: 'done' })
+    const rendered = renderController()
+    await settleMount()
+    const message = `Read [Release notes](${resource.gfsUri}) before the meeting.`
+    act(() => rendered.result.current.handleAddComposerReferenceAttachments([reference]))
+    setComposerDraft(null, message, 'agent-x')
+    const storedSource = getComposerDraft(null, 'agent-x')
+    expect(storedSource).toBe(message)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage(storedSource)
+    })
+
+    expect(rendered.result.current.failedAgentSend).toMatchObject({
+      content: message,
+      references: [reference],
+    })
+    const expectedReferences = buildComposerFileReferences([reference])
+    const firstRequest = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+      content: string
+      fileReferences?: unknown[]
+    }
+    expect(firstRequest.content).toBe(buildComposerRequestContent(message, [reference]))
+    expect(firstRequest.fileReferences).toEqual(expectedReferences)
+
+    await act(async () => {
+      await rendered.result.current.handleRetryFailedAgentSend()
+    })
+
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
+    const retryRequest = clerum.rpc.invokeHostMessage.mock.calls[1]?.[1] as {
+      content: string
+      fileReferences?: unknown[]
+    }
+    expect(retryRequest.content).toBe(firstRequest.content)
+    expect(retryRequest.fileReferences).toEqual(firstRequest.fileReferences)
   })
 })

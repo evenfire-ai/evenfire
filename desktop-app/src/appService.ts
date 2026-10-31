@@ -900,6 +900,7 @@ export class AppService {
   private sessionToken: string | null = null
   private me: SessionMe | null = null
   private profileUiBaseUrlCache: { key: string; value: string } | null = null
+  private profileUiBaseUrlLookupsInFlight = new Map<string, Promise<string | null>>()
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
@@ -1310,8 +1311,13 @@ export class AppService {
 
   private assertGfsDispatchAllowed(): void {
     if (this.gfsTransientTeamHopDepth > 0) {
-      throw new Error('GFS upload dispatch is unavailable during a transient team hop')
+      throw new Error('GFS dispatch is unavailable during a transient team hop')
     }
+  }
+
+  private requireGfsDispatchToken(): string {
+    this.assertGfsDispatchAllowed()
+    return this.requireSessionToken()
   }
 
   private runWithTeamContext<T>(
@@ -2326,17 +2332,43 @@ export class AppService {
     if (this.profileUiBaseUrlCache?.key === cacheKey) {
       return this.profileUiBaseUrlCache.value
     }
+    const sessionGeneration = this.sessionGeneration
+    const envKey = getActiveEnvKey()
+    const lookupKey = `${sessionGeneration}:${cacheKey}`
+    let lookup = this.profileUiBaseUrlLookupsInFlight.get(lookupKey)
+    if (!lookup) {
+      let pendingLookup: Promise<string | null>
+      pendingLookup = this.memberRegistrationServiceClient
+        .getInvitationProfile(normalizedEmail)
+        .then(activation => {
+          const profileUiBaseUrl = String(activation.profileUiBaseUrl || '').trim()
+          const currentCacheKey = `${getActiveEnvKey()}:${this.me?.id || ''}:${normalizedEmail}`
+          if (
+            profileUiBaseUrl &&
+            this.sessionGeneration === sessionGeneration &&
+            getActiveEnvKey() === envKey &&
+            currentCacheKey === cacheKey
+          ) {
+            this.profileUiBaseUrlCache = { key: cacheKey, value: profileUiBaseUrl }
+          }
+          return profileUiBaseUrl || null
+        })
+        .finally(() => {
+          if (this.profileUiBaseUrlLookupsInFlight.get(lookupKey) === pendingLookup) {
+            this.profileUiBaseUrlLookupsInFlight.delete(lookupKey)
+          }
+        })
+      lookup = pendingLookup
+      this.profileUiBaseUrlLookupsInFlight.set(lookupKey, lookup)
+    }
     try {
-      const activation =
-        await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
-      const profileUiBaseUrl = String(activation.profileUiBaseUrl || '').trim()
+      const profileUiBaseUrl = await lookup
       if (!profileUiBaseUrl) {
         if (!fallbackOnLookupError) {
           throw new Error('the invitation profile did not provide a Profile UI URL')
         }
         return config.desktopProfileUiBaseUrl
       }
-      this.profileUiBaseUrlCache = { key: cacheKey, value: profileUiBaseUrl }
       return profileUiBaseUrl
     } catch (error) {
       if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
@@ -2714,7 +2746,19 @@ export class AppService {
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
   async resolveGfsUri(uri: string) {
-    return this.gfsClient.resolveUri(uri, this.requireSessionToken())
+    return this.gfsClient.resolveUri(uri, this.requireGfsDispatchToken())
+  }
+
+  /**
+   * Resolve for a plugin handoff only while the GFS authority that dispatched
+   * the request is still current. A delayed old-scope result must not be tagged
+   * with the renderer's later session scope.
+   */
+  async resolveGfsUriInCurrentAuthScope(uri: string) {
+    const authEpoch = this.gfsAuthEpoch
+    const resource = await this.resolveGfsUri(uri)
+    if (this.gfsDispatchBlocked || this.gfsAuthEpoch !== authEpoch) return null
+    return resource
   }
 
   /**
@@ -2726,7 +2770,7 @@ export class AppService {
   async downloadGfsUri(uri: string, maxBytes?: number, signal?: AbortSignal) {
     return this.gfsClient.download(
       uri,
-      this.requireSessionToken(),
+      this.requireGfsDispatchToken(),
       maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
     )
   }
@@ -2747,7 +2791,7 @@ export class AppService {
   ) {
     return this.gfsClient.downloadInto(
       uri,
-      this.requireSessionToken(),
+      this.requireGfsDispatchToken(),
       signal ? { maxBytes, signal } : { maxBytes },
       onChunk
     )
@@ -2755,7 +2799,7 @@ export class AppService {
 
   /** List a gfs directory's children (deny-by-default: only what the user is granted). */
   async listGfsChildren(resourceId: string, drive?: string, cursor?: string, signal?: AbortSignal) {
-    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), {
+    return this.gfsClient.listChildren(resourceId, this.requireGfsDispatchToken(), {
       drive,
       cursor,
       signal,
@@ -2764,7 +2808,7 @@ export class AppService {
 
   /** List explicit gfs resources the current user can read through grants or shares. */
   async listAccessibleGfsResources(drive?: string, cursor?: string) {
-    return this.gfsClient.listAccessible(this.requireSessionToken(), { drive, cursor })
+    return this.gfsClient.listAccessible(this.requireGfsDispatchToken(), { drive, cursor })
   }
 
   /**
@@ -2776,7 +2820,7 @@ export class AppService {
   async gfsAffordances(resourceId: string, drive?: string): Promise<DelegationAffordances> {
     const { held, isOperator } = await this.gfsClient.affordances(
       resourceId,
-      this.requireSessionToken(),
+      this.requireGfsDispatchToken(),
       drive
     )
     return delegationAffordances(new Set(held), isOperator)
@@ -2801,7 +2845,7 @@ export class AppService {
     // key fails the whole call before any round-trip — never a partial write.
     await this.gfsClient.grant(
       { resourceId, drive, subjects: subjectKeys.map(parseSubjectKey), permissions: bits, inherit },
-      this.requireSessionToken()
+      this.requireGfsDispatchToken()
     )
   }
 
@@ -2811,22 +2855,22 @@ export class AppService {
    * enforced server-side; a caller without manage_acl gets the API's 403.
    */
   async listGfsGrants(resourceId: string, drive?: string) {
-    return this.gfsClient.listGrants({ resourceId, drive }, this.requireSessionToken())
+    return this.gfsClient.listGrants({ resourceId, drive }, this.requireGfsDispatchToken())
   }
 
   /** Revoke an ACL row by id (id learned from listGfsGrants). */
   async revokeGfsGrant(grantId: string) {
-    await this.gfsClient.revokeGrant(grantId, this.requireSessionToken())
+    await this.gfsClient.revokeGrant(grantId, this.requireGfsDispatchToken())
   }
 
   /** List direct URI shares on a resource for the combined access-management view. */
   async listGfsShares(resourceId: string, drive?: string) {
-    return this.gfsClient.listShares({ resourceId, drive }, this.requireSessionToken())
+    return this.gfsClient.listShares({ resourceId, drive }, this.requireGfsDispatchToken())
   }
 
   /** Revoke a direct URI share by its server-issued row id. */
   async revokeGfsShare(shareId: string) {
-    await this.gfsClient.revokeShare(shareId, this.requireSessionToken())
+    await this.gfsClient.revokeShare(shareId, this.requireGfsDispatchToken())
   }
 
   /**
@@ -2854,21 +2898,21 @@ export class AppService {
         permissions: ['read'],
         includeDescendants: true,
       },
-      this.requireSessionToken()
+      this.requireGfsDispatchToken()
     )
   }
 
   async createGfsFolder(parentResourceId: string, name: string, drive?: string) {
     return this.gfsClient.createResource(
       { parentResourceId, drive, name, kind: 'directory' },
-      this.requireSessionToken()
+      this.requireGfsDispatchToken()
     )
   }
 
   async createGfsFile(parentResourceId: string, name: string, encodedData: string, drive?: string) {
     return this.gfsClient.createResource(
       { parentResourceId, drive, name, kind: 'file', encodedData },
-      this.requireSessionToken()
+      this.requireGfsDispatchToken()
     )
   }
 
@@ -3040,14 +3084,15 @@ export class AppService {
 
   private async runScopedLegacyGfsUpload<T>(
     scope: DesktopGfsUploadScope,
-    operation: (token: string, signal: AbortSignal) => Promise<T>
+    operation: (signal: AbortSignal) => Promise<T>
   ): Promise<T> {
     const controller = new AbortController()
     const pending = { controller, promise: Promise.resolve() as Promise<unknown> }
     this.gfsPendingLegacyUploads.add(pending)
     const promise = (async () => {
       this.assertCurrentDesktopGfsUploadScope(scope)
-      const result = await operation(this.requireSessionToken(), controller.signal)
+      this.requireGfsDispatchToken()
+      const result = await operation(controller.signal)
       this.assertCurrentDesktopGfsUploadScope(scope)
       return result
     })()
@@ -3182,9 +3227,10 @@ export class AppService {
         resumeUploadId
       )
         throw error
-      const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
+      const resource = await this.runScopedLegacyGfsUpload(scope, async signal => {
         const encodedData = await legacyEncodedFile(filePath)
         this.assertCurrentDesktopGfsUploadScope(scope)
+        const token = this.requireGfsDispatchToken()
         return this.gfsClient.createResource(
           { parentResourceId, drive: canonicalDrive, name, kind: 'file', encodedData },
           token,
@@ -3221,9 +3267,10 @@ export class AppService {
         resumeUploadId
       )
         throw error
-      const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
+      const resource = await this.runScopedLegacyGfsUpload(scope, async signal => {
         const encodedData = await legacyEncodedFile(filePath)
         this.assertCurrentDesktopGfsUploadScope(scope)
+        const token = this.requireGfsDispatchToken()
         return this.gfsClient.replaceFile(
           { resourceId, drive: canonicalDrive, ifMatch, encodedData },
           token,
@@ -3330,13 +3377,15 @@ export class AppService {
         sameDesktopGfsUploadScope(item.scope, scope, { includeAuthEpoch: false })
     )
     if (!record) throw new Error('GFS upload session is not available in the active security scope')
+    this.assertCurrentDesktopGfsUploadScope(scope)
+    const token = this.requireGfsDispatchToken()
     const url = new URL(
       `/api/v1/me/gfs/uploads/${encodeURIComponent(uploadId)}`,
       `${scope.baseUrl}/`
     )
     url.searchParams.set('drive', scope.drive)
     await gfsUploadTransport.requestJson('DELETE', url.toString(), {
-      token: this.requireSessionToken(),
+      token,
       timeoutMs: 10 * 60 * 1000,
     })
     this.assertCurrentDesktopGfsUploadScope(scope)
@@ -3386,9 +3435,10 @@ export class AppService {
     } catch (error) {
       if (!(error instanceof DesktopUploadCapabilityError) || !error.allowLegacyFallback)
         throw error
-      const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
+      const resource = await this.runScopedLegacyGfsUpload(scope, async signal => {
         const encodedData = await legacyEncodedFile(filePath)
         this.assertCurrentDesktopGfsUploadScope(scope)
+        const token = this.requireGfsDispatchToken()
         return this.gfsClient.createResource(
           { parentResourceId, drive: canonicalDrive, name, kind: 'file', encodedData },
           token,
@@ -3402,7 +3452,7 @@ export class AppService {
   async replaceGfsFile(resourceId: string, encodedData: string, drive?: string, ifMatch?: number) {
     return this.gfsClient.replaceFile(
       { resourceId, drive, encodedData, ifMatch },
-      this.requireSessionToken()
+      this.requireGfsDispatchToken()
     )
   }
 
@@ -3432,9 +3482,10 @@ export class AppService {
     } catch (error) {
       if (!(error instanceof DesktopUploadCapabilityError) || !error.allowLegacyFallback)
         throw error
-      const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
+      const resource = await this.runScopedLegacyGfsUpload(scope, async signal => {
         const encodedData = await legacyEncodedFile(filePath)
         this.assertCurrentDesktopGfsUploadScope(scope)
+        const token = this.requireGfsDispatchToken()
         return this.gfsClient.replaceFile(
           { resourceId, drive: canonicalDrive, ifMatch, encodedData },
           token,
@@ -3448,7 +3499,7 @@ export class AppService {
   async renameGfsResource(resourceId: string, newName: string, drive?: string, ifMatch?: number) {
     return this.gfsClient.renameResource(
       { resourceId, drive, newName, ifMatch },
-      this.requireSessionToken()
+      this.requireGfsDispatchToken()
     )
   }
 
@@ -3479,7 +3530,7 @@ export class AppService {
           ifMatch,
           ...(newName !== undefined ? { newName } : {}),
         },
-        this.requireSessionToken()
+        this.requireGfsDispatchToken()
       )
       this.assertSessionGeneration(expectedSessionGeneration)
       return receipt
@@ -3490,7 +3541,10 @@ export class AppService {
   }
 
   async deleteGfsResource(resourceId: string, drive?: string, ifMatch?: number) {
-    return this.gfsClient.deleteResource({ resourceId, drive, ifMatch }, this.requireSessionToken())
+    return this.gfsClient.deleteResource(
+      { resourceId, drive, ifMatch },
+      this.requireGfsDispatchToken()
+    )
   }
 
   private requireSessionToken(): string {
@@ -6207,6 +6261,34 @@ export class AppService {
       fallbackOnLookupError: false,
     })
     return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
+  }
+
+  async getGfsResourceProfileOrigin(): Promise<{
+    origin: string
+    sessionGeneration: number
+    envKey: string
+  }> {
+    const sessionGeneration = this.sessionGeneration
+    const envKey = getActiveEnvKey()
+    if (!this.me?.id || !this.sessionToken) {
+      throw new Error('An authenticated Desktop session is required to resolve Profile links')
+    }
+
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
+    const normalizedBaseUrl = normalizeExplicitProfileUiBaseUrl(profileUiBaseUrl)
+    if (!normalizedBaseUrl) throw new Error(PROFILE_UI_BASE_URL_ORIGIN_ERROR)
+    if (
+      this.sessionGeneration !== sessionGeneration ||
+      getActiveEnvKey() !== envKey ||
+      !this.me?.id ||
+      !this.sessionToken
+    ) {
+      throw new Error('Desktop session changed while resolving the Profile UI origin')
+    }
+
+    return { origin: new URL(normalizedBaseUrl).origin, sessionGeneration, envKey }
   }
 
   async setSandboxUiBounds(bounds: import('./sandboxUiDriver.js').SandboxUiBounds): Promise<void> {

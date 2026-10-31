@@ -132,7 +132,11 @@ export function scheduleAfterFirstPaintForSession(
   })
 }
 
-export function useAppController() {
+export interface UseAppControllerOptions {
+  onBeforeNativeAgentConversationNotification?: () => void
+}
+
+export function useAppController(options: UseAppControllerOptions = {}) {
   const queryClient = useQueryClient()
 
   // ─── Toast ───
@@ -255,6 +259,11 @@ export function useAppController() {
     teamId: string | null
   } | null>(null)
   const notificationTeamContextQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const beforeNativeAgentConversationNotificationRef = useRef<
+    UseAppControllerOptions['onBeforeNativeAgentConversationNotification']
+  >(options.onBeforeNativeAgentConversationNotification)
+  beforeNativeAgentConversationNotificationRef.current =
+    options.onBeforeNativeAgentConversationNotification
   const openAgentConversationFromNotificationRef = useRef<
     (target: AgentConversationNotificationTarget) => Promise<void>
   >(async () => {})
@@ -282,8 +291,10 @@ export function useAppController() {
     mcpOauthResumeBufferRef.current = createMcpOauthResumeBuffer<ApprovalDecisionTarget>()
   }
   const openAgentConversationFromNotification = useCallback(
-    (target: AgentConversationNotificationTarget) =>
-      openAgentConversationFromNotificationRef.current(target),
+    (target: AgentConversationNotificationTarget) => {
+      beforeNativeAgentConversationNotificationRef.current?.()
+      return openAgentConversationFromNotificationRef.current(target)
+    },
     []
   )
   const decideApprovalFromNotification = useCallback(
@@ -788,21 +799,21 @@ export function useAppController() {
   )
 
   const ensureTeamContext = useCallback(
-    async (target: {
-      teamId?: string
-      announce?: boolean
-      navigationIntentSequence?: number
-    }): Promise<boolean> => {
+    async (
+      target: { teamId?: string; announce?: boolean; navigationIntentSequence?: number },
+      shouldContinue?: () => boolean
+    ): Promise<boolean> => {
       const targetTeamId = String(target.teamId || '').trim()
       if (!targetTeamId) return false
 
       const queuedSwitch = notificationTeamContextQueueRef.current.then(async () => {
+        // Recheck both owner receipts at the queue boundary before changing teams.
+        if (shouldContinue && !shouldContinue()) return false
         if (
           target.navigationIntentSequence !== undefined &&
           !nav.isNavigationIntentCurrent(target.navigationIntentSequence)
-        ) {
+        )
           return false
-        }
         const activeTeamId = currentTeamIdRef.current
         if (targetTeamId === activeTeamId) return false
 
@@ -1168,6 +1179,7 @@ export function useAppController() {
         chatId?: string
         isRemote?: boolean
         title?: string
+        onCurrentError?: (error: unknown) => void
         // When true, drive the chat controller (pending selection + selectedAgent)
         // WITHOUT flipping `navItem` to the chat route. The chat-drawer coexists
         // with the live app on the `apps` route and needs to swap the shared
@@ -1178,6 +1190,16 @@ export function useAppController() {
     ) => {
       if (!agentName) return
       const targetChatId = String(options.chatId || '').trim()
+      const reportChatOpenError = (error: unknown) => {
+        if (options.onCurrentError) {
+          options.onCurrentError(error)
+          return
+        }
+        fullSetStatus(
+          `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
+      }
       // Fast path — ONLY when we are already on the chat route. `switchToChat`
       // sets the active chat imperatively and leaves no pending selection behind,
       // which is safe exactly while the agent-selection effect
@@ -1209,12 +1231,7 @@ export function useAppController() {
         // server is the source of truth and hydrates server-only chats itself.
         void chat
           .switchToChat(agentName, targetChatId, {
-            onCurrentError: error => {
-              fullSetStatus(
-                `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
-                'error'
-              )
-            },
+            onCurrentError: reportChatOpenError,
           })
           .catch(() => undefined)
         nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
@@ -1271,12 +1288,7 @@ export function useAppController() {
       if (options.keepNavItem && targetChatId && nav.selectedAgent === agentName) {
         void chat
           .switchToChat(agentName, targetChatId, {
-            onCurrentError: error => {
-              fullSetStatus(
-                `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
-                'error'
-              )
-            },
+            onCurrentError: reportChatOpenError,
           })
           .catch(() => undefined)
       }
@@ -1332,12 +1344,16 @@ export function useAppController() {
           handleSelectChatAgent(focusedChat.agentRef, {
             chatId: focusedChat.chatId,
             selectLatest: false,
+            navigationIntentAlreadyStarted: true,
           })
           return
         }
         const latestAgent = pickLatestAgent(agentsData.agentNames, activity.agentLastActiveByAgent)
         if (latestAgent) {
-          handleSelectChatAgent(latestAgent, { selectLatest: false })
+          handleSelectChatAgent(latestAgent, {
+            selectLatest: false,
+            navigationIntentAlreadyStarted: true,
+          })
         }
       }
     },
@@ -1352,7 +1368,7 @@ export function useAppController() {
   const openAgentConversationTarget = useCallback(
     async (
       target: AgentConversationNotificationTarget,
-      options: { keepNavItem?: boolean } = {}
+      options: { keepNavItem?: boolean; navigationIntentSequence?: number } = {}
     ) => {
       const targetAgent = String(target.agentName || '').trim()
       if (!targetAgent) return
@@ -1360,24 +1376,36 @@ export function useAppController() {
       const targetTeamId = String(target.teamId || '').trim()
       const activeTeamId = currentTeamIdRef.current
       const requiresTeamSwitch = Boolean(targetTeamId && targetTeamId !== activeTeamId)
-      const navigationIntentSequence = nav.beginUserNavigationIntent()
+      const navigationIntentSequence =
+        options.navigationIntentSequence ?? nav.beginUserNavigationIntent()
       // minispec 04 approach C: when the app embed is live (App requests
       // `keepNavItem`) and no team switch is needed, surface the conversation IN
       // the drawer instead of ejecting to the full-screen chat route. A team
       // switch tears the embed down, so that case keeps the full-screen path.
       const stayInDrawer = Boolean(options.keepNavItem) && !requiresTeamSwitch
+      // App-supplied receipts also cover native desktop notification clicks. The
+      // App owns pending Files/Preview action cancellation; the controller invokes
+      // that owner before it begins asynchronous target resolution.
+      const isNotificationIntentCurrent = () =>
+        nav.isNavigationIntentCurrent(navigationIntentSequence)
 
       try {
-        if (requiresTeamSwitch) {
-          await ensureTeamContext({ teamId: targetTeamId, navigationIntentSequence })
-          if (!nav.isNavigationIntentCurrent(navigationIntentSequence)) return
+        let switchedTeamAfterQueue = false
+        if (targetTeamId) {
+          if (!isNotificationIntentCurrent()) return
+          // Serialize known-team notifications and recheck their receipt at the queue owner.
+          switchedTeamAfterQueue = await ensureTeamContext(
+            { teamId: targetTeamId, navigationIntentSequence },
+            isNotificationIntentCurrent
+          )
+          if (!isNotificationIntentCurrent()) return
         }
         if (isHostAccessBlocked(targetAgent)) {
-          const verified = await verifyHostAccess(targetAgent)
-          if (!verified || !nav.isNavigationIntentCurrent(navigationIntentSequence)) return
+          if (!(await verifyHostAccess(targetAgent)) || !isNotificationIntentCurrent()) return
         }
 
         if (stayInDrawer) {
+          if (!isNotificationIntentCurrent()) return
           // handleSelectChatAgent(keepNavItem) sets the active chat without
           // flipping `navItem` (and imperatively switches for the same-agent
           // case); the drawer reconciler (approach A) syncs the switcher tab.
@@ -1386,6 +1414,13 @@ export function useAppController() {
             keepNavItem: true,
             navigationIntentAlreadyStarted: true,
             ...(targetChatId ? { chatId: targetChatId } : {}),
+            onCurrentError: error => {
+              if (!isNotificationIntentCurrent()) return
+              fullSetStatus(
+                `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
+                'error'
+              )
+            },
           })
           return
         }
@@ -1402,12 +1437,15 @@ export function useAppController() {
         if (
           targetChatId &&
           !requiresTeamSwitch &&
+          !switchedTeamAfterQueue &&
           nav.selectedAgent === targetAgent &&
           nav.navItem === DESKTOP_ROUTES.chat
         ) {
+          if (!isNotificationIntentCurrent()) return
           try {
             await chat.switchToChat(targetAgent, targetChatId, {
               onCurrentError: error => {
+                if (!isNotificationIntentCurrent()) return
                 fullSetStatus(
                   `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
                   'error'
@@ -1419,15 +1457,17 @@ export function useAppController() {
             // This UI event observes that rejection without reporting it again.
             return
           }
-          if (!nav.isNavigationIntentCurrent(navigationIntentSequence)) return
+          if (!isNotificationIntentCurrent()) return
           nav.activateChatTab(targetAgent, targetChatId, undefined, true)
           return
         }
 
+        if (!isNotificationIntentCurrent()) return
         chat.setPendingChatSelection(targetAgent, targetChatId || null)
         nav.setSelectedAgent(targetAgent)
         nav.activateChatTab(targetAgent, targetChatId || null, undefined, true)
       } catch (error) {
+        if (!isNotificationIntentCurrent()) return
         fullSetStatus(
           `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
           'error'
@@ -1598,7 +1638,10 @@ export function useAppController() {
 
   // ─── Cross-domain: handleOpenNotification ───
   const handleOpenNotification = useCallback(
-    async (notification: AppNotification, options: { keepNavItem?: boolean } = {}) => {
+    async (
+      notification: AppNotification,
+      options: { keepNavItem?: boolean; navigationIntentSequence?: number } = {}
+    ) => {
       notif.markNotificationRead(notification.id)
       if (notification.kind === 'workflow_completed') {
         await openWorkflowCompletionTarget(notification)

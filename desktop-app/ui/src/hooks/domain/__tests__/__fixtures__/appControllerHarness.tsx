@@ -7,7 +7,7 @@ import type {
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
 } from '../../../../../../src/types'
-import { useAppController } from '../../../useAppController'
+import { type UseAppControllerOptions, useAppController } from '../../../useAppController'
 import { wrapLikeElectronIpc } from './ipcErrors'
 import { type MockClerum, installMockClerum } from './mockClerum'
 
@@ -450,9 +450,11 @@ export interface RenderAppControllerResult {
   queryClient: QueryClient
 }
 
-export function renderAppController(): RenderAppControllerResult {
+export function renderAppController(
+  options: UseAppControllerOptions = {}
+): RenderAppControllerResult {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  const utils = renderHook(() => useAppController(), {
+  const utils = renderHook(() => useAppController(options), {
     wrapper: ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={queryClient}>
         <AgentTaskTrackerProvider>{children}</AgentTaskTrackerProvider>

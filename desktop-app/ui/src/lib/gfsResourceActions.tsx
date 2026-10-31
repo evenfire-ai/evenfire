@@ -55,6 +55,23 @@ export type GfsResourceActionHandlers = Partial<
   Record<GfsResourceActionId, GfsResourceActionHandler>
 >
 
+export type GfsResourceActionRequest = {
+  id: number
+  targetUri: string
+  actionId: GfsResourceActionId
+  file?: File
+  /** Navigation target for parent-relative actions such as Move on unreadable rows. */
+  navigationUri?: string | null
+  /** Exact row identity when the action must be resolved through its parent. */
+  targetResource?: {
+    resourceId: string
+    name: string
+    kind: GfsResourceKind
+    version: number
+    parentResourceId: string | null
+  }
+}
+
 export type GfsResourceActionOptions = {
   kind: GfsResourceKind
   uri: string

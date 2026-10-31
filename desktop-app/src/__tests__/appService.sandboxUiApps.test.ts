@@ -520,6 +520,59 @@ describe('AppService profile UI link authority', () => {
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
   })
 
+  it('returns the effective authenticated Profile origin for link parsing', async () => {
+    config.desktopProfileUiBaseUrl = 'https://profile.explicit.example'
+    config.desktopProfileUiBaseUrlExplicit = true
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      sessionGeneration: number
+      sessionToken: string
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      getGfsResourceProfileOrigin: () => Promise<{
+        origin: string
+        sessionGeneration: number
+        envKey: string
+      }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.sessionGeneration = 7
+    service.memberRegistrationServiceClient = { getInvitationProfile: vi.fn() }
+
+    await expect(service.getGfsResourceProfileOrigin()).resolves.toEqual({
+      origin: 'https://profile.explicit.example',
+      sessionGeneration: 7,
+      envKey: 'test-env',
+    })
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
+  })
+
+  it('returns a tenant-specific invitation origin rather than deriving from REST', async () => {
+    config.desktopProfileUiBaseUrlExplicit = false
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      sessionGeneration: number
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      getGfsResourceProfileOrigin: () => Promise<{
+        origin: string
+        sessionGeneration: number
+        envKey: string
+      }>
+    }
+    service.me = { id: 'user-tenant', email: 'user@tenant.example' }
+    service.sessionGeneration = 8
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn().mockResolvedValue({
+        profileUiBaseUrl: 'https://invitation-profile.tenant.example/',
+      }),
+    }
+
+    await expect(service.getGfsResourceProfileOrigin()).resolves.toEqual({
+      origin: 'https://invitation-profile.tenant.example',
+      sessionGeneration: 8,
+      envKey: 'test-env',
+    })
+  })
+
   it('creates a shareable GFS link with the canonical resource identity', async () => {
     const service = makeService() as unknown as {
       me: { id: string; email: string }
@@ -541,6 +594,140 @@ describe('AppService profile UI link authority', () => {
     expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledWith(
       'user@tenant.example'
     )
+  })
+
+  it('uses the invitation-specific Profile origin and rejects a changed session', async () => {
+    config.desktopProfileUiBaseUrlExplicit = false
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      sessionGeneration: number
+      sessionToken: string
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      getGfsResourceProfileOrigin: () => Promise<unknown>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.sessionGeneration = 11
+    let releaseLookup!: (value: { profileUiBaseUrl: string }) => void
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn(() => new Promise(resolve => (releaseLookup = resolve))),
+    }
+    const pending = service.getGfsResourceProfileOrigin()
+    expect(releaseLookup).toBeTypeOf('function')
+    service.sessionGeneration = 12
+    releaseLookup({ profileUiBaseUrl: 'https://profile.tenant.example' })
+
+    await expect(pending).rejects.toThrow('Desktop session changed')
+  })
+
+  it('coalesces concurrent Profile origin lookups for one session', async () => {
+    config.desktopProfileUiBaseUrlExplicit = false
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      sessionGeneration: number
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      getGfsResourceProfileOrigin: () => Promise<{
+        origin: string
+        sessionGeneration: number
+        envKey: string
+      }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.sessionGeneration = 21
+    let releaseLookup!: (value: { profileUiBaseUrl: string }) => void
+    const lookup = vi.fn(
+      () => new Promise<{ profileUiBaseUrl: string }>(resolve => (releaseLookup = resolve))
+    )
+    service.memberRegistrationServiceClient = { getInvitationProfile: lookup }
+
+    const pending = Array.from({ length: 8 }, () => service.getGfsResourceProfileOrigin())
+    expect(lookup).toHaveBeenCalledOnce()
+    releaseLookup({ profileUiBaseUrl: 'https://invitation-profile.tenant.example' })
+
+    await expect(Promise.all(pending)).resolves.toEqual(
+      Array.from({ length: 8 }, () => ({
+        origin: 'https://invitation-profile.tenant.example',
+        sessionGeneration: 21,
+        envKey: 'test-env',
+      }))
+    )
+  })
+
+  it('separates Profile origin lookups across session generations', async () => {
+    config.desktopProfileUiBaseUrlExplicit = false
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      sessionGeneration: number
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      getGfsResourceProfileOrigin: () => Promise<{
+        origin: string
+        sessionGeneration: number
+        envKey: string
+      }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.sessionGeneration = 31
+    let releaseOldLookup!: (value: { profileUiBaseUrl: string }) => void
+    let releaseCurrentLookup!: (value: { profileUiBaseUrl: string }) => void
+    const lookup = vi
+      .fn()
+      .mockImplementationOnce(
+        () => new Promise<{ profileUiBaseUrl: string }>(resolve => (releaseOldLookup = resolve))
+      )
+      .mockImplementationOnce(
+        () => new Promise<{ profileUiBaseUrl: string }>(resolve => (releaseCurrentLookup = resolve))
+      )
+    service.memberRegistrationServiceClient = { getInvitationProfile: lookup }
+
+    const oldSession = service.getGfsResourceProfileOrigin()
+    service.sessionGeneration = 32
+    const currentSession = service.getGfsResourceProfileOrigin()
+    expect(lookup).toHaveBeenCalledTimes(2)
+
+    releaseCurrentLookup({ profileUiBaseUrl: 'https://current-profile.tenant.example' })
+    await expect(currentSession).resolves.toMatchObject({
+      origin: 'https://current-profile.tenant.example',
+      sessionGeneration: 32,
+    })
+    releaseOldLookup({ profileUiBaseUrl: 'https://stale-profile.tenant.example' })
+    await expect(oldSession).rejects.toThrow('Desktop session changed')
+
+    await expect(service.getGfsResourceProfileOrigin()).resolves.toMatchObject({
+      origin: 'https://current-profile.tenant.example',
+      sessionGeneration: 32,
+    })
+    expect(lookup).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears a rejected Profile origin lookup so a later request can retry', async () => {
+    config.desktopProfileUiBaseUrlExplicit = false
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      sessionGeneration: number
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      getGfsResourceProfileOrigin: () => Promise<{
+        origin: string
+        sessionGeneration: number
+        envKey: string
+      }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.sessionGeneration = 41
+    const lookup = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('temporary profile lookup failure'))
+      .mockResolvedValueOnce({ profileUiBaseUrl: 'https://retry-profile.tenant.example' })
+    service.memberRegistrationServiceClient = { getInvitationProfile: lookup }
+
+    const failed = Array.from({ length: 4 }, () => service.getGfsResourceProfileOrigin())
+    const failedResults = await Promise.allSettled(failed)
+    expect(failedResults.every(result => result.status === 'rejected')).toBe(true)
+    expect(lookup).toHaveBeenCalledOnce()
+
+    await expect(service.getGfsResourceProfileOrigin()).resolves.toMatchObject({
+      origin: 'https://retry-profile.tenant.example',
+      sessionGeneration: 41,
+    })
+    expect(lookup).toHaveBeenCalledTimes(2)
   })
 
   it('fails closed when the explicit Profile UI base is invalid', async () => {

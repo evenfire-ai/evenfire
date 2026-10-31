@@ -71,6 +71,30 @@ describe('chat message Markdown semantic model', () => {
     expect(findChatSemanticMatches(model, 'needle')).toHaveLength(2)
   })
 
+  it('keeps bare GFS routes as source text while preserving authored Markdown links', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const source = `Open ${uri}. See [the guide](https://example.test/guide).`
+    const model = buildChatMessageSemanticModel(assistant(source))
+    const links: string[] = []
+    const visit = (node: unknown) => {
+      if (!node || typeof node !== 'object') return
+      const value = node as {
+        type?: string
+        tagName?: string
+        properties?: { href?: string }
+        children?: unknown[]
+      }
+      if (value.type === 'element' && value.tagName === 'a' && value.properties?.href) {
+        links.push(value.properties.href)
+      }
+      value.children?.forEach(visit)
+    }
+    visit(model.renderTree)
+
+    expect(links).toEqual(['https://example.test/guide'])
+    expect(model.searchText).toContain(uri)
+  })
+
   it('prevents logical matches from crossing blocks and GFM table cells', () => {
     const blocks = buildChatMessageSemanticModel(assistant('alpha\n\nbeta'))
     const table = buildChatMessageSemanticModel(assistant('| alpha | beta |\n| --- | --- |'))

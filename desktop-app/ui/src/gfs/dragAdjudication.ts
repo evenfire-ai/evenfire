@@ -48,7 +48,7 @@ export interface GfsDragAdjudicationDeps {
    * data. Optional so a surface without an authority boundary still refuses
    * the drop.
    */
-  handleAuthorityFailure?: (message: string, scope: string, sessionGeneration: number) => boolean
+  handleAuthorityFailure?: (error: unknown, scope: string, sessionGeneration: number) => boolean
 }
 
 interface HeldAffordances {
@@ -146,6 +146,8 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
   const reportAuthorityFailure = useCallback(
     (error: unknown): { message: string; sessionFailure: boolean; revoked: boolean } => {
       const message = error instanceof Error ? error.message : String(error ?? '')
+      // Keep the established drop terminality decision from its HTTP message,
+      // but forward the typed value to the shared owner for stale-generation fencing.
       if (!isGfsSessionAuthorityFailure(message, 'operation')) {
         return { message, sessionFailure: false, revoked: false }
       }
@@ -154,7 +156,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
         sessionFailure: true,
         revoked:
           isAuthorityCurrent() && deps.scope && isGfsSessionGeneration(deps.sessionGeneration)
-            ? (deps.handleAuthorityFailure?.(message, deps.scope, deps.sessionGeneration) ?? false)
+            ? (deps.handleAuthorityFailure?.(error, deps.scope, deps.sessionGeneration) ?? false)
             : false,
       }
     },

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { type ReactElement, type ReactNode, useLayoutEffect, useReducer } from 'react'
+import { type ReactElement, type ReactNode, useEffect, useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import {
@@ -12,9 +12,11 @@ import {
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { revokeGfsSessionAccess } from '@hooks/domain/useGfsBrowserController'
 import { useAppController } from '@hooks/useAppController'
 import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
+import { recordLatestGfsConversationContext } from '@lib/gfsConversationPrefill'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { desktopQueryClient, desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -33,6 +35,7 @@ import { App } from '@/App'
 import { USER_SCOPE_INVALIDATED } from '@/gfs/__fixtures__/entityChangeFixtures'
 import {
   openGfsResourcePayload,
+  previewDownloadDeniedMessage,
   resolveDeniedMessage,
   resolveResource,
   resolvedDirectory,
@@ -98,6 +101,19 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     onEmbedSlotRightChange?: (rightPx: number) => void
   },
 }))
+const gfsImagePreviewHarness = vi.hoisted(() => ({
+  props: null as null | {
+    byteLength?: number
+    fileName?: string
+    unavailable?: boolean
+    gfsUri: string
+    mimeType?: string
+    reloadVersion?: number
+    onDownloadError?: (error: unknown) => void
+  },
+  onMount: null as null | ((gfsUri: string) => void),
+  onRender: null as null | ((props: { unavailable?: boolean; gfsUri: string }) => void),
+}))
 const appHeaderHarness = vi.hoisted(() => ({
   props: null as null | {
     notificationTrayMode?: 'drawer' | 'overlay'
@@ -133,7 +149,30 @@ vi.mock('@components/ChatLocalSearch', () => ({ ChatLocalSearch: () => null }))
 vi.mock('@components/CommandPalette', () => ({ CommandPalette: () => null }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/ConfirmDialog', () => ({ ConfirmDialog: () => null }))
-vi.mock('@components/GfsImagePreview', () => ({ GfsImagePreview: () => null }))
+vi.mock('@components/GfsImagePreview', () => ({
+  GfsImagePreview: (props: {
+    byteLength?: number
+    fileName?: string
+    unavailable?: boolean
+    gfsUri: string
+    mimeType?: string
+    reloadVersion?: number
+    onDownloadError?: (error: unknown) => void
+  }) => {
+    gfsImagePreviewHarness.props = props
+    gfsImagePreviewHarness.onRender?.(props)
+    useEffect(() => {
+      if (!props.unavailable) gfsImagePreviewHarness.onMount?.(props.gfsUri)
+    }, [props.gfsUri, props.unavailable])
+    return (
+      <div
+        data-testid="gfs-image-preview"
+        data-gfs-uri={props.gfsUri}
+        data-unavailable={String(Boolean(props.unavailable))}
+      />
+    )
+  },
+}))
 vi.mock('@components/PluginConsentModal', () => ({ PluginConsentModal: () => null }))
 vi.mock('@components/SidebarNav', () => ({
   SidebarNav: (props: NonNullable<typeof sidebarHarness.props>) => {
@@ -235,6 +274,12 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
+  const beginUserNavigationIntent = vi.fn(() => {
+    const next = (controller.navigationIntentSequence ?? 0) + 1
+    controller.navigationIntentSequence = next
+    forceControllerRender()
+    return next
+  })
   // Faithful to the real controller's openFilesSection: open/focus a files tab at
   // `path` through the real store producer (dedupe by path lives in the store).
   const openFilesSection = vi.fn((path: string | null = null) => {
@@ -246,13 +291,15 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   })
   // Faithful to the real controller's openPreviewSection: open/focus a preview
   // tab for a previewable file through the real store producer (dedupe by gfsUri).
-  const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
+  const openPreviewSection = vi.fn((preview: GfsPreviewResource, sessionScope?: string) => {
+    beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openPreviewTab(state, {
         id: nextWorkspaceTabId(),
         title: preview.name,
         gfsUri: preview.gfsUri,
+        ...(sessionScope !== undefined ? { sessionScope } : {}),
         fileKind: preview.kind,
         byteLength: preview.bytes,
         ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
@@ -315,7 +362,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   const handleOpenNotification = vi.fn(
     (
       notification: { kind?: string; agentName?: string; chatId?: string },
-      options: { keepNavItem?: boolean } = {}
+      options: { keepNavItem?: boolean; navigationIntentSequence?: number } = {}
     ) => {
       // Faithful routing: workflow notifications navigate to the plugins section;
       // sdk notifications navigate away without touching the agent chat state.
@@ -331,6 +378,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       controller.selectedAgent = notification.agentName ?? controller.selectedAgent
       controller.activeChatId = notification.chatId ?? null
       if (!options.keepNavItem) {
+        if (options.navigationIntentSequence === undefined) beginUserNavigationIntent()
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
           activateChatState(
@@ -369,7 +417,10 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     showAppsPicker,
     clearAppsPicker,
     activateWorkspaceChatTab: noop,
-    beginUserNavigationIntent: vi.fn(),
+    navigationIntentSequence: 0,
+    beginUserNavigationIntent,
+    isNavigationIntentCurrent: (sequence: number) =>
+      sequence === controller.navigationIntentSequence,
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
@@ -564,6 +615,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     })
     workspaceTabs = openFilesTab(workspaceTabs, { id: 'files-empty-tab', path: null })
     workspaceTabs = selectWorkspaceTab(workspaceTabs, 'files-resource-tab')
+    recordLatestGfsConversationContext(activeWorkspaceTab(workspaceTabs)!)
     currentController = makeController({
       selectedAgent: 'agent-a',
       activeChatId: null,
@@ -974,6 +1026,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     })
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    const intentBeforeNotification = currentController.navigationIntentSequence
 
     // Open the conversation the approval is on (chat-2, a background chat) via the
     // notification tray's gesture.
@@ -994,7 +1047,10 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(currentController.activeChatId).toBe('chat-2')
     expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'chat-2' }),
-      { keepNavItem: true }
+      {
+        keepNavItem: true,
+        navigationIntentSequence: intentBeforeNotification + 1,
+      }
     )
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
   })
@@ -1024,6 +1080,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     })
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    const intentBeforeNotification = currentController.navigationIntentSequence
 
     // The approval is on a chat in a DIFFERENT team (team-b vs the harness team-a).
     await act(async () => {
@@ -1037,12 +1094,12 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     })
     act(() => rerender(<App />))
 
-    // The drawer never opened, and the gesture ran through the plain path WITHOUT
-    // keepNavItem — the eject the full-screen route needs so a team switch survives.
+    // The drawer never opened. The cross-team path carries its intent receipt but
+    // does not set keepNavItem, so the notification stays full-screen.
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'chat-2' }),
-      undefined
+      { navigationIntentSequence: intentBeforeNotification + 1 }
     )
   })
 
@@ -1158,6 +1215,9 @@ describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3
     sandboxUiPageHarness.props = null
     appHeaderHarness.props = null
     appHeaderHarness.openNotification = null
+    gfsImagePreviewHarness.props = null
+    gfsImagePreviewHarness.onMount = null
+    gfsImagePreviewHarness.onRender = null
     openGfsResourceCb = null
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
@@ -1229,6 +1289,7 @@ describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3
 // derived from the real producer (`openGfsResourcePayload`); tabs are asserted on
 // the observable store (T4).
 describe('App plugin previewable handoff — routes through resolveGfsPreview (R1-H3)', () => {
+  const sessionScope = ':user-a:team-a'
   let currentController: AppController
   let openGfsResourceCb:
     | ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void)
@@ -1241,6 +1302,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     appHeaderHarness.props = null
     appHeaderHarness.openNotification = null
     openGfsResourceCb = null
+    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1), 'active')
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
     Object.defineProperty(window, 'clerum', {
@@ -1273,6 +1335,12 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
 
   afterEach(() => {
     cleanup()
+    gfsImagePreviewHarness.props = null
+    gfsImagePreviewHarness.onMount = null
+    gfsImagePreviewHarness.onRender = null
+    desktopQueryClient.removeQueries({
+      queryKey: desktopQueryKeys.gfsAccessState(sessionScope, 1),
+    })
     delete (window as { clerum?: unknown }).clerum
   })
 
@@ -1326,19 +1394,216 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     expect(currentController.openPreviewSection).not.toHaveBeenCalled()
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.files)
   })
+
+  it('expires a plugin image preview when shared GFS authority is revoked', async () => {
+    const imagePayload = await openGfsResourcePayload(
+      resolvedFile('image-1', 'diagram.png', {
+        gfsUri: 'gfs://main/image-1',
+        bytes: 128,
+        version: 3,
+      })
+    )
+    renderApp(<App />)
+
+    act(() => openGfsResourceCb?.(imagePayload))
+    expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('false')
+    let availableDuringRevokedRender = false
+    gfsImagePreviewHarness.onRender = props => {
+      if (
+        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1)) ===
+          'revoked' &&
+        !props.unavailable
+      ) {
+        availableDuringRevokedRender = true
+      }
+    }
+
+    act(() => revokeGfsSessionAccess(desktopQueryClient, sessionScope, 1))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('true')
+    )
+    expect(availableDuringRevokedRender).toBe(false)
+  })
+
+  it('revokes shared GFS access when plugin image download returns a current 401', async () => {
+    const imagePayload = await openGfsResourcePayload(
+      resolvedFile('image-1', 'diagram.png', {
+        gfsUri: 'gfs://main/image-1',
+        bytes: 128,
+        version: 3,
+      })
+    )
+    const deniedMessage = await previewDownloadDeniedMessage(
+      'gfs://main/image-1',
+      { code: 'session_expired', message: 'The previous session expired.' },
+      401
+    )
+    renderApp(<App />)
+
+    act(() => openGfsResourceCb?.(imagePayload))
+    expect(gfsImagePreviewHarness.props?.onDownloadError).toBeTypeOf('function')
+    act(() => gfsImagePreviewHarness.props?.onDownloadError?.(new Error(deniedMessage)))
+
+    await waitFor(() =>
+      expect(
+        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1))
+      ).toBe('revoked')
+    )
+    expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('true')
+  })
+
+  it('revokes shared GFS access when plugin image download returns a typed authority 403', async () => {
+    const imagePayload = await openGfsResourcePayload(
+      resolvedFile('image-1', 'diagram.png', {
+        gfsUri: 'gfs://main/image-1',
+        bytes: 128,
+        version: 3,
+      })
+    )
+    const deniedMessage = await previewDownloadDeniedMessage(
+      'gfs://main/image-1',
+      { code: 'desktop_user_retired', message: 'The account is no longer active.' },
+      403
+    )
+    renderApp(<App />)
+
+    act(() => openGfsResourceCb?.(imagePayload))
+    const onDownloadError = gfsImagePreviewHarness.props?.onDownloadError
+    expect(onDownloadError).toBeTypeOf('function')
+    act(() => onDownloadError?.(new Error(deniedMessage)))
+
+    await waitFor(() =>
+      expect(
+        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1))
+      ).toBe('revoked')
+    )
+    expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('true')
+  })
+
+  it('keeps resource denials and stale plugin download failures local to their preview', async () => {
+    const imagePayload = await openGfsResourcePayload(
+      resolvedFile('image-1', 'diagram.png', {
+        gfsUri: 'gfs://main/image-1',
+        bytes: 128,
+        version: 3,
+      })
+    )
+    const forbiddenMessage = await previewDownloadDeniedMessage(
+      'gfs://main/image-1',
+      { code: 'permission_denied', message: 'This resource is not readable.' },
+      403
+    )
+    const missingMessage = await previewDownloadDeniedMessage(
+      'gfs://main/image-1',
+      { code: 'resource_missing', message: 'This resource no longer exists.' },
+      404
+    )
+    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1), 'active')
+    renderApp(<App />)
+
+    act(() => openGfsResourceCb?.(imagePayload))
+    const onDownloadError = gfsImagePreviewHarness.props?.onDownloadError
+    expect(onDownloadError).toBeTypeOf('function')
+
+    act(() => onDownloadError?.(new Error(forbiddenMessage)))
+    act(() => onDownloadError?.(new Error(missingMessage)))
+    const staleFailure = new Error('401 Unauthorized: earlier GFS request')
+    Object.assign(staleFailure, { code: 'GFS_STALE_SESSION_AUTHORITY' })
+    act(() => onDownloadError?.(staleFailure))
+
+    expect(desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1))).toBe(
+      'active'
+    )
+    expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('false')
+  })
+
+  it('does not reopen a plugin image preview under a later authenticated principal', async () => {
+    const imagePayload = await openGfsResourcePayload(
+      resolvedFile('image-1', 'diagram.png', {
+        gfsUri: 'gfs://main/image-1',
+        bytes: 128,
+        version: 3,
+      })
+    )
+    const downloadOnMount = vi.fn()
+    gfsImagePreviewHarness.onMount = downloadOnMount
+    renderApp(<App />)
+    act(() => openGfsResourceCb?.(imagePayload))
+    await waitFor(() => expect(downloadOnMount).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      currentController.isAuthenticated = false
+      currentController.authenticatedPrincipalIdentity = null
+      forceControllerRender()
+    })
+    expect(screen.queryByTestId('gfs-image-preview')).toBeNull()
+
+    act(() => {
+      currentController.isAuthenticated = true
+      currentController.authenticatedPrincipalIdentity = 'user-b:user-b@example.test'
+      currentController.currentTeamId = 'team-b'
+      currentController.me = {
+        id: 'user-b',
+        email: 'user-b@example.test',
+        name: 'User B',
+        picture: null,
+        teamId: 'team-b',
+        teamName: 'Team B',
+        role: 'member',
+      }
+      forceControllerRender()
+    })
+
+    expect(screen.queryByTestId('gfs-image-preview')).toBeNull()
+    expect(downloadOnMount).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes a plugin image preview when the configured GFS environment changes', async () => {
+    const imagePayload = await openGfsResourcePayload(
+      resolvedFile('image-1', 'diagram.png', {
+        gfsUri: 'gfs://main/image-1',
+        bytes: 128,
+        version: 3,
+      })
+    )
+    const downloadOnMount = vi.fn()
+    gfsImagePreviewHarness.onMount = downloadOnMount
+    renderApp(<App />)
+    act(() => openGfsResourceCb?.(imagePayload))
+    await waitFor(() => expect(downloadOnMount).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      currentController.runtimeConfigState = {
+        ...(currentController.runtimeConfigState ?? {}),
+        envKey: 'environment-b',
+      } as NonNullable<typeof currentController.runtimeConfigState>
+      forceControllerRender()
+    })
+
+    expect(screen.queryByTestId('gfs-image-preview')).toBeNull()
+    await waitFor(() => expect(window.clerum.sandboxUi.setVisible).toHaveBeenCalledWith(true))
+    expect(downloadOnMount).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('App live GFS preview revalidation', () => {
+  const sessionScope = ':user-a:team-a'
   let currentController: AppController
   let dispatchEntityChange: ((event: unknown) => void) | null
+  let openGfsResource:
+    | ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void)
+    | null
 
   beforeEach(() => {
     vi.clearAllMocks()
     dispatchEntityChange = null
+    openGfsResource = null
     const workspaceTabs = openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
       id: 'preview-md',
       title: 'README.md',
       gfsUri: 'gfs://main/readme',
+      sessionScope,
       fileKind: 'markdown',
       byteLength: 14,
       resourceVersion: 3,
@@ -1357,6 +1622,14 @@ describe('App live GFS preview revalidation', () => {
           }),
         },
         gfs: { resolve: vi.fn() },
+        pluginSdk: {
+          onOpenGfsResource: vi.fn(
+            (handler: (resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void) => {
+              openGfsResource = handler
+              return vi.fn()
+            }
+          ),
+        },
         sandboxUi: {
           listApps: vi.fn().mockResolvedValue({ apps: [] }),
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
@@ -1375,6 +1648,9 @@ describe('App live GFS preview revalidation', () => {
   afterEach(() => {
     cleanup()
     desktopQueryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+    desktopQueryClient.removeQueries({
+      queryKey: desktopQueryKeys.gfsAccessState(sessionScope, 1),
+    })
     vi.restoreAllMocks()
     delete (window as { clerum?: unknown }).clerum
   })
@@ -1644,11 +1920,49 @@ describe('App live GFS preview revalidation', () => {
     )
   })
 
+  it('keeps Preview tabs when an old-generation revalidation returns a tagged 401', async () => {
+    currentController.workspaceTabs = openPreviewTab(currentController.workspaceTabs, {
+      id: 'preview-image',
+      title: 'diagram.png',
+      gfsUri: 'gfs://main/diagram',
+      sessionScope,
+      fileKind: 'image',
+      byteLength: 128,
+      mimeType: 'image/png',
+      resourceVersion: 7,
+    })
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    const staleFailure = new Error('401 Unauthorized: session rejected')
+    staleFailure.name = 'GfsStaleSessionAuthorityError'
+    resolve
+      .mockRejectedValueOnce(staleFailure as never)
+      .mockRejectedValueOnce(staleFailure as never)
+
+    renderApp(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+    expect(resolve.mock.calls.map(([uri]) => uri).sort()).toEqual([
+      'gfs://main/diagram',
+      'gfs://main/readme',
+    ])
+
+    expect(currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')).toHaveLength(
+      2
+    )
+    expect(
+      currentController.workspaceTabs.tabs
+        .filter(tab => tab.kind === 'preview')
+        .every(tab => tab.kind === 'preview' && !tab.preview?.unavailable)
+    ).toBe(true)
+  })
+
   it('purges every open GFS preview when the authenticated session expires', async () => {
     currentController.workspaceTabs = openPreviewTab(currentController.workspaceTabs, {
       id: 'preview-image',
       title: 'diagram.png',
       gfsUri: 'gfs://main/diagram',
+      sessionScope,
       fileKind: 'image',
       byteLength: 128,
       mimeType: 'image/png',
@@ -1678,6 +1992,12 @@ describe('App live GFS preview revalidation', () => {
       })
     )
 
+    await waitFor(() =>
+      expect(
+        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1))
+      ).toBe('revoked')
+    )
+
     await waitFor(() => {
       const previews = currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
       expect(previews).toHaveLength(2)
@@ -1690,6 +2010,7 @@ describe('App live GFS preview revalidation', () => {
       id: 'preview-image',
       title: 'diagram.png',
       gfsUri: 'gfs://main/diagram',
+      sessionScope,
       fileKind: 'image',
       byteLength: 128,
       mimeType: 'image/png',
@@ -1713,13 +2034,184 @@ describe('App live GFS preview revalidation', () => {
     })
   })
 
-  it('does not retry a preview after its last tab owner closes', async () => {
+  it('revokes shared GFS access when an App-owned preview detects a current 401', async () => {
+    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1), 'active')
+    const expiredSessionMessage = await resolveDeniedMessage(
+      'gfs://main/readme',
+      { code: 'session_expired', message: 'session expired' },
+      401
+    )
+    vi.mocked(window.clerum.gfs.resolve).mockRejectedValue(new Error(expiredSessionMessage))
+    renderApp(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+
+    await waitFor(() =>
+      expect(
+        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1))
+      ).toBe('revoked')
+    )
+  })
+
+  it('does not republish a sibling preview after a current 401 expires all previews', async () => {
+    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1), 'active')
+    currentController.workspaceTabs = openPreviewTab(currentController.workspaceTabs, {
+      id: 'preview-image',
+      title: 'diagram.png',
+      gfsUri: 'gfs://main/diagram',
+      sessionScope,
+      fileKind: 'image',
+      byteLength: 128,
+      mimeType: 'image/png',
+      resourceVersion: 7,
+    })
+    const expiredSessionMessage = await resolveDeniedMessage(
+      'gfs://main/readme',
+      { code: 'session_expired', message: 'session expired' },
+      401
+    )
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    let finishSibling!: (value: ReturnType<typeof resolvedFile>) => void
+    resolve.mockImplementation(uri => {
+      if (uri === 'gfs://main/readme')
+        return Promise.reject(new Error(expiredSessionMessage)) as never
+      return new Promise(resolvePromise => {
+        finishSibling = resolvePromise
+      }) as never
+    })
+    renderApp(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      const previews = currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
+      expect(previews).toHaveLength(2)
+      expect(previews.every(tab => tab.kind === 'preview' && tab.preview?.unavailable)).toBe(true)
+    })
+
+    await act(async () => {
+      finishSibling(
+        resolvedFile('diagram', 'diagram.png', {
+          gfsUri: 'gfs://main/diagram',
+          bytes: 128,
+          version: 8,
+        })
+      )
+    })
+
+    expect(
+      currentController.workspaceTabs.tabs
+        .filter(tab => tab.kind === 'preview')
+        .every(tab => tab.kind === 'preview' && tab.preview?.unavailable)
+    ).toBe(true)
+  })
+
+  it('expires pending previews when another GFS surface revokes shared access', async () => {
+    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1), 'active')
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    let finishPreview!: (value: ReturnType<typeof resolvedFile>) => void
+    resolve.mockImplementation(
+      () =>
+        new Promise(resolvePromise => {
+          finishPreview = resolvePromise
+        }) as never
+    )
+    renderApp(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      revokeGfsSessionAccess(desktopQueryClient, sessionScope, 1)
+    })
+
+    const previewsUnavailable = () => {
+      const previews = currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
+      return previews.length > 0 && previews.every(tab => tab.preview?.unavailable)
+    }
+    await waitFor(() => expect(previewsUnavailable()).toBe(true))
+    await act(async () => {
+      finishPreview(
+        resolvedFile('readme', 'README.md', {
+          gfsUri: 'gfs://main/readme',
+          bytes: 14,
+          version: 4,
+        })
+      )
+    })
+
+    expect(previewsUnavailable()).toBe(true)
+    expect(resolve).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a plugin image preview attached to its session scope after metadata refresh', async () => {
+    const pluginUri = 'gfs://main/plugin-image'
+    const imagePayload = await openGfsResourcePayload(
+      resolvedFile('plugin-image', 'diagram.png', {
+        gfsUri: pluginUri,
+        bytes: 128,
+        version: 3,
+      })
+    )
+    const downloadOnMount = vi.fn()
+    gfsImagePreviewHarness.onMount = downloadOnMount
+    const resolvedPluginImage = await resolveResource(
+      resolvedFile('plugin-image', 'diagram.png', {
+        gfsUri: pluginUri,
+        bytes: 256,
+        version: 4,
+      })
+    )
+    const refreshedPluginImage = {
+      ...resolvedPluginImage,
+      pathCache: resolvedPluginImage.pathCache ?? null,
+    }
+    const resolvedWorkspacePreview = await resolveResource(
+      resolvedFile('readme', 'README.md', {
+        gfsUri: 'gfs://main/readme',
+        bytes: 14,
+        version: 3,
+      })
+    )
+    const unchangedWorkspacePreview = {
+      ...resolvedWorkspacePreview,
+      pathCache: resolvedWorkspacePreview.pathCache ?? null,
+    }
+    const resolve = vi
+      .mocked(window.clerum.gfs.resolve)
+      .mockImplementation(async uri =>
+        uri === pluginUri ? refreshedPluginImage : unchangedWorkspacePreview
+      )
+    renderApp(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+    act(() => openGfsResource?.(imagePayload))
+
+    expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('false')
+    expect(downloadOnMount).toHaveBeenCalledTimes(1)
+
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(pluginUri))
+    await waitFor(() => expect(downloadOnMount).toHaveBeenCalledTimes(2))
+
+    expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('false')
+    expect(gfsImagePreviewHarness.props?.gfsUri).toBe(pluginUri)
+    expect(gfsImagePreviewHarness.props).toMatchObject({
+      byteLength: 256,
+      fileName: 'diagram.png',
+      mimeType: 'image/png',
+    })
+  })
+
+  it('retries an owned preview and cancels a later retry after its last tab owner closes', async () => {
     const unavailableMessage = await resolveDeniedMessage(
       'gfs://main/readme',
       { code: 'upstream', message: 'upstream unavailable' },
       503
     )
     vi.useFakeTimers()
+    const scheduleTimeout = vi.spyOn(window, 'setTimeout')
     const resolve = vi.mocked(window.clerum.gfs.resolve)
     resolve.mockRejectedValue(new Error(unavailableMessage))
     renderApp(<App />)
@@ -1735,13 +2227,22 @@ describe('App live GFS preview revalidation', () => {
       await Promise.resolve()
     })
     expect(resolve).toHaveBeenCalledTimes(1)
+    expect(scheduleTimeout).toHaveBeenCalledWith(expect.any(Function), 5000)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+      await Promise.resolve()
+    })
+    expect(resolve).toHaveBeenCalledTimes(2)
+    expect(scheduleTimeout).toHaveBeenCalledWith(expect.any(Function), 10000)
 
     act(() => currentController.setWorkspaceTabs({ tabs: [], activeTabId: null }))
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5000)
+      await vi.advanceTimersByTimeAsync(10000)
     })
 
-    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve).toHaveBeenCalledTimes(2)
+    scheduleTimeout.mockRestore()
     vi.useRealTimers()
   })
 })
@@ -1828,6 +2329,38 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
     bindPanelWidth()
     act(() => fireResize())
   }
+
+  it('passes one intent receipt to a full-screen same-team notification', async () => {
+    renderApp(<App />)
+
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    resizeTo(800)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    const intentBeforeNotification = currentController.navigationIntentSequence
+
+    await act(async () => {
+      await appHeaderHarness.openNotification?.({
+        id: 'full-screen-notification',
+        kind: 'assistant_reply',
+        agentName: 'alpha',
+        chatId: 'chat-2',
+        teamId: 'team-a',
+      } as unknown as Parameters<NonNullable<typeof appHeaderHarness.openNotification>>[0])
+    })
+
+    expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 'chat-2' }),
+      { navigationIntentSequence: intentBeforeNotification + 1 }
+    )
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+  })
 
   it('suppresses the drawer below the threshold and restores it on re-widen, but a manual close stays closed', () => {
     renderApp(<App />)

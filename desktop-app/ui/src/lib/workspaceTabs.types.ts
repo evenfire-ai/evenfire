@@ -34,6 +34,8 @@ export type FilesTabPayload = {
  */
 export type PreviewTabPayload = {
   gfsUri: string
+  /** Exact authenticated GFS scope that resolved this Preview. */
+  sessionScope?: string
   fileKind: 'image' | 'markdown' | 'video'
   mimeType?: string
   byteLength: number
@@ -107,6 +109,8 @@ export type OpenPreviewTabInput = {
   title?: string
   /** The gfsUri to preview (dedupe key). */
   gfsUri: string
+  /** Exact authenticated GFS scope that resolved this Preview. */
+  sessionScope?: string
   fileKind: 'image' | 'markdown' | 'video'
   mimeType?: string
   byteLength: number

@@ -36,6 +36,7 @@
  * in a new tree/preview test.
  */
 import { createServer } from 'node:http'
+import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import {
   type GfsAccessibleResource,
   type GfsChildView,
@@ -53,6 +54,7 @@ import { requestJson } from '../../../../src/httpClient.js'
 // the renderer contract fails this module's typecheck.
 type ListChildrenPage = Awaited<ReturnType<typeof window.clerum.gfs.listChildren>>
 type ListAccessiblePage = Awaited<ReturnType<typeof window.clerum.gfs.listAccessible>>
+type Affordances = Awaited<ReturnType<typeof window.clerum.gfs.affordances>>
 // download binds to the PRODUCER's own output, not the renderer `.d.ts`: the
 // `.d.ts` declares `download.resource.pathCache` as required while the producer's
 // `ResolvedGfsResource` leaves it optional, so the mirror overstates the contract
@@ -140,6 +142,16 @@ export async function listAccessiblePage(
   return structuredClone(page)
 }
 
+/** Run held bits through the real GFS client and desktop affordance mapper. */
+export async function resourceAffordances(
+  held: string[],
+  isOperator = false
+): Promise<Affordances> {
+  const client = new GfsClient(stubTransport({ held, isOperator }))
+  const result = await client.affordances('fixture-resource', SESSION_TOKEN, 'main')
+  return structuredClone(delegationAffordances(new Set(result.held), result.isOperator))
+}
+
 /** Run a successful PATCH receipt through the real GfsClient and IPC clone. */
 export async function moveResourceReceipt(
   resourceId: string,
@@ -163,6 +175,17 @@ export async function downloadResult(
 ): Promise<DownloadResult> {
   const client = new GfsClient(stubTransport({ ok: true, data: resource }, bytes))
   const out = await client.download(resource.gfsUri, SESSION_TOKEN)
+  return structuredClone(out)
+}
+
+/** Run the bounded preview download through `GfsClient` and the IPC structured-clone boundary. */
+export async function previewDownloadResult(
+  resource: ResolvedGfsResource,
+  bytes: ArrayBuffer = new ArrayBuffer(4),
+  maxBytes = 2_097_152
+): Promise<DownloadResult> {
+  const client = new GfsClient(stubTransport({ ok: true, data: resource }, bytes))
+  const out = await client.download(resource.gfsUri, SESSION_TOKEN, { maxBytes })
   return structuredClone(out)
 }
 
@@ -228,6 +251,8 @@ export async function resolveDeniedMessage(
     res.end(JSON.stringify({ ok: false, error: errorBody }))
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+  let rejected = false
+  let failure: unknown
   try {
     const address = server.address()
     const port = typeof address === 'object' && address ? address.port : 0
@@ -237,13 +262,87 @@ export async function resolveDeniedMessage(
       fetchBytes: async () => new ArrayBuffer(0),
     })
     await client.resolveUri(gfsUri, SESSION_TOKEN)
-    throw new Error(`expected resolve to reject with a ${status} denial`)
   } catch (error) {
-    if (!(error instanceof Error)) return String(error)
-    return error.message
+    rejected = true
+    failure = error
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()))
   }
+  if (!rejected) throw new Error(`expected resolve to reject with a ${status} denial`)
+  if (!(failure instanceof Error)) return String(failure)
+  return failure.message
+}
+
+/** The IPC-visible error from the real bounded GFS preview download producer. */
+export async function previewDownloadDeniedMessage(
+  gfsUri = 'gfs://main/secret',
+  errorBody: { code: string; message: string } = {
+    code: 'unauthenticated',
+    message: 'The previous session expired.',
+  },
+  status = 401
+): Promise<string> {
+  const server = createServer((_req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: errorBody }))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+  let rejected = false
+  let failure: unknown
+  try {
+    const address = server.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    const client = new GfsClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      requestJson,
+      fetchBytes: async () => new ArrayBuffer(0),
+    })
+    await client.download(gfsUri, SESSION_TOKEN, { maxBytes: 2_097_152 })
+  } catch (error) {
+    rejected = true
+    failure = error
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+  if (!rejected) throw new Error(`expected preview download to reject with a ${status} denial`)
+  if (!(failure instanceof Error)) return String(failure)
+  return failure.message
+}
+
+/** The IPC-visible error from the real GFS `listChildren` producer on a 401. */
+export async function listChildrenDeniedMessage(
+  resourceId = 'fixture-parent',
+  errorBody: { code: string; message: string } = {
+    code: 'unauthenticated',
+    message: 'The previous session expired.',
+  },
+  status = 401
+): Promise<string> {
+  const server = createServer((_req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: errorBody }))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+  let rejected = false
+  let failure: unknown
+  try {
+    const address = server.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    const client = new GfsClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      requestJson,
+      fetchBytes: async () => new ArrayBuffer(0),
+    })
+    await client.listChildren(resourceId, SESSION_TOKEN, { drive: 'main' })
+  } catch (error) {
+    rejected = true
+    failure = error
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+  if (!rejected) throw new Error(`expected listChildren to reject with a ${status} denial`)
+  if (!(failure instanceof Error)) return String(failure)
+  return failure.message
 }
 
 /** A `ResolvedGfsResource` for a downloadable file, for `downloadResult`. */

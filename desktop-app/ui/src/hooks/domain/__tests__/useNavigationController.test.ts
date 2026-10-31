@@ -2,6 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../../constants/navigation'
+import {
+  clearLatestGfsConversationContext,
+  getLatestGfsConversationContext,
+} from '../../../lib/gfsConversationPrefill'
 import { resolveGfsPreview } from '../../../lib/gfsPreview'
 import {
   closeWorkspaceTab,
@@ -29,12 +33,86 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  clearLatestGfsConversationContext()
   if (originalClerum) Object.defineProperty(window, 'clerum', originalClerum)
   else Reflect.deleteProperty(window, 'clerum')
   originalClerum = undefined
 })
 
 describe('useNavigationController — agent-centric navigation (Fase 2)', () => {
+  it('retains the last exact Files context when focusing Chat and clears it at Files root', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-context', path: uri, title: 'Reports' })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() => result.current.selectWorkspaceTabById('chat-tab-1'))
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-root-context', path: null, title: 'Files' })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toBeNull()
+  })
+
+  it('clears retained GFS context when the user switches from one chat to another', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-context', path: uri })
+      )
+    )
+    act(() => result.current.selectWorkspaceTabById('chat-tab-1'))
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openChatTab(state, { id: 'chat-other', agentRef: 'agent-2', chatId: 'chat-2' })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toBeNull()
+  })
+
+  it('clears retained GFS context when the user navigates from Files to Settings', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-context', path: uri })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.settings))
+    expect(result.current.activeTab?.kind).toBe('settings')
+    expect(getLatestGfsConversationContext()).toBeNull()
+  })
+
+  it('clears retained GFS context when the Apps picker is shown over a Files tab', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-context', path: uri })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() => result.current.showAppsPicker())
+    expect(getLatestGfsConversationContext()).toBeNull()
+  })
+
   it.each([
     [
       'throws',
@@ -392,5 +470,48 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     expect(controller.selectedContext).toBeUndefined()
     expect(controller.selectedContextTab).toBeUndefined()
     expect(controller.selectedTeam).toBeUndefined()
+  })
+})
+
+describe('Chat intent receipt ownership', () => {
+  it('honors a caller-owned receipt while revealing the real blank Chat tab', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const ownerTabId = result.current.workspaceTabs.activeTabId
+    act(() => result.current.beginUserNavigationIntent())
+    const started = result.current.navigationIntentSequence
+    act(() =>
+      result.current.handleNavSelect(DESKTOP_ROUTES.chat, { navigationIntentAlreadyStarted: true })
+    )
+    expect(result.current.navigationIntentSequence).toBe(started)
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+    expect(result.current.workspaceTabs.activeTabId).toBe(ownerTabId)
+    expect(result.current.workspaceTabs.tabs.find(tab => tab.id === ownerTabId)?.kind).toBe('chat')
+  })
+
+  it('advances once for each explicit blank Chat reselection and supersedes the earlier receipt', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const ownerTabId = result.current.workspaceTabs.activeTabId
+    const before = result.current.navigationIntentSequence
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat))
+    expect(result.current.navigationIntentSequence).toBe(before + 1)
+    const earlier = result.current.navigationIntentSequence
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat))
+    expect(result.current.navigationIntentSequence).toBe(before + 2)
+    expect(result.current.isNavigationIntentCurrent(earlier)).toBe(false)
+    expect(result.current.workspaceTabs.activeTabId).toBe(ownerTabId)
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+  })
+  it('does not mint user intent for bootstrap or let stale programmatic focus replace Files', () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' }))
+    expect(result.current.navigationIntentSequence).toBe(0)
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+    act(() => result.current.openFilesSection())
+    const selectedFiles = result.current.workspaceTabs.activeTabId
+    const explicitIntent = result.current.navigationIntentSequence
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' }))
+    expect(result.current.navigationIntentSequence).toBe(explicitIntent)
+    expect(result.current.workspaceTabs.activeTabId).toBe(selectedFiles)
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.files)
   })
 })
