@@ -1,37 +1,54 @@
 /**
- * The 422 bodies `POST`/`PUT /admin/contexts` answer when the write adds connector
- * names control-api refuses: `refuseUnverifiedAddedMcpServers` in
- * control-api/src/routes/admin/resources.ts.
+ * Producer fixtures: the 422 bodies `POST`/`PUT /admin/contexts` answer when a write
+ * adds connector names control-api refuses (`refuseUnverifiedAddedMcpServers` in
+ * control-api/src/routes/admin/resources.ts).
  *
- * These are not loaded from a control-api wire golden because this branch does not
- * carry that control-api code yet; the shapes are copied verbatim from that function,
- * `message` strings included, and every test turns them into errors through the real
- * fetch client rather than building error objects by hand. Once this branch is
- * integrated into the main branch, which already has the 422 code, replace them with a
- * golden captured from the real router.
+ * control-api is not importable from this package, so these are the golden wire files
+ * control-api's own route test captures from the real resources router over an
+ * in-memory apiserver: control-api/test/routes.contextRejection.wireGoldens.test.ts →
+ * control-api/test/fixtures/wire/contextRejection.*.json. A producer change breaks the
+ * golden there before it can drift here. Tests turn these bodies into errors through
+ * the real fetch client, never by building error objects by hand.
  */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
-/** A write added a name with no live McpServer behind it. */
-export function unknownMcpServerBody(mcpServers: string[]) {
-  return {
-    error: 'unknown_mcp_server',
-    mcpServers,
-    message: 'one or more connectors no longer exist; reload and try again',
-  }
+type WireCapture = { status: number; body: Record<string, unknown> }
+
+const WIRE_DIR = resolve(__dirname, '../../../control-api/test/fixtures/wire')
+
+function loadGolden(name: string): WireCapture {
+  return JSON.parse(readFileSync(resolve(WIRE_DIR, `contextRejection.${name}.json`), 'utf8'))
 }
 
-/** Server-side cap on the names one write may add (MAX_ADDED_MCP_SERVERS_PER_WRITE). */
-export const TOO_MANY_MCP_SERVERS_BODY = {
-  error: 'too_many_mcp_servers',
-  limit: 256,
-  message: 'a single write may add at most 256 connectors to a context',
+const UNKNOWN_MCP_SERVER = loadGolden('unknownMcpServer')
+const REJECTION_STATUS = UNKNOWN_MCP_SERVER.status
+
+/** A PUT that added `mcp-vanished`, which has no live McpServer. */
+export const UNKNOWN_MCP_SERVER_BODY = UNKNOWN_MCP_SERVER.body
+/** A create naming two connectors that do not exist, as the router lists them. */
+export const UNKNOWN_MCP_SERVERS_BODY = loadGolden('unknownMcpServers').body
+/** A write adding more names than the server's per-write cap. */
+export const TOO_MANY_MCP_SERVERS_BODY = loadGolden('tooManyMcpServers').body
+
+/**
+ * The `unknown_mcp_server` golden for other refused names. The router lists exactly
+ * the added names it could not find, sorted, so only that list is substituted; if the
+ * golden stops carrying it under `mcpServers`, this throws instead of re-adding the key
+ * and hiding a contract change from the UI tests.
+ */
+export function unknownMcpServerBody(mcpServers: string[]): Record<string, unknown> {
+  if (!Array.isArray(UNKNOWN_MCP_SERVER_BODY.mcpServers)) {
+    throw new Error('the unknown_mcp_server golden no longer carries an mcpServers list')
+  }
+  return { ...UNKNOWN_MCP_SERVER_BODY, mcpServers: [...mcpServers].sort() }
 }
 
 /** The response as control-ui's fetch client sees it through the proxy. */
 export function contextRejectionResponse(body: unknown): Response {
   return {
     ok: false,
-    status: 422,
+    status: REJECTION_STATUS,
     statusText: 'Unprocessable Entity',
     headers: new Headers({ 'content-type': 'application/json' }),
     text: async () => JSON.stringify(body),

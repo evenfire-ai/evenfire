@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   TOO_MANY_MCP_SERVERS_BODY,
+  UNKNOWN_MCP_SERVERS_BODY,
   contextRejectionResponse,
   okJsonResponse,
   unknownMcpServerBody,
@@ -64,9 +65,9 @@ describe('context writes refused for the connectors they add', () => {
   })
 
   it('lists every vanished connector', async () => {
-    const error = await contextWriteError(unknownMcpServerBody(['a', 'b']))
+    const error = await contextWriteError(UNKNOWN_MCP_SERVERS_BODY)
     expect(contextMcpServerRejection(error)).toBe(
-      'The connectors a, b no longer exist; reload the page and try again.'
+      'The connectors mcp-gone-a, mcp-gone-b no longer exist; reload the page and try again.'
     )
   })
 
