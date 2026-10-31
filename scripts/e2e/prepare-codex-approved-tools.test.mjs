@@ -1313,14 +1313,15 @@ test('the flag gate names the exact disabled flag and admits the enabled set', (
     checked: [
       'CONTROL_API_CODEX_SUBSCRIPTION_ENABLED',
       'CODEX_LLM_PROXY_EXECUTION_ENABLED',
-      'CODEX_LLM_PROXY_EXECUTION_ENABLED',
       'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED',
     ],
   })
-  assert.deepEqual(
-    probes.map(([deploymentName]) => deploymentName),
-    ['control-api', 'codex-llm-proxy']
-  )
+  // Each flag is required only on the workload that consumes it: the proxy
+  // execution flags are read by the proxies, never by control-api.
+  assert.deepEqual(probes, [
+    ['control-api', ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED']],
+    ['codex-llm-proxy', ['CODEX_LLM_PROXY_EXECUTION_ENABLED']],
+  ])
   assert.throws(
     () =>
       checkSubscriptionGates({

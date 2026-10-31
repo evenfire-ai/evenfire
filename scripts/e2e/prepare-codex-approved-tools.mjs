@@ -183,17 +183,24 @@ export function providerModelName(provider) {
   return validateProvider(provider) === 'grok' ? GROK_MODEL_NAME : 'gpt-5.3-codex'
 }
 
-/** The flags each provider's lane needs in the running workloads. */
+/**
+ * The flags each provider's lane needs in the running workloads. Each flag is
+ * required only on the workload that consumes it: control-api reads the
+ * CONTROL_API_* subscription flags, each proxy reads its own
+ * *_LLM_PROXY_EXECUTION_ENABLED (grok-llm-proxy/src/config.ts reads
+ * GROK_LLM_PROXY_EXECUTION_ENABLED; nothing in control-api does), and the Host
+ * flag is Codex-only.
+ */
 export function subscriptionGateFlags(provider) {
   validateProvider(provider)
   return provider === 'grok'
     ? {
-        controlApi: ['CONTROL_API_GROK_SUBSCRIPTION_ENABLED', 'GROK_LLM_PROXY_EXECUTION_ENABLED'],
+        controlApi: ['CONTROL_API_GROK_SUBSCRIPTION_ENABLED'],
         proxy: ['GROK_LLM_PROXY_EXECUTION_ENABLED'],
         host: [],
       }
     : {
-        controlApi: ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED', 'CODEX_LLM_PROXY_EXECUTION_ENABLED'],
+        controlApi: ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED'],
         proxy: ['CODEX_LLM_PROXY_EXECUTION_ENABLED'],
         host: ['MCP_HOST_CODEX_SUBSCRIPTION_ENABLED'],
       }
