@@ -14,6 +14,10 @@ export interface GfsRecentFileRow {
 
 export type GfsRecentFilesCardProps = {
   files: readonly GfsRecentFileRow[]
+  /** Allow the dedicated view to reveal more history in groups of five. */
+  expandable?: boolean
+  visibleCount?: number
+  onVisibleCountChange?: (count: number) => void
   loading: boolean
   fetching: boolean
   failure: GfsDiscoveryFailure | null

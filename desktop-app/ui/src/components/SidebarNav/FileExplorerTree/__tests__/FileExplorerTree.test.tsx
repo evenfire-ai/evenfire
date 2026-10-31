@@ -114,6 +114,7 @@ function renderTree(
   render(
     <QueryClientProvider client={queryClient}>
       <FileExplorerTree
+        activeLocation={props.activeLocation}
         onOpenFolder={onOpenFolder}
         onOpenPreview={onOpenPreview}
         pushToast={pushToast}
@@ -141,6 +142,17 @@ afterEach(() => {
 })
 
 describe('My home', () => {
+  it('marks the active Recent files destination in the sidebar', () => {
+    installClerum({})
+    renderTree({ activeLocation: GFS_RECENT_FILES_LOCATION })
+    expect(
+      screen.getByRole('treeitem', { name: 'Recent files' }).getAttribute('aria-selected')
+    ).toBe('true')
+    expect(
+      screen.getByRole('treeitem', { name: 'Shared with me' }).getAttribute('aria-selected')
+    ).toBe('false')
+  })
+
   it('shows the server-provided non-main home as a My home section that lists its folders and opens on click', async () => {
     const listHomeChildren = vi.fn(async () =>
       listChildrenPage([childView('child-1', 'Projects', 'directory', { drive: 'private' })])

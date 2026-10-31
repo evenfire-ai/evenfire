@@ -6857,7 +6857,7 @@ describe('FilesPage', () => {
       true
     )
     expect(copyButton.parentElement?.getAttribute('title')).toBe(
-      'No link is available on Shared with me'
+      'No link is available for this view'
     )
 
     fireEvent.click(within(toolbar).getByRole('button', { name: 'Open link' }))
@@ -8360,11 +8360,12 @@ describe('FilesPage', () => {
       bytes: 0,
       permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
     })
-    const renderAt = (pendingGfsUri: string | null) => {
+    const renderAt = (pendingGfsUri: string | null, over: Record<string, unknown> = {}) => {
       const controller = {
         ...baseController(),
         home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
         accessibleResources: [sharedRow('alpha-1', 'Alpha shared'), sharedRow('home-1', 'fixture')],
+        ...over,
       }
       hookMock.useGfsBrowserController.mockReturnValue(controller)
       const onLocationChange = vi.fn()
@@ -8404,13 +8405,35 @@ describe('FilesPage', () => {
     it('opens Recent files as its own tab without resolving a GFS URI', () => {
       const { controller, onLocationChange, onPendingGfsUriHandled } =
         renderAt(GFS_RECENT_FILES_LOCATION)
-      expect(screen.getByRole('heading', { name: 'Recent files', level: 2 })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: 'Files', level: 2 })).toBeTruthy()
       expect(screen.getByRole('region', { name: 'Recent files' })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: 'Recent files', level: 3 })).toBeTruthy()
       expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
       expect(screen.queryByRole('region', { name: 'EvenDrive browser' })).toBeNull()
       expect(controller.openUri).not.toHaveBeenCalled()
       expect(onPendingGfsUriHandled).toHaveBeenCalledTimes(1)
       expect(onLocationChange).toHaveBeenLastCalledWith(GFS_RECENT_FILES_LOCATION, 'Recent files')
+    })
+
+    it('does not show an empty recent list while authority is being revalidated', () => {
+      renderAt(GFS_RECENT_FILES_LOCATION, { authorityPending: true, loadingRecentFiles: false })
+      expect(screen.getByRole('status', { name: 'Loading recent files' })).toBeTruthy()
+      expect(screen.queryByText('No recent files')).toBeNull()
+    })
+
+    it('shows and retries an authority discovery failure in the Recent files view', () => {
+      const retryDiscovery = vi.fn()
+      const retryRecentFiles = vi.fn()
+      renderAt(GFS_RECENT_FILES_LOCATION, {
+        authorityPending: true,
+        discoveryFailure: { kind: 'failed', message: 'Discovery failed', retryAvailableAt: null },
+        retryDiscovery,
+        retryRecentFiles,
+      })
+      expect(screen.queryByText('No recent files')).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: 'Retry file listing' }))
+      expect(retryDiscovery).toHaveBeenCalledOnce()
+      expect(retryRecentFiles).not.toHaveBeenCalled()
     })
 
     it('shows the home and what others share in the overview, and narrows to Shared with me from the trail', () => {
@@ -8426,6 +8449,18 @@ describe('FilesPage', () => {
         GFS_SHARED_WITH_ME_LOCATION,
         'Shared with me'
       )
+    })
+
+    it('keeps My home visible while provisioning and when it needs attention', () => {
+      renderAt(null, { home: { state: 'pending' }, loadingHome: false })
+      const home = screen.getByRole('region', { name: 'My home' })
+      expect(within(home).getByText('Your home folder is being prepared')).toBeTruthy()
+    })
+
+    it('shows a home conflict in the overview instead of hiding the section', () => {
+      renderAt(null, { home: { state: 'conflict' }, loadingHome: false })
+      const home = screen.getByRole('region', { name: 'My home' })
+      expect(within(home).getByText('Your home folder needs attention')).toBeTruthy()
     })
 
     it('titles the Files tab My home at the home root and the folder name inside it', () => {
@@ -9115,6 +9150,46 @@ describe('FilesPage recent files card (D1, D17, D20)', () => {
     expect(browserGrid!.style.getPropertyValue('--da-grid-cols')).toBe(
       recentGrid!.style.getPropertyValue('--da-grid-cols')
     )
+  })
+
+  it('refreshes both recent files and discovery from the overview toolbar', () => {
+    const refreshRecentFiles = vi.fn()
+    const retryDiscovery = vi.fn()
+    withRecent({ refreshRecentFiles, retryDiscovery })
+    const target = document.createElement('div')
+    document.body.appendChild(target)
+    try {
+      renderFilesPage(undefined, undefined, undefined, undefined, target)
+      fireEvent.click(within(target).getByRole('button', { name: 'Refresh' }))
+      expect(refreshRecentFiles).toHaveBeenCalledOnce()
+      expect(retryDiscovery).toHaveBeenCalledOnce()
+    } finally {
+      target.remove()
+    }
+  })
+
+  it('keeps toolbar refresh disabled until the recent-files retry window ends', () => {
+    vi.useFakeTimers()
+    const now = Date.now()
+    withRecent({
+      recentFilesFailure: {
+        kind: 'rate-limited',
+        message: 'Too many requests',
+        retryAvailableAt: now + 5_000,
+      },
+    })
+    const target = document.createElement('div')
+    document.body.appendChild(target)
+    try {
+      renderFilesPage(undefined, undefined, undefined, undefined, target)
+      const refresh = within(target).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement
+      expect(refresh.disabled).toBe(true)
+      act(() => vi.advanceTimersByTime(5_000))
+      expect(refresh.disabled).toBe(false)
+    } finally {
+      target.remove()
+      vi.useRealTimers()
+    }
   })
 
   it('opens a previewable recent file through the preview surface', () => {

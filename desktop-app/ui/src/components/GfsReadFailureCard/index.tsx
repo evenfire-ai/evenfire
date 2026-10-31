@@ -26,7 +26,7 @@ function secondsUntil(deadline: number | null): number {
  * listing, the composer's picker for the same two. A second copy would be a
  * second countdown to keep correct.
  */
-export function GfsReadFailureCard({ failure, onRetry }: GfsReadFailureCardProps) {
+export function GfsReadFailureCard({ failure, onRetry, hasData = false }: GfsReadFailureCardProps) {
   const countdownId = useId()
   const { retryAvailableAt } = failure
   const [remainingSeconds, setRemainingSeconds] = useState(() => secondsUntil(retryAvailableAt))
@@ -57,7 +57,11 @@ export function GfsReadFailureCard({ failure, onRetry }: GfsReadFailureCardProps
       <div role="status">
         <EmptyState
           title={
-            failure.kind === 'rate-limited' ? 'Too many file requests' : 'Could not load your files'
+            failure.kind === 'rate-limited'
+              ? 'Too many file requests'
+              : hasData
+                ? 'Could not refresh your files'
+                : 'Could not load your files'
           }
           body={
             failure.kind === 'rate-limited'

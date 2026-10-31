@@ -24,6 +24,9 @@ export interface FilesPageProps {
   pendingGfsDeepLink?: { id: number; uri: string } | null
   /** Stable destination tab captured by the App navigation authority. */
   workspaceTabId?: string
+  /** Expansion state owned by the current Recent files tab. */
+  recentVisibleCount?: number
+  onRecentVisibleCountChange?: (count: number) => void
   pendingGfsDeepLinkOwnerTabId?: string
   /** Live owner/session/intent fence for this queued request. */
   isPendingGfsDeepLinkCurrent?: () => boolean

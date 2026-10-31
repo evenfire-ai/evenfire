@@ -45,6 +45,7 @@ import {
 } from '../../../tests/e2e/gfsResourceFixtures'
 import { DEV_ISOLATION_ENV, devIsolationPaths } from '../../src/devIsolation'
 import { expect, test } from './fixtures'
+import { stubSaveDialog } from './helpers/electronDialogs'
 import {
   RESPONSE_TIMEOUT_MS,
   assertNoInfraFailureShape,
@@ -1441,15 +1442,15 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
       await test.step('J7a-7 D9 agent read: f2 becomes recent for A only, and the binding names the namespace', async () => {
         const page = aS!.page
         await page.getByRole('navigation', { name: 'Main navigation' }).getByText('Chat').click()
-        const stepper = await openExactAgent(page, getManagedAgentDisplayName(agent))
-        await sendAgentTurn(page, readPrompt(f2Uri))
+        await openExactAgent(page, getManagedAgentDisplayName(agent))
+        const { stepper, responseText } = await sendAgentTurn(page, readPrompt(f2Uri))
+        assertNoInfraFailureShape(responseText)
         await expectReadWithSentinel(stepper, `J7a f2 ${fx.runTag}`)
         const binding = fx.directRunBinding(a.id, agent.name)
         expect(binding).toHaveLength(1)
         expect(binding[0]!.count).toBeGreaterThanOrEqual(1)
         expect(binding[0]!.hostNamespace).toBe(agent.subjectId.split('/')[0]!.replace('1st:', ''))
         const nav = new DesktopFilesNav(page)
-        await nav.expectRecentFiles([f2, f1])
         await nav.expectRecentFiles([f2, f1])
         const bNav = new DesktopFilesNav(bS!.page)
         await bNav.expectRecentFiles([f1])
@@ -1465,8 +1466,9 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
 
       await test.step("J7a-8 D9 agent write: f3 becomes A's newest file only", async () => {
         const page = aS!.page
-        const stepper = await openExactAgent(page, getManagedAgentDisplayName(agent))
-        await sendAgentTurn(page, writePrompt(f3Uri, written))
+        await openExactAgent(page, getManagedAgentDisplayName(agent))
+        const { stepper, responseText } = await sendAgentTurn(page, writePrompt(f3Uri, written))
+        assertNoInfraFailureShape(responseText)
         await expectToolSuccess(stepper, 'gfs_write')
         const nav = new DesktopFilesNav(page)
         await nav.expectRecentFiles([f3, f2, f1])
@@ -1481,13 +1483,14 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
       let copyId = ''
       await test.step("J7a-9 D16 agent copy: every file the copy created is A's activity", async () => {
         const page = aS!.page
-        const stepper = await openExactAgent(page, getManagedAgentDisplayName(agent))
-        await sendAgentTurn(
+        await openExactAgent(page, getManagedAgentDisplayName(agent))
+        const { stepper, responseText } = await sendAgentTurn(
           page,
           `Read ${f1} from ${folderUri} with clerum__gfs_list and clerum__gfs_read, then copy ` +
             `that file into ${destination} with clerum__gfs_copy under the name ${copyName}. ` +
             `Use only the native GFS tools.`
         )
+        assertNoInfraFailureShape(responseText)
         await expectToolSuccess(stepper, 'gfs_read')
         await expectToolSuccess(stepper, 'gfs_copy')
         const destinationId = fx.childId(folderId, destination)
@@ -1566,7 +1569,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     }
   })
 
-  test('J7b Recent files: five files appear in the overview and their own view; a ZIP export records nothing', async ({}, testInfo) => {
+  test('J7b Recent files: five initially, load more in their own view; a ZIP export records nothing', async ({}, testInfo) => {
     test.setTimeout(4 * RESPONSE_TIMEOUT_MS + 30 * 60_000)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const owner = fx.createUser('j7b-owner')
@@ -1615,10 +1618,11 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await expect(page.getByRole('region', { name: 'My home' })).toBeInViewport({ ratio: 1 })
         await expect(page.getByRole('navigation', { name: 'File location' })).toBeInViewport()
       })
-      await test.step('J7b-3 the sidebar opens a separate five-file view with activity times', async () => {
+      await test.step('J7b-3 the sidebar opens a separate view with activity times and Load more', async () => {
         const nav = new DesktopFilesNav(page)
         await page.getByRole('treeitem', { name: 'Recent files', exact: true }).click()
-        await expect(page.getByRole('heading', { name: 'Recent files', level: 2 })).toBeVisible()
+        await expect(page.getByRole('heading', { name: 'Files', level: 2 })).toBeVisible()
+        await expect(nav.recentFiles().getByRole('heading', { name: 'Recent files' })).toBeVisible()
         await expect(nav.recentRows()).toHaveCount(5)
         await expect
           .poll(() =>
@@ -1639,7 +1643,28 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await expect(newestRow.locator('time')).toHaveAttribute('datetime', /.+/)
         await expect(page.getByRole('region', { name: 'My home' })).toHaveCount(0)
         await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toHaveCount(0)
-        await expect(nav.recentFiles().getByRole('button', { name: 'Load more' })).toHaveCount(0)
+        const loadMore = nav.recentFiles().getByRole('button', { name: 'Load more', exact: true })
+        await loadMore.click()
+        await expect(nav.recentRows()).toHaveCount(10)
+        await newestRow.click()
+        await expect(
+          page.getByRole('article', { name: `Text preview of ${names[23]}` })
+        ).toBeVisible()
+        await page
+          .getByRole('toolbar', { name: 'Workspace tabs' })
+          .getByRole('button', { name: 'Recent files', exact: true })
+          .click()
+        await expect(nav.recentRows()).toHaveCount(10)
+        for (const count of [15, 20, 24]) {
+          await loadMore.click()
+          await expect(nav.recentRows()).toHaveCount(count)
+        }
+        await expect
+          .poll(() =>
+            nav.recentRows().evaluateAll(rows => rows.map(row => row.getAttribute('aria-label')))
+          )
+          .toEqual([...names].reverse().map(name => `Open ${name}`))
+        await expect(loadMore).toHaveCount(0)
       })
 
       aS = await launchDesktopAs(testInfo, a)

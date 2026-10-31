@@ -107,6 +107,7 @@ import {
   selectWorkspaceTab,
   selectWorkspaceTabAt,
   setFilesTabPath,
+  setFilesTabRecentVisibleCount,
 } from '@lib/workspaceTabs'
 import type { WorkspaceTab, WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import { AgentsPage } from '@pages/AgentsPage'
@@ -1297,6 +1298,18 @@ export function App() {
       : null
   const activeFilesTabIdRef = React.useRef<string | null>(null)
   activeFilesTabIdRef.current = activeFilesTabId
+  const handleRecentVisibleCountChange = React.useCallback(
+    (count: number) => {
+      const ownerTabId = activeFilesTabIdRef.current
+      if (!ownerTabId) return
+      setWorkspaceTabs(state =>
+        state.activeTabId === ownerTabId
+          ? setFilesTabRecentVisibleCount(state, ownerTabId, count)
+          : state
+      )
+    },
+    [setWorkspaceTabs]
+  )
   const filesSeedRef = React.useRef<{ id: string | null; path: string | null }>({
     id: null,
     path: null,
@@ -4219,6 +4232,7 @@ export function App() {
                                 onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                                 onSelect={handleSidebarNavSelect}
                                 onOpenFilesSection={vm.openFilesSection}
+                                activeFilesLocation={activeFilesTab?.files?.path}
                                 onOpenPreviewSection={vm.openPreviewSection}
                                 pushToast={vm.pushToast}
                                 toggleRequestId={sidebarToggleRequestId}
@@ -4371,6 +4385,8 @@ export function App() {
                                       pushToast={vm.pushToast}
                                       titlebarLeadingTarget={titlebarLeadingRoot}
                                       workspaceTabId={activeFilesTabId ?? undefined}
+                                      recentVisibleCount={activeFilesTab?.files?.recentVisibleCount}
+                                      onRecentVisibleCountChange={handleRecentVisibleCountChange}
                                       pendingGfsUri={filesSeedPath}
                                       pendingGfsDeepLink={
                                         activeGfsDeepLinkForFiles

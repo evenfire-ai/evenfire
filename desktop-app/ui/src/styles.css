@@ -14821,24 +14821,33 @@ pre {
   grid-template-rows: auto auto 1fr;
 }
 
-.da-gfs-my-home {
-  padding: var(--space-2) var(--space-3);
-}
-
-/* The card grows with its rows: no internal scroll and no height cap, like
-   every other overview card. The page scrolls. */
+/* EvenDrive sections use the same flat surface as the original shared view. */
+.da-gfs-my-home,
 .da-gfs-recent {
   min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .da-gfs-recent__activity {
-  color: var(--color-text-muted);
-  white-space: nowrap;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .da-gfs-my-home__open {
   gap: var(--space-2);
-  font-weight: var(--font-weight-semibold);
+}
+
+.da-gfs-drive__header .da-gfs-section-title {
+  padding-inline: var(--space-1);
+  color: var(--text);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-normal);
+  letter-spacing: normal;
 }
 
 .da-gfs-workspace-card {
@@ -15392,6 +15401,10 @@ pre {
   display: none;
 }
 
+.da-gfs-drive--overview {
+  min-height: 0;
+}
+
 .da-gfs-drive__header.page-card__header {
   min-width: 0;
   display: flex;
@@ -15541,7 +15554,11 @@ pre {
 }
 
 .da-gfs-drive > .status-banner,
-.da-gfs-drive > .empty-state {
+.da-gfs-drive > .empty-state,
+.da-gfs-recent > .empty-state,
+.da-gfs-recent > [role='status'] > .empty-state,
+.da-gfs-my-home > [role='status'] > .empty-state,
+.da-gfs-my-home > [role='alert'] > .empty-state {
   margin: var(--space-3) var(--space-4);
 }
 

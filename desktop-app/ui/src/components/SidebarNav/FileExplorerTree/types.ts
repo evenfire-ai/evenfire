@@ -13,6 +13,7 @@ export interface FileExplorerTreeProps {
   /** Double-click / Enter on a folder → open (or focus) its files tab at that
    *  `gfsUri`; Recent files and Shared with me use their client-only locations. */
   onOpenFolder: (location: string) => void
+  activeLocation?: string | null
   /** Single-click / Enter on a previewable file → open (or focus) its preview tab. */
   onOpenPreview: (preview: GfsPreviewResource) => void
   /** Transient success/error feedback for the download fallback. */

@@ -504,6 +504,7 @@ function FileExplorerNode({
  * move dispatch as the Files page.
  */
 export function FileExplorerTree({
+  activeLocation,
   onOpenFolder,
   onOpenPreview,
   pushToast,
@@ -1222,6 +1223,10 @@ export function FileExplorerTree({
     [authorityFailure, ctrl, onOpenPreview, pushToast]
   )
 
+  const recentSelected = activeLocation === GFS_RECENT_FILES_LOCATION
+  const sharedSelected = activeLocation === GFS_SHARED_WITH_ME_LOCATION
+  const selectedResourceId = recentSelected || sharedSelected ? null : selectedId
+
   return (
     <div className="da-file-explorer">
       {ctrl.accessState === 'active' ? (
@@ -1229,9 +1234,10 @@ export function FileExplorerTree({
           <Button
             align="start"
             block
-            className="da-file-explorer__label"
+            className={`da-file-explorer__label${recentSelected ? ' is-selected' : ''}`}
             color="neutral"
             role="treeitem"
+            aria-selected={recentSelected}
             size="sm"
             type="button"
             variant="text"
@@ -1265,7 +1271,7 @@ export function FileExplorerTree({
               onToggle={handleToggle}
               scope={ctrl.sessionScope ?? 'anonymous'}
               sessionGeneration={ctrl.sessionGeneration}
-              selectedId={selectedId}
+              selectedId={selectedResourceId}
             />
           ) : ctrl.home?.state !== 'retired' ? (
             <Button
@@ -1293,9 +1299,10 @@ export function FileExplorerTree({
           <Button
             align="start"
             block
-            className="da-file-explorer__label"
+            className={`da-file-explorer__label${sharedSelected ? ' is-selected' : ''}`}
             color="neutral"
             role="treeitem"
+            aria-selected={sharedSelected}
             size="sm"
             type="button"
             variant="text"
@@ -1376,7 +1383,7 @@ export function FileExplorerTree({
               onToggle={handleToggle}
               scope={ctrl.sessionScope ?? 'anonymous'}
               sessionGeneration={ctrl.sessionGeneration}
-              selectedId={selectedId}
+              selectedId={selectedResourceId}
             />
           ))}
           {ctrl.hasMoreAccessible ? (

@@ -368,6 +368,8 @@ export function FilesPage({
   onPendingGfsUriHandled,
   pendingGfsDeepLink,
   workspaceTabId,
+  recentVisibleCount,
+  onRecentVisibleCountChange,
   pendingGfsDeepLinkOwnerTabId,
   isPendingGfsDeepLinkCurrent,
   onExplicitNavigationIntent,
@@ -3070,6 +3072,17 @@ export function FilesPage({
         : callerHomeRootNode(ctrl.home, accessibleResources),
     [accessibleResources, ctrl.home, current, rootView]
   )
+  const showHomeSection =
+    !current &&
+    rootView === 'overview' &&
+    ctrl.home?.state !== 'retired' &&
+    Boolean(
+      myHome ||
+      ctrl.loadingHome ||
+      ctrl.homeError ||
+      ctrl.home?.state === 'pending' ||
+      ctrl.home?.state === 'conflict'
+    )
   // The controller owns current-view loading semantics, including the
   // page-wide authority gate and the distinction between initial and
   // background query activity.
@@ -3249,7 +3262,32 @@ export function FilesPage({
   }
 
   const recentOnly = !current && rootView === 'recent'
-  const showRecentFiles = !current && rootView !== 'shared' && !accessRevoked
+  const showRecentFiles =
+    !current &&
+    rootView !== 'shared' &&
+    !accessRevoked &&
+    !(rootView === 'overview' && ctrl.authorityPending && ctrl.discoveryFailure)
+  const recentAuthorityFailure = recentOnly && ctrl.authorityPending ? ctrl.discoveryFailure : null
+  const recentFailure =
+    recentAuthorityFailure ?? (ctrl.authorityPending ? null : ctrl.recentFilesFailure)
+  const recentLoading =
+    (ctrl.authorityPending && !recentAuthorityFailure) || ctrl.loadingRecentFiles
+  const refreshBlockedUntil = Math.max(
+    !current && ctrl.discoveryFailure?.kind === 'rate-limited'
+      ? (ctrl.discoveryFailure.retryAvailableAt ?? 0)
+      : 0,
+    showRecentFiles && ctrl.recentFilesFailure?.kind === 'rate-limited'
+      ? (ctrl.recentFilesFailure.retryAvailableAt ?? 0)
+      : 0
+  )
+  const [refreshClock, setRefreshClock] = useState(() => Date.now())
+  useEffect(() => {
+    const now = Date.now()
+    setRefreshClock(now)
+    if (refreshBlockedUntil <= now) return
+    const timer = setTimeout(() => setRefreshClock(Date.now()), refreshBlockedUntil - now)
+    return () => clearTimeout(timer)
+  }, [refreshBlockedUntil])
   const resourceMenuActionsFor = (resource: GfsDriveResource) => {
     const isDirectory = resource.kind === 'directory'
     const canPreview =
@@ -3311,14 +3349,25 @@ export function FilesPage({
         target={titlebarLeadingTarget}
         onRefresh={
           recentOnly
-            ? () => ctrl.refreshRecentFiles()
+            ? () => {
+                void ctrl.retryDiscovery()
+                ctrl.refreshRecentFiles()
+              }
             : current
               ? () => void handleRefreshCurrent()
-              : () => void ctrl.retryDiscovery()
+              : () => {
+                  void ctrl.retryDiscovery()
+                  if (rootView === 'overview') ctrl.refreshRecentFiles()
+                }
         }
         refreshing={
-          recentOnly ? ctrl.fetchingRecentFiles : current ? refreshingCurrent : visibleLoading
+          recentOnly
+            ? ctrl.fetchingRecentFiles
+            : current
+              ? refreshingCurrent
+              : visibleLoading || (rootView === 'overview' && ctrl.fetchingRecentFiles)
         }
+        refreshDisabled={refreshBlockedUntil > refreshClock}
         onCopyLink={current ? () => void handleCopyLink(current.gfsUri) : undefined}
         onOpenLink={() => setOpenLinkOpen(true)}
       />
@@ -3329,44 +3378,74 @@ export function FilesPage({
         {dropVerdictAnnouncement}
       </p>
       <div className="page-header">
-        <h2>{recentOnly ? GFS_RECENT_FILES_LABEL : 'Files'}</h2>
-        <p className="muted">
-          {recentOnly
-            ? 'Files you or your agents opened or changed, most recent first.'
-            : 'Browse and manage everything shared with you in one place.'}
-        </p>
+        <h2>Files</h2>
+        <p className="muted">Browse your files and resources shared with you.</p>
       </div>
 
       <div className="page-layout da-gfs-layout">
         {showRecentFiles ? (
           <GfsRecentFilesCard
-            failure={ctrl.recentFilesFailure}
+            expandable={recentOnly}
+            visibleCount={recentOnly ? recentVisibleCount : undefined}
+            onVisibleCountChange={recentOnly ? onRecentVisibleCountChange : undefined}
+            failure={recentFailure}
             fetching={ctrl.fetchingRecentFiles}
             files={ctrl.recentFiles}
-            loading={ctrl.loadingRecentFiles}
+            loading={recentLoading}
             onOpen={file => {
               if (openFilePreview(file)) return
               void handleDownload(file.gfsUri, file.name)
             }}
-            onRetry={ctrl.retryRecentFiles}
+            onRetry={
+              recentAuthorityFailure ? () => void ctrl.retryDiscovery() : ctrl.retryRecentFiles
+            }
           />
         ) : null}
-        {myHome ? (
+        {showHomeSection ? (
           <section className="page-card da-gfs-my-home" aria-label="My home">
-            <Button
-              align="start"
-              className="da-gfs-my-home__open"
-              color="neutral"
-              onClick={() => ctrl.openResource(myHome)}
-              variant="text"
-            >
-              <IconContexts aria-hidden="true" width={16} height={16} />
-              {myHome.name}
-            </Button>
+            <div className="page-card__header da-gfs-drive__header">
+              {myHome ? (
+                <Button
+                  align="start"
+                  className="da-gfs-drive__breadcrumb da-gfs-my-home__open"
+                  color="neutral"
+                  onClick={() => ctrl.openResource(myHome)}
+                  variant="text"
+                >
+                  <IconContexts aria-hidden="true" width={16} height={16} />
+                  {myHome.name}
+                </Button>
+              ) : (
+                <h3 className="da-gfs-section-title">My home</h3>
+              )}
+            </div>
+            {!myHome && ctrl.homeError ? (
+              <div role="alert">
+                <EmptyState title="Could not load My home" body={ctrl.homeError} />
+              </div>
+            ) : !myHome && ctrl.home?.state === 'conflict' ? (
+              <div role="alert">
+                <EmptyState
+                  title="Your home folder needs attention"
+                  body="Contact an administrator to resolve the conflict."
+                />
+              </div>
+            ) : !myHome && ctrl.home?.state === 'pending' ? (
+              <div role="status">
+                <EmptyState
+                  title="Your home folder is being prepared"
+                  body="Your folder will appear here when it is ready."
+                />
+              </div>
+            ) : !myHome && ctrl.loadingHome ? (
+              <div className="da-gfs-loading" role="status">
+                Loading My home…
+              </div>
+            ) : null}
           </section>
         ) : null}
         <section
-          className="page-card da-gfs-drive"
+          className={`page-card da-gfs-drive${!current && rootView === 'overview' ? ' da-gfs-drive--overview' : ''}`}
           aria-label="EvenDrive browser"
           hidden={recentOnly && !accessRevoked}
           aria-busy={driveBusy}

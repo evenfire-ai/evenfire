@@ -179,7 +179,8 @@ where you are.
 - **Recent files.** The EvenDrive overview starts with **Recent files**: files
   you opened, downloaded or changed, and files an agent read, changed or copied
   in your Desktop chats, most recent first. The overview and the separate
-  **Recent files** sidebar view show the five most recent files. Each row shows
+  **Recent files** sidebar view show the five most recent files initially. In
+  the separate view, **Load more** reveals five more at a time. Each row shows
   the local time of its last activity and, for an earlier day, the date. It
   lists only files you can still read, it is
   private to you, it keeps your 100 most recent files, and it is deleted with

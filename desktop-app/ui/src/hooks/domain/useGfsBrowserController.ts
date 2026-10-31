@@ -1362,6 +1362,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // same pause. Reading the verdict here (not inside an effect) keeps the
   // decision on the render that produced it.
   const recentFilesError = recentFilesQuery.error ? toMessage(recentFilesQuery.error) : null
+  const recentFilesErrorStatus = recentFilesError ? parseHttpStatus(recentFilesError) : null
+  const recentFilesWithheld = Boolean(
+    recentFilesError &&
+    (isGfsSessionAuthorityFailure(recentFilesError, 'operation') ||
+      recentFilesErrorStatus === null ||
+      (recentFilesErrorStatus < 500 && recentFilesErrorStatus !== 429))
+  )
   useEffect(() => {
     if (!recentFilesError) return
     handleAuthorityFailure(recentFilesError, 'operation')
@@ -2015,7 +2022,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     accessibleNotice,
     discoveryFailure,
     // Withheld while authority is being re-proved, exactly like discovery.
-    recentFiles: authorityPending ? [] : (recentFilesQuery.data?.items ?? []),
+    recentFiles:
+      authorityPending || accessState === 'revoked' || recentFilesWithheld
+        ? []
+        : (recentFilesQuery.data?.items ?? []),
     loadingRecentFiles:
       recentFilesQueryEnabled && !recentFilesQuery.isError && recentFilesQuery.data === undefined,
     fetchingRecentFiles: recentFilesQuery.isFetching,

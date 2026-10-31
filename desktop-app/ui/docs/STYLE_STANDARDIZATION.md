@@ -115,6 +115,10 @@ page-card            ← widget/panel frame  (stronger border, shadow — from p
 
 This "panel containing a table" hierarchy is correct. Do not flatten it by removing either frame.
 
+EvenDrive is a scoped exception: its overview sections and individual file views
+use the existing flat Shared with me surface. Their `.da-grid` retains its own
+frame; this exception does not change the shared `page-card` styling elsewhere.
+
 For pages where `da-grid` is the _only_ content of the card (no header, no toolbar), the `page-card` wrapper is made frameless via its page-specific modifier so only the grid frame is visible:
 
 ```css

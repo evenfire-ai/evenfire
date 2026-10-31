@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
+import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { GFS_LISTING_GRID_COLUMNS } from '@lib/gfsListingGrid'
 import { GfsRecentFilesCard } from '../index'
 import type { GfsRecentFileRow } from '../types'
@@ -82,10 +84,55 @@ describe('GfsRecentFilesCard overview limit', () => {
     // Witness: the new first row is on screen, so the refetch really landed.
     expect(rows()[0]?.getAttribute('aria-label')).toBe('Open file-24.txt')
   })
+
+  it('reveals five more at a time only in the dedicated view', () => {
+    renderCard({ expandable: true, files: many.slice(0, 12) })
+    expect(rows()).toHaveLength(5)
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(rows()).toHaveLength(10)
+    expect(document.activeElement).toBe(rows()[5])
+    expect(screen.getByRole('status').textContent).toBe('10 recent files shown.')
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(rows()).toHaveLength(12)
+    expect(document.activeElement).toBe(rows()[10])
+    expect(screen.getByRole('status').textContent).toBe('12 recent files shown.')
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+  })
+
+  it('restores the count supplied by the owning tab and reports further expansion', () => {
+    const onVisibleCountChange = vi.fn()
+    renderCard({ expandable: true, visibleCount: 10, onVisibleCountChange })
+    expect(rows()).toHaveLength(10)
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(onVisibleCountChange).toHaveBeenCalledWith(15)
+  })
+
+  it('moves focus to the new rows when the owning tab controls the count', () => {
+    function ControlledCard() {
+      const [count, setCount] = useState(5)
+      return (
+        <GfsRecentFilesCard
+          files={many}
+          expandable
+          visibleCount={count}
+          onVisibleCountChange={setCount}
+          failure={null}
+          fetching={false}
+          loading={false}
+          onOpen={vi.fn()}
+          onRetry={vi.fn()}
+        />
+      )
+    }
+    render(<ControlledCard />)
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(rows()).toHaveLength(10)
+    expect(document.activeElement).toBe(rows()[5])
+  })
 })
 
 describe('GfsRecentFilesCard row contract (D17)', () => {
-  it('reuses the listing grid, its columns, and its row behaviour', () => {
+  it('reuses the listing grid and opens rows by keyboard', async () => {
     const { onOpen } = renderCard({ files: many.slice(0, 2) })
     const region = screen.getByRole('region', { name: 'Recent files' })
 
@@ -101,13 +148,15 @@ describe('GfsRecentFilesCard row contract (D17)', () => {
     expect(head?.textContent).toContain('Your activity')
 
     const [first, second] = rows()
-    expect(first?.getAttribute('role')).toBe('button')
-    expect(first?.getAttribute('tabindex')).toBe('0')
+    expect(first?.tagName).toBe('BUTTON')
     expect(first?.className).toContain('da-grid__row--clickable')
 
-    fireEvent.keyDown(first!, { key: 'Enter' })
+    const user = userEvent.setup()
+    first!.focus()
+    await user.keyboard('{Enter}')
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ name: 'file-0.txt' }))
-    fireEvent.keyDown(second!, { key: ' ' })
+    second!.focus()
+    await user.keyboard(' ')
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ name: 'file-1.txt' }))
     expect(onOpen).toHaveBeenCalledTimes(2)
 
@@ -139,16 +188,36 @@ describe('GfsRecentFilesCard row contract (D17)', () => {
     expect(times[1]?.textContent).toBe(
       yesterday.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
     )
+    const row = screen.getByRole('button', { name: 'Open file-0.txt' })
+    const descriptionId = row.getAttribute('aria-describedby')
+    expect(descriptionId).toBeTruthy()
+    expect(document.getElementById(descriptionId!)?.textContent).toContain('Last activity')
+    expect(within(row).queryByRole('button')).toBeNull()
   })
 
-  it('opens from a non-interactive row cell and only once from the name button', () => {
+  it('adds the date after the local day changes while the view stays open', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 30, 23, 59))
+    const activity = new Date(2026, 9, 30, 20, 15)
+    renderCard({ files: [file(0, { lastActivityAt: activity.toISOString() })] })
+    const time = screen.getByRole('region', { name: 'Recent files' }).querySelector('time')
+    expect(time?.textContent).toBe(
+      activity.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    )
+    act(() => vi.advanceTimersByTime(60_001))
+    expect(time?.textContent).toBe(
+      activity.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
+    )
+  })
+
+  it('opens once from either the activity cell or the file name', () => {
     const { onOpen } = renderCard({ files: [many[0]!] })
     const row = screen.getByRole('button', { name: 'Open file-0.txt' })
     const time = row.querySelector('time')
     expect(time).toBeTruthy()
     fireEvent.click(time!)
     expect(onOpen).toHaveBeenCalledTimes(1)
-    fireEvent.click(within(row).getByRole('button', { name: 'file-0.txt' }))
+    fireEvent.click(within(row).getByText('file-0.txt'))
     expect(onOpen).toHaveBeenCalledTimes(2)
   })
 })
@@ -196,5 +265,16 @@ describe('GfsRecentFilesCard states', () => {
     expect(queryRows()).toHaveLength(0)
     fireEvent.click(screen.getByRole('button', { name: /retry/i }))
     expect(onRetry).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps authorized rows visible when a refresh fails', () => {
+    const { onRetry } = renderCard({
+      files: [many[0]!],
+      failure: { kind: 'failed', message: 'boom', retryAvailableAt: null },
+    })
+    expect(screen.getByRole('button', { name: 'Open file-0.txt' })).toBeTruthy()
+    expect(screen.getByText('Could not refresh your files')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+    expect(onRetry).toHaveBeenCalledOnce()
   })
 })

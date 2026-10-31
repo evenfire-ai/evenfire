@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useState } from 'react'
+import { useLayoutEffect, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -91,8 +91,20 @@ function recentFile(index: number) {
   }
 }
 
-function Probe({ enabled }: { enabled: boolean }) {
+function Probe({
+  enabled,
+  onSnapshot,
+}: {
+  enabled: boolean
+  onSnapshot?: (snapshot: { failure: string; count: number }) => void
+}) {
   const ctrl = useGfsBrowserController({ recentFilesEnabled: enabled })
+  useLayoutEffect(() => {
+    onSnapshot?.({
+      failure: ctrl.recentFilesFailure?.kind ?? 'none',
+      count: ctrl.recentFiles.length,
+    })
+  })
   return (
     <>
       <div data-testid="count">{ctrl.recentFiles.length}</div>
@@ -114,12 +126,15 @@ function install(gfs: Record<string, unknown>) {
   Object.defineProperty(window, 'clerum', { configurable: true, value: { gfs } })
 }
 
-function renderProbe(enabled = true) {
+function renderProbe(
+  enabled = true,
+  onSnapshot?: (snapshot: { failure: string; count: number }) => void
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <AuthContext.Provider value={authValue()}>
       <QueryClientProvider client={client}>
-        <Probe enabled={enabled} />
+        <Probe enabled={enabled} onSnapshot={onSnapshot} />
       </QueryClientProvider>
     </AuthContext.Provider>
   )
@@ -242,5 +257,45 @@ describe('useGfsBrowserController recent files', () => {
     })
 
     await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
+  })
+
+  it.each(['401 Unauthorized', '403 Forbidden'])(
+    'withholds cached rows on an authorization failure (%s)',
+    async status => {
+      const snapshots: Array<{ failure: string; count: number }> = []
+      const listRecent = vi
+        .fn()
+        .mockResolvedValueOnce({ items: [recentFile(0)] })
+        .mockRejectedValue(new Error(status))
+      install(bridge({ listRecent }))
+      renderProbe(true, snapshot => snapshots.push(snapshot))
+      await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
+
+      act(() => screen.getByRole('button', { name: 'refresh recent' }).click())
+
+      await waitFor(() =>
+        expect(snapshots.some(snapshot => snapshot.failure !== 'none')).toBe(true)
+      )
+      expect(
+        snapshots
+          .filter(snapshot => snapshot.failure !== 'none')
+          .every(snapshot => snapshot.count === 0)
+      ).toBe(true)
+    }
+  )
+
+  it('keeps cached rows after a transient server failure', async () => {
+    const listRecent = vi
+      .fn()
+      .mockResolvedValueOnce({ items: [recentFile(0)] })
+      .mockRejectedValue(new Error('503 Service Unavailable httpStatus=503'))
+    install(bridge({ listRecent }))
+    renderProbe()
+    await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
+
+    act(() => screen.getByRole('button', { name: 'refresh recent' }).click())
+
+    await waitFor(() => expect(screen.getByTestId('failure').textContent).toBe('failed'))
+    expect(screen.getByTestId('count').textContent).toBe('1')
   })
 })
