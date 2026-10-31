@@ -80,8 +80,11 @@ before closing the underlying issue:
    reached a ConfigMap or the NGINX error log.
 3. Replace the literal query value with an uppercase `${NAME}` placeholder and
    provide the new value through `spec.envSecret`, not `spec.env`.
-4. Apply the updated CRD, then verify that the generated ConfigMap contains the
-   placeholder and that the egress proxy becomes ready.
+4. Apply the updated CRD. HCC records the digest of the rendered NGINX template
+   on the remote PodTemplate, so a ConfigMap-only URL change rolls the egress
+   proxy. Verify that the generated ConfigMap contains the placeholder, the
+   Deployment restarted with the new template digest, and the proxy becomes
+   ready.
 
 HCC and this image must roll together in both directions. New HCC with an older
 image fails the exec liveness probe and restarts visibly; rolling only the image

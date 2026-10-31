@@ -179,11 +179,13 @@ environment; a literal `spec.env` value is visible there.
 The resolved query value may contain only `[A-Za-z0-9._~-]` and complete `%XX`
 escapes. The proxy does not encode values. Out-of-class values are rejected
 before NGINX starts; store a value that the upstream expects percent-encoded in
-that form. The remote egress-proxy image and HCC must roll together because the
-rendered exec liveness probe calls the image-provided `egress-proxy-liveness`
-script. Rolling the image back without rolling HCC back makes remote egress
-proxies fail their liveness probes visibly rather than silently losing the stderr
-filter.
+that form. HCC carries the rendered NGINX template digest on the remote
+PodTemplate, so a ConfigMap-only `baseUrl` migration rolls the egress proxy
+instead of leaving its already-running NGINX process stale. The remote
+egress-proxy image and HCC must also roll together because the rendered exec
+liveness probe calls the image-provided `egress-proxy-liveness` script. Rolling
+the image back without rolling HCC back makes remote egress proxies fail their
+liveness probes visibly rather than silently losing the stderr filter.
 
 ### Image Pull Secrets
 

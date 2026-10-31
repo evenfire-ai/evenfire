@@ -124,6 +124,10 @@ export type McpServerMutationOptions = {
 // Kubernetes performs a rolling restart on its own. Same mechanism the per-Host
 // channel-readers use in hostReconciler.ts.
 const CREDENTIALS_REVISION_ANNOTATION = 'clerum.io/credentials-revision'
+// Remote NGINX templates are rendered once at container start. Carrying the
+// template digest on the PodTemplate makes a ConfigMap-only URL change roll the
+// container instead of leaving the already-running NGINX process stale.
+const NGINX_CONFIG_REVISION_ANNOTATION = 'clerum.io/nginx-config-revision'
 
 // Codex P0 fix (PR #101): sanitization constants for remote.authHeaders.
 // Only standard HTTP header token chars — letters, digits, and '-'. Rejecting
@@ -1198,13 +1202,19 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
   }
 
+  private nginxConfigRevision(configMap: k8s.V1ConfigMap): string {
+    return createHash('sha256')
+      .update(configMap.data?.['default.conf.template'] ?? '')
+      .digest('hex')
+  }
+
   /**
    * Ensure ConfigMap exists and is up to date (create or replace).
    */
   private async ensureConfigMap(
     server: McpServerCRD,
     isCurrent: () => boolean = () => true
-  ): Promise<void> {
+  ): Promise<string> {
     const cm = this.buildNginxConfigMap(server)
     const name = `${server.name}-nginx-conf`
     const namespace = server.namespace
@@ -1237,6 +1247,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         }),
       onSkipped: () => createsTotal.inc({ kind: 'ConfigMap', outcome: 'skipped' }),
     })
+
+    return this.nginxConfigRevision(cm)
   }
 
   /**
@@ -1349,7 +1361,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     return new Set((egressProxy.env ?? []).map(entry => entry.name))
   }
 
-  private buildDeployment(server: McpServerCRD, credentialsRevision = ''): k8s.V1Deployment {
+  private buildDeployment(
+    server: McpServerCRD,
+    credentialsRevision = '',
+    nginxConfigRevision = ''
+  ): k8s.V1Deployment {
     // ── Platform hardening: sanitize an ephemeral copy before building PodSpec ──
     // The caller retains this object as the LIST -> WATCH desired-state cache.
     // Mutating it here makes a later status-only watch event look like a
@@ -1486,6 +1502,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
     const runAsUser = server.spec.security?.runAsUser ?? 1000
     const runAsGroup = server.spec.security?.runAsGroup ?? runAsUser
+    const podAnnotations: Record<string, string> = {}
+    if (credentialsRevision) {
+      podAnnotations[CREDENTIALS_REVISION_ANNOTATION] = credentialsRevision
+    }
+    if (this.isRemote(server) && nginxConfigRevision) {
+      podAnnotations[NGINX_CONFIG_REVISION_ANNOTATION] = nginxConfigRevision
+    }
     const hardenedContainerSecurityContext: k8s.V1SecurityContext = {
       allowPrivilegeEscalation: false,
       runAsNonRoot: true,
@@ -1524,14 +1547,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         template: {
           metadata: {
             labels,
-            // Issue #223: rotating a credential changes this digest, which
-            // changes the pod template, which is what makes Kubernetes roll the
-            // pod. Omitted when there is no envSecret — an annotation with an
-            // empty value would be one more field to drift on for connectors
-            // that have no credentials at all.
-            ...(credentialsRevision && {
-              annotations: { [CREDENTIALS_REVISION_ANNOTATION]: credentialsRevision },
-            }),
+            // Issue #223: rotating a credential changes its digest, while a
+            // remote template change changes the NGINX digest. Either change
+            // alters the PodTemplate and rolls the container. Empty revisions
+            // are omitted so they cannot become drift fields.
+            ...(Object.keys(podAnnotations).length > 0 && { annotations: podAnnotations }),
           },
           spec: {
             automountServiceAccountToken: false,
@@ -1767,9 +1787,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   private async ensureDeployment(
     server: McpServerCRD,
     credentialsRevision = '',
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    nginxConfigRevision = ''
   ): Promise<void> {
-    const deployment = this.buildDeployment(server, credentialsRevision)
+    let resolvedNginxConfigRevision = nginxConfigRevision
+    if (this.isRemote(server) && !resolvedNginxConfigRevision) {
+      resolvedNginxConfigRevision = this.nginxConfigRevision(this.buildNginxConfigMap(server))
+    }
+    const deployment = this.buildDeployment(
+      server,
+      credentialsRevision,
+      resolvedNginxConfigRevision
+    )
 
     await ensureResource({
       mutationAllowed: isCurrent,
@@ -2636,12 +2665,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // Ensure resources exist and are up to date
     try {
       // Remote egress proxy: create nginx ConfigMap before Deployment
+      let nginxConfigRevision = ''
       if (this.isRemote(server)) {
         // The CRD image remains desired-state input owned by its author. Remote
         // workloads use the platform-owned proxy image selected in
         // buildDeployment(); rewriting spec.image here would bump generation
         // and retire this reconcile before it can create the runtime resources.
-        await this.ensureConfigMap(server, isCurrent)
+        nginxConfigRevision = await this.ensureConfigMap(server, isCurrent)
       } else {
         // Phase 2.3: plugin image-host allowlist. Audit mode (default) logs a
         // would-be denial and still builds; enforce mode blocks the workload.
@@ -2675,7 +2705,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       if (!isCurrent()) return false
       await this.ensureService(server, isCurrent)
       if (!isCurrent()) return false
-      await this.ensureDeployment(server, secretResult.revision, isCurrent)
+      await this.ensureDeployment(server, secretResult.revision, isCurrent, nginxConfigRevision)
     } catch (err) {
       if (!isCurrent()) return false
       this.setStatus(server.name, {

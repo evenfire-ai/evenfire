@@ -45,6 +45,7 @@ vi.mock('../config', () => ({
 }))
 
 const CREDENTIALS_REVISION_ANNOTATION = 'clerum.io/credentials-revision'
+const NGINX_CONFIG_REVISION_ANNOTATION = 'clerum.io/nginx-config-revision'
 
 function makeServer(): McpServerCRD {
   return {
@@ -106,6 +107,12 @@ describe('McpServer ensureDeployment no-op gate', () => {
   let appsApi: MockAppsApi
   let reconciler: McpServerReconciler
   const server = makeServer()
+
+  function remoteConfigRevision(remote: McpServerCRD): string {
+    return (reconciler as any).nginxConfigRevision(
+      (reconciler as any).buildNginxConfigMap(remote)
+    ) as string
+  }
 
   beforeEach(() => {
     appsApi = createMockAppsApi()
@@ -171,7 +178,12 @@ describe('McpServer ensureDeployment no-op gate', () => {
 
   it('NOOP-MCPDEP-REMOTE-1: equivalent remote Deployment skips replace across reconciles', async () => {
     const remoteServer = makeRemoteServer()
-    const desired = (reconciler as any).buildDeployment(remoteServer, 'rev-1') as k8s.V1Deployment
+    const configRevision = remoteConfigRevision(remoteServer)
+    const desired = (reconciler as any).buildDeployment(
+      remoteServer,
+      'rev-1',
+      configRevision
+    ) as k8s.V1Deployment
     const egressProxy = desired.spec?.template?.spec?.containers?.find(
       container => container.name === 'egress-proxy'
     )
@@ -186,6 +198,9 @@ describe('McpServer ensureDeployment no-op gate', () => {
       periodSeconds: 15,
       timeoutSeconds: 5,
     })
+    expect(desired.spec?.template?.metadata?.annotations?.[NGINX_CONFIG_REVISION_ANNOTATION]).toBe(
+      configRevision
+    )
 
     const existing = asApiserverDeployment(desired)
     appsApi.readNamespacedDeployment.mockResolvedValue(existing)
@@ -200,9 +215,11 @@ describe('McpServer ensureDeployment no-op gate', () => {
   })
 
   it('McpServer remote mutation sweep: every desired leaf is detectable', () => {
+    const remote = makeRemoteServer()
     const desired = (reconciler as any).buildDeployment(
-      makeRemoteServer(),
-      'rev-1'
+      remote,
+      'rev-1',
+      remoteConfigRevision(remote)
     ) as k8s.V1Deployment
     const existing = asApiserverDeployment(desired)
     const undetectable: string[] = []
@@ -215,6 +232,33 @@ describe('McpServer ensureDeployment no-op gate', () => {
     }
 
     expect(undetectable, `undetectable leaf path(s): ${undetectable.join(', ')}`).toEqual([])
+  })
+
+  it('CONFIG-ROLL-MCPDEP-REMOTE-1: a template-only URL change rolls the Deployment', async () => {
+    const literalRemote = makeRemoteServer()
+    const placeholderRemote = makeRemoteServer()
+    placeholderRemote.spec.remote!.baseUrl = 'https://mcp.example.com/mcp?apikey=${API_KEY}'
+
+    const oldRevision = remoteConfigRevision(literalRemote)
+    const newRevision = remoteConfigRevision(placeholderRemote)
+    expect(oldRevision).not.toBe(newRevision)
+
+    const live = (reconciler as any).buildDeployment(
+      literalRemote,
+      'rev-1',
+      oldRevision
+    ) as k8s.V1Deployment
+    appsApi.readNamespacedDeployment.mockResolvedValue(asApiserverDeployment(live))
+
+    await (reconciler as any).ensureDeployment(placeholderRemote, 'rev-1')
+
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+    const body = (
+      appsApi.replaceNamespacedDeployment.mock.calls[0][0] as { body: k8s.V1Deployment }
+    ).body
+    expect(body.spec?.template?.metadata?.annotations?.[NGINX_CONFIG_REVISION_ANNOTATION]).toBe(
+      newRevision
+    )
   })
 
   it('ROTATE-MCPDEP-1: credentials revision change replaces once with the new annotation', async () => {
