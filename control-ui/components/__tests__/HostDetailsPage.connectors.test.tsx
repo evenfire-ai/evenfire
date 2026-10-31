@@ -11,6 +11,11 @@ import {
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
 import {
+  TOO_MANY_MCP_SERVERS_BODY,
+  contextRejectionError,
+  unknownMcpServerBody,
+} from '../../test/fixtures/contextMcpServerRejection'
+import {
   buildContextResource,
   buildSharedContextScenario,
   materializeContextResource,
@@ -477,5 +482,61 @@ describe('HostDetailsPage connectors', () => {
         })
       )
     })
+  })
+})
+
+describe('HostDetailsPage connectors — refused additions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setupApiMocks()
+  })
+
+  it('says a vanished connector no longer exists and stops offering it', async () => {
+    const actualApi = await vi.importActual<typeof import('../../lib/api')>('../../lib/api')
+    const refusal = await contextRejectionError(actualApi, unknownMcpServerBody(['mcp-new']))
+    ;(api.updateContext as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(refusal)
+    renderPage()
+
+    expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Add connector' }))
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'mcp-new' }))
+    ;(api.getMcpServers as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: [{ metadata: { name: 'mcp-existing' } }, { metadata: { name: 'mcp-another' } }],
+    })
+    fireEvent.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Add connector' })
+    )
+
+    const dialog = screen.getByRole('dialog')
+    expect(
+      await within(dialog).findByText(
+        'The connector mcp-new no longer exists; reload the page and try again.'
+      )
+    ).toBeInTheDocument()
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(within(dialog).queryByRole('checkbox', { name: 'mcp-new' })).toBeNull()
+    )
+    expect(within(dialog).getByRole('checkbox', { name: 'mcp-another' })).toBeInTheDocument()
+  })
+
+  it('gives the per-write cap its own message', async () => {
+    const actualApi = await vi.importActual<typeof import('../../lib/api')>('../../lib/api')
+    const refusal = await contextRejectionError(actualApi, TOO_MANY_MCP_SERVERS_BODY)
+    ;(api.updateContext as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(refusal)
+    renderPage()
+
+    expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Add connector' }))
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'mcp-new' }))
+    fireEvent.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Add connector' })
+    )
+
+    expect(
+      await within(screen.getByRole('dialog')).findByText(
+        'A single change can add at most 256 connectors; add fewer at once and try again.'
+      )
+    ).toBeInTheDocument()
   })
 })

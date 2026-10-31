@@ -4917,6 +4917,82 @@ td.cu-registry-description {
   gap: var(--cu-space-2);
 }
 
+/* Marketplace: remote-OAuth subtype chip, badges and per-slot install state. */
+.cu-registry-chip--remote-oauth {
+  color: var(--cu-link);
+  background: rgba(var(--cu-focus-rgb), 0.14);
+  border-color: rgba(var(--cu-focus-rgb), 0.32);
+  text-transform: none;
+}
+
+.cu-registry-name-meta {
+  margin-top: var(--cu-space-05);
+}
+
+.cu-registry-status {
+  color: var(--cu-text);
+}
+
+.cu-remote-oauth-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-1);
+}
+
+.cu-remote-oauth-badges__console {
+  font-size: var(--cu-font-size-xs);
+}
+
+.cu-remote-oauth-slots {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cu-remote-oauth-slots__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-1) var(--cu-space-2);
+}
+
+.cu-remote-oauth-slots__label {
+  font-weight: var(--cu-font-weight-semibold);
+  color: var(--cu-text);
+}
+
+.cu-remote-oauth-slots__status {
+  color: var(--cu-text-soft);
+  overflow-wrap: anywhere;
+}
+
+.cu-remote-oauth-slots__status--installed {
+  color: var(--cu-success);
+}
+
+.cu-remote-oauth-slots__status--uninstalling,
+.cu-remote-oauth-slots__status--occupied {
+  color: var(--cu-warning);
+}
+
+.cu-remote-oauth-slots__actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--cu-space-1);
+  margin-left: auto;
+}
+
+.cu-remote-oauth-slots__notice {
+  margin: var(--cu-space-05) 0 0;
+  font-size: var(--cu-font-size-xs);
+  line-height: var(--cu-line-height-normal);
+  color: var(--cu-warning);
+}
+
 /* Remote wizard: the exact scopes an Entra install asks the operator to confirm. */
 .cu-unverified-scopes {
   margin: var(--cu-space-1) 0;

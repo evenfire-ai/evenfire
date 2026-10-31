@@ -1,0 +1,89 @@
+{
+  "status": 200,
+  "body": [
+    {
+      "input": "https://MCP.Example.com/mcp/",
+      "normalized": "https://mcp.example.com/mcp"
+    },
+    {
+      "input": "HTTPS://mcp.example.com:443/mcp",
+      "normalized": "https://mcp.example.com/mcp"
+    },
+    {
+      "input": "https://mcp.example.com:8443/mcp//",
+      "normalized": "https://mcp.example.com:8443/mcp"
+    },
+    {
+      "input": "https://mcp.example.com/",
+      "normalized": "https://mcp.example.com"
+    },
+    {
+      "input": "https://mcp.example.com",
+      "normalized": "https://mcp.example.com"
+    },
+    {
+      "input": "https://mcp.example.com/Mcp",
+      "normalized": "https://mcp.example.com/Mcp"
+    },
+    {
+      "input": "http://mcp.example.com:80/mcp",
+      "normalized": "http://mcp.example.com/mcp"
+    },
+    {
+      "input": "http://mcp.example.com:443/mcp",
+      "normalized": "http://mcp.example.com:443/mcp"
+    },
+    {
+      "input": "https://mcp.example.com/mcp?x=1",
+      "normalized": "https://mcp.example.com/mcp?x=1"
+    },
+    {
+      "input": "https://mcp.example.com/mcp/?x=1",
+      "normalized": "https://mcp.example.com/mcp?x=1"
+    },
+    {
+      "input": "https://mcp.example.com/mcp#frag",
+      "normalized": "https://mcp.example.com/mcp#frag"
+    },
+    {
+      "input": "https://mcp.example.com/a%20b/",
+      "normalized": "https://mcp.example.com/a%20b"
+    },
+    {
+      "input": "https://xn--bcher-kva.example/mcp",
+      "normalized": "https://xn--bcher-kva.example/mcp"
+    },
+    {
+      "input": "https://bücher.example/mcp",
+      "normalized": "https://xn--bcher-kva.example/mcp"
+    },
+    {
+      "input": "https://[::1]:443/mcp/",
+      "normalized": "https://[::1]/mcp"
+    },
+    {
+      "input": "https://user@mcp.example.com/mcp",
+      "normalized": null
+    },
+    {
+      "input": "https://user:pw@mcp.example.com/mcp",
+      "normalized": null
+    },
+    {
+      "input": "https://:pw@mcp.example.com/",
+      "normalized": null
+    },
+    {
+      "input": "not a url",
+      "normalized": null
+    },
+    {
+      "input": "https://mcp.notion.com/mcp",
+      "normalized": "https://mcp.notion.com/mcp"
+    },
+    {
+      "input": "https://mcp.linear.app/mcp",
+      "normalized": "https://mcp.linear.app/mcp"
+    }
+  ]
+}

@@ -14,7 +14,7 @@
  */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { RegistryEntry } from '../../lib/api'
+import type { RegistryCatalogResponse, RegistryEntry } from '../../lib/api'
 import type { DiscoverRemoteResponse, InstallRemoteResponse } from '../../lib/remoteMcp.types'
 import type { WireCapture } from './remoteMcpWire'
 
@@ -100,3 +100,25 @@ export const CATALOG_TRANSPORT_UNREACHABLE_FAILURE = loadGolden(
 export const CATALOG_CLIENT_ID_IN_USE_FAILURE = loadGolden('install.catalogClientIdInUse')
 /** An old `-oauth-client` Secret without a CR blocks the slot; the body names it. */
 export const CATALOG_SLOT_RESIDUE_FAILURE = loadGolden('install.catalogSlotResidue')
+
+// ─── GET /admin/registry/catalog (install slots) ──────────────────────────────
+
+/**
+ * Catalog with every slot state, over CRs the remote saga's builder produced:
+ * - `@evenfire/linear-remote` user: canonical instance v1.0.0; context free;
+ * - `@evenfire/linear-user` user: instance under the hand-picked name `hand-named-linear`;
+ * - `@acme/linear-pre` user: canonical instance being deleted; context: its canonical
+ *   name taken by a manual install (foreign);
+ * - `@acme/notion-remote` user: free, with the manual `manual-notion` on the same URL;
+ * - `@evenfire/linear-dcr` (untested, user slot) and `@evenfire/workiq-remote`
+ *   (pre-registered, known issue): free; `@evenfire/broken-remote`
+ *   (invalid) and `@evenfire/plain-remote` (not remote-OAuth): nothing installed.
+ */
+export const CATALOG_SLOTS = loadGolden<RegistryCatalogResponse>('catalog.slots').body
+/** `@evenfire/linear-remote` served at v1.0.1 while its user slot holds a v1.0.0 instance. */
+export const CATALOG_BUMPED_VERSION =
+  loadGolden<RegistryCatalogResponse>('catalog.bumpedVersion').body
+
+/** control-api's `normalizeRemoteBaseUrl` over a fixed set of inputs. */
+export const NORMALIZE_BASE_URL_CASES =
+  loadGolden<Array<{ input: string; normalized: string | null }>>('normalizeBaseUrl').body

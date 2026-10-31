@@ -133,12 +133,16 @@ export function ConnectorDetailAccessProvider({ children }: { children: ReactNod
         return true
       } catch (caught) {
         if (isSilentApiError(caught)) return false
+        const message = connectorAccessMutationError(
+          caught,
+          `Failed to give agents access to ${serverName}`
+        )
+        // Some contexts may have taken the connector before another write failed;
+        // reload so the bindings show what the server holds, then report the failure.
+        await load()
         setLoaded(previous => ({
           ...previous,
-          error: connectorAccessMutationError(
-            caught,
-            `Failed to give agents access to ${serverName}`
-          ),
+          error: previous.error ? `${message} ${previous.error}` : message,
         }))
         return false
       } finally {

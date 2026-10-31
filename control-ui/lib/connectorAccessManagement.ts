@@ -9,7 +9,11 @@ import type {
 import type { ContextResource, ContextSpec, HostResource, McpServerResource } from './api'
 import { getAgentTeams, getAgentUsers, updateContext } from './api'
 import { mergeAccessSummaries, sortAccessPrincipals } from './connectorAccess'
-import { buildContextUpdatePayload, contextMutationError } from './contextMutation'
+import {
+  buildContextUpdatePayload,
+  contextMutationError,
+  unknownMcpServerNames,
+} from './contextMutation'
 
 export type ConnectorAccessState = {
   contexts: ContextResource[]
@@ -201,7 +205,10 @@ export async function addConnectorToAgentContexts(
     )
   }
 
-  await Promise.all(
+  // Every write is allowed to settle before a failure is reported: the caller reloads
+  // the contexts on failure, and a reload taken while sibling PUTs are still in flight
+  // would show some of them as not applied.
+  const results = await Promise.allSettled(
     (targets as ContextResource[]).map(context => {
       const spec = contextSpec(context)
       return updateContext(
@@ -213,6 +220,14 @@ export async function addConnectorToAgentContexts(
       )
     })
   )
+  const failures = results.filter(
+    (result): result is PromiseRejectedResult => result.status === 'rejected'
+  )
+  // A vanished connector fails every write the same way and needs a reload, so it is
+  // reported ahead of a per-context conflict.
+  const failure =
+    failures.find(result => unknownMcpServerNames(result.reason) !== null) ?? failures[0]
+  if (failure) throw failure.reason
 }
 
 export async function removeConnectorFromAgentContext(

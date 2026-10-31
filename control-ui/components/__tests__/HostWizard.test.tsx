@@ -11,6 +11,10 @@ import {
   listGrokSubscriptionConnections,
 } from '../../lib/grokSubscription'
 import {
+  contextRejectionError,
+  unknownMcpServerBody,
+} from '../../test/fixtures/contextMcpServerRejection'
+import {
   buildHostReferencesForContext,
   materializeContextResource,
   materializeHostResource,
@@ -1522,5 +1526,35 @@ describe('HostWizard — broker-backed Codex authoring', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
     })
+  }, 15_000)
+})
+
+describe('HostWizard — a selected connector vanished before create', () => {
+  it('says which connector no longer exists and deselects it for the retry', async () => {
+    const actualApi = await vi.importActual<typeof import('../../lib/api')>('../../lib/api')
+    const refusal = await contextRejectionError(actualApi, unknownMcpServerBody(['mcp-a']))
+    vi.mocked(api.apiSend).mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/api/v1/admin/contexts') throw refusal
+      return {}
+    })
+    await renderWizard()
+    await walkToAccessStep({ agentName: 'vanished-connector-agent' })
+    continueToConnectorsStep()
+    fireEvent.click(screen.getByRole('checkbox', { name: /mcp-a/i }))
+    submitFromConnectorsStep()
+
+    expect(
+      await screen.findByText(
+        'The connector mcp-a no longer exists; reload the page and try again.'
+      )
+    ).toBeInTheDocument()
+    // Deselected and no longer offered: a retry cannot send it again.
+    expect(screen.queryByRole('checkbox', { name: /mcp-a/i })).toBeNull()
+    expect(screen.getByText(/None selected/)).toBeInTheDocument()
+    expect(
+      vi
+        .mocked(api.apiSend)
+        .mock.calls.some(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    ).toBe(false)
   }, 15_000)
 })

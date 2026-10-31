@@ -8,13 +8,21 @@ import type { K8sGateway } from '../src/k8s.js'
 import { discoverRemoteOAuth } from '../src/oauth/discovery.js'
 import { PENDING_TTL_MS } from '../src/oauth/dynamicClientStore.js'
 import { probeMcpTransport } from '../src/oauth/mcpTransportProbe.js'
-import { deriveCatalogRemoteServerName } from '../src/routes/admin/catalogRemoteOAuth.js'
+import {
+  deriveCatalogRemoteServerName,
+  normalizeRemoteBaseUrl,
+} from '../src/routes/admin/catalogRemoteOAuth.js'
 import { createAdminRegistryRouter } from '../src/routes/admin/registry.js'
 import {
   type AdminRemoteMcpDeps,
   createAdminRemoteMcpRouter,
 } from '../src/routes/admin/remoteMcp.js'
-import { type RegistryEntry, getEntryVersion } from '../src/services/registryClient.js'
+import {
+  type RegistryEntry,
+  getCategories,
+  getEntryVersion,
+  searchEntries,
+} from '../src/services/registryClient.js'
 import { WORKIQ_GUID_SCOPE } from './fixtures/perServerInstall.js'
 import { type PushRemoteMcpEntryBody, registryEntryRow } from './fixtures/registryEntryRow.js'
 import {
@@ -25,6 +33,7 @@ import {
   makeDiscoveryTransport,
   makeInMemoryDynamicClientsDb,
 } from './fixtures/remoteOAuthDiscovery.js'
+import { remoteOAuthMcpServer } from './fixtures/remoteOAuthMcpServer.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -62,6 +71,8 @@ vi.mock('../src/services/registryClient.js', async importActual => {
   return {
     ...actual,
     getEntryVersion: vi.fn(),
+    searchEntries: vi.fn(),
+    getCategories: vi.fn(async () => ({ data: [] })),
     reportInstall: vi.fn(async () => ({ acknowledged: true, stored: true })),
   }
 })
@@ -97,11 +108,12 @@ function row(
   name: string,
   url: string,
   oauth: Record<string, unknown> | undefined,
-  publisher: Publisher
+  publisher: Publisher,
+  version = '1.0.0'
 ): Record<string, unknown> {
   const body: PushRemoteMcpEntryBody = {
     name,
-    version: '1.0.0',
+    version,
     mcpServer: {
       serverMode: 'remote',
       transport: 'streamableHttp',
@@ -567,5 +579,180 @@ describe('catalog remote-OAuth wire goldens — POST / (catalog-mode install)', 
     )
     expect(actual.status).toBe(409)
     expect(actual).toEqual(golden('install.catalogSlotResidue', actual))
+  })
+})
+
+// ── GET /admin/registry/catalog: install slots ─────────────────────────────
+
+async function readCatalog(
+  gateway: MockGateway,
+  rows: Array<Record<string, unknown>>
+): Promise<WireCapture> {
+  // Row ids are random bytes pinned to FIXED_UUID above; a listing needs them distinct,
+  // as the registry's are, so each row gets its own pinned id.
+  const listed = rows.map((listedRow, index) => ({
+    ...listedRow,
+    id: `${FIXED_UUID.slice(0, -4)}${String(index).padStart(4, '0')}`,
+  }))
+  vi.mocked(searchEntries).mockResolvedValue({
+    data: listed,
+    meta: { total: listed.length, limit: 200, offset: 0 },
+  } as never)
+  const app = express()
+  app.use(express.json())
+  app.use(createAdminRegistryRouter(gateway as unknown as K8sGateway))
+  const res = await request(app).get('/admin/registry/catalog?limit=200')
+  return { status: res.status, body: res.body }
+}
+
+/** A CR exactly as the remote install saga writes it, catalog-stamped when `catalog` is set. */
+async function seedRemoteOAuthCr(
+  gateway: MockGateway,
+  input: Omit<Parameters<typeof remoteOAuthMcpServer>[0], 'namespace'>
+) {
+  await gateway.createResource(
+    'mcpservers',
+    await remoteOAuthMcpServer({ ...input, namespace: NS }),
+    NS
+  )
+}
+
+describe('catalog remote-OAuth wire goldens — GET /admin/registry/catalog', () => {
+  beforeEach(() => {
+    vi.mocked(searchEntries).mockReset()
+    vi.mocked(getCategories).mockResolvedValue({ data: [] } as never)
+  })
+
+  it('catalog.slots: instance, non-canonical, terminating, foreign and a manual install', async () => {
+    const gateway = new MockGateway(NS)
+    // `@evenfire/linear-remote`, user slot: the catalog instance under its canonical name.
+    await seedRemoteOAuthCr(gateway, {
+      serverName: deriveCatalogRemoteServerName('@evenfire/linear-remote', 'user'),
+      grantScope: 'user',
+      catalog: { id: '@evenfire/linear-remote', version: '1.0.0' },
+    })
+    // `@evenfire/linear-user`, user slot: carries the catalog id under a hand-picked name.
+    await seedRemoteOAuthCr(gateway, {
+      serverName: 'hand-named-linear',
+      grantScope: 'user',
+      catalog: { id: '@evenfire/linear-user', version: '1.0.0' },
+    })
+    // `@acme/linear-pre`, user slot: being deleted.
+    const terminating = deriveCatalogRemoteServerName('@acme/linear-pre', 'user')
+    await seedRemoteOAuthCr(gateway, {
+      serverName: terminating,
+      grantScope: 'user',
+      catalog: { id: '@acme/linear-pre', version: '1.0.0' },
+    })
+    gateway.markDeleting('mcpservers', terminating, NS)
+    // `@acme/linear-pre`, context slot: its canonical name taken by a manual install.
+    await seedRemoteOAuthCr(gateway, {
+      serverName: deriveCatalogRemoteServerName('@acme/linear-pre', 'context'),
+      grantScope: 'context',
+    })
+    // A manual per-user install of the URL `@acme/notion-remote` serves.
+    await seedRemoteOAuthCr(gateway, { serverName: 'manual-notion', grantScope: 'user' })
+
+    const actual = await readCatalog(gateway, [
+      ENTRIES.curatorCimd(),
+      ENTRIES.curatorCimdUserOnly(),
+      ENTRIES.curatorDcrOnManualAs(),
+      ENTRIES.curatorWorkiq(),
+      ENTRIES.curatorInvalid(),
+      ENTRIES.orgDcr(),
+      ENTRIES.orgPreRegistered(),
+      ENTRIES.plainRemote(),
+    ])
+    expect(actual.status).toBe(200)
+    const installed = (actual.body as { installed: Record<string, unknown> }).installed
+    expect(installed.catalogKeys).toEqual([])
+    expect(installed.remoteOAuthSlots).toMatchObject({
+      '@evenfire/linear-remote': {
+        user: { kind: 'instance', canonical: true, terminating: false },
+      },
+      '@evenfire/linear-user': { user: { kind: 'instance', canonical: false } },
+      '@acme/linear-pre': {
+        user: { kind: 'instance', terminating: true },
+        context: { kind: 'foreign' },
+      },
+    })
+    expect(installed.manualRemoteOAuth).toContainEqual({
+      serverName: 'manual-notion',
+      baseUrl: PILOTS.notion.mcpUrl,
+      grantScope: 'user',
+    })
+    expect(actual).toEqual(golden('catalog.slots', actual))
+  })
+
+  it('catalog.bumpedVersion: an instance of v1.0.0 while the catalog serves v1.0.1', async () => {
+    const gateway = new MockGateway(NS)
+    await seedRemoteOAuthCr(gateway, {
+      serverName: deriveCatalogRemoteServerName('@evenfire/linear-remote', 'user'),
+      grantScope: 'user',
+      catalog: { id: '@evenfire/linear-remote', version: '1.0.0' },
+    })
+    const bumped = row(
+      '@evenfire/linear-remote',
+      PILOTS.linear.mcpUrl,
+      {
+        source: 'remote',
+        allowedGrantScopes: ['user', 'context'],
+        scopes: ['read'],
+        expectedRegistration: 'cimd',
+        verification: { status: 'verified', checkedAt: '2026-10-20' },
+      },
+      CURATOR,
+      '1.0.1'
+    )
+    const actual = await readCatalog(gateway, [bumped])
+    expect(actual.status).toBe(200)
+    const body = actual.body as {
+      data: Array<{ version: string }>
+      installed: { catalogKeys: string[]; remoteOAuthSlots: Record<string, unknown> }
+    }
+    expect(body.data.map(entry => entry.version)).toEqual(['1.0.1'])
+    expect(body.installed.catalogKeys).toEqual([])
+    expect(body.installed.remoteOAuthSlots).toMatchObject({
+      '@evenfire/linear-remote': { user: { kind: 'instance', version: '1.0.0' } },
+    })
+    expect(actual).toEqual(golden('catalog.bumpedVersion', actual))
+  })
+})
+
+// ── normalizeRemoteBaseUrl: the comparison form the UI's manual-instance notice mirrors ──
+
+describe('catalog remote-OAuth wire goldens — base URL normalization', () => {
+  // The cases of normalizeRemoteBaseUrl's own unit test, plus the manual-install URLs
+  // an operator types. control-ui replicates the function and checks it against this file.
+  const INPUTS = [
+    'https://MCP.Example.com/mcp/',
+    'HTTPS://mcp.example.com:443/mcp',
+    'https://mcp.example.com:8443/mcp//',
+    'https://mcp.example.com/',
+    'https://mcp.example.com',
+    'https://mcp.example.com/Mcp',
+    'http://mcp.example.com:80/mcp',
+    'http://mcp.example.com:443/mcp',
+    'https://mcp.example.com/mcp?x=1',
+    'https://mcp.example.com/mcp/?x=1',
+    'https://mcp.example.com/mcp#frag',
+    'https://mcp.example.com/a%20b/',
+    'https://xn--bcher-kva.example/mcp',
+    'https://bücher.example/mcp',
+    'https://[::1]:443/mcp/',
+    'https://user@mcp.example.com/mcp',
+    'https://user:pw@mcp.example.com/mcp',
+    'https://:pw@mcp.example.com/',
+    'not a url',
+    PILOTS.notion.mcpUrl,
+    PILOTS.linear.mcpUrl,
+  ]
+
+  it('normalizeBaseUrl: every case maps as the server compares it', () => {
+    const actual: WireCapture = {
+      status: 200,
+      body: INPUTS.map(input => ({ input, normalized: normalizeRemoteBaseUrl(input) })),
+    }
+    expect(actual).toEqual(golden('normalizeBaseUrl', actual))
   })
 })
