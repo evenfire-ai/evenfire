@@ -41,6 +41,7 @@ import {
   uniqueGfsFixtureName,
 } from '../../../tests/e2e/gfsUiFixtures'
 import { withTransportRetry } from './gfsTransportRetry'
+import { DesktopFilesNav } from './pages/DesktopFilesNav'
 import { launchAndLogin } from './workflowUi'
 
 function gridRow(page: Page, name: string): Locator {
@@ -97,26 +98,19 @@ async function removeFixture(name: string): Promise<void> {
 /**
  * Open the Files surface at the shared root.
  *
- * The Files surface renders NO aria-current on its breadcrumb, so the old
- * `aria-current="page"` assertion could never pass and both journeys died
- * before they reached a gesture. The signals the UI really renders at the
- * shared root are used instead: the root-only resource menu ("Options for
- * Shared with me" is rendered only when no folder is open) and the
- * breadcrumb's own state — at the root there is no parent to return to, so
- * "Shared with me" is not navigable.
+ * "Shared with me" is a real view (0279f6964): it is reached from the sidebar
+ * like "My home", and its crumb carries `aria-current="page"` (asserted inside
+ * the page object). The root-only resource menu ("Options for Shared with me")
+ * stays here as the second signal: it is rendered only while no folder is open,
+ * so the journey cannot silently start one level deep.
  */
 async function openFilesSharedRoot(page: Page): Promise<void> {
-  const filesNav = page.getByRole('button', { name: /^Files$/, exact: true }).first()
-  await expect(filesNav).toBeVisible({ timeout: 30_000 })
-  await filesNav.click()
-  const sharedWithMe = page
-    .getByRole('navigation', { name: 'File location', exact: true })
-    .getByRole('button', { name: 'Shared with me', exact: true })
-  await expect(sharedWithMe).toBeVisible({ timeout: 30_000 })
+  const nav = new DesktopFilesNav(page)
+  await nav.openFiles()
+  await nav.openSharedWithMe()
   await expect(
     page.getByRole('button', { name: 'Options for Shared with me', exact: true })
   ).toBeVisible({ timeout: 30_000 })
-  await expect(sharedWithMe).toBeDisabled()
 }
 
 /** Descend into a fixture folder from the shared root. */

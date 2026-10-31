@@ -19,6 +19,7 @@ export type GfsErrorCode =
   | "quota_exceeded"
   | "rate_limited"
   | "conflict"
+  | "governed_root_immutable"
   | "idempotency_conflict"
   | "upload_incomplete"
   | "upload_finalizing"
@@ -46,6 +47,7 @@ export const HTTP_STATUS: Record<GfsErrorCode, number> = {
   quota_exceeded: 429,
   rate_limited: 429,
   conflict: 409,
+  governed_root_immutable: 409,
   idempotency_conflict: 409,
   upload_incomplete: 409,
   upload_finalizing: 409,

@@ -151,6 +151,8 @@ describe('external GFS rate boundary', () => {
     ],
     ['DELETE', `/uploads/${RESOURCE_ID}`, 'resource-mutation', '/external/gfs/uploads/:id'],
     ['GET', '/resolve', 'resource', '/external/gfs/resolve'],
+    ['GET', '/home', 'resource', '/external/gfs/home'],
+    ['GET', '/recent', 'resource', '/external/gfs/recent'],
     ['GET', '/resources', 'resource', '/external/gfs/resources'],
     [
       'GET',
@@ -525,6 +527,7 @@ describe('external GFS rate boundary', () => {
 
   it.each([
     ['GET', '/resources', 'resource', 120],
+    ['GET', '/recent', 'resource', 120],
     ['GET', `/proxy/${RESOURCE_ID}`, 'proxy-read', 60],
     ['GET', '/grants', 'grants-read', 45],
     ['GET', '/shares', 'shares-read', 35],

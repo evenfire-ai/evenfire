@@ -61,6 +61,7 @@ const state = vi.hoisted(() => {
       }
       if (text.includes('UPDATE gfs_resources')) {
         events.push('mutation')
+        if (state.updateError) throw state.updateError
         return { rows: [{ version: 3 }] }
       }
       if (text.includes('FROM gfs_resources')) {
@@ -76,6 +77,7 @@ const state = vi.hoisted(() => {
     events,
     db,
     failPaths: false,
+    updateError: undefined as unknown,
     operator: true,
     auditDb: undefined as unknown,
     audits: [] as unknown[],
@@ -136,6 +138,7 @@ describe('gfs resource route transaction boundary', () => {
   beforeEach(() => {
     state.events.length = 0
     state.failPaths = false
+    state.updateError = undefined
     state.operator = true
     state.auditDb = undefined
     state.audits.length = 0
@@ -164,6 +167,33 @@ describe('gfs resource route transaction boundary', () => {
       'audit',
       'commit',
     ])
+  })
+
+  it('maps only the governed-root check after rollback while a normal rename succeeds', async () => {
+    const req = {
+      params: { id: FILE },
+      body: { newName: 'b.md' },
+      query: { drive: 'main' },
+      ip: '127.0.0.1',
+    } as never
+    const success = response()
+    await handlePatch(req, success as never)
+    expect(success.code).toBe(200)
+
+    state.events.length = 0
+    state.updateError = { code: '23514', constraint: 'gfs_governed_root_immutable' }
+    const governed = response()
+    await handlePatch(req, governed as never)
+    expect(governed.code).toBe(409)
+    expect(governed.body).toEqual({
+      ok: false,
+      error: { code: 'governed_root_immutable', message: 'governed root is immutable' },
+    })
+    expect(state.events).toContain('rollback')
+    expect(state.events).not.toContain('commit')
+
+    state.updateError = { code: '23514', constraint: 'another_check' }
+    await expect(handlePatch(req, response() as never)).rejects.toEqual(state.updateError)
   })
 
   it('rolls back before the allowed audit when canonical path publication fails', async () => {

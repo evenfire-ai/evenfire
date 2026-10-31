@@ -22,6 +22,6 @@ describe('AppService logout recovery ownership', () => {
 
     expect(service.getCachedUserId()).toBe('user-a')
     expect(service.sessionToken).toBe('synthetic-session-a')
-    await expect(service.listGfsUploadSessions()).resolves.toEqual([])
+    await expect(service.listGfsUploadSessions('main')).resolves.toEqual([])
   })
 })

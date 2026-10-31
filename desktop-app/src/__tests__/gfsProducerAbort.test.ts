@@ -85,6 +85,7 @@ describe('producer-side abort through the real GfsClient (R1-M6)', () => {
   it('gfs:abort ends the real client listing through its transport signal', async () => {
     const pending = electron.handlers.get('gfs:listChildren')!(trusted, {
       resourceId: 'folder-1',
+      drive: 'main',
       requestId: 'req-real-1',
     })
     const rejection = expect(pending).rejects.toMatchObject({ name: 'AbortError' })

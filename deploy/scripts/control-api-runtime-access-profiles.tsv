@@ -26,6 +26,8 @@ gfs_resources	legacy_dml
 gfs_shares	legacy_dml
 gfs_upload_parts	none
 gfs_upload_sessions	none
+gfs_user_file_activity	read
+gfs_user_homes	upsert
 governed_event_read_v1	read
 governed_event_stream	append
 governed_run_attribution_bindings	append

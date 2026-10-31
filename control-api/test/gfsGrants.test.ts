@@ -36,7 +36,7 @@ interface AuditRow {
   subject: string
   actor: string
   op: string
-  gfsUri: string
+  gfsUri: string | null
   outcome: string
   rowHash: string
 }
@@ -121,7 +121,7 @@ function mockDb(opts: {
           subject: String(v[0]),
           actor: String(v[1]),
           op: String(v[2]),
-          gfsUri: String(v[3]),
+          gfsUri: v[3] === null ? null : String(v[3]),
           outcome: String(v[4]),
           rowHash: String(v[7]),
         })
@@ -879,6 +879,22 @@ describe('assertMayGrant — share authority bit', () => {
 })
 
 describe('auditMutation', () => {
+  it('records an event without a resource as a NULL URI and preserves resource URIs', async () => {
+    const audit: AuditRow[] = []
+    const db = mockDb({ audit })
+    const common = {
+      actorKey: 'platform:user-home',
+      targetKey: 'user:u1',
+      op: 'user_home.retired',
+      drive: 'main',
+      outcome: 'allowed' as const,
+    }
+    await auditMutation(db, { ...common, resourceId: null })
+    await auditMutation(db, { ...common, resourceId: R })
+    expect(audit.map(row => row.gfsUri)).toEqual([null, `gfs://main/${R}`])
+    expect(audit.every(row => /^[0-9a-f]{64}$/.test(row.rowHash))).toBe(true)
+  })
+
   it('writes one audit row with a content hash and the spec fields', async () => {
     const audit: AuditRow[] = []
     const auditSql: string[] = []

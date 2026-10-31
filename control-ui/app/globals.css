@@ -1524,6 +1524,46 @@ body.cu-body {
   color: var(--cu-danger);
 }
 
+/* Member Contact tab: the home folder is the last field of the stack. */
+.cu-user-home {
+  margin-bottom: 0;
+}
+
+.cu-user-home .cu-banner {
+  margin-bottom: 0;
+}
+
+/* The status line receives focus after an accepted rename retry (the dialog opener is gone). */
+.cu-user-home > strong:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 2px;
+}
+
+.cu-user-home__detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-1);
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-sm);
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-user-home__detail p,
+.cu-user-home__detail ul {
+  margin: 0;
+}
+
+.cu-user-home__detail ul {
+  padding-left: var(--cu-space-4);
+}
+
+.cu-user-home__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
+  margin-top: var(--cu-space-1);
+}
+
 .cu-field__hint,
 .cu-field__error {
   font-size: 0.75rem;

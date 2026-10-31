@@ -5,6 +5,7 @@ import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ToastStack } from '@components/Common/ToastStack'
+import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useToastController } from '@hooks/domain/useToastController'
 import { desktopQueryDefaults } from '@lib/queryClient'
@@ -12,6 +13,7 @@ import {
   accessibleResource,
   childView,
   gfsRouteFailureMessage,
+  homeView,
   listAccessiblePage,
   listChildrenPage,
   moveResourceReceipt,
@@ -116,12 +118,13 @@ async function numberedMoveFixture(
   const conflictMessage = await gfsRouteFailureMessage(
     client =>
       client.moveResource(
-        { resourceId: 'file-src', destinationId: 'destination-1', ifMatch: 3 },
+        { resourceId: 'file-src', destinationId: 'destination-1', drive: 'main', ifMatch: 3 },
         'fixture-session-token'
       ),
     409,
     { code: 'name_conflict', message: 'private upstream diagnostic' }
   )
+  expect(conflictMessage).toContain('httpStatus=409')
   const rows = await listAccessiblePage([
     accessibleResource('destination-1', 'Archive', 'directory', {
       path: '/Archive',
@@ -900,6 +903,7 @@ describe('FilesPage Move permission generation fencing', () => {
           {
             resourceId: 'file-src',
             destinationId: 'destination-1',
+            drive: 'main',
             ifMatch: 3,
           },
           'fixture-session-token'
@@ -907,6 +911,7 @@ describe('FilesPage Move permission generation fencing', () => {
       412,
       { code: 'precondition_failed', message: 'the resource version changed' }
     )
+    expect(staleVersionError).toContain('httpStatus=412')
     const rows = await listAccessiblePage([
       accessibleResource('destination-1', 'Archive', 'directory', {
         path: '/Archive',
@@ -1049,6 +1054,7 @@ describe('FilesPage Move permission generation fencing', () => {
       value: {
         auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
             resourceId === 'source-parent' ? children : listChildrenPage([])
@@ -1207,6 +1213,7 @@ describe('FilesPage Move permission generation fencing', () => {
       value: {
         auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
             resourceId === 'source-parent' ? children : listChildrenPage([])
@@ -1468,6 +1475,7 @@ describe('FilesPage Move permission generation fencing', () => {
           {
             resourceId: 'file-src',
             destinationId: 'destination-1',
+            drive: 'main',
             ifMatch: 3,
           },
           'fixture-session-token'
@@ -1475,6 +1483,7 @@ describe('FilesPage Move permission generation fencing', () => {
       409,
       { code: 'name_conflict', message: 'an item with this name already exists' }
     )
+    expect(conflictMessage).toContain('httpStatus=409')
     const rows = await listAccessiblePage([
       accessibleResource('destination-1', 'Archive', 'directory', {
         path: '/Archive',
@@ -1636,7 +1645,7 @@ describe('FilesPage Move permission generation fencing', () => {
     const renderPage = (teamId: string, userId = 'user-a') => (
       <AuthContext.Provider value={authFor(teamId, userId)}>
         <QueryClientProvider client={queryClient}>
-          <FilesPage />
+          <FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
         </QueryClientProvider>
       </AuthContext.Provider>
     )
@@ -1728,7 +1737,7 @@ describe('FilesPage Move permission generation fencing', () => {
     render(
       <AuthContext.Provider value={authFor('team-a')}>
         <QueryClientProvider client={queryClient}>
-          <FilesPage />
+          <FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
         </QueryClientProvider>
       </AuthContext.Provider>
     )

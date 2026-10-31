@@ -64,8 +64,8 @@ export function isEventFromNestedInteractive(
 ): boolean {
   const target = event.target
   if (!(target instanceof Element)) return false
-  return (
-    target.closest('button, a, input, select, textarea, [role="button"], [role="menuitem"]') !==
-    null
+  const interactive = target.closest(
+    'button, a, input, select, textarea, [role="button"], [role="menuitem"]'
   )
+  return interactive !== null && interactive !== event.currentTarget
 }

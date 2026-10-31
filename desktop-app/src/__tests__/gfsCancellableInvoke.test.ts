@@ -151,10 +151,11 @@ describe('preload cancellable GFS bridge (R2-L3)', () => {
 
   it('forwards the download bound and passes a signal-less call through untouched', async () => {
     electron.ipcRenderer.invoke.mockReturnValueOnce(Promise.resolve({ ok: true }))
-    bridge.gfs.download('gfs://main/x', { maxBytes: 512 })
+    bridge.gfs.download('gfs://main/x', { maxBytes: 512, recordOpen: true })
     expect(electron.ipcRenderer.invoke).toHaveBeenCalledWith('gfs:download', {
       uri: 'gfs://main/x',
       maxBytes: 512,
+      recordOpen: true,
       requestId: undefined,
     })
   })

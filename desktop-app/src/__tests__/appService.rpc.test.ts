@@ -506,7 +506,7 @@ describe('AppService.invokeHostMessage', () => {
     await expect(
       service.runWithTeamContext('team-b', async () => {
         await expect(
-          service.startGfsFileUpload('parent-a', 'upload.bin', 'upload.bin')
+          service.startGfsFileUpload('parent-a', 'upload.bin', 'upload.bin', 'main')
         ).rejects.toThrow('GFS upload dispatch is unavailable during a transient team hop')
         return 'team-b-operation'
       })
@@ -739,7 +739,7 @@ describe('AppService.invokeHostMessage', () => {
     service.rpcTokenManager = { clear: vi.fn() }
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {
       await expect(
-        service.startGfsFileUpload('parent-a', 'upload.bin', 'upload.bin')
+        service.startGfsFileUpload('parent-a', 'upload.bin', 'upload.bin', 'main')
       ).rejects.toThrow('GFS upload dispatch is unavailable during a transient team hop')
     })
     service.activateGfsAuthScope = vi.fn()

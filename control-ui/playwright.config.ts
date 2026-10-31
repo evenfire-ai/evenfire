@@ -91,9 +91,15 @@ export default defineConfig({
   use: {
     baseURL:
       process.env.CONTROL_UI_BASE_URL || process.env.CONTROL_UI_URL || 'http://localhost:3000',
-    headless: true,
+    // HUMAN_E2E_RECORDED=1 (/human-e2e-recorder): visible, paced and fully
+    // recorded; certification runs keep the defaults.
+    headless: process.env.HUMAN_E2E_RECORDED !== '1',
     screenshot: 'only-on-failure',
-    trace: 'on-first-retry',
+    trace: 'retain-on-failure',
+    video: process.env.HUMAN_E2E_RECORDED === '1' ? 'on' : 'retain-on-failure',
+    ...(process.env.HUMAN_E2E_RECORDED === '1'
+      ? { launchOptions: { slowMo: Number(process.env.HUMAN_E2E_SLOWMO_MS || 300) } }
+      : {}),
   },
   retries: 0,
   projects: [

@@ -1811,11 +1811,12 @@ h3 {
   line-height: var(--line-height-tight);
 }
 
-/* Sidebar file explorer (spec 18 §3.A) — the accordion panel under "Files". */
+/* Sidebar file explorer (spec 18 §3.A) — the accordion panel under "Files".
+   No indent: its "My home" and "Shared with me" labels start at the left edge
+   of the EvenDrive entry above them. */
 .nav-file-explorer {
   min-width: 0;
   margin: 0 0 var(--space-1) 0;
-  padding-left: var(--sidebar-nav-label-indent);
   /* Claim the sidebar's leftover height so the tree gets real room; the scroll
      is contained to .da-file-explorer below instead of the whole nav column.
      The min-height floor stops expanded siblings (Chat sessions, apps) from
@@ -1906,6 +1907,19 @@ h3 {
   grid-template-columns: 22px minmax(0, 1fr);
   align-items: center;
   gap: var(--space-0-5);
+}
+
+/* A section ("My home") reads like the "Shared with me" label: no toggle
+   column, and its children sit at the same indent as the shared roots. It
+   must follow the row rule above, which it overrides. */
+.da-file-explorer__row--section {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.da-file-explorer__group--section {
+  margin-left: 0;
+  padding-left: 0;
+  border-left: none;
 }
 
 .da-file-explorer__toggle.ui-icon-button {
@@ -14790,6 +14804,67 @@ pre {
   align-content: stretch;
 }
 
+/* The caller's own home sits above the "Shared with me" card: it is not shared
+   with the caller, so it is not a row of that listing. */
+.da-gfs-layout:has(> .da-gfs-my-home) {
+  grid-template-rows: auto 1fr;
+}
+
+/* Recent files is the first overview card, above My home; the browser card
+   stays the stretching row. Without the second rule the three-card overview
+   would hand My home the 1fr row. */
+.da-gfs-layout:has(> .da-gfs-recent) {
+  grid-template-rows: auto 1fr;
+}
+
+.da-gfs-layout:has(> .da-gfs-recent):has(> .da-gfs-my-home) {
+  grid-template-rows: auto auto 1fr;
+}
+
+.da-gfs-layout:has(> .da-gfs-overview-section) {
+  grid-template-rows: auto;
+  align-content: start;
+}
+
+/* EvenDrive sections use the same flat surface as the original shared view. */
+.da-gfs-my-home,
+.da-gfs-overview-section,
+.da-gfs-recent {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.da-gfs-overview-destination.ui-button {
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  color: var(--text);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-medium);
+}
+
+.da-gfs-overview-section > .status-banner,
+.da-gfs-overview-section > [role='status'] > .empty-state {
+  margin: var(--space-3) var(--space-4);
+}
+
+.da-gfs-recent__activity {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.da-gfs-drive__header .da-gfs-section-title {
+  padding-inline: var(--space-1);
+  color: var(--text);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+  letter-spacing: normal;
+}
+
 .da-gfs-workspace-card {
   display: grid;
   min-width: 0;
@@ -15337,6 +15412,14 @@ pre {
   box-shadow: none;
 }
 
+.da-gfs-drive[hidden] {
+  display: none;
+}
+
+.da-gfs-drive--overview {
+  min-height: 0;
+}
+
 .da-gfs-drive__header.page-card__header {
   min-width: 0;
   display: flex;
@@ -15394,6 +15477,14 @@ pre {
   opacity: 1;
   background: rgba(var(--accent-rgb), 0.1);
   cursor: default;
+}
+
+/* The open root of a view ("My home", "Shared with me") reads as the view's
+   muted title, not as a highlighted folder crumb. */
+.da-gfs-drive__breadcrumb--view-root.ui-button[aria-current='page'],
+.da-gfs-section-title--current {
+  opacity: 0.5;
+  background: transparent;
 }
 
 /* Breadcrumb drop-move verdict tints (drop-move parity, refusal UX matrix):
@@ -15479,7 +15570,11 @@ pre {
 }
 
 .da-gfs-drive > .status-banner,
-.da-gfs-drive > .empty-state {
+.da-gfs-drive > .empty-state,
+.da-gfs-recent > .empty-state,
+.da-gfs-recent > [role='status'] > .empty-state,
+.da-gfs-my-home > [role='status'] > .empty-state,
+.da-gfs-my-home > [role='alert'] > .empty-state {
   margin: var(--space-3) var(--space-4);
 }
 

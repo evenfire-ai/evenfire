@@ -55,9 +55,9 @@ describe('gfs:downloadPreview maxBytes ceiling', () => {
   it.each([GFS_PREVIEW_MAX_BYTES + 1, Number.MAX_SAFE_INTEGER])(
     'rejects an over-cap maxBytes (%i) without calling the service',
     async maxBytes => {
-      await expect(handler('gfs:downloadPreview')(trusted, { uri, maxBytes })).rejects.toThrow(
-        'preview download limit exceeds the allowed maximum'
-      )
+      await expect(
+        handler('gfs:downloadPreview')(trusted, { uri, maxBytes, recordOpen: true })
+      ).rejects.toThrow('preview download limit exceeds the allowed maximum')
       expect(service.downloadGfsUri).not.toHaveBeenCalled()
     }
   )
@@ -66,7 +66,7 @@ describe('gfs:downloadPreview maxBytes ceiling', () => {
     ['at the ceiling', GFS_PREVIEW_MAX_BYTES],
     ['a smaller per-type limit (image, 10 MiB)', 10 * 1024 * 1024],
   ])('forwards %s to the service', async (_label, maxBytes) => {
-    await handler('gfs:downloadPreview')(trusted, { uri, maxBytes })
-    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, maxBytes)
+    await handler('gfs:downloadPreview')(trusted, { uri, maxBytes, recordOpen: true })
+    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, { maxBytes, recordOpen: true })
   })
 })

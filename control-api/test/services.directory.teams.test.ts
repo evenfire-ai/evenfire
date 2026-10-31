@@ -30,6 +30,39 @@ vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
   appendControlApiPermissionEventsInTransaction: dbMocks.appendPermissionEvents,
 }))
 
+function mockAdminDeleteUserWithHomeCleanup() {
+  dbMocks.txQuery.mockImplementation(async (sql: string) => {
+    if (sql.includes('SELECT 1 FROM users WHERE id = $1 FOR UPDATE'))
+      return { rows: [{ x: 1 }], rowCount: 1 }
+    if (sql.includes('FROM gfs_desktop_operator_links')) return { rows: [], rowCount: 0 }
+    if (sql.includes('UPDATE workflow_approval_medium_')) return { rows: [], rowCount: 0 }
+    if (sql.includes('SELECT agent_name FROM user_agents'))
+      return { rows: [{ agent_name: 'my-agent' }], rowCount: 1 }
+    if (sql.includes('FROM gfs_user_homes WHERE user_id')) return { rows: [], rowCount: 0 }
+    if (sql.includes('INSERT INTO gfs_audit')) return { rows: [{ id: 'audit-1' }], rowCount: 1 }
+    if (sql.includes('FROM gfs_grants g'))
+      return {
+        rows: [
+          {
+            id: 'grant-1',
+            subject_id: 'u1',
+            home_match: false,
+            user_match: true,
+            agent_candidate: false,
+          },
+        ],
+        rowCount: 1,
+      }
+    if (sql.includes('FROM gfs_shares s'))
+      return { rows: [{ id: 'share-1', home_match: false, user_match: true }], rowCount: 1 }
+    if (sql.includes('SELECT candidate.agent_name FROM unnest')) return { rows: [], rowCount: 0 }
+    if (sql.includes('DELETE FROM gfs_grants') || sql.includes('DELETE FROM gfs_shares'))
+      return { rows: [], rowCount: 1 }
+    if (sql.includes('DELETE FROM users')) return { rows: [{ id: 'u1' }], rowCount: 1 }
+    throw new Error(`unexpected query in adminDeleteUser test: ${sql}`)
+  })
+}
+
 describe('services/directory team management unit tests', () => {
   beforeEach(() => {
     dbMocks.poolQuery.mockReset()
@@ -259,23 +292,18 @@ describe('services/directory team management unit tests', () => {
   })
 
   it('adminDeleteUser does not inspect team memberships before deleting the user row', async () => {
-    dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ x: 1 }], rowCount: 1 })
-    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
-    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
-    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
-    dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ id: 'u1' }], rowCount: 1 })
+    mockAdminDeleteUserWithHomeCleanup()
     await expect(adminDeleteUser('u1')).resolves.toEqual({ ok: true, id: 'u1' })
 
     const sqls = dbMocks.txQuery.mock.calls.map(([sql]) => String(sql))
     expect(sqls.some(sql => sql.includes('FROM team_members'))).toBe(false)
+    expect(dbMocks.txQuery).toHaveBeenCalledWith(expect.stringContaining('DELETE FROM users'), [
+      'u1',
+    ])
   })
 
   it('adminDeleteUser disables approval mediums before deleting the user row', async () => {
-    dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ x: 1 }], rowCount: 1 })
-    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
-    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
-    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
-    dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ id: 'u1' }], rowCount: 1 })
+    mockAdminDeleteUserWithHomeCleanup()
     await expect(adminDeleteUser('u1')).resolves.toEqual({ ok: true, id: 'u1' })
     expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
       2,
@@ -292,11 +320,48 @@ describe('services/directory team management unit tests', () => {
       expect.stringContaining('UPDATE workflow_approval_medium_challenges'),
       ['u1']
     )
-    expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
-      5,
-      expect.stringContaining('DELETE FROM users'),
+    expect(dbMocks.txQuery).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT agent_name FROM user_agents'),
       ['u1']
     )
+    const audit = dbMocks.txQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO gfs_audit')
+    )
+    expect(audit?.[1]).toEqual([
+      'user:u1',
+      'operator:',
+      'user_home.retired',
+      null,
+      'allowed',
+      null,
+      null,
+      expect.stringMatching(/^[0-9a-f]{64}$/),
+      null,
+      null,
+    ])
+    expect(dbMocks.txQuery).toHaveBeenCalledWith(
+      expect.stringContaining('DELETE FROM gfs_grants'),
+      [['grant-1']]
+    )
+    expect(dbMocks.txQuery).toHaveBeenCalledWith(
+      expect.stringContaining('DELETE FROM gfs_shares'),
+      [['share-1']]
+    )
+    expect(dbMocks.txQuery).toHaveBeenCalledWith(expect.stringContaining('DELETE FROM users'), [
+      'u1',
+    ])
+
+    const sqls = dbMocks.txQuery.mock.calls.map(([sql]) => String(sql))
+    const indexOf = (fragment: string) => sqls.findIndex(sql => sql.includes(fragment))
+    expect(indexOf('SELECT 1 FROM users WHERE id = $1 FOR UPDATE')).toBe(0)
+    expect(indexOf('SELECT agent_name FROM user_agents')).toBeGreaterThan(3)
+    expect(indexOf('ORDER BY g.id FOR UPDATE')).toBeGreaterThan(
+      indexOf('SELECT agent_name FROM user_agents')
+    )
+    expect(indexOf('ORDER BY s.id FOR UPDATE')).toBeGreaterThan(indexOf('ORDER BY g.id FOR UPDATE'))
+    expect(indexOf('DELETE FROM gfs_grants')).toBeGreaterThan(indexOf('ORDER BY s.id FOR UPDATE'))
+    expect(indexOf('DELETE FROM gfs_shares')).toBeGreaterThan(indexOf('DELETE FROM gfs_grants'))
+    expect(indexOf('DELETE FROM users')).toBeGreaterThan(indexOf('DELETE FROM gfs_shares'))
   })
 
   it('refuses the legacy hard-delete when operator-link history is retained', async () => {

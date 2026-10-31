@@ -21,6 +21,7 @@ import {
 } from './chatStoreBinding.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import type { GfsShareOptions } from './gfs/uriHandler.js'
 import {
   abortZipJob,
   appendZipEntry,
@@ -694,6 +695,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     return service.listTeamMembers()
   })
+  ipcMain.handle('gfs:getHome', async event => {
+    assertTrustedSender(event)
+    return service.getGfsHome()
+  })
   ipcMain.handle('gfs:resolve', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
@@ -706,7 +711,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   })
   ipcMain.handle(
     'gfs:download',
-    async (event, payload: { uri: string; maxBytes?: number; requestId?: string }) => {
+    async (
+      event,
+      payload: { uri: string; maxBytes?: number; recordOpen: boolean; requestId?: string }
+    ) => {
       assertTrustedSender(event)
       // Optional producer-side bound (folder-zip walk): when present it is
       // validated here in main so an over-large body is rejected before it
@@ -716,15 +724,23 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       if (maxBytes !== undefined && maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
         throw new Error('download limit exceeds the allowed maximum')
       }
+      // Required on every download: the caller states whether this read is the
+      // user opening the file. A missing flag is a bug or a tampered payload,
+      // never an implicit "yes" (that would turn every background read into an
+      // open) nor an implicit "no" (that would lose the card's own entries).
+      if (typeof payload?.recordOpen !== 'boolean') {
+        throw new Error('recordOpen must be a boolean')
+      }
+      const recordOpen = payload.recordOpen
       const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
       return runWithGfsAbortSignal(requestId, signal =>
-        service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes, signal)
+        service.downloadGfsUri(sanitizeString(payload?.uri), { maxBytes, signal, recordOpen })
       )
     }
   )
   ipcMain.handle(
     'gfs:downloadPreview',
-    async (event, payload: { uri: string; maxBytes: number }) => {
+    async (event, payload: { uri: string; maxBytes: number; recordOpen: boolean }) => {
       assertTrustedSender(event)
       // The preview path is bounded: a required ceiling caps the download so an
       // oversized payload is rejected before it materializes (the save-to-disk
@@ -740,7 +756,15 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       if (maxBytes > GFS_PREVIEW_MAX_BYTES) {
         throw new Error('preview download limit exceeds the allowed maximum')
       }
-      return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
+      // Same required-intent rule as 'gfs:download': a reload or a revocation
+      // retry says false, an actual open says true, and nothing is assumed.
+      if (typeof payload?.recordOpen !== 'boolean') {
+        throw new Error('recordOpen must be a boolean')
+      }
+      return service.downloadGfsUri(sanitizeString(payload?.uri), {
+        maxBytes,
+        recordOpen: payload.recordOpen,
+      })
     }
   )
   ipcMain.handle(
@@ -752,6 +776,11 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       return service.listAccessibleGfsResources(drive, cursor)
     }
   )
+  ipcMain.handle('gfs:listRecent', async (event, payload: { drive?: string }) => {
+    assertTrustedSender(event)
+    const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+    return service.listRecentGfsFiles(drive)
+  })
   ipcMain.handle(
     'gfs:listChildren',
     async (
@@ -1156,13 +1185,41 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   })
   ipcMain.handle(
     'gfs:createShare',
-    async (event, payload: { resourceId: string; subjectKeys: string[]; drive?: string }) => {
+    async (
+      event,
+      payload: {
+        resourceId: string
+        subjectKeys: string[]
+        drive?: string
+        options?: GfsShareOptions
+      }
+    ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      let options: GfsShareOptions | undefined
+      if (payload?.options !== undefined) {
+        if (
+          !Array.isArray(payload.options?.permissions) ||
+          typeof payload.options?.includeDescendants !== 'boolean'
+        ) {
+          throw new Error('Invalid read share options')
+        }
+        const permissions = payload.options.permissions.map(sanitizeString)
+        // An empty permission set is not a read share: the server refuses it
+        // (`permissions_invalid`), so refuse it here before the call.
+        if (
+          permissions.length === 0 ||
+          permissions.some(permission => permission !== 'read' && permission !== 'share')
+        ) {
+          throw new Error('Invalid read share options')
+        }
+        options = { permissions, includeDescendants: payload.options.includeDescendants }
+      }
       return service.createGfsShare(
         sanitizeString(payload?.resourceId),
         sanitizeSubjectKeys(payload?.subjectKeys),
-        drive
+        drive,
+        options
       )
     }
   )

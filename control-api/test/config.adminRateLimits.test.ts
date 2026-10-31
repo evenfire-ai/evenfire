@@ -77,6 +77,8 @@ const OPERATING_BUDGETS = [
   ['CONTROL_API_ADMIN_GFS_GRANTS_PER_MIN', 'adminGfsGrantsPerMin', 150],
   ['CONTROL_API_ADMIN_GFS_SHARES_PER_MIN', 'adminGfsSharesPerMin', 150],
   ['CONTROL_API_ADMIN_GFS_LEGACY_GRANT_REPORT_PER_MIN', 'adminGfsLegacyGrantReportPerMin', 150],
+  ['CONTROL_API_ADMIN_GFS_USER_HOMES_READ_PER_MIN', 'adminGfsUserHomesReadPerMin', 150],
+  ['CONTROL_API_ADMIN_GFS_USER_HOMES_WRITE_PER_MIN', 'adminGfsUserHomesWritePerMin', 150],
   ['APPROVAL_RL_REFRESH_PER_MIN', 'approvalRlRefreshPerMin', 100],
   ['APPROVAL_RL_REISSUE_PER_MIN', 'approvalRlReissuePerMin', 25],
   ['CONTROL_API_OAUTH_BROKER_RL_PER_MIN', 'oauthBrokerRlPerMin', 300],

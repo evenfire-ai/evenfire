@@ -38,7 +38,7 @@ async function wireFailure(
     async client => {
       try {
         return await client.moveResource(
-          { resourceId: sourceId, destinationId, ifMatch: 7 },
+          { resourceId: sourceId, destinationId, drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         )
       } catch (error) {

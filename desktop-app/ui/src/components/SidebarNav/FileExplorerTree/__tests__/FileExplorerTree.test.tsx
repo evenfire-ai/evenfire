@@ -3,7 +3,11 @@ import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { FOLDER_HOVER_EXPAND_DELAY_MS } from '@constants/gfsBrowser'
+import {
+  FOLDER_HOVER_EXPAND_DELAY_MS,
+  GFS_RECENT_FILES_LOCATION,
+  GFS_SHARED_WITH_ME_LOCATION,
+} from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { desktopQueryDefaults } from '@lib/queryClient'
@@ -14,6 +18,7 @@ import {
   childView,
   downloadResult,
   gfsRouteFailureMessage,
+  homeView,
   listAccessiblePage,
   listChildrenPage,
   moveResourceReceipt,
@@ -56,10 +61,25 @@ vi.mock('@contexts/AuthContext', () => ({ useAuthContext: () => mockAuthContext 
 // the producer; `listChildrenPage`/`listAccessiblePage`/`downloadResult` return
 // what the renderer actually receives.
 type Producers = {
+  getHome?: () => Promise<Awaited<ReturnType<typeof homeView>>>
   listAccessible?: (drive?: string, cursor?: string) => Promise<unknown>
   listChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
+  /** Children of the caller's home. The home section always lists them, so
+   *  they are served apart from `listChildren`, which serves shared folders. */
+  listHomeChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
   download?: (uri: string) => Promise<unknown>
   getSessionGeneration?: () => Promise<number>
+}
+
+const FIXTURE_HOME_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+
+function listChildrenProducer(producers: Producers) {
+  const shared = producers.listChildren ?? vi.fn(async () => listChildrenPage([]))
+  const home = producers.listHomeChildren ?? vi.fn(async () => listChildrenPage([]))
+  return (resourceId: string, drive?: string, cursor?: string) =>
+    resourceId === FIXTURE_HOME_ID
+      ? home(resourceId, drive, cursor)
+      : shared(resourceId, drive, cursor)
 }
 
 function installClerum(producers: Producers) {
@@ -68,8 +88,9 @@ function installClerum(producers: Producers) {
     value: {
       auth: { getSessionGeneration: producers.getSessionGeneration ?? vi.fn(async () => 7) },
       gfs: {
+        getHome: producers.getHome ?? vi.fn(async () => homeView()),
         listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
-        listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
+        listChildren: listChildrenProducer(producers),
         download:
           producers.download ??
           vi.fn(async () => downloadResult(resolvedFile('fallback', 'fallback.bin'))),
@@ -93,6 +114,7 @@ function renderTree(
   render(
     <QueryClientProvider client={queryClient}>
       <FileExplorerTree
+        activeLocation={props.activeLocation}
         onOpenFolder={onOpenFolder}
         onOpenPreview={onOpenPreview}
         pushToast={pushToast}
@@ -113,9 +135,141 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.restoreAllMocks()
   mockAuthContext.me = { id: 'user-1', teamId: 'team-1' }
   mockAuthContext.sessionGeneration = 7
+})
+
+describe('My home', () => {
+  it('marks the active Recent files destination in the sidebar', () => {
+    installClerum({})
+    renderTree({ activeLocation: GFS_RECENT_FILES_LOCATION })
+    expect(
+      screen.getByRole('treeitem', { name: 'Recent files' }).getAttribute('aria-selected')
+    ).toBe('true')
+    expect(
+      screen.getByRole('treeitem', { name: 'Shared with me' }).getAttribute('aria-selected')
+    ).toBe('false')
+  })
+
+  it('shows the server-provided non-main home as a My home section that lists its folders and opens on click', async () => {
+    const listHomeChildren = vi.fn(async () =>
+      listChildrenPage([childView('child-1', 'Projects', 'directory', { drive: 'private' })])
+    )
+    installClerum({ getHome: async () => homeView({ drive: 'private' }), listHomeChildren })
+    const { onOpenFolder } = renderTree()
+    // Like "Shared with me", My home is a label with its folders listed below
+    // it: no toggle, nothing to expand first.
+    // Until the home loads, My home is the disabled flat entry.
+    await waitFor(() =>
+      expect(screen.getByRole('treeitem', { name: 'My home' }).getAttribute('aria-expanded')).toBe(
+        'true'
+      )
+    )
+    const home = screen.getByRole('treeitem', { name: 'My home' })
+    const recent = screen.getByRole('treeitem', { name: 'Recent files' })
+    expect(recent.compareDocumentPosition(home) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(recent)
+    expect(onOpenFolder).toHaveBeenLastCalledWith(GFS_RECENT_FILES_LOCATION)
+    expect(await within(home).findByRole('treeitem', { name: 'Projects' })).toBeTruthy()
+    expect(listHomeChildren).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'private',
+      undefined
+    )
+    expect(within(home).queryByRole('button', { name: /^(Expand|Collapse) My home$/ })).toBeNull()
+    // The folders under it keep their own toggle.
+    expect(within(home).getByRole('button', { name: 'Expand Projects' })).toBeTruthy()
+    fireEvent.click(within(home).getByRole('button', { name: 'My home' }))
+    await waitFor(() =>
+      expect(onOpenFolder).toHaveBeenCalledWith('gfs://private/aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa')
+    )
+    // "Shared with me" opens its own view, not the EvenDrive overview (null).
+    fireEvent.click(screen.getByRole('treeitem', { name: 'Shared with me' }))
+    expect(onOpenFolder).toHaveBeenLastCalledWith(GFS_SHARED_WITH_ME_LOCATION)
+    expect(onOpenFolder).not.toHaveBeenCalledWith(null)
+  })
+
+  it('lists the caller home only as My home, never under Shared with me', async () => {
+    installClerum({
+      getHome: async () => homeView(),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'fixture', 'directory'),
+          accessibleResource('team-1', 'Team folder', 'directory'),
+          accessibleResource('other-home', 'someone-else', 'directory'),
+        ])
+      ),
+    })
+    renderTree()
+    const shared = await screen.findByRole('tree', { name: 'Shared files' })
+    // Witnesses: what others share stays listed, including another user's home.
+    expect(await within(shared).findByRole('treeitem', { name: 'Team folder' })).toBeTruthy()
+    expect(within(shared).getByRole('treeitem', { name: 'someone-else' })).toBeTruthy()
+    expect(within(shared).queryByRole('treeitem', { name: 'fixture' })).toBeNull()
+    expect(within(shared).queryByRole('treeitem', { name: 'My home' })).toBeNull()
+    const destinations = screen.getByRole('tree', { name: 'File destinations' })
+    expect(within(destinations).getByRole('treeitem', { name: 'My home' })).toBeTruthy()
+  })
+
+  it('shows pending and refetches until ready', async () => {
+    vi.useFakeTimers()
+    const getHome = vi
+      .fn()
+      .mockImplementationOnce(() =>
+        homeView({
+          state: 'pending',
+          drive: null,
+          path: null,
+          resourceId: null,
+          heldPermissions: [],
+        })
+      )
+      .mockImplementation(() => homeView())
+    installClerum({ getHome })
+    renderTree()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(screen.getByText('Your home folder is being prepared')).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: 'My home' }).hasAttribute('disabled')).toBe(true)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_010)
+    })
+    expect(getHome).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText('Your home folder is being prepared')).toBeNull()
+    expect(screen.getByRole('treeitem', { name: 'My home' }).hasAttribute('disabled')).toBe(false)
+  })
+
+  it('shows conflict and unavailable honestly, while retired hides only My home', async () => {
+    installClerum({ getHome: async () => homeView({ state: 'conflict', resourceId: null }) })
+    const first = renderTree()
+    expect(
+      await screen.findByText('Your home folder needs attention from an administrator')
+    ).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: 'Shared with me' })).toBeTruthy()
+    cleanup()
+    const listAccessible = vi.fn(async () =>
+      listAccessiblePage([accessibleResource('shared', 'Shared project', 'directory')])
+    )
+    installClerum({
+      getHome: async () => {
+        throw new Error('home service unavailable')
+      },
+      listAccessible,
+    })
+    renderTree()
+    expect(await screen.findAllByText('home service unavailable')).not.toHaveLength(0)
+    expect(await screen.findByRole('button', { name: 'Shared project' })).toBeTruthy()
+    expect(listAccessible).toHaveBeenCalledWith(undefined, undefined)
+    cleanup()
+    installClerum({ getHome: async () => homeView({ state: 'retired' }) })
+    renderTree()
+    await waitFor(() => expect(screen.queryByRole('treeitem', { name: 'My home' })).toBeNull())
+    expect(screen.getByRole('treeitem', { name: 'Shared with me' })).toBeTruthy()
+    expect(first.onOpenFolder).not.toHaveBeenCalled()
+  })
 })
 
 describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
@@ -219,6 +373,30 @@ describe('FileExplorerTree — sanitizes externally-controlled GFS names in chro
     expect(await screen.findByRole('button', { name: 'Reports' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Expand Reports' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: `Re‮ports​` })).toBeNull()
+  })
+
+  it('refreshes the overview recent card after a successful download', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('z', 'archive.zip', 'file')])
+      ),
+      download: vi.fn(async () => downloadResult(resolvedFile('z', 'archive.zip'))),
+    })
+    const { QueryClient } = await import('@tanstack/react-query')
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries')
+
+    const { pushToast } = renderTree()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'archive.zip' }))
+    // Witness: the save really completed, so the refresh below is a new step.
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
+    await waitFor(() =>
+      expect(
+        invalidate.mock.calls.some(
+          ([filters]) => Array.isArray(filters?.queryKey) && filters.queryKey.includes('recent')
+        )
+      ).toBe(true)
+    )
   })
 
   it('shows the cleaned name in the download toast while the raw name stays for the on-disk file', async () => {
@@ -423,7 +601,9 @@ describe('FileExplorerTree — file single-click activates', () => {
     const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
     fireEvent.click(fileButton)
 
-    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
+    await waitFor(() =>
+      expect(download).toHaveBeenCalledWith('gfs://main/zip-1', { recordOpen: true })
+    )
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
     expect(onOpenPreview).not.toHaveBeenCalled()
   })
@@ -782,7 +962,9 @@ describe('FileExplorerTree — download-path authority wiring (R1-H8)', () => {
     // surface, so the tree revokes and swaps in the unauthorized + retry surface
     // instead of surfacing the raw error as a toast.
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
-    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
+    await waitFor(() =>
+      expect(download).toHaveBeenCalledWith('gfs://main/zip-1', { recordOpen: true })
+    )
     expect(onOpenPreview).not.toHaveBeenCalled()
     // The authority path pre-empts the error toast (the catch returns before it).
     expect(pushToast).not.toHaveBeenCalledWith('401 Unauthorized', 'error')
@@ -807,8 +989,9 @@ function installDndClerum(producers: DndProducers) {
     value: {
       auth: { getSessionGeneration: producers.getSessionGeneration ?? vi.fn(async () => 7) },
       gfs: {
+        getHome: producers.getHome ?? vi.fn(async () => homeView()),
         listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
-        listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
+        listChildren: listChildrenProducer(producers),
         download:
           producers.download ??
           vi.fn(async () => downloadResult(resolvedFile('fallback', 'fallback.bin'))),
@@ -2914,6 +3097,133 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       })
     })
     expect(await screen.findByRole('dialog', { name: 'Move folder A' })).toBeTruthy()
+  })
+
+  it('offers My home as a Move destination for a folder listed under My home', async () => {
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('team-1', 'Team folder', 'directory')])
+      ),
+      listHomeChildren: vi.fn(async () =>
+        listChildrenPage([
+          childView('home-sub-1', 'Projects', 'directory', {
+            parentResourceId: FIXTURE_HOME_ID,
+          }),
+        ])
+      ),
+    })
+    renderTreeWithSession()
+
+    // A folder that lives in the caller's own home: the My home section lists
+    // it, so the keyboard Move path opens from inside the home.
+    const projectsRow = await screen.findByRole('button', { name: 'Projects' })
+    await act(async () => {
+      fireEvent.keyDown(projectsRow, { key: 'F10', shiftKey: true })
+    })
+
+    // Liveness: the dialog really opened for this folder, and its shared
+    // section settled with the folder someone else shared.
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects' })
+    expect(await within(dialog).findByRole('button', { name: 'Team folder' })).toBeTruthy()
+
+    // The caller's home is offered as a destination of its own, labelled
+    // "My home" rather than by its storage folder name.
+    const homeDestinations = within(dialog).getByRole('tree', { name: 'My home destination' })
+    // The treeitem's accessible name also carries its expand/collapse toggle, so
+    // the row itself is pinned by the select button inside it.
+    const homeItem = within(homeDestinations).getByRole('treeitem', { name: /My home/ })
+    expect(within(homeItem).getByRole('button', { name: 'My home' })).toBeTruthy()
+
+    // Liveness: the shared destinations keep their own tree in the same dialog,
+    // so the assertion above cannot be met by an unrelated render.
+    expect(within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })).toBeTruthy()
+  })
+
+  it('drops a folder onto another folder while the home is pending', async () => {
+    // The tree's roots carry their own drive; a pending home means the open
+    // location has none, and the drop must still be admitted on the rows'.
+    const moveResource = vi.fn(async () => ({ resourceId: 'foldera', version: 9 }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folderb') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      const name = id === 'foldera' ? 'A' : id === 'folderb' ? 'B' : 'Grand'
+      return {
+        drive: 'main',
+        resourceId: id === 'grand' ? 'grand' : id,
+        parentResourceId: id === 'grand' ? null : 'grand',
+        name,
+        kind: 'directory',
+        version: id === 'foldera' ? 4 : 1,
+      }
+    })
+    installDndClerum({
+      getHome: async () =>
+        homeView({ state: 'pending', drive: null, path: null, resourceId: null }),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve,
+      moveResource,
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const dataTransfer = dragTypes()
+    const bTreeItem = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragEnter(bTreeItem, { dataTransfer })
+    fireEvent.dragOver(bTreeItem, { dataTransfer })
+    fireEvent.drop(bTreeItem, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder A to B' })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+
+    await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
+    expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined, 7)
+  })
+
+  it('never offers the governed home root as a drag source or a Move', async () => {
+    const home = await homeView({ resourceId: 'home-1', path: '/Users/me' })
+    installDndClerum({
+      getHome: async () => home,
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('home-1', 'Home root', 'directory'),
+          accessibleResource('sibling-1', 'Team folder', 'directory'),
+        ])
+      ),
+    })
+    renderTreeWithSession()
+
+    const homeRow = await screen.findByRole('button', { name: 'My home' })
+    expect(homeRow.getAttribute('draggable')).toBe('false')
+    expect(homeRow.getAttribute('title')).toBeNull()
+
+    // Witness: a sibling row with the same owner bits is still a drag source.
+    const siblingRow = screen.getByRole('button', { name: 'Team folder' })
+    expect(siblingRow.getAttribute('draggable')).toBe('true')
+
+    // The keyboard Move path follows the same gate: the sibling opens the
+    // dialog, the governed root does not.
+    await act(async () => {
+      fireEvent.keyDown(homeRow, { key: 'F10', shiftKey: true })
+    })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await act(async () => {
+      fireEvent.keyDown(siblingRow, { key: 'F10', shiftKey: true })
+    })
+    expect(await screen.findByRole('dialog', { name: 'Move folder Team folder' })).toBeTruthy()
   })
 })
 

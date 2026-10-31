@@ -8,6 +8,7 @@ import { GfsError } from '../api/errors'
 import type { GfsResource } from '../api/read'
 import type { DbAuditSink, PermissionClient } from '../authz/permissionClient'
 import { resolveAuthzContext } from '../authz/subjectResolver'
+import { recordUserFileActivity } from '../db/userFileActivity'
 import { GfsWriteService, type TxClient } from '../db/writeStore'
 import type { UploadPartRow, UploadPrincipal, UploadSessionRow } from './uploadSession'
 
@@ -172,6 +173,14 @@ export function createGfsUploadFinalizer(
       publicationSignal?.throwIfAborted()
       if (completed.rows.length !== 1) {
         throw new GfsError('upload_aborted', 'upload session changed before publication')
+      }
+      // An upload finalization is content the Desktop user published: record it
+      // in the same transaction, after the session is marked completed. A plain
+      // control-admin principal has no Desktop actor and records nothing.
+      if (targetContext.desktopUserId !== undefined) {
+        await recordUserFileActivity(client, targetContext.desktopUserId, [
+          published.resourceId,
+        ])
       }
     }
     const resource =

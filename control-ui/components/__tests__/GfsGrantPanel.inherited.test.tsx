@@ -73,6 +73,8 @@ const FILE_GRANT_ID = '77777777-7777-7777-7777-777777777777'
 const miguelRowTestId = `gfs-access-row-user:${miguel.id}`
 const marcelaRowTestId = `gfs-access-row-user:${marcela.id}`
 const researchTeamRowTestId = `gfs-access-row-team:${researchTeam.id}`
+const ANCESTOR_HOME_EXPOSURE_MESSAGE =
+  'Only operators can have access on the drive root or /Users. Choose a sub-folder for this access.'
 
 function byPathView(resourceId: string, name: string) {
   return {
@@ -353,6 +355,79 @@ describe('GfsGrantPanel inherited access', () => {
     expect(
       within(miguelRow).getByRole('button', { name: 'Access role for Miguel' }).textContent
     ).toContain('Editor')
+  })
+
+  it('explains ancestor_home_exposure on a confirmed parent-folder role change', async () => {
+    mockPutGfsGrant.mockRejectedValue(
+      Object.assign(new Error('409 Conflict - ancestor_home_exposure'), {
+        status: 409,
+        code: 'ancestor_home_exposure',
+      })
+    )
+    renderPanel()
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
+
+    await chooseRole(miguelRow, 'Read')
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update role' }))
+
+    const error = await screen.findByText(ANCESTOR_HOME_EXPOSURE_MESSAGE)
+    expect(error).toHaveAttribute('role', 'alert')
+    expect(error).not.toHaveTextContent('ancestor_home_exposure')
+  })
+
+  it('explains ancestor_home_exposure on a direct role change', async () => {
+    mockGetGfsGrants.mockImplementation(async resourceId => {
+      if (resourceId === FILE_ID) {
+        return {
+          items: [
+            {
+              id: FILE_GRANT_ID,
+              drive: 'main',
+              resourceId: FILE_ID,
+              subject: marcela,
+              permissions: ['read', 'share'],
+              inherit: false,
+            },
+          ],
+        }
+      }
+      if (resourceId === FOLDER_ID) {
+        return {
+          items: [
+            {
+              id: FOLDER_GRANT_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read', 'write'],
+              inherit: true,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    mockPutGfsGrant.mockRejectedValue(
+      Object.assign(new Error('409 Conflict - ancestor_home_exposure'), {
+        status: 409,
+        code: 'ancestor_home_exposure',
+      })
+    )
+    renderPanel()
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const marcelaRow = within(existing)
+      .getAllByTestId(marcelaRowTestId)
+      .find(row => within(row).queryByText('Marcela') !== null)
+    expect(marcelaRow).toBeTruthy()
+
+    await chooseRole(marcelaRow as HTMLElement, 'Editor')
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    const error = await screen.findByText(ANCESTOR_HOME_EXPOSURE_MESSAGE)
+    expect(error).toHaveAttribute('role', 'alert')
+    expect(error).not.toHaveTextContent('ancestor_home_exposure')
   })
 
   // RP-032 — a confirmed role change rewrites the folder's GRANT (with its

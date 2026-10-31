@@ -194,6 +194,20 @@ describe('RPC signed identity validation', () => {
     }
   )
 
+  it('stores the namespace it verified the Host in as the binding host namespace (D14)', async () => {
+    const { config } = await import('../src/config.js')
+    const fixture = buildApp()
+    const bind = await hostRequest(fixture.app, 'POST', 'user-1', BASE_CLAIMS)
+
+    // Witness: the bind ran and was recorded, so the absence of a namespace
+    // below would be a real defect, not a skipped path.
+    expect(bind.status).toBe(200)
+    expect(bind.body).toMatchObject({ bindingStatus: 'recorded' })
+    expect(fixture.bindingService.bind).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ hostRef: HOST_REF, hostNamespace: config.hostsNamespace })
+    )
+  })
+
   it.each(['GET', 'POST'] as const)('%s keeps service tokens outside user routes', async method => {
     const fixture = buildApp()
     const response = await hostRequest(

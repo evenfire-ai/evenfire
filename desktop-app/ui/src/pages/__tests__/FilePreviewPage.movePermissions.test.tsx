@@ -1361,7 +1361,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const failureMessage = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       400,
@@ -1435,7 +1435,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const failureMessage = await gfsRouteFailureMessage(
         client =>
           client.moveResource(
-            { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+            { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
             'fixture-session-token'
           ),
         status,
@@ -1503,7 +1503,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       })
       try {
         await client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         )
       } catch (error) {
@@ -1637,7 +1637,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const failureMessage = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       400,
@@ -1854,7 +1854,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const failureMessage = await gfsRouteFailureMessage(
         client =>
           client.moveResource(
-            { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+            { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
             'fixture-session-token'
           ),
         412,
@@ -1929,7 +1929,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const failureMessage = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       401,
@@ -2204,7 +2204,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const failureMessage = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-2', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-2', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       412,
@@ -2311,7 +2311,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const failureMessage = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       400,
@@ -2519,7 +2519,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const conflict = await gfsRouteFailureMessage(
         client =>
           client.moveResource(
-            { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+            { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
             'fixture-session-token'
           ),
         status,
@@ -2568,7 +2568,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const transportFailure = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       503,

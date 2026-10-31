@@ -13,7 +13,9 @@ export type SidebarNavProps = {
   onSelect: (item: NavItem) => void
   /** Open (or focus) a files tab at a folder's gfsUri — the file explorer's
    *  double-click / Enter action on a folder. */
-  onOpenFilesSection: (gfsUri: string) => void
+  onOpenFilesSection: (gfsUri: string | null) => void
+  /** Location of the active Files tab, used to mark client-only views. */
+  activeFilesLocation?: string | null
   /** Open (or focus) a preview tab — the file explorer's single-click / Enter
    *  action on a previewable file. */
   onOpenPreviewSection: (preview: GfsPreviewResource) => void

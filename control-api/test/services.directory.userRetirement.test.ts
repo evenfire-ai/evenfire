@@ -15,12 +15,17 @@ const mocks = vi.hoisted(() => {
       async <T>(work: (db: DbClient) => Promise<T>): Promise<T> => work({ query: txQuery })
     ),
     retireParentInTransaction: vi.fn(),
+    retireUserHomeForInactiveUser: vi.fn(),
   }
 })
 
 vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn() },
   withTransaction: mocks.withTransaction,
+}))
+
+vi.mock('../src/gfs/userHomeProvisioner.js', () => ({
+  retireUserHomeForInactiveUser: mocks.retireUserHomeForInactiveUser,
 }))
 
 vi.mock('../src/services/gfsDesktopOperatorLinkService.js', () => {
@@ -69,6 +74,8 @@ describe('retireDesktopUser', () => {
   beforeEach(() => {
     mocks.txQuery.mockReset()
     mocks.retireParentInTransaction.mockReset()
+    mocks.retireUserHomeForInactiveUser.mockReset()
+    mocks.retireUserHomeForInactiveUser.mockResolvedValue(undefined)
     mocks.withTransaction.mockReset()
     mocks.withTransaction.mockImplementation(
       async <T>(work: (db: DbClient) => Promise<T>): Promise<T> => work({ query: mocks.txQuery })
@@ -102,6 +109,10 @@ describe('retireDesktopUser', () => {
       lifecycleVersion: 2,
       replayed: false,
     })
+
+    expect(mocks.retireUserHomeForInactiveUser).toHaveBeenCalledTimes(1)
+    expect(mocks.retireUserHomeForInactiveUser.mock.calls[0]?.[1]).toBe(USER_ID)
+    expect(mocks.retireUserHomeForInactiveUser.mock.calls[0]?.[3]).toBe('operator:')
 
     expect(mocks.retireParentInTransaction).toHaveBeenCalledWith(
       expect.anything(),

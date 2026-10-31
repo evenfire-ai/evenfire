@@ -659,6 +659,83 @@ export async function apiSend(
   return parseJsonResponse(res)
 }
 
+// ── Global File System operator home management ──────────────────────────────
+export type GfsUserHomeState = 'pending' | 'ready' | 'conflict' | 'retired'
+export type GfsUserHomeConflict = 'path_conflict' | 'ancestor_grant_conflict' | 'ownership_conflict'
+
+export type GfsUserHome = {
+  userId: string
+  email: string | null
+  name: string | null
+  state: GfsUserHomeState
+  drive: string | null
+  storageUsername: string | null
+  path: string | null
+  resourceId: string | null
+  conflictCode: GfsUserHomeConflict | null
+  lastError: string | null
+  attempts: number
+  lastAttemptAt: string | null
+  updatedAt: string
+}
+
+export type GfsUserHomeConflictAccess = {
+  relation: 'grant' | 'share'
+  subjectType: string
+  subjectId: string
+  subjectLabel: string | null
+  permissions: string[]
+  inherit: boolean
+}
+
+export type GfsUserHomeConflictDetail =
+  | {
+      code: 'path_conflict'
+      resource: { resourceId: string; path: string | null; kind: string; createdAt: string } | null
+      access: GfsUserHomeConflictAccess[]
+    }
+  | {
+      code: 'ancestor_grant_conflict'
+      entries: Array<GfsUserHomeConflictAccess & { resourceId: string; path: string | null }>
+    }
+  | {
+      code: 'ownership_conflict'
+      ownerGrant: { permissions: string[]; inherit: boolean } | null
+    }
+
+export type GfsUserHomeDetail = GfsUserHome & {
+  conflictDetail: GfsUserHomeConflictDetail | null
+}
+
+export function getGfsUserHome(
+  userId: string,
+  signal?: AbortSignal
+): Promise<{ home: GfsUserHomeDetail }> {
+  return apiGet(`/api/v1/gfs/user-homes/${encodeURIComponent(userId)}`, {}, { signal }) as Promise<{
+    home: GfsUserHomeDetail
+  }>
+}
+
+export function retryGfsUserHome(
+  userId: string,
+  storageUsername?: string
+): Promise<{ home: GfsUserHome }> {
+  return apiSend(
+    'POST',
+    `/api/v1/gfs/user-homes/${encodeURIComponent(userId)}/retry`,
+    storageUsername === undefined ? {} : { storageUsername }
+  ) as Promise<{ home: GfsUserHome }>
+}
+
+export function restoreGfsUserHomeOwner(userId: string): Promise<{ home: GfsUserHome }> {
+  return apiSend(
+    'POST',
+    `/api/v1/gfs/user-homes/${encodeURIComponent(userId)}/restore-owner`
+  ) as Promise<{
+    home: GfsUserHome
+  }>
+}
+
 // ── Global File System operator delegation (grant/share) ────────────────────
 // Like registryKeysRequest: unlike apiSend (friendly-remaps the message), these
 // routes need the machine-readable error CODE (e.g. escalation_rejected,

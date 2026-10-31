@@ -7,7 +7,7 @@ import {
 } from '../src/shutdown.js'
 
 describe('Control API shutdown', () => {
-  it('stops the OAuth proactive refresh cron before database pools close', () => {
+  it('stops database workers before database pools close', () => {
     const names = [...CONTROL_API_SHUTDOWN_STEP_NAMES] as string[]
     const cronIndex = names.indexOf('oauth-proactive-refresh-cron')
     const poolIndex = names.indexOf('core-database-pool')
@@ -15,6 +15,8 @@ describe('Control API shutdown', () => {
     expect(names).toContain('oauth-proactive-refresh-cron')
     expect(cronIndex).toBeGreaterThanOrEqual(0)
     expect(poolIndex).toBeGreaterThan(cronIndex)
+    expect(names).toContain('gfs-user-home-reconciler')
+    expect(poolIndex).toBeGreaterThan(names.indexOf('gfs-user-home-reconciler'))
   })
 
   it('stops the shared OAuth grant sweep before database pools close', () => {

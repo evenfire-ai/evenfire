@@ -107,6 +107,7 @@ import {
   selectWorkspaceTab,
   selectWorkspaceTabAt,
   setFilesTabPath,
+  setFilesTabRecentVisibleCount,
 } from '@lib/workspaceTabs'
 import type { WorkspaceTab, WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import { AgentsPage } from '@pages/AgentsPage'
@@ -1297,6 +1298,35 @@ export function App() {
       : null
   const activeFilesTabIdRef = React.useRef<string | null>(null)
   activeFilesTabIdRef.current = activeFilesTabId
+  const focusFilesTabAfterOpenRef = React.useRef(false)
+  const handleOverviewDestination = React.useCallback(
+    (location: string | null, focusTab = false) => {
+      focusFilesTabAfterOpenRef.current = focusTab
+      vm.openFilesSection(location)
+    },
+    [vm.openFilesSection]
+  )
+  React.useLayoutEffect(() => {
+    if (!focusFilesTabAfterOpenRef.current || !activeFilesTabId) return
+    focusFilesTabAfterOpenRef.current = false
+    document
+      .querySelector<HTMLElement>(
+        '[aria-label="Workspace tabs"] .chat-view-tab.is-active .chat-view-tab__select'
+      )
+      ?.focus()
+  }, [activeFilesTabId])
+  const handleRecentVisibleCountChange = React.useCallback(
+    (count: number) => {
+      const ownerTabId = activeFilesTabIdRef.current
+      if (!ownerTabId) return
+      setWorkspaceTabs(state =>
+        state.activeTabId === ownerTabId
+          ? setFilesTabRecentVisibleCount(state, ownerTabId, count)
+          : state
+      )
+    },
+    [setWorkspaceTabs]
+  )
   const filesSeedRef = React.useRef<{ id: string | null; path: string | null }>({
     id: null,
     path: null,
@@ -4219,6 +4249,7 @@ export function App() {
                                 onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                                 onSelect={handleSidebarNavSelect}
                                 onOpenFilesSection={vm.openFilesSection}
+                                activeFilesLocation={activeFilesTab?.files?.path}
                                 onOpenPreviewSection={vm.openPreviewSection}
                                 pushToast={vm.pushToast}
                                 toggleRequestId={sidebarToggleRequestId}
@@ -4371,6 +4402,8 @@ export function App() {
                                       pushToast={vm.pushToast}
                                       titlebarLeadingTarget={titlebarLeadingRoot}
                                       workspaceTabId={activeFilesTabId ?? undefined}
+                                      recentVisibleCount={activeFilesTab?.files?.recentVisibleCount}
+                                      onRecentVisibleCountChange={handleRecentVisibleCountChange}
                                       pendingGfsUri={filesSeedPath}
                                       pendingGfsDeepLink={
                                         activeGfsDeepLinkForFiles
@@ -4388,6 +4421,7 @@ export function App() {
                                       onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
                                       remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                       onLocationChange={handleActiveFilesLocationChange}
+                                      onOpenFilesSection={handleOverviewDestination}
                                       onOpenPreview={vm.openPreviewSection}
                                       onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
                                       routeDialogRequestId={gfsRouteDialogRequestId}
@@ -4545,6 +4579,9 @@ export function App() {
                                 mimeType={pluginGfsPreview.mimeType}
                                 unavailable={pluginGfsPreview.unavailable}
                                 onClose={closePluginGfsPreview}
+                                // D13: the overlay is an open, but only the
+                                // first load; a reload is the same open again.
+                                recordOpen={pluginGfsPreview.reloadVersion === 0}
                               />
                             ) : null}
                           </GfsDragSessionProvider>

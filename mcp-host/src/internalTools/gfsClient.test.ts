@@ -1322,3 +1322,199 @@ describe('gfsc client retry: cancellation, deadline, scope and jitter', () => {
     }
   )
 })
+
+describe('Desktop chat run attribution (D9, D16)', () => {
+  const RUN = '11111111-1111-4111-8111-111111111111'
+  const ATTRIBUTION = 'x-gfs-attribution-run'
+
+  function harness(attributionRunId?: string) {
+    const fetchFn = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url.includes('/content?')) {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          headers: {
+            'content-type': 'application/octet-stream',
+            'x-gfs-uri': FILE_URI,
+            'x-gfs-version': '3',
+            'content-length': '3',
+          },
+        })
+      }
+      if (
+        url.includes('/v1/resources/') &&
+        !url.includes('/children') &&
+        !url.includes('/content')
+      ) {
+        // The metadata probe every content call makes first.
+        return jsonResponse({
+          ok: true,
+          data: {
+            resourceId: FILE_ID,
+            rid: FILE_ID,
+            drive: 'main',
+            gfsUri: FILE_URI,
+            kind: 'file',
+            name: 'neutral.png',
+            version: 3,
+            bytes: 3,
+          },
+        })
+      }
+      if (url.includes('/v1/copy')) return jsonResponse({ ok: true, data: { resourceId: FILE_ID } })
+      if (url.includes('/children'))
+        return jsonResponse({ ok: true, data: { resourceId: FILE_ID, version: 1 } })
+      if (url.includes('/content'))
+        return jsonResponse({ ok: true, data: { resourceId: FILE_ID, version: 2 } })
+      return jsonResponse({ ok: true, data: { items: [], nextCursor: null } })
+    })
+    const client = createGfscClient(
+      { get: () => undefined, readFile: async () => 'unit-gfs-identity', fetch: fetchFn },
+      {
+        maxRetryWaitMs: 1_000,
+        random: () => 0,
+        ...(attributionRunId === undefined ? {} : { attributionRunId }),
+      }
+    )
+    const sentRun = (index: number): string | undefined => {
+      const init = fetchFn.mock.calls[index]?.[1] as RequestInit | undefined
+      const headers = new Headers(init?.headers as HeadersInit | undefined)
+      return headers.get(ATTRIBUTION) ?? undefined
+    }
+    return { client, fetchFn, sentRun }
+  }
+
+  it('sends the run on the five content calls', async () => {
+    const h = harness(RUN)
+
+    await h.client.read({ drive: 'main', resourceId: FILE_ID, mode: 'auto' } as never, {
+      signal: new AbortController().signal,
+    })
+    await h.client.write({ drive: 'main', resourceId: FILE_ID, content: 'aGk=', ifMatch: 1 })
+    await h.client.createFile({
+      drive: 'main',
+      parentResourceId: FILE_ID,
+      name: 'a.txt',
+      content: 'aGk=',
+    })
+    await h.client.copy({
+      drive: 'main',
+      sourceResourceId: FILE_ID,
+      destinationParentId: FILE_ID,
+      newName: 'b',
+      ifMatch: 1,
+    })
+
+    // Every content call that reached the wire carried the run id.
+    const calls = h.fetchFn.mock.calls
+    expect(calls.length).toBeGreaterThanOrEqual(4)
+    const withHeader = calls.filter(call =>
+      new Headers((call[1] as RequestInit | undefined)?.headers as HeadersInit | undefined).has(
+        ATTRIBUTION
+      )
+    )
+    expect(withHeader.length).toBeGreaterThanOrEqual(4)
+    for (let index = 0; index < calls.length; index += 1) {
+      const url = String(calls[index]?.[0])
+      if (/\/(content|children|copy)/.test(url) || url.includes('/v1/resources/')) {
+        expect(h.sentRun(index)).toBe(RUN)
+      }
+    }
+  })
+
+  it('never sends the run on the metadata-only calls', async () => {
+    const h = harness(RUN)
+
+    await h.client.accessible({ drive: 'main' })
+    await h.client.list({ drive: 'main', resourceId: FILE_ID })
+    await h.client.stat({ drive: 'main', resourceId: FILE_ID })
+    await h.client.resolve({ uri: FILE_URI })
+    await h.client.createFolder({ drive: 'main', parentResourceId: FILE_ID, name: 'c' })
+    await h.client.rename({ drive: 'main', resourceId: FILE_ID, newName: 'd', ifMatch: 1 })
+
+    for (let index = 0; index < h.fetchFn.mock.calls.length; index += 1) {
+      expect(h.sentRun(index)).toBeUndefined()
+    }
+    // Witness: the calls were made with their ordinary authorization header.
+    for (const call of h.fetchFn.mock.calls) {
+      const init = call[1] as RequestInit | undefined
+      expect(new Headers(init?.headers as HeadersInit).get('authorization')).toBe(
+        'Bearer unit-gfs-identity'
+      )
+    }
+  })
+
+  it('sends nothing when the option is absent', async () => {
+    const h = harness()
+    await h.client.write({ drive: 'main', resourceId: FILE_ID, content: 'aGk=', ifMatch: 1 })
+    expect(h.fetchFn).toHaveBeenCalledTimes(1)
+    expect(h.sentRun(0)).toBeUndefined()
+  })
+
+  it('rejects a run id that is not a UUID at creation', () => {
+    expect(() =>
+      createGfscClient(
+        { get: () => undefined, readFile: async () => 'x', fetch: vi.fn() },
+        { maxRetryWaitMs: 1, attributionRunId: 'run-1' }
+      )
+    ).toThrow(/attributionRunId must be a UUID/)
+  })
+})
+
+describe('Desktop chat run attribution on download', () => {
+  it('builds the download request with the run attribute', async () => {
+    const RUN = '22222222-2222-4222-8222-222222222222'
+    const fetchFn = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url.includes('/content?')) {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          headers: {
+            'content-type': 'application/octet-stream',
+            'x-gfs-uri': FILE_URI,
+            'x-gfs-version': '3',
+            'content-length': '3',
+          },
+        })
+      }
+      return jsonResponse({
+        ok: true,
+        data: {
+          resourceId: FILE_ID,
+          rid: FILE_ID,
+          drive: 'main',
+          gfsUri: FILE_URI,
+          kind: 'file',
+          name: 'neutral.bin',
+          version: 3,
+          bytes: 3,
+        },
+      })
+    })
+    const client = createGfscClient(
+      { get: () => undefined, readFile: async () => 'unit-gfs-identity', fetch: fetchFn },
+      { maxRetryWaitMs: 1_000, random: () => 0, attributionRunId: RUN }
+    )
+
+    // The transfer store is out of scope here: what matters is that the
+    // download's own request builder carries the run on the metadata probe the
+    // content call is gated by.
+    await expect(
+      Promise.resolve().then(() =>
+        client.download?.(
+          {
+            drive: 'main',
+            resourceId: FILE_ID,
+            targetPath: '/tmp/neutral.bin',
+            maxBytes: 1024,
+            declaredBytes: 3,
+          } as never,
+          {} as never
+        )
+      )
+    ).rejects.toBeTruthy()
+
+    expect(fetchFn).toHaveBeenCalled()
+    const firstInit = fetchFn.mock.calls[0]?.[1] as RequestInit | undefined
+    const headers = new Headers(firstInit?.headers as HeadersInit)
+    expect(String(fetchFn.mock.calls[0]?.[0])).toContain(`/v1/resources/${FILE_ID}`)
+    expect(headers.get('x-gfs-attribution-run')).toBe(RUN)
+    expect(headers.get('accept-encoding')).toBe('identity')
+  })
+})

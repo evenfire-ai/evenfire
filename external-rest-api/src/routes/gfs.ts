@@ -119,12 +119,14 @@ function withGfsRequestId(req: GfsAuthedRequest, options: GfsRequestOptions): Gf
   // policy) is propagated across the authenticated service boundary.
   const clientIp = req.ip?.trim()
   const forwardedClientIp = clientIp && isIP(clientIp) !== 0 ? clientIp : undefined
+  const authority = req.header('x-evenfire-gfs-authority')
   return {
     ...options,
     extraHeaders: {
       ...options.extraHeaders,
       'x-request-id': req.gfsRequestId!,
       ...(forwardedClientIp ? { 'x-forwarded-for': forwardedClientIp } : {}),
+      ...(authority === undefined ? {} : { 'x-evenfire-gfs-authority': authority }),
     },
   }
 }
@@ -324,6 +326,31 @@ export function createGfsRouter(options: GfsRouterOptions = {}): Router {
     }
   })
 
+  router.get('/me/gfs/home', async (req: AuthedRequest, res, next) => {
+    try {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/home', {
+        userSessionToken: extractAuthToken(req),
+      })
+      res.status(200).json(data)
+    } catch (error) {
+      forwardControlApiError(error, res, next)
+    }
+  })
+
+  // The caller's own EvenDrive activity, newest first. The whole list (at most
+  // 100 rows) comes back in one response; the card pages client-side.
+  router.get('/me/gfs/recent', async (req: AuthedRequest, res, next) => {
+    try {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/recent', {
+        userSessionToken: extractAuthToken(req),
+        query: { drive: typeof req.query.drive === 'string' ? req.query.drive : undefined },
+      })
+      res.status(200).json(data)
+    } catch (error) {
+      forwardControlApiError(error, res, next)
+    }
+  })
+
   router.get('/me/gfs/resolve', async (req: AuthedRequest, res, next) => {
     try {
       const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/resolve', {
@@ -469,7 +496,13 @@ export function createGfsRouter(options: GfsRouterOptions = {}): Router {
         `/external/gfs/proxy/${encodeURIComponent(req.params.rid)}`,
         withGfsRequestId(req, {
           userSessionToken: extractAuthToken(req),
-          query: { drive: typeof req.query.drive === 'string' ? req.query.drive : undefined },
+          query: {
+            drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
+            // The only record path a Desktop client controls: control-api
+            // records an open on `intent=open` and refuses any other value. An
+            // absent intent stays absent so an ordinary read forwards no key.
+            ...(typeof req.query.intent === 'string' ? { intent: req.query.intent } : {}),
+          },
         })
       )
       res.status(upstream.status)
@@ -597,6 +630,7 @@ async function proxyUploadStream(
       'upload-offset',
       'upload-chunk-length',
       'upload-checksum',
+      'x-evenfire-gfs-authority',
     ]) {
       const value = req.headers[name]
       if (typeof value === 'string') extraHeaders[name] = value

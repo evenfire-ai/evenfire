@@ -55,29 +55,41 @@ describe('gfs:download maxBytes boundary (R1-H2)', () => {
   })
 
   it('passes a within-ceiling bound through to the service', async () => {
-    await handler('gfs:download')(trusted, { uri, maxBytes: 1024 })
-    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, 1024, undefined)
+    await handler('gfs:download')(trusted, { uri, maxBytes: 1024, recordOpen: false })
+    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, {
+      maxBytes: 1024,
+      recordOpen: false,
+      signal: undefined,
+    })
   })
 
   it('stays uncapped when no bound is requested', async () => {
-    await handler('gfs:download')(trusted, { uri })
-    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, undefined, undefined)
+    await handler('gfs:download')(trusted, { uri, recordOpen: true })
+    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, {
+      maxBytes: undefined,
+      recordOpen: true,
+      signal: undefined,
+    })
   })
 
   it('rejects a bound above the ceiling before reaching the service', async () => {
     await expect(
-      handler('gfs:download')(trusted, { uri, maxBytes: GFS_DOWNLOAD_MAX_BYTES_CEILING + 1 })
+      handler('gfs:download')(trusted, {
+        uri,
+        maxBytes: GFS_DOWNLOAD_MAX_BYTES_CEILING + 1,
+        recordOpen: false,
+      })
     ).rejects.toThrow('download limit exceeds the allowed maximum')
     expect(service.downloadGfsUri).not.toHaveBeenCalled()
   })
 
   it('rejects an invalid bound instead of silently ignoring it', async () => {
-    await expect(handler('gfs:download')(trusted, { uri, maxBytes: 0 })).rejects.toThrow(
-      'Invalid maxBytes'
-    )
-    await expect(handler('gfs:download')(trusted, { uri, maxBytes: 'big' })).rejects.toThrow(
-      'Invalid maxBytes'
-    )
+    await expect(
+      handler('gfs:download')(trusted, { uri, maxBytes: 0, recordOpen: false })
+    ).rejects.toThrow('Invalid maxBytes')
+    await expect(
+      handler('gfs:download')(trusted, { uri, maxBytes: 'big', recordOpen: false })
+    ).rejects.toThrow('Invalid maxBytes')
     expect(service.downloadGfsUri).not.toHaveBeenCalled()
   })
 })

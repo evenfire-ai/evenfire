@@ -326,7 +326,29 @@ export function setFilesTabPath(
   return {
     ...state,
     tabs: state.tabs.map(tab =>
-      tab.id === tabId ? { ...tab, title: nextTitle, files: { path: nextPath } } : tab
+      tab.id === tabId ? { ...tab, title: nextTitle, files: { ...tab.files, path: nextPath } } : tab
+    ),
+  }
+}
+
+/** Keep the Recent files expansion with the owning tab, not the mounted page. */
+export function setFilesTabRecentVisibleCount(
+  state: WorkspaceTabsState,
+  tabId: string,
+  count: number
+): WorkspaceTabsState {
+  const target = state.tabs.find(tab => tab.id === tabId && tab.kind === 'files')
+  if (!target || !Number.isSafeInteger(count) || count < 1) return state
+  if (target.files?.recentVisibleCount === count) return state
+  return {
+    ...state,
+    tabs: state.tabs.map(tab =>
+      tab.id === tabId
+        ? {
+            ...tab,
+            files: { ...tab.files, path: tab.files?.path ?? null, recentVisibleCount: count },
+          }
+        : tab
     ),
   }
 }

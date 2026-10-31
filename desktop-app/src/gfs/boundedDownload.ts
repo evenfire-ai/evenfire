@@ -1,4 +1,5 @@
 import { ApiError } from '../httpClient.js'
+import { GFS_USER_AUTHORITY_HEADER } from './transport.js'
 
 /** The dependency seam so the bound can be tested with a fabricated response. */
 export interface BoundedDownloadDeps {
@@ -43,7 +44,7 @@ export async function streamBoundedBytes(
     else opts.signal.addEventListener('abort', () => controller.abort(), { once: true })
   }
   const res = await deps.fetch(url, {
-    headers: { authorization: `Bearer ${token}` },
+    headers: { authorization: `Bearer ${token}`, ...GFS_USER_AUTHORITY_HEADER },
     signal: controller.signal,
   })
   if (!res.ok) {
@@ -128,7 +129,7 @@ export async function fetchBoundedBytes(
     else opts.signal.addEventListener('abort', () => controller.abort(), { once: true })
   }
   const res = await deps.fetch(url, {
-    headers: { authorization: `Bearer ${token}` },
+    headers: { authorization: `Bearer ${token}`, ...GFS_USER_AUTHORITY_HEADER },
     signal: controller.signal,
   })
   if (!res.ok) {

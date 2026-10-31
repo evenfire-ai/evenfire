@@ -24,16 +24,21 @@ import {
 } from './desktopEnvironmentUrl.js'
 import { fetchBoundedBytes, streamBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
+import { gfsUploadTransport, requestGfsJson } from './gfs/transport.js'
 import {
   DesktopGfsUploadJob,
   DesktopUploadCapabilityError,
   type DesktopUploadInput,
   type DesktopUploadSession,
-  type DesktopUploadTransport,
   formatGfsUploadLimit,
 } from './gfs/upload.js'
-import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
-import { ApiError, requestJson, withTimeout } from './httpClient.js'
+import {
+  GfsClient,
+  type GfsResourceView,
+  type GfsShareOptions,
+  parseSubjectKey,
+} from './gfs/uriHandler.js'
+import { ApiError } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
@@ -375,26 +380,6 @@ const RECONNECT_ATTEMPT_TIMEOUT_MS = 8000
 // watchdog).
 const RECONNECT_WAITING_FOR_OPEN_TIMEOUT_MS = 195_000
 const SAVED_SESSION_RESTORE_RETRY_DELAY_MS = 5_000
-
-const gfsUploadTransport: DesktopUploadTransport = {
-  requestJson,
-  requestPart: async (url, token, headers, body, timeoutMs, signal) => {
-    const response = await fetch(url, {
-      method: 'PUT',
-      headers: { authorization: `Bearer ${token}`, ...headers },
-      body: body as unknown as BodyInit,
-      // Node's fetch requires this opt-in for a streaming request body.
-      duplex: 'half',
-      signal: withTimeout(signal, timeoutMs),
-    } as RequestInit & { duplex: 'half' })
-    const text = await response.text()
-    return {
-      status: response.status,
-      text,
-      retryAfter: response.headers.get('retry-after') ?? undefined,
-    }
-  },
-}
 
 const LEGACY_GFS_MAX_FILE_BYTES = 16 * 1024 * 1024
 const LEGACY_GFS_READ_BUFFER_BYTES = 1024 * 1024
@@ -890,7 +875,7 @@ export class AppService {
     get baseUrl() {
       return config.externalRestApiBaseUrl
     },
-    requestJson,
+    requestJson: requestGfsJson,
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
     fetchByteStream: (url, token, opts, onChunk) => streamBoundedBytes(url, token, opts, onChunk),
   })
@@ -2719,16 +2704,16 @@ export class AppService {
 
   /**
    * Resolve then download a gfs:// resource's bytes through the brokered proxy.
-   * `maxBytes` bounds the download for the preview path (rejected before an
-   * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
-   * reads the full body.
+   * `opts.maxBytes` bounds the download for the preview path (rejected before an
+   * oversized payload materializes); omitting it (save-to-disk) reads the full
+   * body. `opts.recordOpen` is required: the caller states whether this read is
+   * the user opening the file (recorded by the API) or not.
    */
-  async downloadGfsUri(uri: string, maxBytes?: number, signal?: AbortSignal) {
-    return this.gfsClient.download(
-      uri,
-      this.requireSessionToken(),
-      maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
-    )
+  async downloadGfsUri(
+    uri: string,
+    opts: { maxBytes?: number; signal?: AbortSignal; recordOpen: boolean }
+  ) {
+    return this.gfsClient.download(uri, this.requireSessionToken(), opts)
   }
 
   /**
@@ -2762,9 +2747,21 @@ export class AppService {
     })
   }
 
+  async getGfsHome() {
+    return this.gfsClient.getHome(this.requireSessionToken())
+  }
+
   /** List explicit gfs resources the current user can read through grants or shares. */
   async listAccessibleGfsResources(drive?: string, cursor?: string) {
     return this.gfsClient.listAccessible(this.requireSessionToken(), { drive, cursor })
+  }
+
+  /**
+   * List the current user's own recent EvenDrive files, newest first. The
+   * server has already filtered them by the caller's `read` authority.
+   */
+  async listRecentGfsFiles(drive?: string) {
+    return this.gfsClient.listRecent(this.requireSessionToken(), { drive })
   }
 
   /**
@@ -2841,18 +2838,22 @@ export class AppService {
   }
 
   /**
-   * Create a read share for a subject. A "share" grants read access (the minimal
-   * shared capability); the no-escalation engine still requires the caller hold
-   * read + share. includeDescendants so a folder share covers its subtree.
+   * Create a read share or lower an existing share. Existing callers retain
+   * the original read-only, descendant-covering defaults.
    */
-  async createGfsShare(resourceId: string, subjectKeys: string[], drive?: string) {
+  async createGfsShare(
+    resourceId: string,
+    subjectKeys: string[],
+    drive?: string,
+    options?: GfsShareOptions
+  ) {
     await this.gfsClient.createShare(
       {
         resourceId,
         drive,
         subjects: subjectKeys.map(parseSubjectKey),
-        permissions: ['read'],
-        includeDescendants: true,
+        permissions: options?.permissions ?? ['read'],
+        includeDescendants: options?.includeDescendants ?? true,
       },
       this.requireSessionToken()
     )

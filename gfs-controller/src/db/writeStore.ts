@@ -250,6 +250,12 @@ export interface CopyInput {
    * Optional so non-route copy callers/tests are unaffected.
    */
   authzEpoch?: { captured: PermissionEpoch; current: () => PermissionEpoch };
+  /**
+   * Optional hook executed in the copy transaction, after every node of the copy
+   * is inserted and before the success audit and COMMIT, with exactly the file
+   * ids the copy created. A throw rolls the whole copy back.
+   */
+  onPublished?: (client: TxClient, fileResourceIds: string[]) => Promise<void>;
 }
 
 export class GfsWriteService {

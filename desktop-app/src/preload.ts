@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import type { GfsShareOptions } from './gfs/uriHandler.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DeepLinkAcknowledgmentAuthority,
@@ -207,6 +208,7 @@ const clerum = Object.freeze({
     switch: (teamId: string) => ipcRenderer.invoke('team:switch', { teamId }),
   },
   gfs: {
+    getHome: () => ipcRenderer.invoke('gfs:getHome'),
     getUserNavigationGeneration: (): number | null =>
       ipcRenderer.sendSync('gfs:getUserNavigationGeneration'),
     advanceUserNavigationGeneration: (): number | null =>
@@ -225,12 +227,20 @@ const clerum = Object.freeze({
     },
     copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
-    download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
-      cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
-    downloadPreview: (uri: string, maxBytes: number) =>
-      ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
+    download: (
+      uri: string,
+      options: { maxBytes?: number; signal?: AbortSignal; recordOpen: boolean }
+    ) =>
+      cancellableGfsInvoke(
+        'gfs:download',
+        { uri, maxBytes: options.maxBytes, recordOpen: options.recordOpen },
+        options.signal
+      ),
+    downloadPreview: (uri: string, maxBytes: number, recordOpen: boolean) =>
+      ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes, recordOpen }),
     listAccessible: (drive?: string, cursor?: string) =>
       ipcRenderer.invoke('gfs:listAccessible', { drive, cursor }),
+    listRecent: (drive?: string) => ipcRenderer.invoke('gfs:listRecent', { drive }),
     listChildren: (
       resourceId: string,
       drive?: string,
@@ -300,14 +310,14 @@ const clerum = Object.freeze({
         ifMatch,
         resumeUploadId,
       }),
-    getUploadSnapshot: (uploadId: string, drive = 'main') =>
+    getUploadSnapshot: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:getUploadSnapshot', { uploadId, drive }),
-    listUploadSessions: (drive = 'main') => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
-    pauseUpload: (uploadId: string, drive = 'main') =>
+    listUploadSessions: (drive?: string) => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
+    pauseUpload: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:pauseUpload', { uploadId, drive }),
-    resumeUpload: (uploadId: string, drive = 'main') =>
+    resumeUpload: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
-    cancelUpload: (uploadId: string, drive = 'main') =>
+    cancelUpload: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
     replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
@@ -347,11 +357,13 @@ const clerum = Object.freeze({
     listShares: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:listShares', { resourceId, drive }),
     revokeShare: (shareId: string) => ipcRenderer.invoke('gfs:revokeShare', { shareId }),
-    // A desktop share grants READ access only (the minimal shared capability) —
-    // unlike `grant`, it takes no permission bits by design. The server still
-    // enforces the caller holds read + share (no-escalation).
-    createShare: (resourceId: string, subjectKeys: string[], drive?: string) =>
-      ipcRenderer.invoke('gfs:createShare', { resourceId, subjectKeys, drive }),
+    // Share options permit only Read-strength permissions; main validates them.
+    createShare: (
+      resourceId: string,
+      subjectKeys: string[],
+      drive?: string,
+      options?: GfsShareOptions
+    ) => ipcRenderer.invoke('gfs:createShare', { resourceId, subjectKeys, drive, options }),
   },
   agents: {
     listMine: () => ipcRenderer.invoke('agents:listMine'),
