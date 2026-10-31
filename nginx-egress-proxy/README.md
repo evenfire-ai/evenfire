@@ -65,17 +65,40 @@ For each remote McpServer, host-context-controller:
    into the ConfigMap, and a literal `spec.env` value is visible in the
    Deployment env, so neither may carry a credential.
 
+### Existing literal query credentials
+
+This change does not migrate or reject a literal credential already written in
+`spec.remote.baseUrl`. That value remains in the existing CRD and generated
+ConfigMap until an operator replaces it. Complete the operational follow-up
+before closing the underlying issue:
+
+1. Inventory remote McpServer CRDs and their generated egress-proxy ConfigMaps
+   for a URL query value that is not a complete `${NAME}` placeholder. Record
+   the inventory outside public issue data; do not copy the URL or credential
+   into an issue, PR, or log.
+2. Rotate each affected provider key, because the old value may already have
+   reached a ConfigMap or the NGINX error log.
+3. Replace the literal query value with an uppercase `${NAME}` placeholder and
+   provide the new value through `spec.envSecret`, not `spec.env`.
+4. Apply the updated CRD, then verify that the generated ConfigMap contains the
+   placeholder and that the egress proxy becomes ready.
+
+HCC and this image must roll together in both directions. New HCC with an older
+image fails the exec liveness probe and restarts visibly; rolling only the image
+back removes the stderr filter while leaving the new probe. Preserve the previous
+compatible HCC/image pair for rollback.
+
 Before NGINX starts, `egress-proxy-entrypoint` runs `egress-proxy-template-check`
 over the templates. envsubst substitutes every defined variable (`$NAME` and
 `${NAME}`), so the check reads each reference to a defined variable, works out
 where it sits the way NGINX's tokenizer does, and rejects a value that would
 change the syntax there:
 
-| Where the reference sits                               | Rejected in the value                              |
-| ------------------------------------------------------ | -------------------------------------------------- |
-| inside `"..."` (auth headers)                          | control characters (TAB, CR, LF, …), `"`, `$`, `\` |
+| Where the reference sits                               | Rejected in the value                                                            |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| inside `"..."` (auth headers)                          | control characters (TAB, CR, LF, …), `"`, `$`, `\`                               |
 | inside an unquoted argument (the baseUrl query)        | anything outside `[A-Za-z0-9._~-]`, or a `%` that is not a complete `%XX` escape |
-| argument start, inside `'...'`, a comment, after a `\` | any value                                          |
+| argument start, inside `'...'`, a comment, after a `\` | any value                                                                        |
 
 A rejected value stops the container before NGINX starts (CrashLoopBackOff,
 readiness never passes). The log names the template file, the variable and the
