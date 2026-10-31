@@ -84,6 +84,13 @@ function requiredEnv(name: string): string {
   return value.replace(/\/$/, '')
 }
 
+/** The canonical launcher resolves this value; older callers used ADMIN_PASS. */
+function requiredAdminPassword(): string {
+  const value = process.env.E2E_ADMIN_PASSWORD || process.env.ADMIN_PASS
+  if (!value) throw new Error('[USER-HOME-E2E] E2E_ADMIN_PASSWORD is required.')
+  return value
+}
+
 /**
  * A Control UI operator context whose actions and navigations fail within a
  * minute. Playwright Test sets both defaults to 0 (no limit), so a stalled
@@ -558,7 +565,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
   }, testInfo) => {
     test.setTimeout(20 * 60_000)
     const adminUser = requiredEnv('ADMIN_USER')
-    const adminPass = requiredEnv('ADMIN_PASS')
+    const adminPass = requiredAdminPassword()
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const owner = fx.createUser('j1b-owner')
     const b = fx.createUser('j1b-b')
@@ -1035,7 +1042,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     test.setTimeout(15 * 60_000)
     const adminLogin = requiredEnv('ADMIN_USER')
     // Initial setup seeds the linked Desktop user with the admin's own password.
-    const adminPassword = requiredEnv('ADMIN_PASS')
+    const adminPassword = requiredAdminPassword()
     const initial = readInitialAdmin(adminLogin, adminPassword)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const adminFile = `j5-admin-${fx.runTag}.txt`
@@ -1218,7 +1225,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
   }, testInfo) => {
     test.setTimeout(4 * RESPONSE_TIMEOUT_MS + 15 * 60_000)
     const adminUser = requiredEnv('ADMIN_USER')
-    const adminPass = requiredEnv('ADMIN_PASS')
+    const adminPass = requiredAdminPassword()
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const [agent] = discoverManagedGfsAgents()
     const owner = fx.createUser('j6-owner')
@@ -1794,7 +1801,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         const controlPage = await control.newPage()
         await new ControlUiAccessPanel(controlPage).login(
           requiredEnv('ADMIN_USER'),
-          requiredEnv('ADMIN_PASS')
+          requiredAdminPassword()
         )
         // E2E_GUARDIAN_NAVIGATION: user-detail-entry — the operator opens this fixture user
         await controlPage.goto(`/users-and-teams/users/${owner.id}`)
