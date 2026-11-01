@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import type { DbClient, DbTransactionClient } from '../src/db.js'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import type { PinnedTransport } from '../src/http/pinnedFetch.js'
 import type { K8sGateway } from '../src/k8s.js'
 import type { DiscoveryResult } from '../src/oauth/discovery.js'
@@ -176,11 +177,9 @@ function makeApp(
       ...routerDeps,
     })
   )
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'unknown' })
-    }
-  )
+  // The production handler, so a thrown error reaches the client with the status and
+  // body it would get in the real app.
+  app.use(clerumErrorHandler)
   return app
 }
 
@@ -495,6 +494,116 @@ describe('catalog mode: the entry decides what can be installed (T-C2)', () => {
       expect(spy.discoveredUrls).toEqual([])
     }
   )
+})
+
+// ── Registry read failures ──────────────────────────────────────────────────
+
+describe('catalog mode: a failed registry read reaches the admin with its status, nothing written', () => {
+  // The real registry client over a stubbed `fetch`: the error each case throws, and the
+  // status the production handler gives it, come from the code that runs in the app.
+  let realGetEntryVersion: typeof getEntryVersion
+  beforeAll(async () => {
+    realGetEntryVersion = (
+      await vi.importActual<typeof import('../src/services/registryClient.js')>(
+        '../src/services/registryClient.js'
+      )
+    ).getEntryVersion
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const ENTRY_PATH = `/entries/${encodeURIComponent(ENTRY)}/versions/${VERSION}`
+  const unavailable = {
+    error: 'registry_unavailable',
+    message: 'The registry is currently unavailable. Check the connection and try again.',
+  }
+  const timeoutError = () => Object.assign(new Error('aborted'), { name: 'TimeoutError' })
+
+  interface RegistryFailure {
+    label: string
+    answer: () => Promise<Response>
+    status: number
+    body: Record<string, unknown>
+  }
+  const failures: RegistryFailure[] = [
+    {
+      label: 'the entry does not exist (404)',
+      answer: async () => new Response('', { status: 404 }),
+      status: 404,
+      body: { error: 'Registry 404' },
+    },
+    {
+      label: 'the registry answers 5xx',
+      answer: async () => new Response('', { status: 503 }),
+      status: 503,
+      body: unavailable,
+    },
+    {
+      label: 'the registry is unreachable',
+      answer: async () => Promise.reject(new TypeError('fetch failed')),
+      status: 503,
+      body: unavailable,
+    },
+    {
+      label: 'the registry read times out',
+      answer: async () => Promise.reject(timeoutError()),
+      status: 503,
+      body: unavailable,
+    },
+    {
+      label: 'the registry rejects our machine token (401)',
+      answer: async () => new Response('', { status: 401 }),
+      status: 502,
+      body: { error: 'registry_integration_error', message: 'The registry could not be reached.' },
+    },
+  ]
+
+  function registryFails(answer: () => Promise<Response>) {
+    const fetchSpy = vi.fn(answer)
+    vi.stubGlobal('fetch', fetchSpy)
+    vi.mocked(getEntryVersion).mockImplementation(realGetEntryVersion)
+    return fetchSpy
+  }
+
+  function registryUrls(fetchSpy: ReturnType<typeof vi.fn>): string[] {
+    return fetchSpy.mock.calls.map(([url]) => String(url))
+  }
+
+  it.each(failures)('install: $label → $status', async ({ answer, status, body }) => {
+    const fetchSpy = registryFails(answer)
+    const gw = new MockGateway(NS)
+    const spy: AppSpy = { discoveredUrls: [], probedUrls: [] }
+    const res = await request(makeApp(gw, cimdResult, {}, spy))
+      .post(ROUTE)
+      .send(catalogBody())
+
+    expect(res.status).toBe(status)
+    expect(res.body).toEqual({ ...body, correlationId: expect.any(String) })
+    expect(registryUrls(fetchSpy).length).toBeGreaterThan(0)
+    expect(registryUrls(fetchSpy).every(url => url.endsWith(ENTRY_PATH))).toBe(true)
+    expect(spy.discoveredUrls).toEqual([])
+    expect(spy.probedUrls).toEqual([])
+    expect(await gw.listResource('mcpservers', NS)).toEqual([])
+    expect(await gw.listSecrets(NS)).toEqual([])
+    expect(reportInstallDouble.calls).not.toHaveBeenCalled()
+  })
+
+  it.each(failures)('/discover: $label → $status', async ({ answer, status, body }) => {
+    const fetchSpy = registryFails(answer)
+    const gw = new MockGateway(NS)
+    const spy: AppSpy = { discoveredUrls: [], probedUrls: [] }
+    const res = await request(makeApp(gw, cimdResult, {}, spy))
+      .post(DISCOVER_ROUTE)
+      .send({ catalogEntry: { name: ENTRY, version: VERSION }, grantScope: 'user' })
+
+    expect(res.status).toBe(status)
+    expect(res.body).toEqual({ ...body, correlationId: expect.any(String) })
+    expect(registryUrls(fetchSpy).every(url => url.endsWith(ENTRY_PATH))).toBe(true)
+    expect(spy.discoveredUrls).toEqual([])
+    expect(spy.probedUrls).toEqual([])
+    expect(await gw.listResource('mcpservers', NS)).toEqual([])
+  })
 })
 
 // ── T-C4 ────────────────────────────────────────────────────────────────────
