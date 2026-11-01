@@ -289,6 +289,8 @@ interface Req {
    * own settle sleeps (see `settleClock`).
    */
   virtualClock?: number
+  /** Another install or uninstall of the same server name was in flight at some point. */
+  nameOverlap?: boolean
 }
 
 /** A running command, and how many of its gates are waiting for a release. */
@@ -368,6 +370,10 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     /** Gates reached since the last hand-off to the scheduler. */
     waiting: [] as WaitingGate[],
     hooks: undefined as ScenarioHooks | undefined,
+    /** Installs and uninstalls in flight, by server name. */
+    inflight: new Map<string, Set<Req>>(),
+    /** RFC 7592 deletes the authorization server received. */
+    revoked: [] as string[],
     api: undefined as unknown as ReturnType<typeof fakeCustomObjectsApiserver>,
     secrets: undefined as unknown as MockGateway,
     app: undefined as unknown as express.Express,
@@ -670,6 +676,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     }
     if (req.method === 'DELETE') {
       await gate('as.revoke')
+      H.revoked.push(req.url)
       return { status: 204, headers: {}, bodyText: '' }
     }
     return { status: 404, headers: {}, bodyText: 'unexpected url' }
@@ -704,6 +711,20 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     }
     H.reqs.push(rec)
     return rec
+  }
+
+  /** Runs `work` with `rec` registered as in flight on `name`, noting any overlap. */
+  async function onName<T>(rec: Req, name: string, work: () => Promise<T>): Promise<T> {
+    const others = H.inflight.get(name) ?? new Set<Req>()
+    H.inflight.set(name, others)
+    if (others.size > 0) rec.nameOverlap = true
+    for (const o of others) o.nameOverlap = true
+    others.add(rec)
+    try {
+      return await work()
+    } finally {
+      others.delete(rec)
+    }
   }
 
   async function send(rec: Req, test: request.Test): Promise<request.Response> {
@@ -819,8 +840,19 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       if (this.tamper === 'trailingSlash') body.baseUrl = `${entry.url}/`
       if (this.tamper === 'evilUrl') body.baseUrl = EVIL_URL
       if (this.tamper === 'serverName') body.serverName = 'my-own-name'
-      const uidBefore = liveUid(canonical(this.slot))
-      await send(rec, request(H.app).post('/admin/mcp-servers/remote').send(body))
+      const name = canonical(this.slot)
+      const uidBefore = liveUid(name)
+      await onName(rec, name, () =>
+        send(rec, request(H.app).post('/admin/mcp-servers/remote').send(body))
+      )
+      // With no CR before or after and no other install or uninstall of the name in
+      // flight, the slot was free the whole time: a leftover dynamic client bound to a
+      // dead CR must be reclaimed, never reported as occupancy.
+      const occupancy =
+        rec.body?.error === 'server_name_in_use' || rec.body?.error === 'install_in_progress'
+      if (rec.status === 409 && occupancy && !rec.nameOverlap && !uidBefore && !liveUid(name)) {
+        violation(`${rec.label}: ${String(rec.body?.error)} on a free slot`)
+      }
       // A slot held by the same CR for the whole request cannot be installed, so the
       // request must not have minted a client at the AS nor written a client Secret
       // for it. Uids are never reused: an unchanged uid means no uninstall freed it.
@@ -872,7 +904,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       const name = canonical(this.slot)
       const path =
         this.via === 'generic' ? `/admin/mcp-servers/${name}` : `/admin/registry/uninstall/${name}`
-      await send(rec, request(H.app).delete(path))
+      await onName(rec, name, () => send(rec, request(H.app).delete(path)))
       if (this.via === 'generic') {
         expectOutcome(rec, [
           [200, undefined],
@@ -1352,6 +1384,8 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     H.actorSeq = 0
     H.waiting = []
     H.hooks = undefined
+    H.inflight = new Map()
+    H.revoked = []
     await dbPool.query('TRUNCATE oauth_grants, dynamic_clients')
     H.api = fakeCustomObjectsApiserver({
       namespaces: { contexts: CTX_NS, mcpservers: NS },
@@ -1438,6 +1472,9 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
    * The row stays bound to a dead uid until the next install of the name reclaims it.
    */
   function boundAfterTeardownClaim(name: string, uid: string): boolean {
+    // A later install of the name must have reclaimed the row: past one, it is not this
+    // residue any more but a reclaim that did not happen.
+    if (liveUid(name) !== undefined) return false
     return H.reqs.some(
       i =>
         i.kind === 'install' &&
@@ -1445,6 +1482,12 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
           b =>
             b.name === name &&
             b.uid === uid &&
+            !H.reqs.some(
+              later =>
+                later.kind === 'install' &&
+                later.status === 201 &&
+                later.crCreates.some(c => c.name === name && c.seq > b.seq)
+            ) &&
             H.reqs.some(
               u =>
                 u.kind === 'uninstall' &&
@@ -1839,6 +1882,66 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       expect(H.reqs.find(r => r.kind === 'uninstall')?.status).toBe(200)
       expect(await restCheck()).toEqual([])
       expect(coverage['dangling name left by the strip window']).toBe(before + 1)
+    } finally {
+      restoreClock()
+    }
+  })
+
+  const BU = SLOTS.find(s => label(s) === 'B-u')!
+
+  it('a dynamic client bound after the uninstall teardown is the only orphan accepted, and the next install reclaims it', async () => {
+    const restoreClock = settleClock()
+    try {
+      await startRun([])
+      const name = canonical(BU)
+      const bindReached = deferred()
+      const claimed = deferred()
+      const bound = deferred()
+      H.hooks = {
+        before: async (what, rec) => {
+          if (rec?.kind === 'install' && what.startsWith('db:UPDATE dynamic_clients SET cr_uid')) {
+            bindReached.resolve()
+            await claimed.promise
+          }
+          if (rec?.kind === 'uninstall' && what === `k8s.delete:mcpservers/${name}`) {
+            await bound.promise
+          }
+        },
+        after: (_what, rec) => {
+          if (rec?.kind === 'uninstall' && rec.dcrClaims.length > 0) claimed.resolve()
+          if (rec?.kind === 'install' && rec.dcrBinds.length > 0) bound.resolve()
+        },
+      }
+      const before = coverage['dynamic client bound after the uninstall teardown'] ?? 0
+      // The install has created its CR and waits at the bind; the uninstall reads that
+      // CR, claims rows by its uid (the pending row has none yet), then deletes it.
+      const install = new Install(BU, '1.0.0', 'dcr', 'none', 'client-a', false).run()
+      await bindReached.promise
+      await new Uninstall(BU, 'generic', false).run()
+      await install
+      const [first] = H.reqs.filter(r => r.kind === 'install')
+      expect(first.status).toBe(201)
+      expect(H.reqs.find(r => r.kind === 'uninstall')?.status).toBe(200)
+      expect(await restCheck()).toEqual([])
+      expect(coverage['dynamic client bound after the uninstall teardown']).toBe(before + 1)
+      const orphan = (await rawDb.query(
+        'SELECT cr_uid, registration_client_uri FROM dynamic_clients WHERE server_name = $1',
+        [name]
+      )) as QueryResult<{ cr_uid: string; registration_client_uri: string }>
+      expect(orphan.rows).toHaveLength(1)
+      expect(orphan.rows[0].cr_uid).toBe(first.crCreates[0].uid)
+      expect(H.revoked).toEqual([])
+
+      // The next install of the slot takes the row over and revokes the dead client.
+      await new Install(BU, '1.0.0', 'dcr', 'none', 'client-a', false).run()
+      const second = H.reqs.filter(r => r.kind === 'install')[1]
+      expect(second.status).toBe(201)
+      const row = (await rawDb.query('SELECT cr_uid FROM dynamic_clients WHERE server_name = $1', [
+        name,
+      ])) as QueryResult<{ cr_uid: string }>
+      expect(row.rows.map(r => r.cr_uid)).toEqual([second.crCreates[0].uid])
+      expect(H.revoked).toEqual([orphan.rows[0].registration_client_uri])
+      expect(await restCheck()).toEqual([])
     } finally {
       restoreClock()
     }
