@@ -958,8 +958,26 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
             ? ([[409, 'oauth_client_id_in_use']] as Array<[number, string]>)
             : []),
         ])
-        if (rec.status === 201 && rec.body?.serverName !== canonical(this.slot)) {
+      }
+      // Alone or not, a 201 installs the slot under its canonical name, as a catalog
+      // instance of this entry and scope.
+      if (rec.status === 201) {
+        const created = rec.crCreates.find(c => c.name === rec.body?.serverName)
+        const cr = created
+          ? (H.api.peek('mcpservers', NS, created.name) as StoredObj | undefined)
+          : undefined
+        if (rec.body?.serverName !== name) {
           violation(`${rec.label}: installed as ${String(rec.body?.serverName)}`)
+        } else if (
+          cr &&
+          cr.metadata.uid === created?.uid &&
+          (cr.metadata.annotations?.['clerum.io/catalog-id'] !== entry.name ||
+            cr.spec.oauth?.source !== 'remote' ||
+            cr.spec.oauth?.grantScope !== scope)
+        ) {
+          violation(
+            `${rec.label}: the CR it created is not a catalog instance of ${label(this.slot)}`
+          )
         }
       }
     }
