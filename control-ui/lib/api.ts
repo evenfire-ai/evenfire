@@ -2597,9 +2597,14 @@ export async function getLlmProviderCatalogPolicies(): Promise<LlmProviderCatalo
   return res?.providers ?? []
 }
 
+/**
+ * Sets the provider's override, or clears it with `null` so the provider
+ * follows the code default again. The key is always sent: the route rejects a
+ * body without it, so a reset can never be mistaken for an empty request.
+ */
 export async function setLlmProviderCatalogAutoEnable(
   provider: string,
-  autoEnable: boolean
+  autoEnable: boolean | null
 ): Promise<LlmProviderCatalogPolicy> {
   return apiSend(
     'PUT',

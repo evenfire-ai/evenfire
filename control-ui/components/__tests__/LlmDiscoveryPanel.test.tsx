@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import * as api from '../../lib/api'
 import type { LlmAllowedModel } from '../../lib/api'
-import { buildCatalogPolicy } from '../../test/fixtures/llmProviderCatalogPolicy'
+import { catalogPolicyCase } from '../../test/fixtures/llmProviderCatalogPolicy'
 import { LlmDiscoveryPanel } from '../LlmDiscoveryPanel'
 import { ToastProvider } from '../Toast'
 
@@ -122,7 +122,9 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
   })
 
   it('opens the per-provider auto-enable settings from the header', async () => {
-    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([buildCatalogPolicy('openai')])
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([
+      catalogPolicyCase('openai.default'),
+    ])
     render(
       <LlmDiscoveryPanel
         items={[reviewModel]}

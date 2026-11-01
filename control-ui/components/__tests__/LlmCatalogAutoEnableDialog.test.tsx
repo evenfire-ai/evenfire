@@ -10,10 +10,7 @@ import {
 } from '@testing-library/react'
 import * as api from '../../lib/api'
 import type { LlmProviderCatalogPolicy } from '../../lib/api.types'
-import {
-  CATALOG_SYNC_IN_PROGRESS_BODY,
-  buildCatalogPolicy,
-} from '../../test/fixtures/llmProviderCatalogPolicy'
+import { catalogPolicyCase, catalogPolicyError } from '../../test/fixtures/llmProviderCatalogPolicy'
 import { LlmCatalogAutoEnableDialog } from '../LlmCatalogAutoEnableDialog'
 import { ToastProvider } from '../Toast'
 
@@ -26,21 +23,25 @@ vi.mock('../../lib/api', async importOriginal => {
   }
 })
 
-const OVERRIDE_AT = '2026-10-29T08:30:00.000Z'
-
-const openaiDefault = buildCatalogPolicy('openai')
-const azureDefault = buildCatalogPolicy('azure')
-const openrouterCustom = buildCatalogPolicy('openrouter', {
-  auto_enable: true,
-  updated_at: OVERRIDE_AT,
-  updated_by: 'ops-admin',
-})
+const openaiDefault = catalogPolicyCase('openai.default')
+const azureDefault = catalogPolicyCase('azure.default')
+const groqCustomOn = catalogPolicyCase('groq.override_on')
+const openaiCustomOff = catalogPolicyCase('openai.override_off')
 
 // The client error is produced by the real formatter from the exact body the
 // control-api route sends, not hand-built.
 function apiError(body: unknown, status: number, statusText: string) {
   const text = JSON.stringify(body)
   return api.formatApiError(new Response(text, { status, statusText }), text)
+}
+
+function syncInProgressError() {
+  const { status, body } = catalogPolicyError('catalog_sync_in_progress')
+  return apiError(body, status, 'Service Unavailable')
+}
+
+function changedBy(policy: LlmProviderCatalogPolicy) {
+  return `${policy.updated_by} · ${new Date(policy.updated_at as string).toLocaleString()}`
 }
 
 function deferred<T>() {
@@ -67,7 +68,7 @@ beforeEach(() => {
   vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([
     openaiDefault,
     azureDefault,
-    openrouterCustom,
+    groqCustomOn,
   ])
 })
 
@@ -100,32 +101,31 @@ describe('LlmCatalogAutoEnableDialog', () => {
     expect(checkbox('Azure OpenAI')).not.toBeChecked()
     expect(rowOf('Azure OpenAI')).toHaveTextContent('Default')
 
-    expect(checkbox('OpenRouter')).toBeChecked()
-    const custom = rowOf('OpenRouter')
+    expect(checkbox('Groq')).toBeChecked()
+    const custom = rowOf('Groq')
     expect(custom).toHaveTextContent('Custom')
     expect(custom).toHaveTextContent('Default: Off')
-    expect(custom).toHaveTextContent(`ops-admin · ${new Date(OVERRIDE_AT).toLocaleString()}`)
+    expect(custom).toHaveTextContent(changedBy(groqCustomOn))
   })
 
   it('PUTs the flipped value and shows the state the server confirmed', async () => {
-    const saved = buildCatalogPolicy('azure', {
-      auto_enable: true,
-      updated_at: '2026-10-30T09:00:00.000Z',
-      updated_by: 'admin',
-    })
-    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockResolvedValue(saved)
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([
+      catalogPolicyCase('groq.default'),
+    ])
+    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockResolvedValue(groqCustomOn)
     render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
-    await waitFor(() => expect(checkbox('Azure OpenAI')).toBeInTheDocument())
+    await waitFor(() => expect(checkbox('Groq')).toBeInTheDocument())
+    expect(checkbox('Groq')).not.toBeChecked()
 
-    fireEvent.click(checkbox('Azure OpenAI'))
+    fireEvent.click(checkbox('Groq'))
 
-    expect(api.setLlmProviderCatalogAutoEnable).toHaveBeenCalledWith('azure', true)
-    await waitFor(() => expect(checkbox('Azure OpenAI')).toBeChecked())
-    expect(rowOf('Azure OpenAI')).toHaveTextContent('Custom')
-    expect(rowOf('Azure OpenAI')).toHaveTextContent('Default: Off')
+    expect(api.setLlmProviderCatalogAutoEnable).toHaveBeenCalledWith('groq', true)
+    await waitFor(() => expect(checkbox('Groq')).toBeChecked())
+    expect(rowOf('Groq')).toHaveTextContent('Custom')
+    expect(rowOf('Groq')).toHaveTextContent('Default: Off')
     expect(
       await screen.findByText(
-        'Azure OpenAI: eligible new models that a live catalog sync finds will start enabled.'
+        'Groq: eligible new models that a live catalog sync finds will start enabled.'
       )
     ).toBeInTheDocument()
   })
@@ -150,22 +150,14 @@ describe('LlmCatalogAutoEnableDialog', () => {
     expect(onDismiss).not.toHaveBeenCalled()
 
     await act(async () => {
-      resolveSave(
-        buildCatalogPolicy('openai', {
-          auto_enable: false,
-          updated_at: '2026-10-30T09:00:00.000Z',
-          updated_by: 'admin',
-        })
-      )
+      resolveSave(openaiCustomOff)
     })
     expect(checkbox('OpenAI')).not.toBeChecked()
     expect(checkbox('OpenAI')).toBeEnabled()
   })
 
   it('shows a retry message on 503 catalog_sync_in_progress and keeps the old state', async () => {
-    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockRejectedValue(
-      apiError(CATALOG_SYNC_IN_PROGRESS_BODY, 503, 'Service Unavailable')
-    )
+    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockRejectedValue(syncInProgressError())
     render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
     await waitFor(() => expect(checkbox('OpenAI')).toBeInTheDocument())
 
@@ -186,15 +178,15 @@ describe('LlmCatalogAutoEnableDialog', () => {
       apiError({ error: 'internal_error' }, 500, 'Internal Server Error')
     )
     render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
-    await waitFor(() => expect(checkbox('OpenRouter')).toBeInTheDocument())
+    await waitFor(() => expect(checkbox('Groq')).toBeInTheDocument())
 
-    fireEvent.click(checkbox('OpenRouter'))
+    fireEvent.click(checkbox('Groq'))
 
-    expect(api.setLlmProviderCatalogAutoEnable).toHaveBeenCalledWith('openrouter', false)
-    expect(await screen.findByText(/The OpenRouter setting was not saved: 500/)).toBeInTheDocument()
+    expect(api.setLlmProviderCatalogAutoEnable).toHaveBeenCalledWith('groq', false)
+    expect(await screen.findByText(/The Groq setting was not saved: 500/)).toBeInTheDocument()
     expect(screen.queryByText(/catalog sync is running/)).toBeNull()
-    expect(checkbox('OpenRouter')).toBeChecked()
-    expect(rowOf('OpenRouter')).toHaveTextContent('ops-admin')
+    expect(checkbox('Groq')).toBeChecked()
+    expect(rowOf('Groq')).toHaveTextContent(changedBy(groqCustomOn))
   })
 
   it('shows a load failure with a retry that re-reads the policy', async () => {
@@ -234,16 +226,12 @@ describe('LlmCatalogAutoEnableDialog', () => {
     )
 
     expect(screen.queryByRole('checkbox')).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Reset .* to default$/ })).toBeNull()
     expect(screen.getByText('Loading auto-enable settings…')).toBeInTheDocument()
 
-    const serverOff = buildCatalogPolicy('openai', {
-      auto_enable: false,
-      updated_at: '2026-10-30T09:00:00.000Z',
-      updated_by: 'other-admin',
-    })
-    await act(async () => slowRead.resolve([serverOff]))
+    await act(async () => slowRead.resolve([openaiCustomOff]))
     expect(checkbox('OpenAI')).not.toBeChecked()
-    expect(rowOf('OpenAI')).toHaveTextContent('other-admin')
+    expect(rowOf('OpenAI')).toHaveTextContent(changedBy(openaiCustomOff))
   })
 
   it('discards a read from a previous open that lands after the current one', async () => {
@@ -264,12 +252,7 @@ describe('LlmCatalogAutoEnableDialog', () => {
       </ToastProvider>
     )
 
-    const serverOff = buildCatalogPolicy('openai', {
-      auto_enable: false,
-      updated_at: '2026-10-30T09:00:00.000Z',
-      updated_by: 'admin',
-    })
-    await act(async () => secondRead.resolve([serverOff]))
+    await act(async () => secondRead.resolve([openaiCustomOff]))
     expect(checkbox('OpenAI')).not.toBeChecked()
 
     await act(async () => firstRead.resolve([openaiDefault]))
@@ -281,5 +264,192 @@ describe('LlmCatalogAutoEnableDialog', () => {
     render(<LlmCatalogAutoEnableDialog open={false} onDismiss={vi.fn()} />)
     expect(api.getLlmProviderCatalogPolicies).not.toHaveBeenCalled()
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+})
+
+function resetButton(label: string) {
+  return screen.getByRole('button', { name: `Reset ${label} to default` })
+}
+
+function queryResetButton(label: string) {
+  return screen.queryByRole('button', { name: `Reset ${label} to default` })
+}
+
+describe('LlmCatalogAutoEnableDialog reset to default', () => {
+  it('offers a reset only on overridden rows, including an override equal to the default', async () => {
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([
+      catalogPolicyCase('openai.override_same'),
+      groqCustomOn,
+      azureDefault,
+    ])
+    render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
+    await waitFor(() => expect(checkbox('OpenAI')).toBeInTheDocument())
+
+    expect(rowOf('OpenAI')).toHaveTextContent('Custom')
+    expect(resetButton('OpenAI')).toBeEnabled()
+    expect(resetButton('Groq')).toBeEnabled()
+    expect(queryResetButton('Azure OpenAI')).toBeNull()
+  })
+
+  it('shows a reset row as default even though it records who reset it', async () => {
+    const reset = catalogPolicyCase('openai.reset')
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([reset])
+    render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
+    await waitFor(() => expect(checkbox('OpenAI')).toBeInTheDocument())
+
+    expect(checkbox('OpenAI')).toBeChecked()
+    expect(rowOf('OpenAI')).toHaveTextContent('Default')
+    expect(rowOf('OpenAI')).not.toHaveTextContent('Custom')
+    expect(rowOf('OpenAI')).not.toHaveTextContent(reset.updated_by as string)
+    expect(queryResetButton('OpenAI')).toBeNull()
+  })
+
+  it('sends a null override and shows the default state the server confirmed', async () => {
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([groqCustomOn])
+    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockResolvedValue(
+      catalogPolicyCase('groq.reset')
+    )
+    render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
+    await waitFor(() => expect(checkbox('Groq')).toBeChecked())
+
+    fireEvent.click(resetButton('Groq'))
+
+    expect(api.setLlmProviderCatalogAutoEnable).toHaveBeenCalledTimes(1)
+    expect(api.setLlmProviderCatalogAutoEnable).toHaveBeenCalledWith('groq', null)
+    await waitFor(() => expect(checkbox('Groq')).not.toBeChecked())
+    expect(checkbox('Groq')).toBeEnabled()
+    expect(rowOf('Groq')).toHaveTextContent('Default')
+    expect(rowOf('Groq')).not.toHaveTextContent('Custom')
+    expect(rowOf('Groq')).not.toHaveTextContent(groqCustomOn.updated_by as string)
+    expect(queryResetButton('Groq')).toBeNull()
+    expect(
+      await screen.findByText(
+        'Groq now follows the default: new models that the catalog sync finds will start disabled.'
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('moves focus to the row checkbox once a reset removes the button', async () => {
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([groqCustomOn])
+    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockResolvedValue(
+      catalogPolicyCase('groq.reset')
+    )
+    render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
+    await waitFor(() => expect(checkbox('Groq')).toBeChecked())
+
+    resetButton('Groq').focus()
+    fireEvent.click(resetButton('Groq'))
+
+    await waitFor(() => expect(queryResetButton('Groq')).toBeNull())
+    expect(document.activeElement).toBe(checkbox('Groq'))
+  })
+
+  it('keeps focus on the reset button when the reset is refused', async () => {
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([openaiCustomOff])
+    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockRejectedValue(syncInProgressError())
+    render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
+    await waitFor(() => expect(checkbox('OpenAI')).toBeInTheDocument())
+
+    resetButton('OpenAI').focus()
+    fireEvent.click(resetButton('OpenAI'))
+
+    expect(await screen.findByText(/A catalog sync is running/)).toBeInTheDocument()
+    expect(resetButton('OpenAI')).toBeEnabled()
+    expect(document.activeElement).toBe(resetButton('OpenAI'))
+  })
+
+  it('shows the retry message on 503 and leaves the override on screen', async () => {
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([openaiCustomOff])
+    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockRejectedValue(syncInProgressError())
+    render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
+    await waitFor(() => expect(checkbox('OpenAI')).toBeInTheDocument())
+
+    fireEvent.click(resetButton('OpenAI'))
+
+    expect(
+      await screen.findByText(
+        'A catalog sync is running, so the OpenAI setting was not saved. Try again in a moment.'
+      )
+    ).toBeInTheDocument()
+    expect(checkbox('OpenAI')).not.toBeChecked()
+    expect(checkbox('OpenAI')).toBeEnabled()
+    expect(rowOf('OpenAI')).toHaveTextContent('Custom')
+    expect(rowOf('OpenAI')).toHaveTextContent(changedBy(openaiCustomOff))
+    expect(resetButton('OpenAI')).toBeEnabled()
+  })
+
+  it('locks the row and the dialog while a reset is pending', async () => {
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([openaiCustomOff])
+    const save = deferred<LlmProviderCatalogPolicy>()
+    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockReturnValue(save.promise)
+    const onDismiss = vi.fn()
+    render(<LlmCatalogAutoEnableDialog open onDismiss={onDismiss} />)
+    await waitFor(() => expect(checkbox('OpenAI')).toBeInTheDocument())
+
+    fireEvent.click(resetButton('OpenAI'))
+
+    expect(resetButton('OpenAI')).toBeDisabled()
+    expect(checkbox('OpenAI')).toBeDisabled()
+    expect(checkbox('OpenAI')).not.toBeChecked()
+    expect(rowOf('OpenAI')).toHaveTextContent('Saving…')
+    fireEvent.click(resetButton('OpenAI'))
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    expect(onDismiss).not.toHaveBeenCalled()
+    expect(api.setLlmProviderCatalogAutoEnable).toHaveBeenCalledTimes(1)
+
+    await act(async () => save.resolve(catalogPolicyCase('openai.reset')))
+    expect(checkbox('OpenAI')).toBeChecked()
+    expect(checkbox('OpenAI')).toBeEnabled()
+    expect(queryResetButton('OpenAI')).toBeNull()
+  })
+
+  it('disables the reset while a toggle on the same row is pending', async () => {
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([groqCustomOn])
+    const save = deferred<LlmProviderCatalogPolicy>()
+    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockReturnValue(save.promise)
+    render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
+    await waitFor(() => expect(checkbox('Groq')).toBeInTheDocument())
+
+    fireEvent.click(checkbox('Groq'))
+
+    expect(resetButton('Groq')).toBeDisabled()
+    fireEvent.click(resetButton('Groq'))
+    expect(api.setLlmProviderCatalogAutoEnable).toHaveBeenCalledTimes(1)
+    expect(api.setLlmProviderCatalogAutoEnable).toHaveBeenCalledWith('groq', false)
+
+    await act(async () => save.resolve(catalogPolicyCase('groq.override_same')))
+    expect(checkbox('Groq')).not.toBeChecked()
+    expect(resetButton('Groq')).toBeEnabled()
+  })
+
+  it('drops a reset answer that lands while a reopen is still reading', async () => {
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValueOnce([openaiCustomOff])
+    const save = deferred<LlmProviderCatalogPolicy>()
+    vi.mocked(api.setLlmProviderCatalogAutoEnable).mockReturnValue(save.promise)
+    const { rerender } = render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
+    await waitFor(() => expect(checkbox('OpenAI')).toBeInTheDocument())
+    fireEvent.click(resetButton('OpenAI'))
+
+    rerender(
+      <ToastProvider>
+        <LlmCatalogAutoEnableDialog open={false} onDismiss={vi.fn()} />
+      </ToastProvider>
+    )
+    const slowRead = deferred<LlmProviderCatalogPolicy[]>()
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockReturnValueOnce(slowRead.promise)
+    rerender(
+      <ToastProvider>
+        <LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />
+      </ToastProvider>
+    )
+
+    await act(async () => save.resolve(catalogPolicyCase('openai.reset')))
+    expect(screen.queryByRole('checkbox')).toBeNull()
+    expect(screen.getByText('Loading auto-enable settings…')).toBeInTheDocument()
+
+    await act(async () => slowRead.resolve([openaiCustomOff]))
+    expect(checkbox('OpenAI')).not.toBeChecked()
+    expect(rowOf('OpenAI')).toHaveTextContent('Custom')
+    expect(resetButton('OpenAI')).toBeEnabled()
   })
 })

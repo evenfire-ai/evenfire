@@ -6,7 +6,7 @@ import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { useToast } from '@components/Toast'
-import { CheckboxField } from '@components/ui'
+import { Button, CheckboxField } from '@components/ui'
 import {
   getLlmProviderCatalogPolicies,
   isCatalogSyncInProgressError,
@@ -20,11 +20,22 @@ import type { LlmCatalogAutoEnableDialogProps } from './types'
 const COLUMNS: TableHeaderColumn[] = [
   { key: 'provider', label: 'Provider', minWidth: '10rem' },
   { key: 'autoEnable', label: 'Auto-enable new models', width: '11rem' },
-  { key: 'setting', label: 'Setting', width: '11rem' },
+  { key: 'setting', label: 'Setting', width: '16rem' },
   { key: 'changed', label: 'Last change', minWidth: '12rem' },
 ]
 
-function toggleErrorMessage(caught: unknown, label: string): string {
+function savedMessage(saved: LlmProviderCatalogPolicy, label: string): string {
+  const effect = saved.auto_enable
+    ? 'eligible new models that a live catalog sync finds will start enabled.'
+    : 'new models that the catalog sync finds will start disabled.'
+  return saved.overridden ? `${label}: ${effect}` : `${label} now follows the default: ${effect}`
+}
+
+function autoEnableCheckboxId(provider: string): string {
+  return `llm-auto-enable-${provider}`
+}
+
+function saveErrorMessage(caught: unknown, label: string): string {
   if (isCatalogSyncInProgressError(caught)) {
     return `A catalog sync is running, so the ${label} setting was not saved. Try again in a moment.`
   }
@@ -39,6 +50,7 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
   const [loadError, setLoadError] = useState('')
   const [saveError, setSaveError] = useState('')
   const [pending, setPending] = useState<Set<string>>(new Set())
+  const [focusAfterReset, setFocusAfterReset] = useState<string | null>(null)
   // Each open (and each retry) starts a new generation so a slow read from an
   // earlier open can never overwrite the rows of the current one.
   const loadGeneration = useRef(0)
@@ -71,6 +83,16 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
     void load()
   }, [open])
 
+  // A successful reset unmounts the Reset button (the row is no longer
+  // overridden), which would drop keyboard focus to the page. The row's
+  // checkbox only exists after the commit, so focus moves here, not in save().
+  // CheckboxField does not forward a ref, hence the lookup by id.
+  useEffect(() => {
+    if (focusAfterReset === null) return
+    document.getElementById(autoEnableCheckboxId(focusAfterReset))?.focus()
+    setFocusAfterReset(null)
+  }, [focusAfterReset, policies])
+
   const rows = useMemo(
     () =>
       (policies ?? [])
@@ -79,26 +101,23 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
     [policies]
   )
 
-  // The row is only ever replaced by the server's response: a failed save
-  // leaves the last confirmed state on screen, so there is nothing to roll back.
-  async function handleToggle(policy: LlmProviderCatalogPolicy, label: string) {
-    const nextValue = !policy.auto_enable
+  // The toggle and the reset share this path so they get the same lock, error
+  // and reopen handling. The row is only ever replaced by the server's
+  // response: a failed save leaves the last confirmed state on screen, so there
+  // is nothing to roll back. `null` clears the override.
+  async function save(policy: LlmProviderCatalogPolicy, label: string, value: boolean | null) {
     setPending(current => new Set(current).add(policy.provider))
     setSaveError('')
     try {
-      const saved = await setLlmProviderCatalogAutoEnable(policy.provider, nextValue)
+      const saved = await setLlmProviderCatalogAutoEnable(policy.provider, value)
       setPolicies(current =>
         current ? current.map(row => (row.provider === saved.provider ? saved : row)) : current
       )
-      showToast(
-        saved.auto_enable
-          ? `${label}: eligible new models that a live catalog sync finds will start enabled.`
-          : `${label}: new models that the catalog sync finds will start disabled.`,
-        { tone: 'success' }
-      )
+      if (value === null) setFocusAfterReset(saved.provider)
+      showToast(savedMessage(saved, label), { tone: 'success' })
     } catch (caught) {
       if (isSilentApiError(caught)) return
-      setSaveError(toggleErrorMessage(caught, label))
+      setSaveError(saveErrorMessage(caught, label))
     } finally {
       setPending(current => {
         const next = new Set(current)
@@ -177,10 +196,11 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
                   </td>
                   <td>
                     <CheckboxField
+                      id={autoEnableCheckboxId(policy.provider)}
                       className="cu-checkbox-field--centered"
                       checked={policy.auto_enable}
                       disabled={saving}
-                      onChange={() => void handleToggle(policy, label)}
+                      onChange={() => void save(policy, label, !policy.auto_enable)}
                       aria-label={`Auto-enable new ${label} models`}
                       label={saving ? 'Saving…' : policy.auto_enable ? 'On' : 'Off'}
                     />
@@ -192,6 +212,15 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
                         <span className="cu-llm-auto-enable__hint">
                           Default: {policy.default ? 'On' : 'Off'}
                         </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={saving}
+                          onClick={() => void save(policy, label, null)}
+                          aria-label={`Reset ${label} to default`}
+                        >
+                          Reset
+                        </Button>
                       </span>
                     ) : (
                       <span className="cu-px-badge cu-px-badge--off">Default</span>
