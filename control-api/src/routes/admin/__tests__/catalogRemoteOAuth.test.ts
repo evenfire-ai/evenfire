@@ -342,9 +342,9 @@ describe('parseRemoteOAuthCatalogBlock (T-C3)', () => {
 })
 
 describe('isCuratorEntry (T-C5, pure part)', () => {
-  it('unscoped name published by the curator (lands in @clerum) ⇒ curator', () => {
+  it('unscoped name published by a curator-class client (lands in @clerum) ⇒ org', () => {
     expect(isCuratorEntry(entry(oauthBlock(), { name: 'notion-remote', publisher: CURATOR }))).toBe(
-      true
+      false
     )
   })
 
@@ -479,6 +479,17 @@ describe('resolveRemoteOAuthEntry', () => {
     const r = resolveRemoteOAuthEntry(e)
     expect(r).toMatchObject({ remoteOAuth: { valid: true }, publisher: '@acme' })
     for (const key of REMOTE_OAUTH_PRESENTATION_KEYS) expect(oauthOf(r)).not.toHaveProperty(key)
+    expect(oauthOf(r)).toEqual({
+      source: 'remote',
+      allowedGrantScopes: ['user', 'context'],
+      expectedRegistration: 'pre-registered',
+    })
+  })
+
+  it('unscoped curator-class entry loses presentation metadata and stays valid', () => {
+    const e = entry(fullBlock, { name: 'notion-remote', publisher: CURATOR })
+    const r = resolveRemoteOAuthEntry(e)
+    expect(r).toMatchObject({ remoteOAuth: { valid: true }, publisher: null })
     expect(oauthOf(r)).toEqual({
       source: 'remote',
       allowedGrantScopes: ['user', 'context'],

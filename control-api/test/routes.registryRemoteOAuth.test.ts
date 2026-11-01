@@ -116,6 +116,17 @@ const invalidCuratorRow = () =>
     { kind: 'curator-machine' }
   )
 
+/**
+ * The same block published unscoped by a curator-class client. The registry
+ * stores it in the reserved `@clerum` org, but without the scope in its name it
+ * is not a curated publish.
+ */
+const unscopedCuratorRow = () =>
+  registryEntryRow(
+    { name: 'notion-remote', mcpServer: remoteOAuthMeta(PRESENTATION) },
+    { kind: 'curator-machine' }
+  )
+
 /** A plain remote entry (static headers, no OAuth); `@acme/*` names are published by acme. */
 const plainRemoteRow = (name: string, version = '1.0.0') =>
   registryEntryRow(
@@ -150,6 +161,16 @@ function expectOrgStripped(entry: Record<string, unknown>) {
   expect(oauth).toMatchObject({ source: 'remote', allowedGrantScopes: ['user', 'context'] })
 }
 
+function expectUnscopedStripped(entry: Record<string, unknown>) {
+  expect(entry.remoteOAuth).toEqual({ valid: true })
+  expect(entry.publisher).toBeNull()
+  expect(oauthOf(entry)).toEqual({
+    source: 'remote',
+    allowedGrantScopes: ['user', 'context'],
+    expectedRegistration: 'pre-registered',
+  })
+}
+
 function expectInvalidStripped(entry: Record<string, unknown>) {
   expect(entry.remoteOAuth).toMatchObject({ valid: false })
   expect(oauthOf(entry)).toEqual({ source: 'remote' })
@@ -157,7 +178,13 @@ function expectInvalidStripped(entry: Record<string, unknown>) {
 
 describe('catalog reads resolve remote-OAuth entries', () => {
   const page = () => {
-    const rows = [curatorRow(), orgRow(), invalidCuratorRow(), plainRemoteRow('plain-mcp')]
+    const rows = [
+      curatorRow(),
+      orgRow(),
+      invalidCuratorRow(),
+      plainRemoteRow('plain-mcp'),
+      unscopedCuratorRow(),
+    ]
     return { data: rows, meta: { total: rows.length, limit: 50, offset: 0 } }
   }
 
@@ -173,6 +200,7 @@ describe('catalog reads resolve remote-OAuth entries', () => {
     expectOrgStripped(byName.get('@acme/notion')!)
     expectInvalidStripped(byName.get('@evenfire/broken')!)
     expect(byName.get('plain-mcp')).toEqual(source.data[3])
+    expectUnscopedStripped(byName.get('notion-remote')!)
   })
 
   it('GET /admin/registry/entries (search)', async () => {
@@ -188,12 +216,14 @@ describe('catalog reads resolve remote-OAuth entries', () => {
     expectOrgStripped(byName.get('@acme/notion')!)
     expectInvalidStripped(byName.get('@evenfire/broken')!)
     expect(byName.get('plain-mcp')).toEqual(source.data[3])
+    expectUnscopedStripped(byName.get('notion-remote')!)
   })
 
   it.each([
     ['curator', curatorRow, expectCuratorIntact],
     ['org', orgRow, expectOrgStripped],
     ['invalid curator', invalidCuratorRow, expectInvalidStripped],
+    ['unscoped curator-class', unscopedCuratorRow, expectUnscopedStripped],
   ] as const)('GET /admin/registry/entries/:name — %s', async (_label, row, expectation) => {
     const entry = row()
     vi.mocked(getEntry).mockResolvedValue(entry as never)
@@ -208,6 +238,7 @@ describe('catalog reads resolve remote-OAuth entries', () => {
     ['curator', curatorRow, expectCuratorIntact],
     ['org', orgRow, expectOrgStripped],
     ['invalid curator', invalidCuratorRow, expectInvalidStripped],
+    ['unscoped curator-class', unscopedCuratorRow, expectUnscopedStripped],
   ] as const)(
     'GET /admin/registry/entries/:name/versions/:version — %s',
     async (_label, row, expectation) => {

@@ -342,17 +342,19 @@ export function catalogRegistrationDrifts(
  * fail-closed: anything not proven curator is treated as an ordinary org entry.
  *
  * The scope is a trustworthy signal because the registry enforces it: only a
- * curator client may publish under a reserved scope, and an unscoped name is only
- * accepted from a curator (it lands in the reserved `@clerum` org). `owner_id` is
- * not compared because it is a per-database UUID control-api does not know; it is
- * only required to be present so legacy rows with a null owner never qualify.
+ * curator client may publish under a reserved scope. An unscoped name does not
+ * qualify even though only a curator-class client can publish one: that class
+ * also covers the platform's own control-api clients, so an unscoped entry is not
+ * proof of a curated publish, and the hook trust rule draws the same line.
+ * `owner_id` is not compared because it is a per-database UUID control-api does
+ * not know; it is only required to be present so legacy rows with a null owner
+ * never qualify.
  */
 export function isCuratorEntry(entry: CatalogEntryInput): boolean {
   if (entry.owner_type !== 'org') return false
   if (typeof entry.owner_id !== 'string' || entry.owner_id === '') return false
-  const parsed = parseRegistryEntryName(entry.name)
-  if (parsed === null) return false
-  return parsed.scope === null || OFFICIAL_EVENFIRE_SCOPES.includes(parsed.scope)
+  const scope = parseRegistryEntryName(entry.name)?.scope
+  return typeof scope === 'string' && OFFICIAL_EVENFIRE_SCOPES.includes(scope)
 }
 
 /**
