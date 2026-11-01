@@ -257,9 +257,9 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-// ── T-C1 ────────────────────────────────────────────────────────────────────
+// ── Where the install target comes from ──────────────────────────────────
 
-describe('catalog mode: URL, name and provenance come from the entry (T-C1)', () => {
+describe('catalog mode: URL, name and provenance come from the entry', () => {
   it('an equivalent body URL is accepted, but only the entry URL is used and persisted', async () => {
     serveEntry(remoteOAuthRow())
     const gw = new MockGateway(NS)
@@ -280,7 +280,7 @@ describe('catalog mode: URL, name and provenance come from the entry (T-C1)', ()
       'clerum.io/catalog-id': ENTRY,
       'clerum.io/catalog-version': VERSION,
     })
-    // Discovery, the kernel and the probe all ran on the literal entry URL.
+    // Discovery, the endpoint URL check and the probe all ran on the literal entry URL.
     expect(spy.discoveredUrls).toEqual([NOTION_URL])
     expect(spy.probedUrls).toEqual([NOTION_URL])
   })
@@ -349,9 +349,9 @@ describe('catalog mode: URL, name and provenance come from the entry (T-C1)', ()
   })
 })
 
-// ── T-C2 ────────────────────────────────────────────────────────────────────
+// ── What the entry allows ────────────────────────────────────────────────
 
-describe('catalog mode: the entry decides what can be installed (T-C2)', () => {
+describe('catalog mode: the entry decides what can be installed', () => {
   it('a grant scope the entry does not allow → 400 catalog_grant_scope_not_allowed', async () => {
     serveEntry(remoteOAuthRow({ allowedGrantScopes: ['user'] }))
     const gw = new MockGateway(NS)
@@ -606,9 +606,9 @@ describe('catalog mode: a failed registry read reaches the admin with its status
   })
 })
 
-// ── T-C4 ────────────────────────────────────────────────────────────────────
+// ── Drift between the entry and discovery ────────────────────────────────
 
-describe('catalog mode /discover: drift against expectedRegistration (T-C4)', () => {
+describe('catalog mode /discover: drift against expectedRegistration', () => {
   const discoverBody = { catalogEntry: { name: ENTRY, version: VERSION }, grantScope: 'user' }
 
   it('detected ≠ expected → catalogDrift; discovery ran on the entry URL', async () => {
@@ -717,9 +717,9 @@ describe('catalog mode /discover: drift against expectedRegistration (T-C4)', ()
   })
 })
 
-// ── T-C6 ────────────────────────────────────────────────────────────────────
+// ── Cost ─────────────────────────────────────────────────────────────────
 
-describe('catalog mode cost: one registry read, one install report, no Context list (T-C6)', () => {
+describe('catalog mode cost: one registry read, one install report, no Context list', () => {
   it('CIMD: exactly one getEntryVersion and one reportInstall, with the entry identity', async () => {
     serveEntry(remoteOAuthRow())
     const gw = new MockGateway(NS)
@@ -793,9 +793,9 @@ describe('catalog mode cost: one registry read, one install report, no Context l
   })
 })
 
-// ── Races on one slot (T-R1..T-R4, T-R8) ────────────────────────────────────
+// ── Races on one slot ────────────────────────────────────────────────────
 
-describe('H1 · two DCR installs of the same slot (T-R1)', () => {
+describe('two DCR installs of the same slot', () => {
   function dcrApp(gw: MockGateway, db: DbClient, transport: PinnedTransport) {
     return makeApp(gw, dcrResult, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
   }
@@ -884,7 +884,7 @@ describe('H1 · two DCR installs of the same slot (T-R1)', () => {
   })
 })
 
-describe('H2 · two CIMD installs of the same slot (T-R2)', () => {
+describe('two CIMD installs of the same slot', () => {
   it('the loser of the CR create → 409 server_name_in_use; the winner CR is untouched', async () => {
     serveEntry(remoteOAuthRow())
     const gw = new MockGateway(NS)
@@ -930,7 +930,7 @@ function decodedSecret(secret: { data?: Record<string, string> }): Record<string
   )
 }
 
-describe('H3 · two pre-registered installs of the same slot (T-R3)', () => {
+describe('two pre-registered installs of the same slot', () => {
   it('the loser of the Secret create → 409 install_in_progress; the winner Secret is intact', async () => {
     serveEntry(remoteOAuthRow({ expectedRegistration: 'pre-registered' }))
     const gw = new MockGateway(NS)
@@ -972,7 +972,7 @@ describe('H3 · two pre-registered installs of the same slot (T-R3)', () => {
   })
 })
 
-describe('H3c · the winner is in flight without a CR (T-R8)', () => {
+describe('the winner of a slot is in flight without a CR', () => {
   it('held between createSecret and createResource for 9 minutes → still install_in_progress', async () => {
     serveEntry(remoteOAuthRow({ expectedRegistration: 'pre-registered' }))
     const gw = new MockGateway(NS)
@@ -1052,7 +1052,7 @@ describe('H3c · the winner is in flight without a CR (T-R8)', () => {
   })
 })
 
-describe('H3b · a leftover client Secret blocks the slot (T-R5)', () => {
+describe('a leftover client Secret blocks the slot', () => {
   const oldTimestamp = () => new Date(Date.now() - PENDING_TTL_MS - 60_000)
 
   it('an old Secret without a CR → 409 catalog_slot_residue naming it; the Secret is intact', async () => {
@@ -1074,7 +1074,7 @@ describe('H3b · a leftover client Secret blocks the slot (T-R5)', () => {
     expect(await gw.listResource('mcpservers', NS)).toEqual([])
   })
 
-  it('E3x: the CR deleted outside control-api leaves a Secret that later blocks the slot', async () => {
+  it('the CR deleted outside control-api leaves a Secret that later blocks the slot', async () => {
     serveEntry(remoteOAuthRow({ expectedRegistration: 'pre-registered' }))
     const gw = new MockGateway(NS)
     const name = canonical('user')
@@ -1140,7 +1140,7 @@ describe('H3b · a leftover client Secret blocks the slot (T-R5)', () => {
   })
 })
 
-describe('H5 · installing from a stale catalog snapshot (T-R4)', () => {
+describe('installing from a stale catalog snapshot', () => {
   it('a slot shown free that was installed meanwhile → 409 server_name_in_use, never a duplicate', async () => {
     const row = remoteOAuthRow()
     serveEntry(row)
@@ -1180,9 +1180,9 @@ describe('H5 · installing from a stale catalog snapshot (T-R4)', () => {
   })
 })
 
-// ── Regressions (T-R6, T-R7) ────────────────────────────────────────────────
+// ── Leftovers of out-of-band writers and earlier installs ────────────────
 
-describe('H8 · the canonical name left in an allowlist by an out-of-band writer (T-R6)', () => {
+describe('the canonical name left in an allowlist by an out-of-band writer', () => {
   it('the install creates the CR and leaves the allowlist exactly as it was', async () => {
     serveEntry(remoteOAuthRow())
     const gw = new MockGateway(NS)
@@ -1201,7 +1201,7 @@ describe('H8 · the canonical name left in an allowlist by an out-of-band writer
   })
 })
 
-describe('H9 · a dynamic client of an earlier installation of the slot (T-R7)', () => {
+describe('a dynamic client of an earlier installation of the slot', () => {
   it('after an out-of-band CR delete, the reinstall takes the row over under its own identity', async () => {
     serveEntry(remoteOAuthRow({ expectedRegistration: 'dcr' }))
     const gw = new MockGateway(NS)
@@ -1226,7 +1226,7 @@ describe('H9 · a dynamic client of an earlier installation of the slot (T-R7)',
     const oldCr = (await gw.getResource('mcpservers', name, NS)) as StoredCr
     const oldRow = await getDynamicClient(db, ENC_KEY, key)
     expect(oldRow?.crUid).toBe(oldCr.metadata.uid)
-    await gw.deleteResource('mcpservers', name, NS) // E3x: row stays bound to a dead uid
+    await gw.deleteResource('mcpservers', name, NS) // deleted outside control-api: the row stays bound to a dead uid
 
     // The AS assigns the reinstall a client of its own.
     const second = {
@@ -1245,9 +1245,9 @@ describe('H9 · a dynamic client of an earlier installation of the slot (T-R7)',
   })
 })
 
-// ── T-R10 ───────────────────────────────────────────────────────────────────
+// ── Rollback fencing ─────────────────────────────────────────────────────
 
-describe('rollback of the created CR is fenced by uid only (T-R10)', () => {
+describe('rollback of the created CR is fenced by uid only', () => {
   /** Stands in for HCC writing the CR status right after the create: the RV moves on. */
   function bumpResourceVersionOnCreate(gw: MockGateway) {
     gw.setResourceCreateFault(async ({ plural, name, namespace }) => {
@@ -1288,7 +1288,7 @@ describe('rollback of the created CR is fenced by uid only (T-R10)', () => {
     return outer
   }
 
-  it('2a: a status write between create and rollback still lets the rollback delete the CR', async () => {
+  it('a pruned field: a status write between create and rollback still lets the rollback delete the CR', async () => {
     const gw = new MockGateway(NS)
     pruneAsProfile(gw)
     bumpResourceVersionOnCreate(gw)
@@ -1305,7 +1305,7 @@ describe('rollback of the created CR is fenced by uid only (T-R10)', () => {
     )
   })
 
-  it('2a: a homonym recreated with another uid before the rollback is left alone', async () => {
+  it('a pruned field: a homonym recreated with another uid before the rollback is left alone', async () => {
     const gw = new MockGateway(NS)
     pruneAsProfile(gw)
     let homonymUid: string | undefined
@@ -1326,7 +1326,7 @@ describe('rollback of the created CR is fenced by uid only (T-R10)', () => {
     expect(survivor.metadata.uid).toBe(homonymUid)
   })
 
-  it('2b: a status write before a failed bind still lets the rollback delete the CR', async () => {
+  it('a failed bind: a status write before it still lets the rollback delete the CR', async () => {
     serveEntry(remoteOAuthRow({ expectedRegistration: 'dcr' }))
     const gw = new MockGateway(NS)
     bumpResourceVersionOnCreate(gw)

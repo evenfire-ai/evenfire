@@ -497,8 +497,10 @@ export interface McpServerLike {
   spec?: Record<string, unknown> | null
 }
 
-const CATALOG_ID_ANNOTATION = 'clerum.io/catalog-id'
-const CATALOG_VERSION_ANNOTATION = 'clerum.io/catalog-version'
+/** Every annotation that records a catalog identity on a CR starts with this. */
+export const CATALOG_ANNOTATION_PREFIX = 'clerum.io/catalog-'
+const CATALOG_ID_ANNOTATION = `${CATALOG_ANNOTATION_PREFIX}id` as const
+const CATALOG_VERSION_ANNOTATION = `${CATALOG_ANNOTATION_PREFIX}version` as const
 
 function specOAuth(cr: McpServerLike): Record<string, unknown> | undefined {
   const oauth = cr.spec?.oauth

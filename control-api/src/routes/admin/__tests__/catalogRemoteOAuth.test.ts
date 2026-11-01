@@ -102,7 +102,7 @@ describe('isRemoteOAuthEntry', () => {
   })
 })
 
-describe('parseRemoteOAuthCatalogBlock (T-C3)', () => {
+describe('parseRemoteOAuthCatalogBlock', () => {
   it('accepts a minimal valid entry and returns the literal endpoint url', () => {
     const r = parseRemoteOAuthCatalogBlock(
       entry(oauthBlock(), { url: 'https://MCP.x.com:443/mcp/' }),
@@ -341,7 +341,7 @@ describe('parseRemoteOAuthCatalogBlock (T-C3)', () => {
   })
 })
 
-describe('isCuratorEntry (T-C5, pure part)', () => {
+describe('isCuratorEntry', () => {
   it('unscoped name published by a curator-class client (lands in @clerum) ⇒ org', () => {
     expect(isCuratorEntry(entry(oauthBlock(), { name: 'notion-remote', publisher: CURATOR }))).toBe(
       false

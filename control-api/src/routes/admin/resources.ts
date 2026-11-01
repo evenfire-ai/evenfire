@@ -36,6 +36,7 @@ import {
 } from '../../types.js'
 import { mapWithConcurrencyLimit } from '../../utils/mapWithConcurrencyLimit.js'
 import {
+  CATALOG_ANNOTATION_PREFIX,
   becomesCatalogRemoteOAuthInstance,
   catalogInstanceIdentityChanges,
   isCatalogRemoteOAuthInstance,
@@ -601,8 +602,6 @@ async function refuseUnverifiedAddedMcpServers(
   })
   return true
 }
-
-const CATALOG_ANNOTATION_PREFIX = 'clerum.io/catalog-'
 
 /**
  * Whether a generic McpServer create claims a catalog remote-OAuth identity. Only

@@ -344,7 +344,10 @@ async function classifyCatalogClientSecretConflict(
   return 'catalog_slot_residue'
 }
 
-/** Kernel §4 on the operator's authorization-server override, before any fetch. */
+/**
+ * The operator's authorization-server override is untrusted input: hold it to the same
+ * https/public-host rule as every OAuth endpoint before anything fetches it.
+ */
 async function authorizationServerKernelErrors(
   authorizationServer: string | undefined
 ): Promise<ValidationError[]> {

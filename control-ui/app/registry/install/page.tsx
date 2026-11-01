@@ -702,8 +702,9 @@ function RegistryInstallPageContent() {
     void loadEntry()
   }, [entryName, entryVersion])
 
-  // A remote-OAuth entry is decided first: it must never reach the OAuth or registry
-  // install forms, whichever other keys its block carries.
+  // The render checks a remote-OAuth entry after the recipe and hook branches and
+  // before the OAuth and registry install forms: it must never reach either form,
+  // whichever other keys its block carries.
   const remoteOAuth = useMemo(() => getRemoteOAuthCatalogBlock(entry), [entry])
   // An mcp-server entry that declares OAuth routes to the OAuth install wizard
   // instead of the ordinary connector form (S1-U4).

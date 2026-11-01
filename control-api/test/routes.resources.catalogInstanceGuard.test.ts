@@ -259,7 +259,8 @@ describe('generic McpServer PUT on a catalog instance', () => {
       oauth: { ...a.spec.oauth, scopes: ['stale'] },
     }).then(res => res)
     await parked
-    // E3 + E1 by another actor while the PUT is parked after the guard validated A.
+    // Another actor uninstalls and reinstalls the slot while the PUT is parked after the
+    // guard validated A.
     otherActor = true
     await api.gateway.deleteResource('mcpservers', 'notion-user', MCP_NS)
     const b = await installCatalogInstance(api)
