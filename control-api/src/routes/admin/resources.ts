@@ -1141,8 +1141,9 @@ export function createAdminResourcesRouter(
           },
           spec: body.spec,
         }
+        const isCatalogInstance = isCatalogRemoteOAuthInstance(mcpServerCurrent)
         if (
-          isCatalogRemoteOAuthInstance(mcpServerCurrent) ||
+          isCatalogInstance ||
           becomesCatalogRemoteOAuthInstance(mcpServerCurrent, mcpServerNext)
         ) {
           const fields = catalogInstanceIdentityChanges(mcpServerCurrent, mcpServerNext)
@@ -1154,8 +1155,9 @@ export function createAdminResourcesRouter(
             res.status(409).json({
               error: 'catalog_instance_immutable',
               fields,
-              message:
-                'the identity of a catalog connector cannot be edited; uninstall it and install again',
+              message: isCatalogInstance
+                ? 'the identity of a catalog connector cannot be edited; uninstall it and install again'
+                : 'a catalog connector identity can only be created by installing from the catalog',
             })
             return
           }

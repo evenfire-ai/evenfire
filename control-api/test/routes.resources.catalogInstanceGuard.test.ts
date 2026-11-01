@@ -27,6 +27,10 @@ const { clerumErrorHandler } = await import('../src/http/errorHandler.js')
  */
 const MCP_NS = config.mcpServersNamespace
 const CATALOG = { id: 'org/notion', version: '1.0.0' }
+const EDIT_INSTANCE_MESSAGE =
+  'the identity of a catalog connector cannot be edited; uninstall it and install again'
+const ACQUIRE_IDENTITY_MESSAGE =
+  'a catalog connector identity can only be created by installing from the catalog'
 
 function setup() {
   const api = fakeCustomObjectsApiserver({
@@ -90,6 +94,7 @@ describe('generic McpServer PUT on a catalog instance', () => {
     expect(res.status).toBe(409)
     expect(res.body.error).toBe('catalog_instance_immutable')
     expect(res.body.fields).toEqual(['spec.remote.baseUrl', 'spec.transport.url'])
+    expect(res.body.message).toBe(EDIT_INSTANCE_MESSAGE)
     expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
     expect(stored(api)!.spec.remote.baseUrl).toBe(cr.spec.remote.baseUrl)
   })
@@ -187,6 +192,7 @@ describe('generic McpServer PUT on a catalog instance', () => {
       expect(res.status).toBe(409)
       expect(res.body.error).toBe('catalog_instance_immutable')
       expect(res.body.fields).toContain('metadata.annotations.clerum.io/catalog-id')
+      expect(res.body.message).toBe(ACQUIRE_IDENTITY_MESSAGE)
       expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
       expect(stored(api, 'manual-notion')).toEqual(before)
     }
@@ -436,6 +442,7 @@ describe('generic McpServer POST', () => {
     expect(res.status).toBe(409)
     expect(res.body.error).toBe('catalog_instance_immutable')
     expect(res.body.fields).toContain('spec.oauth.source')
+    expect(res.body.message).toBe(ACQUIRE_IDENTITY_MESSAGE)
     expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
     expect(stored(api, 'forged')).toEqual(before)
   })
@@ -463,6 +470,7 @@ describe('generic McpServer POST', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error).toBe('catalog_instance_immutable')
+    expect(res.body.message).toBe(ACQUIRE_IDENTITY_MESSAGE)
     expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
     expect(stored(api, 'forged')).toEqual(before)
   })
