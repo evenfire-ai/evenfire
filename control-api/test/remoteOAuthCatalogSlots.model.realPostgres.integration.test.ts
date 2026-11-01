@@ -467,13 +467,35 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     handOff(s)
   }
 
-  /** Releases gates one at a time, each among all the parked ones, until `p` settles. */
+  const SETTLE_DEADLINE_MS = 30_000
+
+  /** What is still running or parked, for a run that does not settle. */
+  function unsettled(s: fc.Scheduler): string {
+    const parked = s
+      .report()
+      .filter(t => t.status === 'pending')
+      .map(t => t.label)
+    return `commands ${[...H.actors].map(a => a.id).join(', ') || 'none'}; parked: ${
+      [...parked, ...H.waiting.map(g => g.label)].join(', ') || 'none'
+    }`
+  }
+
+  /**
+   * Releases gates one at a time, each among all the parked ones, until `p` settles.
+   * A run that has not settled by the deadline fails with what is still pending,
+   * instead of running into the test timeout with no diagnosis.
+   */
   async function drain(s: fc.Scheduler, p: Promise<unknown>): Promise<void> {
     let done = false
     void p.finally(() => {
       done = true
     })
+    const deadline = performance.now() + SETTLE_DEADLINE_MS
     while (!done) {
+      if (performance.now() > deadline) {
+        violation(`never settled within ${SETTLE_DEADLINE_MS} ms: ${unsettled(s)}`)
+        return
+      }
       await quiesce(s)
       if (done) break
       if (s.count() > 0) await s.waitOne()
@@ -1937,7 +1959,12 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
               )
               await drain(s, Promise.allSettled(pending))
               // Work a request left running after its response still parks at gates.
+              const settleBy = performance.now() + SETTLE_DEADLINE_MS
               while (H.waiting.length > 0 || s.count() > 0) {
+                if (performance.now() > settleBy) {
+                  violation(`never settled within ${SETTLE_DEADLINE_MS} ms: ${unsettled(s)}`)
+                  break
+                }
                 handOff(s)
                 await s.waitIdle()
                 await new Promise(resolve => setImmediate(resolve))
