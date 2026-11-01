@@ -1212,8 +1212,11 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
   }
 
   /**
-   * The consent callback's write: the grant sealed with the uid of the CR it read.
-   * The read and the write are apart, as in the callback.
+   * The consent callback's write: the grant sealed with the uid of the CR it read,
+   * with the read and the write apart as in the callback. It reimplements only that
+   * sealing step (key from the live CR, `upsertOAuthGrant` with its uid): the whole
+   * callback needs a signed state, a token exchange and member access, none of which
+   * the slot invariants depend on.
    */
   class Consent implements Step {
     constructor(
