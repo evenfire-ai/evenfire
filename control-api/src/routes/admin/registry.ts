@@ -4168,17 +4168,25 @@ export function createAdminRegistryRouter(
           spec: existingServer.spec ?? {},
         }
 
+        // 2. Fetch new version metadata
+        const entry = await getEntryVersion(body.registryEntryName, body.registryEntryVersion)
+
+        // Install stamps the name the registry resolved (an unscoped curator alias
+        // resolves to its @clerum name), so comparing only the requested name would
+        // refuse upgrading through the same alias it was installed with. CRs written
+        // before that carry the requested name, which still has to match them.
         const installedCatalogId = getCatalogId(existingServer.metadata)
-        if (installedCatalogId && installedCatalogId !== body.registryEntryName) {
+        if (
+          installedCatalogId &&
+          installedCatalogId !== entry.name &&
+          installedCatalogId !== body.registryEntryName
+        ) {
           res.status(409).json({
             error: 'mcp_server_entry_identity_mismatch',
-            reason: `McpServer "${body.serverName}" was installed from "${installedCatalogId}", not "${body.registryEntryName}" — uninstall and install to change entry`,
+            reason: `McpServer "${body.serverName}" was installed from "${installedCatalogId}", not "${entry.name}" — uninstall and install to change entry`,
           })
           return
         }
-
-        // 2. Fetch new version metadata
-        const entry = await getEntryVersion(body.registryEntryName, body.registryEntryVersion)
         // Same reason from the other side: a CR that is not remote-OAuth would get the
         // curated URL and the catalog identity without ever running the remote install.
         if (isRemoteOAuthEntry(entry)) {
