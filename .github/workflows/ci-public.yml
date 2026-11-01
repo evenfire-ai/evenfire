@@ -575,6 +575,15 @@ jobs:
             oauth.legacyGrantLaneFence.realPostgres.integration.test.ts \
             routes.mcpOauth.legacyGrantLaneFence.realPostgres.integration.test.ts \
             oauth.dcrCredential.installIdentity.realPostgres.integration.test.ts \
+            contracts.llmAttention.wire.realPostgres.integration.test.ts \
+            db.llmRetireSeededCatalog.realPostgres.integration.test.ts \
+            routes.adminLlmProviderCatalogPolicy.realPostgres.integration.test.ts \
+            routes.llmCatalogDismissed.realPostgres.integration.test.ts \
+            services.llmAllowlistPublication.realPostgres.integration.test.ts \
+            services.llmCatalogAutoEnable.realPostgres.integration.test.ts \
+            services.llmCatalogSyncFakeDb.concurrency.realPostgres.integration.test.ts \
+            services.llmCatalogSyncFakeDb.differential.realPostgres.integration.test.ts \
+            services.llmProviderCatalogSettings.realPostgres.integration.test.ts \
             db.realPostgresMigration.integration.test.ts
 
       - name: Install gfs-controller dependencies
