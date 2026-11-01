@@ -1953,12 +1953,14 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       restoreClock()
     }
     if (process.env.FC_COVERAGE) process.stderr.write(`${JSON.stringify(coverage, null, 2)}\n`)
-    // Only states the default seed reaches many times over. The rare windows are
-    // pinned by the deterministic scenarios below, so a change in the generator that
-    // stops reaching them cannot pass unnoticed.
+    // A seed replays the same interleavings on any machine, so these counts are fixed
+    // for the default seed: a generator change that stops reaching a state turns this
+    // red. The deterministic scenarios below pin the rare windows on their own.
     for (const reached of [
       'install 201',
       'install 409 server_name_in_use',
+      'install 409 install_in_progress',
+      'ctxEdit 409 conflict',
       'uninstall completed via generic',
       'uninstall completed via registry',
       'install 201 on a slot uninstalled earlier',
@@ -2096,6 +2098,74 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       expect(row.rows.map(r => r.cr_uid)).toEqual([second.crCreates[0].uid])
       expect(H.revoked).toEqual([orphan.rows[0].registration_client_uri])
       expect(await restCheck()).toEqual([])
+    } finally {
+      restoreClock()
+    }
+  })
+
+  it('a second install of a slot whose winner is in flight loses with the code of its registration mode', async () => {
+    const restoreClock = settleClock()
+    try {
+      for (const [slot, mode, loserCode] of [
+        [AU, 'pre-registered', 'install_in_progress'],
+        [BU, 'dcr', 'install_in_progress'],
+        [AU, 'cimd', 'server_name_in_use'],
+      ] as const) {
+        await startRun([])
+        const name = canonical(slot)
+        const atCreate = deferred()
+        const loserDone = deferred()
+        let winner: string | undefined
+        H.hooks = {
+          before: async (what, rec) => {
+            if (rec?.kind !== 'install' || what !== `k8s.create:mcpservers/${name}`) return
+            winner ??= rec.id
+            if (rec.id !== winner) return
+            atCreate.resolve()
+            await loserDone.promise
+          },
+        }
+        // The first install stops right before its CR create: its pending row or its
+        // client Secret exists, its CR does not.
+        const first = new Install(slot, '1.0.0', mode, 'none', 'client-a', false).run()
+        await atCreate.promise
+        await new Install(slot, '1.0.0', mode, 'none', 'client-b', false).run()
+        loserDone.resolve()
+        await first
+        const [a, b] = H.reqs.filter(r => r.kind === 'install')
+        if (mode === 'cimd') {
+          // A CIMD install holds nothing before its CR: the second one wins the create
+          // and the held one loses it.
+          expect([b.status, a.status, a.body?.error]).toEqual([201, 409, loserCode])
+        } else {
+          expect([a.status, b.status, b.body?.error]).toEqual([201, 409, loserCode])
+        }
+        expect(await restCheck()).toEqual([])
+      }
+    } finally {
+      restoreClock()
+    }
+  })
+
+  it('an allowlist edit built on a snapshot the Context has moved past is refused as a conflict', async () => {
+    const restoreClock = settleClock()
+    try {
+      await startRun([{ slot: AU, mode: 0, enable: false }])
+      await new OpenDialog('c2').run()
+      // Another edit moves c2 on; the dialog still holds the old resourceVersion.
+      await new EditContext('c2', PLAIN, true, false, false).run()
+      // The stale edit adds a live server, so the ratchet passes and the resourceVersion decides.
+      await new EditContext('c2', AU, true, true, false).run()
+      const [fresh, stale] = H.reqs.filter(r => r.kind === 'ctxEdit')
+      expect(fresh.status).toBe(200)
+      expect([stale.status, stale.body]).toEqual([
+        409,
+        { error: 'conflict', reason: 'resource_changed' },
+      ])
+      expect(await restCheck()).toEqual([])
+      expect(
+        (H.api.peek('contexts', CTX_NS, 'c2') as StoredObj | undefined)?.spec.mcpServers
+      ).toEqual([PLAIN])
     } finally {
       restoreClock()
     }
