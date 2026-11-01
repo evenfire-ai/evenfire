@@ -291,12 +291,17 @@ interface Req {
   virtualClock?: number
   /** Another install or uninstall of the same server name was in flight at some point. */
   nameOverlap?: boolean
+  /** How the install was asked for, to predict a pre-registered client id clash. */
+  installMode?: Mode
+  clientId?: string
 }
 
 /** A running command, and how many of its gates are waiting for a release. */
 interface Actor {
   id: number
   parked: number
+  /** Another command ran at some point while this one did. */
+  overlapped: boolean
 }
 
 /** A gate reached but not yet handed to the scheduler. */
@@ -374,6 +379,8 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     inflight: new Map<string, Set<Req>>(),
     /** RFC 7592 deletes the authorization server received. */
     revoked: [] as string[],
+    /** Setup runs its commands one after another, with nothing else in flight. */
+    sequential: false,
     api: undefined as unknown as ReturnType<typeof fakeCustomObjectsApiserver>,
     secrets: undefined as unknown as MockGateway,
     app: undefined as unknown as express.Express,
@@ -713,6 +720,30 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     return rec
   }
 
+  /**
+   * The reference model of live CRs: every install that answered 201, keyed by the
+   * name it answered with and the uid it created, minus every uid an uninstall
+   * deleted. Uids are never reused, so the model needs no order between requests.
+   */
+  function modelLive(): Map<string, { uid: string; rec: Req }> {
+    const deleted = new Set(
+      H.reqs.filter(r => r.kind === 'uninstall').flatMap(r => r.crDeletes.map(d => d.uid))
+    )
+    const live = new Map<string, { uid: string; rec: Req }>()
+    for (const rec of H.reqs) {
+      if (rec.kind !== 'install' || rec.status !== 201) continue
+      const name = String(rec.body?.serverName)
+      const create = rec.crCreates.find(c => c.name === name)
+      if (create && !deleted.has(create.uid)) live.set(name, { uid: create.uid, rec })
+    }
+    return live
+  }
+
+  /** Whether `rec` ran with no other command in flight, so its outcome is exact. */
+  function ranAlone(rec: Req): boolean {
+    return rec.actor ? !rec.actor.overlapped : H.sequential
+  }
+
   /** Runs `work` with `rec` registered as in flight on `name`, noting any overlap. */
   async function onName<T>(rec: Req, name: string, work: () => Promise<T>): Promise<T> {
     const others = H.inflight.get(name) ?? new Set<Req>()
@@ -824,7 +855,12 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     ) {}
     async run() {
       const { entry, scope } = this.slot
-      const rec = newReq('install', this.toString(), { slot: this.slot, entry })
+      const rec = newReq('install', this.toString(), {
+        slot: this.slot,
+        entry,
+        installMode: this.mode,
+        clientId: this.clientId,
+      })
       const body: Record<string, unknown> = {
         catalogEntry: {
           name: this.tamper === 'alias' ? entry.name.replace(/^@evenfire\//, '') : entry.name,
@@ -842,6 +878,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       if (this.tamper === 'serverName') body.serverName = 'my-own-name'
       const name = canonical(this.slot)
       const uidBefore = liveUid(name)
+      const model = modelLive()
       await onName(rec, name, () =>
         send(rec, request(H.app).post('/admin/mcp-servers/remote').send(body))
       )
@@ -874,12 +911,40 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
         expectOutcome(rec, [[400, 'catalog_grant_scope_not_allowed']])
       } else if (this.tamper === 'evilUrl') {
         expectOutcome(rec, [[400, 'catalog_base_url_mismatch']])
+      } else if (ranAlone(rec)) {
+        // Alone, the outcome follows from the model: a held slot, a client id another
+        // live pre-registered install of the entry already uses, or a free slot. The
+        // client id must be unique only behind a per-server callback, whose single
+        // redirect URI is what binds the codes to one server.
+        const clash =
+          this.mode === 'pre-registered' &&
+          [...model.values()].some(
+            l =>
+              l.rec.entry === entry &&
+              l.rec.installMode === 'pre-registered' &&
+              l.rec.clientId === this.clientId &&
+              l.rec.body?.callbackVariant === 'per-server'
+          )
+        expectOutcome(rec, [
+          model.has(name)
+            ? [409, 'server_name_in_use']
+            : clash
+              ? [409, 'oauth_client_id_in_use']
+              : [201, undefined],
+        ])
+        bump('install predicted alone')
       } else {
+        // A CIMD install keeps no pending row nor client Secret, so losing a race is
+        // always the CR create: never "in progress".
         expectOutcome(rec, [
           [201, undefined],
           [409, 'server_name_in_use'],
-          [409, 'install_in_progress'],
-          [409, 'oauth_client_id_in_use'],
+          ...(this.mode === 'cimd'
+            ? []
+            : ([[409, 'install_in_progress']] as Array<[number, string]>)),
+          ...(this.mode === 'pre-registered'
+            ? ([[409, 'oauth_client_id_in_use']] as Array<[number, string]>)
+            : []),
         ])
         if (rec.status === 201 && rec.body?.serverName !== canonical(this.slot)) {
           violation(`${rec.label}: installed as ${String(rec.body?.serverName)}`)
@@ -904,8 +969,27 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       const name = canonical(this.slot)
       const path =
         this.via === 'generic' ? `/admin/mcp-servers/${name}` : `/admin/registry/uninstall/${name}`
+      const holder = modelLive().get(name)
       await onName(rec, name, () => send(rec, request(H.app).delete(path)))
-      if (this.via === 'generic') {
+      if (ranAlone(rec)) {
+        // Alone, an installed slot is deleted and answered 200; an empty one is a 404
+        // on the generic route and a "not found" warning on the registry route.
+        if (holder) {
+          expectOutcome(rec, [[200, undefined]])
+          if (!rec.crDeletes.some(d => d.uid === holder.uid)) {
+            violation(`${rec.label}: answered ${rec.status} without deleting ${holder.uid}`)
+          }
+        } else if (this.via === 'generic') {
+          expectOutcome(rec, [[404, undefined]])
+        } else {
+          expectOutcome(rec, [[200, undefined]])
+          const warnings = (rec.body?.warnings as string[] | undefined) ?? []
+          if (rec.crDeletes.length > 0 || !warnings.some(w => w.endsWith('not found'))) {
+            violation(`${rec.label}: an empty slot was not reported as not found`)
+          }
+        }
+        bump('uninstall predicted alone')
+      } else if (this.via === 'generic') {
         expectOutcome(rec, [
           [200, undefined],
           [404, undefined],
@@ -1386,6 +1470,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     H.hooks = undefined
     H.inflight = new Map()
     H.revoked = []
+    H.sequential = false
     await dbPool.query('TRUNCATE oauth_grants, dynamic_clients')
     H.api = fakeCustomObjectsApiserver({
       namespaces: { contexts: CTX_NS, mcpservers: NS },
@@ -1417,6 +1502,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       if (res.status !== 201) throw new Error(`setup: context ${name} ${res.status}`)
     }
     // Through the same commands, unscheduled: their requests join the model as any other.
+    H.sequential = true
     for (const { slot, mode, enable } of initial) {
       const modes = slot.entry.modes
       await new Install(
@@ -1429,6 +1515,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       ).run()
       if (enable) await new EditContext('c2', slot, true, false, false).run()
     }
+    H.sequential = false
     if (H.violations.length > 0) throw new Error(`setup: ${H.violations.join('; ')}`)
   }
 
@@ -1765,7 +1852,8 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
             H.s = s
             const pending: Promise<void>[] = []
             const launch = (st: Step) => {
-              const actor: Actor = { id: ++H.actorSeq, parked: 0 }
+              const actor: Actor = { id: ++H.actorSeq, parked: 0, overlapped: H.actors.size > 0 }
+              for (const other of H.actors) other.overlapped = true
               H.actors.add(actor)
               return actorAls
                 .run(actor, () => st.run())
@@ -1847,6 +1935,8 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       'serverEdit 200',
       'forge 400 catalog_annotations_not_allowed',
       'grant served by the live install',
+      'install predicted alone',
+      'uninstall predicted alone',
     ]) {
       expect(
         coverage[reached] ?? 0,
