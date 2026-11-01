@@ -1041,36 +1041,60 @@ export function useAppController() {
   const logoutAndGetSessionGeneration =
     useCallback(async (): Promise<DesktopLogoutOutcome | null> => {
       let committedOutcome: Extract<DesktopLogoutOutcome, { kind: 'committed' }> | null = null
+      const logoutSessionGeneration = sessionGenerationRef.current
+      const logoutSessionIdentity = activeAuthenticatedSessionIdentityRef.current
+      let newerAcceptedSessionObserved = false
+      const newerAcceptedSessionIsVisible = () => {
+        if (newerAcceptedSessionObserved) return true
+        const currentGeneration = sessionGenerationRef.current
+        const currentIdentity = activeAuthenticatedSessionIdentityRef.current
+        return (
+          (currentGeneration !== null && currentGeneration !== logoutSessionGeneration) ||
+          (currentIdentity !== null && currentIdentity !== logoutSessionIdentity)
+        )
+      }
+      const publishLogoutStatus = (message: string, tone: Tone) => {
+        if (!newerAcceptedSessionIsVisible()) fullSetStatus(message, tone)
+      }
       const reflectSignedOutState = () => {
+        if (newerAcceptedSessionIsVisible()) return
         auth.setIsAuthenticated(false)
         auth.setMe(null)
         auth.setPassword('')
+      }
+      const cleanupErrors: unknown[] = []
+      const attemptCleanup = (cleanup: () => void) => {
+        try {
+          cleanup()
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
       }
       try {
         auth.setBusy(true)
         // Render the signed-out state before awaiting main-process persistence or native cleanup.
         // The main process fences the old lease synchronously when this IPC call begins.
-        reflectSignedOutState()
+        attemptCleanup(reflectSignedOutState)
         catalogRefreshPromiseRef.current = null
-        agentsData.reset()
-        contextsData.reset()
-        mcpServersData.reset()
-        connectorsData.reset()
-        teamsData.reset()
-        resetWorkflowsData()
-        queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
-        queryClient.clear()
+        attemptCleanup(() => agentsData.reset())
+        attemptCleanup(() => contextsData.reset())
+        attemptCleanup(() => mcpServersData.reset())
+        attemptCleanup(() => connectorsData.reset())
+        attemptCleanup(() => teamsData.reset())
+        attemptCleanup(() => resetWorkflowsData())
+        attemptCleanup(() => queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot }))
+        attemptCleanup(() => queryClient.clear())
         activeAuthenticatedSessionIdentityRef.current = null
         authenticatedSessionIdentityRef.current = null
         sessionGenerationRef.current = null
         setPublishedSessionGeneration(null)
-        nav.resetSessionNavigation()
-        auth.setDesktopReleaseStatus(null)
-        setPostPaintDataReady(false)
-        chat.resetChat()
-        notif.resetNotifications()
+        attemptCleanup(() => nav.resetSessionNavigation())
+        attemptCleanup(() => auth.setDesktopReleaseStatus(null))
+        attemptCleanup(() => setPostPaintDataReady(false))
+        attemptCleanup(() => chat.resetChat())
+        attemptCleanup(() => notif.resetNotifications())
         void chat.stopAllActivityStreams().catch(error => {
-          fullSetStatus(
+          publishLogoutStatus(
             `Signed out, but chat cleanup did not complete: ${error instanceof Error ? error.message : String(error)}`,
             'warn'
           )
@@ -1081,11 +1105,20 @@ export function useAppController() {
           if (logoutResult.reason === 'superseded') {
             const sessionState = await window.clerum.auth.getSessionState().catch(() => null)
             if (sessionState?.authenticated) {
+              const sessionIdentity =
+                sessionState.me &&
+                `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+              newerAcceptedSessionObserved = Boolean(
+                sessionState.authenticated &&
+                ((Number.isSafeInteger(sessionState.sessionGeneration) &&
+                  sessionState.sessionGeneration !== logoutSessionGeneration) ||
+                  (sessionIdentity && sessionIdentity !== logoutSessionIdentity))
+              )
               auth.setIsAuthenticated(true)
               auth.setMe(sessionState.me)
             }
           }
-          fullSetStatus(
+          publishLogoutStatus(
             logoutResult.reason === 'superseded'
               ? 'Logout was superseded by a newer session change; no environment handoff was made.'
               : 'Signed out locally, but durable logout was not committed; no environment handoff was made.',
@@ -1095,26 +1128,32 @@ export function useAppController() {
         }
 
         committedOutcome = logoutResult
-        reflectSignedOutState()
-        chat.resetChat()
-        notif.resetNotifications()
-        fullSetStatus(
-          logoutResult.cleanup === 'pending'
-            ? 'Logged out. Secure credential cleanup is pending.'
-            : 'Logged out.',
-          'success'
-        )
+        if (!newerAcceptedSessionIsVisible()) {
+          attemptCleanup(reflectSignedOutState)
+          attemptCleanup(() => chat.resetChat())
+          attemptCleanup(() => notif.resetNotifications())
+        }
+        if (cleanupErrors.length > 0) {
+          const error = cleanupErrors[0]
+          const localCleanupMessage = `Signed out, but some local cleanup failed: ${error instanceof Error ? error.message : String(error)}`
+          publishLogoutStatus(localCleanupMessage, 'warn')
+        } else {
+          publishLogoutStatus(
+            logoutResult.cleanup === 'pending'
+              ? 'Logged out. Secure credential cleanup is pending.'
+              : 'Logged out.',
+            'success'
+          )
+        }
         return logoutResult
       } catch (error) {
         if (committedOutcome) {
           reflectSignedOutState()
-          fullSetStatus(
-            `Signed out, but logout follow-up failed: ${error instanceof Error ? error.message : String(error)}`,
-            'warn'
-          )
+          const followUpMessage = `Signed out, but logout follow-up failed: ${error instanceof Error ? error.message : String(error)}`
+          publishLogoutStatus(followUpMessage, 'warn')
           return committedOutcome
         }
-        fullSetStatus(
+        publishLogoutStatus(
           `Logout failed: ${error instanceof Error ? error.message : String(error)}`,
           'error'
         )
