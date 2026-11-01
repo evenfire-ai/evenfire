@@ -486,7 +486,7 @@ export function remoteMcpManagedLabels(): Record<string, string> {
 export function buildRemoteMcpServerResource(input: {
   serverName: string
   namespace: string
-  /** Already kernel-validated; persisted literally. */
+  /** Already checked by the https + public-host + non-blocked-IP rule; persisted literally. */
   baseUrl: string
   oauth: RemoteOAuthSpec
   /** Catalog provenance, set only by a catalog install; a manual install carries none. */
