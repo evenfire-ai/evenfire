@@ -1,29 +1,24 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { Button } from '@components/Common'
 
 export interface GfsMoveConfirmRequest {
   /** Sanitizable display facts of the moving folder. */
   sourceName: string
   destinationName: string
-  /** Suggested numbered-name candidate, when destination names are known. */
-  suggestedName?: string
-  /** Numbered renaming is allowed (source-resource write proved). */
-  canRename: boolean
 }
 
 export interface GfsMoveConfirmDialogProps {
   request: GfsMoveConfirmRequest
   busy?: boolean
-  onConfirm: (options: { allowNumberedRename: boolean }) => void
+  onConfirm: () => void
   onCancel: () => void
 }
 
 /**
- * The ONE confirmation for folder moves (rev-2 §1): explains the
- * inherited-access impact and records the conflict naming policy in the same
- * dialog, so no second automatic prompt follows the drop. Files move without
- * confirmation. Escape/Cancel end the admission before dispatch; once the
- * PATCH is dispatched it cannot be recalled.
+ * The ONE confirmation for folder moves (rev-2 §1) discloses the inherited-
+ * access impact. Dragging does not consent to a numbered rename. Escape/Cancel
+ * end the admission before dispatch; once the PATCH is dispatched it cannot
+ * be recalled.
  */
 export function GfsMoveConfirmDialog({
   request,
@@ -31,7 +26,6 @@ export function GfsMoveConfirmDialog({
   onConfirm,
   onCancel,
 }: GfsMoveConfirmDialogProps) {
-  const [allowNumberedRename, setAllowNumberedRename] = useState(false)
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null)
   const dialogRef = useRef<HTMLElement | null>(null)
 
@@ -126,31 +120,12 @@ export function GfsMoveConfirmDialog({
             sharing entries stay with their items — including any access they grant — and you may
             lose access.
           </p>
-          {request.canRename ? (
-            <label className="da-gfs-move-confirm-dialog__rename-toggle">
-              <input
-                checked={allowNumberedRename}
-                disabled={busy}
-                onChange={event => setAllowNumberedRename(event.target.checked)}
-                type="checkbox"
-              />
-              <span>
-                {request.suggestedName
-                  ? `Use a numbered name if needed (e.g. “${request.suggestedName}”)`
-                  : 'Use a numbered name if needed'}
-              </span>
-            </label>
-          ) : null}
         </div>
         <footer className="da-gfs-move-confirm-dialog__actions">
           <Button disabled={busy} onClick={onCancel} ref={cancelButtonRef} variant="ghost">
             Cancel
           </Button>
-          <Button
-            disabled={busy}
-            onClick={() => onConfirm({ allowNumberedRename })}
-            variant="solid"
-          >
+          <Button disabled={busy} onClick={onConfirm} variant="solid">
             {busy ? 'Moving…' : 'Move'}
           </Button>
         </footer>

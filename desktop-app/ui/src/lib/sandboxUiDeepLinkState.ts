@@ -37,6 +37,31 @@ export function removePendingSandboxUiDeepLink(
   return current.filter(item => item.link.id !== linkId)
 }
 
+export function clearSandboxUiDeepLinkProcessingOwner(
+  currentOwnerId: number | null,
+  completedLinkId: number
+): number | null {
+  return currentOwnerId === completedLinkId ? null : currentOwnerId
+}
+
+export function isSandboxUiDeepLinkProcessingOwner(
+  currentOwnerId: number | null,
+  linkId: number
+): boolean {
+  return currentOwnerId === linkId
+}
+
+export function getSandboxUiDeepLinkMetadataIdsToPrune(
+  metadataIds: Iterable<number>,
+  pendingLinkIds: Iterable<number>,
+  processingOwnerId: number | null
+): number[] {
+  const pendingIds = new Set(pendingLinkIds)
+  return [...new Set(metadataIds)].filter(
+    linkId => linkId !== processingOwnerId && !pendingIds.has(linkId)
+  )
+}
+
 export function isPendingSandboxUiDeepLinkAwaitingConfirmation(
   pending: PendingSandboxUiDeepLink,
   currentIdentity: string | null
@@ -119,9 +144,19 @@ export function failPendingSandboxUiDeepLink(
       ? {
           ...item,
           failedMessage: message,
+          failedMessageDismissed: false,
           nextRetryAt: undefined,
         }
       : item
+  )
+}
+
+export function dismissPendingSandboxUiDeepLinkFailure(
+  current: PendingSandboxUiDeepLink[],
+  linkId: number
+): PendingSandboxUiDeepLink[] {
+  return current.map(item =>
+    item.link.id === linkId && item.failedMessage ? { ...item, failedMessageDismissed: true } : item
   )
 }
 
@@ -134,6 +169,7 @@ export function resetPendingSandboxUiDeepLinkFailure(
       ? {
           ...item,
           failedMessage: undefined,
+          failedMessageDismissed: false,
           nextRetryAt: undefined,
           retryCount: 0,
         }

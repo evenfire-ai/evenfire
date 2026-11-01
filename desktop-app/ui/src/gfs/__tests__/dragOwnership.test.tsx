@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
     isAuthenticated: true,
     me: { id: 'user-1', teamId: 'team-1' },
     runtimeConfigState: { envKey: 'env-1' },
+    sessionGeneration: 0,
   },
 }))
 vi.mock('@hooks/domain/useGfsBrowserController', () => ({
@@ -37,6 +38,7 @@ function baseController() {
     current: null,
     crumbs: [],
     sessionScope: 'env-1:user-1:team-1',
+    sessionGeneration: 0,
     accessibleResources: [],
     items: [],
     affordances: null,
@@ -191,6 +193,7 @@ for (const surface of ['sidebar', 'files'] as const) {
       Object.defineProperty(window, 'clerum', {
         configurable: true,
         value: {
+          auth: { getSessionGeneration: vi.fn(async () => 0) },
           gfs: {
             listChildren: vi.fn(async () =>
               listChildrenPage([
@@ -510,7 +513,10 @@ for (const surface of ['sidebar', 'files'] as const) {
         'target',
         expect.any(Number),
         undefined,
-        'other-parent'
+        'other-parent',
+        h.ctrl.sessionScope,
+        true,
+        0
       )
     })
 
@@ -525,7 +531,12 @@ for (const surface of ['sidebar', 'files'] as const) {
       h.start()
       h.drop()
       await waitFor(() =>
-        expect(h.ctrl.handleAuthorityFailure).toHaveBeenCalledWith(message, 'operation')
+        expect(h.ctrl.handleAuthorityFailure).toHaveBeenCalledWith(
+          message,
+          'operation',
+          h.ctrl.sessionScope,
+          h.ctrl.sessionGeneration
+        )
       )
       expect(h.moveResource).not.toHaveBeenCalled()
       expect(h.toast).not.toHaveBeenCalled()
@@ -554,8 +565,14 @@ for (const surface of ['sidebar', 'files'] as const) {
       h.drop()
       await waitFor(() => expect(h.ctrl.convergeCommittedMove).toHaveBeenCalled())
       expect(h.ctrl.convergeCommittedMove).toHaveBeenCalledWith(
-        { resourceId: 'source', destinationId: 'target', oldParentId: 'grand' },
-        { version: expect.any(Number) }
+        {
+          resourceId: 'source',
+          destinationId: 'target',
+          oldParentId: 'grand',
+          expectedSessionGeneration: 0,
+        },
+        { version: expect.any(Number) },
+        h.ctrl.sessionScope
       )
       expect(h.toast).toHaveBeenCalledWith('Moved Source to Target', 'success')
     })
@@ -579,6 +596,7 @@ describe('files surface drop admission (RP-002)', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
         gfs: {
           listChildren: vi.fn(async () => listChildrenPage([])),
           affordances,
@@ -611,7 +629,12 @@ describe('files surface drop admission (RP-002)', () => {
     // The session is revoked and the gesture ends: no confirmation, no
     // dispatch, nothing announced.
     await waitFor(() =>
-      expect(ctrl.handleAuthorityFailure).toHaveBeenCalledWith(message, 'operation')
+      expect(ctrl.handleAuthorityFailure).toHaveBeenCalledWith(
+        message,
+        'operation',
+        ctrl.sessionScope,
+        ctrl.sessionGeneration
+      )
     )
     expect(screen.queryByRole('dialog', { name: 'Move folder Source to Target' })).toBeNull()
     expect(moveResource).not.toHaveBeenCalled()
