@@ -64,10 +64,21 @@ CLERUM_MODEL_PROVIDER=openai     # optional with one key: openai | claude | zai 
 > `ZAI_API_KEY`, `BAILIAN_API_KEY`, uses that provider's default model, and logs
 > the choice. With several keys the first one in that order wins, so set
 > `CLERUM_MODEL_PROVIDER` when you want another. `CLERUM_MODEL_NAME` without
-> `CLERUM_MODEL_PROVIDER` stops setup with an error naming both, and so does a
-> pair that is not enabled in the model allowlist. With no key at all, the
-> seeded agent gets `openai/gpt-5.4-mini` with placeholder credentials and will
-> not reply.
+> `CLERUM_MODEL_PROVIDER` stops setup with an error naming both. With no key at
+> all, the seeded agent gets `openai/gpt-5.4-mini` with placeholder credentials
+> and will not reply.
+
+> ⚠️ **Model allowlist:** no model catalog ships with the install. control-api
+> fetches it from models.dev at startup, so setup needs outbound access to
+> models.dev, and it waits for that first sync (up to 3 minutes,
+> `CLERUM_CATALOG_WAIT_SECONDS`). When the catalog did not enable the agent's
+> model, setup adds or enables it through the admin API. That is the case for
+> the zai default `glm-5.1`, which models.dev does not list, and for Bailian,
+> whose models are never auto-enabled. Setup then stops if the model is still
+> not enabled. A model added this way has no price, so cost budgets do not
+> limit it until you price it under **Cost → LLM prices**. Details, warning
+> codes, and the reused-DB and no-egress cases:
+> [LLM providers § 4.7](../llm-providers/README.md#47-local-minikube-make-minikube-setup).
 
 ## 2. Set up the cluster (one command)
 

@@ -994,6 +994,12 @@ jobs:
       - name: Test full-setup Host model resolution and catalog check
         run: bash scripts/tests/test-minikube-host-model.sh
 
+      - name: Test the seed's LLM model ensure through the admin API
+        run: bash scripts/tests/test-e2e-llm-model-ensure.sh
+
+      - name: Test the E2E LLM model manifest covers every E2E model literal
+        run: bash scripts/tests/test-e2e-llm-models-manifest.sh
+
       - name: Test release image resolution
         run: bash scripts/tests/test-resolve-release-images.sh
 
