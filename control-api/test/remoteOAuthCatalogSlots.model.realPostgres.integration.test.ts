@@ -1699,7 +1699,18 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
             .map(w => ({ rec, w }))
         )
         const lastAdd = adds.sort((a, b) => b.w.seq - a.w.seq)[0]
-        if (lastAdd && addedInsideStripWindow(lastAdd.rec, lastAdd.w, name)) {
+        // An uninstall of the name that listed the Contexts after that add and deleted
+        // a CR had to strip it; the window of an earlier uninstall no longer explains it.
+        const strippedLater =
+          lastAdd &&
+          H.reqs.some(
+            u =>
+              u.kind === 'uninstall' &&
+              u.ctxLists.length > 0 &&
+              u.ctxLists[0] > lastAdd.w.seq &&
+              u.crDeletes.some(d => d.name === name)
+          )
+        if (lastAdd && !strippedLater && addedInsideStripWindow(lastAdd.rec, lastAdd.w, name)) {
           bump('dangling name left by the strip window')
           continue
         }
@@ -1882,6 +1893,17 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       expect(H.reqs.find(r => r.kind === 'uninstall')?.status).toBe(200)
       expect(await restCheck()).toEqual([])
       expect(coverage['dangling name left by the strip window']).toBe(before + 1)
+
+      // Reinstalled, the name in c2 is live again; the next uninstall must strip it.
+      await new Install(AU, '1.0.0', 'cimd', 'none', 'client-a', false).run()
+      await new Uninstall(AU, 'generic', false).run()
+      expect(H.reqs.filter(r => r.kind !== 'ctxRead').map(r => r.status)).toEqual([
+        201, 200, 200, 201, 200,
+      ])
+      expect(await restCheck()).toEqual([])
+      expect(
+        (H.api.peek('contexts', CTX_NS, 'c2') as StoredObj | undefined)?.spec.mcpServers
+      ).toEqual([])
     } finally {
       restoreClock()
     }
