@@ -1533,6 +1533,16 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     }
     if (!byName.has(PLAIN)) violation('the manual server disappeared')
 
+    // A catalog install neither reads nor writes an allowlist: enabling the server in
+    // a Context is a separate admin decision, and listing them costs every install.
+    for (const rec of H.reqs) {
+      if (rec.kind === 'install' && (rec.ctxWrites.length > 0 || rec.ctxLists.length > 0)) {
+        violation(
+          `${rec.label}: listed Contexts ${rec.ctxLists.length} time(s), wrote ${rec.ctxWrites.length}`
+        )
+      }
+    }
+
     // A losing install never deletes what it did not create.
     for (const rec of H.reqs.filter(r => r.kind === 'install')) {
       const own = new Set(rec.crCreates.map(c => c.uid))
