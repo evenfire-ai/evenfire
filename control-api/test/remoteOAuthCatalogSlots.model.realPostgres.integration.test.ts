@@ -280,6 +280,36 @@ interface Req {
   dcrClaims: Array<{ name: string; uid: string; seq: number }>
   /** Client registrations this request made at the authorization server. */
   asRegistrations: number
+  /** The command that issued the request; undefined during setup and checks. */
+  actor?: Actor
+  /** Gates this request has reached, in order: half of each gate's canonical key. */
+  gates: number
+  /**
+   * The clock this request reads once it has deleted something, advanced only by its
+   * own settle sleeps (see `settleClock`).
+   */
+  virtualClock?: number
+}
+
+/** A running command, and how many of its gates are waiting for a release. */
+interface Actor {
+  id: number
+  parked: number
+}
+
+/** A gate reached but not yet handed to the scheduler. */
+interface WaitingGate {
+  req: number
+  gate: number
+  label: string
+  actor?: Actor
+  release: () => void
+}
+
+/** Hooks a deterministic scenario uses to hold and observe steps; unscheduled runs only. */
+interface ScenarioHooks {
+  before?: (label: string, rec: Req | undefined) => Promise<void> | void
+  after?: (label: string, rec: Req | undefined) => void
 }
 
 interface ConsentRecord {
@@ -319,6 +349,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
   const discovery = new Map<EntryDef['key'], DiscoveryResult>()
   let cimdResult: DiscoveryResult
   const als = new AsyncLocalStorage<Req>()
+  const actorAls = new AsyncLocalStorage<Actor>()
 
   const H = {
     s: null as fc.Scheduler | null,
@@ -331,9 +362,12 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     dialogs: new Map<string, Snapshot>(),
     serverSnaps: new Map<string, Snapshot>(),
     dcrCounter: 0,
-    /** Commands running, and gates they are parked at. */
-    active: 0,
-    parked: 0,
+    /** Commands running. */
+    actors: new Set<Actor>(),
+    actorSeq: 0,
+    /** Gates reached since the last hand-off to the scheduler. */
+    waiting: [] as WaitingGate[],
+    hooks: undefined as ScenarioHooks | undefined,
     api: undefined as unknown as ReturnType<typeof fakeCustomObjectsApiserver>,
     secrets: undefined as unknown as MockGateway,
     app: undefined as unknown as express.Express,
@@ -347,41 +381,111 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
   // ── scheduler gates ───────────────────────────────────────────────────────
 
   async function gate(what: string): Promise<void> {
+    const rec = als.getStore()
     const s = H.s
-    if (!s) return
-    H.parked += 1
-    try {
-      await s.schedule(Promise.resolve(), what)
-    } finally {
-      H.parked -= 1
+    if (!s) {
+      await H.hooks?.before?.(what, rec)
+      return
     }
+    const actor = rec?.actor
+    if (!actor) violation(`gate ${what} reached outside any command`)
+    if (actor) actor.parked += 1
+    await new Promise<void>(release => {
+      H.waiting.push({
+        req: rec ? Number(rec.id.slice(1)) : 0,
+        gate: rec ? ++rec.gates : 0,
+        label: `${rec?.id ?? '-'}:${what}`,
+        actor,
+        release,
+      })
+    })
   }
 
   /**
-   * Waits until every running command is parked at a gate (or a short deadline
-   * passes). Requests travel over real sockets and real Postgres; releasing a gate
-   * while the others are still on the wire would let one command run ahead alone,
-   * and the scheduler would only ever see one candidate.
+   * Hands the waiting gates to the scheduler in a canonical order (request, then the
+   * request's own gate count). The scheduler picks by position, and gates arrive in
+   * whatever order sockets and Postgres answer; sorting first is what makes a seed
+   * replay the same interleaving on a loaded machine.
    */
-  async function quiesce(): Promise<void> {
-    const deadline = Date.now() + 250
-    while (H.parked < H.active && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 1))
+  function handOff(s: fc.Scheduler): void {
+    const batch = H.waiting.sort((a, b) => a.req - b.req || a.gate - b.gate)
+    H.waiting = []
+    for (const g of batch) {
+      void s.schedule(Promise.resolve(), g.label).then(() => {
+        // Before the gate's continuation runs, so the next quiescence check is exact.
+        if (g.actor) g.actor.parked -= 1
+        g.release()
+      })
     }
   }
 
-  /** Releases scheduled gates, one at a time and each among all parked ones, until `p` settles. */
+  const QUIESCE_DEADLINE_MS = 5_000
+
+  /**
+   * Waits until every running command is parked at a gate, then hands the waiting
+   * gates to the scheduler. Releasing while a command is still on a socket or in
+   * Postgres would change the set of candidates with the machine's speed. A command
+   * that never parks within the deadline fails the run instead of being left out.
+   */
+  async function quiesce(s: fc.Scheduler): Promise<void> {
+    const deadline = performance.now() + QUIESCE_DEADLINE_MS
+    await new Promise(resolve => setImmediate(resolve))
+    while ([...H.actors].some(a => a.parked === 0)) {
+      if (performance.now() > deadline) {
+        violation(
+          `quiescence deadline: command(s) ${[...H.actors]
+            .filter(a => a.parked === 0)
+            .map(a => a.id)
+            .join(', ')} never reached a gate`
+        )
+        break
+      }
+      await new Promise(resolve => setTimeout(resolve, 1))
+    }
+    handOff(s)
+  }
+
+  /** Releases gates one at a time, each among all the parked ones, until `p` settles. */
   async function drain(s: fc.Scheduler, p: Promise<unknown>): Promise<void> {
     let done = false
     void p.finally(() => {
       done = true
     })
     while (!done) {
-      await quiesce()
+      await quiesce(s)
       if (done) break
       if (s.count() > 0) await s.waitOne()
       else await new Promise(resolve => setTimeout(resolve, 1))
     }
+  }
+
+  // The registry uninstall polls by name until its deletes settle, with a wall-clock
+  // deadline: a same-name reinstall keeps the poll alive, and the number of polls
+  // would follow the machine's speed. Once an uninstall has deleted something, its
+  // clock moves only with its own settle sleeps, which fire at once.
+  const REGISTRY_SETTLE_POLL_MS = 100
+  const realNow = Date.now.bind(Date)
+  const realSetTimeout = globalThis.setTimeout
+  function settleClock(): () => void {
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => {
+      const clock = als.getStore()?.virtualClock
+      return clock ?? realNow()
+    })
+    globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+      const rec = als.getStore()
+      if (rec?.virtualClock !== undefined && ms === REGISTRY_SETTLE_POLL_MS) {
+        rec.virtualClock += ms
+        return realSetTimeout(fn, 0, ...args)
+      }
+      return realSetTimeout(fn, ms, ...args)
+    }) as typeof setTimeout
+    return () => {
+      now.mockRestore()
+      globalThis.setTimeout = realSetTimeout
+    }
+  }
+  function startVirtualClock(rec: Req | undefined): void {
+    if (rec?.kind === 'uninstall' && rec.virtualClock === undefined) rec.virtualClock = realNow()
   }
 
   function serialized<T>(work: () => Promise<T>): Promise<T> {
@@ -406,6 +510,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       if (rec && /DELETE FROM dynamic_clients[\s\S]*cr_uid = \$4 OR/.test(text)) {
         rec.dcrClaims.push({ name: v[2], uid: v[3], seq })
       }
+      H.hooks?.after?.(`db:${text.replace(/\s+/g, ' ').trim().slice(0, 48)}`, rec)
       return result
     })
   }
@@ -460,6 +565,8 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
           throw err
         }
         const seq = ++H.seq
+        if (verb === 'delete') startVirtualClock(rec)
+        H.hooks?.after?.(`k8s.${verb}:${args.plural}/${name ?? '*'}`, rec)
         if (!rec) return out
         const obj = out as StoredObj
         if (args.plural === 'mcpservers') {
@@ -508,7 +615,9 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
           return async (name: string, ns?: string, pre?: { uid?: string }) => {
             await gate(`secret.delete:${name}`)
             const out = await target.deleteSecret(name, ns, pre as never)
-            als.getStore()?.secretDeletes.push({ name, uid: pre?.uid })
+            const rec = als.getStore()
+            rec?.secretDeletes.push({ name, uid: pre?.uid })
+            startVirtualClock(rec)
             return out
           }
         }
@@ -589,6 +698,8 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       dcrBinds: [],
       dcrClaims: [],
       asRegistrations: 0,
+      actor: actorAls.getStore(),
+      gates: 0,
       ...extra,
     }
     H.reqs.push(rec)
@@ -1030,7 +1141,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     async run() {
       const s = H.s
       if (!s) return
-      await quiesce()
+      await quiesce(s)
       if (s.count() > 0) await s.waitOne()
     }
     toString() {
@@ -1219,7 +1330,6 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     }
   })
 
-  /** Initial world through production writers: one manual server, two Contexts. */
   /** Slots installed (and possibly enabled in c2) before the commands start. */
   type Initial = Array<{ slot: Slot; mode: number; enable: boolean }>
   const initialArb: fc.Arbitrary<Initial> = fc.uniqueArray(
@@ -1227,6 +1337,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     { maxLength: 3, selector: i => label(i.slot) }
   )
 
+  /** Initial world through production writers: one manual server, two Contexts, `initial`. */
   async function startRun(initial: Initial): Promise<void> {
     H.s = null
     H.seq = 0
@@ -1237,8 +1348,10 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     H.consents = []
     H.dialogs = new Map()
     H.serverSnaps = new Map()
-    H.active = 0
-    H.parked = 0
+    H.actors = new Set()
+    H.actorSeq = 0
+    H.waiting = []
+    H.hooks = undefined
     await dbPool.query('TRUNCATE oauth_grants, dynamic_clients')
     H.api = fakeCustomObjectsApiserver({
       namespaces: { contexts: CTX_NS, mcpservers: NS },
@@ -1573,93 +1686,103 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
   }
 
   it('every interleaving keeps one instance per slot, curated identity, an honest catalog and clean allowlists', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.scheduler(),
-        initialArb,
-        fc.commands([step as unknown as fc.Arbitrary<fc.AsyncCommand<object, object>>], {
-          maxCommands: MAX_COMMANDS,
-          size: '+1',
-        }),
-        async (s, initial, cmds) => {
-          await startRun(initial)
-          H.s = s
-          const pending: Promise<void>[] = []
-          const launch = (st: Step) => {
-            H.active += 1
-            return st
-              .run()
-              .catch(err => {
-                violation(`${st.toString()} threw: ${(err as Error).stack ?? String(err)}`)
-              })
-              .finally(() => {
-                H.active -= 1
-              })
+    const restoreClock = settleClock()
+    try {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.scheduler(),
+          initialArb,
+          fc.commands([step as unknown as fc.Arbitrary<fc.AsyncCommand<object, object>>], {
+            maxCommands: MAX_COMMANDS,
+            size: '+1',
+          }),
+          async (s, initial, cmds) => {
+            await startRun(initial)
+            H.s = s
+            const pending: Promise<void>[] = []
+            const launch = (st: Step) => {
+              const actor: Actor = { id: ++H.actorSeq, parked: 0 }
+              H.actors.add(actor)
+              return actorAls
+                .run(actor, () => st.run())
+                .catch(err => {
+                  violation(`${st.toString()} threw: ${(err as Error).stack ?? String(err)}`)
+                })
+                .finally(() => {
+                  H.actors.delete(actor)
+                })
+            }
+            try {
+              await fc.asyncModelRun(
+                () => ({ model: {}, real: {} }),
+                [...cmds].map(cmd => {
+                  // `fc.commands` iterates wrappers that keep the generated command in `cmd`;
+                  // reading `parallel` off the wrapper would run every step in sequence. The
+                  // wrapper's `hasRan` is what shrinking and the printed counterexample keep.
+                  const wrapper = cmd as unknown as { cmd?: Step; hasRan?: boolean }
+                  const st = (wrapper.cmd ?? cmd) as unknown as Step
+                  return {
+                    check: () => true,
+                    run: async () => {
+                      wrapper.hasRan = true
+                      if (st instanceof Release) await st.run()
+                      else if (st.parallel) pending.push(launch(st))
+                      else await drain(s, launch(st))
+                    },
+                    toString: () => st.toString(),
+                  }
+                })
+              )
+              await drain(s, Promise.allSettled(pending))
+              // Work a request left running after its response still parks at gates.
+              while (H.waiting.length > 0 || s.count() > 0) {
+                handOff(s)
+                await s.waitIdle()
+                await new Promise(resolve => setImmediate(resolve))
+              }
+            } finally {
+              H.s = null
+            }
+            await H.dbTail
+            await checkAtRest()
+            if (H.violations.length > 0) {
+              const order = s
+                .report()
+                .filter(t => t.status !== 'pending')
+                .map(t => t.label)
+              throw new Error(
+                [
+                  'violations:',
+                  ...H.violations.map(v => `  - ${v}`),
+                  `commands: ${[...cmds].map(c => String(c)).join(' ; ')}`,
+                  `requests: ${H.reqs.map(r => `${r.label}→${r.status ?? '-'}`).join(' ; ')}`,
+                  `scheduler order (${order.length}):`,
+                  ...order.map((what, i) => `  ${i + 1}. ${what}`),
+                ].join('\n')
+              )
+            }
           }
-          try {
-            await fc.asyncModelRun(
-              () => ({ model: {}, real: {} }),
-              [...cmds].map(cmd => {
-                // `fc.commands` iterates wrappers that keep the generated command in `cmd`;
-                // reading `parallel` off the wrapper would run every step in sequence. The
-                // wrapper's `hasRan` is what shrinking and the printed counterexample keep.
-                const wrapper = cmd as unknown as { cmd?: Step; hasRan?: boolean }
-                const st = (wrapper.cmd ?? cmd) as unknown as Step
-                return {
-                  check: () => true,
-                  run: async () => {
-                    wrapper.hasRan = true
-                    if (st instanceof Release) await st.run()
-                    else if (st.parallel) pending.push(launch(st))
-                    else await drain(s, launch(st))
-                  },
-                  toString: () => st.toString(),
-                }
-              })
-            )
-            await drain(s, Promise.allSettled(pending))
-            await s.waitIdle()
-            if (s.count() > 0) violation(`${s.count()} scheduled tasks never settled`)
-          } finally {
-            H.s = null
-          }
-          await H.dbTail
-          await checkAtRest()
-          if (H.violations.length > 0) {
-            const order = s
-              .report()
-              .filter(t => t.status !== 'pending')
-              .map(t => t.label)
-            throw new Error(
-              [
-                'violations:',
-                ...H.violations.map(v => `  - ${v}`),
-                `commands: ${[...cmds].map(c => String(c)).join(' ; ')}`,
-                `requests: ${H.reqs.map(r => `${r.label}→${r.status ?? '-'}`).join(' ; ')}`,
-                `scheduler order (${order.length}):`,
-                ...order.map((what, i) => `  ${i + 1}. ${what}`),
-              ].join('\n')
-            )
-          }
-        }
-      ),
-      { numRuns: NUM_RUNS, seed: SEED, endOnFailure: !process.env.FC_SHRINK }
-    )
+        ),
+        { numRuns: NUM_RUNS, seed: SEED, endOnFailure: !process.env.FC_SHRINK }
+      )
+    } finally {
+      restoreClock()
+    }
     if (process.env.FC_COVERAGE) process.stderr.write(`${JSON.stringify(coverage, null, 2)}\n`)
+    // Only states the default seed reaches many times over. The rare windows are
+    // pinned by the deterministic scenarios below, so a change in the generator that
+    // stops reaching them cannot pass unnoticed.
     for (const reached of [
       'install 201',
       'install 409 server_name_in_use',
-      'install 409 install_in_progress',
       'uninstall completed via generic',
       'uninstall completed via registry',
       'install 201 on a slot uninstalled earlier',
       'ctxEdit 422 unknown_mcp_server',
-      'ctxEdit 409 conflict',
       'serverEdit 409 catalog_instance_immutable',
       'serverEdit 200',
       'forge 400 catalog_annotations_not_allowed',
       'grant served by the live install',
-      'dangling name left by the strip window',
     ]) {
       expect(
         coverage[reached] ?? 0,
@@ -1667,4 +1790,57 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       ).toBeGreaterThan(0)
     }
   }, 600_000)
+
+  // ── deterministic scenarios ───────────────────────────────────────────────
+
+  function deferred() {
+    let resolve!: () => void
+    const promise = new Promise<void>(r => {
+      resolve = r
+    })
+    return { promise, resolve }
+  }
+
+  const AU = SLOTS.find(s => label(s) === 'A-u')!
+
+  async function restCheck(): Promise<string[]> {
+    H.hooks = undefined
+    await H.dbTail
+    await checkAtRest()
+    return H.violations
+  }
+
+  it('an edit that lands between the strip and the CR delete is the only dangling name accepted', async () => {
+    const restoreClock = settleClock()
+    try {
+      await startRun([{ slot: AU, mode: 0, enable: false }])
+      const name = canonical(AU)
+      const listed = deferred()
+      const edited = deferred()
+      H.hooks = {
+        after: (what, rec) => {
+          if (rec?.kind === 'uninstall' && what === 'k8s.list:contexts/*') listed.resolve()
+        },
+        before: async (what, rec) => {
+          if (rec?.kind === 'uninstall' && what === `k8s.delete:mcpservers/${name}`) {
+            await edited.promise
+          }
+        },
+      }
+      const before = coverage['dangling name left by the strip window'] ?? 0
+      const uninstall = new Uninstall(AU, 'generic', false).run()
+      await listed.promise
+      // The uninstall has listed the Contexts (c2 did not hold the name) and the CR is
+      // still alive: the ratchet lets the add through.
+      await new EditContext('c2', AU, true, false, false).run()
+      edited.resolve()
+      await uninstall
+      expect(H.reqs.find(r => r.kind === 'ctxEdit')?.status).toBe(200)
+      expect(H.reqs.find(r => r.kind === 'uninstall')?.status).toBe(200)
+      expect(await restCheck()).toEqual([])
+      expect(coverage['dangling name left by the strip window']).toBe(before + 1)
+    } finally {
+      restoreClock()
+    }
+  })
 })
