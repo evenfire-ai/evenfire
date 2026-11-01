@@ -108,6 +108,7 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
     listEnabledGroupedByProvider: typeof import('../src/services/llmAllowedModels.js').listEnabledGroupedByProvider
     createLlmPrice: typeof import('../src/services/llmPrices.js').createLlmPrice
     setProviderAutoEnable: typeof import('../src/services/llmProviderCatalogSettings.js').setProviderAutoEnable
+    listProviderCatalogPolicy: typeof import('../src/services/llmProviderCatalogSettings.js').listProviderCatalogPolicy
     withTransaction: typeof import('../src/db.js').withTransaction
     Writer: typeof import('../src/services/llmAllowedModelsConfigMap.js').LlmAllowedModelsConfigMapWriter
   }
@@ -142,6 +143,7 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
       listEnabledGroupedByProvider: allowlistMod.listEnabledGroupedByProvider,
       createLlmPrice: pricesMod.createLlmPrice,
       setProviderAutoEnable: policyMod.setProviderAutoEnable,
+      listProviderCatalogPolicy: policyMod.listProviderCatalogPolicy,
       withTransaction: dbMod.withTransaction,
       Writer: cmMod.LlmAllowedModelsConfigMapWriter,
     }
@@ -280,6 +282,10 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
         .map(r => pick(r, ['provider', 'auto_enable', 'updated_by']))
         .sort((a, b) => byCodeUnits(String(a.provider), String(b.provider))),
       audit: t.audit.map(r => `${r.actor} ${r.action} ${r.provider}/${r.model}`).sort(byCodeUnits),
+      // What the GET and the sync derive from the stored rows, NULL included.
+      policy: (await mod.listProviderCatalogPolicy(side.pool)).map(
+        ({ updated_at: _at, ...rest }) => rest
+      ),
       lastRun: await lastRun(side),
       configMap: configMapOf(side.cluster),
     }
@@ -515,6 +521,20 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
     const shrunk = withoutFirst(withoutFirst(full, 'claude', 3), 'groq', 2)
     await both('live, some entries gone', side => sync(side, shrunk))
     await both('live again (idempotent)', side => sync(side, shrunk))
+
+    // Reset both overrides (NULL), and one provider that never had a row.
+    await both('reset deepseek to default', side =>
+      mod.setProviderAutoEnable('deepseek', null, 'admin', side.pool)
+    )
+    await both('reset groq to default', side =>
+      mod.setProviderAutoEnable('groq', null, 'admin', side.pool)
+    )
+    await both('reset openrouter (no override yet)', side =>
+      mod.setProviderAutoEnable('openrouter', null, 'admin', side.pool)
+    )
     await both('live with the deleted and renamed pairs back', side => sync(side, full))
+    await both('override again after a reset', side =>
+      mod.setProviderAutoEnable('groq', true, 'admin', side.pool)
+    )
   }, 120_000)
 })

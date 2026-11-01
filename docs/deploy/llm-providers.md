@@ -152,7 +152,9 @@ cannot decide (see "Offline installations"). Whether an inserted row starts
   `perplexity`) are ON by default; aggregators and clouds (`openrouter`,
   `bedrock`, `vertex`, `azure`, `together`, `fireworks`, `deepinfra`, `nebius`,
   `novita`, `groq`, `cerebras`, `bailian`) are OFF. An operator can override
-  each one (`PUT /admin/llm-providers/:provider/catalog-policy`). The policy only
+  each one (`PUT /admin/llm-providers/:provider/catalog-policy` with
+  `{"auto_enable": true|false}`), and reset it with `{"auto_enable": null}`, after
+  which the provider follows its code default again. The policy only
   decides for models inserted **after** the change; it never enables or disables
   an existing row.
 - **Eligibility.** The catalog must list text output and `tool_call: true`, the

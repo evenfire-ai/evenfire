@@ -103,7 +103,8 @@ interface StoredPriceRow extends Required<FakePriceRow> {
 
 export interface FakeSettingsRow {
   provider: string
-  auto_enable: boolean
+  /** NULL: no override, the provider follows its code default. */
+  auto_enable: boolean | null
   updated_by: string | null
   updated_at: string
 }
@@ -136,7 +137,7 @@ export interface FakeDbSeed {
   dismissed?: string[]
   prices?: FakePriceRow[]
   /** `llm_provider_catalog_settings` overrides. */
-  settings?: Record<string, boolean>
+  settings?: Record<string, boolean | null>
 }
 
 /** Where a statement was issued from, for interleaving and for the history. */
@@ -909,9 +910,16 @@ export function makeFakeDb(
           hold: true,
           value: undefined,
         }))
+        // node-postgres sends both null and undefined as SQL NULL. Anything
+        // else that is not a boolean would be a coercion Postgres performs
+        // and this fake does not model, so it is refused.
+        const requested = p[1] ?? null
+        if (requested !== null && typeof requested !== 'boolean') {
+          throw new Error(`llmCatalogSyncFakeDb: non-boolean auto_enable ${String(requested)}`)
+        }
         const row = {
           provider,
-          auto_enable: p[1] === true,
+          auto_enable: requested,
           updated_at: now(),
           updated_by: p[2] ?? null,
         }

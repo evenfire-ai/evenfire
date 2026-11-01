@@ -29,6 +29,16 @@ describe('llmCatalogSyncFakeDb · strict recognition', () => {
     await expect(db.pool('t').query('SELECT 1')).rejects.toThrow(/unrecognized SQL/)
   })
 
+  it('stores a reset as NULL and refuses an auto_enable it would have to coerce', async () => {
+    const db = makeFakeDb()
+    await setProviderAutoEnable('claude', false, 'admin', db.pool('t'))
+    await setProviderAutoEnable('claude', null, 'admin', db.pool('t'))
+    expect(db.settings).toMatchObject([{ provider: 'claude', auto_enable: null }])
+    await expect(
+      setProviderAutoEnable('claude', 'true' as never, 'admin', db.pool('t'))
+    ).rejects.toThrow(/non-boolean auto_enable/)
+  })
+
   it('throws on a known statement with one extra condition', async () => {
     const db = makeFakeDb([{ provider: 'claude', model: 'a' }])
     await expect(db.pool('t').query(`${SYNC_SELECT} AND enabled`, ['claude'])).rejects.toThrow(

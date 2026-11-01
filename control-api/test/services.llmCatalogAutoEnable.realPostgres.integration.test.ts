@@ -439,6 +439,28 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
       }
     })
 
+    it("after a reset to default, the run follows each provider's code default", async () => {
+      expect(PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT.mistral).toBe(true)
+      expect(PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT.groq).toBe(false)
+      // Override against the default, then reset: the run must not keep the override.
+      await mod.setProviderAutoEnable('mistral', false, 'test')
+      await mod.setProviderAutoEnable('groq', true, 'test')
+      await mod.setProviderAutoEnable('mistral', null, 'test')
+      await mod.setProviderAutoEnable('groq', null, 'test')
+      const catalog = wholeLiveProviders(['mistral', 'groq'])
+      await sync(catalog)
+
+      const db = await rows()
+      const enabledOf = (p: CatalogProvider) =>
+        discoveredOf(catalog, p).filter(m => db.get(`${p}/${m.model_id}`)!.enabled).length
+      const eligibleOf = (p: CatalogProvider) =>
+        discoveredOf(catalog, p).filter(isAutoEnableEligible).length
+      expect(eligibleOf('mistral')).toBeGreaterThan(0)
+      expect(eligibleOf('groq')).toBeGreaterThan(0)
+      expect(enabledOf('mistral')).toBe(eligibleOf('mistral'))
+      expect(enabledOf('groq')).toBe(0)
+    })
+
     it('L4 · every inserted row with a catalog cost carries that price; unpriced ones carry none', async () => {
       const catalog = wholeLiveProviders(['claude', 'groq'])
       await sync(catalog)

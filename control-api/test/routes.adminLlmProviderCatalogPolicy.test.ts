@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
 import { PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT } from '@clerum/llm-providers'
 import { createApp } from '../src/app.js'
+import {
+  CATALOG_POLICY_NOT_FOUND_BODY,
+  CATALOG_SYNC_IN_PROGRESS_BODY,
+} from '../src/routes/admin/llmProviderCatalogPolicy.js'
 import { PROVIDER_KEY_MAP } from '../src/services/modelsDevClient.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -57,7 +61,10 @@ function authed(method: 'get' | 'put', path: string) {
 }
 
 // Route the tx client by statement: the lock, the pre-read, the upsert.
-function stubToggleTx(previous: { auto_enable: boolean } | null, autoEnable: boolean) {
+function stubToggleTx(
+  previous: { auto_enable: boolean | null } | null,
+  autoEnable: boolean | null
+) {
   mockTxQuery.mockImplementation(async (sql: string, params: unknown[] = []) => {
     if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}], rowCount: 1 }
     if (sql.includes('INSERT INTO llm_provider_catalog_settings')) {
@@ -195,13 +202,14 @@ describe('admin llm-provider catalog-policy routes', () => {
     const res = await authed('put', `/api/v1/admin/llm-providers/${provider}/catalog-policy`)
       .send({ auto_enable: true })
       .expect(404)
-    expect(res.body.error).toBe('not_found')
+    expect(res.body).toEqual(CATALOG_POLICY_NOT_FOUND_BODY)
     expect(mockTxQuery).not.toHaveBeenCalled()
   })
 
   it.each([
     ['missing field', {}],
     ['non-boolean', { auto_enable: 'true' }],
+    ['arbitrary string', { auto_enable: 'x' }],
     ['unknown key', { auto_enable: true, provider: 'groq' }],
   ])('PUT 400s a body with a %s', async (_label, body) => {
     const res = await authed('put', '/api/v1/admin/llm-providers/openai/catalog-policy')
@@ -210,6 +218,37 @@ describe('admin llm-provider catalog-policy routes', () => {
     expect(res.body.error).toBe('invalid_request')
     expect(mockTxQuery).not.toHaveBeenCalled()
   })
+
+  it('PUT null is a reset: it upserts NULL under the catalog-sync lock', async () => {
+    stubToggleTx({ auto_enable: false }, null)
+    await authed('put', '/api/v1/admin/llm-providers/openai/catalog-policy')
+      .send({ auto_enable: null })
+      .expect(200)
+    const sqls = mockTxQuery.mock.calls.map(([sql]) => String(sql))
+    expect(sqls[0]).toContain('pg_advisory_xact_lock')
+    const upsert = mockTxQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO llm_provider_catalog_settings')
+    )!
+    expect(upsert[1]).toEqual(['openai', null, ADMIN_CLAIMS.sub])
+  })
+
+  it.each([false, null])(
+    'PUT %s maps a lock-wait statement timeout to the retryable 503 body',
+    async autoEnable => {
+      mockTxQuery.mockImplementation(async (sql: string) => {
+        if (sql.includes('pg_advisory_xact_lock')) {
+          throw Object.assign(new Error('canceling statement due to statement timeout'), {
+            code: '57014',
+          })
+        }
+        throw new Error(`unexpected tx query: ${sql}`)
+      })
+      const res = await authed('put', '/api/v1/admin/llm-providers/claude/catalog-policy')
+        .send({ auto_enable: autoEnable })
+        .expect(503)
+      expect(res.body).toEqual(CATALOG_SYNC_IN_PROGRESS_BODY)
+    }
+  )
 
   it('PUT maps a lock-wait statement timeout to a retryable 503', async () => {
     mockTxQuery.mockImplementation(async (sql: string) => {

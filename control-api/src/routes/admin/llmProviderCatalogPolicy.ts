@@ -10,7 +10,22 @@ import {
   setProviderAutoEnable,
 } from '../../services/llmProviderCatalogSettings.js'
 
-const setCatalogPolicySchema = z.object({ auto_enable: z.boolean() }).strict()
+// `null` resets the provider to its code default; the key itself is required
+// so an empty body cannot be read as a reset.
+const setCatalogPolicySchema = z.object({ auto_enable: z.boolean().nullable() }).strict()
+
+/** Sent verbatim; control-ui's tests read them from the generated wire contract. */
+export const CATALOG_SYNC_IN_PROGRESS_STATUS = 503
+export const CATALOG_SYNC_IN_PROGRESS_BODY = {
+  error: 'catalog_sync_in_progress',
+  message: 'a catalog sync is running and holds the policy lock; nothing was saved — retry shortly',
+} as const
+
+export const CATALOG_POLICY_NOT_FOUND_STATUS = 404
+export const CATALOG_POLICY_NOT_FOUND_BODY = {
+  error: 'not_found',
+  message: 'provider has no catalog auto-enable policy',
+} as const
 
 const fallbackLog = rootLogger.child({ module: 'admin-llm-provider-catalog-policy' })
 
@@ -43,10 +58,7 @@ export function createAdminLlmProviderCatalogPolicyRouter(): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const provider = req.params.provider
       if (!isCatalogPolicyProvider(provider)) {
-        res.status(404).json({
-          error: 'not_found',
-          message: 'provider has no catalog auto-enable policy',
-        })
+        res.status(CATALOG_POLICY_NOT_FOUND_STATUS).json(CATALOG_POLICY_NOT_FOUND_BODY)
         return
       }
       const parsed = setCatalogPolicySchema.safeParse(req.body)
@@ -65,11 +77,7 @@ export function createAdminLlmProviderCatalogPolicyRouter(): Router {
             { event: 'llm_provider_catalog_policy_lock_timeout', provider, actor },
             'catalog policy toggle timed out waiting for a running catalog sync'
           )
-          res.status(503).json({
-            error: 'catalog_sync_in_progress',
-            message:
-              'a catalog sync is running and holds the policy lock; nothing was saved — retry shortly',
-          })
+          res.status(CATALOG_SYNC_IN_PROGRESS_STATUS).json(CATALOG_SYNC_IN_PROGRESS_BODY)
           return
         }
         throw error
@@ -81,6 +89,9 @@ export function createAdminLlmProviderCatalogPolicyRouter(): Router {
           actor,
           previousAutoEnable: outcome.previousAutoEnable,
           autoEnable: outcome.policy.auto_enable,
+          // Tells a reset (false) apart from setting the default explicitly.
+          previousOverridden: outcome.previousOverridden,
+          overridden: outcome.policy.overridden,
         },
         'llm provider catalog auto-enable policy changed'
       )

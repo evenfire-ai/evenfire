@@ -6392,10 +6392,13 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       // Operator overrides of the per-provider catalog auto-enable policy. No
       // CHECK on `provider`: a row for a provider later removed from the code
       // must not block the migration, and the service only writes known ids.
+      // `auto_enable` NULL means "no override": the provider follows the code
+      // default, including a later change of it. The runtime role has no
+      // DELETE, so a reset to the default is an UPDATE to NULL.
       await db.query(`
         CREATE TABLE IF NOT EXISTS llm_provider_catalog_settings (
           provider TEXT PRIMARY KEY,
-          auto_enable BOOLEAN NOT NULL,
+          auto_enable BOOLEAN,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_by TEXT
         );

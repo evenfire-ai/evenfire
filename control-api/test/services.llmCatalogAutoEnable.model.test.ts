@@ -183,12 +183,19 @@ function capOrder(models: DiscoveredModel[]): DiscoveredModel[] {
   })
 }
 
-/** The policy in force at clock `seq`: the code default, overridden by toggles committed before. */
+/**
+ * The policy in force at clock `seq`: the code default, overridden by toggles
+ * committed before. A reset (stored NULL) puts the provider back on its default.
+ */
 function policyAt(history: HistoryEvent[], seq: number): Record<string, boolean> {
   const policy: Record<string, boolean> = { ...PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT }
   for (const e of history) {
     if (e.table === 'llm_provider_catalog_settings' && e.seq < seq && e.after) {
-      policy[String(e.after.provider)] = e.after.auto_enable === true
+      const provider = String(e.after.provider) as keyof typeof PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT
+      policy[provider] =
+        e.after.auto_enable === null
+          ? PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT[provider]
+          : e.after.auto_enable === true
     }
   }
   return policy
@@ -346,7 +353,7 @@ type Sub =
   | { kind: 'create'; pair: number; enabled: boolean }
   | { kind: 'put'; target: number; op: 'enable' | 'disable' | 'rename'; to: number }
   | { kind: 'delete'; target: number }
-  | { kind: 'toggle'; provider: Provider; on: boolean }
+  | { kind: 'toggle'; provider: Provider; on: boolean | null }
   | { kind: 'price'; pair: number; enabled: boolean }
   | { kind: 'failK8s' }
   | { kind: 'boot'; replica: 'a' | 'b' }
@@ -382,7 +389,8 @@ const subArb: fc.Arbitrary<Sub> = fc.oneof(
     arbitrary: fc.record({
       kind: fc.constant('toggle' as const),
       provider: fc.constantFrom(...PROVIDERS),
-      on: fc.boolean(),
+      // null: reset to the code default.
+      on: fc.constantFrom(true, false, null),
     }),
     weight: 2,
   },

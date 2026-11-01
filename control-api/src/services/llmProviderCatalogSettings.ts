@@ -2,7 +2,8 @@
  * Per-provider catalog auto-enable policy: whether models newly discovered in
  * the public catalog start enabled. The code default lives in
  * `@clerum/llm-providers`; an operator override is a row in
- * `llm_provider_catalog_settings`. Without a row, the code default applies.
+ * `llm_provider_catalog_settings`. Without a row, or with `auto_enable` NULL
+ * (a reset), the code default applies.
  *
  * Only providers with a public-catalog mapping (`PROVIDER_KEY_MAP`) have a
  * policy; the subscription providers keep their own dynamic catalogs.
@@ -21,6 +22,10 @@ export interface ProviderCatalogPolicy {
   auto_enable: boolean
   default: boolean
   overridden: boolean
+  /**
+   * The last write to the row, a reset included: an audit trace, not an
+   * override marker. Null only when no operator ever wrote the provider.
+   */
   updated_at: string | null
   updated_by: string | null
 }
@@ -44,9 +49,10 @@ export function isCatalogPolicyProvider(value: unknown): value is CatalogPolicyP
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(PROVIDER_KEY_MAP, value)
 }
 
-interface SettingsRow {
+export interface CatalogSettingsRow {
   provider: string
-  auto_enable: boolean
+  /** NULL: no override. */
+  auto_enable: boolean | null
   updated_at: Date | string
   updated_by: string | null
 }
@@ -55,24 +61,29 @@ function toIso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : String(value)
 }
 
-function toPolicy(provider: CatalogPolicyProviderId, row: SettingsRow | undefined) {
+/** The one producer of the catalog-policy wire entry. */
+export function toPolicy(
+  provider: CatalogPolicyProviderId,
+  row: CatalogSettingsRow | undefined
+): ProviderCatalogPolicy {
   const codeDefault = PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT[provider]
+  const override = row?.auto_enable ?? null
   return {
     provider,
-    auto_enable: row ? row.auto_enable : codeDefault,
+    auto_enable: override ?? codeDefault,
     default: codeDefault,
-    overridden: row !== undefined,
+    overridden: override !== null,
     updated_at: row ? toIso(row.updated_at) : null,
     updated_by: row ? row.updated_by : null,
-  } satisfies ProviderCatalogPolicy
+  }
 }
 
-async function readOverrides(db: DbClient): Promise<Map<string, SettingsRow>> {
+async function readOverrides(db: DbClient): Promise<Map<string, CatalogSettingsRow>> {
   const result = await db.query(
     `SELECT provider, auto_enable, updated_at, updated_by
        FROM llm_provider_catalog_settings`
   )
-  return new Map((result.rows as SettingsRow[]).map(row => [row.provider, row]))
+  return new Map((result.rows as CatalogSettingsRow[]).map(row => [row.provider, row]))
 }
 
 /** Every catalog-mapped provider with its effective, default and override state. */
@@ -120,17 +131,22 @@ async function acquireCatalogSyncLockOrTimeout(db: DbClient): Promise<void> {
 }
 
 /**
- * Persist the operator's override for one provider and return the new entry
- * plus the effective value it replaced. The upsert runs after the catalog-sync
- * lock in the same transaction, so it commits either before a sync run reads
- * the policy or after that run has committed.
+ * Persist the operator's override for one provider, or with `null` reset it to
+ * the code default, and return the new entry plus the entry it replaced. The
+ * upsert runs after the catalog-sync lock in the same transaction, so it
+ * commits either before a sync run reads the policy or after that run has
+ * committed; a reset is no exception.
  */
 export async function setProviderAutoEnable(
   provider: CatalogPolicyProviderId,
-  autoEnable: boolean,
+  autoEnable: boolean | null,
   actor: string,
   txPool: Pool = pool
-): Promise<{ policy: ProviderCatalogPolicy; previousAutoEnable: boolean }> {
+): Promise<{
+  policy: ProviderCatalogPolicy
+  previousAutoEnable: boolean
+  previousOverridden: boolean
+}> {
   return withTransaction(async db => {
     await acquireCatalogSyncLockOrTimeout(db)
     const before = await db.query(
@@ -139,10 +155,7 @@ export async function setProviderAutoEnable(
           WHERE provider = $1`,
       [provider]
     )
-    const previousAutoEnable = toPolicy(
-      provider,
-      before.rows[0] as SettingsRow | undefined
-    ).auto_enable
+    const previous = toPolicy(provider, before.rows[0] as CatalogSettingsRow | undefined)
     const result = await db.query(
       `INSERT INTO llm_provider_catalog_settings (provider, auto_enable, updated_at, updated_by)
          VALUES ($1, $2, NOW(), $3)
@@ -154,8 +167,9 @@ export async function setProviderAutoEnable(
       [provider, autoEnable, actor]
     )
     return {
-      policy: toPolicy(provider, result.rows[0] as SettingsRow),
-      previousAutoEnable,
+      policy: toPolicy(provider, result.rows[0] as CatalogSettingsRow),
+      previousAutoEnable: previous.auto_enable,
+      previousOverridden: previous.overridden,
     }
   }, txPool)
 }

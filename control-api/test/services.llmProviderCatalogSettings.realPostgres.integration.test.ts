@@ -6,6 +6,7 @@ import { initDb } from '../src/db.js'
 import { acquireCatalogSyncLock } from '../src/services/llmCatalogSyncLock.js'
 import {
   CatalogPolicyLockTimeoutError,
+  listProviderCatalogPolicy,
   readEffectiveAutoEnablePolicy,
   setProviderAutoEnable,
 } from '../src/services/llmProviderCatalogSettings.js'
@@ -38,7 +39,7 @@ describeRealPostgres('llm_provider_catalog_settings on real PostgreSQL', () => {
   let dbPool: Pool
 
   async function storedRow(provider: string) {
-    const { rows } = await dbPool.query<{ auto_enable: boolean; updated_by: string | null }>(
+    const { rows } = await dbPool.query<{ auto_enable: boolean | null; updated_by: string | null }>(
       'SELECT auto_enable, updated_by FROM llm_provider_catalog_settings WHERE provider = $1',
       [provider]
     )
@@ -136,6 +137,10 @@ describeRealPostgres('llm_provider_catalog_settings on real PostgreSQL', () => {
         `SELECT auto_enable FROM llm_provider_catalog_settings WHERE provider = 'mistral'`
       )
       expect(read.rows).toEqual([{ auto_enable: true }])
+      // The reset is an UPDATE to NULL: the role has no DELETE, and needs none.
+      await runtime.query(
+        `UPDATE llm_provider_catalog_settings SET auto_enable = NULL WHERE provider = 'mistral'`
+      )
     } finally {
       await runtime.query('RESET ROLE').catch(() => {})
       runtime.release()
@@ -158,7 +163,8 @@ describeRealPostgres('llm_provider_catalog_settings on real PostgreSQL', () => {
 
     await dbPool.query(
       `INSERT INTO llm_provider_catalog_settings (provider, auto_enable)
-       VALUES ('claude', false), ('openrouter', true), ('retired-provider', true)`
+       VALUES ('claude', false), ('openrouter', true), ('retired-provider', true),
+              ('openai', NULL), ('groq', NULL)`
     )
     try {
       const after = await readEffectiveAutoEnablePolicy(dbPool)
@@ -201,6 +207,107 @@ describeRealPostgres('llm_provider_catalog_settings on real PostgreSQL', () => {
       await holder.query('ROLLBACK').catch(() => {})
       holder.release()
       await toggle.catch(() => {})
+      await dbPool.query('DELETE FROM llm_provider_catalog_settings')
+    }
+  })
+
+  // claude is ON by default, groq OFF: a reset must land on each provider's own
+  // default, not on a constant.
+  it('a reset stores NULL and every reader then follows the code default', async () => {
+    expect(PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT.claude).toBe(true)
+    expect(PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT.groq).toBe(false)
+    try {
+      await setProviderAutoEnable('claude', false, 'admin-set', dbPool)
+      await setProviderAutoEnable('groq', true, 'admin-set', dbPool)
+
+      const claude = await setProviderAutoEnable('claude', null, 'admin-reset', dbPool)
+      const groq = await setProviderAutoEnable('groq', null, 'admin-reset', dbPool)
+      // A reset of a provider that never had an override is accepted too.
+      const openai = await setProviderAutoEnable('openai', null, 'admin-reset', dbPool)
+
+      expect(claude.previousAutoEnable).toBe(false)
+      expect(groq.previousAutoEnable).toBe(true)
+      expect(openai.previousAutoEnable).toBe(true)
+      expect(await storedRow('claude')).toEqual({ auto_enable: null, updated_by: 'admin-reset' })
+      expect(await storedRow('openai')).toEqual({ auto_enable: null, updated_by: 'admin-reset' })
+
+      const listed = await listProviderCatalogPolicy(dbPool)
+      for (const outcome of [claude.policy, groq.policy, openai.policy]) {
+        const fromList = listed.find(p => p.provider === outcome.provider)
+        expect(fromList).toEqual(outcome)
+        expect(outcome).toMatchObject({
+          auto_enable: PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT[outcome.provider],
+          default: PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT[outcome.provider],
+          overridden: false,
+          updated_by: 'admin-reset',
+        })
+        expect(outcome.updated_at).not.toBeNull()
+      }
+
+      const effective = await readEffectiveAutoEnablePolicy(dbPool)
+      expect(effective.claude).toBe(true)
+      expect(effective.groq).toBe(false)
+      expect(effective.openai).toBe(true)
+    } finally {
+      await dbPool.query('DELETE FROM llm_provider_catalog_settings')
+    }
+  })
+
+  it('an explicit override equal to the default is still an override', async () => {
+    try {
+      const { policy } = await setProviderAutoEnable('claude', true, 'admin-same', dbPool)
+      expect(policy).toMatchObject({ auto_enable: true, default: true, overridden: true })
+      expect((await listProviderCatalogPolicy(dbPool)).find(p => p.provider === 'claude')).toEqual(
+        policy
+      )
+    } finally {
+      await dbPool.query('DELETE FROM llm_provider_catalog_settings')
+    }
+  })
+
+  it('a reset does not commit while a sync run holds the lock, and commits after it', async () => {
+    await setProviderAutoEnable('claude', false, 'admin-set', dbPool)
+    const holder = await holdSyncLock()
+    let settled = false
+    const reset = setProviderAutoEnable('claude', null, 'admin-reset', dbPool).finally(() => {
+      settled = true
+    })
+    try {
+      await waitForWaiterOrSettled(() => settled)
+
+      expect(settled).toBe(false)
+      expect(await storedRow('claude')).toEqual({ auto_enable: false, updated_by: 'admin-set' })
+      expect((await readEffectiveAutoEnablePolicy(holder)).claude).toBe(false)
+
+      await holder.query('COMMIT')
+      const outcome = await reset
+      expect(outcome.policy).toMatchObject({ auto_enable: true, overridden: false })
+      expect((await readEffectiveAutoEnablePolicy(dbPool)).claude).toBe(true)
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      holder.release()
+      await reset.catch(() => {})
+      await dbPool.query('DELETE FROM llm_provider_catalog_settings')
+    }
+  })
+
+  it('a reset cut by statement_timeout on the lock is retryable and writes nothing', async () => {
+    await setProviderAutoEnable('gemini', false, 'admin-set', dbPool)
+    const shortPool = new Pool({
+      connectionString: databaseUrl(adminUrl!, database),
+      statement_timeout: 300,
+    })
+    const holder = await holdSyncLock()
+    try {
+      await expect(
+        setProviderAutoEnable('gemini', null, 'admin-reset', shortPool)
+      ).rejects.toBeInstanceOf(CatalogPolicyLockTimeoutError)
+      await holder.query('COMMIT')
+      expect(await storedRow('gemini')).toEqual({ auto_enable: false, updated_by: 'admin-set' })
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      holder.release()
+      await endPoolAndWaitForClients(shortPool)
       await dbPool.query('DELETE FROM llm_provider_catalog_settings')
     }
   })
