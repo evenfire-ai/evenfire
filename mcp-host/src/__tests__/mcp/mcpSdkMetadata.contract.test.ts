@@ -86,7 +86,6 @@ describe('MCP SDK metadata ownership contract', () => {
 
     const wrapper = new McpClient({
       name: 'metadata-contract',
-      contextRef: 'ctx',
       transport: { type: 'streamableHttp', url: 'http://metadata-contract/mcp' },
       enabled: true,
       status: { deployed: true, ready: true },

@@ -12,11 +12,13 @@ import { GfsDragSessionProvider, GfsDragSessionStore, useGfsDragSession } from '
 import type { GfsDropTargetFact, GfsHoverCheckLease } from '../dragSession.types'
 
 const scope = 'test:user-1:team-1'
+const SESSION_GENERATION = 7
 vi.mock('@contexts/AuthContext', () => ({
   useAuthContext: () => ({
     isAuthenticated: true,
     me: { id: 'user-1', teamId: 'team-1' },
     runtimeConfigState: { envKey: 'test' },
+    sessionGeneration: SESSION_GENERATION,
   }),
 }))
 function source(id = 'source') {
@@ -62,8 +64,18 @@ async function setup(provider = true) {
   const hook = renderHook(
     () => {
       const session = useGfsDragSession()
-      const first = useGfsDragAdjudication({ scope, drive: 'main', resolve: vi.fn() })
-      const second = useGfsDragAdjudication({ scope, drive: 'main', resolve: vi.fn() })
+      const first = useGfsDragAdjudication({
+        scope,
+        sessionGeneration: SESSION_GENERATION,
+        drive: 'main',
+        resolve: vi.fn(),
+      })
+      const second = useGfsDragAdjudication({
+        scope,
+        sessionGeneration: SESSION_GENERATION,
+        drive: 'main',
+        resolve: vi.fn(),
+      })
       return { session, first, second }
     },
     { wrapper }
@@ -165,7 +177,10 @@ describe('gesture-owned hover budget (R1-M2)', () => {
       const h = await setup()
       const stale = vi.fn()
       if (warm)
-        h.queryClient.setQueryData(desktopQueryKeys.gfsAffordances(scope, 'old', 'main'), h.bits)
+        h.queryClient.setQueryData(
+          desktopQueryKeys.gfsAffordances(scope, 'old', 'main', SESSION_GENERATION),
+          h.bits
+        )
       h.result.current.first.scheduleColdCheck(target('old'), null, stale)
       h.begin('new', 'second')
       await h.dwell()
@@ -182,7 +197,10 @@ describe('gesture-owned hover budget (R1-M2)', () => {
   it.each([true, false])('never paints or fetches after native end (warm=%s)', async warm => {
     const h = await setup()
     if (warm)
-      h.queryClient.setQueryData(desktopQueryKeys.gfsAffordances(scope, 'ended', 'main'), h.bits)
+      h.queryClient.setQueryData(
+        desktopQueryKeys.gfsAffordances(scope, 'ended', 'main', SESSION_GENERATION),
+        h.bits
+      )
     const done = vi.fn()
     h.result.current.second.scheduleColdCheck(target('ended'), null, done)
     h.result.current.session!.endDrag()

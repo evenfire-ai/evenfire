@@ -239,7 +239,7 @@ export const mcpHostJwtReissueTotal = getOrCreateCounter({
 
 // OAuth mcp-server broker refused a caller on its Host binding. reason:
 // lineage | unauthenticated | host_not_bound | server_not_found |
-// context_ref_mismatch | no_grant | unavailable. route: user_token |
+// no_grant | unavailable. route: user_token |
 // grants_exists. The mcp-server and Host go to the log, never a label.
 export const mcpOauthBrokerDeniedTotal = getOrCreateCounter({
   name: 'mcp_oauth_broker_denied_total',

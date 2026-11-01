@@ -110,7 +110,6 @@ async function connectMcp(catalogs: Record<string, RemoteTool[]>): Promise<McpMa
     remote.catalogs.set(server, tools)
     await manager.addServer({
       name: server,
-      contextRef: 'test-context',
       enabled: true,
       transport: { type: 'streamableHttp' as const, url: `http://${server}/mcp` },
       status: { deployed: true, ready: true },

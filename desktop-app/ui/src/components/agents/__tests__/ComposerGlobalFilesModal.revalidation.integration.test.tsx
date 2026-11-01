@@ -14,9 +14,11 @@ import { desktopQueryKeys } from '@/hooks/domain/queryKeys'
 import { ComposerGlobalFilesModal } from '../ComposerGlobalFilesModal'
 
 const SESSION_SCOPE = ':user-a:team-a'
-const ACCESSIBLE_KEY = desktopQueryKeys.gfsAccessible(SESSION_SCOPE, 'main')
+const SESSION_GENERATION = 1
+const ACCESSIBLE_KEY = desktopQueryKeys.gfsAccessible(SESSION_SCOPE, 'main', SESSION_GENERATION)
 const authValue = {
   isAuthenticated: true,
+  sessionGeneration: SESSION_GENERATION,
   me: {
     id: 'user-a',
     email: 'a@example.test',

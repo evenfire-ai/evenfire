@@ -172,7 +172,16 @@ describeRealPostgres('legacy grants seen by the broker, gate and sweep (real Pos
   }
 
   const invocable = async (gateway: MockGateway) =>
-    (await resolveInvocableMcpServersForContexts(gateway, NS, [CONTEXT], USER, db)).map(s => s.name)
+    (
+      await resolveInvocableMcpServersForContexts(
+        gateway,
+        NS,
+        [CONTEXT],
+        USER,
+        db,
+        config.contextsNamespace
+      )
+    ).map(s => s.name)
 
   const sweep = async (gateway: MockGateway, name: string) =>
     resolveBatchGrantExistence(
@@ -181,6 +190,7 @@ describeRealPostgres('legacy grants seen by the broker, gate and sweep (real Pos
         gateway,
         binding: await resolveHccHostBinding(gateway, HOST),
         mcpServersNamespace: NS,
+        contextsNamespace: NS,
       },
       [{ mcpServerName: name, userId: USER }]
     )

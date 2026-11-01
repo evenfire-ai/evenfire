@@ -61,8 +61,10 @@ const host = (name: string, contextRef: string | null) => ({
   spec: contextRef ? { contextRef } : {},
 })
 
-const ctx = (contextId: string, servers: string[]) => ({
-  spec: { contextId, mcpServers: servers },
+// Shape the apiserver returns: a Context always carries its metadata.name.
+const ctx = (name: string, servers: string[]) => ({
+  metadata: { name },
+  spec: { contextId: name, mcpServers: servers },
 })
 
 const oauthServer = (
@@ -112,7 +114,13 @@ beforeEach(() => {
 async function connectorsFor(g: K8sGateway, agentNames: string[]) {
   const agents = await resolveConnectorsForAgents(
     g,
-    { mcpServersNamespace: NS, hostsNamespace: HOSTS_NS, agentNames, userId: USER },
+    {
+      mcpServersNamespace: NS,
+      contextsNamespace: NS,
+      hostsNamespace: HOSTS_NS,
+      agentNames,
+      userId: USER,
+    },
     DB
   )
   return agents
@@ -248,7 +256,7 @@ describe('resolveConnectorsForAgents — concrete tri-state + fail-closed', () =
     expect(agent.connectors[0]).toMatchObject({ name: 'gdrive', status: 'authorized' })
   })
 
-  it('a context-flavor server is keyed by its OWN spec.contextRef, decoupled from userId', async () => {
+  it("a context-flavor server is keyed by the agent's Context, decoupled from userId and any legacy CR field", async () => {
     grantExists.mockResolvedValue(true)
     const g = gateway({
       hosts: [host('agent-a', 'ctx-scope')],
@@ -261,7 +269,7 @@ describe('resolveConnectorsForAgents — concrete tri-state + fail-closed', () =
       grantKind: 'shared',
       ownerKind: 'mcpserver',
       recipeName: 'shared',
-      contextId: 'ctx-authoritative',
+      contextId: 'ctx-scope',
     })
     expect(key).not.toHaveProperty('userId')
   })

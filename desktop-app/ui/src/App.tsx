@@ -10,6 +10,7 @@ import {
   NotificationsContext,
   WorkspaceActionsProvider,
 } from '@contexts/index'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { ChatDrawer } from '@components/ChatDrawer'
@@ -17,7 +18,7 @@ import { ChatLocalSearch } from '@components/ChatLocalSearch'
 import { ChatSwitcher } from '@components/ChatSwitcher'
 import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
 import { CommandPalette } from '@components/CommandPalette'
-import { Button, ToastStack } from '@components/Common'
+import { Button, StatusBanner, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
@@ -28,8 +29,14 @@ import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBa
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  desktopQueryKeys,
+  hasGfsSessionGeneration,
+  isGfsSessionAuthorityCurrent,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import { isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
+import type { WorkspaceNavigationSnapshot } from '@hooks/domain/useNavigationController'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
 import {
@@ -41,11 +48,13 @@ import { useEmbedOwnership } from '@hooks/useEmbedOwnership'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
+import { releaseComposerDraftForWorkspaceTab } from '@lib/composerDraftStore'
 import type { Launch, LaunchId, LaunchOutcome } from '@lib/embedOwnership.types'
 import { createEmbedOwnershipMachine } from '@lib/embedOwnershipMachine'
 import type { EmbedRefreshErrorEvent } from '@lib/embedOwnershipMachine.types'
 import { embedFailureMessage, embedViewState } from '@lib/embedOwnershipView'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
+import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
 import {
   authoritativeGfsStatus,
   expireGfsPreviewTabs,
@@ -53,7 +62,9 @@ import {
   shouldRevalidateGfsQuery,
 } from '@lib/gfsEntityChangeState'
 import { resolveGfsPreview } from '@lib/gfsPreview'
+import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
+import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   canProcessSandboxUiDeepLinks,
@@ -66,13 +77,17 @@ import {
 } from '@lib/sandboxUiConversationOrigin'
 import {
   MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS,
+  clearSandboxUiDeepLinkProcessingOwner,
   confirmPendingSandboxUiDeepLink,
   deferPendingSandboxUiDeepLink,
+  dismissPendingSandboxUiDeepLinkFailure,
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
   findPendingSandboxUiDeepLinkAwaitingConfirmation,
+  getSandboxUiDeepLinkMetadataIdsToPrune,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
+  isSandboxUiDeepLinkProcessingOwner,
   removePendingSandboxUiDeepLink,
   resetPendingSandboxUiDeepLinkFailure,
   shouldPurgeSandboxUiDeepLinks,
@@ -84,6 +99,7 @@ import {
   cycleWorkspaceTab,
   newChatTab,
   openAppTab,
+  prepareNewChatWorkspaceTab,
   reconcileWorkspaceChatTab,
   refreshPreviewTab,
   reorderWorkspaceTab,
@@ -107,6 +123,7 @@ import { UnavailablePage } from '@pages/UnavailablePage'
 import { WorkflowsPage } from '@pages/WorkflowsPage'
 import type {
   EmbedLaunchPlan,
+  GfsResourceDeepLinkEnvelope,
   PendingSandboxUiDeepLink,
   SandboxUiDeepLinkEnvelope,
 } from '@/App.types'
@@ -118,6 +135,13 @@ import {
   isDesktopCommandEligible,
   platformFromNavigator,
 } from '../../src/desktopCommands'
+import type { DeepLinkAcknowledgmentAuthority } from '../../src/types'
+
+type SandboxUiSessionInvalidation = {
+  sessionGeneration: number
+  appDeepLinkMinimumId: number
+  gfsDeepLinkMinimumId: number
+}
 
 type PendingSandboxUiDeepLinkLaunch = {
   linkId: number
@@ -126,6 +150,18 @@ type PendingSandboxUiDeepLinkLaunch = {
   linkTeamId?: string
   switchedTeam: boolean
   conversationOrigin: SandboxUiConversationOrigin | null
+  originNavigation?: WorkspaceNavigationSnapshot
+  originApp?: ActiveSandboxUiApp | null
+  navigationIntentSequence?: number
+  restoreWorkspace?: boolean
+  originEmbedClosed?: boolean
+}
+
+type EmbedHandoffWaiter = {
+  resolve: (outcome: 'ready' | 'failed') => void
+  ownerLaunchId: LaunchId | null
+  originReleased: boolean
+  originClosed: boolean
 }
 
 function formatLinkProvidedEnvironmentName(name: string): string {
@@ -147,6 +183,10 @@ const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
 
 const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
   'App link paused because you switched teams. Retry to open it from the current team, or dismiss it.'
+const SANDBOX_UI_DEEP_LINK_ROLLBACK_RETRY_MESSAGE =
+  'Could not finish refreshing the previous team. Retry this app link.'
+const SANDBOX_UI_DEEP_LINK_CLOSE_RETRY_MESSAGE =
+  'The current app could not be safely closed. Retry this app link.'
 
 // Every reveal gesture launches whatever app tab its commit leaves active.
 const ACTIVE_TAB_LAUNCH: EmbedLaunchPlan = { kind: 'activeTab' }
@@ -317,6 +357,16 @@ export function App() {
   const [pendingSandboxUiDeepLinks, setPendingSandboxUiDeepLinks] = React.useState<
     PendingSandboxUiDeepLink[]
   >([])
+  const [pendingGfsDeepLinks, setPendingGfsDeepLinks] = React.useState<
+    GfsResourceNavigationRequest[]
+  >([])
+  const [sessionInvalidation, setSessionInvalidation] =
+    React.useState<SandboxUiSessionInvalidation | null>(null)
+  const [sessionInvalidationReadFailed, setSessionInvalidationReadFailed] = React.useState(false)
+  const [sessionInvalidationRetryTick, setSessionInvalidationRetryTick] = React.useState(0)
+  const [activeGfsDeepLink, setActiveGfsDeepLink] =
+    React.useState<GfsResourceNavigationRequest | null>(null)
+  const [gfsRouteDialogRequestId, setGfsRouteDialogRequestId] = React.useState(0)
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
   // The universal tab store lives in the controller (single writer; `vm.navItem`
   // is its projection). App composes the strip/reveal/reconcile over it.
@@ -331,6 +381,8 @@ export function App() {
     [workspaceTabs.tabs, vm.hostAuthorityRevision, vm.isHostAccessBlocked]
   )
   const setWorkspaceTabs = vm.setWorkspaceTabs
+  const navigationIntentSequenceRef = React.useRef(vm.navigationIntentSequence)
+  navigationIntentSequenceRef.current = vm.navigationIntentSequence
   const nextChatTabId = vm.nextWorkspaceTabId
   const workspaceTabsRef = React.useRef(workspaceTabs)
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
@@ -373,7 +425,28 @@ export function App() {
   const activeConversationOriginRef = React.useRef<SandboxUiConversationOrigin | null>(null)
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
   const pendingSandboxUiDeepLinksRef = React.useRef<PendingSandboxUiDeepLink[]>([])
+  const sandboxUiDeepLinkMinimumIdRef = React.useRef(1)
+  const pendingGfsDeepLinksRef = React.useRef<GfsResourceNavigationRequest[]>([])
+  const processingGfsDeepLinkIdRef = React.useRef<number | null>(null)
+  const activeGfsDeepLinkRef = React.useRef<GfsResourceNavigationRequest | null>(null)
+  const sessionInvalidationRef = React.useRef<SandboxUiSessionInvalidation | null>(null)
+  const sessionInvalidationQueueRevisionRef = React.useRef(0)
+  activeGfsDeepLinkRef.current = activeGfsDeepLink
+  const acknowledgedGfsDeepLinkIdsRef = React.useRef(new Set<number>())
+  const gfsDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
+  const gfsDeepLinkGenerationRef = React.useRef(0)
+  const gfsDeepLinkMinimumIdRef = React.useRef(0)
+  const gfsDeepLinkAcceptingRef = React.useRef(true)
+  const gfsRouteDialogRequestSequenceRef = React.useRef(0)
   const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
+  const sandboxUiDeepLinkOriginNavigationByIdRef = React.useRef(
+    new Map<number, WorkspaceNavigationSnapshot>()
+  )
+  const sandboxUiDeepLinkOriginAppByIdRef = React.useRef(
+    new Map<number, ActiveSandboxUiApp | null>()
+  )
+  const sandboxUiDeepLinkIntentByIdRef = React.useRef(new Map<number, number>())
+  const sandboxUiDeepLinkClosedOriginEmbedsRef = React.useRef(new Set<number>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   workspaceTabsRef.current = workspaceTabs
@@ -398,7 +471,7 @@ export function App() {
   const [embedRefreshError, setEmbedRefreshError] = React.useState<EmbedRefreshErrorEvent | null>(
     null
   )
-  const handoffWaitersRef = React.useRef(new Map<number, () => void>())
+  const handoffWaitersRef = React.useRef(new Map<number, EmbedHandoffWaiter>())
   const [embed] = React.useState(() =>
     createEmbedOwnershipMachine({
       bridge: {
@@ -407,9 +480,14 @@ export function App() {
       },
       updateTabs: updater => setWorkspaceTabsRef.current(updater),
       onHandoffReady: requestId => {
-        const resolve = handoffWaitersRef.current.get(requestId)
+        const waiter = handoffWaitersRef.current.get(requestId)
         handoffWaitersRef.current.delete(requestId)
-        resolve?.()
+        waiter?.resolve('ready')
+      },
+      onHandoffFailed: requestId => {
+        const waiter = handoffWaitersRef.current.get(requestId)
+        handoffWaitersRef.current.delete(requestId)
+        waiter?.resolve('failed')
       },
       onOwnerRefreshError: event =>
         setEmbedRefreshError({ launchId: event.launchId, message: event.message }),
@@ -417,7 +495,13 @@ export function App() {
       // matching the launch here keeps one from ever clearing another's error.
       onOwnerRefreshRecovered: event =>
         setEmbedRefreshError(prev => (prev?.launchId === event.launchId ? null : prev)),
-      onTransition: ({ previous, next }) => {
+      onTransition: ({ event, previous, next }) => {
+        if (event.type === 'closeFailed') {
+          vm.pushToast(
+            'The current app could not be closed safely. Try launching it again.',
+            'error'
+          )
+        }
         // The tab stays but its embed is gone (back to apps, team handoff, a
         // failed open, a crash, a session end): drop the chrome that belonged
         // to it, as the picker it falls back to has none. Leaving the tab is
@@ -471,7 +555,15 @@ export function App() {
     const lifetime = embedLifetimeRef.current!
     lifetime.mounts += 1
     const sandboxUi = window.clerum.sandboxUi
-    const offReleased = sandboxUi.onReleased?.(event => embed.onReleased(event))
+    const offReleased = sandboxUi.onReleased?.(event => {
+      for (const waiter of handoffWaitersRef.current.values()) {
+        if (waiter.ownerLaunchId !== null && waiter.ownerLaunchId === event.launchId) {
+          waiter.originReleased = true
+          waiter.originClosed = event.reason === 'closed'
+        }
+      }
+      embed.onReleased(event)
+    })
     const offTitle = sandboxUi.onTitleChanged?.(event => embed.onTitleChanged(event))
     const offRefreshError = sandboxUi.onRefreshError?.(event => embed.onRefreshError(event))
     const offRefreshRecovered = sandboxUi.onRefreshRecovered?.(event =>
@@ -639,7 +731,11 @@ export function App() {
   // by the seam from the committed store, not here; DOM tabs (files/settings)
   // render from the derived `navItem`, so this only drops the app chrome.
   const revealWorkspaceTab = React.useCallback(
-    (tab: WorkspaceTab | undefined, inDrawer = chatDrawerVisibleRef.current) => {
+    (
+      tab: WorkspaceTab | undefined,
+      inDrawer = chatDrawerVisibleRef.current,
+      navigationIntentAlreadyStarted = false
+    ) => {
       if (!tab || tab.kind === 'files' || tab.kind === 'settings' || tab.kind === 'preview') {
         if (!inDrawer) leaveSandboxForChat()
         return
@@ -647,6 +743,9 @@ export function App() {
       if (tab.kind === 'app') return
       const agentRef = tab.chat?.agentRef ?? null
       const chatId = tab.chat?.chatId ?? null
+      const navigationIntentOption = navigationIntentAlreadyStarted
+        ? { navigationIntentAlreadyStarted: true }
+        : {}
       if (inDrawer) {
         // Swap the shared <ChatPage>'s conversation in place, keeping the live
         // app mounted and the `apps` route active. A blank tab with no agent
@@ -655,8 +754,14 @@ export function App() {
           vm.handleSelectChatAgent(
             agentRef,
             chatId
-              ? { chatId, title: tab.title, selectLatest: false, keepNavItem: true }
-              : { selectLatest: false, keepNavItem: true }
+              ? {
+                  chatId,
+                  title: tab.title,
+                  selectLatest: false,
+                  keepNavItem: true,
+                  ...navigationIntentOption,
+                }
+              : { selectLatest: false, keepNavItem: true, ...navigationIntentOption }
           )
         }
         return
@@ -672,7 +777,9 @@ export function App() {
       if (agentRef) {
         vm.handleSelectChatAgent(
           agentRef,
-          chatId ? { chatId, title: tab.title, selectLatest: false } : { selectLatest: false }
+          chatId
+            ? { chatId, title: tab.title, selectLatest: false, ...navigationIntentOption }
+            : { selectLatest: false, ...navigationIntentOption }
         )
       } else {
         vm.handleNavSelect(DESKTOP_ROUTES.chat)
@@ -687,15 +794,16 @@ export function App() {
     (id: string) => {
       const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
       if (!tab) return
+      vm.beginUserNavigationIntent()
       // Re-clicking the active app tab relaunches it only when its view is gone;
       // a live view is left as it is (Refresh is the explicit reload).
       activateAndLaunch(
         state => selectWorkspaceTab(state, id),
-        () => revealWorkspaceTab(tab, false),
+        () => revealWorkspaceTab(tab, false, true),
         ACTIVE_TAB_LAUNCH
       )
     },
-    [activateAndLaunch, revealWorkspaceTab]
+    [activateAndLaunch, revealWorkspaceTab, vm.beginUserNavigationIntent]
   )
 
   // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
@@ -705,9 +813,12 @@ export function App() {
       const tab = workspaceTabsRef.current.tabs.find(
         candidate => candidate.id === id && candidate.kind === 'chat'
       )
-      if (tab) revealWorkspaceTab(tab, true)
+      if (tab) {
+        vm.beginUserNavigationIntent()
+        revealWorkspaceTab(tab, true, true)
+      }
     },
-    [revealWorkspaceTab]
+    [revealWorkspaceTab, vm.beginUserNavigationIntent]
   )
 
   const handleCloseWorkspaceTab = React.useCallback(
@@ -716,6 +827,10 @@ export function App() {
       const wasActive = current.activeTabId === id
       const projected = closeWorkspaceTab(current, id)
       if (projected === current) return
+      releaseComposerDraftForWorkspaceTab(id)
+      if (wasActive || activeGfsDeepLinkRef.current?.ownerTabId === id) {
+        vm.beginUserNavigationIntent()
+      }
       // Closing the active tab activates a neighbor (or empties the workspace,
       // §5). Reveal it so its content follows the strip. Whether an app is
       // launched is decided on the commit, not on App's last render: a pending
@@ -726,7 +841,7 @@ export function App() {
         ACTIVATED_TAB_LAUNCH
       )
     },
-    [activateAndLaunch, revealWorkspaceTab]
+    [activateAndLaunch, revealWorkspaceTab, vm.beginUserNavigationIntent]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -739,14 +854,36 @@ export function App() {
   )
 
   const handleNewWorkspaceChatTab = React.useCallback(() => {
-    vm.clearAppsPicker()
+    const sourceTab = vm.activeWorkspaceTab
     const agentRef = vm.selectedAgent
+    vm.beginUserNavigationIntent()
+    const sourceHasResource = Boolean(
+      (sourceTab?.kind === 'files' && sourceTab.files?.path) ||
+      (sourceTab?.kind === 'preview' && sourceTab.preview?.gfsUri)
+    )
+    if (sourceHasResource) {
+      const destination = prepareNewChatWorkspaceTab(
+        workspaceTabsRef.current,
+        nextChatTabId(),
+        agentRef,
+        chatDrawerDivertableRef.current
+      )
+      if (prefillNewConversationWithGfsResource(sourceTab, agentRef, destination.tabId)) {
+        workspaceTabsRef.current = destination.state
+        setWorkspaceTabs(destination.state)
+      }
+    }
+    vm.clearAppsPicker()
     if (chatDrawerDivertableRef.current) {
       // Drawer is a valid surface (app live, panel wide enough): open the blank
       // chat in the drawer without tearing the live embed down.
       setChatDrawerOpen(true)
       if (agentRef) {
-        vm.handleSelectChatAgent(agentRef, { selectLatest: false, keepNavItem: true })
+        vm.handleSelectChatAgent(agentRef, {
+          selectLatest: false,
+          keepNavItem: true,
+          navigationIntentAlreadyStarted: true,
+        })
       }
       // With no agent yet there is nothing to seed, so this INTENTIONALLY writes
       // nothing to the store — opening/focusing the drawer is the whole action
@@ -755,7 +892,10 @@ export function App() {
       // No divertable drawer: full-screen chat route so the new chat is reachable.
       leaveSandboxForChat()
       if (agentRef) {
-        vm.handleSelectChatAgent(agentRef, { selectLatest: false })
+        vm.handleSelectChatAgent(agentRef, {
+          selectLatest: false,
+          navigationIntentAlreadyStarted: true,
+        })
       } else {
         const id = nextChatTabId()
         setWorkspaceTabs(state => newChatTab(state, id, null))
@@ -767,9 +907,21 @@ export function App() {
     nextChatTabId,
     setWorkspaceTabs,
     vm.clearAppsPicker,
+    vm.beginUserNavigationIntent,
+    vm.activeWorkspaceTab,
     vm.handleSelectChatAgent,
     vm.selectedAgent,
   ])
+
+  const handleOpenGfsRoute = React.useCallback(() => {
+    const requestId = ++gfsRouteDialogRequestSequenceRef.current
+    setGfsRouteDialogRequestId(requestId)
+    vm.openFilesSection(null)
+  }, [vm.openFilesSection])
+
+  const handleGfsRouteDialogRequestHandled = React.useCallback((requestId: number) => {
+    setGfsRouteDialogRequestId(current => (current === requestId ? 0 : current))
+  }, [])
 
   const openChatDrawer = React.useCallback(() => {
     setChatDrawerOpen(true)
@@ -1138,6 +1290,11 @@ export function App() {
   // page reports back don't re-arm FilesPage's open-once seed effect.
   const activeFilesTab = vm.activeWorkspaceTab?.kind === 'files' ? vm.activeWorkspaceTab : undefined
   const activeFilesTabId = activeFilesTab?.id ?? null
+  const activeGfsDeepLinkForFiles =
+    activeGfsDeepLink?.ownerTabId === activeFilesTabId &&
+    vm.isGfsResourceNavigationCurrent(activeGfsDeepLink, gfsDeepLinkGenerationRef.current)
+      ? activeGfsDeepLink
+      : null
   const activeFilesTabIdRef = React.useRef<string | null>(null)
   activeFilesTabIdRef.current = activeFilesTabId
   const filesSeedRef = React.useRef<{ id: string | null; path: string | null }>({
@@ -1148,20 +1305,96 @@ export function App() {
     filesSeedRef.current = { id: activeFilesTabId, path: activeFilesTab?.files?.path ?? null }
   }
   const filesSeedPath = filesSeedRef.current.path
-  // Persist the browser's live location onto the active files tab. Stable
-  // (reads the active id from a ref), so FilesPage's effect fires only when the
-  // location actually changes; `setFilesTabPath` no-ops when nothing moved.
+  // Keep browser updates tied to the files tab and navigation intent that own
+  // them; a delayed resolver from a canceled link cannot retarget another tab.
   const handleFilesLocationChange = React.useCallback(
-    (gfsUri: string | null, name: string | null) => {
-      const id = activeFilesTabIdRef.current
-      if (!id) return
-      setWorkspaceTabs(state => setFilesTabPath(state, id, gfsUri, name ?? undefined))
+    (ownerTabId: string, intentSequence: number, gfsUri: string | null, name: string | null) => {
+      if (!vm.isNavigationIntentCurrent(intentSequence)) return
+      if (workspaceTabsRef.current.activeTabId !== ownerTabId) return
+      setWorkspaceTabs(state => {
+        if (!vm.isNavigationIntentCurrent(intentSequence) || state.activeTabId !== ownerTabId) {
+          return state
+        }
+        return setFilesTabPath(state, ownerTabId, gfsUri, name ?? undefined)
+      })
     },
-    [setWorkspaceTabs]
+    [setWorkspaceTabs, vm.isNavigationIntentCurrent]
   )
+  const handleActiveFilesLocationChange = React.useCallback(
+    (gfsUri: string | null, name: string | null) => {
+      const ownerTabId = activeFilesTabIdRef.current
+      if (!ownerTabId) return
+      handleFilesLocationChange(
+        ownerTabId,
+        activeGfsDeepLinkForFiles?.intentSequence ?? vm.navigationIntentSequence,
+        gfsUri,
+        name
+      )
+    },
+    [
+      activeGfsDeepLinkForFiles?.intentSequence,
+      handleFilesLocationChange,
+      vm.navigationIntentSequence,
+    ]
+  )
+  const isActiveGfsDeepLinkCurrent = React.useCallback(() => {
+    const request = activeGfsDeepLinkRef.current
+    return Boolean(
+      activeFilesTabId &&
+      request?.ownerTabId === activeFilesTabId &&
+      vm.isGfsResourceNavigationCurrent(request, gfsDeepLinkGenerationRef.current)
+    )
+  }, [activeFilesTabId, vm.isGfsResourceNavigationCurrent])
+  const openActiveGfsDeepLinkPreview = React.useCallback(
+    (
+      id: number,
+      preview: GfsPreviewResource,
+      returnLocation: { gfsUri: string | null; name: string | null }
+    ) => {
+      const request = activeGfsDeepLinkRef.current
+      if (!request || request.id !== id) return false
+      return vm.completeGfsResourceNavigationPreview(
+        request,
+        preview,
+        gfsDeepLinkGenerationRef.current,
+        returnLocation
+      )
+    },
+    [vm.completeGfsResourceNavigationPreview]
+  )
+
+  const previewSessionScope =
+    vm.isAuthenticated && vm.me
+      ? `${vm.runtimeConfigState?.envKey ?? ''}:${vm.me.id}:${vm.me.teamId ?? ''}`
+      : null
+  const previewSessionGeneration = isGfsSessionGeneration(vm.sessionGeneration)
+    ? vm.sessionGeneration
+    : null
+  const livePreviewAuthorityRef = React.useRef({
+    scope: previewSessionScope,
+    generation: previewSessionGeneration,
+  })
+  livePreviewAuthorityRef.current = {
+    scope: previewSessionScope,
+    generation: previewSessionGeneration,
+  }
 
   const refreshOpenPreview = React.useCallback(
     async (gfsUri: string, fromRetry = false) => {
+      const ownsAuthority = () =>
+        isGfsSessionAuthorityCurrent(
+          previewSessionScope,
+          previewSessionGeneration,
+          livePreviewAuthorityRef.current.scope,
+          livePreviewAuthorityRef.current.generation
+        )
+      if (!ownsAuthority()) return
+      const queryFilter = {
+        queryKey: desktopQueryKeys.gfsRoot,
+        predicate: (query: { queryKey: readonly unknown[] }) =>
+          query.queryKey[2] === previewSessionScope &&
+          hasGfsSessionGeneration(query.queryKey, previewSessionGeneration),
+      }
       if (!fromRetry) {
         const existingTimer = previewRetryTimersRef.current.get(gfsUri)
         if (existingTimer !== undefined) window.clearTimeout(existingTimer)
@@ -1171,10 +1404,10 @@ export function App() {
       const generation = (previewRefreshGenerationRef.current.get(gfsUri) ?? 0) + 1
       previewRefreshGenerationRef.current.set(gfsUri, generation)
       const isCurrentGeneration = () =>
-        previewRefreshGenerationRef.current.get(gfsUri) === generation
+        previewRefreshGenerationRef.current.get(gfsUri) === generation && ownsAuthority()
       try {
         const resource = await window.clerum.gfs.resolve(gfsUri)
-        if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
+        if (!isCurrentGeneration()) return
         const preview =
           resource.kind === 'file'
             ? resolveGfsPreview({
@@ -1241,7 +1474,7 @@ export function App() {
         previewRetryTimersRef.current.delete(gfsUri)
         previewRetryAttemptRef.current.delete(gfsUri)
       } catch (error) {
-        if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
+        if (!isCurrentGeneration()) return
         const status = authoritativeGfsStatus(error)
         const message = error instanceof Error ? error.message : String(error ?? '')
         if (status === 401 || isGfsSessionAuthorityFailure(message, 'operation')) {
@@ -1262,7 +1495,7 @@ export function App() {
           setPluginGfsPreview(current =>
             markPluginGfsPreviewUnavailable(current, current?.gfsUri ?? '')
           )
-          void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+          void queryClient.removeQueries(queryFilter)
           return
         }
         if (status === 403 || status === 404) {
@@ -1277,7 +1510,7 @@ export function App() {
             isCurrentGeneration() ? markPluginGfsPreviewUnavailable(current, gfsUri) : current
           )
           void queryClient.invalidateQueries({
-            queryKey: desktopQueryKeys.gfsRoot,
+            ...queryFilter,
             refetchType: 'active',
           })
         }
@@ -1287,13 +1520,13 @@ export function App() {
           const delayMs = Math.min(5000 * 2 ** Math.min(attempt - 1, 4), 60_000)
           const retryTimer = window.setTimeout(() => {
             previewRetryTimersRef.current.delete(gfsUri)
-            void refreshOpenPreview(gfsUri, true)
+            if (isCurrentGeneration()) void refreshOpenPreview(gfsUri, true)
           }, delayMs)
           previewRetryTimersRef.current.set(gfsUri, retryTimer)
         }
       }
     },
-    [queryClient, setWorkspaceTabs]
+    [queryClient, setWorkspaceTabs, previewSessionScope, previewSessionGeneration]
   )
 
   React.useEffect(() => {
@@ -1308,6 +1541,8 @@ export function App() {
     const gfsQueryFilter = {
       queryKey: desktopQueryKeys.gfsRoot,
       predicate: (query: { queryKey: readonly unknown[] }) =>
+        query.queryKey[2] === previewSessionScope &&
+        hasGfsSessionGeneration(query.queryKey, previewSessionGeneration) &&
         shouldRevalidateGfsQuery(query.queryKey),
     }
     const revalidateGfs = (hardRecovery = false) => {
@@ -1318,12 +1553,20 @@ export function App() {
         return
       }
       gfsRevalidationInFlight = true
-      const queryFilter = hardRecovery ? { queryKey: desktopQueryKeys.gfsRoot } : gfsQueryFilter
+      const queryFilter = hardRecovery
+        ? {
+            queryKey: desktopQueryKeys.gfsRoot,
+            predicate: (query: { queryKey: readonly unknown[] }) =>
+              query.queryKey[2] === previewSessionScope &&
+              hasGfsSessionGeneration(query.queryKey, previewSessionGeneration),
+          }
+        : gfsQueryFilter
       const foregroundReadWasActive = queryClient.isFetching(queryFilter) > 0
       setRemoteGfsChangeEpoch(epoch => epoch + 1)
       void queryClient
         .invalidateQueries({ ...queryFilter, refetchType: 'active' }, { cancelRefetch: false })
         .then(async () => {
+          if (!active) return
           const resources = new Set(
             workspaceTabsRef.current.tabs
               .filter(tab => tab.kind === 'preview' && tab.preview)
@@ -1383,6 +1626,8 @@ export function App() {
     entityChangeRegistry,
     queryClient,
     refreshOpenPreview,
+    previewSessionScope,
+    previewSessionGeneration,
     vm.authenticatedPrincipalIdentity,
     vm.currentTeamId,
     vm.isAuthenticated,
@@ -1468,22 +1713,6 @@ export function App() {
       window.clearInterval(intervalId)
     }
   }, [vm.currentTeamId, vm.isAuthenticated])
-
-  React.useEffect(() => {
-    const identity = vm.authenticatedPrincipalIdentity
-    const previousIdentity = sandboxUiDeepLinkIdentityRef.current
-    sandboxUiDeepLinkIdentityRef.current = identity
-    if (!shouldPurgeSandboxUiDeepLinks(previousIdentity, identity)) return
-
-    pendingSandboxUiDeepLinksRef.current = []
-    setPendingSandboxUiDeepLinks([])
-    processingSandboxUiDeepLinkIdRef.current = null
-    sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
-    sandboxUiDeepLinkGenerationRef.current += 1
-    void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
-      console.warn('[Desktop] Could not clear stale app deep links:', error)
-    })
-  }, [vm.authenticatedPrincipalIdentity])
 
   React.useEffect(() => {
     setNotificationDrawerReady(false)
@@ -1606,29 +1835,231 @@ export function App() {
   )
 
   const setPendingSandboxUiDeepLinkState = React.useCallback((next: PendingSandboxUiDeepLink[]) => {
+    const metadataIds = new Set<number>([
+      ...sandboxUiDeepLinkRestoreTeamByIdRef.current.keys(),
+      ...sandboxUiDeepLinkOriginNavigationByIdRef.current.keys(),
+      ...sandboxUiDeepLinkOriginAppByIdRef.current.keys(),
+      ...sandboxUiDeepLinkIntentByIdRef.current.keys(),
+      ...sandboxUiDeepLinkClosedOriginEmbedsRef.current,
+    ])
+    const pendingIds = new Set(next.map(item => item.link.id))
+    for (const linkId of getSandboxUiDeepLinkMetadataIdsToPrune(
+      metadataIds,
+      pendingIds,
+      processingSandboxUiDeepLinkIdRef.current
+    )) {
+      sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkOriginAppByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkIntentByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkClosedOriginEmbedsRef.current.delete(linkId)
+    }
     pendingSandboxUiDeepLinksRef.current = next
     setPendingSandboxUiDeepLinks(next)
   }, [])
 
-  const clearSandboxUiDeepLinkProcessing = React.useCallback((linkId?: number) => {
-    if (linkId === undefined || processingSandboxUiDeepLinkIdRef.current === linkId) {
-      processingSandboxUiDeepLinkIdRef.current = null
+  const resetSandboxUiDeepLinkSession = React.useCallback(() => {
+    pendingSandboxUiDeepLinksRef.current = []
+    processingSandboxUiDeepLinkIdRef.current = null
+    sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
+    sandboxUiDeepLinkOriginNavigationByIdRef.current.clear()
+    sandboxUiDeepLinkOriginAppByIdRef.current.clear()
+    sandboxUiDeepLinkIntentByIdRef.current.clear()
+    sandboxUiDeepLinkClosedOriginEmbedsRef.current.clear()
+    sandboxUiDeepLinkGenerationRef.current += 1
+    setPendingSandboxUiDeepLinkState([])
+  }, [setPendingSandboxUiDeepLinkState])
+
+  React.useEffect(() => {
+    const identity = vm.authenticatedPrincipalIdentity
+    const previousIdentity = sandboxUiDeepLinkIdentityRef.current
+    sandboxUiDeepLinkIdentityRef.current = identity
+    if (
+      sessionInvalidationRef.current ||
+      !shouldPurgeSandboxUiDeepLinks(previousIdentity, identity)
+    ) {
+      return
     }
+
+    resetSandboxUiDeepLinkSession()
+    void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
+      console.warn('[Desktop] Could not clear stale app deep links:', error)
+    })
+  }, [resetSandboxUiDeepLinkSession, vm.authenticatedPrincipalIdentity])
+
+  const setPendingGfsDeepLinkState = React.useCallback((next: GfsResourceNavigationRequest[]) => {
+    const ordered = [...next].sort((left, right) => left.id - right.id)
+    pendingGfsDeepLinksRef.current = ordered
+    setPendingGfsDeepLinks(ordered)
   }, [])
+
+  const handleSessionInvalidated = React.useCallback(
+    (event: SandboxUiSessionInvalidation) => {
+      // Older component harnesses use a controller stub with no published
+      // generation. Keep their existing reset behavior; the production
+      // controller always publishes number|null from the main session source.
+      if (vm.sessionGeneration === undefined) {
+        resetSandboxUiDeepLinkSession()
+        return
+      }
+      const current = sessionInvalidationRef.current
+      if (current && event.sessionGeneration < current.sessionGeneration) return
+      sessionInvalidationRef.current = event
+      setSessionInvalidation(event)
+      setSessionInvalidationReadFailed(false)
+      sandboxUiDeepLinkMinimumIdRef.current = Math.max(
+        sandboxUiDeepLinkMinimumIdRef.current,
+        event.appDeepLinkMinimumId
+      )
+      gfsDeepLinkMinimumIdRef.current = Math.max(
+        gfsDeepLinkMinimumIdRef.current,
+        event.gfsDeepLinkMinimumId
+      )
+      resetSandboxUiDeepLinkSession()
+      gfsDeepLinkGenerationRef.current += 1
+      gfsDeepLinkAcceptingRef.current = false
+      pendingGfsDeepLinksRef.current = []
+      processingGfsDeepLinkIdRef.current = null
+      activeGfsDeepLinkRef.current = null
+      setActiveGfsDeepLink(null)
+      setPendingGfsDeepLinkState([])
+    },
+    [resetSandboxUiDeepLinkSession, setPendingGfsDeepLinkState, vm.sessionGeneration]
+  )
+
+  React.useEffect(
+    () => window.clerum.sandboxUi.onSessionInvalidated(handleSessionInvalidated),
+    [handleSessionInvalidated]
+  )
+
+  const acknowledgeGfsDeepLink = React.useCallback(
+    async (id: number) => {
+      if (acknowledgedGfsDeepLinkIdsRef.current.has(id)) return
+      acknowledgedGfsDeepLinkIdsRef.current.add(id)
+      setPendingGfsDeepLinkState(pendingGfsDeepLinksRef.current.filter(item => item.id !== id))
+      if (activeGfsDeepLinkRef.current?.id === id) {
+        activeGfsDeepLinkRef.current = null
+        setActiveGfsDeepLink(null)
+      }
+      if (processingGfsDeepLinkIdRef.current === id) processingGfsDeepLinkIdRef.current = null
+      try {
+        await window.clerum.gfs?.acknowledgeDeepLink?.(id)
+      } catch {
+        // Main can replay an unacknowledged entry after renderer restart.
+      }
+    },
+    [setPendingGfsDeepLinkState]
+  )
+
+  const enqueueGfsDeepLink = React.useCallback(
+    (value: GfsResourceDeepLinkEnvelope) => {
+      if (!Number.isSafeInteger(value?.id) || value.id <= 0) return
+      if (sessionInvalidationRef.current) {
+        sessionInvalidationQueueRevisionRef.current += 1
+        return
+      }
+      if (!gfsDeepLinkAcceptingRef.current || value.id < gfsDeepLinkMinimumIdRef.current) return
+      if (acknowledgedGfsDeepLinkIdsRef.current.has(value.id)) return
+      if (pendingGfsDeepLinksRef.current.some(item => item.id === value.id)) return
+      const uri = normalizeGfsResourceUri(value?.uri)
+      if (!uri) {
+        vm.pushToast('Could not open EvenDrive link: the resource route is malformed.', 'error')
+        void acknowledgeGfsDeepLink(value.id)
+        return
+      }
+      const request = vm.beginGfsResourceNavigation(
+        value.id,
+        uri,
+        gfsDeepLinkGenerationRef.current,
+        value.userNavigationGenerationAtActivation
+      )
+      if (!request) {
+        void acknowledgeGfsDeepLink(value.id)
+        return
+      }
+      setPendingGfsDeepLinkState([...pendingGfsDeepLinksRef.current, request])
+    },
+    [
+      acknowledgeGfsDeepLink,
+      setPendingGfsDeepLinkState,
+      vm.beginGfsResourceNavigation,
+      vm.pushToast,
+    ]
+  )
+
+  const handleGfsDeepLinkOutcome = React.useCallback(
+    (id: number, outcome: 'opened' | 'terminal' | 'retryable' | 'superseded') => {
+      if (processingGfsDeepLinkIdRef.current !== id) return
+      const request = activeGfsDeepLinkRef.current
+      if (!request || request.id !== id) return
+      if (
+        request.principalGeneration !== gfsDeepLinkGenerationRef.current ||
+        !vm.isNavigationIntentCurrent(request.intentSequence)
+      ) {
+        void acknowledgeGfsDeepLink(id)
+        return
+      }
+      if (outcome === 'retryable') return
+      void acknowledgeGfsDeepLink(id)
+    },
+    [acknowledgeGfsDeepLink, vm.isNavigationIntentCurrent]
+  )
+
+  const clearSandboxUiDeepLinkProcessing = React.useCallback(
+    (linkId: number) => {
+      const processingLinkId = processingSandboxUiDeepLinkIdRef.current
+      processingSandboxUiDeepLinkIdRef.current = clearSandboxUiDeepLinkProcessingOwner(
+        processingLinkId,
+        linkId
+      )
+      if (processingLinkId === linkId) {
+        // The scheduler reads pending links from React state but reads its owner
+        // from a ref. Publish the same entries so an already-confirmed link gets
+        // another scheduler pass without changing its identity or retry state.
+        setPendingSandboxUiDeepLinkState([...pendingSandboxUiDeepLinksRef.current])
+      }
+    },
+    [setPendingSandboxUiDeepLinkState]
+  )
+
+  const clearSandboxUiDeepLinkLocalOwnership = React.useCallback(
+    (linkId: number) => {
+      clearSandboxUiDeepLinkProcessing(linkId)
+      sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkOriginAppByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkIntentByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkClosedOriginEmbedsRef.current.delete(linkId)
+    },
+    [clearSandboxUiDeepLinkProcessing]
+  )
 
   const acknowledgeSandboxUiDeepLink = React.useCallback(
     async (linkId: number) => {
+      const isPending = pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)
+      clearSandboxUiDeepLinkLocalOwnership(linkId)
+      if (!isPending) return
       const next = removePendingSandboxUiDeepLink(pendingSandboxUiDeepLinksRef.current, linkId)
       setPendingSandboxUiDeepLinkState(next)
-      clearSandboxUiDeepLinkProcessing(linkId)
-      sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
       try {
         await window.clerum.sandboxUi.acknowledgeDeepLink(linkId)
       } catch (error) {
         console.warn('[Desktop] Could not acknowledge app deep link:', error)
       }
     },
-    [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState]
+    [clearSandboxUiDeepLinkLocalOwnership, setPendingSandboxUiDeepLinkState]
+  )
+
+  const cancelSupersededSandboxUiDeepLink = React.useCallback(
+    async (linkId: number) => {
+      if (!pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)) {
+        clearSandboxUiDeepLinkLocalOwnership(linkId)
+        return
+      }
+      vm.pushToast('App link canceled because you navigated elsewhere.', 'info')
+      await acknowledgeSandboxUiDeepLink(linkId)
+    },
+    [acknowledgeSandboxUiDeepLink, clearSandboxUiDeepLinkLocalOwnership, vm.pushToast]
   )
 
   const deferSandboxUiDeepLink = React.useCallback(
@@ -1637,7 +2068,6 @@ export function App() {
       message: string,
       tone: 'info' | 'error' = 'error'
     ): boolean => {
-      clearSandboxUiDeepLinkProcessing(pending.link.id)
       if ((pending.retryCount ?? 0) >= MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS) {
         const next = failPendingSandboxUiDeepLink(
           pendingSandboxUiDeepLinksRef.current,
@@ -1657,67 +2087,257 @@ export function App() {
       vm.pushToast(message, tone)
       return false
     },
-    [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState, vm.pushToast]
+    [setPendingSandboxUiDeepLinkState, vm.pushToast]
+  )
+
+  const markSandboxUiDeepLinkRetryableFailure = React.useCallback(
+    (linkId: number, message = SANDBOX_UI_DEEP_LINK_ROLLBACK_RETRY_MESSAGE) => {
+      if (!pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)) return
+      clearSandboxUiDeepLinkProcessing(linkId)
+      setPendingSandboxUiDeepLinkState(
+        failPendingSandboxUiDeepLink(pendingSandboxUiDeepLinksRef.current, linkId, message)
+      )
+    },
+    [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState]
   )
 
   const restoreSandboxUiDeepLinkTeam = React.useCallback(
     async (context: PendingSandboxUiDeepLinkLaunch) => {
+      const stillOwnsSessionAndLink = () =>
+        context.generation === sandboxUiDeepLinkGenerationRef.current &&
+        pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === context.linkId)
+      const stillOwnsLinkAndNavigation = () =>
+        stillOwnsSessionAndLink() &&
+        (context.navigationIntentSequence === undefined ||
+          vm.isNavigationIntentCurrent(context.navigationIntentSequence))
       if (
-        !context.switchedTeam ||
-        !context.originalTeamId ||
-        !context.linkTeamId ||
-        vm.getCurrentTeamId() !== context.linkTeamId ||
-        context.generation !== sandboxUiDeepLinkGenerationRef.current
+        !stillOwnsLinkAndNavigation() ||
+        (context.switchedTeam &&
+          (!context.originalTeamId ||
+            !context.linkTeamId ||
+            vm.getCurrentTeamId() !== context.linkTeamId))
+      )
+        return 'superseded' as const
+      // A failed target-team RPC that left the origin embed open is a no-op for
+      // navigation. There is nothing to roll back unless this transaction
+      // switched teams or actually closed the origin view.
+      if (
+        !context.switchedTeam &&
+        !context.originEmbedClosed &&
+        context.linkTeamId &&
+        context.originalTeamId !== context.linkTeamId
       ) {
-        return
+        return 'restored' as const
       }
-      try {
-        await vm.handleEnsureTeamContext({ teamId: context.originalTeamId, announce: true })
+      if (vm.getCurrentTeamId() !== context.linkTeamId && context.switchedTeam) {
+        return 'superseded' as const
+      }
+      let originTeamRestored = !context.switchedTeam
+      let retryable = false
+      if (context.switchedTeam) {
+        try {
+          await vm.handleEnsureTeamContext({
+            teamId: context.originalTeamId,
+            announce: true,
+            navigationIntentSequence: context.navigationIntentSequence,
+          })
+          if (!stillOwnsLinkAndNavigation()) return 'superseded' as const
+          originTeamRestored = vm.getCurrentTeamId() === context.originalTeamId
+          if (!originTeamRestored) {
+            vm.pushToast(
+              'Could not restore the previous team because the active team changed.',
+              'error'
+            )
+          }
+        } catch (rollbackError) {
+          if (!stillOwnsLinkAndNavigation()) return 'superseded' as const
+          const message =
+            rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+          originTeamRestored = vm.getCurrentTeamId() === context.originalTeamId
+          retryable = originTeamRestored
+          vm.pushToast(
+            originTeamRestored
+              ? `The previous team is active, but its data refresh failed: ${message}. Retry the app link.`
+              : `Could not restore the previous team: ${message}`,
+            'error'
+          )
+        }
+      }
+      // A workspace/app owned by the origin must never be restored under the
+      // target team's session when rollback failed or another team won.
+      if (!originTeamRestored || vm.getCurrentTeamId() !== context.originalTeamId) {
+        return retryable ? ('retryable' as const) : ('superseded' as const)
+      }
+      if (!stillOwnsLinkAndNavigation()) return 'superseded' as const
+      if (
+        context.restoreWorkspace &&
+        context.originNavigation &&
+        context.navigationIntentSequence !== undefined &&
+        vm.isNavigationIntentCurrent(context.navigationIntentSequence)
+      ) {
+        const restoredIntent = vm.restoreWorkspaceNavigation(
+          context.originNavigation,
+          context.navigationIntentSequence
+        )
+        if (!stillOwnsSessionAndLink() || vm.getCurrentTeamId() !== context.originalTeamId) {
+          return 'superseded' as const
+        }
+        if (restoredIntent !== null) {
+          sandboxUiDeepLinkIntentByIdRef.current.set(context.linkId, restoredIntent)
+          if (context.originEmbedClosed && context.originApp) {
+            // The target-team app listing can still be pending in React state
+            // when rollback continues. Replace this ref synchronously so the
+            // relaunch below can resolve the exact origin app immediately.
+            const restoredApps = [
+              context.originApp,
+              ...availableSandboxUiAppsRef.current.filter(
+                app => app.appRef !== context.originApp?.appRef
+              ),
+            ]
+            availableSandboxUiAppsRef.current = restoredApps
+            setAvailableSandboxUiApps(restoredApps)
+          }
+          const originTab = activeWorkspaceTab(context.originNavigation.workspaceTabs)
+          if (
+            context.originEmbedClosed &&
+            context.originApp &&
+            originTab?.kind === 'app' &&
+            originTab.app?.appRef === context.originApp.appRef &&
+            vm.getCurrentTeamId() === context.originalTeamId &&
+            stillOwnsSessionAndLink() &&
+            vm.isNavigationIntentCurrent(restoredIntent)
+          ) {
+            activateAndLaunch(state => selectWorkspaceTab(state, originTab.id), undefined, {
+              kind: 'activeTab',
+              replace: true,
+            })
+          }
+        }
+      } else if (context.conversationOrigin) {
         const origin = context.conversationOrigin
-        if (origin && (!origin.teamId || origin.teamId === context.originalTeamId)) {
+        if (
+          stillOwnsLinkAndNavigation() &&
+          vm.getCurrentTeamId() === context.originalTeamId &&
+          (!origin.teamId || origin.teamId === context.originalTeamId)
+        ) {
           vm.handleSelectChatAgent(origin.agentName, {
             selectLatest: false,
             chatId: origin.chatId,
             title: origin.title,
+            navigationIntentAlreadyStarted: true,
           })
         }
-      } catch (rollbackError) {
-        const message =
-          rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-        vm.pushToast(`Could not restore the previous team: ${message}`, 'error')
       }
+      return retryable ? ('retryable' as const) : ('restored' as const)
     },
-    [vm.getCurrentTeamId, vm.handleEnsureTeamContext, vm.handleSelectChatAgent, vm.pushToast]
+    [
+      activateAndLaunch,
+      setAvailableSandboxUiApps,
+      vm.getCurrentTeamId,
+      vm.handleEnsureTeamContext,
+      vm.handleSelectChatAgent,
+      vm.isNavigationIntentCurrent,
+      vm.pushToast,
+      vm.restoreWorkspaceNavigation,
+    ]
   )
 
-  const deferSandboxUiDeepLinkUntilTerminal = React.useCallback(
+  const deferSandboxUiDeepLinkAndRestoreOrigin = React.useCallback(
     async (
       pending: PendingSandboxUiDeepLink,
       message: string,
       launchContext: PendingSandboxUiDeepLinkLaunch,
-      tone: 'info' | 'error' = 'error'
+      tone: 'info' | 'error' = 'error',
+      restoreWhileRetryable = true
     ) => {
-      if (deferSandboxUiDeepLink(pending, message, tone)) {
-        await restoreSandboxUiDeepLinkTeam(launchContext)
+      const terminal = deferSandboxUiDeepLink(pending, message, tone)
+      if (!terminal && !restoreWhileRetryable) {
+        // The target team is intentionally retained for this retry. No async
+        // rollback remains in flight, so the exact processing turn can settle.
+        clearSandboxUiDeepLinkProcessing(pending.link.id)
+        return
       }
+      let outcome: Awaited<ReturnType<typeof restoreSandboxUiDeepLinkTeam>>
+      try {
+        outcome = await restoreSandboxUiDeepLinkTeam(launchContext)
+      } catch {
+        const dismissed = pendingSandboxUiDeepLinksRef.current.some(
+          item => item.link.id === pending.link.id && item.failedMessageDismissed
+        )
+        if (dismissed) {
+          await acknowledgeSandboxUiDeepLink(pending.link.id)
+          return
+        }
+        // A rejected restore operation is settled but not safe to retry in the
+        // background. Surface it as retryable and release this exact owner so
+        // the queue cannot remain blocked indefinitely.
+        markSandboxUiDeepLinkRetryableFailure(
+          pending.link.id,
+          'Could not safely restore the previous workspace. Verify the active team, then retry.'
+        )
+        return
+      }
+      const dismissed = pendingSandboxUiDeepLinksRef.current.some(
+        item => item.link.id === pending.link.id && item.failedMessageDismissed
+      )
+      if (dismissed) {
+        await acknowledgeSandboxUiDeepLink(pending.link.id)
+        return
+      }
+      if (outcome === 'retryable') markSandboxUiDeepLinkRetryableFailure(pending.link.id)
+      else if (
+        outcome === 'superseded' &&
+        launchContext.navigationIntentSequence !== undefined &&
+        !vm.isNavigationIntentCurrent(launchContext.navigationIntentSequence)
+      ) {
+        await cancelSupersededSandboxUiDeepLink(pending.link.id)
+      }
+      // Keep the queue turn through rollback and any supersession cleanup. A
+      // later confirmed link must not start under the team being rolled back.
+      clearSandboxUiDeepLinkProcessing(pending.link.id)
     },
-    [deferSandboxUiDeepLink, restoreSandboxUiDeepLinkTeam]
+    [
+      cancelSupersededSandboxUiDeepLink,
+      clearSandboxUiDeepLinkProcessing,
+      deferSandboxUiDeepLink,
+      acknowledgeSandboxUiDeepLink,
+      markSandboxUiDeepLinkRetryableFailure,
+      restoreSandboxUiDeepLinkTeam,
+      vm.isNavigationIntentCurrent,
+    ]
   )
 
   // A cross-team link switches teams, which does not end the embed session, so
   // the live view is handed off first: ownership drops and the switch waits
   // until main has released every view this renderer still had, each leaving
-  // its route on its tab. Resolves `false` when App went away meanwhile.
+  // its route on its tab. No owner is a successful no-op; `closed` means this
+  // transaction released the live owner, while `failed` keeps the switch closed.
   const handoffSeqRef = React.useRef(0)
-  const handOffEmbedBeforeTeamSwitch = React.useCallback(async (): Promise<boolean> => {
+  const handOffEmbedBeforeTeamSwitch = React.useCallback(async (): Promise<
+    'closed' | 'released' | 'no-owner' | 'failed'
+  > => {
     const lifetime = embedLifetimeRef.current!
-    if (lifetime.disposed) return false
+    if (lifetime.disposed) return 'failed'
+    const snapshot = embed.getSnapshot()
+    const ownerLaunchId = snapshot.owner
+    if (ownerLaunchId === null && snapshot.views.size === 0) return 'no-owner'
     const requestId = ++handoffSeqRef.current
-    const ready = new Promise<void>(resolve => handoffWaitersRef.current.set(requestId, resolve))
+    let resolveReady!: (outcome: 'ready' | 'failed') => void
+    const ready = new Promise<'ready' | 'failed'>(resolve => (resolveReady = resolve))
+    const waiter: EmbedHandoffWaiter = {
+      resolve: resolveReady,
+      ownerLaunchId,
+      originReleased: false,
+      originClosed: false,
+    }
+    handoffWaitersRef.current.set(requestId, waiter)
     embed.dispatch({ type: 'handoff', requestId })
-    await Promise.race([ready, lifetime.unmounted])
+    const outcome = await Promise.race([ready, lifetime.unmounted.then(() => 'failed' as const)])
     handoffWaitersRef.current.delete(requestId)
-    return !lifetime.disposed
+    if (outcome !== 'ready' || lifetime.disposed) return 'failed'
+    if (ownerLaunchId === null) return 'no-owner'
+    if (waiter.originReleased) return waiter.originClosed ? 'closed' : 'released'
+    return embed.getSnapshot().views.has(ownerLaunchId) ? 'failed' : 'no-owner'
   }, [embed])
 
   // What a deep link does once its launch settled. Mounted: done. Failed: retried
@@ -1736,7 +2356,7 @@ export function App() {
         item => item.link.id === context.linkId
       )
       if (!pending) {
-        clearSandboxUiDeepLinkProcessing(context.linkId)
+        clearSandboxUiDeepLinkLocalOwnership(context.linkId)
         return
       }
       if (outcome === 'mounted') {
@@ -1744,11 +2364,18 @@ export function App() {
         return
       }
       if (outcome === 'abandoned') {
-        await acknowledgeSandboxUiDeepLink(context.linkId)
+        if (
+          context.navigationIntentSequence !== undefined &&
+          !vm.isNavigationIntentCurrent(context.navigationIntentSequence)
+        ) {
+          await cancelSupersededSandboxUiDeepLink(context.linkId)
+        } else {
+          await acknowledgeSandboxUiDeepLink(context.linkId)
+        }
         return
       }
       const failure = embed.getSnapshot().failure
-      await deferSandboxUiDeepLinkUntilTerminal(
+      await deferSandboxUiDeepLinkAndRestoreOrigin(
         pending,
         failure?.launchId === launchId
           ? embedFailureMessage(failure)
@@ -1759,13 +2386,22 @@ export function App() {
     [
       acknowledgeSandboxUiDeepLink,
       clearSandboxUiDeepLinkProcessing,
-      deferSandboxUiDeepLinkUntilTerminal,
+      clearSandboxUiDeepLinkLocalOwnership,
+      cancelSupersededSandboxUiDeepLink,
+      deferSandboxUiDeepLinkAndRestoreOrigin,
       embed,
+      vm.isNavigationIntentCurrent,
     ]
   )
 
   React.useEffect(() => {
     const enqueue = (link: SandboxUiDeepLinkEnvelope) => {
+      if (!Number.isSafeInteger(link?.id) || link.id <= 0) return
+      if (sessionInvalidationRef.current) {
+        sessionInvalidationQueueRevisionRef.current += 1
+        return
+      }
+      if (link.id < sandboxUiDeepLinkMinimumIdRef.current) return
       const next = enqueuePendingSandboxUiDeepLink(
         pendingSandboxUiDeepLinksRef.current,
         link,
@@ -1787,6 +2423,477 @@ export function App() {
   }, [setPendingSandboxUiDeepLinkState])
 
   React.useEffect(() => {
+    const identity = vm.authenticatedPrincipalIdentity
+    const previousIdentity = gfsDeepLinkIdentityRef.current
+    gfsDeepLinkIdentityRef.current = identity
+    if (
+      sessionInvalidationRef.current ||
+      !shouldPurgeSandboxUiDeepLinks(previousIdentity, identity)
+    )
+      return
+
+    const generation = ++gfsDeepLinkGenerationRef.current
+    gfsDeepLinkAcceptingRef.current = false
+    setPendingGfsDeepLinkState([])
+    processingGfsDeepLinkIdRef.current = null
+    activeGfsDeepLinkRef.current = null
+    setActiveGfsDeepLink(null)
+    const listIntentSequence = navigationIntentSequenceRef.current
+
+    void (async () => {
+      try {
+        const minimumId = await window.clerum.gfs?.clearPendingDeepLinks?.()
+        if (generation !== gfsDeepLinkGenerationRef.current) return
+        if (!Number.isSafeInteger(minimumId) || minimumId === undefined || minimumId < 1) {
+          throw new Error('The EvenDrive deep-link queue did not return a valid reset boundary')
+        }
+        gfsDeepLinkMinimumIdRef.current = Math.max(gfsDeepLinkMinimumIdRef.current, minimumId)
+        gfsDeepLinkAcceptingRef.current = true
+
+        const pending = await window.clerum.gfs?.listPendingDeepLinks?.()
+        if (generation !== gfsDeepLinkGenerationRef.current) return
+        const currentLinks = pending?.links.filter(
+          link => link.id >= gfsDeepLinkMinimumIdRef.current
+        )
+        if (!vm.isNavigationIntentCurrent(listIntentSequence)) {
+          currentLinks
+            ?.filter(link => !pendingGfsDeepLinksRef.current.some(item => item.id === link.id))
+            .forEach(link => void acknowledgeGfsDeepLink(link.id))
+          return
+        }
+        currentLinks?.forEach(enqueueGfsDeepLink)
+      } catch {
+        if (generation === gfsDeepLinkGenerationRef.current) {
+          vm.pushToast(
+            'Could not safely refresh pending EvenDrive links after the account changed.',
+            'error'
+          )
+        }
+      }
+    })()
+  }, [
+    enqueueGfsDeepLink,
+    acknowledgeGfsDeepLink,
+    setPendingGfsDeepLinkState,
+    vm.isNavigationIntentCurrent,
+    vm.authenticatedPrincipalIdentity,
+    vm.pushToast,
+  ])
+
+  React.useEffect(() => {
+    let cancelled = false
+    const unsubscribe = window.clerum.gfs?.onDeepLink?.(enqueueGfsDeepLink)
+    const listGeneration = gfsDeepLinkGenerationRef.current
+    const listIntentSequence = navigationIntentSequenceRef.current
+    const pendingLinks = gfsDeepLinkAcceptingRef.current
+      ? window.clerum.gfs?.listPendingDeepLinks?.()
+      : undefined
+    void pendingLinks
+      ?.then(result => {
+        if (
+          cancelled ||
+          listGeneration !== gfsDeepLinkGenerationRef.current ||
+          !gfsDeepLinkAcceptingRef.current
+        )
+          return
+        const currentLinks = result?.links.filter(
+          link => link.id >= gfsDeepLinkMinimumIdRef.current
+        )
+        if (!vm.isNavigationIntentCurrent(listIntentSequence)) {
+          currentLinks
+            ?.filter(link => !pendingGfsDeepLinksRef.current.some(item => item.id === link.id))
+            .forEach(link => void acknowledgeGfsDeepLink(link.id))
+          return
+        }
+        currentLinks?.forEach(enqueueGfsDeepLink)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+      unsubscribe?.()
+    }
+  }, [acknowledgeGfsDeepLink, enqueueGfsDeepLink, vm.isNavigationIntentCurrent])
+
+  React.useEffect(() => {
+    const barrier = sessionInvalidation
+    if (!barrier || sessionInvalidationRef.current !== barrier) return
+    let cancelled = false
+    const stillOwnsBarrier = () => !cancelled && sessionInvalidationRef.current === barrier
+    const retryAfterQueueChange = () => {
+      if (stillOwnsBarrier()) setSessionInvalidationRetryTick(value => value + 1)
+    }
+    const listHeldQueues = async () => {
+      const [appPending, gfsPending] = await Promise.all([
+        window.clerum.sandboxUi.listPendingDeepLinks(),
+        window.clerum.gfs?.listPendingDeepLinks?.(),
+      ])
+      return {
+        apps: appPending.links
+          .filter(link => link.id >= barrier.appDeepLinkMinimumId)
+          .sort((left, right) => left.id - right.id),
+        resources: (gfsPending?.links ?? [])
+          .filter(link => link.id >= barrier.gfsDeepLinkMinimumId)
+          .sort((left, right) => left.id - right.id),
+      }
+    }
+    const hasNewQueueIds = (
+      queues: Awaited<ReturnType<typeof listHeldQueues>>,
+      checkedAppIds: ReadonlySet<number>,
+      checkedResourceIds: ReadonlySet<number>
+    ) =>
+      queues.apps.some(link => !checkedAppIds.has(link.id)) ||
+      queues.resources.some(link => !checkedResourceIds.has(link.id))
+
+    const retireHeldQueues = async (
+      queues: Awaited<ReturnType<typeof listHeldQueues>>,
+      authority: DeepLinkAcknowledgmentAuthority
+    ): Promise<boolean> => {
+      const acknowledgeResource = window.clerum.gfs?.acknowledgeDeepLink
+      if (queues.resources.length && !acknowledgeResource) {
+        throw new Error('EvenDrive link acknowledgment is unavailable')
+      }
+      const results = await Promise.all([
+        ...queues.apps.map(link => window.clerum.sandboxUi.acknowledgeDeepLink(link.id, authority)),
+        ...queues.resources.map(link => acknowledgeResource!(link.id, authority)),
+      ])
+      if (!stillOwnsBarrier()) return false
+      if (results.some(result => result !== true)) {
+        retryAfterQueueChange()
+        return false
+      }
+      return true
+    }
+
+    void (async () => {
+      try {
+        const [session, liveSessionGeneration, runtimeConfig] = await Promise.all([
+          window.clerum.auth.getSessionState(),
+          window.clerum.auth.getSessionGeneration(),
+          window.clerum.auth.getRuntimeConfigState(),
+        ])
+        if (!stillOwnsBarrier()) return
+        if (
+          !Number.isSafeInteger(liveSessionGeneration) ||
+          session.sessionGeneration !== liveSessionGeneration
+        )
+          return
+
+        const navigationGeneration = window.clerum.gfs?.getUserNavigationGeneration?.()
+        if (!Number.isSafeInteger(navigationGeneration) || navigationGeneration === null) return
+        const retirementAuthority = {
+          sessionGeneration: liveSessionGeneration,
+          userNavigationGeneration: navigationGeneration!,
+        }
+        const queueRevisionBeforeSnapshot = sessionInvalidationQueueRevisionRef.current
+        const heldQueues = await listHeldQueues()
+        if (!stillOwnsBarrier()) return
+        if (sessionInvalidationQueueRevisionRef.current !== queueRevisionBeforeSnapshot) {
+          retryAfterQueueChange()
+          return
+        }
+        const heldApps = heldQueues.apps
+        const heldResources = heldQueues.resources
+        const checkedAppIds = new Set(heldQueues.apps.map(link => link.id))
+        const checkedResourceIds = new Set(heldQueues.resources.map(link => link.id))
+
+        if (!session.authenticated || !session.me) {
+          if (
+            vm.isAuthenticated ||
+            (vm.sessionGeneration !== null && vm.sessionGeneration !== undefined)
+          )
+            return
+          // A confirmed signed-out snapshot retires only the exact IDs that
+          // belonged to this barrier. A later invalidation can never be
+          // acknowledged by this batch because queue IDs are monotonic.
+          if (!(await retireHeldQueues(heldQueues, retirementAuthority))) return
+          const queueRevisionBeforeFinalSnapshot = sessionInvalidationQueueRevisionRef.current
+          const [finalQueues, finalSession, finalSessionGeneration, finalRuntimeConfig] =
+            await Promise.all([
+              listHeldQueues(),
+              window.clerum.auth.getSessionState(),
+              window.clerum.auth.getSessionGeneration(),
+              window.clerum.auth.getRuntimeConfigState(),
+            ])
+          if (!stillOwnsBarrier()) return
+          if (
+            sessionInvalidationQueueRevisionRef.current !== queueRevisionBeforeFinalSnapshot ||
+            hasNewQueueIds(finalQueues, checkedAppIds, checkedResourceIds)
+          ) {
+            retryAfterQueueChange()
+            return
+          }
+          if (
+            finalSession.authenticated ||
+            finalSession.me ||
+            finalSession.sessionGeneration !== finalSessionGeneration ||
+            vm.isAuthenticated ||
+            (vm.sessionGeneration !== null && vm.sessionGeneration !== undefined) ||
+            finalRuntimeConfig.envKey !== runtimeConfig.envKey
+          )
+            return
+          sessionInvalidationRef.current = null
+          setSessionInvalidation(null)
+          setSessionInvalidationReadFailed(false)
+          sandboxUiDeepLinkMinimumIdRef.current = barrier.appDeepLinkMinimumId
+          gfsDeepLinkMinimumIdRef.current = barrier.gfsDeepLinkMinimumId
+          gfsDeepLinkAcceptingRef.current = true
+          return
+        }
+        if (vm.sessionGeneration !== liveSessionGeneration) return
+
+        const sessionTeamId = String(session.me.teamId ?? '').trim()
+        const publishedIdentity = `${session.me.id}:${String(session.me.email || '')
+          .trim()
+          .toLowerCase()}:${sessionTeamId}`
+        const matchesPublishedSession = (
+          candidate: typeof session,
+          candidateGeneration: number,
+          candidateRuntimeConfig: typeof runtimeConfig
+        ) => {
+          const controllerIdentity = vm.me
+            ? `${vm.me.id}:${String(vm.me.email || '')
+                .trim()
+                .toLowerCase()}:${String(vm.me.teamId ?? '').trim()}`
+            : null
+          return (
+            candidate.authenticated &&
+            !!candidate.me &&
+            candidate.sessionGeneration === candidateGeneration &&
+            candidateGeneration === vm.sessionGeneration &&
+            `${candidate.me.id}:${String(candidate.me.email || '')
+              .trim()
+              .toLowerCase()}:${String(candidate.me.teamId ?? '').trim()}` === publishedIdentity &&
+            vm.isAuthenticated &&
+            controllerIdentity === publishedIdentity &&
+            vm.currentTeamId === sessionTeamId &&
+            !!vm.runtimeConfigState?.envKey &&
+            candidateRuntimeConfig.envKey === runtimeConfig.envKey &&
+            candidateRuntimeConfig.envKey === vm.runtimeConfigState.envKey
+          )
+        }
+        if (!matchesPublishedSession(session, liveSessionGeneration, runtimeConfig)) return
+
+        const rendererIntentSequence = vm.navigationIntentSequence
+        const eligibleApps: typeof heldApps = []
+        const staleApps: typeof heldApps = []
+        const eligibleResources: typeof heldResources = []
+        const staleResources: typeof heldResources = []
+        for (const link of heldApps) {
+          if (link.userNavigationGenerationAtActivation !== navigationGeneration) {
+            staleApps.push(link)
+          } else {
+            eligibleApps.push(link)
+          }
+        }
+        for (const link of heldResources) {
+          if (link.userNavigationGenerationAtActivation !== navigationGeneration) {
+            staleResources.push(link)
+          } else {
+            eligibleResources.push(link)
+          }
+        }
+
+        // Recheck app visibility and cross-team membership through the
+        // replacement session before any held link is offered to the user.
+        // Cross-team app visibility is checked again by the normal post-switch
+        // authorization path after explicit confirmation.
+        const sameTeamApps = eligibleApps.filter(
+          link => !link.teamId || link.teamId === sessionTeamId
+        )
+        const crossTeamApps = eligibleApps.filter(
+          link => link.teamId && link.teamId !== sessionTeamId
+        )
+        const [appListing, teamDirectory] = await Promise.all([
+          sameTeamApps.length ? window.clerum.sandboxUi.listApps() : Promise.resolve(null),
+          crossTeamApps.length ? window.clerum.team.directory() : Promise.resolve(null),
+        ])
+        const [latestSession, latestSessionGeneration, latestRuntimeConfig] = await Promise.all([
+          window.clerum.auth.getSessionState(),
+          window.clerum.auth.getSessionGeneration(),
+          window.clerum.auth.getRuntimeConfigState(),
+        ])
+        if (
+          !stillOwnsBarrier() ||
+          !vm.isNavigationIntentCurrent(rendererIntentSequence) ||
+          window.clerum.gfs?.getUserNavigationGeneration?.() !== navigationGeneration ||
+          !matchesPublishedSession(latestSession, latestSessionGeneration, latestRuntimeConfig)
+        ) {
+          return
+        }
+        if (sessionInvalidationQueueRevisionRef.current !== queueRevisionBeforeSnapshot) {
+          retryAfterQueueChange()
+          return
+        }
+        const queueRevisionBeforeAuthorizationSnapshot = sessionInvalidationQueueRevisionRef.current
+        const authorizedQueues = await listHeldQueues()
+        if (!stillOwnsBarrier()) return
+        if (
+          sessionInvalidationQueueRevisionRef.current !==
+            queueRevisionBeforeAuthorizationSnapshot ||
+          hasNewQueueIds(authorizedQueues, checkedAppIds, checkedResourceIds)
+        ) {
+          retryAfterQueueChange()
+          return
+        }
+        const currentAppIds = new Set(authorizedQueues.apps.map(link => link.id))
+        const currentResourceIds = new Set(authorizedQueues.resources.map(link => link.id))
+
+        const authorizedAppRefs = new Set(
+          (appListing?.apps ?? []).map(app => app.appRef.toLowerCase())
+        )
+        const authorizedTeamIds = new Set((teamDirectory?.items ?? []).map(item => item.team.id))
+        const finalApps = eligibleApps.filter(
+          link =>
+            currentAppIds.has(link.id) &&
+            (link.teamId && link.teamId !== sessionTeamId
+              ? authorizedTeamIds.has(link.teamId)
+              : authorizedAppRefs.has(link.appRef.toLowerCase()))
+        )
+        const discardedApps = [
+          ...staleApps.filter(link => currentAppIds.has(link.id)),
+          ...eligibleApps.filter(link => currentAppIds.has(link.id) && !finalApps.includes(link)),
+        ]
+        const discardedResources = staleResources.filter(link => currentResourceIds.has(link.id))
+        const finalResources = eligibleResources.filter(link => currentResourceIds.has(link.id))
+        if (
+          !(await retireHeldQueues(
+            { apps: discardedApps, resources: discardedResources },
+            retirementAuthority
+          ))
+        )
+          return
+
+        const queueRevisionBeforeFinalSnapshot = sessionInvalidationQueueRevisionRef.current
+        const [finalQueues, finalSession, finalSessionGeneration, finalRuntimeConfig] =
+          await Promise.all([
+            listHeldQueues(),
+            window.clerum.auth.getSessionState(),
+            window.clerum.auth.getSessionGeneration(),
+            window.clerum.auth.getRuntimeConfigState(),
+          ])
+        if (!stillOwnsBarrier()) return
+        if (
+          sessionInvalidationQueueRevisionRef.current !== queueRevisionBeforeFinalSnapshot ||
+          hasNewQueueIds(finalQueues, checkedAppIds, checkedResourceIds) ||
+          !vm.isNavigationIntentCurrent(rendererIntentSequence) ||
+          window.clerum.gfs?.getUserNavigationGeneration?.() !== navigationGeneration ||
+          !matchesPublishedSession(finalSession, finalSessionGeneration, finalRuntimeConfig)
+        ) {
+          if (
+            sessionInvalidationQueueRevisionRef.current !== queueRevisionBeforeFinalSnapshot ||
+            hasNewQueueIds(finalQueues, checkedAppIds, checkedResourceIds)
+          )
+            retryAfterQueueChange()
+          return
+        }
+
+        const finalAppIds = new Set(finalQueues.apps.map(link => link.id))
+        const finalResourceIds = new Set(finalQueues.resources.map(link => link.id))
+        sandboxUiDeepLinkMinimumIdRef.current = barrier.appDeepLinkMinimumId
+        gfsDeepLinkMinimumIdRef.current = barrier.gfsDeepLinkMinimumId
+        gfsDeepLinkAcceptingRef.current = true
+        sessionInvalidationRef.current = null
+        setSessionInvalidation(null)
+        setSessionInvalidationReadFailed(false)
+        for (const link of finalApps.filter(link => finalAppIds.has(link.id))) {
+          const next = enqueuePendingSandboxUiDeepLink(
+            pendingSandboxUiDeepLinksRef.current,
+            link,
+            activeConversationOriginRef.current,
+            vm.authenticatedPrincipalIdentity
+          )
+          setPendingSandboxUiDeepLinkState(next)
+        }
+        finalResources.filter(link => finalResourceIds.has(link.id)).forEach(enqueueGfsDeepLink)
+      } catch {
+        if (stillOwnsBarrier()) setSessionInvalidationReadFailed(true)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    enqueueGfsDeepLink,
+    sessionInvalidation,
+    setPendingSandboxUiDeepLinkState,
+    vm.authenticatedPrincipalIdentity,
+    vm.currentTeamId,
+    vm.isAuthenticated,
+    vm.isNavigationIntentCurrent,
+    vm.me,
+    vm.navigationIntentSequence,
+    vm.runtimeConfigState?.envKey,
+    vm.sessionGeneration,
+    sessionInvalidationRetryTick,
+  ])
+
+  React.useEffect(() => {
+    const active = activeGfsDeepLinkRef.current
+    if (
+      active &&
+      (active.principalGeneration !== gfsDeepLinkGenerationRef.current ||
+        !vm.isNavigationIntentCurrent(active.intentSequence))
+    ) {
+      void acknowledgeGfsDeepLink(active.id)
+      return
+    }
+
+    const pending = pendingGfsDeepLinksRef.current[0]
+    if (
+      pending &&
+      (pending.principalGeneration !== gfsDeepLinkGenerationRef.current ||
+        !vm.isNavigationIntentCurrent(pending.intentSequence))
+    ) {
+      void acknowledgeGfsDeepLink(pending.id)
+      return
+    }
+
+    if (
+      bootSplashLoading ||
+      !vm.isAuthenticated ||
+      !vm.authenticatedPrincipalIdentity ||
+      processingGfsDeepLinkIdRef.current !== null
+    ) {
+      return
+    }
+    if (!pending) return
+    const uri = normalizeGfsResourceUri(pending.uri)
+    if (!uri) {
+      void acknowledgeGfsDeepLink(pending.id)
+      vm.pushToast('Could not open EvenDrive link: the resource route is malformed.', 'error')
+      return
+    }
+    processingGfsDeepLinkIdRef.current = pending.id
+    activeGfsDeepLinkRef.current = pending
+    setActiveGfsDeepLink(pending)
+    try {
+      if (!vm.activateGfsResourceNavigation(pending, gfsDeepLinkGenerationRef.current)) {
+        void acknowledgeGfsDeepLink(pending.id)
+      }
+    } catch (error) {
+      processingGfsDeepLinkIdRef.current = null
+      activeGfsDeepLinkRef.current = null
+      setActiveGfsDeepLink(null)
+      void acknowledgeGfsDeepLink(pending.id)
+      vm.pushToast(
+        `Could not open EvenDrive link: ${error instanceof Error ? error.message : String(error)}`,
+        'error'
+      )
+    }
+  }, [
+    acknowledgeGfsDeepLink,
+    bootSplashLoading,
+    pendingGfsDeepLinks,
+    vm.activateGfsResourceNavigation,
+    vm.authenticatedPrincipalIdentity,
+    vm.isNavigationIntentCurrent,
+    vm.isAuthenticated,
+    vm.navigationIntentSequence,
+    vm.pushToast,
+  ])
+
+  React.useEffect(() => {
     if (
       !canProcessSandboxUiDeepLinks(
         bootSplashLoading,
@@ -1799,6 +2906,7 @@ export function App() {
     const currentIdentity = vm.authenticatedPrincipalIdentity
     if (!currentIdentity) return
     let stalePending: PendingSandboxUiDeepLink | null = null
+    let supersededPending: PendingSandboxUiDeepLink | null = null
     const now = Date.now()
     // Written as a loop rather than `.find()` because TypeScript's control-flow
     // analysis does not track assignments made inside a callback: `stalePending`
@@ -1812,6 +2920,11 @@ export function App() {
         continue
       }
       if (isPendingSandboxUiDeepLinkAwaitingConfirmation(item, currentIdentity)) continue
+      const expectedIntent = sandboxUiDeepLinkIntentByIdRef.current.get(item.link.id)
+      if (expectedIntent === undefined || !vm.isNavigationIntentCurrent(expectedIntent)) {
+        supersededPending = item
+        break
+      }
       if (item.failedMessage) continue
       if (item.nextRetryAt && item.nextRetryAt > now) continue
       pending = item
@@ -1821,26 +2934,89 @@ export function App() {
       void acknowledgeSandboxUiDeepLink(stalePending.link.id)
       return
     }
+    if (supersededPending) {
+      if (
+        isSandboxUiDeepLinkProcessingOwner(
+          processingSandboxUiDeepLinkIdRef.current,
+          supersededPending.link.id
+        )
+      ) {
+        // The active transaction will observe the stale intent when its
+        // awaited operation settles. Keep its exact processing turn until
+        // then; acknowledging here would admit a second link into an
+        // unresolved team/embed transaction.
+        return
+      }
+      void cancelSupersededSandboxUiDeepLink(supersededPending.link.id)
+      return
+    }
     if (!pending || processingSandboxUiDeepLinkIdRef.current !== null) return
+    const navigationIntentSequence = sandboxUiDeepLinkIntentByIdRef.current.get(pending.link.id)
+    if (
+      navigationIntentSequence === undefined ||
+      !vm.isNavigationIntentCurrent(navigationIntentSequence)
+    ) {
+      void cancelSupersededSandboxUiDeepLink(pending.link.id)
+      return
+    }
     processingSandboxUiDeepLinkIdRef.current = pending.link.id
     const processingGeneration = sandboxUiDeepLinkGenerationRef.current
 
     void (async () => {
       const restoreTeamId = sandboxUiDeepLinkRestoreTeamByIdRef.current.get(pending.link.id)
       const originalTeamId = restoreTeamId ?? vm.getCurrentTeamId()
+      let originNavigation =
+        sandboxUiDeepLinkOriginNavigationByIdRef.current.get(pending.link.id) ??
+        vm.captureWorkspaceNavigation()
+      sandboxUiDeepLinkOriginNavigationByIdRef.current.set(pending.link.id, originNavigation)
+      let originApp: ActiveSandboxUiApp | null
+      if (sandboxUiDeepLinkOriginAppByIdRef.current.has(pending.link.id)) {
+        originApp = sandboxUiDeepLinkOriginAppByIdRef.current.get(pending.link.id) ?? null
+      } else {
+        const originTab = activeWorkspaceTab(originNavigation.workspaceTabs)
+        const candidate =
+          (activeSandboxUiApp?.appRef === originTab?.app?.appRef ? activeSandboxUiApp : null) ??
+          availableSandboxUiAppsRef.current.find(app => app.appRef === originTab?.app?.appRef) ??
+          null
+        originApp =
+          originTab?.kind === 'app' && originTab.app?.appRef === candidate?.appRef
+            ? candidate
+            : null
+        sandboxUiDeepLinkOriginAppByIdRef.current.set(pending.link.id, originApp)
+      }
       let switchedTeam = Boolean(
         restoreTeamId && pending.link.teamId && restoreTeamId !== pending.link.teamId
       )
+      const makeLaunchContext = (): PendingSandboxUiDeepLinkLaunch => ({
+        linkId: pending.link.id,
+        generation: processingGeneration,
+        originalTeamId,
+        linkTeamId: pending.link.teamId,
+        switchedTeam,
+        conversationOrigin: pending.conversationOrigin,
+        originNavigation,
+        originApp,
+        navigationIntentSequence,
+        restoreWorkspace:
+          switchedTeam || sandboxUiDeepLinkClosedOriginEmbedsRef.current.has(pending.link.id),
+        originEmbedClosed: sandboxUiDeepLinkClosedOriginEmbedsRef.current.has(pending.link.id),
+      })
       const currentTeamId = vm.getCurrentTeamId()
       try {
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
+        // A retry may resume at the origin after a rollback or remain in the
+        // target team while that app is still starting. Any third team is a
+        // user-owned switch and must cancel this link.
         if (
           restoreTeamId &&
           pending.retryCount &&
-          pending.link.teamId &&
+          currentTeamId !== restoreTeamId &&
           currentTeamId !== pending.link.teamId
         ) {
           sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(pending.link.id)
+          sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(pending.link.id)
+          sandboxUiDeepLinkOriginAppByIdRef.current.delete(pending.link.id)
+          sandboxUiDeepLinkClosedOriginEmbedsRef.current.delete(pending.link.id)
           clearSandboxUiDeepLinkProcessing(pending.link.id)
           const next = failPendingSandboxUiDeepLink(
             pendingSandboxUiDeepLinksRef.current,
@@ -1855,11 +3031,41 @@ export function App() {
           return
         }
         if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
-          if (!(await handOffEmbedBeforeTeamSwitch())) return
+          const embedSnapshot = embed.getSnapshot()
+          if (originApp || embedSnapshot.owner !== null || embedSnapshot.views.size > 0) {
+            const handoff = await handOffEmbedBeforeTeamSwitch()
+            if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
+            if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
+              await cancelSupersededSandboxUiDeepLink(pending.link.id)
+              return
+            }
+            if (handoff === 'failed') {
+              vm.pushToast(
+                'Could not open app link: the current app could not be safely closed.',
+                'error'
+              )
+              markSandboxUiDeepLinkRetryableFailure(
+                pending.link.id,
+                SANDBOX_UI_DEEP_LINK_CLOSE_RETRY_MESSAGE
+              )
+              return
+            }
+            if (handoff === 'closed' || handoff === 'released' || handoff === 'no-owner') {
+              if (handoff === 'closed') {
+                sandboxUiDeepLinkClosedOriginEmbedsRef.current.add(pending.link.id)
+              }
+              originNavigation = vm.captureWorkspaceNavigation()
+              sandboxUiDeepLinkOriginNavigationByIdRef.current.set(
+                pending.link.id,
+                originNavigation
+              )
+            }
+          }
           try {
             const didSwitchTeam = await vm.handleEnsureTeamContext({
               teamId: pending.link.teamId,
               announce: true,
+              navigationIntentSequence,
             })
             switchedTeam = switchedTeam || didSwitchTeam
             if (switchedTeam && originalTeamId !== pending.link.teamId) {
@@ -1874,15 +3080,8 @@ export function App() {
               sandboxUiDeepLinkRestoreTeamByIdRef.current.set(pending.link.id, originalTeamId)
             }
             if (isTransientSandboxUiTeamContextError(error)) {
-              const launchContext: PendingSandboxUiDeepLinkLaunch = {
-                linkId: pending.link.id,
-                generation: processingGeneration,
-                originalTeamId,
-                linkTeamId: pending.link.teamId,
-                switchedTeam,
-                conversationOrigin: pending.conversationOrigin,
-              }
-              await deferSandboxUiDeepLinkUntilTerminal(
+              const launchContext = makeLaunchContext()
+              await deferSandboxUiDeepLinkAndRestoreOrigin(
                 pending,
                 `Could not switch to the linked team yet: ${errorMessage(
                   error
@@ -1896,8 +3095,16 @@ export function App() {
           }
         }
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
+        if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
+          await cancelSupersededSandboxUiDeepLink(pending.link.id)
+          return
+        }
         const result = await window.clerum.sandboxUi.listApps()
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
+        if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
+          await cancelSupersededSandboxUiDeepLink(pending.link.id)
+          return
+        }
         const availableApps = toActiveSandboxUiApps(result.apps)
         setAvailableSandboxUiApps(availableApps)
         const resolution = resolveSandboxUiDeepLinkApp(result.apps, pending.link.appRef)
@@ -1905,19 +3112,15 @@ export function App() {
           throw new Error("You don't have access to this app in the linked team")
         }
         if (resolution.status === 'starting') {
-          const launchContext: PendingSandboxUiDeepLinkLaunch = {
-            linkId: pending.link.id,
-            generation: processingGeneration,
-            originalTeamId,
-            linkTeamId: pending.link.teamId,
-            switchedTeam,
-            conversationOrigin: pending.conversationOrigin,
-          }
-          await deferSandboxUiDeepLinkUntilTerminal(
+          const launchContext = makeLaunchContext()
+          // Keep the target context through retries; the helper restores only
+          // when defer marks the startup attempt terminal or exhausted.
+          await deferSandboxUiDeepLinkAndRestoreOrigin(
             pending,
             `${resolution.label} is still starting up. This link will retry shortly.`,
             launchContext,
-            'info'
+            'info',
+            false
           )
           return
         }
@@ -1936,19 +3139,22 @@ export function App() {
         // the queue moves on only after it mounted, failed or was left.
         const outcome = await awaitLaunchOutcome(launchId)
         if (outcome === null) return
-        await finishSandboxUiDeepLinkLaunch(
-          {
-            linkId: pending.link.id,
-            generation: processingGeneration,
-            originalTeamId,
-            linkTeamId: pending.link.teamId,
-            switchedTeam,
-            conversationOrigin: pending.conversationOrigin,
-          },
-          launchId,
-          outcome
-        )
+        await finishSandboxUiDeepLinkLaunch(makeLaunchContext(), launchId, outcome)
       } catch (err) {
+        if (
+          processingGeneration !== sandboxUiDeepLinkGenerationRef.current ||
+          processingSandboxUiDeepLinkIdRef.current !== pending.link.id
+        ) {
+          return
+        }
+        if (
+          processingGeneration === sandboxUiDeepLinkGenerationRef.current &&
+          processingSandboxUiDeepLinkIdRef.current === pending.link.id &&
+          !vm.isNavigationIntentCurrent(navigationIntentSequence)
+        ) {
+          await cancelSupersededSandboxUiDeepLink(pending.link.id)
+          return
+        }
         const message = err instanceof Error ? err.message : String(err)
         vm.pushToast(`Could not open app link: ${message}`, 'error')
         if (
@@ -1957,34 +3163,68 @@ export function App() {
         ) {
           return
         }
-        await restoreSandboxUiDeepLinkTeam({
-          linkId: pending.link.id,
-          generation: processingGeneration,
-          originalTeamId,
-          linkTeamId: pending.link.teamId,
-          switchedTeam,
-          conversationOrigin: pending.conversationOrigin,
-        })
+        const restoreOutcome = await restoreSandboxUiDeepLinkTeam(makeLaunchContext())
+        if (restoreOutcome === 'retryable') {
+          markSandboxUiDeepLinkRetryableFailure(pending.link.id)
+          return
+        }
         await acknowledgeSandboxUiDeepLink(pending.link.id)
       }
-    })()
+    })().catch(error => {
+      // Capture and restoration can throw outside the scheduler's inner
+      // operation handler. The promise is settled here, so release only this
+      // exact processing owner and leave an actionable retry state.
+      if (
+        processingGeneration !== sandboxUiDeepLinkGenerationRef.current ||
+        processingSandboxUiDeepLinkIdRef.current !== pending.link.id
+      ) {
+        clearSandboxUiDeepLinkProcessing(pending.link.id)
+        return
+      }
+      const currentPending = pendingSandboxUiDeepLinksRef.current.find(
+        item => item.link.id === pending.link.id
+      )
+      if (!currentPending) {
+        clearSandboxUiDeepLinkLocalOwnership(pending.link.id)
+        return
+      }
+      if (currentPending.failedMessageDismissed) {
+        void acknowledgeSandboxUiDeepLink(pending.link.id)
+        return
+      }
+      if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
+        void cancelSupersededSandboxUiDeepLink(pending.link.id)
+        return
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      markSandboxUiDeepLinkRetryableFailure(
+        pending.link.id,
+        `App link processing stopped safely: ${message}. Confirm the active team, then retry.`
+      )
+    })
   }, [
     acknowledgeSandboxUiDeepLink,
     awaitLaunchOutcome,
     bootSplashLoading,
     clearSandboxUiDeepLinkProcessing,
-    deferSandboxUiDeepLinkUntilTerminal,
+    clearSandboxUiDeepLinkLocalOwnership,
+    cancelSupersededSandboxUiDeepLink,
+    deferSandboxUiDeepLinkAndRestoreOrigin,
     finishSandboxUiDeepLinkLaunch,
     handOffEmbedBeforeTeamSwitch,
     launchSandboxUiApp,
+    markSandboxUiDeepLinkRetryableFailure,
     pendingSandboxUiDeepLinks,
     restoreSandboxUiDeepLinkTeam,
     sandboxUiConversationOrigin,
     sandboxUiDeepLinkRetryTick,
     vm.authenticatedPrincipalIdentity,
+    vm.captureWorkspaceNavigation,
     vm.getCurrentTeamId,
     vm.handleEnsureTeamContext,
     vm.isAuthenticated,
+    vm.isNavigationIntentCurrent,
+    vm.navigationIntentSequence,
     vm.pushToast,
     setPendingSandboxUiDeepLinkState,
   ])
@@ -2149,10 +3389,15 @@ export function App() {
       // chat-specific.
       const selectAndReveal = (update: (current: WorkspaceTabsState) => WorkspaceTabsState) => {
         const projected = update(state)
-        if (projected === state) return
+        if (projected === state) {
+          vm.beginUserNavigationIntent()
+          return
+        }
+        const projectedTab = activeWorkspaceTab(projected)
+        vm.beginUserNavigationIntent()
         activateAndLaunch(
           update,
-          () => revealWorkspaceTab(activeWorkspaceTab(projected), false),
+          () => revealWorkspaceTab(projectedTab, false, true),
           ACTIVE_TAB_LAUNCH
         )
       }
@@ -2324,6 +3569,7 @@ export function App() {
       vm.handleNavSelect,
       vm.handleLogout,
       vm.handleSelectChatAgent,
+      vm.beginUserNavigationIntent,
       vm.isAuthenticated,
       vm.navItem,
       vm.selectedAgent,
@@ -2347,50 +3593,98 @@ export function App() {
       vm.authenticatedPrincipalIdentity
     ) ?? null
   const failedSandboxUiDeepLink = vm.authenticatedPrincipalIdentity
-    ? pendingSandboxUiDeepLinks.find(item => item.failedMessage)
+    ? pendingSandboxUiDeepLinks.find(item => item.failedMessage && !item.failedMessageDismissed)
+    : null
+  const pendingSandboxUiDeepLinkRollback = vm.authenticatedPrincipalIdentity
+    ? pendingSandboxUiDeepLinks.find(
+        item =>
+          item.link.id === processingSandboxUiDeepLinkIdRef.current &&
+          item.failedMessageDismissed &&
+          !isPendingSandboxUiDeepLinkStale(item, vm.authenticatedPrincipalIdentity)
+      )
     : null
 
-  const handleConfirmSandboxUiDeepLink = React.useCallback(() => {
-    const identity = vm.authenticatedPrincipalIdentity
-    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
-      pendingSandboxUiDeepLinksRef.current,
-      identity
-    )
-    if (!identity || !pending) return
-    const next = confirmPendingSandboxUiDeepLink(
-      pendingSandboxUiDeepLinksRef.current,
-      pending.link.id,
-      identity
-    )
-    setPendingSandboxUiDeepLinkState(next)
-  }, [setPendingSandboxUiDeepLinkState, vm.authenticatedPrincipalIdentity])
+  const handleConfirmSandboxUiDeepLink = React.useCallback(
+    (linkId: number) => {
+      const identity = vm.authenticatedPrincipalIdentity
+      const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+        pendingSandboxUiDeepLinksRef.current,
+        identity
+      )
+      if (!identity || !pending || pending.link.id !== linkId) return
+      const navigationIntentSequence = vm.beginUserNavigationIntent()
+      sandboxUiDeepLinkIntentByIdRef.current.set(linkId, navigationIntentSequence)
+      const next = confirmPendingSandboxUiDeepLink(
+        pendingSandboxUiDeepLinksRef.current,
+        linkId,
+        identity
+      )
+      setPendingSandboxUiDeepLinkState(next)
+    },
+    [
+      setPendingSandboxUiDeepLinkState,
+      vm.authenticatedPrincipalIdentity,
+      vm.beginUserNavigationIntent,
+    ]
+  )
 
-  const handleDismissSandboxUiDeepLink = React.useCallback(() => {
-    const identity = vm.authenticatedPrincipalIdentity
-    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
-      pendingSandboxUiDeepLinksRef.current,
-      identity
-    )
-    if (!pending) return
-    void acknowledgeSandboxUiDeepLink(pending.link.id)
-  }, [acknowledgeSandboxUiDeepLink, vm.authenticatedPrincipalIdentity])
+  const handleDismissSandboxUiDeepLink = React.useCallback(
+    (linkId: number) => {
+      const identity = vm.authenticatedPrincipalIdentity
+      const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+        pendingSandboxUiDeepLinksRef.current,
+        identity
+      )
+      if (!pending || pending.link.id !== linkId) return
+      void acknowledgeSandboxUiDeepLink(linkId)
+    },
+    [acknowledgeSandboxUiDeepLink, vm.authenticatedPrincipalIdentity]
+  )
 
-  const handleRetryFailedSandboxUiDeepLink = React.useCallback(() => {
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item => item.failedMessage)
-    if (!pending) return
-    const next = resetPendingSandboxUiDeepLinkFailure(
-      pendingSandboxUiDeepLinksRef.current,
-      pending.link.id
-    )
-    setPendingSandboxUiDeepLinkState(next)
-    setSandboxUiDeepLinkRetryTick(value => value + 1)
-  }, [setPendingSandboxUiDeepLinkState])
+  const handleRetryFailedSandboxUiDeepLink = React.useCallback(
+    (linkId: number) => {
+      const pending = pendingSandboxUiDeepLinksRef.current.find(
+        item => item.link.id === linkId && item.failedMessage && !item.failedMessageDismissed
+      )
+      if (!pending) return
+      const navigationIntentSequence = sandboxUiDeepLinkIntentByIdRef.current.get(linkId)
+      if (
+        navigationIntentSequence === undefined ||
+        !vm.isNavigationIntentCurrent(navigationIntentSequence)
+      ) {
+        void cancelSupersededSandboxUiDeepLink(linkId)
+        return
+      }
+      const next = resetPendingSandboxUiDeepLinkFailure(
+        pendingSandboxUiDeepLinksRef.current,
+        linkId
+      )
+      setPendingSandboxUiDeepLinkState(next)
+      setSandboxUiDeepLinkRetryTick(value => value + 1)
+    },
+    [
+      cancelSupersededSandboxUiDeepLink,
+      setPendingSandboxUiDeepLinkState,
+      vm.isNavigationIntentCurrent,
+    ]
+  )
 
-  const handleDismissFailedSandboxUiDeepLink = React.useCallback(() => {
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item => item.failedMessage)
-    if (!pending) return
-    void acknowledgeSandboxUiDeepLink(pending.link.id)
-  }, [acknowledgeSandboxUiDeepLink])
+  const handleDismissFailedSandboxUiDeepLink = React.useCallback(
+    (linkId: number) => {
+      const pending = pendingSandboxUiDeepLinksRef.current.find(
+        item => item.link.id === linkId && item.failedMessage && !item.failedMessageDismissed
+      )
+      if (!pending) return
+      if (processingSandboxUiDeepLinkIdRef.current === linkId) {
+        setPendingSandboxUiDeepLinkState(
+          dismissPendingSandboxUiDeepLinkFailure(pendingSandboxUiDeepLinksRef.current, linkId)
+        )
+        return
+      }
+      void acknowledgeSandboxUiDeepLink(linkId)
+    },
+    [acknowledgeSandboxUiDeepLink, setPendingSandboxUiDeepLinkState]
+  )
 
   const sandboxUiDeepLinkDialog = pendingSandboxUiConfirmation ? (
     <ConfirmDialog
@@ -2398,8 +3692,8 @@ export function App() {
       body={<p>Open {pendingSandboxUiConfirmation.link.appRef} in this desktop session.</p>}
       cancelLabel="Dismiss"
       confirmLabel="Open"
-      onCancel={handleDismissSandboxUiDeepLink}
-      onConfirm={handleConfirmSandboxUiDeepLink}
+      onCancel={() => handleDismissSandboxUiDeepLink(pendingSandboxUiConfirmation.link.id)}
+      onConfirm={() => handleConfirmSandboxUiDeepLink(pendingSandboxUiConfirmation.link.id)}
       tone="primary"
     />
   ) : failedSandboxUiDeepLink ? (
@@ -2413,8 +3707,8 @@ export function App() {
       }
       cancelLabel="Dismiss"
       confirmLabel="Retry"
-      onCancel={handleDismissFailedSandboxUiDeepLink}
-      onConfirm={handleRetryFailedSandboxUiDeepLink}
+      onCancel={() => handleDismissFailedSandboxUiDeepLink(failedSandboxUiDeepLink.link.id)}
+      onConfirm={() => handleRetryFailedSandboxUiDeepLink(failedSandboxUiDeepLink.link.id)}
       tone="primary"
     />
   ) : null
@@ -2426,6 +3720,7 @@ export function App() {
       statusText: vm.statusText,
       statusTone: vm.statusTone,
       isAuthenticated: vm.isAuthenticated,
+      sessionGeneration: vm.sessionGeneration,
       me: vm.me,
       email: vm.email,
       password: vm.password,
@@ -2493,6 +3788,7 @@ export function App() {
       vm.handleStartDesktopSetup,
       vm.hasDependencyOutage,
       vm.isAuthenticated,
+      vm.sessionGeneration,
       vm.loadSession,
       vm.me,
       vm.password,
@@ -2636,9 +3932,21 @@ export function App() {
     setComposerFocusRequestId(value => value + 1)
   }, [])
 
+  const activeWorkspaceTabForComposer = activeWorkspaceTab(workspaceTabs)
+  const composerWorkspaceChatTabId = chatDrawerVisible
+    ? (workspaceTabs.tabs.find(
+        tab =>
+          tab.kind === 'chat' &&
+          (tab.chat?.agentRef ?? null) === vm.selectedAgent &&
+          (tab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
+      )?.id ?? null)
+    : activeWorkspaceTabForComposer?.kind === 'chat'
+      ? activeWorkspaceTabForComposer.id
+      : null
   const chatComposerStateValue = React.useMemo(
     () => ({
       activeChatId: vm.activeChatId,
+      workspaceChatTabId: composerWorkspaceChatTabId,
       composerImageAttachments: vm.composerImageAttachments,
       composerFileAttachments: vm.composerFileAttachments,
       composerFileRefusals: vm.composerFileRefusals,
@@ -2652,6 +3960,7 @@ export function App() {
     }),
     [
       vm.activeChatId,
+      composerWorkspaceChatTabId,
       vm.composerImageAttachments,
       vm.composerFileAttachments,
       vm.composerFileRefusals,
@@ -2958,6 +4267,50 @@ export function App() {
                                     />
                                   </TitlebarActionsPortal>
                                   <ToastStack items={vm.toasts} onDismiss={vm.dismissToast} />
+                                  {vm.isAuthenticated && !vm.currentTeamId ? (
+                                    <StatusBanner
+                                      tone="warn"
+                                      text="You’re signed in, but this session has no active team."
+                                    />
+                                  ) : null}
+                                  {sessionInvalidation && sessionInvalidationReadFailed ? (
+                                    <div
+                                      data-testid="sandbox-ui-session-revalidation-pending"
+                                      role="status"
+                                      aria-live="polite"
+                                    >
+                                      <StatusBanner tone="warn">
+                                        <span>
+                                          Could not verify pending links. Retry to check this
+                                          session.
+                                        </span>
+                                        <Button
+                                          color="neutral"
+                                          onClick={() => {
+                                            setSessionInvalidationReadFailed(false)
+                                            setSessionInvalidationRetryTick(value => value + 1)
+                                          }}
+                                          size="xs"
+                                          variant="outline"
+                                        >
+                                          Retry verification
+                                        </Button>
+                                      </StatusBanner>
+                                    </div>
+                                  ) : null}
+                                  {pendingSandboxUiDeepLinkRollback ? (
+                                    <div
+                                      className="app-link-rollback-pending"
+                                      data-testid="sandbox-ui-deep-link-rollback-pending"
+                                      role="status"
+                                      aria-live="polite"
+                                    >
+                                      <StatusBanner
+                                        tone="info"
+                                        text="This app link is waiting for the previous team restore to finish. It remains queued and cannot be retried yet."
+                                      />
+                                    </div>
+                                  ) : null}
                                   {/* Single global strip: driven by the universal
                                     store, visible on every route above the
                                     per-kind seam so any tab is reachable from any
@@ -3016,10 +4369,31 @@ export function App() {
                                     <FilesPage
                                       key={activeFilesTabId ?? 'files'}
                                       pushToast={vm.pushToast}
+                                      titlebarLeadingTarget={titlebarLeadingRoot}
+                                      workspaceTabId={activeFilesTabId ?? undefined}
                                       pendingGfsUri={filesSeedPath}
+                                      pendingGfsDeepLink={
+                                        activeGfsDeepLinkForFiles
+                                          ? {
+                                              id: activeGfsDeepLinkForFiles.id,
+                                              uri: activeGfsDeepLinkForFiles.uri,
+                                            }
+                                          : null
+                                      }
+                                      pendingGfsDeepLinkOwnerTabId={
+                                        activeGfsDeepLinkForFiles?.ownerTabId
+                                      }
+                                      isPendingGfsDeepLinkCurrent={isActiveGfsDeepLinkCurrent}
+                                      onExplicitNavigationIntent={vm.beginUserNavigationIntent}
+                                      onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
                                       remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-                                      onLocationChange={handleFilesLocationChange}
+                                      onLocationChange={handleActiveFilesLocationChange}
                                       onOpenPreview={vm.openPreviewSection}
+                                      onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
+                                      routeDialogRequestId={gfsRouteDialogRequestId}
+                                      onRouteDialogRequestHandled={
+                                        handleGfsRouteDialogRequestHandled
+                                      }
                                     />
                                   )}
                                   {vm.navItem === DESKTOP_ROUTES.preview &&
@@ -3033,6 +4407,12 @@ export function App() {
                                         byteLength={activePreviewPayload.byteLength}
                                         reloadVersion={activePreviewPayload.reloadVersion}
                                         unavailable={activePreviewPayload.unavailable}
+                                        pushToast={vm.pushToast}
+                                        onOpenRoute={handleOpenGfsRoute}
+                                        onRenameCommitted={renamedUri => {
+                                          void refreshOpenPreview(renamedUri)
+                                        }}
+                                        titlebarLeadingTarget={titlebarLeadingRoot}
                                       />
                                     )}
                                   {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}

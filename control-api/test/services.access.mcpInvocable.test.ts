@@ -56,8 +56,10 @@ const okServer = (name: string, url?: string) => ({
   },
 })
 
-const ctx = (contextId: string, servers: string[]) => ({
-  spec: { contextId, mcpServers: servers },
+// Shape the apiserver returns: a Context always carries its metadata.name.
+const ctx = (name: string, servers: string[]) => ({
+  metadata: { name },
+  spec: { contextId: name, mcpServers: servers },
 })
 
 const host = (name: string, contextRef: string | null) => ({
@@ -84,7 +86,8 @@ describe('resolveInvocableMcpServersForContexts', () => {
       'mcp-server',
       ['trading'],
       CALLER,
-      NO_GRANTS_DB
+      NO_GRANTS_DB,
+      'mcp-server'
     )
     expect(out.map(s => s.name)).toEqual(['mcp-a', 'mcp-b'])
     expect(out[0].url).toContain('mcp-a.mcp-server.svc')
@@ -102,7 +105,7 @@ describe('resolveInvocableMcpServersForContexts', () => {
       ],
     })
     const names = (
-      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB)
+      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB, 'ns')
     ).map(s => s.name)
     expect(names).toEqual(['a'])
   })
@@ -119,7 +122,7 @@ describe('resolveInvocableMcpServersForContexts', () => {
       ],
     })
     const names = (
-      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB)
+      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB, 'ns')
     ).map(s => s.name)
     expect(names).toEqual(['a'])
   })
@@ -136,7 +139,7 @@ describe('resolveInvocableMcpServersForContexts', () => {
       ],
     })
     const names = (
-      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB)
+      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB, 'ns')
     ).map(s => s.name)
     expect(names).toEqual(['a'])
   })
@@ -156,7 +159,8 @@ describe('resolveInvocableMcpServersForContexts', () => {
       'mcp-server',
       ['trading'],
       CALLER,
-      NO_GRANTS_DB
+      NO_GRANTS_DB,
+      'mcp-server'
     )
     expect(out).toEqual([
       { name: 'mcp-fred', url: 'http://mcp-fred.mcp-server.svc.cluster.local:3000/mcp' },
@@ -169,16 +173,16 @@ describe('resolveInvocableMcpServersForContexts', () => {
       mcpservers: [okServer('a'), okServer('b')],
     })
     const names = (
-      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB)
+      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB, 'ns')
     ).map(s => s.name)
     expect(names).toEqual(['a'])
   })
 
   it('returns an empty array when no contexts are in scope', async () => {
     const g = gateway({ contexts: [ctx('trading', ['a'])], mcpservers: [okServer('a')] })
-    expect(await resolveInvocableMcpServersForContexts(g, 'ns', [], CALLER, NO_GRANTS_DB)).toEqual(
-      []
-    )
+    expect(
+      await resolveInvocableMcpServersForContexts(g, 'ns', [], CALLER, NO_GRANTS_DB, 'ns')
+    ).toEqual([])
   })
 
   it('results are stable-sorted by name', async () => {
@@ -187,7 +191,7 @@ describe('resolveInvocableMcpServersForContexts', () => {
       mcpservers: [okServer('a'), okServer('b'), okServer('c')],
     })
     const names = (
-      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB)
+      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB, 'ns')
     ).map(s => s.name)
     expect(names).toEqual(['a', 'b', 'c'])
   })
@@ -205,6 +209,7 @@ describe('resolveMcpServersForAgents', () => {
     })
     const out = await resolveMcpServersForAgents(g, {
       mcpServersNamespace: 'mcp-server',
+      contextsNamespace: 'mcp-server',
       hostsNamespace: 'mcp-host',
       agentNames: ['trader', 'ops'],
     })
@@ -234,6 +239,7 @@ describe('resolveMcpServersForAgents', () => {
     })
     const out = await resolveMcpServersForAgents(g, {
       mcpServersNamespace: 'mcp-server',
+      contextsNamespace: 'mcp-server',
       hostsNamespace: 'mcp-host',
       agentNames: ['trader'],
     })
@@ -250,6 +256,7 @@ describe('resolveMcpServersForAgents', () => {
     })
     const out = await resolveMcpServersForAgents(g, {
       mcpServersNamespace: 'mcp-server',
+      contextsNamespace: 'mcp-server',
       hostsNamespace: 'mcp-host',
       agentNames: ['trader', 'ghost'],
     })
@@ -270,6 +277,7 @@ describe('resolveMcpServersForAgents', () => {
       await expect(
         resolveMcpServersForAgents(g, {
           mcpServersNamespace: 'mcp-server',
+          contextsNamespace: 'mcp-server',
           hostsNamespace: 'mcp-host',
           agentNames: ['trader'],
         })
@@ -285,6 +293,7 @@ describe('resolveMcpServersForAgents', () => {
     })
     const out = await resolveMcpServersForAgents(g, {
       mcpServersNamespace: 'mcp-server',
+      contextsNamespace: 'mcp-server',
       hostsNamespace: 'mcp-host',
       agentNames: ['c1', 'a1', 'b1'],
     })
@@ -297,6 +306,7 @@ describe('resolveMcpServersForAgents', () => {
     })
     const out = await resolveMcpServersForAgents(g, {
       mcpServersNamespace: 'mcp-server',
+      contextsNamespace: 'mcp-server',
       hostsNamespace: 'mcp-host',
       agentNames: ['visible-a', 'visible-b'],
     })
@@ -320,6 +330,7 @@ describe('resolveMcpServersForAgents', () => {
     })
     const out = await resolveMcpServersForAgents(g, {
       mcpServersNamespace: 'mcp-server',
+      contextsNamespace: 'mcp-server',
       hostsNamespace: 'mcp-host',
       agentNames: ['trader'],
     })
@@ -330,6 +341,7 @@ describe('resolveMcpServersForAgents', () => {
     const g = gateway({})
     const out = await resolveMcpServersForAgents(g, {
       mcpServersNamespace: 'mcp-server',
+      contextsNamespace: 'mcp-server',
       hostsNamespace: 'mcp-host',
       agentNames: [],
     })
@@ -352,6 +364,7 @@ describe('resolveMcpServersForAgents', () => {
     } as unknown as K8sGateway
     const out = await resolveMcpServersForAgents(g, {
       mcpServersNamespace: 'mcp-server',
+      contextsNamespace: 'mcp-server',
       hostsNamespace: 'mcp-host',
       agentNames: ['trader'],
     })
@@ -388,10 +401,12 @@ describe('parity: agent-scoped server names ⊆ RPC-flat-list for the same conte
       'ns',
       ['trading'],
       CALLER,
-      NO_GRANTS_DB
+      NO_GRANTS_DB,
+      'ns'
     )
     const agents = await resolveMcpServersForAgents(g, {
       mcpServersNamespace: 'ns',
+      contextsNamespace: 'ns',
       hostsNamespace: 'mcp-host',
       agentNames: ['trader'],
     })
