@@ -380,6 +380,8 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     inflight: new Map<string, Set<Req>>(),
     /** RFC 7592 deletes the authorization server received. */
     revoked: [] as string[],
+    /** Teardown purges of the grants sealed with one CR uid. */
+    grantPurges: [] as Array<{ name: string; uid: string; seq: number }>,
     /** Setup runs its commands one after another, with nothing else in flight. */
     sequential: false,
     api: undefined as unknown as ReturnType<typeof fakeCustomObjectsApiserver>,
@@ -529,6 +531,9 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       }
       if (rec && /DELETE FROM dynamic_clients[\s\S]*cr_uid = \$4 OR/.test(text)) {
         rec.dcrClaims.push({ name: v[2], uid: v[3], seq })
+      }
+      if (/DELETE FROM oauth_grants\s+WHERE owner_kind = 'mcpserver'/.test(text)) {
+        H.grantPurges.push({ name: v[1], uid: v[2], seq })
       }
       H.hooks?.after?.(`db:${text.replace(/\s+/g, ' ').trim().slice(0, 48)}`, rec)
       return result
@@ -1488,6 +1493,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     H.hooks = undefined
     H.inflight = new Map()
     H.revoked = []
+    H.grantPurges = []
     H.sequential = false
     await dbPool.query('TRUNCATE oauth_grants, dynamic_clients')
     H.api = fakeCustomObjectsApiserver({
@@ -1772,7 +1778,12 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
           const last = H.consents
             .filter(c => c.user === user && c.name === name)
             .sort((a, b) => b.seq - a.seq)[0]
-          const expected = last?.uid === live.metadata.uid
+          // An uninstall that purged this install's grants and then stopped short of
+          // the CR delete leaves the install live without them; a retry finishes it.
+          const purgedSince =
+            last !== undefined &&
+            H.grantPurges.some(g => g.name === name && g.uid === last.uid && g.seq > last.seq)
+          const expected = last?.uid === live.metadata.uid && !purgedSince
           if (served !== expected) {
             violation(`I6: ${user} on ${name} served=${served}, model=${expected}`)
           }
