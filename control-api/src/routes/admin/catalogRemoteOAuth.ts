@@ -580,6 +580,30 @@ export function catalogInstanceIdentityChanges(
   return changes
 }
 
+/**
+ * Whether a full replace from `currentCr` to `nextCr` turns a CR that is not a
+ * catalog remote-OAuth instance into one. Judged on the state the replace would
+ * store (annotations merged as the replace merges them), because the identity can
+ * arrive in either half: catalog annotations added to a manual remote-OAuth
+ * connector, or `oauth.source: remote` added to a CR that already carries a
+ * catalog id. Only the catalog install saga may create that identity.
+ */
+export function becomesCatalogRemoteOAuthInstance(
+  currentCr: McpServerLike,
+  nextCr: McpServerLike
+): boolean {
+  if (isCatalogRemoteOAuthInstance(currentCr)) return false
+  return isCatalogRemoteOAuthInstance({
+    metadata: {
+      annotations: mergeAnnotationsForReplace(
+        currentCr.metadata?.annotations ?? undefined,
+        nextCr.metadata?.annotations ?? undefined
+      ),
+    },
+    spec: nextCr.spec,
+  })
+}
+
 /** What occupies one install slot (catalog entry × grant scope) of a remote-OAuth entry. */
 export type RemoteOAuthSlotState =
   | {

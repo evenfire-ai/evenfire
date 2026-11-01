@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { catalogAnnotations } from '../src/routes/admin/registry.js'
 import { fakeCustomObjectsApiserver } from './fixtures/fakeCustomObjectsApiserver.js'
 import { remoteOAuthMcpServer } from './fixtures/remoteOAuthMcpServer.js'
 
@@ -159,6 +160,74 @@ describe('generic McpServer PUT on a catalog instance', () => {
 
     expect(res.status).toBe(200)
     expect(stored(api, 'manual-notion')!.spec.remote.baseUrl).toBe('https://other.example.com/mcp')
+  })
+
+  it.each([
+    [
+      'catalog-id and catalog-version with a different base URL',
+      catalogAnnotations(CATALOG.id, CATALOG.version),
+      'https://evil.example.com/mcp',
+    ],
+    ['catalog-id alone', { 'clerum.io/catalog-id': CATALOG.id }, undefined],
+  ])(
+    'refuses to turn a manual connector into a catalog instance by adding %s (409)',
+    async (_, annotations, baseUrl) => {
+      const api = setup()
+      const cr = await installCatalogInstance(api, 'manual-notion', null)
+      const before = structuredClone(stored(api, 'manual-notion')!)
+      api.customApi.replaceNamespacedCustomObject.mockClear()
+
+      const res = await request(api.app)
+        .put('/admin/mcp-servers/manual-notion')
+        .send({
+          metadata: { annotations },
+          spec: baseUrl ? { ...cr.spec, remote: { baseUrl } } : cr.spec,
+        })
+
+      expect(res.status).toBe(409)
+      expect(res.body.error).toBe('catalog_instance_immutable')
+      expect(res.body.fields).toContain('metadata.annotations.clerum.io/catalog-id')
+      expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+      expect(stored(api, 'manual-notion')).toEqual(before)
+    }
+  )
+
+  it('lets a manual connector carry unrelated annotations', async () => {
+    const api = setup()
+    const cr = await installCatalogInstance(api, 'manual-notion', null)
+
+    const res = await request(api.app)
+      .put('/admin/mcp-servers/manual-notion')
+      .send({ metadata: { annotations: { 'example.com/note': 'x' } }, spec: cr.spec })
+
+    expect(res.status).toBe(200)
+    expect(stored(api, 'manual-notion')!.metadata.annotations?.['example.com/note']).toBe('x')
+  })
+
+  // A catalog id on a CR that is not remote-OAuth stays editable as long as the
+  // edit does not make it one.
+  it('lets a non-remote CR that carries a catalog id be edited', async () => {
+    const api = setup()
+    const created = await request(api.app)
+      .post('/admin/mcp-servers')
+      .send({ metadata: { name: 'forged', annotations: { 'clerum.io/catalog-id': CATALOG.id } } })
+    expect(created.status).toBe(201)
+    const remote = await remoteOAuthMcpServer({
+      serverName: 'forged',
+      namespace: MCP_NS,
+      grantScope: 'user',
+    })
+    const spec = {
+      ...(remote.spec as Spec),
+      oauth: { ...(remote.spec as Spec).oauth, source: 'notion' },
+    }
+
+    const res = await editPagePut(api, spec, 'forged')
+
+    expect(res.status).toBe(200)
+    const after = stored(api, 'forged')!
+    expect(after.spec.oauth.source).toBe('notion')
+    expect(after.metadata.annotations?.['clerum.io/catalog-id']).toBe(CATALOG.id)
   })
 
   // The edit page sends neither uid nor resourceVersion. If the instance it validated
@@ -346,13 +415,55 @@ describe('generic McpServer POST', () => {
     }
   )
 
-  it('lets a create with catalog annotations through when the OAuth source is not remote', async () => {
+  // The create alone is not a catalog instance; what must not happen is the PUT
+  // that completes the identity afterwards.
+  it('a create with catalog annotations and a non-remote OAuth source cannot become an instance by PUT (409)', async () => {
     const api = setup()
 
-    const res = await postWith(api, { 'clerum.io/catalog-id': CATALOG.id }, 'notion')
+    const created = await postWith(api, { 'clerum.io/catalog-id': CATALOG.id }, 'notion')
+    expect(created.status).toBe(201)
+    const before = structuredClone(stored(api, 'forged')!)
+    const remote = await remoteOAuthMcpServer({
+      serverName: 'forged',
+      namespace: MCP_NS,
+      grantScope: 'user',
+    })
+    api.customApi.replaceNamespacedCustomObject.mockClear()
 
-    expect(res.status).toBe(201)
-    expect(stored(api, 'forged')).toBeDefined()
+    const res = await editPagePut(api, remote.spec as Spec, 'forged')
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('catalog_instance_immutable')
+    expect(res.body.fields).toContain('spec.oauth.source')
+    expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(stored(api, 'forged')).toEqual(before)
+  })
+
+  it('a create with catalog annotations and no spec cannot become an instance by PUT (409)', async () => {
+    const api = setup()
+
+    const created = await request(api.app)
+      .post('/admin/mcp-servers')
+      .send({ metadata: { name: 'forged', annotations: { 'clerum.io/catalog-id': CATALOG.id } } })
+    expect(created.status).toBe(201)
+    const before = structuredClone(stored(api, 'forged')!)
+    const remote = await remoteOAuthMcpServer({
+      serverName: 'forged',
+      namespace: MCP_NS,
+      grantScope: 'user',
+    })
+    api.customApi.replaceNamespacedCustomObject.mockClear()
+
+    const res = await editPagePut(
+      api,
+      { ...(remote.spec as Spec), remote: { baseUrl: 'https://evil.example.com/mcp' } },
+      'forged'
+    )
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('catalog_instance_immutable')
+    expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(stored(api, 'forged')).toEqual(before)
   })
 
   it('lets a remote-OAuth create without catalog annotations through', async () => {

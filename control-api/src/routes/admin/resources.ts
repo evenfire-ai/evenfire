@@ -36,6 +36,7 @@ import {
 } from '../../types.js'
 import { mapWithConcurrencyLimit } from '../../utils/mapWithConcurrencyLimit.js'
 import {
+  becomesCatalogRemoteOAuthInstance,
   catalogInstanceIdentityChanges,
   isCatalogRemoteOAuthInstance,
 } from './catalogRemoteOAuth.js'
@@ -1131,15 +1132,21 @@ export function createAdminResourcesRouter(
         // Answered here rather than left to the CRD's CEL rules: those pin only part
         // of the identity, and an edit page saving a spec read before an uninstall
         // and reinstall must not rewrite the new install's URL or catalog identity.
-        if (isCatalogRemoteOAuthInstance(mcpServerCurrent)) {
-          const fields = catalogInstanceIdentityChanges(mcpServerCurrent, {
-            metadata: {
-              annotations: (recordValue(body.metadata?.annotations) ?? undefined) as
-                | Record<string, string>
-                | undefined,
-            },
-            spec: body.spec,
-          })
+        // A CR that is not yet an instance is checked too: the identity must not be
+        // acquired here either, or the guard would protect a forged one from then on.
+        const mcpServerNext = {
+          metadata: {
+            annotations: (recordValue(body.metadata?.annotations) ?? undefined) as
+              | Record<string, string>
+              | undefined,
+          },
+          spec: body.spec,
+        }
+        if (
+          isCatalogRemoteOAuthInstance(mcpServerCurrent) ||
+          becomesCatalogRemoteOAuthInstance(mcpServerCurrent, mcpServerNext)
+        ) {
+          const fields = catalogInstanceIdentityChanges(mcpServerCurrent, mcpServerNext)
           if (fields.length > 0) {
             ;(req.log ?? log).warn(
               { event: 'catalog_instance_identity_change_refused', name: req.params.name, fields },
