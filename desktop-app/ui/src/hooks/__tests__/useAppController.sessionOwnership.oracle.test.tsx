@@ -422,6 +422,41 @@ describe('useAppController session ownership oracle', () => {
     expect(app.result.current.controller.statusTone).not.toBe('success')
   })
 
+  it('preserves pending credential cleanup disclosure when local cache cleanup also fails', async () => {
+    const { service, handle, app } = await installNativeLogoutOwner()
+    tracker = app.result.current.tracker
+    service.tokenStore.clearSessionTokenStrictly = vi
+      .fn()
+      .mockRejectedValue(new Error('keychain unavailable'))
+
+    const removeQueries = app.queryClient.removeQueries.bind(app.queryClient)
+    vi.spyOn(app.queryClient, 'removeQueries').mockImplementation(filters => {
+      if (JSON.stringify(filters?.queryKey) === JSON.stringify(desktopQueryKeys.gfsRoot)) {
+        throw new Error('diagnostic cache cleanup failure')
+      }
+      return removeQueries(filters)
+    })
+
+    await act(async () => {
+      await app.result.current.controller.handleLogout()
+    })
+
+    expect(handle.logout).toHaveBeenCalledOnce()
+    await expect(handle.logout.mock.results[0]?.value).resolves.toMatchObject({
+      kind: 'committed',
+      cleanup: 'pending',
+    })
+    await expect(service.getSessionState()).resolves.toMatchObject({
+      authenticated: false,
+      me: null,
+    })
+    expect(app.result.current.controller.isAuthenticated).toBe(false)
+    expect(app.result.current.controller.statusTone).toBe('warn')
+    expect(app.result.current.controller.statusText).toContain('credential cleanup is pending')
+    expect(app.result.current.controller.statusText).toContain('local cleanup failed')
+    expect(app.result.current.controller.statusText).toContain('diagnostic cache cleanup failure')
+  })
+
   it('does not apply an old local-cleanup warning after a newer owner is accepted', async () => {
     const { service, handle, app } = await installNativeLogoutOwner()
     tracker = app.result.current.tracker

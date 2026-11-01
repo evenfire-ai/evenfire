@@ -1136,7 +1136,12 @@ export function useAppController() {
         if (cleanupErrors.length > 0) {
           const error = cleanupErrors[0]
           const localCleanupMessage = `Signed out, but some local cleanup failed: ${error instanceof Error ? error.message : String(error)}`
-          publishLogoutStatus(localCleanupMessage, 'warn')
+          publishLogoutStatus(
+            logoutResult.cleanup === 'pending'
+              ? `${localCleanupMessage} Secure credential cleanup is pending.`
+              : localCleanupMessage,
+            'warn'
+          )
         } else {
           publishLogoutStatus(
             logoutResult.cleanup === 'pending'
@@ -1150,7 +1155,12 @@ export function useAppController() {
         if (committedOutcome) {
           reflectSignedOutState()
           const followUpMessage = `Signed out, but logout follow-up failed: ${error instanceof Error ? error.message : String(error)}`
-          publishLogoutStatus(followUpMessage, 'warn')
+          publishLogoutStatus(
+            committedOutcome.cleanup === 'pending'
+              ? `${followUpMessage} Secure credential cleanup is pending.`
+              : followUpMessage,
+            'warn'
+          )
           return committedOutcome
         }
         publishLogoutStatus(
