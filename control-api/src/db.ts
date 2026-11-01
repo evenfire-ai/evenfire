@@ -5,6 +5,10 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import {
+  LEGACY_SEEDED_MODEL_PRICES,
+  SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG,
+} from './data/llmCatalogLegacySeeds.js'
 import { rootLogger } from './observability/logger.js'
 import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
 import {
@@ -3465,35 +3469,12 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
           ON llm_model_prices (provider, model) WHERE enabled;
       `)
 
-      // Seed convenience prices (USD per 1,000,000 tokens) for the providers/
-      // models the repo ships with by default, plus a couple of well-known
-      // public models, so cost-unit budgets have example rows to work with out
-      // of the box. ON CONFLICT DO NOTHING keeps this idempotent and never
-      // clobbers an admin-edited price on re-run.
-      //
-      // !!! APPROXIMATE — ADMIN MUST REVIEW. These are plausible public-list
-      // figures, not contractually exact. Some default model ids (e.g.
-      // gpt-5.4-mini, glm-5.1, qwen3-coder-plus) have no published price yet;
-      // values below are best-effort placeholders. Anthropic cache pricing is
-      // modeled as ~0.1x input (cache read) and ~1.25x input (cache write).
-      await db.query(`
-        INSERT INTO llm_model_prices
-          (provider, model, input_token_price, output_token_price, cache_read_token_price, cache_write_token_price)
-        VALUES
-          -- openai (default model gpt-5.4-mini is unreleased → placeholder)
-          ('openai', 'gpt-5.4-mini', 0.15, 0.60, 0.075, 0.15),
-          ('openai', 'gpt-4o', 2.50, 10.00, 1.25, 0),
-          ('openai', 'gpt-4o-mini', 0.15, 0.60, 0.075, 0),
-          -- claude (default model claude-sonnet-4-6 is forward-named → placeholder)
-          ('claude', 'claude-sonnet-4-6', 3.00, 15.00, 0.30, 3.75),
-          ('claude', 'claude-3-5-sonnet', 3.00, 15.00, 0.30, 3.75),
-          ('claude', 'claude-3-5-haiku', 0.80, 4.00, 0.08, 1.00),
-          -- zai / z.ai (glm-5.1 unreleased → placeholder)
-          ('zai', 'glm-5.1', 0.60, 2.20, 0.11, 0),
-          -- bailian / Alibaba Model Studio (qwen3-coder-plus → placeholder)
-          ('bailian', 'qwen3-coder-plus', 1.00, 5.00, 0.20, 0)
-        ON CONFLICT DO NOTHING;
-      `)
+      // The placeholder prices this migration used to seed are retired: a new
+      // installation prices models from the catalog sync, which loads `cost`
+      // when it inserts a model. Installations that already applied the seed
+      // keep those rows until 0135 deletes the ones no admin edited. What the
+      // seed wrote is kept as data in LEGACY_SEEDED_MODEL_PRICES
+      // (src/data/llmCatalogLegacySeeds.ts).
     },
   },
   {
@@ -3723,122 +3704,32 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
         );
       `)
 
-      // Seed the current static catalog (control-ui/lib/llm.ts LLM_MODELS_BY_
-      // PROVIDER, 25 models) so the upgrade is a behavior no-op — the allowlist
-      // reintroduces the model gate R1 removed without disrupting deployed
-      // Hosts. `vendor` is set per row. ON CONFLICT DO NOTHING keeps this
-      // idempotent and never clobbers an admin-edited row on re-run.
-      await db.query(`
-        INSERT INTO llm_allowed_models (provider, model, vendor)
-        VALUES
-          -- openai (runtime) → OpenAI (vendor)
-          ('openai', 'gpt-5.5', 'OpenAI'),
-          ('openai', 'gpt-5.4', 'OpenAI'),
-          ('openai', 'gpt-5.4-mini', 'OpenAI'),
-          ('openai', 'gpt-5.4-nano', 'OpenAI'),
-          ('openai', 'gpt-5.1-codex', 'OpenAI'),
-          ('openai', 'gpt-5.1-codex-mini', 'OpenAI'),
-          -- claude (runtime) → Anthropic (vendor)
-          ('claude', 'claude-opus-4-7', 'Anthropic'),
-          ('claude', 'claude-sonnet-4-6', 'Anthropic'),
-          ('claude', 'claude-haiku-4-5', 'Anthropic'),
-          ('claude', 'claude-opus-4-6', 'Anthropic'),
-          ('claude', 'claude-sonnet-4-5', 'Anthropic'),
-          -- zai (runtime) → Zhipu (vendor)
-          ('zai', 'glm-5.2', 'Zhipu'),
-          ('zai', 'glm-5.1', 'Zhipu'),
-          ('zai', 'glm-5', 'Zhipu'),
-          ('zai', 'glm-5-turbo', 'Zhipu'),
-          ('zai', 'glm-4.7', 'Zhipu'),
-          -- bailian (runtime) hosts multiple vendors under one platform
-          ('bailian', 'qwen3-coder-plus', 'Alibaba'),
-          ('bailian', 'qwen3.5-plus', 'Alibaba'),
-          ('bailian', 'qwen3-coder-next', 'Alibaba'),
-          ('bailian', 'qwen3-max-2026-01-23', 'Alibaba'),
-          ('bailian', 'MiniMax-M2.5', 'MiniMax'),
-          ('bailian', 'glm-5.1', 'Zhipu'),
-          ('bailian', 'glm-5', 'Zhipu'),
-          ('bailian', 'glm-4.7', 'Zhipu'),
-          ('bailian', 'kimi-k2.5', 'Moonshot')
-        ON CONFLICT DO NOTHING;
-      `)
+      // The static catalog this migration used to seed is retired: a new
+      // installation gets its initial catalog from the boot catalog sync.
+      // Installations that already applied the seed keep its rows; 0135
+      // reclassifies the ones models.dev lists. What the seed wrote is kept as
+      // data in LEGACY_SEEDED_ALLOWED_MODELS (src/data/llmCatalogLegacySeeds.ts).
     },
   },
   {
     version: '0057_llm_allowed_models_vertex_bedrock',
-    apply: async db => {
-      // R4: seed a curated allowlist for the two new providers (Google Vertex AI
-      // and Amazon Bedrock). enabled=true — a provider without credentials is
-      // unusable regardless (the "provider usable" chip is an R4.5 concern), so
-      // enabling the rows just makes them selectable once creds are configured.
-      // ON CONFLICT DO NOTHING keeps this idempotent and never clobbers an
-      // admin-edited row. Bedrock model ids are runtime-specific (distinct from
-      // the native `claude` ids); the sonnet id matches registryCore's
-      // bedrock defaultModel (B1).
-      await db.query(`
-        INSERT INTO llm_allowed_models (provider, model, vendor)
-        VALUES
-          -- vertex (runtime) → Google (vendor)
-          ('vertex', 'gemini-2.5-pro', 'Google'),
-          ('vertex', 'gemini-2.5-flash', 'Google'),
-          -- bedrock (runtime) → Anthropic (vendor); Bedrock model ids
-          ('bedrock', 'anthropic.claude-sonnet-4-6-v1:0', 'Anthropic'),
-          ('bedrock', 'anthropic.claude-haiku-4-5-v1:0', 'Anthropic')
-        ON CONFLICT DO NOTHING;
-      `)
-    },
+    // This migration only seeded default allowlist rows, so it is a no-op now:
+    // a new installation gets its initial catalog from the boot catalog sync.
+    // The version stays because installations that applied it have it recorded;
+    // their rows are untouched here and 0135 reclassifies the ones models.dev
+    // lists. What it wrote is kept as data in LEGACY_SEEDED_ALLOWED_MODELS
+    // (src/data/llmCatalogLegacySeeds.ts).
+    apply: async () => {},
   },
   {
     version: '0058_llm_allowed_models_new_providers',
-    apply: async db => {
-      // Seed one sensible default model per new provider added in the LLM
-      // provider expansion (packages/llm-providers now carries 21 ids). Same
-      // shape as 0056/0057: enabled=true (a provider without credentials is
-      // unusable regardless), a `vendor` label for UI grouping, and ON CONFLICT
-      // DO NOTHING to stay idempotent and never clobber an admin-edited row.
-      //
-      // Model strings that embed `/` (together, fireworks, deepinfra, nebius,
-      // novita, openrouter) are plain data — the allowlist keys on
-      // (provider, model) and url-encoding is handled via the surrogate id, so
-      // the slashes carry no routing meaning here.
-      //
-      // azure is intentionally NOT seeded: its `model` is an Azure OpenAI
-      // deployment name, not a catalog id, so there is no sensible default —
-      // the operator registers their own deployment names via /llm-models.
-      await db.query(`
-        INSERT INTO llm_allowed_models (provider, model, vendor)
-        VALUES
-          -- openrouter (runtime) is an aggregator; vendor = model creator
-          ('openrouter', 'anthropic/claude-sonnet-latest', 'OpenRouter'),
-          -- gemini (runtime) → Google (vendor)
-          ('gemini', 'gemini-2.5-flash', 'Google'),
-          -- deepseek (runtime) → DeepSeek (vendor)
-          ('deepseek', 'deepseek-v4-flash', 'DeepSeek'),
-          -- groq (runtime) hosts Meta's Llama
-          ('groq', 'llama-3.3-70b-versatile', 'Meta'),
-          -- together (runtime) hosts Meta's Llama
-          ('together', 'meta-llama/Llama-3.3-70B-Instruct-Turbo', 'Meta'),
-          -- fireworks (runtime) hosts Meta's Llama
-          ('fireworks', 'accounts/fireworks/models/llama-v3p3-70b-instruct', 'Meta'),
-          -- mistral (runtime) → Mistral (vendor)
-          ('mistral', 'mistral-medium-latest', 'Mistral'),
-          -- xai (runtime) → xAI (vendor)
-          ('xai', 'grok-4.3', 'xAI'),
-          -- cerebras (runtime) hosts OpenAI's gpt-oss
-          ('cerebras', 'gpt-oss-120b', 'OpenAI'),
-          -- deepinfra (runtime) hosts DeepSeek
-          ('deepinfra', 'deepseek-ai/DeepSeek-V3.2', 'DeepSeek'),
-          -- perplexity (runtime) → Perplexity (vendor)
-          ('perplexity', 'sonar-pro', 'Perplexity'),
-          -- moonshot (runtime) → Moonshot (vendor)
-          ('moonshot', 'kimi-k2.6', 'Moonshot'),
-          -- nebius (runtime) hosts Alibaba's Qwen
-          ('nebius', 'Qwen/Qwen3-235B-A22B-Instruct-2507', 'Alibaba'),
-          -- novita (runtime) hosts DeepSeek
-          ('novita', 'deepseek/deepseek-v3.2', 'DeepSeek')
-        ON CONFLICT DO NOTHING;
-      `)
-    },
+    // This migration only seeded default allowlist rows, so it is a no-op now:
+    // a new installation gets its initial catalog from the boot catalog sync.
+    // The version stays because installations that applied it have it recorded;
+    // their rows are untouched here and 0135 reclassifies the ones models.dev
+    // lists. What it wrote is kept as data in LEGACY_SEEDED_ALLOWED_MODELS
+    // (src/data/llmCatalogLegacySeeds.ts).
+    apply: async () => {},
   },
   {
     version: '0059_llm_allowed_models_catalog_lifecycle',
@@ -6135,21 +6026,13 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   },
   {
     version: '0100_seed_minimax_allowed_model',
-    apply: async db => {
-      // Seed one sensible default model for the newly added `minimax` provider
-      // (packages/llm-providers). Same shape as 0056/0057/0058: enabled=true (a
-      // provider without credentials is unusable regardless), a `vendor` label
-      // for UI grouping, and ON CONFLICT DO NOTHING so the migration stays
-      // idempotent and never clobbers an admin-edited row. `MiniMax-M2` mirrors
-      // registryCore's minimax defaultModel. Operators curate the rest via
-      // /llm-models.
-      await db.query(`
-        INSERT INTO llm_allowed_models (provider, model, vendor)
-        VALUES
-          ('minimax', 'MiniMax-M2', 'MiniMax')
-        ON CONFLICT DO NOTHING;
-      `)
-    },
+    // This migration only seeded default allowlist rows, so it is a no-op now:
+    // a new installation gets its initial catalog from the boot catalog sync.
+    // The version stays because installations that applied it have it recorded;
+    // their rows are untouched here and 0135 reclassifies the ones models.dev
+    // lists. What it wrote is kept as data in LEGACY_SEEDED_ALLOWED_MODELS
+    // (src/data/llmCatalogLegacySeeds.ts).
+    apply: async () => {},
   },
   {
     version: '0101_codex_multi_connection',
@@ -6473,7 +6356,65 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       `)
     },
   },
+  {
+    version: '0135_llm_retire_seeded_catalog',
+    apply: applyRetireSeededLlmCatalog,
+  },
 ]
+
+/**
+ * Hands the retired seed catalog over to the catalog sync on installations that
+ * applied the seeds, without deleting or disabling anything a Host may use.
+ *
+ * - Seeded pairs models.dev lists become `source='discovery'`, so the sync
+ *   tracks them (`last_seen_at`, `stale`, the deprecated status). The match is
+ *   the explicit pair list, never `source='manual'` alone: that would also take
+ *   pairs an operator added by hand (Azure deployments, Bedrock inference
+ *   profiles), which the sync would then mark stale. Pairs models.dev does not
+ *   list stay `manual` for the same reason. `enabled`, display name and context
+ *   window are not written here. The sync never changes `enabled` on an
+ *   existing row, and never the display name or context window of an enabled
+ *   one; on a disabled one it only fills them while they are NULL.
+ * - 0044's placeholder prices are deleted while all four prices (and the
+ *   currency) still equal what the seed wrote. A row an admin changed is a real
+ *   price and stays. The deleted pairs become unpriced until an admin prices
+ *   them: the sync loads a price only when it inserts a model, and these rows
+ *   already exist.
+ */
+async function applyRetireSeededLlmCatalog(db: DbClient): Promise<void> {
+  await db.query(
+    `UPDATE llm_allowed_models AS t
+        SET source = 'discovery'
+       FROM unnest($1::text[], $2::text[]) AS s(provider, model)
+      WHERE t.provider = s.provider
+        AND t.model = s.model
+        AND t.source = 'manual'`,
+    [
+      SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG.map(([provider]) => provider),
+      SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG.map(([, model]) => model),
+    ]
+  )
+  await db.query(
+    `DELETE FROM llm_model_prices AS p
+      USING unnest($1::text[], $2::text[], $3::numeric[], $4::numeric[], $5::numeric[], $6::numeric[])
+            AS s(provider, model, input_price, output_price, cache_read_price, cache_write_price)
+      WHERE p.provider = s.provider
+        AND p.model = s.model
+        AND p.input_token_price = s.input_price
+        AND p.output_token_price = s.output_price
+        AND p.cache_read_token_price = s.cache_read_price
+        AND p.cache_write_token_price = s.cache_write_price
+        AND p.currency = 'USD'`,
+    [
+      LEGACY_SEEDED_MODEL_PRICES.map(row => row.provider),
+      LEGACY_SEEDED_MODEL_PRICES.map(row => row.model),
+      LEGACY_SEEDED_MODEL_PRICES.map(row => row.input_token_price),
+      LEGACY_SEEDED_MODEL_PRICES.map(row => row.output_token_price),
+      LEGACY_SEEDED_MODEL_PRICES.map(row => row.cache_read_token_price),
+      LEGACY_SEEDED_MODEL_PRICES.map(row => row.cache_write_token_price),
+    ]
+  )
+}
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
   // `workflow_recipe_allowed_users` and `user_workflow_triggers` had identical

@@ -11,6 +11,7 @@ import {
   mapCatalogToProviders,
 } from '../src/services/modelsDevClient.js'
 import { FakeConfigMapApi } from './helpers/fakeAllowlistCluster.js'
+import { applyLegacyCatalogSeeds } from './helpers/llmCatalogLegacySeeds.js'
 import type { FakeDb } from './helpers/llmCatalogSyncFakeDb.js'
 import {
   LIVE_MODELS_DEV_CAPTURED_AT,
@@ -27,9 +28,11 @@ import './realPostgres.requirement.ts'
 // sync runs (live, capped, vendored, implausible), admin create / disable /
 // rename / delete, conflicting creates, policy toggles and price creates —
 // against the fake and against real Postgres, through the same production
-// functions, and requires the same observable state after every step. The fake
-// starts from what the real migrations seed. Skipped without
-// CONTROL_API_REAL_PG_ADMIN_URL.
+// functions, and requires the same observable state after every step. Both
+// start from an installation upgraded from a release that seeded a default
+// catalog (the seed statements, then the migration that retires them), which
+// carries both manual and discovery rows; a new installation starts empty.
+// Skipped without CONTROL_API_REAL_PG_ADMIN_URL.
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -125,6 +128,11 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
     limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
+    await migratePool.query(`DELETE FROM schema_migrations WHERE version = $1`, [
+      '0135_llm_retire_seeded_catalog',
+    ])
+    await applyLegacyCatalogSeeds(migratePool)
+    await dbMod.initDb({ connect: () => migratePool.connect() })
     await endPoolAndWaitForClients(migratePool)
 
     const syncMod = await import('../src/services/llmCatalogSync.js')
@@ -165,7 +173,7 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
               (SELECT count(*) FROM llm_catalog_sync_runs)::int AS runs`
     )
     expect(others.rows[0]).toEqual({ dismissed: 0, settings: 0, runs: 0 })
-    expect(seeded.rows.length).toBeGreaterThan(0)
+    expect(new Set(seeded.rows.map(r => r.source))).toEqual(new Set(['manual', 'discovery']))
     fake = makeFakeDb(seeded.rows, {
       prices: seededPrices.rows.map(r => ({
         ...r,

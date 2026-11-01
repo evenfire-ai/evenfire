@@ -195,9 +195,8 @@ describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)
     materializer = new LlmAllowedModelsConfigMapWriter(cluster, 'mcp-host', 3, dbPool)
     vi.spyOn(materializer, 'materializeIfChanged')
 
-    // initDb seeds the static allowlist as `source='manual'` rows. Start from
-    // an empty table so the seed below is the whole universe the sync sees.
-    await dbPool.query('DELETE FROM llm_allowed_models')
+    // initDb seeds no catalog, so the rows below are the whole universe the
+    // sync sees.
     for (const row of SEED) {
       await dbPool.query(
         `INSERT INTO llm_allowed_models

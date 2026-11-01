@@ -269,8 +269,8 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
     mockVerifyAdminToken.mockReset().mockReturnValue(ADMIN_CLAIMS)
     mockIsAdminTokenRevoked.mockReset().mockResolvedValue(false)
     mockFindAdminById.mockReset().mockResolvedValue(ACTIVE_ADMIN)
-    // initDb seeds the static allowlist and prices; every case starts from an
-    // empty installation.
+    // initDb seeds no catalog; this clears what earlier cases wrote, so every
+    // case starts from an empty installation.
     await corePool.query(`
       DELETE FROM llm_allowed_models;
       DELETE FROM llm_catalog_dismissed;

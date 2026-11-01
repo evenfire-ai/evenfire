@@ -21,8 +21,8 @@
  *     authored: `enabled`, `source`, `stale`, `last_seen_at`, `discovered_at`,
  *     ctx and display are never written. ONLY `image_input` is filled, under
  *     the same guard as a discovery row (NULL or not-newer discovery evidence),
- *     because the 44 seeded pairs are all `source='manual'` and are exactly the
- *     rows a fresh installation serves (#654).
+ *     because a manual row the catalog lists is served like any other and
+ *     should carry the same capability evidence (#654).
  *   - discovery rows absent from this run → UPDATE stale=true. NEVER deleted,
  *     NEVER auto-disabled (R3.7): an enabled model that vanished stays enabled +
  *     served, only flagged stale for an operator decision.
@@ -539,10 +539,10 @@ async function reconcileProviderRows(
       // `context_window_tokens`, `display_name` are all absent from the
       // statement below. The §11.2 invariant exists to protect those.
       //
-      // `image_input` is not among them (#654). 44 pairs are seeded as
-      // `source='manual'`, 29 of which models.dev lists; skipping them entirely
-      // would leave exactly the rows a fresh installation SERVES with no
-      // evidence at all, while rows an operator discovered later got some. The
+      // `image_input` is not among them (#654). A manual row whose id the
+      // catalog lists (added by hand, or a retired seed pair the catalog started
+      // listing after 0135 was written) is served like a discovered one;
+      // skipping it would leave it with no evidence at all. The
       // guard is the same as the discovery branch — NULL, or discovery-sourced
       // evidence not newer than this capture — so an operator's `curated`
       // verdict is still untouchable here.
