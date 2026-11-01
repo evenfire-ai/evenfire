@@ -599,6 +599,7 @@ describe('catalog mode: a failed registry read reaches the admin with its status
 
     expect(res.status).toBe(status)
     expect(res.body).toEqual({ ...body, correlationId: expect.any(String) })
+    expect(registryUrls(fetchSpy).length).toBeGreaterThan(0)
     expect(registryUrls(fetchSpy).every(url => url.endsWith(ENTRY_PATH))).toBe(true)
     expect(spy.discoveredUrls).toEqual([])
     expect(spy.probedUrls).toEqual([])
