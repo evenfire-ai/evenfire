@@ -43,6 +43,7 @@ import express from 'express'
 import fc from 'fast-check'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
+import { type Server, createServer } from 'node:http'
 import { Pool, type QueryResult } from 'pg'
 import request from 'supertest'
 import { config } from '../src/config.js'
@@ -384,6 +385,12 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     api: undefined as unknown as ReturnType<typeof fakeCustomObjectsApiserver>,
     secrets: undefined as unknown as MockGateway,
     app: undefined as unknown as express.Express,
+    /**
+     * One listening server per run, reused by every request. Handing supertest the
+     * app makes it listen on a new ephemeral port per request, and a long run then
+     * exhausts the local ports (EADDRNOTAVAIL).
+     */
+    server: undefined as unknown as Server,
   }
   const coverage: Record<string, number> = {}
   const bump = (what: string, n = 1) => {
@@ -820,7 +827,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
   ): Promise<Snapshot | undefined> {
     const path = kind === 'ctxRead' ? '/admin/contexts' : '/admin/mcp-servers'
     const rec = newReq(kind, `Read(${name})`)
-    const res = await send(rec, request(H.app).get(path))
+    const res = await send(rec, request(H.server).get(path))
     if (res.status !== 200) {
       violation(`${rec.label}: list answered ${res.status}`)
       return undefined
@@ -880,7 +887,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       const uidBefore = liveUid(name)
       const model = modelLive()
       await onName(rec, name, () =>
-        send(rec, request(H.app).post('/admin/mcp-servers/remote').send(body))
+        send(rec, request(H.server).post('/admin/mcp-servers/remote').send(body))
       )
       // With no CR before or after and no other install or uninstall of the name in
       // flight, the slot was free the whole time: a leftover dynamic client bound to a
@@ -970,7 +977,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       const path =
         this.via === 'generic' ? `/admin/mcp-servers/${name}` : `/admin/registry/uninstall/${name}`
       const holder = modelLive().get(name)
-      await onName(rec, name, () => send(rec, request(H.app).delete(path)))
+      await onName(rec, name, () => send(rec, request(H.server).delete(path)))
       if (ranAlone(rec)) {
         // Alone, an installed slot is deleted and answered 200; an empty one is a 404
         // on the generic route and a "not found" warning on the registry route.
@@ -1022,7 +1029,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     constructor(readonly parallel: boolean) {}
     async run() {
       const rec = newReq('catalog', this.toString())
-      await send(rec, request(H.app).get('/admin/registry/catalog'))
+      await send(rec, request(H.server).get('/admin/registry/catalog'))
       expectOutcome(rec, [[200, undefined]])
     }
     toString() {
@@ -1069,7 +1076,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       const rec = newReq('ctxEdit', this.toString())
       await send(
         rec,
-        request(H.app)
+        request(H.server)
           .put(`/admin/contexts/${this.ctx}`)
           .send({
             metadata: { resourceVersion: snap.rv },
@@ -1102,7 +1109,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       const rec = newReq('ctxCreate', this.toString())
       await send(
         rec,
-        request(H.app)
+        request(H.server)
           .post('/admin/contexts')
           .send({
             metadata: { name: 'c3' },
@@ -1159,7 +1166,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
         }
       }
       const rec = newReq('serverEdit', this.toString(), { slot: this.slot })
-      await send(rec, request(H.app).put(`/admin/mcp-servers/${name}`).send({ metadata, spec }))
+      await send(rec, request(H.server).put(`/admin/mcp-servers/${name}`).send({ metadata, spec }))
       expectOutcome(rec, [
         [404, undefined],
         [409, 'catalog_instance_immutable'],
@@ -1192,7 +1199,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
         }),
         annotations: catalogAnnotations(this.slot.entry.name, this.slot.entry.versions[0]),
       })
-      await send(rec, request(H.app).post('/admin/mcp-servers').send(cr))
+      await send(rec, request(H.server).post('/admin/mcp-servers').send(cr))
       expectOutcome(rec, [[400, 'catalog_annotations_not_allowed']])
     }
     toString() {
@@ -1435,6 +1442,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       testDb.query = undefined
       testDb.txPool = undefined
       asDouble.transport = undefined
+      await closeServer()
       if (dbPool) await endPoolAndWaitForClients(dbPool)
       if (adminPool) {
         await adminPool.query(
@@ -1455,6 +1463,13 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     fc.record({ slot: slotArb, mode: fc.nat(1), enable: fc.boolean() }),
     { maxLength: 3, selector: i => label(i.slot) }
   )
+
+  async function closeServer(): Promise<void> {
+    const server = H.server as Server | undefined
+    if (!server?.listening) return
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(resolve))
+  }
 
   /** Initial world through production writers: one manual server, two Contexts, `initial`. */
   async function startRun(initial: Initial): Promise<void> {
@@ -1482,6 +1497,9 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     instrumentApiserver(H.api)
     H.secrets = new MockGateway(NS)
     H.app = buildApp(compositeGateway())
+    await closeServer()
+    H.server = createServer(H.app)
+    await new Promise<void>(resolve => H.server.listen(0, '127.0.0.1', resolve))
 
     const plain = buildRemoteMcpServerResource({
       serverName: PLAIN,
@@ -1493,13 +1511,13 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
         cimdClientId: 'https://control.example.com/cimd',
       }),
     })
-    const created = await request(H.app).post('/admin/mcp-servers').send(plain)
+    const created = await request(H.server).post('/admin/mcp-servers').send(plain)
     if (created.status !== 201) throw new Error(`setup: plain server ${created.status}`)
     for (const [name, servers] of [
       ['c1', [PLAIN]],
       ['c2', []],
     ] as const) {
-      const res = await request(H.app)
+      const res = await request(H.server)
         .post('/admin/contexts')
         .send({ metadata: { name }, spec: { contextId: name, mcpServers: [...servers] } })
       if (res.status !== 201) throw new Error(`setup: context ${name} ${res.status}`)
@@ -1693,7 +1711,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     }
 
     // I6: the catalog shows exactly the live slots; a free slot keeps no residue.
-    const res = await request(H.app).get('/admin/registry/catalog')
+    const res = await request(H.server).get('/admin/registry/catalog')
     if (res.status !== 200)
       violation(`catalog at rest answered ${res.status} ${res.text.slice(0, 300)}`)
     const slots = (res.body?.installed?.remoteOAuthSlots ?? {}) as Record<
