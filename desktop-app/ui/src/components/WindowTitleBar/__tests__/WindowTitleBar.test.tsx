@@ -70,7 +70,7 @@ describe('WindowTitleBar', () => {
       'Minimize window',
       'Maximize window',
     ])
-    expect(buttons.every(button => button.querySelector('.ant-btn-icon'))).toBe(true)
+    expect(buttons.every(button => button.querySelector('.window-control-icon'))).toBe(true)
     expect(
       buttons.map(button =>
         Array.from(button.classList).find(className =>

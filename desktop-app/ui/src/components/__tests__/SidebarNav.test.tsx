@@ -167,11 +167,13 @@ describe('SidebarNav logo', () => {
     expect(settingsMenu.querySelector('[data-testid="nav-files"]')).toBeNull()
   })
 
-  it('uses the Ant Design hard-drive icon inside the EvenDrive nav item', () => {
+  it('uses the restored hard-drive icon inside the EvenDrive nav item', () => {
     const { container } = render(<SidebarNav {...baseProps()} />)
     const filesLink = container.querySelector('[data-testid="nav-files"]')
-    expect(filesLink?.querySelector('[data-icon="hdd"]')).toBeTruthy()
-    expect(filesLink?.querySelector('.anticon-hdd')?.getAttribute('aria-hidden')).toBe('true')
+    const icon = filesLink?.querySelector('.nav-icon svg')
+    expect(icon?.getAttribute('viewBox')).toBe('0 0 24 24')
+    expect(icon?.getAttribute('aria-hidden')).toBe('true')
+    expect(icon?.querySelectorAll('line').length).toBe(3)
   })
 
   it('points the sidebar toggle toward its action', () => {
@@ -181,14 +183,18 @@ describe('SidebarNav logo', () => {
     )
 
     const collapseButton = screen.getByRole('button', { name: 'Collapse sidebar' })
-    expect(collapseButton.querySelector('[data-icon="left"]')).not.toBeNull()
+    expect(
+      collapseButton.querySelector('.sidebar-collapse-icon')?.classList.contains('expanded')
+    ).toBe(false)
     fireEvent.click(collapseButton)
     expect(onCollapsedChange).toHaveBeenCalledWith(true)
 
     rerender(<SidebarNav {...baseProps({ collapsed: true, onCollapsedChange })} />)
 
     const expandButton = screen.getByRole('button', { name: 'Expand sidebar' })
-    expect(expandButton.querySelector('[data-icon="right"]')).not.toBeNull()
+    expect(
+      expandButton.querySelector('.sidebar-collapse-icon')?.classList.contains('expanded')
+    ).toBe(true)
     fireEvent.click(expandButton)
     expect(onCollapsedChange).toHaveBeenLastCalledWith(false)
   })

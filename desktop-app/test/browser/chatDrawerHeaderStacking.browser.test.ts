@@ -39,7 +39,7 @@ async function mountPortalEraShell(page: Page, drawerOpen: boolean): Promise<voi
               ? // Mirror App's real render: the drawer lives inside the fixed
                 // right-rail shell, which owns the z-index that keeps the
                 // portalled titlebar search above it (mini-spec 04a §B).
-                '<div class="right-rail-shell" data-occupant="chat-drawer"><aside class="chat-drawer is-ready">Chat drawer</aside></div>'
+                '<div class="right-rail-shell" style="--rail-width: 420px" data-occupant="chat-drawer"><aside class="chat-drawer is-ready">Chat drawer</aside></div>'
               : ''
           }
         </section>
@@ -67,6 +67,7 @@ async function topmostAtOverlap(page: Page): Promise<string | null> {
     const topmost = document.elementFromPoint((left + right) / 2, (top + bottom) / 2)
     if (topmost?.closest('.ant-popover')) return 'search-result'
     if (topmost?.closest('.chat-drawer')) return 'chat-drawer'
+    if (topmost?.closest('.content-panel')) return 'content-panel'
     return null
   })
 }
@@ -96,7 +97,7 @@ describe('chat drawer titlebar overlay paint order', () => {
       ;(element as HTMLElement).style.zIndex = '200'
     })
 
-    expect(await topmostAtOverlap(page)).toBe('chat-drawer')
+    expect(await topmostAtOverlap(page)).toBe('content-panel')
     await page.close()
   })
 

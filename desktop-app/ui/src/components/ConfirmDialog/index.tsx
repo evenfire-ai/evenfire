@@ -1,5 +1,5 @@
-import { useEffect, useId, useRef, useState } from 'react'
-import { Button } from '@components/Common'
+import { useRef, useState } from 'react'
+import { Button, Flex, Modal } from 'antd'
 import type { ConfirmDialogProps } from './types'
 
 export function ConfirmDialog({
@@ -11,7 +11,6 @@ export function ConfirmDialog({
   title,
   tone = 'primary',
 }: ConfirmDialogProps) {
-  const titleId = useId()
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null)
   const onCancelRef = useRef(onCancel)
   const [pending, setPending] = useState(false)
@@ -31,56 +30,48 @@ export function ConfirmDialog({
     })
   }
 
-  useEffect(() => {
-    cancelButtonRef.current?.focus()
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !pendingRef.current) onCancelRef.current()
-    }
-    window.addEventListener('keydown', handleEscape)
-    return () => window.removeEventListener('keydown', handleEscape)
-  }, [])
-
   return (
-    <div
-      className="confirm-dialog-backdrop"
-      role="presentation"
-      onMouseDown={event => {
-        if (event.target === event.currentTarget && !pendingRef.current) onCancelRef.current()
+    <Modal
+      open
+      title={title}
+      aria-busy={pending}
+      onCancel={() => {
+        if (!pendingRef.current) onCancelRef.current()
       }}
-    >
-      <div
-        className="confirm-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-busy={pending}
-      >
-        <h3 id={titleId}>{title}</h3>
-        <div className="confirm-dialog-body">{body}</div>
-        <div className="confirm-dialog-actions">
+      footer={
+        <Flex justify="end" gap="small">
           <Button
-            ref={cancelButtonRef}
-            color="neutral"
+            autoFocus
             disabled={pending}
+            htmlType="button"
             onClick={() => {
               if (!pendingRef.current) onCancelRef.current()
             }}
-            size="sm"
-            variant="ghost"
+            ref={cancelButtonRef}
+            size="small"
           >
             {cancelLabel}
           </Button>
           <Button
-            className={`composer-send-button composer-send-button-compact confirm-dialog-confirm confirm-dialog-confirm--${tone}`}
-            color={tone === 'danger' ? 'danger' : 'primary'}
+            aria-busy={pending}
+            danger={tone === 'danger'}
+            disabled={pending}
             loading={pending}
+            htmlType="button"
             onClick={handleConfirm}
-            size="sm"
+            size="small"
+            type="primary"
           >
             {confirmLabel}
           </Button>
-        </div>
-      </div>
-    </div>
+        </Flex>
+      }
+      closable={false}
+      keyboard
+      maskClosable
+      destroyOnHidden
+    >
+      {body}
+    </Modal>
   )
 }

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react'
 import type { PropsWithChildren, ReactElement } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext } from '@contexts/AuthContext'
 import type { AuthContextValue } from '@contexts/AuthContext.types'
 import {
@@ -13,6 +13,7 @@ import {
   waitFor,
 } from '@testing-library/react'
 import type { AppNotification } from '@/uiTypes'
+import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import { AppHeader } from '../index'
 
 function AuthContextTestWrapper({ children }: PropsWithChildren) {
@@ -24,6 +25,8 @@ function AuthContextTestWrapper({ children }: PropsWithChildren) {
 function render(ui: ReactElement, options?: RenderOptions) {
   return testingLibraryRender(ui, { ...options, wrapper: AuthContextTestWrapper })
 }
+
+beforeEach(installAntdDomEnvironment)
 
 const notificationMocks = vi.hoisted(() => ({
   clear: vi.fn(),
@@ -156,13 +159,9 @@ describe('AppHeader notification tray presentation', () => {
     render(<AppHeader />)
     fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
 
-    expect(
-      screen.getByText('Research agent', { selector: '.notification-menu-agent' })
-    ).toBeTruthy()
-    expect(screen.getByText('Workflows', { selector: '.notification-menu-agent' })).toBeTruthy()
-    expect(
-      screen.queryByText('research-agent', { selector: '.notification-menu-agent' })
-    ).toBeNull()
+    expect(screen.getByText('Research agent')).toBeTruthy()
+    expect(screen.getByText('Workflows')).toBeTruthy()
+    expect(screen.queryByText('research-agent')).toBeNull()
   })
 
   // QA parity with the control-ui header fix: while the access catalog (the
@@ -182,16 +181,11 @@ describe('AppHeader notification tray presentation', () => {
     render(<AppHeader />)
     fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
 
-    const agentLine = screen
-      .getByTestId('notification-menu-item')
-      .querySelector('.notification-menu-agent')
-    expect(agentLine?.querySelector('.notification-menu-agent-skeleton')).not.toBeNull()
-    expect(
-      screen.queryByText('research-agent', { selector: '.notification-menu-agent' })
-    ).toBeNull()
+    expect(screen.getByRole('status', { name: 'Loading agent name' })).toBeTruthy()
+    expect(screen.queryByText('research-agent')).toBeNull()
   })
 
-  it('opens a notification when its card surface is clicked', () => {
+  it('opens a notification when its card surface is clicked', async () => {
     const notification = {
       id: 'notification-1',
       kind: 'assistant_reply' as const,
@@ -209,7 +203,9 @@ describe('AppHeader notification tray presentation', () => {
     fireEvent.click(screen.getByTestId('notification-menu-item'))
 
     expect(notificationMocks.open).toHaveBeenCalledWith(notification)
-    expect(screen.queryByRole('dialog', { name: 'Notifications and approvals' })).toBeNull()
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Notifications and approvals' })).toBeNull()
+    })
   })
 
   it('opens through the controlled command request and preserves tray lifecycle', async () => {
@@ -339,11 +335,7 @@ describe('AppHeader notification tray presentation', () => {
       />
     )
 
-    expect(
-      screen
-        .getByRole('dialog', { name: 'Notifications and approvals' })
-        .classList.contains('notification-menu--app-drawer')
-    ).toBe(true)
+    expect(document.querySelector('.ant-drawer')).not.toBeNull()
   })
 
   it('aligns the embedded-app drawer to the measured embed slot edge', () => {
@@ -354,8 +346,9 @@ describe('AppHeader notification tray presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
 
     const tray = screen.getByRole('dialog', { name: 'Notifications and approvals' })
-    expect(tray.classList.contains('notification-menu--embed-aligned')).toBe(true)
-    expect(tray.style.getPropertyValue('--notification-drawer-left')).toBe('416px')
+    const wrapper = tray.closest('.ant-drawer-content-wrapper') as HTMLElement | null
+    expect(wrapper).not.toBeNull()
+    expect(wrapper?.style.left).toBe('416px')
   })
 
   it('keeps the existing floating overlay outside embedded apps', async () => {
@@ -367,11 +360,7 @@ describe('AppHeader notification tray presentation', () => {
     await waitFor(() => {
       expect(onShellOverlayOpenChange).toHaveBeenLastCalledWith(true)
     })
-    expect(
-      screen
-        .getByRole('dialog', { name: 'Notifications and approvals' })
-        .classList.contains('notification-menu--app-drawer')
-    ).toBe(false)
+    expect(document.querySelector('.ant-drawer')).toBeNull()
   })
 
   it('uses the shared search label at constrained widths', () => {

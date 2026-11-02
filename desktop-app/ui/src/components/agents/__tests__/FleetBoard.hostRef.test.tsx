@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import type { PropsWithChildren, ReactElement } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext } from '@contexts/AuthContext'
 import type { AuthContextValue } from '@contexts/AuthContext.types'
 import { type RenderOptions, cleanup, render as testingLibraryRender } from '@testing-library/react'
 import { fleetRowHostRefs } from '../../../../../test/e2e-playwright/helpers/fleetRowHostRefs'
+import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import { FleetBoard } from '../FleetBoard'
 
 function AuthContextTestWrapper({ children }: PropsWithChildren) {
@@ -16,6 +17,8 @@ function AuthContextTestWrapper({ children }: PropsWithChildren) {
 function render(ui: ReactElement, options?: RenderOptions) {
   return testingLibraryRender(ui, { ...options, wrapper: AuthContextTestWrapper })
 }
+
+beforeEach(installAntdDomEnvironment)
 
 // The stateless-wake spec reads hostRefs from the rendered FleetBoard rows.
 // Both row shapes are rendered here: one whose display name differs from its
@@ -59,6 +62,8 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
 }))
 
 describe('fleetRowHostRefs on rendered FleetBoard rows', () => {
+  beforeEach(installAntdDomEnvironment)
+
   afterEach(() => {
     cleanup()
   })

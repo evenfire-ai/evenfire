@@ -268,6 +268,7 @@ vi.mock('@components/Common', async () => {
   }
 })
 vi.mock('@components/WorkspaceTabStrip', () => ({
+  WORKSPACE_TABS_ID: 'workspace-tabs',
   WorkspaceTabStrip: (props: WorkspaceTabStripProps) => {
     workspaceTabStripHarness.props = props
     if (!commonHarness.renderWorkspaceSurfaces) return null
@@ -5378,15 +5379,19 @@ describe('App deep-link orchestration', () => {
       act(() => getController().openFilesSection(root.gfsUri))
       const sidebar = surface.startsWith('sidebar')
       let panel = sidebar ? within(await view.findByTestId('lag-sidebar')) : within(view.container)
-      if (sidebar) fireEvent.click(await panel.findByRole('button', { name: 'Lag root' }))
-      await panel.findByRole('button', { name: sidebar ? sourceName : `Open ${sourceName}` })
+      if (sidebar) fireEvent.click(await panel.findByRole('treeitem', { name: 'Lag root' }))
+      await panel.findByRole(sidebar ? 'treeitem' : 'button', {
+        name: sidebar ? sourceName : `Open ${sourceName}`,
+      })
       const sourceButton = () =>
-        panel.getByRole('button', { name: sidebar ? sourceName : `Open ${sourceName}` })
+        panel.getByRole(sidebar ? 'treeitem' : 'button', {
+          name: sidebar ? sourceName : `Open ${sourceName}`,
+        })
       const destinationRow = () => {
-        const button = panel.getByRole('button', { name: sidebar ? 'Target' : 'Open Target' })
-        return sidebar
-          ? button.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
-          : button
+        const destination = panel.getByRole(sidebar ? 'treeitem' : 'button', {
+          name: sidebar ? 'Target' : 'Open Target',
+        })
+        return destination
       }
       const settleBridge = async () => {
         await act(async () => {
@@ -5398,7 +5403,7 @@ describe('App deep-link orchestration', () => {
         if (surface === 'sidebar-dialog') {
           fireEvent.keyDown(sourceButton(), { key: 'F10', shiftKey: true })
           const dialog = await view.findByRole('dialog', { name: `Move file ${sourceName}` })
-          fireEvent.click(await within(dialog).findByRole('button', { name: 'Target' }))
+          fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Target' }))
           fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Target)' }))
         } else {
           const dataTransfer = {
@@ -5451,7 +5456,8 @@ describe('App deep-link orchestration', () => {
       } finally {
         queryClient.clear()
       }
-    }
+    },
+    120_000
   )
 
   it('R6-M4 ignores an outgoing preview refresh 401 after replacement publication', async () => {

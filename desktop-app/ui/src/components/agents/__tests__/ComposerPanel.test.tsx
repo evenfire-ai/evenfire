@@ -256,39 +256,50 @@ describe.each([
       const uploadItem = screen.getByRole('menuitem', { name: 'Upload Files' })
 
       fireEvent.mouseEnter(pluginsItem)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(16)
+      })
       const pluginsSubmenu = submenu()
       expect(pluginsSubmenu).toBeTruthy()
+      expect(pluginsItem.getAttribute('aria-expanded')).toBe('true')
       fireEvent.mouseLeave(pluginsItem)
       fireEvent.mouseEnter(pluginsSubmenu as HTMLElement)
       await act(async () => {
         await vi.advanceTimersByTimeAsync(400)
       })
-      expect(submenu()).toBeTruthy()
+      expect(screen.getByRole('menuitem', { name: 'No plugins available' })).toBeTruthy()
 
       fireEvent.mouseLeave(pluginsSubmenu as HTMLElement)
       fireEvent.mouseEnter(uploadItem)
       await act(async () => {
         await vi.advanceTimersByTimeAsync(399)
       })
-      expect(submenu()).toBeTruthy()
+      expect(screen.getByRole('menuitem', { name: 'No plugins available' })).toBeTruthy()
+      expect(pluginsItem.getAttribute('aria-expanded')).toBe('true')
 
       fireEvent.mouseEnter(connectorsItem)
-      expect(screen.getByRole('menu', { name: 'connectors choices' })).toBeTruthy()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(16)
+      })
+      expect(screen.getByRole('menuitem', { name: 'No connectors available' })).toBeTruthy()
+      expect(connectorsItem.getAttribute('aria-expanded')).toBe('true')
       await act(async () => {
         await vi.advanceTimersByTimeAsync(400)
       })
-      expect(screen.getByRole('menu', { name: 'connectors choices' })).toBeTruthy()
+      expect(screen.getByRole('menuitem', { name: 'No connectors available' })).toBeTruthy()
+      expect(connectorsItem.getAttribute('aria-expanded')).toBe('true')
 
       fireEvent.mouseLeave(connectorsItem)
       fireEvent.mouseEnter(uploadItem)
       await act(async () => {
         await vi.advanceTimersByTimeAsync(399)
       })
-      expect(submenu()).toBeTruthy()
+      expect(screen.getByRole('menuitem', { name: 'No connectors available' })).toBeTruthy()
+      expect(connectorsItem.getAttribute('aria-expanded')).toBe('true')
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1)
       })
-      expect(submenu()).toBeNull()
+      expect(connectorsItem.getAttribute('aria-expanded')).toBe('false')
     } finally {
       vi.clearAllTimers()
       vi.useRealTimers()
@@ -301,23 +312,19 @@ describe.each([
 
     for (const label of ['Plugins', 'Connectors']) {
       const item = screen.getByRole('menuitem', { name: new RegExp(label) })
-      const title = item.querySelector('.ant-menu-title-content')
+      const title = item.querySelector('.ant-dropdown-menu-title-content')
 
+      expect(title).toBeTruthy()
       expect(title?.textContent).toContain(label)
-      expect(title?.classList.contains('ant-menu-title-content-with-extra')).toBe(true)
-      expect(title?.querySelector('.ant-menu-item-extra')).toBeTruthy()
       expect(title?.querySelector('div')).toBeNull()
     }
 
     const agentFilesItem = screen.queryByRole('menuitem', { name: 'Agent Files' })
     if (agentFilesItem) {
-      const title = agentFilesItem.querySelector('.ant-menu-title-content')
+      const title = agentFilesItem.querySelector('.ant-dropdown-menu-title-content')
+      expect(title).toBeTruthy()
       expect(title?.textContent).toContain('Agent Files')
       expect(title?.querySelector('div')).toBeNull()
-      if (title && title.querySelector('[aria-disabled="true"]')) {
-        expect(title.classList.contains('ant-menu-title-content-with-extra')).toBe(true)
-        expect(title.querySelector('.ant-menu-item-extra')).toBeTruthy()
-      }
     }
   })
 
@@ -354,7 +361,7 @@ describe.each([
     expect(textarea.style.overflowY).toBe('hidden')
   })
 
-  it('keeps context and model popovers outside the clipped text viewport', () => {
+  it('keeps context and model popovers outside the clipped text viewport', async () => {
     const { container } = render(<ComposerPanel inline={inline} />)
     const shell = container.querySelector('.composer-input-shell')
     const viewport = container.querySelector('.composer-textarea-viewport')
@@ -365,6 +372,7 @@ describe.each([
     expect(viewport?.contains(contextMenu)).toBe(false)
 
     fireEvent.mouseEnter(screen.getByRole('menuitem', { name: /Plugins/ }))
+    await waitFor(() => expect(document.querySelector('.composer-reference-submenu')).toBeTruthy())
     // The submenu is portaled to document.body, so it lives outside the
     // component subtree entirely — query the whole document for it.
     const submenu = document.querySelector('.composer-reference-submenu')
@@ -454,7 +462,7 @@ describe('ComposerPanel EvenDrive picker', () => {
 })
 
 describe('ComposerPanel reference submenu portaling', () => {
-  it('portals the submenu out of the drawer overflow-clipping ancestors', () => {
+  it('portals the submenu out of the drawer overflow-clipping ancestors', async () => {
     // Reproduce the narrow-drawer DOM: the composer sits inside ancestors that
     // clip overflow. In-flow, the submenu was cropped by them; portaled, it is
     // no longer their descendant.
@@ -471,6 +479,7 @@ describe('ComposerPanel reference submenu portaling', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
     fireEvent.mouseEnter(screen.getByRole('menuitem', { name: /Plugins/ }))
 
+    await waitFor(() => expect(document.querySelector('.composer-reference-submenu')).toBeTruthy())
     const submenu = document.querySelector('.composer-reference-submenu')
     expect(submenu).toBeTruthy()
     // Not a descendant of the overflow-clipping ancestor, the drawer, or the
@@ -1525,7 +1534,8 @@ describe('ComposerPanel document attachments (#678)', () => {
     render(<ComposerPanel inline />)
 
     const chip = screen.getByTestId('composer-file-chip')
-    expect(chip.querySelector('svg[data-icon="file-text"]')).not.toBeNull()
+    expect(chip.querySelector('.ant-tag .ant-flex > span[aria-hidden="true"] svg')).not.toBeNull()
+    expect(chip.querySelector('svg[data-icon]')).toBeNull()
     expect(chip.querySelector('svg[data-icon="picture"]')).toBeNull()
   })
 

@@ -117,11 +117,12 @@ async function openEnvironmentSetup(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('AuthPage', () => {
-  it('gives the sign-in card consistent inner spacing', () => {
+  it('keeps the user-approved block and inline spacing for the sign-in card', () => {
     renderAuthPage()
 
     const cardBody = document.querySelector('.ant-card-body') as HTMLElement
-    expect(cardBody.style.padding).toBe('32px')
+    expect(cardBody.style.paddingBlock).toBe('32px')
+    expect(cardBody.style.paddingInline).toBe('16px')
   })
 
   // The invitation email form moved to onboarding's invited step.

@@ -95,6 +95,29 @@ function render(ui: ReactElement) {
   })
 }
 
+function workspaceTabElements(): HTMLElement[] {
+  return within(screen.getByRole('toolbar', { name: 'Workspace tabs' })).getAllByRole(
+    'tab'
+  ) as HTMLElement[]
+}
+
+function activeWorkspaceTabElement(): HTMLElement | null {
+  return screen
+    .getByRole('toolbar', { name: 'Workspace tabs' })
+    .querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+}
+
+function workspaceTabLabel(element: Element | null): string | null {
+  return element?.querySelector<HTMLElement>('[aria-label]')?.getAttribute('aria-label') ?? null
+}
+
+function closeWorkspaceTab(title: string) {
+  const tab = screen.getByRole('tab', { name: title })
+  const tabContainer = tab.parentElement
+  if (!tabContainer) throw new Error(`Workspace tab ${title} has no close control container`)
+  fireEvent.click(within(tabContainer).getByRole('button', { name: /^Close / }))
+}
+
 // The sandbox-ui main fake runs the real main process; these are the
 // layers under it that the suite does not stand up.
 vi.mock(
@@ -1267,20 +1290,17 @@ describe('App deep-link orchestration', () => {
     render(<App />)
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
-    const chatButton = screen.getByRole('button', { name: 'New chat' })
+    const chatButton = screen.getByRole('tab', { name: 'New chat' })
     chatButton.focus()
     expect(link.userNavigationGenerationAtActivation).toBe(0)
     fireEvent.click(chatButton)
-    expect(chatButton.getAttribute('aria-pressed')).toBe('true')
+    expect(chatButton.getAttribute('aria-selected')).toBe('true')
 
     // The queue captured generation 0 at activation. The explicit Chat click
     // happens before the renderer receives this delayed event.
     act(() => emitGfsDeepLink?.(link))
 
-    const activeTabButton = screen
-      .getByRole('toolbar', { name: 'Workspace tabs' })
-      .querySelector('button[aria-pressed="true"]')
-    expect(activeTabButton?.getAttribute('aria-label')).toBe('New chat')
+    expect(workspaceTabLabel(activeWorkspaceTabElement())).toBe('New chat')
     expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
     expect(
       currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-root')?.files?.path
@@ -1314,7 +1334,7 @@ describe('App deep-link orchestration', () => {
     render(<App />)
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
-    const chatButton = screen.getByRole('button', { name: 'New chat' })
+    const chatButton = screen.getByRole('tab', { name: 'New chat' })
     chatButton.focus()
     fireEvent.click(chatButton)
     expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
@@ -1330,10 +1350,7 @@ describe('App deep-link orchestration', () => {
       tab => tab.kind === 'files' && tab.id !== 'files-root'
     )
     expect(destinationTab?.id).toBeTruthy()
-    const activeTabButton = screen
-      .getByRole('toolbar', { name: 'Workspace tabs' })
-      .querySelector('button[aria-pressed="true"]')
-    expect(activeTabButton?.getAttribute('aria-label')).toBe('Files')
+    expect(workspaceTabLabel(activeWorkspaceTabElement())).toBe('Files')
     expect(currentController.workspaceTabs.tabs).toHaveLength(3)
     expect(currentController.workspaceTabs.activeTabId).not.toBe('files-root')
     expect(
@@ -1411,7 +1428,7 @@ describe('App deep-link orchestration', () => {
     const ownerId = currentController.workspaceTabs.activeTabId
     expect(currentController.workspaceTabs.activeTabId).toBe(ownerId)
 
-    fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'New chat' }))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
     await act(async () => {
       resolveLink(producerResource)
@@ -1424,7 +1441,7 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
     expect(currentController.pushToast).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Files' }))
     expect(currentController.workspaceTabs.activeTabId).toBe(ownerId)
     expect(filesPageHarness.props?.pendingGfsDeepLink).toBeNull()
     expect(filesPageHarness.resolveRequests).toHaveLength(1)
@@ -1525,18 +1542,14 @@ describe('App deep-link orchestration', () => {
       tabId: 'files-a',
       uri: uriA,
     })
-    expect(screen.getByRole('button', { name: 'Files A' }).getAttribute('aria-pressed')).toBe(
-      'true'
-    )
+    expect(screen.getByRole('tab', { name: 'Files A' }).getAttribute('aria-selected')).toBe('true')
 
-    const filesBTabButton = screen.getByRole('button', { name: 'Files B' })
+    // Ant Design marks non-active tabs inaccessible when jsdom reports a zero
+    // width nav; use the tab itself to exercise the state transition here.
+    const filesBTabButton = screen.getByRole('tab', { name: 'Files B', hidden: true })
     filesBTabButton.focus()
     fireEvent.click(filesBTabButton)
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Files B' }).getAttribute('aria-pressed')).toBe(
-        'true'
-      )
-    )
+    await waitFor(() => expect(workspaceTabLabel(activeWorkspaceTabElement())).toBe('Files B'))
     expect(screen.getByTestId('files-page-surface').getAttribute('data-saved-route')).toBe(uriB)
 
     await act(async () => {
@@ -1545,10 +1558,7 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
 
-    const activeTabButton = screen
-      .getByRole('toolbar', { name: 'Workspace tabs' })
-      .querySelector('button[aria-pressed="true"]')
-    expect(activeTabButton?.getAttribute('aria-label')).toBe('Files B')
+    expect(workspaceTabLabel(activeWorkspaceTabElement())).toBe('Files B')
     expect(
       currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-b')?.files?.path
     ).toBe(uriB)
@@ -1656,7 +1666,7 @@ describe('App deep-link orchestration', () => {
 
       act(() => emitGfsDeepLink?.(linkA))
       await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
-      fireEvent.click(screen.getByRole('button', { name: 'Files B' }))
+      fireEvent.click(screen.getByRole('tab', { name: 'Files B' }))
       await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1))
 
       await act(async () => {
@@ -1667,7 +1677,8 @@ describe('App deep-link orchestration', () => {
       expect(
         screen
           .getByRole('toolbar', { name: 'Workspace tabs' })
-          .querySelector('button[aria-pressed="true"]')
+          .querySelector('[role="tab"][aria-selected="true"]')
+          ?.querySelector('[aria-label]')
           ?.getAttribute('aria-label')
       ).toBe('Files B')
       expect(
@@ -1726,7 +1737,7 @@ describe('App deep-link orchestration', () => {
 
       let finalButton: HTMLElement | null = null
       for (const label of sequence) {
-        const button = screen.getByRole('button', { name: label })
+        const button = screen.getByRole('tab', { name: label })
         button.focus()
         fireEvent.click(button)
         finalButton = button
@@ -1735,7 +1746,8 @@ describe('App deep-link orchestration', () => {
       expect(
         screen
           .getByRole('toolbar', { name: 'Workspace tabs' })
-          .querySelector('button[aria-pressed="true"]')
+          .querySelector('[role="tab"][aria-selected="true"]')
+          ?.querySelector('[aria-label]')
           ?.getAttribute('aria-label')
       ).toBe(expectedLabel)
 
@@ -1748,7 +1760,8 @@ describe('App deep-link orchestration', () => {
       expect(
         screen
           .getByRole('toolbar', { name: 'Workspace tabs' })
-          .querySelector('button[aria-pressed="true"]')
+          .querySelector('[role="tab"][aria-selected="true"]')
+          ?.querySelector('[aria-label]')
           ?.getAttribute('aria-label')
       ).toBe(expectedLabel)
       expect(currentController.workspaceTabs.activeTabId).toBe(expectedTabId)
@@ -1788,11 +1801,11 @@ describe('App deep-link orchestration', () => {
     act(() => emitGfsDeepLink?.(linkA))
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
 
-    fireEvent.click(screen.getByRole('button', { name: 'Close Files A' }))
+    closeWorkspaceTab('Files A')
     const activeAfterClose = screen
       .getByRole('toolbar', { name: 'Workspace tabs' })
-      .querySelector('button[aria-pressed="true"]')
-    const activeLabelAfterClose = activeAfterClose?.getAttribute('aria-label')
+      .querySelector('[role="tab"][aria-selected="true"]')
+    const activeLabelAfterClose = workspaceTabLabel(activeAfterClose)
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1))
     await act(async () => {
       resolveA(producerResource)
@@ -1800,11 +1813,12 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
 
-    expect(screen.queryByRole('button', { name: 'Files A' })).toBeNull()
+    expect(screen.queryByRole('tab', { name: 'Files A' })).toBeNull()
     expect(
       screen
         .getByRole('toolbar', { name: 'Workspace tabs' })
-        .querySelector('button[aria-pressed="true"]')
+        .querySelector('[role="tab"][aria-selected="true"]')
+        ?.querySelector('[aria-label]')
         ?.getAttribute('aria-label')
     ).toBe(activeLabelAfterClose)
     expect(filesPageHarness.resolveRequests).toHaveLength(1)
@@ -1907,7 +1921,7 @@ describe('App deep-link orchestration', () => {
 
     act(() => emitGfsDeepLink?.(linkA))
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
-    fireEvent.click(screen.getByRole('button', { name: 'Files B' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Files B' }))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkA.id))
 
     linkB = produceGfsResourceDeepLink(uriB, queue)
@@ -1918,7 +1932,7 @@ describe('App deep-link orchestration', () => {
       tabId: 'files-b',
       uri: uriB,
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Files C' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Files C' }))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkB.id))
 
     await act(async () => {
@@ -1930,8 +1944,8 @@ describe('App deep-link orchestration', () => {
 
     const activeTabButton = screen
       .getByRole('toolbar', { name: 'Workspace tabs' })
-      .querySelector('button[aria-pressed="true"]')
-    expect(activeTabButton?.getAttribute('aria-label')).toBe('Files C')
+      .querySelector('[role="tab"][aria-selected="true"]')
+    expect(workspaceTabLabel(activeTabButton)).toBe('Files C')
     expect(currentController.workspaceTabs.activeTabId).toBe('files-c')
     expect(
       currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-a')?.files?.path
@@ -2207,19 +2221,13 @@ describe('App deep-link orchestration', () => {
 
     await screen.findByAltText('Preview of report.png')
     await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
-    const titleRow = screen
-      .getByRole('heading', { name: 'report.png', level: 2 })
-      .closest('.da-gfs-preview-title-row')
-    if (!titleRow) throw new Error('Preview title actions were not rendered')
-    fireEvent.click(
-      within(titleRow as HTMLElement).getByRole('button', { name: 'Options for report.png' })
-    )
+    fireEvent.click(screen.getByRole('button', { name: 'Options for report.png' }))
     fireEvent.click(
       within(screen.getByRole('menu', { name: 'Actions for report.png' })).getByRole('menuitem', {
         name: 'Rename',
       })
     )
-    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    const dialog = await screen.findByRole('dialog', { name: 'Rename “report.png”' })
     fireEvent.change(within(dialog).getByLabelText('New name'), {
       target: { value: 'renamed-report.png' },
     })
@@ -3939,10 +3947,7 @@ describe('App deep-link orchestration', () => {
     const tabBReturnIndex = realController.current!.workspaceTabs.tabs.findIndex(
       tab => tab.id === tabB.id
     )
-    const selectorsBeforeSwitch = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__select')
-    )
-    const tabBReturnButton = selectorsBeforeSwitch[tabBReturnIndex]
+    const tabBReturnButton = workspaceTabElements()[tabBReturnIndex]
     if (!tabBReturnButton) throw new Error('New Chat B tab selector was not rendered')
     fireEvent.click(tabBReturnButton)
     await waitFor(() =>
@@ -3957,10 +3962,7 @@ describe('App deep-link orchestration', () => {
     const tabAIndex = realController.current!.workspaceTabs.tabs.findIndex(
       tab => tab.id === tabA.id
     )
-    const selectors = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__select')
-    )
-    const tabAButton = selectors[tabAIndex]
+    const tabAButton = workspaceTabElements()[tabAIndex]
     if (!tabAButton) throw new Error('New Chat A tab selector was not rendered')
     fireEvent.click(tabAButton)
     await waitFor(() =>
@@ -3975,10 +3977,7 @@ describe('App deep-link orchestration', () => {
     const tabBIndex = realController.current!.workspaceTabs.tabs.findIndex(
       tab => tab.id === tabB.id
     )
-    const refreshedSelectors = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__select')
-    )
-    const tabBButton = refreshedSelectors[tabBIndex]
+    const tabBButton = workspaceTabElements()[tabBIndex]
     if (!tabBButton) throw new Error('New Chat B tab selector was not rendered')
     fireEvent.click(tabBButton)
     await waitFor(() =>
@@ -3993,10 +3992,11 @@ describe('App deep-link orchestration', () => {
       )
       .toBe('draft owned by New Chat B')
 
-    const closeButtons = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__close')
-    )
-    const tabACloseButton = closeButtons[tabAIndex]
+    const tabAElement = workspaceTabElements()[tabAIndex]
+    const tabAContainer = tabAElement?.parentElement
+    const tabACloseButton = tabAContainer
+      ? within(tabAContainer).getByRole('button', { name: /^Close / })
+      : null
     if (!tabACloseButton) throw new Error('New Chat A close button was not rendered')
     fireEvent.click(tabACloseButton)
     await waitFor(() =>
@@ -4019,8 +4019,8 @@ describe('App deep-link orchestration', () => {
     )
     const inputForFailedSend = screen.getByRole('textbox', { name: 'Agent message composer' })
     fireEvent.keyDown(inputForFailedSend, { key: 'Enter', code: 'Enter' })
+    await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
     const recoverInput = await screen.findByRole('button', { name: 'Recover input' })
-    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
       content: 'draft owned by New Chat B',
       attachments: [expect.objectContaining({ filename: 'tab-notes.txt' })],
@@ -5084,9 +5084,7 @@ describe('App deep-link orchestration', () => {
     const tabId = appTabs()[0]?.id
     if (!tabId) throw new Error('The sidebar launch did not create an app tab')
     const intentBefore = currentController.navigationIntentSequence
-    const activeTabButton = screen
-      .getByRole('toolbar', { name: 'Workspace tabs' })
-      .querySelector('button[aria-pressed="true"]')
+    const activeTabButton = activeWorkspaceTabElement()
     if (!activeTabButton) throw new Error('The active app tab is not rendered')
 
     fireEvent.click(activeTabButton)
@@ -5107,9 +5105,7 @@ describe('App deep-link orchestration', () => {
     render(<App />)
     const { link, queue } = await rejectCrossTeamAppHandoffClose()
     const intentBefore = currentController.navigationIntentSequence
-    const activeTabButton = screen
-      .getByRole('toolbar', { name: 'Workspace tabs' })
-      .querySelector('button[aria-pressed="true"]')
+    const activeTabButton = activeWorkspaceTabElement()
     if (!activeTabButton) throw new Error('The active app tab is not rendered')
 
     fireEvent.click(activeTabButton)
@@ -5141,7 +5137,7 @@ describe('App deep-link orchestration', () => {
     if (!tabId) throw new Error('The sidebar launch did not create an app tab')
     const intentBefore = currentController.navigationIntentSequence
 
-    fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'New chat' }))
     await waitFor(() =>
       expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('chat')
     )
@@ -5149,7 +5145,7 @@ describe('App deep-link orchestration', () => {
     expect(chatIntent).toBeGreaterThan(intentBefore)
     expect(main.live()).toEqual(originLiveView)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Linked App', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Linked App', selected: false }))
     await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe(tabId))
     await waitFor(() => expect(currentController.navigationIntentSequence).toBe(chatIntent + 1))
     await act(() => main.settle())

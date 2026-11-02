@@ -102,17 +102,14 @@ describe('ChatDrawer', () => {
     expect(drawer.hasAttribute('inert')).toBe(true)
   })
 
-  it('confines the composer reference submenu to the drawer interior, off the embed rect', () => {
-    // Right-docked drawer: the embed is to its LEFT and paints above all DOM, so
-    // a submenu crossing the drawer's left edge would be occluded. The submenu is
-    // now portaled to document.body and positioned with a fixed rect clamped to
-    // the drawer's rect in JS (useFlyoutPosition) — a submenu clamped inside the
-    // drawer is by construction off the embed. Pin `position: fixed` and prove the
-    // old in-flow rightward override was removed so it can't reintroduce the
-    // clipped/occluded in-flow layout.
+  it('keeps the portaled composer reference submenu bounded to the viewport', () => {
+    // Ant Design owns the popup portal and positioning. The renderer stylesheet
+    // only bounds its dimensions; ComposerPanel tests verify the popup is portaled
+    // outside the drawer's overflow-clipping subtree.
     const rule = stylesheet.match(/(?:^|[};/])\s*\.composer-reference-submenu\s*\{([^}]*)\}/)?.[1]
     expect(rule).toBeTruthy()
-    expect(rule).toMatch(/position:\s*fixed/)
+    expect(rule).toMatch(/width:\s*min\(/)
+    expect(rule).toMatch(/max-height:/)
     expect(stylesheet).not.toContain('.chat-drawer .composer-reference-submenu')
   })
 

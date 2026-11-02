@@ -118,7 +118,7 @@ describe('AgentWorkspace chat — agent Context reaches the chat Connect', () =>
     ])
     mcpMock.agentContextByName = catalog.agentContextByName
 
-    render(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
+    render(<AgentWorkspace mode="chat" />)
 
     expect(chatThreadProps.last?.agentContextByName).toEqual({
       'agent-x': 'ctx-sales',

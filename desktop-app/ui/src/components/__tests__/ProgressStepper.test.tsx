@@ -867,7 +867,7 @@ describe('ProgressStepper — cancel button', () => {
     const btn = screen.getByTestId('progress-cancel-btn')
     expect(btn).toBeDefined()
     expect(btn.getAttribute('aria-label')).toBe('Stop agent')
-    expect(btn.querySelector('[aria-label="stop"]')).toBeTruthy()
+    expect(btn.querySelector('.stepper-stop-symbol')).toBeTruthy()
   })
 
   it('renders cancel button on connecting status when onCancel is provided', () => {
@@ -891,7 +891,7 @@ describe('ProgressStepper — cancel button', () => {
     fireEvent.click(btn)
     expect(onCancel).toHaveBeenCalledOnce()
     expect(btn.getAttribute('aria-label')).toBe('Stopping agent')
-    expect(btn.querySelector('[aria-label="stop"]')).toBeTruthy()
+    expect(btn.querySelector('.stepper-stop-symbol')).toBeTruthy()
     expect(btn.hasAttribute('disabled')).toBe(true)
   })
 })

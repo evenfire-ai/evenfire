@@ -85,16 +85,14 @@ describe('chat drawer — no horizontal overflow', () => {
     expect(right).toMatch(/flex:\s*0 1 auto/)
   })
 
-  // The composer reference submenu and the agent selector menu are portaled to
-  // document.body and positioned with a fixed rect confined to the drawer in JS,
-  // so they can no longer be cropped by the drawer's overflow-clipping ancestors
-  // (or occluded by the native embed). Pin `position: fixed` and prove the old
-  // in-flow drawer override is gone so nobody reintroduces the clipped in-flow
-  // layout.
-  it('portals the composer submenu and agent selector menu with a fixed rect', () => {
-    expect(ruleBody('.composer-reference-submenu')).toMatch(/position:\s*fixed/)
+  // Ant Design owns the composer submenu's portal placement; the app stylesheet
+  // only bounds its dimensions. The title selector still uses its own fixed
+  // geometry because it is not an Ant Design popup.
+  it('bounds the portaled composer submenu and title selector without drawer overrides', () => {
+    const composerSubmenu = ruleBody('.composer-reference-submenu')
+    expect(composerSubmenu).toMatch(/width:\s*min\(/)
+    expect(composerSubmenu).toMatch(/max-height:/)
     expect(ruleBody('.agent-title-selector-menu')).toMatch(/position:\s*fixed/)
-    // The dead in-flow confinement override must not come back.
     expect(styles).not.toContain('.chat-drawer .composer-reference-submenu')
   })
 })

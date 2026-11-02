@@ -10,6 +10,7 @@ import {
   useQuery,
 } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
@@ -39,6 +40,9 @@ import {
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { AppNotification } from '@/uiTypes'
+import { installAntdDomEnvironment } from '../test/antdDomEnvironment'
+
+beforeEach(installAntdDomEnvironment)
 
 // The universal tab store now lives inside the controller (single writer;
 // `navItem` derives from the active tab). These tests mock the controller, so
@@ -503,7 +507,23 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     resetComposerDraftStore()
   })
 
-  it('reopening the drawer keeps the switched-to chat instead of re-seeding the origin', () => {
+  async function selectDrawerChat(title: string) {
+    const trigger = screen.getByRole('combobox', { name: 'Open chats' })
+    const user = userEvent.setup()
+    const control = trigger
+      .closest('.ant-select')
+      ?.querySelector<HTMLElement>('.ant-select-content')
+    if (!control) throw new Error('Chat switcher did not render its Ant Design select content')
+    await user.click(control)
+    const options = await screen.findAllByRole('option')
+    const option = options.find(candidate => candidate.textContent?.includes(title)) as
+      | HTMLElement
+      | undefined
+    if (!option) throw new Error(`Chat option did not render: ${title}`)
+    await user.click(option)
+  }
+
+  it('reopening the drawer keeps the switched-to chat instead of re-seeding the origin', async () => {
     currentController = makeController({
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
@@ -531,18 +551,24 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
+    act(() => sandboxUiPageHarness.props?.onEmbedBoundsApplied?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
-    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
+    expect(
+      screen.getByRole('combobox', { name: 'Open chats' }).closest('.ant-select')?.textContent
+    ).toContain('First chat')
 
     // Switch to chat-2 in the drawer switcher.
     const beginUserNavigationIntent = currentController.beginUserNavigationIntent as ReturnType<
       typeof vi.fn
     >
     const intentAdvancesBeforeSwitch = beginUserNavigationIntent.mock.calls.length
-    act(() => fireEvent.click(screen.getByRole('button', { name: 'Open chats' })))
-    act(() => fireEvent.click(screen.getByRole('option', { name: 'Second chat' })))
+    await selectDrawerChat('Second chat')
     expect(beginUserNavigationIntent).toHaveBeenCalledTimes(intentAdvancesBeforeSwitch + 1)
-    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+    await waitFor(() =>
+      expect(
+        screen.getByRole('combobox', { name: 'Open chats' }).closest('.ant-select')?.textContent
+      ).toContain('Second chat')
+    )
 
     // Close the drawer, then reopen it.
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
@@ -551,7 +577,9 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
-    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+    expect(
+      screen.getByRole('combobox', { name: 'Open chats' }).closest('.ant-select')?.textContent
+    ).toContain('Second chat')
   })
 
   it('binds a Files New Chat prefill to the exact chat tab created by the App', async () => {
@@ -626,7 +654,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   // origin and the active chat differ: only then does asserting the eject carries
   // chat-2 prove that the switched-to conversation survives the expansion (with
   // both equal, an eject that hard-coded the origin would pass just the same).
-  it('ejects the switched-to drawer conversation (chat-2) to the full-screen chat route on "Open chat in full screen"', () => {
+  it('ejects the switched-to drawer conversation (chat-2) to the full-screen chat route on "Open chat in full screen"', async () => {
     currentController = makeController({
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
@@ -655,6 +683,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
+    act(() => sandboxUiPageHarness.props?.onEmbedBoundsApplied?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
     expect(screen.getByRole('button', { name: 'Collapse chat drawer' })).toBeTruthy()
@@ -662,9 +691,12 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     // Switch to chat-2 in the drawer switcher — the conversation that must survive
     // the expansion. Prove it landed through the real switcher AND the rendered
     // ChatPage surface (its active-chat id), not the controller mock.
-    act(() => fireEvent.click(screen.getByRole('button', { name: 'Open chats' })))
-    act(() => fireEvent.click(screen.getByRole('option', { name: 'Second chat' })))
-    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+    await selectDrawerChat('Second chat')
+    await waitFor(() =>
+      expect(
+        screen.getByRole('combobox', { name: 'Open chats' }).closest('.ant-select')?.textContent
+      ).toContain('Second chat')
+    )
     const drawerSurface = screen.getByTestId('chat-page-surface')
     expect(drawerSurface.getAttribute('data-active-chat-id')).toBe('chat-2')
     const focusBeforeExpand = Number(drawerSurface.getAttribute('data-composer-focus-request-id'))
@@ -817,8 +849,11 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
+    act(() => sandboxUiPageHarness.props?.onEmbedBoundsApplied?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(document.querySelector('.chat-drawer')?.getAttribute('data-ready')).toBe('true')
+    expect(screen.queryByRole('dialog', { name: 'Chat' })).toBeNull()
 
     // Ignore any selection the launch itself performed; assert only on the command.
     vi.mocked(currentController.handleSelectChatAgent).mockClear()
@@ -834,7 +869,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
   })
 
-  it('reverts the notification tray to overlay form while the chat drawer is visible', () => {
+  it('keeps the tray over the chat drawer through its exit animation', () => {
     currentController = makeController({
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
@@ -851,16 +886,21 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
+    act(() => sandboxUiPageHarness.props?.onEmbedBoundsApplied?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     // Both drawers share the same fixed right-rail rect, so the notification tray
     // must NOT use its drawer form while the chat drawer is up — it reverts to the
     // overlay/popover form (handled by the existing shell-overlay freeze).
     expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
 
-    // Closing the chat drawer (app still mounted) restores the tray's drawer form.
+    // Keep the tray in overlay mode until the chat drawer has completed its exit;
+    // both drawers use the same right rail and must not overlap during motion.
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
-    expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
+    expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
+    // ChatDrawer remains mounted for Ant Design's exit motion; it notifies App
+    // when that motion finishes, at which point the tray can reclaim the rail.
+    expect(document.querySelector('.chat-drawer')).toBeTruthy()
   })
 
   it('passes the measured embed edge to the notification drawer while chat is closed', () => {
@@ -939,7 +979,9 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       })
     })
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
-    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
+    expect(
+      screen.getByRole('combobox', { name: 'Open chats' }).closest('.ant-select')?.textContent
+    ).toContain('First chat')
 
     // The ChatThread session list picks chat-2: switchToChat moves activeChatId
     // only — no tab-state call. The reconciler must re-derive the switcher.
@@ -949,7 +991,9 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     })
 
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
-    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+    expect(
+      screen.getByRole('combobox', { name: 'Open chats' }).closest('.ant-select')?.textContent
+    ).toContain('Second chat')
   })
 
   // #3 — open-conversation gesture is drawer-aware (minispec 04 approach C). An
@@ -972,6 +1016,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
+    act(() => sandboxUiPageHarness.props?.onEmbedBoundsApplied?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
 
@@ -996,7 +1041,9 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       expect.objectContaining({ chatId: 'chat-2' }),
       { keepNavItem: true }
     )
-    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+    expect(
+      screen.getByRole('combobox', { name: 'Open chats' }).closest('.ant-select')?.textContent
+    ).toContain('Second chat')
   })
 
   // #3b — cross-team gesture must EJECT to full-screen, not surface in the drawer.
@@ -1841,20 +1888,22 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
         defaultPath: '/',
       })
     })
+    act(() => sandboxUiPageHarness.props?.onEmbedBoundsApplied?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
-    expect(screen.queryByRole('button', { name: 'Open chats' })).not.toBeNull()
+    expect(screen.queryByRole('combobox', { name: 'Open chats' })).not.toBeNull()
 
     // Narrow the panel below CHAT_DRAWER_MIN_PANEL_WIDTH (846): the drawer is
     // suppressed and the app takes the full width (no gutter class).
     resizeTo(800)
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
-    expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
+    expect(screen.queryByRole('combobox', { name: 'Open chats' })).toBeNull()
 
     // Re-widen above the threshold: the open intent was never cleared, so the
     // drawer reappears on its own.
     resizeTo(1200)
+    act(() => sandboxUiPageHarness.props?.onEmbedBoundsApplied?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
-    expect(screen.queryByRole('button', { name: 'Open chats' })).not.toBeNull()
+    expect(screen.queryByRole('combobox', { name: 'Open chats' })).not.toBeNull()
 
     // Manual close while visible clears the intent.
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
@@ -1863,7 +1912,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
     // Widening (or any resize) must NOT bring a manually-closed drawer back.
     resizeTo(2000)
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
-    expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
+    expect(screen.queryByRole('combobox', { name: 'Open chats' })).toBeNull()
   })
 
   // Repro of round-4 #1: below the minimum panel width the drawer is suppressed
@@ -2064,7 +2113,9 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     // jsdom lays nothing out (getBoundingClientRect is all-zero), so give the
     // global tab strip a measurable bottom edge. The rail must anchor to THIS,
     // below the strip, never the static 64px fallback.
-    const strip = container.querySelector('.chat-view-tabs') as HTMLElement
+    const strip = container.querySelector(
+      '[role="toolbar"][aria-label="Workspace tabs"] .ant-tabs'
+    ) as HTMLElement
     expect(strip).not.toBeNull()
     strip.getBoundingClientRect = () =>
       ({
@@ -2146,6 +2197,18 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
   })
 
+  it('closes the drawer from its collapse button', () => {
+    renderApp(<App />)
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse chat drawer' }))
+
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Collapse chat drawer' })).toBeNull()
+  })
+
   // R4: selecting a chat tab with the drawer open collapses the drawer before the
   // chat shows, and clears the open intent so returning to a non-chat tab does not
   // silently re-open it.
@@ -2162,7 +2225,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     expect(document.querySelector('.chat-drawer')).not.toBeNull()
 
     // Select the chat tab from the strip (full-screen chat).
-    act(() => fireEvent.click(screen.getByRole('button', { name: 'First chat' })))
+    act(() => fireEvent.click(screen.getByRole('tab', { name: /First chat/ })))
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
     expect(document.querySelector('.chat-drawer')).toBeNull()
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
@@ -2170,7 +2233,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
 
     // Return to the app tab: the drawer stays closed (intent cleared by R4). Were
     // the intent left set, `drawerAvailable && chatDrawerOpen` would re-open it.
-    act(() => fireEvent.click(screen.getByRole('button', { name: 'App' })))
+    act(() => fireEvent.click(screen.getByRole('tab', { name: 'App' })))
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
     expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
@@ -2179,9 +2242,9 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
 
   // Right-rail single-occupancy (E): while the chat drawer holds the rail the
   // notification tray is forced to its overlay/popover form (never the app-drawer
-  // form), so opening the tray can't close the drawer. Collapsing the drawer frees
-  // the rail and the tray reclaims its drawer form — the tray behavior is intact.
-  it('keeps the notification tray out of the rail while the chat drawer occupies it', () => {
+  // form), so opening the tray can't close the drawer. The tray reclaims its
+  // drawer form after the chat drawer's exit motion finishes.
+  it('keeps the notification tray out of the rail until the chat drawer exits', async () => {
     renderApp(<App />)
     act(() =>
       sidebarHarness.props?.onOpenSandboxUiApp?.({
@@ -2196,6 +2259,6 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
 
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
-    expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
+    await waitFor(() => expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer'))
   })
 })

@@ -10,6 +10,7 @@ import {
   NotificationsContext,
   WorkspaceActionsProvider,
 } from '@contexts/index'
+import { Button, Descriptions, Empty, Flex, Modal, Typography } from 'antd'
 import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
@@ -18,7 +19,7 @@ import { ChatLocalSearch } from '@components/ChatLocalSearch'
 import { ChatSwitcher } from '@components/ChatSwitcher'
 import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
 import { CommandPalette } from '@components/CommandPalette'
-import { Button, StatusBanner, ToastStack } from '@components/Common'
+import { StatusBanner, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
@@ -26,7 +27,7 @@ import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { RightRailShell } from '@components/RightRailShell'
 import { SidebarNav } from '@components/SidebarNav'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
-import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
+import { WORKSPACE_TABS_ID, WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import {
@@ -270,54 +271,48 @@ function DesktopUpdateRequiredDialog({
   latestVersion: string
   onDownload: () => void
 }) {
-  const titleId = React.useId()
-  const descriptionId = React.useId()
   const detailsId = React.useId()
   const [detailsOpen, setDetailsOpen] = React.useState(false)
 
   return (
-    <div className="desktop-update-dialog-backdrop" role="presentation">
-      <section
-        aria-describedby={descriptionId}
-        aria-labelledby={titleId}
-        aria-modal="true"
-        className="desktop-update-dialog"
-        role="dialog"
-      >
-        <h3 id={titleId}>Desktop update required</h3>
-        <div className="desktop-update-dialog__body" id={descriptionId}>
-          <p>
-            This workspace requires the latest version of Evenfire Desktop before you can continue.
-          </p>
-        </div>
-        <div className="desktop-update-dialog__actions">
-          <Button block onClick={onDownload}>
-            Download update
-          </Button>
-        </div>
-        <button
-          type="button"
-          className="desktop-update-dialog__more-info"
+    <Modal
+      open
+      title="Desktop update required"
+      footer={null}
+      closable={false}
+      keyboard={false}
+      maskClosable={false}
+    >
+      <Flex vertical gap="middle">
+        <Typography.Paragraph>
+          This workspace requires the latest version of Evenfire Desktop before you can continue.
+        </Typography.Paragraph>
+        <Button block onClick={onDownload} size="small" type="primary">
+          Download update
+        </Button>
+        <Button
           aria-controls={detailsId}
           aria-expanded={detailsOpen}
           onClick={() => setDetailsOpen(open => !open)}
+          size="small"
+          type="link"
         >
           {detailsOpen ? 'Hide info' : 'More info'}
-        </button>
+        </Button>
         {detailsOpen ? (
-          <dl className="desktop-update-dialog__versions" id={detailsId}>
-            <div>
-              <dt>Installed</dt>
-              <dd>{currentVersion}</dd>
-            </div>
-            <div>
-              <dt>Latest</dt>
-              <dd>{latestVersion}</dd>
-            </div>
-          </dl>
+          <div id={detailsId} aria-label="Version information" role="region">
+            <Descriptions
+              column={1}
+              items={[
+                { key: 'installed', label: 'Installed', children: currentVersion },
+                { key: 'latest', label: 'Latest', children: latestVersion },
+              ]}
+              size="small"
+            />
+          </div>
         ) : null}
-      </section>
-    </div>
+      </Flex>
+    </Modal>
   )
 }
 
@@ -341,6 +336,8 @@ export function App() {
   const [notificationDrawerReady, setNotificationDrawerReady] = React.useState(false)
   const [notificationTrayLeft, setNotificationTrayLeft] = React.useState<number | null>(null)
   const [chatDrawerOpen, setChatDrawerOpen] = React.useState(false)
+  // Keep manually closed drawers mounted until Ant Design finishes its exit.
+  const [chatDrawerExitPending, setChatDrawerExitPending] = React.useState(false)
   const [chatDrawerReady, setChatDrawerReady] = React.useState(false)
   // Measured top of the embed slot, published as `--chat-drawer-top` so the fixed
   // drawer follows the app content down when the sandbox-ui header wraps (narrow
@@ -390,6 +387,9 @@ export function App() {
   // callbacks) can tell whether a reveal should target the in-app drawer or the
   // full-screen chat route without re-binding on every render.
   const chatDrawerVisibleRef = React.useRef(false)
+  // Only manually closing a ready drawer needs an exit animation. Forced route
+  // changes continue to unmount it immediately, avoiding two live ChatPages.
+  const chatDrawerExitReadyRef = React.useRef(false)
   // Mirrors `chatDrawerDivertable`: the drawer is a VALID surface to divert a
   // gesture into only when the app is live AND the panel is wide enough to render
   // it. Below the minimum width the drawer is suppressed, so "new chat" /
@@ -772,6 +772,7 @@ export function App() {
       // clearing the open INTENT here keeps the drawer from silently re-opening
       // when the user later returns to a non-chat tab (going to a chat is an
       // explicit focus change; R5's "intact" only spans non-chat ↔ non-chat).
+      setChatDrawerExitPending(false)
       setChatDrawerOpen(false)
       leaveSandboxForChat()
       if (agentRef) {
@@ -877,6 +878,7 @@ export function App() {
     if (chatDrawerDivertableRef.current) {
       // Drawer is a valid surface (app live, panel wide enough): open the blank
       // chat in the drawer without tearing the live embed down.
+      setChatDrawerExitPending(false)
       setChatDrawerOpen(true)
       if (agentRef) {
         vm.handleSelectChatAgent(agentRef, {
@@ -924,6 +926,7 @@ export function App() {
   }, [])
 
   const openChatDrawer = React.useCallback(() => {
+    setChatDrawerExitPending(false)
     setChatDrawerOpen(true)
     // Seed the drawer from the conversation the app was opened from ONLY when
     // there is no real chat to return to yet. Once a real conversation is active
@@ -971,6 +974,7 @@ export function App() {
   }, [vm.activeChatId, vm.handleSelectChatAgent, vm.lastActiveChatTabId, vm.selectedAgent])
 
   const closeChatDrawer = React.useCallback(() => {
+    setChatDrawerExitPending(chatDrawerExitReadyRef.current)
     setChatDrawerOpen(false)
   }, [])
 
@@ -997,6 +1001,7 @@ export function App() {
     } else {
       vm.handleNavSelect(DESKTOP_ROUTES.chat)
     }
+    setChatDrawerExitPending(false)
     setChatDrawerOpen(false)
     setComposerFocusRequestId(value => value + 1)
   }, [
@@ -1029,6 +1034,7 @@ export function App() {
         String(notification.agentName || '').trim() !== '' &&
         (!notification.teamId || notification.teamId === vm.getCurrentTeamId())
       if (surfacesInDrawer) {
+        setChatDrawerExitPending(false)
         setChatDrawerOpen(true)
         return vm.handleOpenNotification(notification, { keepNavItem: true })
       }
@@ -1116,6 +1122,16 @@ export function App() {
     drawerContentFloor
   )
   const chatDrawerVisible = chatDrawerDesired && !chatDrawerResize.panelTooNarrow
+  const chatDrawerExiting =
+    chatDrawerExitPending &&
+    !chatDrawerVisible &&
+    drawerAvailable &&
+    !chatDrawerResize.panelTooNarrow
+  React.useEffect(() => {
+    if (!drawerAvailable || chatDrawerResize.panelTooNarrow) {
+      setChatDrawerExitPending(false)
+    }
+  }, [chatDrawerResize.panelTooNarrow, drawerAvailable])
   // Can a gesture be diverted INTO the drawer right now? Only if it is a valid
   // surface: drawer available AND wide enough to render. Kept SEPARATE from the
   // hook's `active` input on purpose — folding `!panelTooNarrow` into
@@ -1132,6 +1148,10 @@ export function App() {
   // flicker, and never the "inert forever" trap where a DOM tab waits for a
   // bounds ack that never arrives.
   const drawerReady = drawerHasEmbed ? chatDrawerReady : chatDrawerVisible
+  chatDrawerExitReadyRef.current = chatDrawerVisible && drawerReady
+  const finishChatDrawerExit = React.useCallback(() => {
+    if (!chatDrawerVisibleRef.current) setChatDrawerExitPending(false)
+  }, [])
   // The rail starts below the header on both tab kinds: app tabs follow the
   // embed's measured header top; DOM tabs follow the measured bottom of the
   // global tab strip (both sit below the strip). The static 64px CSS fallback
@@ -1144,7 +1164,8 @@ export function App() {
   // (the existing shell-overlay freeze covers that case) to avoid two stacked
   // drawers fighting for the same rect. AppHeader's tray open-state is its own
   // internal `notificationsOpen`, so flipping the mode never closes an open tray.
-  const notificationTrayUsesDrawer = Boolean(activeSandboxUiApp) && !chatDrawerVisible
+  const notificationTrayUsesDrawer =
+    Boolean(activeSandboxUiApp) && !chatDrawerVisible && !chatDrawerExiting
   const appNotificationDrawerOpen = notificationTrayUsesDrawer && headerNotificationTrayOpen
   const activeConversationOrigin = React.useMemo<SandboxUiConversationOrigin | null>(() => {
     if (vm.navItem !== DESKTOP_ROUTES.chat || !vm.selectedAgent || !vm.activeChatId) {
@@ -1734,7 +1755,9 @@ export function App() {
       setChatDrawerContentTop(null)
       return
     }
-    const strip = contentPanelRef.current?.querySelector('.chat-view-tabs')
+    const strip = contentPanelRef.current?.querySelector(
+      '[role="toolbar"][aria-label="Workspace tabs"] .ant-tabs'
+    )
     if (!strip) {
       setChatDrawerContentTop(null)
       return
@@ -1777,6 +1800,7 @@ export function App() {
       // instead of the destroy-and-reconstitute round-trip. `keepNavItem`
       // records a pending selection that survives the `apps` route change and
       // loads the chat. The reconcile effect adds the chat tab to the switcher.
+      setChatDrawerExitPending(false)
       setChatDrawerOpen(true)
       vm.handleSelectChatAgent(conversationOrigin.agentName, {
         chatId: conversationOrigin.chatId,
@@ -3313,6 +3337,7 @@ export function App() {
     setCommandPaletteOpen(false)
     setCommandPaletteReturnToSandbox(false)
     setSettingsShortcutsRequestId(0)
+    setChatDrawerExitPending(false)
     setChatDrawerOpen(false)
     setChatSwitcherFocusRequestId(0)
   }, [vm.authenticatedPrincipalIdentity])
@@ -4285,13 +4310,13 @@ export function App() {
                                           session.
                                         </span>
                                         <Button
-                                          color="neutral"
                                           onClick={() => {
                                             setSessionInvalidationReadFailed(false)
                                             setSessionInvalidationRetryTick(value => value + 1)
                                           }}
-                                          size="xs"
-                                          variant="outline"
+                                          size="small"
+                                          type="default"
+                                          variant="outlined"
                                         >
                                           Retry verification
                                         </Button>
@@ -4333,21 +4358,35 @@ export function App() {
                                   )}
                                   {vm.navItem === DESKTOP_ROUTES.chat &&
                                     (workspaceTabs.tabs.length === 0 ? (
-                                      <section className="chat-view-workspace" aria-label="Home">
-                                        <div className="chat-view-surface">
-                                          <div className="workspace-home-empty">
-                                            <h2>Nothing open</h2>
+                                      <Flex
+                                        component="section"
+                                        vertical
+                                        className="chat-view-workspace"
+                                        aria-label="Home"
+                                      >
+                                        <Flex
+                                          component="section"
+                                          vertical
+                                          className="chat-view-surface"
+                                        >
+                                          <Flex vertical className="workspace-home-empty">
+                                            <Empty image={null} description="Nothing open" />
                                             <Button onClick={handleNewWorkspaceChatTab}>
                                               New chat
                                             </Button>
-                                            <p className="muted">
+                                            <Typography.Text type="secondary">
                                               or open something from the sidebar
-                                            </p>
-                                          </div>
-                                        </div>
-                                      </section>
+                                            </Typography.Text>
+                                          </Flex>
+                                        </Flex>
+                                      </Flex>
                                     ) : (
                                       <ChatViewWorkspace
+                                        labelledBy={
+                                          workspaceTabs.activeTabId
+                                            ? `${WORKSPACE_TABS_ID}-tab-${workspaceTabs.activeTabId}`
+                                            : undefined
+                                        }
                                         localSearch={
                                           chatLocalSearchOpen ? (
                                             <ChatLocalSearch
@@ -4359,12 +4398,10 @@ export function App() {
                                         }
                                         surfaceId="chat-view-panel"
                                       >
-                                        <ChatPage scrollContainerRef={contentPanelRef} />
+                                        <ChatPage />
                                       </ChatViewWorkspace>
                                     ))}
-                                  {vm.navItem === DESKTOP_ROUTES.agents && (
-                                    <AgentsPage scrollContainerRef={contentPanelRef} />
-                                  )}
+                                  {vm.navItem === DESKTOP_ROUTES.agents && <AgentsPage />}
                                   {vm.navItem === DESKTOP_ROUTES.files && (
                                     <FilesPage
                                       key={activeFilesTabId ?? 'files'}
@@ -4482,7 +4519,7 @@ export function App() {
                                   universal gutter. Single global <ChatPage>/
                                   ChatSwitcher — no duplicated tab state or
                                   streams. */}
-                                {chatDrawerVisible && (
+                                {(chatDrawerVisible || chatDrawerExiting) && (
                                   <RightRailShell
                                     occupant="chat-drawer"
                                     width={chatDrawerResize.width}
@@ -4500,9 +4537,11 @@ export function App() {
                                       }
                                       onNewChat={handleNewWorkspaceChatTab}
                                       onExpandFullScreen={expandChatDrawerToFullScreen}
-                                      onToggle={toggleChatDrawer}
+                                      onCollapse={closeChatDrawer}
                                       containerRef={chatDrawerRef}
                                       ready={drawerReady}
+                                      open={chatDrawerVisible}
+                                      onAfterClose={finishChatDrawerExit}
                                       onResizeHandleMouseDown={
                                         chatDrawerResize.onResizeHandleMouseDown
                                       }
@@ -4510,7 +4549,7 @@ export function App() {
                                       width={chatDrawerResize.width}
                                       resizing={chatDrawerResize.isResizing}
                                     >
-                                      <ChatPage scrollContainerRef={chatDrawerRef} />
+                                      <ChatPage />
                                     </ChatDrawer>
                                   </RightRailShell>
                                 )}

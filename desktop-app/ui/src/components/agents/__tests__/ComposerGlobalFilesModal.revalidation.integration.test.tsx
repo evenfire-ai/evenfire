@@ -103,7 +103,9 @@ describe('ComposerGlobalFilesModal controller revalidation', () => {
     await act(async () => initialResponse.resolve(emptyPage))
     const emptyState = await screen.findByText('No shared files yet')
     const picker = screen.getByRole('dialog')
-    const browser = picker.querySelector('.composer-global-files-browser')
+    // The picker is rendered by Ant Design Modal now; keep the behavioral
+    // assertion anchored to its visible content surface, not its old wrapper.
+    const browser = picker.querySelector('.ant-modal-body')
     expect(browser).not.toBeNull()
     expect(queryClient.getQueryData(ACCESSIBLE_KEY)).toMatchObject({ pages: [{ items: [] }] })
     expect(screen.queryByRole('status')).toBeNull()
