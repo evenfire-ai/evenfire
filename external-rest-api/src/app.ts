@@ -16,6 +16,7 @@ import { createMembersRouter } from './routes/members.js'
 import { createNotificationsRouter } from './routes/notifications.js'
 import { createOauthCallbackRouter } from './routes/oauthCallback.js'
 import { createOauthGrantsRouter } from './routes/oauthGrants.js'
+import { createOidcProfileFlowRouter } from './routes/oidcProfileFlow.js'
 import { createRpcRouter } from './routes/rpc.js'
 import { createTeamRouter } from './routes/team.js'
 import { createUserApprovalDecisionsRouter } from './routes/userApprovalDecisions.js'
@@ -63,6 +64,7 @@ export function createApp() {
 
   const api = express.Router()
   api.use(createAuthRouter())
+  api.use(createOidcProfileFlowRouter())
   api.use(createDesktopRouter())
   api.use(createMeRouter())
   api.use(createMembersRouter())
