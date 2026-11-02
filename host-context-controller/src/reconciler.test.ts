@@ -285,6 +285,17 @@ function firstPatchWithType(
   return sets.find(conditions => conditions.some(condition => condition.type === type))
 }
 
+/** Structured entries hccLogger wrote through a console spy (one JSON line per call). */
+function loggedEntries(spy: { mock: { calls: unknown[][] } }): Array<Record<string, unknown>> {
+  return spy.mock.calls.flatMap(args => {
+    try {
+      return [JSON.parse(String(args[0])) as Record<string, unknown>]
+    } catch {
+      return []
+    }
+  })
+}
+
 describe('Reconciler managed:false guard (Risk 1.7)', () => {
   let appsApi: ReturnType<typeof createMockAppsApi>
   let coreApi: ReturnType<typeof createMockCoreApi>
@@ -1591,9 +1602,13 @@ describe('PR-B B1 — writeStatusCondition', () => {
 
     expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(3)
     expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(3)
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to write status condition Ready=True'),
-      conflict
+    expect(loggedEntries(warn)).toContainEqual(
+      expect.objectContaining({
+        level: 'warn',
+        scope: '[Reconciler]',
+        msg: expect.stringContaining('Failed to write status condition Ready=True'),
+        err: { name: 'Error', message: conflict.message },
+      })
     )
     warn.mockRestore()
   })
@@ -1640,9 +1655,13 @@ describe('PR-B B1 — writeStatusCondition', () => {
       message: 'stale reconcile result',
     })
 
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to write status condition Ready=True'),
-      writeFailure
+    expect(loggedEntries(warn)).toContainEqual(
+      expect.objectContaining({
+        level: 'warn',
+        scope: '[Reconciler]',
+        msg: expect.stringContaining('Failed to write status condition Ready=True'),
+        err: { name: 'Error', message: writeFailure.message },
+      })
     )
     warn.mockRestore()
   })
@@ -2316,9 +2335,13 @@ describe('full reconciliation inventory authority', () => {
 
     await expect(reconciler.fullReconcile([])).rejects.toBe(inventoryError)
 
-    expect(error).toHaveBeenCalledWith(
-      '[Reconciler] Failed to list managed deployments:',
-      inventoryError
+    expect(loggedEntries(error)).toContainEqual(
+      expect.objectContaining({
+        level: 'error',
+        scope: '[Reconciler]',
+        msg: 'Failed to list managed deployments',
+        err: { name: 'Error', message: inventoryError.message },
+      })
     )
     error.mockRestore()
   })

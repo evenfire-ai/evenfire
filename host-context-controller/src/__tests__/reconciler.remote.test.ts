@@ -44,6 +44,17 @@ vi.mock('../config', () => ({
   },
 }))
 
+/** Structured entries hccLogger wrote through a console spy (one JSON line per call). */
+function loggedEntries(spy: { mock: { calls: unknown[][] } }): Array<Record<string, unknown>> {
+  return spy.mock.calls.flatMap(args => {
+    try {
+      return [JSON.parse(String(args[0])) as Record<string, unknown>]
+    } catch {
+      return []
+    }
+  })
+}
+
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
 const LEGACY_REMOTE_EGRESS_IMAGE = ['nginxinc/nginx-unprivileged', '1.27-alpine'].join(':')
@@ -1262,9 +1273,13 @@ describe('McpServerReconciler remote egress proxy', () => {
         'Failed to delete runtime Kubernetes resources for McpServer "mcp-sentry-remote"'
       )
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to delete ConfigMap'),
-        expect.anything()
+      expect(loggedEntries(consoleSpy)).toContainEqual(
+        expect.objectContaining({
+          level: 'error',
+          scope: '[Reconciler]',
+          msg: expect.stringContaining('Failed to delete ConfigMap'),
+          err: expect.objectContaining({ message: expect.any(String) }),
+        })
       )
       consoleSpy.mockRestore()
     })
@@ -1983,6 +1998,39 @@ describe('plugin image-host allowlist (2.3)', () => {
       )
     } finally {
       cfg.enforcePluginImageAllowlist = false
+    }
+  })
+})
+
+describe('remote reconcile security warnings', () => {
+  it('reports a stripped forbidden env name once per reconcile, not once per internal build', async () => {
+    // The query-placeholder check reads the egress-proxy env names. Deriving
+    // them must not re-run the logging sanitizer, or every [Security] warning
+    // is emitted again for the ConfigMap build on top of the Deployment build.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const appsApi = createMockAppsApi()
+    const coreApi = createMockCoreApi()
+    const customApi = createMockCustomApi()
+    coreApi.readNamespacedSecret.mockResolvedValue({
+      data: { SENTRY_AUTH_TOKEN: 'base64-encoded-token' },
+    })
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    const reconciler = buildReconciler(appsApi, coreApi, customApi)
+    try {
+      await reconciler.reconcile(
+        cloneServer(REMOTE_SERVER, { env: [{ name: 'LD_PRELOAD', value: '/x.so' }] })
+      )
+
+      expect(appsApi.createNamespacedDeployment).toHaveBeenCalledOnce()
+      const stripped = warn.mock.calls.filter(args => {
+        const line = args.map(String).join(' ')
+        return line.includes('LD_PRELOAD') && line.includes('stripped (forbidden)')
+      })
+      expect(stripped).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
     }
   })
 })

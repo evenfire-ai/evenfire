@@ -139,6 +139,30 @@ const MAX_AUTH_HEADER_VALUE_LENGTH = 2048
 // the ConfigMap. Restrict them to uppercase environment-variable names so an
 // unresolved value cannot become an arbitrary NGINX variable.
 const QUERY_PLACEHOLDER_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g
+// CRD-supplied env names that could hijack the runtime (loader, interpreter or
+// cluster-access knobs). sanitizeCrdSpec strips them from spec.env.
+const FORBIDDEN_CRD_ENV_NAMES = new Set([
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'PATH',
+  'NODE_OPTIONS',
+  'PYTHONPATH',
+  'JAVA_TOOL_OPTIONS',
+  'KUBECONFIG',
+  'KUBERNETES_SERVICE_HOST',
+  'KUBERNETES_SERVICE_PORT',
+])
+
+function withoutForbiddenCrdEnv<T extends { name: string }>(
+  env: T[],
+  onStripped: (name: string) => void = () => {}
+): T[] {
+  return env.filter(e => {
+    if (!FORBIDDEN_CRD_ENV_NAMES.has(e.name.toUpperCase())) return true
+    onStripped(e.name)
+    return false
+  })
+}
 const WRC_OWNED_RUNTIME_READY_REASON = 'WrcOwnedRuntimeRegistered'
 // Keep fleet admission aligned with the external-egress convergence lane:
 // enough parallelism for independent servers without allocating one pending
@@ -471,9 +495,10 @@ export class McpServerReconciler {
     if (this.assumeInventoryAuthorityWhenUnconfigured) return true
     if (!this.warnedUnconfiguredAuthority) {
       this.warnedUnconfiguredAuthority = true
-      console.error(
-        '[Reconciler] inventory authority not configured — mutation fences fail closed. ' +
-          'Wire setInventoryAuthority() and setResolveCurrentServer() before reconciling.'
+      hccLogger.error(
+        'inventory authority not configured — mutation fences fail closed. ' +
+          'Wire setInventoryAuthority() and setResolveCurrentServer() before reconciling.',
+        { scope: '[Reconciler]' }
       )
     }
     return false
@@ -775,9 +800,9 @@ export class McpServerReconciler {
         state.ticking = false
         this.setStatus(name, { deployed: true, ready: true, message: 'Running' })
         this.readinessPolls.delete(name)
-        console.log(
-          `[Reconciler] McpServer "${name}" is now ready (after ${state.attempts} poll(s))`
-        )
+        hccLogger.info(`McpServer "${name}" is now ready (after ${state.attempts} poll(s))`, {
+          scope: '[Reconciler]',
+        })
         // The poll MUST write the CRD, not just in-memory status (issue #223).
         // With generation-aware readiness the check right after a replace is
         // always false, so this is the ONLY place a converged rollout is ever
@@ -819,8 +844,9 @@ export class McpServerReconciler {
         state.ticking = false
         state.exhausted = true
         state.detail = rollout.detail
-        console.warn(
-          `[Reconciler] McpServer "${name}" not ready after ${maxAttempts} polls — giving up (${rollout.detail})`
+        hccLogger.warn(
+          `McpServer "${name}" not ready after ${maxAttempts} polls — giving up (${rollout.detail})`,
+          { scope: '[Reconciler]' }
         )
         // Give up loudly, on the CRD: a stuck rollout must be visible to the
         // operator with the numbers that prove it, never left as a stale
@@ -872,19 +898,22 @@ export class McpServerReconciler {
           const message =
             `Secret "${secretName}" is missing required key "${keyMapping.secretKey}" ` +
             `(needed for env var ${keyMapping.envVar})`
-          console.error(`[Reconciler] ${message} in McpServer ${server.name}`)
+          hccLogger.error(`${message} in McpServer ${server.name}`, { scope: '[Reconciler]' })
           return { ok: false, reason: 'SecretMissingKey', message }
         }
       }
 
-      console.log(`[Reconciler] Secret "${secretName}" validated for McpServer ${server.name}`)
+      hccLogger.info(`Secret "${secretName}" validated for McpServer ${server.name}`, {
+        scope: '[Reconciler]',
+      })
       return { ok: true, revision }
     } catch (error: unknown) {
       const code = getErrorCode(error)
       if (code === 404) {
         const message = `Secret "${secretName}" not found in namespace "${server.namespace}"`
-        console.error(
-          `[Reconciler] ${message}. McpServer ${server.name} will NOT be deployed. Create the secret first.`
+        hccLogger.error(
+          `${message}. McpServer ${server.name} will NOT be deployed. Create the secret first.`,
+          { scope: '[Reconciler]' }
         )
         return { ok: false, reason: 'SecretNotFound', message }
       }
@@ -892,11 +921,16 @@ export class McpServerReconciler {
         const message =
           `Access denied reading Secret "${secretName}" in namespace "${server.namespace}" ` +
           `(K8s API ${code})`
-        console.error(`[Reconciler] ${message}. McpServer ${server.name} will be failed closed.`)
+        hccLogger.error(`${message}. McpServer ${server.name} will be failed closed.`, {
+          scope: '[Reconciler]',
+        })
         return { ok: false, reason: 'SecretAccessDenied', message }
       }
       const errMsg = error instanceof Error ? error.message : String(error)
-      console.error(`[Reconciler] Failed to read secret "${secretName}":`, error)
+      hccLogger.error(`Failed to read secret "${secretName}"`, {
+        scope: '[Reconciler]',
+        err: error,
+      })
       return {
         ok: false,
         reason: 'ReadError',
@@ -991,7 +1025,7 @@ export class McpServerReconciler {
    *
    * Returns a safe { header, valueTemplate } tuple with the valueTemplate already
    * escaped for nginx double-quoted string context, or null if the entry is
-   * rejected (a console.warn is emitted describing why).
+   * rejected (a warning is logged describing why).
    */
   private sanitizeAuthHeader(h: {
     header: string
@@ -999,17 +1033,23 @@ export class McpServerReconciler {
   }): { header: string; valueTemplate: string } | null {
     // Validate header name — HTTP token chars only (RFC 7230 subset we allow).
     if (!HEADER_NAME_RE.test(h.header)) {
-      console.warn(`[HCC] Rejecting authHeader with invalid name: ${h.header.slice(0, 32)}`)
+      hccLogger.warn(`Rejecting authHeader with invalid name: ${h.header.slice(0, 32)}`, {
+        scope: '[HCC]',
+      })
       return null
     }
     // Bound the value length so a pathological CRD cannot blow up the ConfigMap.
     if (h.valueTemplate.length > MAX_AUTH_HEADER_VALUE_LENGTH) {
-      console.warn(`[HCC] Rejecting authHeader value too long for header: ${h.header}`)
+      hccLogger.warn(`Rejecting authHeader value too long for header: ${h.header}`, {
+        scope: '[HCC]',
+      })
       return null
     }
     // CR/LF/NUL allow HTTP request smuggling and nginx directive injection.
     if (/[\r\n\0]/.test(h.valueTemplate)) {
-      console.warn(`[HCC] Rejecting authHeader with CR/LF/NUL in value for header: ${h.header}`)
+      hccLogger.warn(`Rejecting authHeader with CR/LF/NUL in value for header: ${h.header}`, {
+        scope: '[HCC]',
+      })
       return null
     }
     // Escape backslashes (first, to avoid double-escaping) then double quotes so
@@ -1270,20 +1310,23 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // ── CRITICAL: prevent root execution ──
     if (server.spec.security) {
       if (server.spec.security.runAsUser !== undefined && server.spec.security.runAsUser < 1) {
-        console.warn(
-          `[Security] McpServer "${server.name}": runAsUser=${server.spec.security.runAsUser} rejected (must be >= 1)`
+        hccLogger.warn(
+          `McpServer "${server.name}": runAsUser=${server.spec.security.runAsUser} rejected (must be >= 1)`,
+          { scope: '[Security]' }
         )
         server.spec.security.runAsUser = 1000
       }
       if (server.spec.security.runAsGroup !== undefined && server.spec.security.runAsGroup < 1) {
-        console.warn(
-          `[Security] McpServer "${server.name}": runAsGroup=${server.spec.security.runAsGroup} rejected (must be >= 1)`
+        hccLogger.warn(
+          `McpServer "${server.name}": runAsGroup=${server.spec.security.runAsGroup} rejected (must be >= 1)`,
+          { scope: '[Security]' }
         )
         server.spec.security.runAsGroup = 1000
       }
       if (server.spec.security.fsGroup !== undefined && server.spec.security.fsGroup < 1) {
-        console.warn(
-          `[Security] McpServer "${server.name}": fsGroup=${server.spec.security.fsGroup} rejected (must be >= 1)`
+        hccLogger.warn(
+          `McpServer "${server.name}": fsGroup=${server.spec.security.fsGroup} rejected (must be >= 1)`,
+          { scope: '[Security]' }
         )
         server.spec.security.fsGroup = 1000
       }
@@ -1293,9 +1336,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         const original = server.spec.security.addCapabilities
         server.spec.security.addCapabilities = original.filter(cap => {
           if (!isWorkflowRecipeDefaultAllowedCapability(cap)) {
-            console.warn(
-              `[Security] McpServer "${server.name}": capability "${cap}" stripped (forbidden)`
-            )
+            hccLogger.warn(`McpServer "${server.name}": capability "${cap}" stripped (forbidden)`, {
+              scope: '[Security]',
+            })
             return false
           }
           return true
@@ -1304,27 +1347,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     // ── HIGH: sanitize env vars — block dangerous names ──
-    const FORBIDDEN_ENV = new Set([
-      'LD_PRELOAD',
-      'LD_LIBRARY_PATH',
-      'PATH',
-      'NODE_OPTIONS',
-      'PYTHONPATH',
-      'JAVA_TOOL_OPTIONS',
-      'KUBECONFIG',
-      'KUBERNETES_SERVICE_HOST',
-      'KUBERNETES_SERVICE_PORT',
-    ])
     if (server.spec.env) {
-      server.spec.env = server.spec.env.filter(e => {
-        if (FORBIDDEN_ENV.has(e.name.toUpperCase())) {
-          console.warn(
-            `[Security] McpServer "${server.name}": env "${e.name}" stripped (forbidden)`
-          )
-          return false
-        }
-        return true
-      })
+      server.spec.env = withoutForbiddenCrdEnv(server.spec.env, name =>
+        hccLogger.warn(`McpServer "${server.name}": env "${name}" stripped (forbidden)`, {
+          scope: '[Security]',
+        })
+      )
     }
 
     // ── MEDIUM: clamp resources to platform limits ──
@@ -1347,36 +1375,30 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
 
   /**
    * Names of the env vars the egress-proxy container of a remote server
-   * receives, read from the Deployment this reconcile writes: buildDeployment
-   * strips the forbidden spec.env names and appends the authHeaders backfill
-   * and the platform entries, so no second copy of those rules exists here.
+   * receives. buildDeployment and this method share buildContainerEnv and the
+   * forbidden-name filter, so no second copy of those rules exists here. The
+   * filter runs silently: buildDeployment reports each stripped name once per
+   * reconcile, and this lookup must not report it again.
    */
   private egressProxyEnvNames(server: McpServerCRD): Set<string> {
-    const egressProxy = this.buildDeployment(server).spec?.template.spec?.containers.find(
-      container => container.name === 'egress-proxy'
-    )
-    if (!egressProxy) {
-      throw new Error(`remote MCP server "${server.name}" renders no egress-proxy container`)
+    const envSafe: McpServerCRD = {
+      ...server,
+      spec: {
+        ...server.spec,
+        env: server.spec.env && withoutForbiddenCrdEnv(server.spec.env),
+      },
     }
-    return new Set((egressProxy.env ?? []).map(entry => entry.name))
+    return new Set(this.buildContainerEnv(envSafe).map(entry => entry.name))
   }
 
-  private buildDeployment(
-    server: McpServerCRD,
-    credentialsRevision = '',
-    nginxConfigRevision = ''
-  ): k8s.V1Deployment {
-    // ── Platform hardening: sanitize an ephemeral copy before building PodSpec ──
-    // The caller retains this object as the LIST -> WATCH desired-state cache.
-    // Mutating it here makes a later status-only watch event look like a
-    // user-driven spec revision, which invalidates the authoritative policy
-    // revocation marker during startup. Sanitization remains mandatory for the
-    // generated PodSpec, but must never rewrite the observed CRD inventory.
-    server = structuredClone(server)
-    this.sanitizeCrdSpec(server)
-
+  /**
+   * Env for the server's main container (the egress proxy of a remote server):
+   * envMapping, spec.env, spec.envSecret, then the remote authHeaders backfill
+   * and the platform-owned NGINX_ENVSUBST_FILTER. Expects spec.env already
+   * stripped of forbidden names.
+   */
+  private buildContainerEnv(server: McpServerCRD): k8s.V1EnvVar[] {
     const transportPort = server.spec.transport.port || 3000
-    const isStdio = server.spec.transport.type === 'stdio'
     const isRemote = this.isRemote(server)
     const healthCheckPort = server.spec.healthCheck?.port
 
@@ -1462,6 +1484,31 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       // every defined name, and appending it last wins over every env source.
       env.push({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
     }
+
+    return env
+  }
+
+  private buildDeployment(
+    server: McpServerCRD,
+    credentialsRevision = '',
+    nginxConfigRevision = ''
+  ): k8s.V1Deployment {
+    // ── Platform hardening: sanitize an ephemeral copy before building PodSpec ──
+    // The caller retains this object as the LIST -> WATCH desired-state cache.
+    // Mutating it here makes a later status-only watch event look like a
+    // user-driven spec revision, which invalidates the authoritative policy
+    // revocation marker during startup. Sanitization remains mandatory for the
+    // generated PodSpec, but must never rewrite the observed CRD inventory.
+    server = structuredClone(server)
+    this.sanitizeCrdSpec(server)
+
+    const transportPort = server.spec.transport.port || 3000
+    const isStdio = server.spec.transport.type === 'stdio'
+    const isRemote = this.isRemote(server)
+    const healthCheckPort = server.spec.healthCheck?.port
+
+    // --- Env vars ---
+    const env = this.buildContainerEnv(server)
 
     // --- Ports ---
     const ports: k8s.V1ContainerPort[] = [
@@ -2103,28 +2150,36 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       configMap = await this.coreApi.readNamespacedConfigMap({ name: configMapName, namespace })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[Reconciler] ConfigMap "${configMapName}" already gone`)
+        hccLogger.info(`ConfigMap "${configMapName}" already gone`, { scope: '[Reconciler]' })
       } else {
-        console.error(`[Reconciler] Failed to read ConfigMap "${configMapName}" ownership:`, error)
+        hccLogger.error(`Failed to read ConfigMap "${configMapName}" ownership`, {
+          scope: '[Reconciler]',
+          err: error,
+        })
         throw error
       }
       return
     }
 
     if (!this.isHccOwnedMcpResource(configMap, serverName)) {
-      console.warn(`[Reconciler] Skipping ConfigMap "${configMapName}" delete — not HCC-owned`)
+      hccLogger.warn(`Skipping ConfigMap "${configMapName}" delete — not HCC-owned`, {
+        scope: '[Reconciler]',
+      })
       return
     }
     if (deleteAllowed && !(await deleteAllowed())) return
 
     try {
       await this.coreApi.deleteNamespacedConfigMap({ name: configMapName, namespace })
-      console.log(`[Reconciler] Deleted nginx ConfigMap "${configMapName}"`)
+      hccLogger.info(`Deleted nginx ConfigMap "${configMapName}"`, { scope: '[Reconciler]' })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[Reconciler] ConfigMap "${configMapName}" already gone`)
+        hccLogger.info(`ConfigMap "${configMapName}" already gone`, { scope: '[Reconciler]' })
       } else {
-        console.error(`[Reconciler] Failed to delete ConfigMap "${configMapName}":`, error)
+        hccLogger.error(`Failed to delete ConfigMap "${configMapName}"`, {
+          scope: '[Reconciler]',
+          err: error,
+        })
         throw error
       }
     }
@@ -2140,28 +2195,34 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       service = await this.coreApi.readNamespacedService({ name, namespace })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[Reconciler] Service "${name}" already gone`)
+        hccLogger.info(`Service "${name}" already gone`, { scope: '[Reconciler]' })
       } else {
-        console.error(`[Reconciler] Failed to read Service "${name}" ownership:`, error)
+        hccLogger.error(`Failed to read Service "${name}" ownership`, {
+          scope: '[Reconciler]',
+          err: error,
+        })
         throw error
       }
       return
     }
 
     if (!this.isHccOwnedMcpResource(service, name)) {
-      console.warn(`[Reconciler] Skipping Service "${name}" delete — not HCC-owned`)
+      hccLogger.warn(`Skipping Service "${name}" delete — not HCC-owned`, { scope: '[Reconciler]' })
       return
     }
     if (deleteAllowed && !(await deleteAllowed())) return
 
     try {
       await this.coreApi.deleteNamespacedService({ name, namespace })
-      console.log(`[Reconciler] Deleted Service "${name}"`)
+      hccLogger.info(`Deleted Service "${name}"`, { scope: '[Reconciler]' })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[Reconciler] Service "${name}" already gone`)
+        hccLogger.info(`Service "${name}" already gone`, { scope: '[Reconciler]' })
       } else {
-        console.error(`[Reconciler] Failed to delete Service "${name}":`, error)
+        hccLogger.error(`Failed to delete Service "${name}"`, {
+          scope: '[Reconciler]',
+          err: error,
+        })
         throw error
       }
     }
@@ -2369,14 +2430,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         resourceVersion = current.metadata?.resourceVersion
       } catch (error) {
         if (getErrorCode(error) === 404) {
-          console.warn(
-            `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — skipping status update`
+          hccLogger.warn(
+            `McpServer "${server.name}" deleted mid-reconcile — skipping status update`,
+            { scope: '[Reconciler]' }
           )
           return decline()
         }
-        console.warn(
-          `[Reconciler] Failed to read status for "${server.name}" — skipping status update for type "${condition.type}" to avoid clobbering other status fields:`,
-          error
+        hccLogger.warn(
+          `Failed to read status for "${server.name}" — skipping status update for type "${condition.type}" to avoid clobbering other status fields`,
+          { scope: '[Reconciler]', err: error }
         )
         return decline()
       }
@@ -2477,8 +2539,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       } catch (error) {
         const errorCode = getErrorCode(error)
         if (errorCode === 404) {
-          console.warn(
-            `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — status patch skipped`
+          hccLogger.warn(
+            `McpServer "${server.name}" deleted mid-reconcile — status patch skipped`,
+            { scope: '[Reconciler]' }
           )
           return decline()
         }
@@ -2492,9 +2555,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         ) {
           continue
         }
-        console.warn(
-          `[Reconciler] Failed to write status condition ${condition.type}=${condition.status} on "${server.name}" (attempt ${attempt}/${STATUS_CONDITION_WRITE_MAX_ATTEMPTS}):`,
-          error
+        hccLogger.warn(
+          `Failed to write status condition ${condition.type}=${condition.status} on "${server.name}" (attempt ${attempt}/${STATUS_CONDITION_WRITE_MAX_ATTEMPTS})`,
+          { scope: '[Reconciler]', err: error }
         )
         return decline()
       }
@@ -2561,9 +2624,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const currentManaged = server.spec.managed ?? true
     const previousManaged = this.managedSnapshot.get(server.name)
     if (previousManaged !== undefined && previousManaged !== currentManaged) {
-      console.error(
-        `[Reconciler] McpServer "${server.name}": managed field changed from ${previousManaged} to ${currentManaged}. ` +
-          `This is not allowed — delete and recreate the McpServer to change ownership.`
+      hccLogger.error(
+        `McpServer "${server.name}": managed field changed from ${previousManaged} to ${currentManaged}. ` +
+          `This is not allowed — delete and recreate the McpServer to change ownership.`,
+        { scope: '[Reconciler]' }
       )
       if (!isCurrent()) return false
       this.setStatus(server.name, {
@@ -2582,15 +2646,16 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       let cleanupComplete = true
       let retract: RetractManagedRuntimeResult | undefined
       if (currentManaged) {
-        console.log(
-          `[Reconciler] McpServer "${server.name}" is disabled — removing HCC-owned resources`
-        )
+        hccLogger.info(`McpServer "${server.name}" is disabled — removing HCC-owned resources`, {
+          scope: '[Reconciler]',
+        })
         retract = await this.retractManagedRuntime(server, 'disabled', isCurrent)
         if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
         cleanupComplete = retract.cleanupComplete
       } else {
-        console.log(
-          `[Reconciler] McpServer "${server.name}" is disabled but WRC-owned; skipping runtime cleanup`
+        hccLogger.info(
+          `McpServer "${server.name}" is disabled but WRC-owned; skipping runtime cleanup`,
+          { scope: '[Reconciler]' }
         )
       }
       if (!isCurrent()) return false
@@ -2617,9 +2682,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const secretResult = await this.validateSecret(server)
     if (!isCurrent()) return false
     if (!secretResult.ok) {
-      console.error(
-        `[Reconciler] Skipping deployment of "${server.name}" — secret validation failed`
-      )
+      hccLogger.error(`Skipping deployment of "${server.name}" — secret validation failed`, {
+        scope: '[Reconciler]',
+      })
       const withdrawRuntime = shouldFailClosedForSecretFailure(secretResult.reason)
       let cleanupComplete = true
       let retract: RetractManagedRuntimeResult | undefined
@@ -2628,8 +2693,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
         cleanupComplete = retract.cleanupComplete
       } else {
-        console.warn(
-          `[Reconciler] Preserving existing runtime for "${server.name}" after transient Secret read failure`
+        hccLogger.warn(
+          `Preserving existing runtime for "${server.name}" after transient Secret read failure`,
+          { scope: '[Reconciler]' }
         )
       }
       if (!isCurrent()) return false
@@ -2682,7 +2748,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (!decision.ok) {
           const message = `Image "${server.spec.image}" is not permitted by the plugin image allowlist (${decision.reason})`
           if (config.enforcePluginImageAllowlist) {
-            console.warn(`[Reconciler] ${message} — blocking "${server.name}" (enforce mode)`)
+            hccLogger.warn(`${message} — blocking "${server.name}" (enforce mode)`, {
+              scope: '[Reconciler]',
+            })
             await this.writeStatusCondition(
               server,
               {
@@ -2697,8 +2765,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
             this.setStatus(server.name, { deployed: false, ready: false, message })
             return isCurrent()
           }
-          console.warn(
-            `[Reconciler] ${message} for "${server.name}" — audit mode, allowing (set CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true to block)`
+          hccLogger.warn(
+            `${message} for "${server.name}" — audit mode, allowing (set CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true to block)`,
+            { scope: '[Reconciler]' }
           )
         }
       }
@@ -2824,9 +2893,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     isCurrent: () => boolean
   ): Promise<boolean> {
     if (!isCurrent()) return false
-    console.log(
-      `[Reconciler] McpServer "${server.name}" is WRC-owned (managed:false); ` +
-        'skipping HCC runtime creation/deletion and updating discovery status.'
+    hccLogger.info(
+      `McpServer "${server.name}" is WRC-owned (managed:false); ` +
+        'skipping HCC runtime creation/deletion and updating discovery status.',
+      { scope: '[Reconciler]' }
     )
 
     const secretResult = await this.validateSecret(server)
@@ -2897,7 +2967,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * Reconcile a deleted McpServer.
    */
   async reconcileDelete(name: string, namespace: string): Promise<void> {
-    console.log(`[Reconciler] McpServer "${name}" deleted — cleaning up resources`)
+    hccLogger.info(`McpServer "${name}" deleted — cleaning up resources`, { scope: '[Reconciler]' })
     const capturedAuthority = this.inventoryAuthority()
     const obligation = { namespace }
     this.pendingReconciliations.set(name, obligation)
@@ -2948,9 +3018,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     desiredServers: McpServerCRD[],
     options: McpServerFullReconcileOptions = {}
   ): Promise<void> {
-    console.log(
-      `[Reconciler] Running full reconciliation for ${desiredServers.length} McpServer(s)`
-    )
+    hccLogger.info(`Running full reconciliation for ${desiredServers.length} McpServer(s)`, {
+      scope: '[Reconciler]',
+    })
     const capturedAuthority = this.inventoryAuthority()
 
     // Get all deployments managed by skill-mapper
@@ -3018,18 +3088,19 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (!presentNames.has(name)) this.pendingReconciliations.set(name, { namespace })
         await runEffect(name, async () => {
           if (!(await this.orphanDeleteAllowed(name, namespace, capturedAuthority))) {
-            console.warn(
-              `[Reconciler] Deferring orphan cleanup for "${name}": McpServer exists or inventory authority is unknown or changed`
+            hccLogger.warn(
+              `Deferring orphan cleanup for "${name}": McpServer exists or inventory authority is unknown or changed`,
+              { scope: '[Reconciler]' }
             )
             return
           }
-          console.log(`[Reconciler] Removing orphaned resources for "${name}"`)
+          hccLogger.info(`Removing orphaned resources for "${name}"`, { scope: '[Reconciler]' })
           await this.reconcileDelete(name, namespace)
         })
       }
     }
 
-    console.log('[Reconciler] Full reconciliation complete')
+    hccLogger.info('Full reconciliation complete', { scope: '[Reconciler]' })
   }
 
   /**
@@ -3043,7 +3114,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       })
       return response.items || []
     } catch (error) {
-      console.error('[Reconciler] Failed to list managed deployments:', error)
+      hccLogger.error('Failed to list managed deployments', { scope: '[Reconciler]', err: error })
       throw error
     }
   }
