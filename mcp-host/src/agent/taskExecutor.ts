@@ -75,6 +75,7 @@ import { resolveBridgeCall } from '../core/orchestration/toolUseLoopToolBatch'
 import {
   type PreparedGfsFile,
   attachedFilesForTurnContext,
+  attachedImagesForTurnContext,
   buildTurnContextBlock,
   stripTurnContextBlock,
 } from '../core/orchestration/turnContext'
@@ -125,6 +126,7 @@ import type {
 } from '../db/worker/modelStepCheckpointOps'
 import type { ModelStepTurnFence } from '../db/worker/protocol'
 import { isModelStepFenceMismatch, parseModelStepCheckpointLoopState } from '../db/worker/protocol'
+import { GFS_SAVE_ATTACHMENT_TOOL } from '../internalTools/gfs'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
@@ -1264,9 +1266,16 @@ export class TaskExecutor {
           'Model-step continuation origin user message index does not point at a user message'
         )
       }
-      this.replaceRecordedTurnContextBlock(messages, originIndex)
-      validateToolLinkages(messages)
       const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
+      // The rebuilt block follows the registry that was actually built, the
+      // same rule the first attempt applies: restored attachment bytes make
+      // the save tool available again, so its instruction reappears with it.
+      this.replaceRecordedTurnContextBlock(
+        messages,
+        originIndex,
+        loopConfig.toolRegistry.get(GFS_SAVE_ATTACHMENT_TOOL) !== null
+      )
+      validateToolLinkages(messages)
       const recorder = this.createContinuationRecorder(
         sessionKey,
         continuation,
@@ -2115,15 +2124,22 @@ export class TaskExecutor {
     // `referenced_file` lines, so a message with file attachments or resolved
     // file references gets it with the cache off too; the attachment
     // condition also registers `clerum__attachment_read`.
-    if (this.needsTurnContextBlock()) {
-      this.prependTurnContextBlock(messages)
-    }
+    const hasFileAttachments =
+      this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
+    const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
     const promptAssemblyStart = Date.now()
     const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
+    const promptAssemblyMs = Date.now() - promptAssemblyStart
+    // The save instruction follows the registry that was actually built, so it
+    // appears exactly when the model can call the tool.
+    const saveAvailable = loopConfig.toolRegistry.get(GFS_SAVE_ATTACHMENT_TOOL) !== null
+    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences || saveAvailable) {
+      this.prependTurnContextBlock(messages, saveAvailable)
+    }
     if (this.turnTiming) {
       // buildLoopConfig assembles the tool registry (MCP schemas) and the
       // system identity (workspace files / tiered prompt parts).
-      this.turnTiming.addPromptAssemblyMs(Date.now() - promptAssemblyStart)
+      this.turnTiming.addPromptAssemblyMs(promptAssemblyMs)
       let inputChars = 0
       for (const m of messages) {
         if (typeof m.content === 'string') inputChars += m.content.length
@@ -2213,7 +2229,11 @@ export class TaskExecutor {
    * Replace it with one built from the continuation's own re-resolved
    * references and prepared files (mutates in place).
    */
-  private replaceRecordedTurnContextBlock(messages: ChatMessage[], originIndex: number): void {
+  private replaceRecordedTurnContextBlock(
+    messages: ChatMessage[],
+    originIndex: number,
+    saveAvailable: boolean
+  ): void {
     const origin = messages[originIndex]
     if (!origin || origin.role !== 'user') {
       throw new Error(
@@ -2261,7 +2281,8 @@ export class TaskExecutor {
       }
       break
     }
-    if (this.needsTurnContextBlock()) this.prependTurnContextBlock(messages, originIndex)
+    if (this.needsTurnContextBlock() || saveAvailable)
+      this.prependTurnContextBlock(messages, saveAvailable, originIndex)
   }
 
   /**
@@ -2271,7 +2292,11 @@ export class TaskExecutor {
    * no human user text we inject a synthetic `<cron task>` placeholder so the
    * wire shape stays consistent (P1-004 §5.5).
    */
-  private prependTurnContextBlock(messages: ChatMessage[], onlyIndex?: number): void {
+  private prependTurnContextBlock(
+    messages: ChatMessage[],
+    saveAvailable: boolean,
+    onlyIndex?: number
+  ): void {
     const start = onlyIndex ?? messages.length - 1
     const end = onlyIndex ?? 0
     for (let i = start; i >= end; i--) {
@@ -2290,6 +2315,9 @@ export class TaskExecutor {
             }
           : undefined,
         attachedFiles: attachedFilesForTurnContext(this.task.sourceMessage?.attachments),
+        attachmentSave: saveAvailable
+          ? { images: attachedImagesForTurnContext(this.task.sourceMessage?.attachments) }
+          : undefined,
         referencedFiles: referencedFilesForTurnContext(
           this.task.sourceMessage?.fileReferenceResolutions
         ),
