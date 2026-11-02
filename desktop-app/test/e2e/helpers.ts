@@ -29,12 +29,16 @@ if (fs.existsSync(envPath)) {
 // (vi.mock is auto-hoisted above normal declarations by vitest)
 const testState = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
+  const listeners = new Map<string, (...args: unknown[]) => unknown>()
   const ipcMainMock = {
     handle: (channel: string, handler: (...args: unknown[]) => unknown) => {
       handlers.set(channel, handler)
     },
+    on: (channel: string, handler: (...args: unknown[]) => unknown) => {
+      listeners.set(channel, handler)
+    },
   }
-  return { handlers, ipcMainMock }
+  return { handlers, listeners, ipcMainMock }
 })
 
 vi.mock('electron', () => ({
@@ -52,6 +56,7 @@ let service: InstanceType<typeof import('../../src/appService.js').AppService> |
 
 export async function setupHarness(): Promise<void> {
   testState.handlers.clear()
+  testState.listeners.clear()
   const { AppService } = await import('../../src/appService.js')
   const { registerIpcHandlers } = await import('../../src/ipc.js')
   service = new AppService()
@@ -67,6 +72,7 @@ export async function teardownHarness(): Promise<void> {
     }
   }
   testState.handlers.clear()
+  testState.listeners.clear()
   service = null
 }
 
