@@ -206,6 +206,17 @@ of copying minikube's choices.
 | `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST` (HCC)                                      | `"false"` (audit)         | Set `"true"`, and narrow `CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES` (base includes `clerum/`).                                                                                                                                                  |
 | `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST` (control-api) | `"false"` (audit) | Set `"true"` so control-api refuses non-allowlisted connector images up front, not only HCC at reconcile. |
 
+If you install connectors from the Evenfire catalog, add `registry.evenfire.ai/`
+to both allowed-prefix lists before you turn enforcement on:
+`CONTROL_API_ALLOWED_IMAGE_PREFIXES` (control-api, `control-api-config`) and
+`CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES` (HCC, Deployment env). Every catalog
+connector image is served from `registry.evenfire.ai/<org>/<name>`, and the
+base lists do not include it. Without it, control-api rejects the install with
+`422` and `host_not_allowed`, and HCC marks the server `Ready=False` with
+`ImageNotAllowed`. For example, the base list plus the registry:
+`ghcr.io/evenfire-ai/,registry.evenfire.ai/,mongodb/,mcr.microsoft.com/,clerum/`,
+with your own registry first if you have one.
+
 For a read-only check of API-server and DNS egress before you rely on
 enforcement, see [`deploy/scripts/np-enforce-preflight.sh`](../../deploy/scripts/np-enforce-preflight.sh).
 It was written for GKE; read it before you run it elsewhere.
@@ -356,7 +367,8 @@ runbooks are in [releases and upgrades](releases-and-upgrades.md#upgrade-notes):
 - Switch both connector-image allowlists to enforce
   (`CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true` for HCC and
   `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST=true` for control-api), and narrow both
-  allowed-prefix lists.
+  allowed-prefix lists. Keep `registry.evenfire.ai/` in both if you install
+  connectors from the Evenfire catalog ([Write your overlay](#write-your-overlay)).
 - Custom workflow coordinator images are off by default
   (`WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE=false`). If you turn them on, keep
   `WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST=true` (the default), which requires a
