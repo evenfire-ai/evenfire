@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { type Server, createServer } from 'node:http'
 import { FileExplorerTree } from '@components/SidebarNav/FileExplorerTree'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
