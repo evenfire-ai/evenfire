@@ -3,13 +3,25 @@
 set -euo pipefail
 set +x
 
-PROJECT_DIR="${T0_PROJECT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
+SCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+PROJECT_DIR="${T0_PROJECT_DIR:-$SCRIPT_ROOT}"
 ORIGIN_DEV="${T0_ORIGIN_DEV:-origin/dev}"
 HEAD="${T0_HEAD:-HEAD}"
 
 shell_files=()
 package_dirs=()
-seen_packages="|"
+package_list="$(node "$SCRIPT_ROOT/scripts/ci/certification-inputs.mjs" list-affected --root "$PROJECT_DIR" --base "$ORIGIN_DEV" --head "$HEAD")"
+while IFS= read -r package; do
+  if [ -n "$package" ]; then package_dirs+=("$package"); fi
+done <<< "$package_list"
+if [ "${1:-}" = '--list-packages' ] && [ "$#" -eq 1 ]; then
+  if [ -n "$package_list" ]; then printf '%s\n' "$package_list"; fi
+  exit 0
+fi
+if [ "$#" -ne 0 ]; then
+  printf 'usage: t0.sh [--list-packages]\n' >&2
+  exit 2
+fi
 while IFS= read -r path; do
   [ -n "$path" ] || continue
   absolute_path="$PROJECT_DIR/$path"
@@ -25,26 +37,6 @@ while IFS= read -r path; do
       ;;
   esac
 
-  # Resolve the nearest package.json by walking upward from the changed file.
-  # This covers nested packages such as packages/workflow-sdk instead of
-  # incorrectly mapping them to packages/package.json.
-  candidate="$absolute_path"
-  if [ ! -d "$candidate" ]; then
-    candidate="$(dirname -- "$candidate")"
-  fi
-  while [ "$candidate" != "$PROJECT_DIR" ] && [[ "$candidate" == "$PROJECT_DIR"/* ]]; do
-    if [ -f "$candidate/package.json" ]; then
-      package="${candidate#"$PROJECT_DIR/"}"
-      if [[ "$seen_packages" != *"|$package|"* ]]; then
-        seen_packages="${seen_packages}${package}|"
-        package_dirs+=("$package")
-      fi
-      break
-    fi
-    parent="$(dirname -- "$candidate")"
-    [ "$parent" != "$candidate" ] || break
-    candidate="$parent"
-  done
 done < <(git -C "$PROJECT_DIR" diff --name-only --diff-filter=ACMRTUXB "$ORIGIN_DEV...$HEAD")
 
 if [ "${#shell_files[@]}" -gt 0 ]; then
@@ -65,7 +57,7 @@ has_npm_script() {
     "$package_dir/package.json" "$script_name"
 }
 
-if [ "${#package_dirs[@]}" -gt 0 ]; then
+if [ -n "$package_list" ]; then
   for package in "${package_dirs[@]}"; do
     # Live Vitest/Playwright E2E is the T2 opt-in lane. T0 is unit/build only.
     case "$package" in

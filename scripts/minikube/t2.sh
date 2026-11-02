@@ -81,6 +81,24 @@ run_t1_local_preflight() {
     "Node/package/Docker prerequisites passed in ${REAL_PG_PREFLIGHT_DURATION_SECONDS}s; T1 workers=1"
 }
 
+run_certification_inputs_preflight() {
+  local scope
+  if [ "$T2_RUN_T1" = true ]; then
+    scope=t2
+  elif [ "$T2_RUN_T0" = true ]; then
+    scope=t0
+  else
+    return 0
+  fi
+  if ! node "$SCRIPT_DIR/../ci/certification-inputs.mjs" check \
+    --root "$T2_PROJECT_DIR" --scope "$scope" --base "$T2_ORIGIN_DEV" --head "$T2_HEAD"; then
+    T2_NEXT_COMMAND='prepare the reported local inputs explicitly, then re-run the canonical gate'
+    t2_evidence_write local-preflight FAIL 'certification inputs are incomplete'
+    t2_fail LOCAL_DEPENDENCY_MISSING 'certification input preflight failed before T0'
+    return 1
+  fi
+}
+
 run_t0() {
   local phase_started_seconds="$SECONDS"
   if [ "$T2_RUN_T0" != true ]; then
@@ -551,6 +569,7 @@ main() {
   t2_evidence_init
 
   run_t1_local_preflight
+  run_certification_inputs_preflight
   run_t0
   if [ "$T2_RUN_T0" = true ] && ! t2_lane_completed "$T2_T0_STATUS"; then
     T2_NEXT_COMMAND='re-run make minikube-t2 with T2_RUN_T0=true so the static lane is executed'

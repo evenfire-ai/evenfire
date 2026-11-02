@@ -19,17 +19,22 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
-const OBSERVED_DEV_SOURCE_COMMIT = '0b26101eb247adcc44f70d39451f3e82c3225d47'
-const OBSERVED_DEV_DB_SOURCE_SHA256 =
-  '1948ad306fe56b368f120edbc70ddbac6cb9b981d9fd218e7ded2575ed3b2beb'
+const certificationInputs = JSON.parse(
+  readFileSync(new URL('../../tests/contracts/certification-inputs.json', import.meta.url), 'utf8')
+) as {
+  producers: Record<string, { env: string; commit: string; sourceHashes: Record<string, string> }>
+}
+const observedProducer = certificationInputs.producers.observedDev
+const latestProducer = certificationInputs.producers.latestDev
+const OBSERVED_DEV_SOURCE_COMMIT = observedProducer.commit
+const OBSERVED_DEV_DB_SOURCE_SHA256 = observedProducer.sourceHashes['control-api/src/db.ts']
 const OBSERVED_DEV_RECEIPT_COUNT = 133
 const OBSERVED_DEV_RECEIPT_SET_SHA256 =
   'acb72ad12e1d342310832cf7628ab8351a80cee7311111039b4c2b9720077307'
-const LATEST_DEV_SOURCE_COMMIT = '87f962fb999ed5dbcab90bd52562de0eba4aa564'
-const LATEST_DEV_DB_SOURCE_SHA256 =
-  '616678c106f762a8b82ea45f42e01ddc42fb90dda935d62fd0f4b72c2a2eeebc'
+const LATEST_DEV_SOURCE_COMMIT = latestProducer.commit
+const LATEST_DEV_DB_SOURCE_SHA256 = latestProducer.sourceHashes['control-api/src/db.ts']
 const LATEST_DEV_MIGRATION_ENTRY_SOURCE_SHA256 =
-  '2b582252753c6455fc85d7cb4563313e3b63ecf7c7630aa6252f70f0bb286a81'
+  latestProducer.sourceHashes['control-api/src/migrate.ts']
 const LATEST_DEV_RECEIPT_COUNT = 134
 const DEV_PASSWORD_SUCCESS_ADMISSION_VERSION = '0130_password_login_success_admission'
 // Dev migrations after 0106 that both pinned DEV producers predate or include.
@@ -41,8 +46,8 @@ const DEV_POST_0106_THROUGH_0129 = CONTROL_API_MIGRATIONS.map(
     version <= '0129_workflow_schedules_concurrency_policy'
 )
 
-const OBSERVED_DEV_SOURCE_DIR = process.env.TASK106_R61_B1_DEV_SOURCE_DIR
-const LATEST_DEV_SOURCE_DIR = process.env.TASK106_R61_B1_LATEST_DEV_SOURCE_DIR
+const OBSERVED_DEV_SOURCE_DIR = process.env[observedProducer.env]
+const LATEST_DEV_SOURCE_DIR = process.env[latestProducer.env]
 if (
   process.env.CONTROL_API_REAL_PG_REQUIRED === '1' &&
   (!OBSERVED_DEV_SOURCE_DIR || !LATEST_DEV_SOURCE_DIR)

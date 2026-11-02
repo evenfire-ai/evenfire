@@ -8,14 +8,20 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
-const OBSERVED_DEV_SOURCE_DIR = process.env.TASK106_R61_B1_DEV_SOURCE_DIR
-const OBSERVED_DEV_SOURCE_COMMIT = '0b26101eb247adcc44f70d39451f3e82c3225d47'
-const OBSERVED_DEV_DB_SOURCE_SHA256 =
-  '1948ad306fe56b368f120edbc70ddbac6cb9b981d9fd218e7ded2575ed3b2beb'
+const certificationInputs = JSON.parse(
+  readFileSync(new URL('../../tests/contracts/certification-inputs.json', import.meta.url), 'utf8')
+) as {
+  producers: Record<string, { env: string; commit: string; sourceHashes: Record<string, string> }>
+}
+const observedProducer = certificationInputs.producers.observedDev
+const latestProducer = certificationInputs.producers.latestDev
+const OBSERVED_DEV_SOURCE_DIR = process.env[observedProducer.env]
+const OBSERVED_DEV_SOURCE_COMMIT = observedProducer.commit
+const OBSERVED_DEV_DB_SOURCE_SHA256 = observedProducer.sourceHashes['control-api/src/db.ts']
 
 if (
   process.env.CONTROL_API_REAL_PG_REQUIRED === '1' &&
-  (!OBSERVED_DEV_SOURCE_DIR || !process.env.TASK106_R61_B1_LATEST_DEV_SOURCE_DIR)
+  (!OBSERVED_DEV_SOURCE_DIR || !process.env[latestProducer.env])
 ) {
   throw new Error(
     'R61-B1 real PostgreSQL lane requires both pinned DEV producer source directories'

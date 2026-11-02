@@ -92,10 +92,14 @@ finally:
         pass
 PY
 grep -Fq 't0.sh' "$T2"
+# T1 keeps durable reporter evidence (structure and results, no free text) and
+# fails when it cannot be written.
+grep -Fq 't1-reporter-projection.py' "$T1"
+grep -Fq 'T1 reporter evidence could not be persisted' "$T1"
 grep -Fq 'T0_SHELLCHECK=PASS' "$T0"
 grep -Fq 'npm run build' "$T0"
 grep -Fq 'npm test' "$T0"
-grep -Fq 'if [ "${#package_dirs[@]}" -gt 0 ]' "$T0"
+grep -Fq 'if [ -n "$package_list" ]' "$T0"
 grep -Fq 'Ready pod owner ReplicaSet could not be verified' "$ROOT/deploy/scripts/lib/gfs-credential-rollout.sh"
 grep -Fq 'treating marker as stale' "$ROOT/scripts/minikube/pre-gate-sync.sh"
 for identity_file in "$COMMON" "$ROOT/scripts/minikube/sync-auth-key.sh" "$ROOT/scripts/minikube/require-t2-mutation-lock.sh" "$ROOT/scripts/minikube/pre-gate-sync.sh"; do
@@ -654,6 +658,8 @@ for exit_code in 1 2 7 126 137; do
     source "$1"
     PROJECT_DIR="$T1_EXIT_ROOT"
     T1_TMP_DIR="$(mktemp -d)"
+    # Production T1 always calls t2_evidence_init before any suite runs.
+    T2_EVIDENCE_DIR="$T1_TMP_DIR/evidence"
     trap '\''rm -rf "$T1_TMP_DIR"'\'' EXIT
     list_real_pg_files() {
       printf "%s\\n" "$T1_EXIT_ROOT/control-api/test/fake.realPostgres.test.ts"

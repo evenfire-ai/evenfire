@@ -259,6 +259,11 @@ jobs:
         working-directory: desktop-app
         run: npm run verify:electron
 
+      - name: Validate declared test inputs
+        env:
+          CERTIFICATION_SERVICE: ${{ matrix.service }}
+        run: node scripts/ci/certification-inputs.mjs check --scope matrix --service "$CERTIFICATION_SERVICE"
+
       - name: Build
         working-directory: ${{ matrix.service }}
         run: npm run build
@@ -463,26 +468,29 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # R61-B1 acceptance runs exact migration producers for observed DEV
-      # history and the latest fetched DEV graph. Immutable pins keep clean CI
-      # portable.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: 0b26101eb247adcc44f70d39451f3e82c3225d47
-          path: r61-b1-producers/observed-dev
-          persist-credentials: false
-
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: 87f962fb999ed5dbcab90bd52562de0eba4aa564
-          path: r61-b1-producers/latest-dev
-          persist-credentials: false
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: control-api/package-lock.json
+
+      # The same validated pin declaration is consumed by local preflight and
+      # the real-PostgreSQL tests; these checkouts stay read-only producers.
+      - name: Resolve historical producer pins
+        id: certification_inputs
+        run: node scripts/ci/certification-inputs.mjs pins >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.certification_inputs.outputs.observed_commit }}
+          path: r61-b1-producers/observed-dev
+          persist-credentials: false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.certification_inputs.outputs.latest_commit }}
+          path: r61-b1-producers/latest-dev
+          persist-credentials: false
 
       - name: Install dependencies
         working-directory: control-api
@@ -508,9 +516,10 @@ jobs:
         working-directory: r61-b1-producers/observed-dev/control-api
         run: npm ci
 
-      - name: Build observed DEV migration runner
-        working-directory: r61-b1-producers/observed-dev/control-api
-        run: npm run build
+      - name: Build observed DEV producer with provenance
+        env:
+          TASK106_R61_B1_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/observed-dev
+        run: node scripts/ci/certification-inputs.mjs build-producer --producer observedDev
 
       - name: Install latest DEV producer dependencies
         working-directory: r61-b1-producers/latest-dev/packages/workflow-runtime-core
@@ -524,9 +533,10 @@ jobs:
         working-directory: r61-b1-producers/latest-dev/control-api
         run: npm ci
 
-      - name: Build latest DEV migration runner
-        working-directory: r61-b1-producers/latest-dev/control-api
-        run: npm run build
+      - name: Build latest DEV producer with provenance
+        env:
+          TASK106_R61_B1_LATEST_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/latest-dev
+        run: node scripts/ci/certification-inputs.mjs build-producer --producer latestDev
 
       - name: Install External REST contract-test dependencies
         working-directory: external-rest-api
@@ -536,10 +546,20 @@ jobs:
         working-directory: external-rest-api
         run: npm run build
 
-      - name: Validate recovery suite selection contract
+      - name: Validate Real PostgreSQL certification inputs
+        env:
+          TASK106_R61_B1_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/observed-dev
+          TASK106_R61_B1_LATEST_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/latest-dev
+        run: node scripts/ci/certification-inputs.mjs check --scope ci-t1
+
+      - name: Validate recovery suite selection, certification input and T1 evidence contracts
         env:
           CODEX_SCRATCH_ROOT: ${{ runner.temp }}
-        run: node --test scripts/tests/password-recovery-suite-contract.test.mjs
+        run: >-
+          node --test
+          scripts/tests/password-recovery-suite-contract.test.mjs
+          scripts/tests/certification-inputs.test.mjs
+          scripts/tests/t1-reporter-projection.test.mjs
 
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api
