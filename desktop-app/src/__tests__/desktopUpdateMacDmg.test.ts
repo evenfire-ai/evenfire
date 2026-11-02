@@ -598,7 +598,7 @@ void saveVerifiedMacInstaller({
   })
 
   it('preserves a live or identity-unknown mount recovery marker', async () => {
-    const fixture = await createFixture()
+    await createFixture()
     const operationId = '55555555-5555-4555-8555-555555555555'
     const operationPath = path.join(temporaryRoot, operationId)
     const mountPath = path.join(operationPath, 'mounted-installer')
