@@ -64,6 +64,7 @@ function createDependencies(
   options: {
     platform?: 'darwin' | 'win32' | 'linux'
     architecture?: 'x64' | 'arm64'
+    appRoot?: string
     updaterCapable?: boolean
     downloadAsset?: DesktopUpdateManagerDependencies['downloadAsset']
     preparePayload?: DesktopUpdateManagerDependencies['preparePayload']
@@ -81,11 +82,12 @@ function createDependencies(
   const platform = options.platform ?? 'linux'
   const architecture = options.architecture ?? 'x64'
   const appRoot =
-    platform === 'darwin'
+    options.appRoot ??
+    (platform === 'darwin'
       ? '/Applications/Evenfire.app'
       : platform === 'win32'
         ? 'C:/Users/alice/AppData/Local/Programs/Evenfire/app-0.11.0'
-        : '/opt/evenfire/Evenfire-linux-x64'
+        : '/opt/evenfire/Evenfire-linux-x64')
   const location: DesktopInstallLocation = {
     platform,
     architecture,
@@ -851,12 +853,17 @@ describe('DesktopUpdateManager', () => {
   })
 
   it('invalidates the macOS action when the saved DMG changes but preserves the file', async () => {
+    const installedAppPath = path.join(userDataPath, 'installed', 'Evenfire.app')
+    const installedAsarPath = path.join(installedAppPath, 'Contents', 'Resources', 'app.asar')
+    await fs.mkdir(path.dirname(installedAsarPath), { recursive: true })
+    await fs.writeFile(installedAsarPath, 'source-app-archive')
     const hashFile = vi.fn(async (filePath: string) =>
       (await fs.readFile(filePath, 'utf8')) === 'published-dmg' ? EXPECTED_DIGEST : 'b'.repeat(64)
     )
     dependencies = createDependencies({
       platform: 'darwin',
       architecture: 'arm64',
+      appRoot: installedAppPath,
       hashFile,
     })
     manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
@@ -869,6 +876,10 @@ describe('DesktopUpdateManager', () => {
     )
     expect(mockApp.quit).not.toHaveBeenCalled()
     await expect(fs.readFile(installerPath, 'utf8')).resolves.toBe('tampered-dmg')
+    expect(hashFile).toHaveBeenCalledWith(installedAsarPath)
+    expect(hashFile.mock.calls.map(([filePath]) => filePath)).not.toContain(
+      '/Applications/Evenfire.app/Contents/Resources/app.asar'
+    )
   })
 
   it('cancels the helper handoff if the backend recommendation changes during authorization', async () => {
