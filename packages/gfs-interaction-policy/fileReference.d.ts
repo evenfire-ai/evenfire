@@ -34,7 +34,8 @@ export interface FileReferenceV1 {
 }
 
 export type FileReferenceErrorCode =
-  'FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED' | 'FILE_REFERENCE_INVALID'
+  | 'FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED'
+  | 'FILE_REFERENCE_INVALID'
 
 export type FileReferenceParseResult =
   | { ok: true; value: FileReferenceV1 }

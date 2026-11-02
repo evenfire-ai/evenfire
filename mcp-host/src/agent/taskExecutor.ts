@@ -2592,14 +2592,16 @@ export class TaskExecutor {
         att =>
           att.kind === 'image' && (att.mimeType === 'image/jpeg' || att.mimeType === 'image/png')
       )
-      .map((att): MessageContentPart => ({
-        type: 'image',
-        mimeType: att.mimeType as 'image/jpeg' | 'image/png',
-        data: att.dataBase64,
-        ...(bindSource
-          ? { source: { kind: 'attachment' as const, attachmentId: att.id, messageId } }
-          : {}),
-      }))
+      .map(
+        (att): MessageContentPart => ({
+          type: 'image',
+          mimeType: att.mimeType as 'image/jpeg' | 'image/png',
+          data: att.dataBase64,
+          ...(bindSource
+            ? { source: { kind: 'attachment' as const, attachmentId: att.id, messageId } }
+            : {}),
+        })
+      )
     if (!imageParts.length) {
       return []
     }
