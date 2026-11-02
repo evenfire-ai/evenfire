@@ -1,5 +1,7 @@
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
+import { attachmentSaveName } from '../core/attachments/attachmentSave'
+import type { Attachment } from '../core/types'
 import { logger } from '../logger'
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
 import { VisualInputError } from '../visualInput/policy'
@@ -806,6 +808,10 @@ export interface GfscWriteClient extends GfscReadClient {
     },
     call?: GfscCallOptions
   ): Promise<unknown>
+  createFileFromBytes(
+    args: { drive: string; parentResourceId: string; name: string; contentBase64: string },
+    call?: GfscCallOptions
+  ): Promise<unknown>
   createFolder(
     args: { drive: string; parentResourceId: string; name: string },
     call?: GfscCallOptions
@@ -1012,6 +1018,86 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
               callOptions(context)
             )
           )
+        } catch (err) {
+          return mutationFail(err)
+        }
+      },
+    },
+  ]
+}
+
+export const GFS_SAVE_ATTACHMENT_TOOL = 'clerum__gfs_save_attachment'
+
+/**
+ * Saves an attachment of the turn's own message into a gfs folder. The Host
+ * resolves the id against that message only and forwards the admitted base64
+ * unchanged, so the model never carries the bytes and cannot write bytes it
+ * was not given. The file is named by attachmentSaveName, the name its
+ * turn-context line shows; rename afterwards with clerum__gfs_rename.
+ */
+export function buildGfsAttachmentSaveTools(
+  client: GfscWriteClient,
+  attachments: readonly Attachment[]
+): InternalToolDefinition[] {
+  return [
+    {
+      name: GFS_SAVE_ATTACHMENT_TOOL,
+      description:
+        'Save a file or image attached to the current message into an existing gfs folder, byte for byte. ' +
+        'Pass the id of its attached_file or attached_image line. The new file is named as that line shows. ' +
+        'If a file with that name already ' +
+        'exists in the folder the save fails with conflict: tell the user and do not rename or replace ' +
+        'their files unless they ask.',
+      parameters: {
+        type: 'object',
+        required: ['drive', 'parentResourceId', 'attachmentId'],
+        properties: {
+          drive: { type: 'string', description: 'gfs drive name.' },
+          parentResourceId: { type: 'string', description: 'Destination folder resource id.' },
+          attachmentId: {
+            type: 'string',
+            description: 'The id of an attached_file or attached_image line in the turn context.',
+          },
+        },
+      },
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
+        const { drive, parentResourceId, attachmentId } = args
+        if (typeof drive !== 'string' || typeof parentResourceId !== 'string') {
+          return invalidArgs(
+            'clerum__gfs_save_attachment requires string drive and parentResourceId'
+          )
+        }
+        const attachment = attachments.find(candidate => candidate.id === attachmentId)
+        if (!attachment) {
+          return invalidArgs(
+            'attachment_not_found: no attachment with this id is part of the current message'
+          )
+        }
+        if (typeof attachment.dataBase64 !== 'string') {
+          return invalidArgs(
+            'bytes_unavailable_after_restart: ask the user to attach the file again in a new message'
+          )
+        }
+        const name = attachmentSaveName(attachment)
+        if (name === null) {
+          return invalidArgs(
+            'attachment_name_missing: this attachment has no name to save it under'
+          )
+        }
+        const bytes = Buffer.byteLength(attachment.dataBase64, 'base64')
+        // No local size check: gfsc bounds the write body with a per-deployment
+        // GFS_MAX_WRITE_BODY_BYTES the Host cannot see, and answers 413, which
+        // mutationFail reports as limit_exceeded.
+        try {
+          const resource = await client.createFileFromBytes(
+            { drive, parentResourceId, name, contentBase64: attachment.dataBase64 },
+            callOptions(context)
+          )
+          return ok({ attachmentId: attachment.id, name, bytes, resource })
         } catch (err) {
           return mutationFail(err)
         }
