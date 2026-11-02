@@ -15,7 +15,7 @@ import type { SessionFsmStore } from './sessionFsm'
  * carrying `{reason, outcome}` and preserving the existing outcome names
  * (`reconcile_rejoined`, `rejoin_capped_offline`, `reconcile_replaced`,
  * `recovered_from_task_result`, `fell_through_to_resend`) plus `revoked`,
- * `stale_drop`, `offline`, and `error`.
+ * `stale_drop`, `offline`, `error`, and `model_step_resumable`.
  */
 
 /** Precedence-branch outcomes (stable telemetry names + Fase-3 additions). */
@@ -29,6 +29,10 @@ export type ReconcileOutcome =
    *  green (§4.8 new outcome name). */
   | 'recovered_error'
   | 'fell_through_to_resend'
+  /** The Host holds a `resumable` model-step checkpoint for the failed turn
+   *  (#1043 / #1044): the turn is offered as **Retry model step**, never as
+   *  Resend, so the loud caller must not paint the Resend banner. */
+  | 'model_step_resumable'
   | 'stale_drop'
   | 'revoked'
   | 'authority_unverified'

@@ -226,6 +226,8 @@ function WorkspaceHarness({
                 semanticModelsByMessageId: new Map(
                   buildLoadedChatSemanticModels(messages).map(model => [model.messageId, model])
                 ),
+                modelStepCheckpoint: null,
+                modelStepRetry: null,
               }}
             >
               <ChatActionsProvider

@@ -31,6 +31,7 @@ import {
   SESSION_PREVIEW_LIMIT,
 } from '@constants/agents'
 import { HTML_PREVIEW_INLINE_MAX_BYTES } from '@constants/htmlPreview'
+import { agentErrorText } from '@lib/agentErrorText'
 import type { AccessCatalog, ChatMessageAttachment } from '../../../../src/types'
 import { estimateBase64DecodedLength } from '../../lib/base64Size'
 import { chatMessageDomId } from '../../lib/chatLocalSearch'
@@ -53,6 +54,7 @@ import { ChatMarkdownContent } from './ChatMarkdownContent'
 import { ChatStateBadge } from './ChatStateBadge'
 import { InFlightAssistantPlaceholder } from './InFlightAssistantPlaceholder'
 import { MessageTokens } from './MessageTokens'
+import { ModelStepRetryNotice } from './ModelStepRetryNotice'
 import { NudgeArea } from './NudgeArea'
 
 type ChatThreadProps = {
@@ -299,6 +301,8 @@ export function ChatThread({
     localSearchQuery,
     localSearchCurrentMatch,
     semanticModelsByMessageId,
+    modelStepCheckpoint,
+    modelStepRetry,
   } = useChatThreadStateContext()
   const {
     chatList,
@@ -316,6 +320,7 @@ export function ChatThread({
     handleDeleteChat: onDeleteChat,
     handleAddComposerImageAttachments: onAddComposerImageAttachments,
     handleAddComposerReferenceAttachments: onAddComposerReferenceAttachments,
+    handleRetryModelStep,
   } = useAgentChatActionsContext()
   const { cancelTask: onCancelTask } = useMcpRuntimeContext()
 
@@ -786,6 +791,11 @@ export function ChatThread({
                             : ''
                       const isLastAssistantMessage =
                         group.role === 'assistant' && messageIndex === group.items.length - 1
+                      // #1043: a code with a summary shows it instead of the
+                      // Host's transport message, which stays in Details.
+                      const errorCopy = message.isError
+                        ? agentErrorText(message.errorCode, message.content)
+                        : ''
                       const workflowArtifactScopeForAssistant =
                         message.role === 'assistant' && prevGroup?.role === 'user'
                           ? (prevGroup.items
@@ -830,10 +840,10 @@ export function ChatThread({
                                       query={localSearchQuery}
                                       activeOccurrence={activeSearchOccurrence}
                                     />
-                                  ) : message.content.length <= 180 ? (
-                                    message.content
+                                  ) : errorCopy.length <= 180 ? (
+                                    errorCopy
                                   ) : (
-                                    `${message.content.slice(0, 177)}...`
+                                    `${errorCopy.slice(0, 177)}...`
                                   )}
                                 </div>
                                 <details className="error-bubble-details">
@@ -1008,6 +1018,13 @@ export function ChatThread({
           chatId={activeChatId}
           onStartNewChat={() => onStartNewChat(selectedAgent, { selectLatest: false })}
           onRefreshState={() => onSelectChat(activeChatId)}
+        />
+      )}
+      {activeChatId && selectedAgent && (modelStepCheckpoint || modelStepRetry?.unavailable) && (
+        <ModelStepRetryNotice
+          checkpoint={modelStepCheckpoint}
+          retry={modelStepRetry ?? null}
+          onRetry={() => void handleRetryModelStep()}
         />
       )}
       {isDedicatedAgentView && (

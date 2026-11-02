@@ -87,6 +87,34 @@ describe('sendAgentMessage — synchronous (non-async) response', () => {
     expect(assistant?.[0]?.content).toBe('bad request')
     expect(spies.pushToast).toHaveBeenCalledWith('Message to agent-x failed: bad request', 'error')
   })
+
+  it('renders a synchronous provider outage with the fixed summary in the toast', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({
+      error: {
+        message: 'proxy stream failed with provider_unavailable',
+        code: 'LLM_MODEL_OVERLOADED',
+        provider: 'codex-subscription',
+      },
+    })
+    const { result, spies } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.handleSendAgentMessage('do the thing')
+    })
+
+    const assistant = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
+      | Array<{ role?: string; content?: string; isError?: boolean; errorCode?: string }>
+      | undefined
+    expect(assistant?.[0]?.isError).toBe(true)
+    expect(assistant?.[0]?.errorCode).toBe('LLM_MODEL_OVERLOADED')
+    // The bubble keeps the Host message; only the toast carries the summary.
+    expect(assistant?.[0]?.content).toBe('proxy stream failed with provider_unavailable')
+    expect(spies.pushToast).toHaveBeenCalledWith(
+      'Message to agent-x failed: The model provider could not complete this response.',
+      'error'
+    )
+  })
 })
 
 describe('sendAgentMessage — POST failure', () => {

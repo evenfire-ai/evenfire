@@ -25,6 +25,8 @@ export function browserApiPath(path: string): string {
   return `${CONTROL_UI_API_PREFIX}${path}`
 }
 export type Scenario = {
+  /** Present only on the single Grok recovery scenario; Codex rows omit it. */
+  provider?: 'grok'
   catalogSize: number
   runId: string
   agentName: string
@@ -40,6 +42,7 @@ export type Scenario = {
 export type Evidence = {
   runId: string
   catalogSize: number
+  executions: Record<string, number>
   calls: Array<{ runId: string; tool: string; callId: string | number; businessId: string }>
 }
 export type UpstreamEvidence = {
@@ -57,6 +60,9 @@ export type UpstreamEvidence = {
     finalResponses: number
     unexpectedRetries: number
   }
+  // #1044: the deterministic upstream's model-step retry turns
+  // (`codex-llm-proxy/test/approvedToolsUpstream.ts`).
+  modelStepRetry: ModelStepRetryEvidence
   requests: Array<{
     definitionCount: number
     explicitNonStrictCount: number
@@ -67,6 +73,25 @@ export type UpstreamEvidence = {
     stage: string
   }>
 }
+export const modelStepRetryFields = [
+  'turns',
+  'markerSearches',
+  'unavailableResponses',
+  'zeroToolUnavailable',
+  'continuationUnavailable',
+  'continuations',
+  'toolResults',
+  'resends',
+  'followUps',
+  'unexpectedRetries',
+  'approvalRequests',
+  'approvalFinals',
+  'absorbed',
+  // #1044 C12: `capped` retried calls held open, counted when they arrive. The
+  // `cappedAbortedEarly` flag is a boolean and stays out of these deltas.
+  'cappedHeld',
+] as const
+export type ModelStepRetryEvidence = Record<(typeof modelStepRetryFields)[number], number>
 export function required(name: string): string {
   const value = process.env[name]?.trim()
   if (!value) throw new Error(`Missing required isolated-profile precondition: ${name}`)
@@ -88,10 +113,64 @@ export function localUrl(value: string): string {
   }
   return url.origin
 }
+/** The provider the prepared lane runs against; set by every Make target. */
+export function approvedToolsProvider(): 'codex' | 'grok' {
+  const value = required('APPROVED_TOOLS_PROVIDER')
+  if (value !== 'codex' && value !== 'grok')
+    throw new Error('APPROVED_TOOLS_PROVIDER must be codex or grok')
+  return value
+}
+/**
+ * The suite this lane run owns; required, with no default. `approved-tools` is
+ * the seven base journeys (and the real-hybrid pair); `native-workflow` is the
+ * single workflow journey with its own coordinator fixture (#1048 MS-NW);
+ * `model-step-retry` is the visible setup plus the retry cases. Each run reads
+ * exactly one, and the combinations the lane does not run are refused here as
+ * well as by prepare.
+ */
+export function approvedToolsSuite(): 'approved-tools' | 'native-workflow' | 'model-step-retry' {
+  const value = required('APPROVED_TOOLS_SUITE')
+  if (value !== 'approved-tools' && value !== 'native-workflow' && value !== 'model-step-retry')
+    throw new Error(
+      'APPROVED_TOOLS_SUITE must be approved-tools, native-workflow or model-step-retry'
+    )
+  return value
+}
+/**
+ * The Desktop approval label of a fixture connector tool. The Host projects the
+ * MCP server name as the display name (`getDisplayName`,
+ * `mcp-host/src/progress/intentExtraction.ts:12-19`) and
+ * `formatToolApprovalLabel` keeps it instead of the tool function, so the
+ * pending approval names the connector only. Which tool was pending is proven
+ * by the physical execution the case asserts after the decision, never by this
+ * label.
+ */
+export function connectorApprovalLabel(scenario: Scenario): string {
+  const name = scenario.connectorName
+  return name.charAt(0).toUpperCase() + name.slice(1)
+}
 export function scenarios(): Scenario[] {
   const parsed: unknown = JSON.parse(required('APPROVED_TOOLS_SCENARIOS'))
-  if (!Array.isArray(parsed) || parsed.length !== 3)
+  const provider = approvedToolsProvider()
+  const suite = approvedToolsSuite()
+  const grok = provider === 'grok'
+  // The Grok lane prepares exactly one 83-tool agent bound to the connection the
+  // user created by hand in the Control UI (C1, C2, C11 share it).
+  if (grok && suite !== 'model-step-retry')
+    throw new Error('The Grok lane runs only the model-step-retry suite')
+  if (grok && (!Array.isArray(parsed) || parsed.length !== 1))
+    throw new Error('Exactly one Grok approved-tools scenario required')
+  // The Codex model-step suite needs the single 83-tool agent too: its own
+  // prepare output carries no workflow scenario and no other catalogue.
+  if (!grok && suite === 'model-step-retry' && (!Array.isArray(parsed) || parsed.length !== 1))
+    throw new Error('Exactly one Codex model-step-retry scenario required')
+  if (!grok && suite === 'approved-tools' && (!Array.isArray(parsed) || parsed.length !== 3))
     throw new Error('Exactly three approved-tools scenarios required')
+  // The native workflow run prepares its one scenario separately
+  // (`APPROVED_TOOLS_WORKFLOW_SCENARIO`): it owns no receipt catalog, and the
+  // workflow helper asserts that isolation.
+  if (suite === 'native-workflow' && (!Array.isArray(parsed) || parsed.length !== 0))
+    throw new Error('The native-workflow suite prepares no receipt scenario')
   const fields = [
     'runId',
     'agentName',
@@ -115,6 +194,22 @@ export function scenarios(): Scenario[] {
     if (process.env.APPROVED_TOOLS_UPSTREAM_MODE === 'deterministic')
       localUrl(row.upstreamEvidenceUrl)
   }
+  if (grok) {
+    const [row] = rows
+    if (row.provider !== 'grok' || row.catalogSize !== 83)
+      throw new Error('The Grok scenario must be the 83-tool Grok agent')
+    if (row.subscriptionName !== required('APPROVED_TOOLS_GROK_CONNECTION_NAME'))
+      throw new Error('The Grok scenario must use the user-created connection')
+    return rows
+  }
+  if (rows.some(row => row.provider !== undefined))
+    throw new Error('Codex scenarios must not carry a provider')
+  if (suite === 'model-step-retry') {
+    const [row] = rows
+    if (row.catalogSize !== 83) throw new Error('The model-step-retry scenario must be 83 tools')
+    return rows
+  }
+  if (suite === 'native-workflow') return rows
   if (catalogSizes.some(size => rows.filter(row => row.catalogSize === size).length !== 1))
     throw new Error('Scenarios must cover 83, 150, 250 exactly once')
   for (const key of ['runId', 'agentName', 'contextName', 'connectorName', 'fixtureUrl'] as const) {
@@ -141,6 +236,10 @@ export async function readEvidence(scenario: Scenario): Promise<Evidence> {
     !Array.isArray(evidence.calls)
   )
     throw new Error('Evidence scenario mismatch')
+  for (const call of evidence.calls) {
+    if (call.runId !== scenario.runId || !Number.isSafeInteger(evidence.executions?.[call.tool]))
+      throw new Error('Missing physical execution evidence')
+  }
   return evidence
 }
 
@@ -179,6 +278,11 @@ export async function readUpstreamEvidence(scenario: Scenario): Promise<Upstream
     const value = evidence.limitBoundary?.[field]
     if (!Number.isSafeInteger(value) || value < 0)
       throw new Error(`Missing upstream limit boundary evidence ${field}`)
+  }
+  for (const field of modelStepRetryFields) {
+    const value = evidence.modelStepRetry?.[field]
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new Error(`Missing upstream model-step retry evidence ${field}`)
   }
   if (!Array.isArray(evidence.requests)) throw new Error('Missing upstream request evidence')
   return evidence

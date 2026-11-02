@@ -32,6 +32,7 @@ export function createApprovedToolsFixture({ catalogSize = 83, runId = randomUUI
   const names = new Set(tools.map(tool => tool.name))
   let businessId
   const calls = []
+  const executions = Object.fromEntries(tools.map(tool => [tool.name, 0]))
 
   const send = (response, status, body) => {
     response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
@@ -53,7 +54,7 @@ export function createApprovedToolsFixture({ catalogSize = 83, runId = randomUUI
       const requestedRun = url.searchParams.get('runId')
       if (!RUN_ID.test(requestedRun ?? '')) return send(response, 400, { error: 'Invalid runId' })
       if (requestedRun !== runId) return send(response, 404, { error: 'Unknown run' })
-      return send(response, 200, { runId, catalogSize, calls })
+      return send(response, 200, { runId, catalogSize, calls, executions })
     }
     if (url.pathname !== '/mcp') return send(response, 404, { error: 'Not found' })
     // This fixture implements stateless JSON responses, not an SSE subscription.
@@ -122,6 +123,8 @@ export function createApprovedToolsFixture({ catalogSize = 83, runId = randomUUI
           // Generated inside this service only when a business call arrives.
           businessId ??= randomUUID()
           const record = { runId, tool: params.name, callId: id, businessId }
+          // Count physical executions even if a replay reuses the MCP request id.
+          executions[params.name]++
           calls.push(record)
           result = { content: [{ type: 'text', text: JSON.stringify(record) }], isError: false }
         }

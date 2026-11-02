@@ -548,6 +548,50 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(appended?.[0]?.errorCode).toBe('provider_error')
     })
 
+    it('4.5b toasts a provider outage with the fixed summary and keeps the Host message on the bubble', async () => {
+      clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-abc' })
+      const { result, spies } = renderController()
+      await settleMount()
+
+      const sendPromise = result.current.handleSendAgentMessage('hola')
+      await waitForProgressHandler('task-abc')
+      await act(async () => {
+        clerum.emitTaskProgress('task-abc', {
+          type: 'terminal',
+          data: {
+            taskId: 'task-abc',
+            status: 'failed',
+            error: {
+              message: 'proxy stream failed with provider_unavailable',
+              code: 'LLM_MODEL_OVERLOADED',
+              provider: 'codex-subscription',
+            },
+          },
+        })
+      })
+      await act(async () => {
+        await sendPromise
+      })
+
+      await waitFor(() =>
+        expect(spies.pushToast).toHaveBeenCalledWith(
+          'Message to agent-x failed: The model provider could not complete this response.',
+          'error'
+        )
+      )
+      expect(spies.pushToast).toHaveBeenCalledTimes(1)
+      // Witness: the stored bubble keeps the Host message and its code, so only
+      // the toast carries the summary.
+      const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
+        | Array<{ isError?: boolean; errorCode?: string; content?: string }>
+        | undefined
+      expect(appended?.[0]).toMatchObject({
+        isError: true,
+        errorCode: 'LLM_MODEL_OVERLOADED',
+        content: 'proxy stream failed with provider_unavailable',
+      })
+    })
+
     it('does not toast or repaint a terminal error after its append crosses a team switch', async () => {
       const pendingAppend = deferred<void>()
       clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-old-team' })
@@ -1162,6 +1206,60 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(
         Object.values(result.current.sessionStateByChatKey).some(s => s.state === 'processing')
       ).toBe(false)
+      await sendPromise
+    })
+
+    it('SR-7b toasts a durable provider outage with the fixed summary', async () => {
+      clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-abc' })
+      clerum.rpc.loadSessionMessages.mockResolvedValue({
+        agent: 'agent-x',
+        chatId: 'c',
+        turns: [],
+        state: 'idle',
+      })
+      clerum.rpc.getTaskResult.mockResolvedValue({
+        success: false,
+        status: 'completed',
+        error: {
+          code: 'LLM_MODEL_OVERLOADED',
+          message: 'proxy stream failed with provider_unavailable',
+          provider: 'codex-subscription',
+        },
+      })
+      const { result, spies } = renderController()
+      await settleMount()
+
+      const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
+      await waitForProgressHandler('task-abc')
+      await act(async () => {
+        clerum.emitTaskProgress('task-abc', {
+          type: 'open',
+          taskId: 'task-abc',
+          hostRef: 'agent-x',
+        })
+        clerum.emitTaskProgress('task-abc', {
+          type: 'error',
+          message: 'Progress stream disconnected',
+        })
+      })
+
+      await waitFor(() => {
+        const last = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]?.[0] as
+          | { isError?: boolean }
+          | undefined
+        expect(last?.isError).toBe(true)
+      })
+      const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
+        | Array<{ isError?: boolean; errorCode?: string; content?: string }>
+        | undefined
+      expect(appended?.[0]?.errorCode).toBe('LLM_MODEL_OVERLOADED')
+      expect(appended?.[0]?.content).toBe('proxy stream failed with provider_unavailable')
+      await waitFor(() =>
+        expect(spies.pushToast).toHaveBeenCalledWith(
+          'Message to agent-x failed: The model provider could not complete this response.',
+          'error'
+        )
+      )
       await sendPromise
     })
 

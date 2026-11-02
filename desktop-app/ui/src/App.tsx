@@ -3995,6 +3995,8 @@ export function App() {
       semanticModelsByMessageId: new Map(
         chatSemanticModels.map(model => [model.messageId, model] as const)
       ),
+      modelStepCheckpoint: vm.modelStepCheckpoint,
+      modelStepRetry: vm.modelStepRetry,
     }),
     [
       vm.activeChatId,
@@ -4009,6 +4011,8 @@ export function App() {
       chatLocalSearchOpen,
       chatLocalSearchState,
       chatSemanticModels,
+      vm.modelStepCheckpoint,
+      vm.modelStepRetry,
     ]
   )
 

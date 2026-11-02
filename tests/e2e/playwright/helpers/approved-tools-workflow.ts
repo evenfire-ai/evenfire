@@ -177,9 +177,12 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
       const option = desktop.getByTestId(`model-option-${scenario.modelName}`)
       await expect(option).toHaveCount(1)
       await option.click()
-      await expect(
-        desktop.getByRole('button', { name: `Model — ${scenario.modelName}`, exact: true })
-      ).toBeVisible()
+      // The chip label shows a catalog displayName when there is one; the
+      // selected model id is the stable witness (ModelSelector.tsx:212-213).
+      await expect(desktop.getByTestId('selected-chat-model')).toHaveAttribute(
+        'data-model-id',
+        scenario.modelName
+      )
     })
 
     await test.step('Request the workflow and approve its native invocation and bound recipe approval', async () => {
@@ -264,7 +267,7 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     try {
       await signOutDesktop(await app.firstWindow())
     } catch {
-      cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+      cleanupError = 'Desktop sign-out failed'
     }
     try {
       await app.close()

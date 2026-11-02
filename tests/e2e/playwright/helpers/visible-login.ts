@@ -1,4 +1,5 @@
 import { type Page, expect } from '@playwright/test'
+import { loginLedgerRootFromEnv, recordPasswordLogin, waitForLoginPace } from './login-ledger.mjs'
 
 const ADMIN_USERNAME = process.env.TEST_ADMIN_USERNAME ?? 'admin'
 const ADMIN_PASSWORD = process.env.TEST_ADMIN_PASSWORD ?? 'changeme123!'
@@ -10,6 +11,13 @@ export async function loginControlUiVisible(page: Page): Promise<void> {
   await expect(page.getByLabel('Username or email')).toBeVisible({ timeout: 20_000 })
   await page.getByLabel('Username or email').fill(ADMIN_USERNAME)
   await page.getByLabel('Password').fill(ADMIN_PASSWORD)
+  // MS-B1: this admin login consumes the same global password pace as the
+  // lane's Desktop logins, so it is recorded in the lane's ledger too. The lane
+  // run directory is the only place it applies: other projects call this helper
+  // without one and stay unpaced.
+  const ledgerRoot = loginLedgerRootFromEnv()
+  await waitForLoginPace(ledgerRoot)
+  recordPasswordLogin(ledgerRoot, { surface: 'control-ui', inputChecks: 0 })
   const login = page.waitForResponse(
     response =>
       response.url().includes('/api/v1/admin/auth/login') && response.request().method() === 'POST'

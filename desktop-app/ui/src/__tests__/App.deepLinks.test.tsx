@@ -4608,7 +4608,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(getController().isAuthenticated).toBe(true))
     await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
     await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
-    await waitFor(() => expect(handle.teamDirectory).toHaveBeenCalledOnce())
+    await waitFor(() => expect(getController().teamDirectoryHydrated).toBe(true))
     await act(async () => {
       await Promise.resolve()
       await Promise.resolve()

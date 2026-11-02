@@ -1,9 +1,13 @@
-import { type ElectronApplication, _electron as electron } from '@playwright/test'
+import { type ElectronApplication, _electron as electron, test } from '@playwright/test'
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
+import { createMainOutputBuffer } from './desktop-diagnostics.mjs'
 
+// E2E_GUARDIAN_IPC_FLOW: the Desktop app and its session live in the main
+// process; this helper starts and inspects it through Playwright's Electron
+// API, so there is no renderer HTTP request to await.
 const DESKTOP_APP_DIR = path.resolve(__dirname, '../../../../desktop-app')
 const MAIN_JS = path.join(DESKTOP_APP_DIR, 'dist/main.js')
 const LOOPBACK_V4 = ['127', '0', '0', '1'].join('.')
@@ -56,64 +60,120 @@ function profileOwnedEndpoints(): { externalApiUrl: string; rpcProxyUrl: string 
   )
 }
 
-function writeIsolatedRuntimeConfig(
-  configPath: string,
-  externalApiUrl: string,
-  rpcProxyUrl: string
-): void {
-  fs.mkdirSync(path.dirname(configPath), { recursive: true })
-  fs.writeFileSync(
-    configPath,
-    `${JSON.stringify(
-      {
-        appName: 'Evenfire Codex subscription',
-        externalRestApiBaseUrl: externalApiUrl,
-        rpcProxyBaseUrl: rpcProxyUrl,
-      },
-      null,
-      2
-    )}\n`,
-    { encoding: 'utf8', mode: 0o600 }
-  )
+// Desktop dev-isolation contract (`desktop-app/src/devIsolation.ts`). An isolated
+// run never uses keytar, so no session reaches the shared `Evenfire` login
+// Keychain account. Each launch gets its own run directory, and the app derives
+// its name from that directory's slug, so the `<appName> Safe Storage` key that
+// `safeStorage` creates is new for every launch and no existing item is read.
+const DEV_ISOLATION_ENV = {
+  enable: 'EVENFIRE_DEV_ISOLATION',
+  runDir: 'EVENFIRE_DEV_ISOLATION_RUN_DIR',
+  restUrl: 'EVENFIRE_DEV_ISOLATION_REST_URL',
+  rpcUrl: 'EVENFIRE_DEV_ISOLATION_RPC_URL',
+  target: 'EVENFIRE_DEV_ISOLATION_TARGET',
+  appPath: 'EVENFIRE_DEV_ISOLATION_APP_PATH',
+} as const
+
+// MS-1 item 1 (#1048): run16's ten failed Retry clicks left no trace of where the
+// continuation stopped, because the Desktop main process output was discarded.
+// Every launch keeps the tail of it for the failure capture to filter. The bound
+// is a memory guard, not a policy: the filter in `desktop-diagnostics.mjs` is what
+// decides what leaves the helper.
+const MAIN_OUTPUT_LINE_LIMIT = 5_000
+let mainOutput = createMainOutputBuffer(MAIN_OUTPUT_LINE_LIMIT)
+
+/**
+ * Pipes the main process's stdout and stderr into this launch's buffer. Called
+ * before the first window exists, so nothing the app prints on startup is lost.
+ */
+function captureMainOutput(app: ElectronApplication): void {
+  const buffer = createMainOutputBuffer(MAIN_OUTPUT_LINE_LIMIT)
+  mainOutput = buffer
+  for (const stream of [app.process().stdout, app.process().stderr]) {
+    if (!stream) continue
+    stream.setEncoding('utf8')
+    stream.on('data', (chunk: string) => buffer.push(chunk))
+    stream.on('end', () => buffer.flush())
+  }
+}
+
+/**
+ * Everything the current launch's main process wrote, oldest first. The caller
+ * filters it against the closed set of retry-layer patterns
+ * (`helpers/desktop-diagnostics.mjs`); this raw buffer is never attached.
+ */
+export function desktopMainLogLines(): string[] {
+  return mainOutput.lines()
 }
 
 export async function launchDesktopApp(): Promise<ElectronApplication> {
   const { externalApiUrl, rpcProxyUrl } = profileOwnedEndpoints()
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-subscription-electron-'))
-  const runtimeConfigPath = path.join(userDataDir, 'e2e-runtime-config.json')
-  writeIsolatedRuntimeConfig(runtimeConfigPath, externalApiUrl, rpcProxyUrl)
+  const runDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-approved-tools-')))
+  const userDataDir = path.join(runDir, 'user-data')
+  const configPath = path.join(runDir, 'runtime-config.json')
+  fs.mkdirSync(userDataDir, { mode: 0o700 })
+  const compiledAppPath = fs.realpathSync(path.dirname(MAIN_JS))
+  const executablePath = desktopElectronExecutable()
 
   let app: ElectronApplication
   try {
     app = await electron.launch({
-      executablePath: desktopElectronExecutable(),
+      executablePath,
       args: [`--user-data-dir=${userDataDir}`, MAIN_JS],
       cwd: DESKTOP_APP_DIR,
+      // Playwright records the Desktop window itself. The directory is the
+      // test's own output path (under the config's `outputDir`, the lane's
+      // artifacts directory), never `runDir`: that directory is deleted when the
+      // app closes (below), which would take the video with it. Every caller is
+      // a test body, so `test.info()` exists here.
+      recordVideo: { dir: test.info().outputPath('desktop-video') },
       env: {
         ...process.env,
+        [DEV_ISOLATION_ENV.enable]: '1',
+        [DEV_ISOLATION_ENV.runDir]: runDir,
+        [DEV_ISOLATION_ENV.restUrl]: externalApiUrl,
+        [DEV_ISOLATION_ENV.rpcUrl]: rpcProxyUrl,
+        [DEV_ISOLATION_ENV.target]: path.basename(runDir),
+        [DEV_ISOLATION_ENV.appPath]: compiledAppPath,
         EXTERNAL_REST_API_BASE_URL: externalApiUrl,
         RPC_PROXY_BASE_URL: rpcProxyUrl,
-        CLERUM_DESKTOP_CONFIG_PATH: runtimeConfigPath,
+        CLERUM_DESKTOP_CONFIG_PATH: configPath,
         EVENFIRE_RENDERER_URL: '',
         ELECTRON_RENDERER_URL: '',
         NODE_ENV: 'test',
       },
     })
   } catch (error) {
-    fs.rmSync(userDataDir, { recursive: true, force: true })
+    fs.rmSync(runDir, { recursive: true, force: true })
     throw error
   }
+  app.on('close', () => fs.rmSync(runDir, { recursive: true, force: true }))
+  // Before the first window: the retry layer's own errors are printed while the
+  // continuation POST runs, which can be before any window query.
+  captureMainOutput(app)
 
-  const actualUserDataDir = await app.evaluate(({ app: electronApp }) =>
-    electronApp.getPath('userData')
-  )
-  if (fs.realpathSync(actualUserDataDir) !== fs.realpathSync(userDataDir)) {
+  // Public process identities only. The app refuses a mismatched isolated
+  // launch on its own; these checks prove isolation is on at all, that this
+  // checkout's build and Electron run, and that the profile is the new one.
+  const runtime = await app.evaluate(({ app: electronApp }) => ({
+    name: electronApp.getName(),
+    userData: electronApp.getPath('userData'),
+    appPath: electronApp.getAppPath(),
+    executablePath: process.execPath,
+    isPackaged: electronApp.isPackaged,
+  }))
+  const mismatches = [
+    runtime.name.startsWith('Evenfire ') ? null : `app name ${runtime.name}`,
+    fs.realpathSync(runtime.userData) === fs.realpathSync(userDataDir) ? null : 'userData',
+    fs.realpathSync(runtime.appPath) === compiledAppPath ? null : 'app path',
+    fs.realpathSync(runtime.executablePath) === fs.realpathSync(executablePath)
+      ? null
+      : 'Electron executable',
+    runtime.isPackaged ? 'packaged app' : null,
+  ].filter(Boolean)
+  if (mismatches.length > 0) {
     await app.close()
-    throw new Error(
-      `Electron did not honor the isolated user-data-dir: expected ${userDataDir}, got ${actualUserDataDir}`
-    )
+    throw new Error(`Desktop did not start dev-isolated: ${mismatches.join(', ')}`)
   }
-
-  app.on('close', () => fs.rmSync(userDataDir, { recursive: true, force: true }))
   return app
 }

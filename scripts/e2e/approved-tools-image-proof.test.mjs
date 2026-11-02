@@ -58,8 +58,8 @@ function observedEntries(images, spell = ref => ref) {
   return Object.entries(images).map(([ref, id]) => ({ ref: spell(ref), id }))
 }
 
-function certify({ profile = PROFILE, sourceHead = HEAD, manifest, images }) {
-  return buildApprovedToolsImageProof({ profile, sourceHead, manifest, images })
+function certify({ profile = PROFILE, sourceHead = HEAD, manifest, images, suite = 'native-workflow' }) {
+  return buildApprovedToolsImageProof({ profile, sourceHead, manifest, images, suite })
 }
 
 test('certifies every fixture and base ref at the reviewed commit', () => {
@@ -298,6 +298,58 @@ test('requires the Control API OAuth fixture and its current exact base', () => 
   )
 })
 
+test('the base lane proves five images and never requires the workflow pair (#1048 MS-NW)', () => {
+  const baseRefs = EXPECTED_IMAGES.filter(ref => !ref.includes('workflow'))
+  const workflowRefs = EXPECTED_IMAGES.filter(ref => ref.includes('workflow'))
+  assert.equal(baseRefs.length, 5)
+  assert.equal(workflowRefs.length, 2)
+  // A profile that holds no workflow image at all: the base proof must still
+  // succeed, and its record must not mention an image it never used.
+  const images = Object.fromEntries(baseRefs.map((ref, index) => [ref, digest(`${ref}#${index}`)]))
+  const proof = certify({
+    suite: 'approved-tools',
+    manifest: manifestFor(images),
+    images: observedEntries(images),
+  })
+  assert.deepEqual(Object.keys(proof.images).sort(), [...baseRefs].sort())
+  for (const ref of workflowRefs) assert.equal(proof.images[ref], undefined)
+  // The retry suite prepares no workflow backend either.
+  assert.deepEqual(
+    Object.keys(
+      certify({ suite: 'model-step-retry', manifest: manifestFor(images), images: observedEntries(images) })
+        .images
+    ).sort(),
+    [...baseRefs].sort()
+  )
+  // Liveness: the same fixture set is refused for the native-workflow suite,
+  // which is the only suite that prepares a WorkflowRecipe.
+  assert.throws(
+    () =>
+      certify({
+        suite: 'native-workflow',
+        manifest: manifestFor(images),
+        images: observedEntries(images),
+      }),
+    /IMAGE_PROOF_IMAGE_MISSING: the manifest records no image digest for clerum\/workflow-custom-sdk-e2e:approved-tools-test; acquire the fixtures with: make minikube-build-codex-approved-tools-fixtures and make minikube-build-codex-approved-tools-native-workflow-fixtures/
+  )
+})
+
+test('a native-workflow proof records the workflow pair and its base binding', () => {
+  const images = recordedImages()
+  const proof = certify({
+    suite: 'native-workflow',
+    manifest: manifestFor(images),
+    images: observedEntries(images),
+  })
+  assert.equal(proof.images[WORKFLOW_FIXTURE], images[WORKFLOW_FIXTURE])
+  assert.equal(proof.images[WORKFLOW_BASE], images[WORKFLOW_BASE])
+  assert.deepEqual(proof.derivedFrom[WORKFLOW_FIXTURE], {
+    ref: WORKFLOW_BASE,
+    id: images[WORKFLOW_BASE],
+  })
+})
+
+
 test('keeps the OAuth fixture out of publication, pulls and default runtime verification', () => {
   const name = 'codex-approved-tools-control-api-e2e'
   const ref = `clerum/${name}:test`
@@ -305,4 +357,20 @@ test('keeps the OAuth fixture out of publication, pulls and default runtime veri
   assert.ok(!pullInGhcrMode().some(image => image.name === name))
   assert.ok(!minikubeVerifyRefs({ mode: 'local' }).includes(ref))
   assert.ok(!minikubeVerifyRefs({ mode: 'ghcr', tag: HEAD, includeE2eFixtures: true }).includes(ref))
+})
+
+
+test('Grok proves only its own proxy pair, shared MCP and Control API pair at the reviewed head', () => {
+  const refs = ['clerum/grok-llm-proxy:test', 'clerum/grok-approved-tools-proxy-e2e:test', 'clerum/codex-approved-tools-mcp-e2e:test', 'clerum/control-api:test', 'clerum/codex-approved-tools-control-api-e2e:test']
+  const images = Object.fromEntries(refs.map(ref => [ref, digest(ref)]))
+  const manifest = { profile: PROFILE, images, sourceRevisions: Object.fromEntries(refs.map(ref => [ref, HEAD])), derivedFrom: {
+    [refs[1]]: { ref: refs[0], id: images[refs[0]] },
+    [refs[4]]: { ref: refs[3], id: images[refs[3]] },
+  } }
+  const options = { profile: PROFILE, sourceHead: HEAD, provider: 'grok', suite: 'model-step-retry', manifest, images: observedEntries(images) }
+  assert.deepEqual(Object.keys(buildApprovedToolsImageProof(options).images).sort(), refs.sort())
+  const stale = structuredClone(options)
+  stale.manifest.derivedFrom['clerum/grok-approved-tools-proxy-e2e:test'].id = digest('stale')
+  assert.throws(() => buildApprovedToolsImageProof(stale), /IMAGE_PROOF_BASE_MISMATCH/)
+  assert.throws(() => buildApprovedToolsImageProof({ ...options, provider: 'other' }), /provider/)
 })

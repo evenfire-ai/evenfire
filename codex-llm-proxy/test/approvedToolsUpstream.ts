@@ -16,6 +16,45 @@ const LIMIT_PROBE_CALLS = 257
 // the continuation must carry every result back before the final answer.
 const LIMIT_BOUNDARY = 'tool call limit boundary'
 const LIMIT_BOUNDARY_CALLS = 256
+// #1044 model-step retry. A user turn containing `model step retry <kind> <marker>`:
+// - `probe`: one read-only search carrying the marker, then a 503 for the model
+//   step that follows its result, then (only after Retry model step) the final
+//   answer.
+// - `twice`: like `probe`, but the first continuation also gets a 503; the
+//   second continuation gets the final answer.
+// - `zero`: a 503 for the first model step, before any tool runs.
+// - `receipt`: like `probe`, with a real fixture receipt before the 503.
+// - `approval`: after the kept search and 503, discovery leads to a real
+//   fixture receipt call that requires the user's decision.
+// - `absorbed`: three 503s for the step after the search, which the Host's own
+//   automatic retries outlast: that step then answers on its fourth call, with
+//   no checkpoint to resume and no notice for the user.
+// - `capped`: one immediate 503 for the step after the search, then the retried
+//   call is held open for 120 s. The Host's 60 s cap cancels it and shows the
+//   resumable notice; every later call of the turn is the continuation, which
+//   answers. C12 proves the cap end to end.
+// A step that must end on the resumable notice fails MODEL_STEP_OUTAGES times:
+// the Host retries a failed model step three times by itself when the failure
+// would leave a resumable checkpoint, so the automatic retries absorb the first
+// three 503s and the fourth one stands. `zero` keeps one outage: that turn has
+// no confirmed tool, so there is nothing to resume and the Host never retries it.
+// A turn left on its 503 can be sent again by the user (Resend): the history
+// then carries the marker's user message twice and no tool rows, and gets a
+// plain answer. A turn containing `model step retry followup <marker>` is a new
+// message sent instead of the retry; it gets a plain answer.
+const MODEL_STEP_TURN =
+  /\bmodel step retry (probe|twice|zero|approval|receipt|absorbed|capped) ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
+const MODEL_STEP_FOLLOWUP = /\bmodel step retry followup ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
+const MODEL_STEP_PREFIX = 'model step retry '
+const MODEL_STEP_MAX_TURNS = 64
+// The Host's default `CLERUM_MODEL_STEP_AUTO_RETRIES=3`: three automatic retries
+// per failed model step, so four outages are needed for one to stand. An
+// `absorbed` turn fails three times, which is what those three retries outlast.
+const HOST_MODEL_STEP_AUTO_RETRIES = 3
+const MODEL_STEP_OUTAGES = HOST_MODEL_STEP_AUTO_RETRIES + 1
+// How long the `capped` kind holds its retried call open. Longer than the Host's
+// 60 s model-step retry cap, so the cap is what ends that step.
+const MODEL_STEP_CAPPED_HOLD_MS = 120_000
 
 function record(value: unknown): Row {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -107,6 +146,28 @@ function boundaryResults(rows: Row[], sent: Set<string>): number {
   return calls.length
 }
 
+// The continuation of a model-step probe turn must carry the one search call
+// the first completion emitted, once, plus its results. Returns how many
+// results for that call it carried; any other row shape is a protocol error.
+function modelStepToolResults(rows: Row[], callId: string, marker: string): number {
+  const calls = rows.filter(row => row.type === 'function_call')
+  if (calls.length !== 1 || calls[0]!.call_id !== callId || calls[0]!.name !== BRIDGES[0])
+    throw new Error('model_step_call_not_replayed')
+  if (!isDeepStrictEqual(parse(calls[0]!.arguments), { query: marker, limit: 1 }))
+    throw new Error('model_step_call_arguments_changed')
+  const outputs = rows.filter(row => row.type === 'function_call_output')
+  if (outputs.some(output => output.call_id !== callId)) throw new Error('uncorrelated_result')
+  if (rows.some(row => row.type !== 'function_call' && row.type !== 'function_call_output'))
+    throw new Error('unexpected_continuation_row')
+  for (const output of outputs) {
+    if (rows.indexOf(output) < rows.indexOf(calls[0]!)) throw new Error('uncorrelated_result')
+    const result = textResult(output.output, BRIDGES[0])
+    if (failed(result) || !Array.isArray(result.results))
+      throw new Error('model_step_search_failed')
+  }
+  return outputs.length
+}
+
 function described(exchange: Exchange): string {
   if (
     exchange.call.name !== BRIDGES[1] ||
@@ -129,11 +190,15 @@ function receipt(exchange: Exchange, candidate: string): Row {
   )
     throw new Error('invocation_target_mismatch')
   const value = exchange.result
+  // callId is the MCP request id the fixture server copies verbatim into the
+  // business record. JSON-RPC ids are strings or numbers, and the Host's MCP
+  // SDK client sends numbers, so both are the real shape; anything else is
+  // not an id the fixture server could have recorded.
   if (
     typeof value.businessId !== 'string' ||
     !value.businessId ||
     typeof value.runId !== 'string' ||
-    typeof value.callId !== 'string' ||
+    (typeof value.callId !== 'string' && !Number.isSafeInteger(value.callId)) ||
     typeof value.tool !== 'string' ||
     !candidate.endsWith(`__${value.tool}`)
   )
@@ -305,10 +370,20 @@ function stream(...events: Row[]): Response {
   )
 }
 
-export function createApprovedToolsUpstream() {
+// The default preserves existing Codex fixture callers; Grok selects its frozen
+// external boundary explicitly. Neither provider delegates unmatched requests.
+export function createApprovedToolsUpstream(provider: 'codex' | 'grok' = 'codex') {
+  if (provider !== 'codex' && provider !== 'grok') throw new Error('invalid_fixture_provider')
+  const completions =
+    provider === 'grok' ? 'https://cli-chat-proxy.grok.com/v1/responses' : COMPLETIONS
+  const catalog = provider === 'grok' ? 'https://cli-chat-proxy.grok.com/v1/models' : CATALOG
   const evidence = {
     catalogRequests: 0,
     rejected: 0,
+    // Rejection counts by bounded fixture-internal error name, so a 422 in a
+    // lane evidence file names its exact throw instead of only counting it.
+    // Names are fixture constants; no request or result content is recorded.
+    rejections: {} as Record<string, number>,
     completions: 0,
     searchCalls: 0,
     describeCalls: 0,
@@ -327,6 +402,32 @@ export function createApprovedToolsUpstream() {
       finalResponses: 0,
       unexpectedRetries: 0,
     },
+    // #1044 model-step retry turns: turns started, searches emitted with a
+    // marker (the only tool a turn runs), 503 answers (every kind), 503 answers
+    // given before any tool ran (`zero`), continuations that got a 503 again
+    // (`twice`), continuations answered, results of the original search those
+    // answered continuations carried, Resends answered, follow-up messages
+    // answered, completions served for a stage that was already served (a retry
+    // the Host must never make), steps whose outages the Host's own retries
+    // outlasted (`absorbed`), and `capped` retried calls held open (counted when
+    // they arrive) plus whether the client gave one up before it answered.
+    modelStepRetry: {
+      turns: 0,
+      markerSearches: 0,
+      unavailableResponses: 0,
+      zeroToolUnavailable: 0,
+      continuationUnavailable: 0,
+      continuations: 0,
+      toolResults: 0,
+      resends: 0,
+      followUps: 0,
+      unexpectedRetries: 0,
+      approvalRequests: 0,
+      approvalFinals: 0,
+      absorbed: 0,
+      cappedHeld: 0,
+      cappedAbortedEarly: false,
+    },
     // Only bounded measurements, never request or result contents.
     requests: [] as Array<{
       definitionCount: number
@@ -343,17 +444,70 @@ export function createApprovedToolsUpstream() {
   const answeredProbeTurns = new Set<string>()
   // Call IDs sent for each boundary turn, and whether its final answer was sent.
   const boundaryTurns = new Map<string, { sent: Set<string>; finalized: boolean }>()
+  // Model-step turns by marker: the kind, the search call ID emitted for the
+  // turn (none for `zero`), the last stage served for it, and how many 503s it
+  // got.
+  const modelStepTurns = new Map<
+    string,
+    {
+      kind: 'probe' | 'twice' | 'zero' | 'approval' | 'receipt' | 'absorbed' | 'capped'
+      callId: string | null
+      stage:
+        | 'searched'
+        | 'reading'
+        | 'unavailable'
+        | 'capped'
+        | 'approving'
+        | 'continued'
+        | 'resent'
+        | 'followed_up'
+      unavailable: number
+    }
+  >()
+
+  const overloadedResponse = () =>
+    Response.json(
+      { error: { code: 'server_is_overloaded', message: 'fixture provider unavailable' } },
+      { status: 503 }
+    )
+
+  // #1044 C12 — the retried call of a `capped` step. It is counted when it
+  // arrives, so the evidence is final before the hold starts, and then it either
+  // answers with the provider's 503 after MODEL_STEP_CAPPED_HOLD_MS or rejects
+  // with the caller's own abort reason at once, sending no response.
+  const cappedHeld = (signal: AbortSignal | null | undefined): Promise<Response> =>
+    new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const gaveUp = () => {
+        if (timer !== undefined) clearTimeout(timer)
+        signal?.removeEventListener('abort', gaveUp)
+        evidence.modelStepRetry.cappedAbortedEarly = true
+        reject(signal?.reason)
+      }
+      timer = setTimeout(() => {
+        if (timer !== undefined) clearTimeout(timer)
+        signal?.removeEventListener('abort', gaveUp)
+        resolve(overloadedResponse())
+      }, MODEL_STEP_CAPPED_HOLD_MS)
+      signal?.addEventListener('abort', gaveUp, { once: true })
+      // An already-aborted signal never replays its event on a new listener.
+      if (signal?.aborted) gaveUp()
+    })
 
   const fetchFn: typeof fetch = async (input, init) => {
     try {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-      if (url === CATALOG && (!init?.method || init.method === 'GET')) {
+      if (url === catalog && (!init?.method || init.method === 'GET')) {
         evidence.catalogRequests++
         return Response.json({
-          models: [{ slug: 'gpt-5.3-codex', display_name: 'Codex isolated tool test' }],
+          models: [
+            provider === 'grok'
+              ? { slug: 'grok-4.6', displayName: 'Grok isolated tool test' }
+              : { slug: 'gpt-5.3-codex', display_name: 'Codex isolated tool test' },
+          ],
         })
       }
-      if (url !== COMPLETIONS || init?.method !== 'POST') throw new Error('operation_denied')
+      if (url !== completions || init?.method !== 'POST') throw new Error('operation_denied')
       const payload = parse(init.body)
       if (payload.stream !== true || payload.store !== false)
         throw new Error('invalid_stream_contract')
@@ -370,6 +524,15 @@ export function createApprovedToolsUpstream() {
       const user = history[lastUser]
       if (!user || typeof user.content !== 'string' || !user.content.trim())
         throw new Error('missing_user_request')
+      if (provider === 'grok') {
+        const turn = MODEL_STEP_TURN.exec(user.content.toLowerCase())
+        if (
+          payload.model !== 'grok-4.6' ||
+          !turn ||
+          !['receipt', 'zero', 'absorbed'].includes(turn[1]!)
+        )
+          throw new Error('unsupported_grok_recovery_turn')
+      }
       if (user.content.toLowerCase().includes(LIMIT_BOUNDARY)) {
         if (evidence.requests.length >= 512) throw new Error('evidence_capacity_exceeded')
         evidence.limitBoundary.completions++
@@ -465,6 +628,261 @@ export function createApprovedToolsUpstream() {
           }))
         )
       }
+      if (user.content.includes(MODEL_STEP_PREFIX)) {
+        if (evidence.requests.length >= 512) throw new Error('evidence_capacity_exceeded')
+        const text = user.content
+        const rows = history.slice(lastUser + 1)
+        const measured = (stage: string) => ({
+          definitionCount: tools.length,
+          explicitNonStrictCount: tools.filter(tool => tool.strict === false).length,
+          definitionBytes: Buffer.byteLength(JSON.stringify(tools)),
+          inputBytes: Buffer.byteLength(JSON.stringify(payload.input)),
+          connectorDefinitionCount: 0,
+          leakedSchema: false,
+          stage,
+        })
+        const followUp = MODEL_STEP_FOLLOWUP.exec(text)
+        if (followUp) {
+          const turn = modelStepTurns.get(followUp[1]!)
+          // A follow-up answers a probe turn that was left on its 503.
+          if (!turn || rows.length) throw new Error('unknown_model_step_turn')
+          // Denial and cancellation finish the waiting continuation locally.
+          // A later user message is a fresh turn, never a replay of its tools.
+          if (turn.stage !== 'unavailable' && turn.stage !== 'approving') {
+            evidence.modelStepRetry.unexpectedRetries++
+            throw new Error('unexpected_retry')
+          }
+          turn.stage = 'followed_up'
+          evidence.modelStepRetry.followUps++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_followup'))
+          return stream({
+            type: 'response.output_text.delta',
+            delta: `followup ${followUp[1]} answered`,
+          })
+        }
+        const opened = MODEL_STEP_TURN.exec(text)
+        if (!opened) throw new Error('invalid_model_step_marker')
+        const kind = opened[1] as
+          | 'probe'
+          | 'twice'
+          | 'zero'
+          | 'approval'
+          | 'receipt'
+          | 'absorbed'
+          | 'capped'
+        const marker = opened[2]!
+        const turn = modelStepTurns.get(marker)
+        // How many user messages of the history open this same turn: one for
+        // the turn and its continuations, two once the user sent it again.
+        const openings = history.filter(row => {
+          if (row.role !== 'user' || typeof row.content !== 'string') return false
+          const match = MODEL_STEP_TURN.exec(row.content)
+          return match?.[2] === marker
+        }).length
+        const unavailable = (stage: string) => {
+          evidence.modelStepRetry.unavailableResponses++
+          evidence.completions++
+          evidence.requests.push(measured(stage))
+          return overloadedResponse()
+        }
+        if (!turn) {
+          if (rows.length || openings !== 1) throw new Error('unknown_model_step_turn')
+          if (modelStepTurns.size >= MODEL_STEP_MAX_TURNS)
+            throw new Error('evidence_capacity_exceeded')
+          evidence.modelStepRetry.turns++
+          if (kind === 'zero') {
+            // The first model step fails before any tool ran: there is nothing
+            // to continue, so the Host keeps no checkpoint and offers Resend.
+            modelStepTurns.set(marker, { kind, callId: null, stage: 'unavailable', unavailable: 1 })
+            evidence.modelStepRetry.zeroToolUnavailable++
+            return unavailable('model_step_zero_unavailable')
+          }
+          if (!names.has(BRIDGES[0]!)) throw new Error('unadvertised_function')
+          const item = {
+            type: 'function_call',
+            id: randomUUID(),
+            call_id: randomUUID(),
+            name: BRIDGES[0],
+            arguments: JSON.stringify({ query: marker, limit: 1 }),
+          }
+          modelStepTurns.set(marker, {
+            kind,
+            callId: item.call_id,
+            stage: 'searched',
+            unavailable: 0,
+          })
+          evidence.modelStepRetry.markerSearches++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_search'))
+          return stream({ type: 'response.output_item.done', item })
+        }
+        if (turn.kind !== kind) throw new Error('unknown_model_step_turn')
+        if (!rows.length) {
+          // The user sent the turn left on its 503 again: a new turn whose
+          // history repeats the marker's message. The Host never re-sends a
+          // request by itself with a second copy of the user message, so one
+          // opening here is a retry it must not make.
+          if (turn.stage !== 'unavailable' || openings !== 2) {
+            evidence.modelStepRetry.unexpectedRetries++
+            throw new Error('unexpected_retry')
+          }
+          turn.stage = 'resent'
+          evidence.modelStepRetry.resends++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_resent'))
+          return stream({
+            type: 'response.output_text.delta',
+            delta: `resent ${marker} answered`,
+          })
+        }
+        if (
+          turn.callId === null ||
+          openings !== 1 ||
+          (turn.stage !== 'searched' &&
+            turn.stage !== 'reading' &&
+            turn.stage !== 'unavailable' &&
+            turn.stage !== 'capped' &&
+            turn.stage !== 'approving')
+        ) {
+          evidence.modelStepRetry.unexpectedRetries++
+          throw new Error('unexpected_retry')
+        }
+        // A `twice` turn fails two steps: the one after the search and its first
+        // continuation. Every other kind fails one step; `absorbed` fails
+        // HOST_MODEL_STEP_AUTO_RETRIES times, so those retries alone outlast it,
+        // and `capped` holds its one retried call instead of counting outages.
+        const stepOutages =
+          turn.kind === 'absorbed'
+            ? HOST_MODEL_STEP_AUTO_RETRIES
+            : turn.kind === 'twice'
+              ? MODEL_STEP_OUTAGES * 2
+              : MODEL_STEP_OUTAGES
+        const originalRows =
+          turn.stage === 'approving' || turn.kind === 'receipt' ? rows.slice(0, 2) : rows
+        const received = modelStepToolResults(originalRows, turn.callId, marker)
+        if (turn.kind === 'receipt') {
+          // C1 keeps the search protocol probe and also executes an observable
+          // receipt before the outage; its fixture counter witnesses Retry.
+          if (received !== 1) throw new Error('incomplete_model_step_batch')
+          const decision = receiptDecision(exchanges(rows.slice(2)))
+          if (decision.stage === 'denied') throw new Error('model_step_receipt_failed')
+          if (turn.stage === 'unavailable' && decision.stage !== 'final')
+            throw new Error('model_step_receipt_not_replayed')
+          if (decision.stage !== 'final') {
+            if (!names.has(decision.stage)) throw new Error('unadvertised_function')
+            turn.stage = 'reading'
+            evidence.completions++
+            evidence.requests.push(measured('model_step_receipt_tool'))
+            return stream({
+              type: 'response.output_item.done',
+              item: {
+                type: 'function_call',
+                id: randomUUID(),
+                call_id: randomUUID(),
+                name: decision.stage,
+                arguments: JSON.stringify(decision.args),
+              },
+            })
+          }
+          if (turn.unavailable < MODEL_STEP_OUTAGES) {
+            turn.stage = 'unavailable'
+            turn.unavailable++
+            return unavailable('model_step_unavailable')
+          }
+        }
+        if (turn.stage === 'searched') {
+          // The model step after the confirmed search result: the provider is
+          // unavailable, so the Host keeps the turn as a resumable checkpoint.
+          if (received !== 1) throw new Error('incomplete_model_step_batch')
+          turn.stage = 'unavailable'
+          turn.unavailable++
+          return unavailable('model_step_unavailable')
+        }
+        if (turn.kind === 'capped' && turn.stage === 'unavailable') {
+          // #1044 C12: the step's one held retry. It is counted here, on arrival,
+          // so the evidence cannot depend on whether the Host's 60 s cap or the
+          // 120 s answer wins. The next call of the turn is its continuation.
+          if (received !== 1) throw new Error('incomplete_model_step_batch')
+          turn.stage = 'capped'
+          evidence.modelStepRetry.unavailableResponses++
+          evidence.modelStepRetry.cappedHeld++
+          evidence.requests.push(measured('model_step_capped_held'))
+          return await cappedHeld(init?.signal)
+        }
+        if (turn.stage === 'unavailable' && turn.unavailable < stepOutages) {
+          // The Host's automatic retry of that same step meets the outage again.
+          // A `twice` turn's continuation fails its own outages the same way.
+          const continuation = turn.kind === 'twice' && turn.unavailable >= MODEL_STEP_OUTAGES
+          turn.unavailable++
+          if (continuation) evidence.modelStepRetry.continuationUnavailable++
+          return unavailable(
+            continuation ? 'model_step_continuation_unavailable' : 'model_step_unavailable'
+          )
+        }
+        if (turn.kind === 'absorbed') {
+          // The step that failed three times is retried by the Host itself and
+          // answers here: no checkpoint, no continuation and no Retry model step.
+          if (received !== 1) throw new Error('incomplete_model_step_batch')
+          turn.stage = 'continued'
+          evidence.modelStepRetry.absorbed++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_absorbed_final'))
+          return stream({
+            type: 'response.output_text.delta',
+            delta: `absorbed ${marker} toolResults=${received}`,
+          })
+        }
+        if (turn.kind === 'approval') {
+          const decision = receiptDecision(exchanges(rows.slice(2)))
+          if (decision.stage === 'denied') {
+            evidence.requests.push(measured('model_step_approval_denied'))
+            return stream({
+              type: 'response.output_text.delta',
+              delta: 'The receipt operation was denied.',
+            })
+          }
+          if (decision.stage === 'final') {
+            turn.stage = 'continued'
+            evidence.modelStepRetry.continuations++
+            evidence.modelStepRetry.toolResults += received
+            evidence.modelStepRetry.approvalFinals++
+            evidence.completions++
+            evidence.requests.push(measured('model_step_approval_final'))
+            return stream({
+              type: 'response.output_text.delta',
+              delta: `approved ${marker} businessId=${decision.result!.businessId} toolResults=${received}`,
+            })
+          }
+          if (!names.has(decision.stage)) throw new Error('unadvertised_function')
+          turn.stage = 'approving'
+          if (rows.length === 2) evidence.modelStepRetry.approvalRequests++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_approval_tool'))
+          return stream({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: randomUUID(),
+              call_id: randomUUID(),
+              name: decision.stage,
+              arguments: JSON.stringify(decision.args),
+            },
+          })
+        }
+        // The continuation after Retry model step. The answer reports how many
+        // results of the original search it carried, so a duplicated or lost
+        // result is visible in the chat as well as in this evidence.
+        turn.stage = 'continued'
+        evidence.modelStepRetry.continuations++
+        evidence.modelStepRetry.toolResults += received
+        evidence.completions++
+        evidence.requests.push(measured('model_step_continued'))
+        return stream({
+          type: 'response.output_text.delta',
+          delta: `continued ${marker} toolResults=${received}`,
+        })
+      }
       const isWorkflow = /\bworkflow\b/i.test(user.content)
       if (!isWorkflow && !user.content.toLowerCase().includes(FIXTURE_QUERY))
         throw new Error('unsupported_fixture_task')
@@ -523,8 +941,22 @@ export function createApprovedToolsUpstream() {
           arguments: JSON.stringify(args),
         },
       })
-    } catch {
+    } catch (error) {
+      // A caller that abandons a held `capped` retry gets its own abort reason
+      // back and no response: that is not a fixture protocol rejection, and the
+      // evidence counters are final when the call arrived.
+      if (init?.signal?.aborted && error === init.signal.reason) throw error
       evidence.rejected++
+      const rejectionName = error instanceof Error ? error.message : 'unknown'
+      const rejectionKey = /^[a-z0-9_]{1,80}$/.test(rejectionName) ? rejectionName : 'unnamed'
+      if (
+        evidence.rejections[rejectionKey] === undefined &&
+        Object.keys(evidence.rejections).length >= 32
+      ) {
+        evidence.rejections.other = (evidence.rejections.other ?? 0) + 1
+      } else {
+        evidence.rejections[rejectionKey] = (evidence.rejections[rejectionKey] ?? 0) + 1
+      }
       return Response.json({ error: { code: 'fixture_protocol_rejected' } }, { status: 422 })
     }
   }

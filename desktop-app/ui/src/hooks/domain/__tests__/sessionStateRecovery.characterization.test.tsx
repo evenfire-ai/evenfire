@@ -261,4 +261,50 @@ describe('onTrackerTerminal — recover via reconcile catch', () => {
     expect(result.current.failedAgentSend).toMatchObject({ content: 'spend' })
     await sendPromise
   })
+
+  it('toasts a durable provider outage with the fixed summary', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-catch' })
+    clerum.rpc.loadSessionMessages.mockRejectedValue(new Error('boom'))
+    clerum.rpc.getTaskResult.mockResolvedValue({
+      status: 'completed',
+      success: false,
+      error: {
+        code: 'LLM_MODEL_OVERLOADED',
+        message: 'proxy stream failed with provider_unavailable',
+        provider: 'codex-subscription',
+      },
+    })
+    const { result, spies } = renderController()
+    await settleMount()
+
+    const sendPromise = result.current.handleSendAgentMessage('spend').catch(() => undefined)
+    await waitFor(() => expect(clerum.hasProgressHandler('task-catch')).toBe(true))
+    await act(async () => {
+      clerum.emitTaskProgress('task-catch', {
+        type: 'open',
+        taskId: 'task-catch',
+        hostRef: 'agent-x',
+      })
+      clerum.emitTaskProgress('task-catch', { type: 'error', message: 'stream dropped' })
+    })
+
+    await waitFor(() => {
+      const last = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]?.[0] as
+        | { isError?: boolean }
+        | undefined
+      expect(last?.isError).toBe(true)
+    })
+    const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
+      | Array<{ isError?: boolean; errorCode?: string; content?: string }>
+      | undefined
+    expect(appended?.[0]?.errorCode).toBe('LLM_MODEL_OVERLOADED')
+    expect(appended?.[0]?.content).toBe('proxy stream failed with provider_unavailable')
+    await waitFor(() =>
+      expect(spies.pushToast).toHaveBeenCalledWith(
+        'Message to agent-x failed: The model provider could not complete this response.',
+        'error'
+      )
+    )
+    await sendPromise
+  })
 })

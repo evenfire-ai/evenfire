@@ -335,7 +335,7 @@ minikube-restore-image-capabilities: ## Resume restoration of a recorded image f
 		IMAGE_CAPABILITIES_RUN_DIR="$(IMAGE_CAPABILITIES_RUN_DIR)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs restore
 
-.PHONY: minikube-build-codex-approved-tools-fixtures minikube-build-codex-approved-tools-fixtures-body
+.PHONY: minikube-build-codex-approved-tools-fixtures minikube-build-codex-approved-tools-fixtures-body minikube-build-codex-approved-tools-native-workflow-fixtures minikube-build-codex-approved-tools-native-workflow-fixtures-body
 minikube-build-codex-approved-tools-fixtures: ## Acquire optional Codex tools fixture images before T2 reconcile
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
@@ -349,23 +349,97 @@ minikube-build-codex-approved-tools-fixtures-body:
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-llm-proxy
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-proxy-e2e
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-mcp-e2e
+
+# #1048 MS-NW: the custom coordinator image belongs to the native-workflow suite
+# alone, so it is acquired by its own target. Acquire both targets on the same
+# HEAD when the native-workflow lane runs; the image proof requires every ref of
+# that suite at the reviewed commit.
+minikube-build-codex-approved-tools-native-workflow-fixtures: ## Acquire the native-workflow coordinator fixture images before T2 reconcile
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-build-codex-approved-tools-native-workflow-fixtures-body
+
+minikube-build-codex-approved-tools-native-workflow-fixtures-body:
+	@bash scripts/minikube/require-t2-mutation-lock.sh
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-workflow-e2e
 
-.PHONY: minikube-prepare-codex-approved-tools minikube-run-codex-approved-tools minikube-restore-codex-approved-tools
+# Each lane run takes the owned profile's own mutation lease and its own run
+# directory, and restores what it prepared: lanes never share a lease, a fixture
+# run directory or a verdict (A28 D-SEP). Every target validates the inherited
+# lease before its first cluster mutation.
+.PHONY: minikube-prepare-codex-approved-tools minikube-run-codex-approved-tools minikube-restore-codex-approved-tools minikube-run-codex-native-workflow minikube-restore-codex-native-workflow minikube-run-codex-model-step-retry minikube-restore-codex-model-step-retry
 minikube-prepare-codex-approved-tools: ## Prepare isolated deterministic tools fixtures; requires prior image acquisition and fresh run directory
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
-		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs prepare
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_SUITE=approved-tools bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs prepare
 
-minikube-run-codex-approved-tools: ## Prepare, run visible deterministic E2E and restore production proxy image in owned Minikube
+minikube-run-codex-approved-tools: ## Run approved-tools Desktop E2E (deterministic or prepared real-hybrid) and restore the owned proxy
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
-		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_SUITE=approved-tools bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
 
 minikube-restore-codex-approved-tools: ## Restore recorded proxy image/env and close only this fixture run's owned forwards
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_SUITE=approved-tools bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs restore
+
+# #1044: the native workflow journey is its own suite run (#1048 MS-NW): it owns
+# the custom coordinator image and the `WorkflowRecipe`, and the base suite owns
+# neither.
+minikube-run-codex-native-workflow: ## Run the native-workflow suite and restore the owned fixtures
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_UPSTREAM_MODE=deterministic APPROVED_TOOLS_SUITE=native-workflow \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
+
+minikube-restore-codex-native-workflow: ## Restore only the recorded native-workflow fixture resources
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_UPSTREAM_MODE=deterministic APPROVED_TOOLS_SUITE=native-workflow \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs restore
+
+# #1044: the retry cases run as their own suite run, with no dependency on the
+# base approved-tools journeys. The suite is deterministic only, so the target
+# pins the upstream mode the runner requires.
+minikube-run-codex-model-step-retry: ## Run the Codex model-step retry suite (C1-C12) and restore the owned fixtures
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_UPSTREAM_MODE=deterministic APPROVED_TOOLS_SUITE=model-step-retry \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
+
+minikube-restore-codex-model-step-retry: ## Restore only the recorded Codex model-step fixture resources
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_UPSTREAM_MODE=deterministic APPROVED_TOOLS_SUITE=model-step-retry \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs restore
+
+.PHONY: minikube-build-grok-model-step-fixtures minikube-build-grok-model-step-fixtures-body minikube-run-grok-model-step minikube-restore-grok-model-step
+minikube-build-grok-model-step-fixtures: ## Acquire optional Grok recovery fixtures before T2 reconcile
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-build-grok-model-step-fixtures-body
+
+minikube-build-grok-model-step-fixtures-body:
+	@bash scripts/minikube/require-t2-mutation-lock.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=control-api
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-control-api-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=grok-llm-proxy
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=grok-approved-tools-proxy-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-mcp-e2e
+
+minikube-run-grok-model-step: ## Run C1/C2/C11 with a user-created Grok connection and restore fixtures
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		APPROVED_TOOLS_PROVIDER=grok APPROVED_TOOLS_UPSTREAM_MODE=deterministic APPROVED_TOOLS_SUITE=model-step-retry \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
+
+minikube-restore-grok-model-step: ## Restore only the recorded Grok fixture resources; preserve the user's connection
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		APPROVED_TOOLS_PROVIDER=grok APPROVED_TOOLS_UPSTREAM_MODE=deterministic APPROVED_TOOLS_SUITE=model-step-retry \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs restore
 
 minikube-build-e2e-fixtures: ## Build the two unpublished coordinator E2E fixtures under one mutation lease

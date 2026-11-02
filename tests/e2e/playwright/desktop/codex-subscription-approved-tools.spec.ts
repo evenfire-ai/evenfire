@@ -11,10 +11,12 @@
  */
 import { type Page, expect, test } from '@playwright/test'
 import { readAgentDeploymentGeneration, waitForAgentRollout } from '../helpers/agent-rollout'
+import { newAgentResponses, openAgentChat, send } from '../helpers/approved-tools-chat'
 import {
   type Scenario,
   type UpstreamEvidence,
   browserApiPath,
+  connectorApprovalLabel,
   localUrl,
   readEvidence,
   readUpstreamEvidence,
@@ -22,7 +24,6 @@ import {
   scenarios,
 } from '../helpers/approved-tools-scenarios'
 import { prepareSubscriptionVisible } from '../helpers/approved-tools-subscription'
-import { workflowJourney } from '../helpers/approved-tools-workflow'
 import { expectSignedOutLaunch, signOutDesktop } from '../helpers/desktop-session'
 import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginControlUiVisible } from '../helpers/visible-login'
@@ -78,72 +79,16 @@ async function saveConnector(page: Page, scenario: Scenario, remove: boolean) {
   else await expect(row).toBeVisible()
 }
 
-test('native workflow: visible approval, trigger, status and result artifact', async ({
-  page,
-}, testInfo) => {
-  await workflowJourney(page, testInfo)
-})
-
-async function send(page: Page, prompt: string) {
-  await expect(page.getByTestId('chat-input')).toBeVisible()
-  await page.getByTestId('chat-input').fill(prompt)
-  await expect(page.getByTestId('send-button')).toBeEnabled()
-  await page.getByTestId('send-button').click()
-  await expect(page.getByTestId('message-list').getByText(prompt, { exact: true })).toBeVisible()
-}
-
-async function newAgentResponses(page: Page) {
-  const responses = page.getByTestId('agent-response')
-  // Snapshot stable message identities before sending; previous turns must not
-  // satisfy the new turn's result, even when their visible text is identical.
-  const previousIds = await responses.evaluateAll(elements =>
-    elements.map(element => element.getAttribute('data-chat-message-id'))
-  )
-  expect(previousIds.every(id => typeof id === 'string' && id.length > 0)).toBe(true)
-  const exclusions = previousIds
-    .map(id => `:not([data-chat-message-id=${JSON.stringify(id)}])`)
-    .join('')
-  return responses.and(page.locator(`[data-chat-message-id]${exclusions}`))
-}
-
-async function openAgentChat(desktop: Page, scenario: Scenario) {
-  await expectSignedOutLaunch(desktop)
-  await desktop.getByLabel('Email', { exact: true }).fill(required('TEST_USER_EMAIL'))
-  await desktop.getByLabel('Password', { exact: true }).fill(required('TEST_USER_PASSWORD'))
-  await desktop.getByRole('button', { name: 'Sign in', exact: true }).click()
-  await expect(desktop.getByTestId('nav-chat')).toBeVisible()
-  await desktop.getByTestId('nav-chat').click()
-  await desktop.getByTestId('nav-new-chat').click()
-  await expect(
-    desktop.getByRole('heading', { name: 'Start a new conversation with:', exact: true })
-  ).toBeVisible()
-  await desktop.getByRole('button', { name: 'Switch chat agent', exact: true }).click()
-  await desktop.getByRole('menuitem', { name: scenario.agentDisplayName, exact: true }).click()
-  await expect(
-    desktop.getByRole('button', { name: 'Switch chat agent', exact: true })
-  ).toContainText(scenario.agentDisplayName)
-  await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
-  // The menu labels an option with the allowlist entry's displayName and
-  // falls back to the model id when there is none (ModelSelector.tsx:276).
-  // Which of the two renders depends on catalog metadata this test does not
-  // own: the deterministic upstream serves a display_name of its own. Keying
-  // on the testid (ModelSelector.tsx:269) anchors this to the same id the
-  // Control UI step bound, instead of to a label sourced outside this spec.
-  const modelOption = desktop.getByTestId(`model-option-${scenario.modelName}`)
-  await expect(modelOption).toHaveCount(1)
-  await modelOption.click()
-  await expect(
-    desktop.getByRole('button', { name: `Model — ${scenario.modelName}`, exact: true })
-  ).toBeVisible()
-  await expect(desktop.getByTestId('agent-response')).toHaveCount(0)
-}
-
 async function receiptApproval(page: Page, scenario: Scenario, previousCalls: number) {
   const pending = page
     .getByTestId('progress-stepper')
     .filter({ has: page.getByTestId('approval-approve-btn') })
   await expect(pending).toHaveCount(1)
-  await expect(pending).toContainText('workitem_read_receipt')
+  // The pending approval names the connector, not the tool: the Host projects
+  // the MCP server name as the display name and the Desktop keeps it
+  // (`formatToolApprovalLabel`). The receipt tool this decision approves is
+  // proven by the physical execution each caller asserts after the decision.
+  await expect(pending).toContainText(connectorApprovalLabel(scenario))
   await expect(pending).toContainText('requires approval')
   await expect(pending).not.toContainText('clerum__tool_call requires approval')
   expect((await readEvidence(scenario)).calls).toHaveLength(previousCalls)
@@ -207,17 +152,14 @@ test('authenticated user without agent access cannot select the protected agents
     expect(await Promise.all(cases.map(readEvidence))).toEqual(before)
     journeyPassed = true
   } finally {
-    // Sign out before the window closes. The session token lives in the macOS
-    // Keychain, keyed by the REST+RPC origin, which a fresh --user-data-dir does
-    // not isolate: leaving it behind signs the next launch in as this
-    // unauthorized user, and the next test's login form never renders. This has
-    // to run on the failure path too, because a journey that fails before
-    // signing out leaks the session exactly as one that never tried.
+    // Sign out before the window closes, on the failure path too, so the
+    // journey ends this user's session. Each launch is dev-isolated
+    // (`helpers/launch-desktop.ts`), so no session reaches the next launch.
     let cleanupError: string | undefined
     try {
       await signOutDesktop(await app.firstWindow())
     } catch {
-      cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+      cleanupError = 'Desktop sign-out failed'
     }
     try {
       await app.close()
@@ -286,7 +228,8 @@ for (const scenario of cases) {
       await page.getByRole('button', { name: 'Add connector', exact: true }).click()
       const dialog = page.getByRole('dialog', { name: 'Add connectors' })
       await expect(dialog).toBeVisible()
-      await dialog.getByRole('option', { name: scenario.connectorName, exact: true }).click()
+      // The picker is MultiSelectActionDialog: one checkbox per connector.
+      await dialog.getByRole('checkbox', { name: scenario.connectorName, exact: true }).check()
       await saveConnector(page, scenario, false)
     })
     await test.step('Wait for the agent rollout the model binding triggered', async () => {
@@ -567,7 +510,7 @@ for (const scenario of cases) {
       try {
         await signOutDesktop(await app.firstWindow())
       } catch {
-        cleanupFailures.push('Desktop sign-out failed; the session stays in the Keychain')
+        cleanupFailures.push('Desktop sign-out failed')
       }
       try {
         await app.close()
@@ -622,7 +565,7 @@ if (mode === 'deterministic') {
         await expect(responses.locator('.error-bubble-label')).toHaveText(
           'Too Many Tool Calls · CODEX-SUBSCRIPTION'
         )
-        await expect(responses.getByText('Model Overloaded')).toHaveCount(0)
+        await expect(responses.getByText('Provider Unavailable')).toHaveCount(0)
       })
       await test.step('One upstream completion, no retry, no connector call', async () => {
         const upstreamAfter = await readUpstreamEvidence(scenario)
@@ -636,14 +579,12 @@ if (mode === 'deterministic') {
       })
       journeyPassed = true
     } finally {
-      // Sign out before closing: the session lives in the host Keychain, so a
-      // window closed while authenticated signs the next launch in and that
-      // launch never renders a login form.
+      // Sign out before closing, on every path, so the journey ends its session.
       let cleanupError: string | undefined
       try {
         await signOutDesktop(await app.firstWindow())
       } catch {
-        cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+        cleanupError = 'Desktop sign-out failed'
       }
       try {
         await app.close()
@@ -709,14 +650,12 @@ if (mode === 'deterministic') {
       })
       journeyPassed = true
     } finally {
-      // Sign out before closing: the session lives in the host Keychain, so a
-      // window closed while authenticated signs the next launch in and that
-      // launch never renders a login form.
+      // Sign out before closing, on every path, so the journey ends its session.
       let cleanupError: string | undefined
       try {
         await signOutDesktop(await app.firstWindow())
       } catch {
-        cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+        cleanupError = 'Desktop sign-out failed'
       }
       try {
         await app.close()

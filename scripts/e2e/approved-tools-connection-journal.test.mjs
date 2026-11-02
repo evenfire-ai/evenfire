@@ -4,7 +4,10 @@ import { stripTypeScriptTypes } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { createFixtureIdentityJournal } from '../../tests/e2e/fixtures/codex-subscription/approved-tools-setup/identity-lifecycle.mjs'
+import {
+  createFixtureIdentityJournal,
+  recordFixtureConnection,
+} from '../../tests/e2e/fixtures/codex-subscription/approved-tools-setup/identity-lifecycle.mjs'
 import {
   beginConnectionCapture,
   connectionCaptureName,
@@ -81,10 +84,18 @@ test('invalid response, symlink and replaced file never supply cleanup authority
   }
 })
 test('restore ingests exact response once and blocks pending, foreign and conflicting evidence', () => {
-  const scenarios = makeScenarios(run, [43101, 43102, 43103], 43105)
+  const scenarios = makeScenarios(
+    run,
+    [43101, 43102, 43103],
+    43105,
+    'codex',
+    undefined,
+    'approved-tools'
+  )
   const workflowScenario = makeWorkflowScenario(run, 43104, 43105)
   const input = {
     mode: 'deterministic',
+    suite: 'approved-tools',
     run,
     profile,
     context: profile,
@@ -92,7 +103,14 @@ test('restore ingests exact response once and blocks pending, foreign and confli
   }
   const journal = createFixtureIdentityJournal(input, { env })
   journal.status = 'created'
-  const state = { run, profile, scenarios, workflowScenario, identityJournal: journal }
+  const state = {
+    run,
+    suite: 'approved-tools',
+    profile,
+    scenarios,
+    workflowScenario,
+    identityJournal: journal,
+  }
   const bound = { ...binding, fixtureUserId: journal.users[0].id }
   const evidence = { scenario: '83', fixtureUserId: bound.fixtureUserId, ...body }
   const value = { version: 1, binding: bound, status: 'created', evidence }
@@ -108,6 +126,50 @@ test('restore ingests exact response once and blocks pending, foreign and confli
   assert.throws(() => ingestFixtureConnections(state, read, () => saves++), /Incomplete/)
   assert.equal(saves, 1)
 })
+test('the model-step-retry suite ingests its one journaled connection and refuses a second', () => {
+  const suite = 'model-step-retry'
+  const scenarios = makeScenarios(run, [43101], 43103, 'codex', undefined, suite)
+  const input = { mode: 'deterministic', suite, run, profile, context: profile, scenarios }
+  const journal = createFixtureIdentityJournal(input, { env })
+  journal.status = 'created'
+  assert.equal('workflow' in journal.grants, false)
+  const state = { run, suite, profile, scenarios, identityJournal: journal }
+  const bound = { ...binding, fixtureUserId: journal.users[0].id }
+  const evidence = { scenario: '83', fixtureUserId: bound.fixtureUserId, ...body }
+  const value = { version: 1, binding: bound, status: 'created', evidence }
+  let saves = 0
+  ingestFixtureConnections(
+    state,
+    name => (name === connectionCaptureName('83') ? JSON.stringify(value) : null),
+    () => saves++
+  )
+  assert.equal(saves, 1)
+  assert.deepEqual(journal.connections, [evidence])
+  const second = {
+    ...evidence,
+    id: '44444444-4444-4444-8444-444444444444',
+    connectionKey: 'codex-fedcba9876543210',
+    displayName: `Codex fixture 150 ${run}`,
+    scenario: '150',
+  }
+  // The model-step-retry suite owns at most one journaled connection and only
+  // the 83 catalog exists on that lane.
+  const limited = structuredClone(state.identityJournal)
+  assert.throws(
+    () => recordFixtureConnection(input, limited, { env }, second),
+    /Connection journal is required/
+  )
+  const unowned = structuredClone(state.identityJournal)
+  unowned.connections = []
+  assert.throws(
+    () => recordFixtureConnection(input, unowned, { env }, second),
+    /Invalid public connection creation evidence/
+  )
+  assert.deepEqual(unowned.connections, [])
+  assert.deepEqual(state.identityJournal.connections, [evidence])
+  assert.equal(saves, 1)
+})
+
 test('real page createGrant callback persists the response before later UI assertions and retains string return', async () => {
   const filename = path.resolve('tests/e2e/playwright/pages/codex-subscription.ts')
   // Execute the real method with unit adapters; no browser or Playwright dependency

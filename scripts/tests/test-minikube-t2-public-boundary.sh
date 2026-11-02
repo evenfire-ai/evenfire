@@ -217,7 +217,20 @@ for line in diff.splitlines():
                     "/test/" in f"/{current.lower()}"
                     or "/tests/" in f"/{current.lower()}"
                     or current.lower().startswith("scripts/tests/")
-                    or current.lower().endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+                    or current.lower().endswith(
+                        (
+                            ".test.ts",
+                            ".test.tsx",
+                            ".spec.ts",
+                            ".spec.tsx",
+                            ".test.mjs",
+                            ".spec.mjs",
+                            ".test.cjs",
+                            ".spec.cjs",
+                            ".test.js",
+                            ".spec.js",
+                        )
+                    )
                 )
             ):
                 continue
