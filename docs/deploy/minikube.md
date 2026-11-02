@@ -99,15 +99,21 @@ otherwise surfaces at the migration gate as
 On a fresh cluster (no volume, no reset state) there is nothing to delete and
 setup continues. On a cluster that already has the volume, the reset refuses to
 run unless you name the exact volume it may delete. This deletes all data in
-that volume, so check the UID yourself before passing it — do not read it inline:
+that volume, so check the UID yourself before passing it — do not read it inline.
+The make targets act on the kube context named by `MINIKUBE_PROFILE` (default
+`clerum-test`). Set `KCTX` to that name, confirm the cluster, and pass the same
+value to `make`:
 
 ```bash
+KCTX=clerum-test                         # your minikube profile = its kube context
+kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
+
 # 1. Inspect the volume you are about to delete and note its UID
-kubectl --context clerum-test -n control-plane get pvc control-postgres-data \
+kubectl --context "$KCTX" -n control-plane get pvc control-postgres-data \
   -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp
 
 # 2. Paste that UID as a literal value
-CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-setup
+CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-setup MINIKUBE_PROFILE="$KCTX"
 
 # or keep the data instead:
 make minikube-setup REUSE_DB=true
@@ -686,12 +692,15 @@ make minikube-pf-desktop      # Re-establish port forwards
 ```bash
 # Destructive: deletes the postgres PVC and all its data, recreates it,
 # restarts control-api.
+KCTX=clerum-test                         # your minikube profile = its kube context
+kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
+
 # 1. Inspect the PVC it will delete and note its UID:
-kubectl --context clerum-test -n control-plane get pvc control-postgres-data \
+kubectl --context "$KCTX" -n control-plane get pvc control-postgres-data \
   -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp
 
 # 2. Paste that UID as a literal value (or `none` if there is no PVC):
-CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-db-reset
+CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-db-reset MINIKUBE_PROFILE="$KCTX"
 # → Allows re-running the initial admin setup in Control UI
 ```
 
@@ -1153,13 +1162,16 @@ disabled. Fix it by rebuilding the DB, which deletes all data in the
 `control-postgres-data` volume:
 
 ```bash
+KCTX=clerum-test                         # your minikube profile = its kube context
+kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
+
 # 1. Inspect the PVC you are about to delete and note its UID
-kubectl --context clerum-test -n control-plane get pvc control-postgres-data \
+kubectl --context "$KCTX" -n control-plane get pvc control-postgres-data \
   -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp
 
 # 2. Paste that UID as a literal value
 CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> \
-  make minikube-setup ARGS="--reset-db --skip-build"
+  make minikube-setup MINIKUBE_PROFILE="$KCTX" ARGS="--reset-db --skip-build"
 ```
 
 ### JWT 401 errors after key regeneration
