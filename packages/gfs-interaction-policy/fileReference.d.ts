@@ -34,8 +34,7 @@ export interface FileReferenceV1 {
 }
 
 export type FileReferenceErrorCode =
-  | 'FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED'
-  | 'FILE_REFERENCE_INVALID'
+  'FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED' | 'FILE_REFERENCE_INVALID'
 
 export type FileReferenceParseResult =
   | { ok: true; value: FileReferenceV1 }
@@ -58,6 +57,13 @@ export declare function parseFileReferenceV1(input: unknown): FileReferenceParse
  * brackets are neutralized, for text a model reads.
  */
 export declare function quotePromptValue(value: string): string
+
+/**
+ * Why `name` is not a valid GFS resource name, or `null` when it is: the rule
+ * FileReference names and the GFS controller share (NFC, 1-255 code points,
+ * not `.` or `..`, no `/` or ASCII control characters).
+ */
+export declare function resourceNameProblem(name: string): string | null
 
 export declare function deriveFileReferenceId(
   source: FileReferenceSource,

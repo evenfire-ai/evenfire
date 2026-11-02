@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable, Writable } from "node:stream";
 import { GfsAuthError, type GfsScope, type GfsVerifiedClaims } from "../auth/verify";
@@ -752,6 +753,35 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     expect(calls[0].op).toBe("create");
     expect((calls[0].input as { name: string; content: Buffer }).name).toBe("n.txt");
     expect((calls[0].input as { content: Buffer }).content.toString("utf8")).toBe("hi");
+  });
+
+  it("201 create stores the exact bytes of contentBase64", async () => {
+    // The Host saves a chat attachment by sending contentBase64 on this route;
+    // what reaches the write store must be the decoded original, never the
+    // base64 text decoded as UTF-8.
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      randomBytes(64),
+    ]);
+    const res = new FakeRes();
+    const { d, calls } = writeDeps();
+    await run(
+      d,
+      reqBody(`/v1/resources/${RID}/children`, {
+        method: "POST",
+        auth: "Bearer t",
+        body: { name: "logo.png", kind: "file", contentBase64: png.toString("base64") },
+      }),
+      res
+    );
+    expect(res.statusCode).toBe(201);
+    expect(calls[0].op).toBe("create");
+    const stored = calls[0].input as { name: string; content: Buffer };
+    expect(stored.name).toBe("logo.png");
+    expect(stored.content.length).toBe(png.length);
+    expect(createHash("sha256").update(stored.content).digest("hex")).toBe(
+      createHash("sha256").update(png).digest("hex")
+    );
   });
 
   it("201 create directory sends kind=directory without file content", async () => {
