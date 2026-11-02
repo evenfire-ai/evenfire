@@ -1381,6 +1381,7 @@ describe('App deep-link orchestration', () => {
     )
     const controllerBridge = window.clerum
     Object.assign(window.clerum, {
+      auth: { ...(rendererBridge.auth ?? {}), ...(controllerBridge.auth ?? {}) },
       shortcuts: rendererBridge.shortcuts,
       entityChanges: rendererBridge.entityChanges,
       app: rendererBridge.app,
@@ -1830,6 +1831,7 @@ describe('App deep-link orchestration', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -2229,6 +2231,7 @@ describe('App deep-link orchestration', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -2598,6 +2601,7 @@ describe('App deep-link orchestration', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -2829,6 +2833,7 @@ describe('App deep-link orchestration', () => {
       )
     }
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -3132,6 +3137,7 @@ describe('App deep-link orchestration', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -3241,6 +3247,7 @@ describe('App deep-link orchestration', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -5042,6 +5049,7 @@ describe('App deep-link orchestration', () => {
     const appBridge = window.clerum
     const { handle } = installAppControllerClerum({ agentNames: ['agent-x'] })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -5178,6 +5186,7 @@ describe('App deep-link orchestration', () => {
     const appBridge = window.clerum
     const { handle } = installAppControllerClerum({ agentNames: ['agent-x'] })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -7048,6 +7057,7 @@ describe('App deep-link orchestration', () => {
       return { authenticated: true, me: userB }
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
