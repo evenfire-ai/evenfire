@@ -8,7 +8,10 @@ import {
   setComposerDraft,
   setResourceComposerPrefill,
 } from '@lib/composerDraftStore'
-import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
+import {
+  clearLatestGfsConversationContext,
+  prefillNewConversationWithGfsResource,
+} from '@lib/gfsConversationPrefill'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
@@ -26,6 +29,7 @@ const draftSurfaceHarness: {
 afterEach(() => {
   cleanup()
   resetComposerDraftStore()
+  clearLatestGfsConversationContext()
   draftSurfaceHarness.setDraft = null
   vi.restoreAllMocks()
 })

@@ -37,6 +37,7 @@ import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
 import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { formatFileSize } from '@lib/composerFileAdmission'
+import { prefillEmptyConversationWithGfsResource } from '@lib/gfsConversationPrefill'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
 import type {
@@ -402,6 +403,11 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     if (!textarea || textarea.disabled || document.activeElement === textarea) return
     textarea.focus()
   }, [composerFocusRequestId])
+
+  useEffect(() => {
+    if (!activeChatId || !selectedAgent) return
+    prefillEmptyConversationWithGfsResource(activeChatId, selectedAgent)
+  }, [activeChatId, composerFocusRequestId, selectedAgent])
 
   const handleDraftChange = useCallback(
     (value: string) => {

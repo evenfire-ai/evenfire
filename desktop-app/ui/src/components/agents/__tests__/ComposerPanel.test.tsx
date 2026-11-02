@@ -14,7 +14,16 @@ import {
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
 import type { ComposerDraftWriteResult } from '@hooks/useComposerDraft'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import { readComposerFile } from '@lib/composerFileAdmission'
+import {
+  clearLatestGfsConversationContext,
+  recordLatestGfsConversationContext,
+} from '@lib/gfsConversationPrefill'
 import {
   type ImageInputDecision,
   imageInputBlockMessage,
@@ -201,6 +210,8 @@ afterEach(() => {
   globalFilesMock.showComposerItem = false
   globalFilesMock.modalProps = undefined
   draftState.value = ''
+  clearLatestGfsConversationContext()
+  resetComposerDraftStore()
   draftState.set.mockReset()
   Object.assign(composerState, {
     composerImageAttachments: [],
@@ -325,6 +336,43 @@ describe.each([
     expect(textarea.selectionEnd).toBe(8)
     otherInput.remove()
   })
+
+  it('prefills an empty persisted chat once from the latest visible GFS route', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    composerState.activeChatId = 'chat-persisted'
+    recordLatestGfsConversationContext({
+      id: 'files-context',
+      kind: 'files',
+      title: 'Reports',
+      files: { path: uri },
+    })
+
+    const { rerender } = render(<ComposerPanel inline={inline} />)
+    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe(uri)
+
+    rerender(<ComposerPanel inline={inline} />)
+    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe(uri)
+    expect(draftState.set).not.toHaveBeenCalled()
+  })
+
+  it('does not overwrite a persisted chat draft with contextual GFS prefill', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    composerState.activeChatId = 'chat-persisted'
+    setComposerDraft('chat-persisted', 'existing draft', 'agent-1')
+    recordLatestGfsConversationContext({
+      id: 'preview-context',
+      kind: 'preview',
+      title: 'report.md',
+      preview: {
+        gfsUri: uri,
+        fileKind: 'markdown',
+        byteLength: 1,
+      },
+    })
+
+    render(<ComposerPanel inline={inline} />)
+    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe('existing draft')
+  })
 })
 
 describe('ComposerPanel EvenDrive picker', () => {
@@ -394,12 +442,10 @@ describe('ComposerPanel reference submenu portaling', () => {
 
   it('keeps the menu mounted through a mousedown on a portaled submenu item so its click fires', async () => {
     // A clickable plugin so the submenu holds a real menuitem, not an empty state.
-    window.clerum.workflows.list = vi.fn(
-      async (): Promise<WorkflowRecipeListResult> => ({
-        items: [{ metadata: { namespace: 'ns', name: 'plug-a' } }],
-        count: 1,
-      })
-    )
+    window.clerum.workflows.list = vi.fn(async (): Promise<WorkflowRecipeListResult> => ({
+      items: [{ metadata: { namespace: 'ns', name: 'plug-a' } }],
+      count: 1,
+    }))
     render(<ComposerPanel inline={false} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))

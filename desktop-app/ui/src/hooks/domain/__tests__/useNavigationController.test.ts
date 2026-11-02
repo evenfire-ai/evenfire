@@ -2,6 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../../constants/navigation'
+import {
+  clearLatestGfsConversationContext,
+  getLatestGfsConversationContext,
+} from '../../../lib/gfsConversationPrefill'
 import { resolveGfsPreview } from '../../../lib/gfsPreview'
 import {
   closeWorkspaceTab,
@@ -29,12 +33,55 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  clearLatestGfsConversationContext()
   if (originalClerum) Object.defineProperty(window, 'clerum', originalClerum)
   else Reflect.deleteProperty(window, 'clerum')
   originalClerum = undefined
 })
 
 describe('useNavigationController — agent-centric navigation (Fase 2)', () => {
+  it('retains exact Files context while switching to the existing Chat tab', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-context', path: uri, title: 'Reports' })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat))
+    expect(result.current.activeTab?.kind).toBe('chat')
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+  })
+
+  it('clears GFS context when a different non-chat workspace route becomes active', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-context', path: uri })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.settings))
+    expect(getLatestGfsConversationContext()).toBeNull()
+  })
+
+  it('does not record a Files root as a conversation resource context', () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-root', path: null, title: 'Files' })
+      )
+    )
+
+    expect(getLatestGfsConversationContext()).toBeNull()
+  })
+
   it.each([
     [
       'throws',
