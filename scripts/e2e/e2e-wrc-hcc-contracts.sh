@@ -504,8 +504,8 @@ else
   exit 1
 fi
 
-# shellcheck disable=SC2016  # NGINX_LOCAL_RESOLVERS is a template placeholder.
-if printf '%s\n' "$nginx_conf" | grep -Fq 'resolver ${NGINX_LOCAL_RESOLVERS} ipv6=off;'; then
+# shellcheck disable=SC2016  # NGINX_LOCAL_RESOLVERS is an unbraced envsubst name.
+if printf '%s\n' "$nginx_conf" | grep -Fq 'resolver $NGINX_LOCAL_RESOLVERS ipv6=off;'; then
   ok "remote proxy uses the platform resolver literal"
 else
   fail "remote proxy is missing the platform resolver literal"

@@ -32,7 +32,10 @@ For each remote McpServer, host-context-controller:
    parsed components so injected characters (e.g. newlines) are stripped.
    The hostname must stay within `[a-z0-9._-]` after parsing (the CRD schema
    enforces the same class at admission); it is rendered unquoted, where `;`
-   would end a directive and `$name` would be an NGINX variable.
+   would end a directive and `$name` would be an NGINX variable. Trailing dots
+   are canonicalized away before any check: `svc.cluster.local.` is the DNS root
+   form of the same name and resolves like `svc.cluster.local`, so it is rejected
+   by the same internal-service checks and rendered without the dot.
    Query placeholders must be complete `${NAME}` values where `NAME` matches
    `[A-Za-z_][A-Za-z0-9_]*` (exact case) and is declared by `spec.env` or
    `spec.envSecret`. A `spec.env` name HCC strips as forbidden
@@ -58,6 +61,13 @@ For each remote McpServer, host-context-controller:
    header names restricted to `[A-Za-z0-9-]`, values capped at 2048 chars,
    CR/LF/NUL rejected (HTTP request smuggling / nginx directive-injection
    defense), backslashes and quotes escaped for nginx's quoted-string context.
+   A value that references a platform-owned proxy variable
+   (`NGINX_LOCAL_RESOLVERS`, `NGINX_ENTRYPOINT_LOCAL_RESOLVERS`,
+   `NGINX_ENVSUBST_FILTER`) or a container env name the platform strips (`PATH`,
+   `KUBERNETES_SERVICE_HOST`, ...) is rejected in both `${NAME}` and `$NAME`
+   form: either would be read from the proxy container's own environment, not
+   from `spec.envSecret`. A rejected entry renders no header and adds no env
+   entry.
 4. **Deploys this image as the only container** (`egress-proxy`) of the
    per-server Deployment. The ConfigMap mounts at `/etc/nginx/templates`, so
    `envsubst` resolves `${VAR}` placeholders in auth headers and in the baseUrl
@@ -82,9 +92,10 @@ Residuals:
   effect. In both, a value containing `$name` is expanded by NGINX, so a client
   header can reach the upstream URL, an added header or the error log. Only an
   admin who can write the Secret or the CRD env can set such a value, and the
-  same actor can already do it on `dev` through `authHeaders`. A
-  container-start template value check closes it; that layer is tracked with
-  #1240.
+  same actor can already do it on `dev` through `authHeaders`. The
+  container-start template value check that would close it is not part of
+  #1240's acceptance criteria: it lands with the #1243 egress-proxy image layer.
+  Until both changes deploy, this PR alone does not close this residual.
 - A literal credential written into `baseUrl` instead of a placeholder is still
   stored in the ConfigMap. Use placeholders.
 

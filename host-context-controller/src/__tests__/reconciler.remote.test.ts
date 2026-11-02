@@ -327,7 +327,11 @@ describe('McpServerReconciler remote egress proxy', () => {
     it('emits the platform resolver literal at http level and no upstream keepalive (U4)', () => {
       const conf = remoteConfig(reconciler, REMOTE_SERVER)
 
-      expect(conf).toContain('resolver ${NGINX_LOCAL_RESOLVERS} ipv6=off;')
+      // Bare envsubst name on purpose: the image exports NGINX_LOCAL_RESOLVERS
+      // from 15-local-resolvers.envsh, after the container-start template check,
+      // so the braced form would be refused there as an undefined reference.
+      expect(conf).toContain('resolver $NGINX_LOCAL_RESOLVERS ipv6=off;')
+      expect(conf).not.toContain('$' + '{NGINX_LOCAL_RESOLVERS}')
       expect(conf).not.toMatch(/resolver[^;]*valid=/)
       expect(conf).not.toMatch(/\bkeepalive\b|proxy_http_version/)
       expect(conf).toContain('proxy_pass https://remote_upstream/sse;')
@@ -798,6 +802,38 @@ describe('McpServerReconciler remote egress proxy', () => {
         warn.mockRestore()
       })
 
+      it('rejects a valueTemplate referencing a platform-owned or forbidden env name (V1 MINOR-1)', () => {
+        // `${NGINX_LOCAL_RESOLVERS}` would be resolved by envsubst from the
+        // proxy container's environment (the image exports it there), and a
+        // bare `$PATH` is read by NGINX from the container's environment.
+        // Neither may become an upstream header.
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
+        const cm = (reconciler as any).buildNginxConfigMap(
+          buildWithAuth([
+            { header: 'X-Resolver', valueTemplate: 'Bearer ' + '$' + '{NGINX_LOCAL_RESOLVERS}' },
+            { header: 'X-Path', valueTemplate: '$PATH' },
+            { header: 'X-Good', valueTemplate: 'Bearer ${SENTRY_AUTH_TOKEN}' },
+          ])
+        )
+        const conf = cm.data['default.conf.template']
+
+        expect(conf).not.toContain('X-Resolver')
+        expect(conf).not.toContain('X-Path')
+        expect(conf).toContain('proxy_set_header X-Good "Bearer ${SENTRY_AUTH_TOKEN}";')
+        expect(warn).toHaveBeenCalledTimes(2)
+        expect(warn).toHaveBeenCalledWith(
+          'Rejecting authHeader that references a platform-owned variable',
+          { scope: '[HCC]', header: 'X-Resolver', envVar: 'NGINX_LOCAL_RESOLVERS' }
+        )
+        expect(warn).toHaveBeenCalledWith(
+          'Rejecting authHeader that references a platform-owned variable',
+          { scope: '[HCC]', header: 'X-Path', envVar: 'PATH' }
+        )
+        // The warning never carries the template value.
+        expect(JSON.stringify(warn.mock.calls)).not.toContain('Bearer')
+        warn.mockRestore()
+      })
+
       it('rejects values longer than the 2048-char bound', () => {
         const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const tooLong = 'x'.repeat(2049)
@@ -1017,6 +1053,48 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(optionalEntries).toEqual([{ name: 'OPTIONAL_TOKEN', value: '' }])
       expect(secondaryEntries).toEqual([{ name: 'SECONDARY_TOKEN', value: '' }])
       expect(staticEntries).toEqual([{ name: 'STATIC_TOKEN', value: 'already-set' }])
+    })
+
+    it('does not backfill platform-owned env names for authHeaders (V1 MINOR-1)', () => {
+      // The braced forms are what the backfill loop scans. A dropped header
+      // must not leave PATH='' or a platform-owned resolver name behind.
+      const { envSecret: _envSecret, ...specWithoutSecret } = REMOTE_SERVER.spec
+      const server: McpServerCRD = {
+        ...REMOTE_SERVER,
+        spec: {
+          ...specWithoutSecret,
+          remote: {
+            baseUrl: 'https://api.example.com/v1',
+            authHeaders: [
+              { header: 'X-Resolver', valueTemplate: '$' + '{NGINX_LOCAL_RESOLVERS}' },
+              { header: 'X-Path', valueTemplate: '$' + '{PATH}' },
+              { header: 'X-Bare-Path', valueTemplate: '$PATH' },
+              { header: 'X-Good', valueTemplate: 'Bearer ' + '$' + '{OPTIONAL_TOKEN}' },
+            ],
+          },
+        },
+      }
+
+      const deployment = (reconciler as any).buildDeployment(server)
+      const egressContainer = deployment.spec.template.spec.containers.find(
+        (c: any) => c.name === 'egress-proxy'
+      )
+      const names = egressContainer.env.map((e: any) => e.name)
+
+      expect(names).not.toContain('PATH')
+      expect(names).not.toContain('NGINX_LOCAL_RESOLVERS')
+      // The sibling placeholder still backfills exactly once.
+      expect(names.filter((n: string) => n === 'OPTIONAL_TOKEN')).toHaveLength(1)
+      expect(egressContainer.env.find((e: any) => e.name === 'OPTIONAL_TOKEN')).toEqual({
+        name: 'OPTIONAL_TOKEN',
+        value: '',
+      })
+      // The platform appends its two entries last, as before.
+      expect(egressContainer.env.at(-2)).toEqual({
+        name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
+        value: '1',
+      })
+      expect(egressContainer.env.at(-1)).toEqual({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
     })
   })
 
@@ -1642,6 +1720,49 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(() => {
         ;(reconciler as any).sanitizeRemoteUrl('https://kubernetes.default:443/api')
       }).toThrow('must not point to internal cluster services')
+    })
+
+    it.each([
+      ['sentry.svc.cluster.local.'],
+      ['control-api.control-plane.svc.cluster.local.'],
+      ['control-api.control-plane.svc.'],
+      ['kubernetes.default.'],
+      // The URL parser decodes %2e and keeps repeated dots, so stripping only
+      // one trailing dot would leave the same bypass one step away.
+      ['sentry.svc.cluster.local%2e'],
+      ['sentry.svc.cluster.local..'],
+    ])('should reject an internal cluster host in DNS root form (%s)', host => {
+      // A trailing dot is the DNS root form of the same name: it resolves
+      // exactly like the undotted name, while the textual endsWith/=== checks
+      // only saw the dotted string and let it through. The dot must be gone
+      // before any host check runs.
+      expect(() => {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://${host}/mcp`)
+      }).toThrow('must not point to internal cluster services')
+    })
+
+    it('should canonicalize a trailing dot on an external host before rendering (U10)', () => {
+      const result = (reconciler as any).sanitizeRemoteUrl('https://API.EXAMPLE.COM./mcp')
+
+      expect(result.hostname).toBe('api.example.com')
+      expect(result.host).toBe('api.example.com')
+      expect(result.safeUrl).toBe('https://api.example.com/mcp')
+      // The explicit port survives canonicalization.
+      expect((reconciler as any).sanitizeRemoteUrl('https://api.example.com.:8443/mcp').host).toBe(
+        'api.example.com:8443'
+      )
+
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: 'https://api.example.com./mcp' },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      // The canonical name is what reaches every rendered directive.
+      expect(conf).toContain('server api.example.com:443 resolve;')
+      expect(conf).toContain('proxy_ssl_name api.example.com;')
+      expect(conf).toContain('proxy_set_header Host api.example.com;')
+      expect(conf).toContain('proxy_redirect https://api.example.com/mcp /mcp;')
+      expect(conf).not.toContain('api.example.com.')
     })
 
     it('should reject RFC1918 10.x.x.x private IPs', () => {

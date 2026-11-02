@@ -586,13 +586,13 @@ assert_count() {
 
 for port in 8441 8442 8443 8444 8445; do
   t="$WORK/templates/$port/default.conf.template"
-  # shellcheck disable=SC2016  # literal envsubst placeholder expected in the template.
-  assert_count "$t" 'resolver ${NGINX_LOCAL_RESOLVERS} ipv6=off;' 1
+  # shellcheck disable=SC2016  # literal unbraced envsubst name expected in the template.
+  assert_count "$t" 'resolver $NGINX_LOCAL_RESOLVERS ipv6=off;' 1
   assert_count "$t" "server upstream.test:$port resolve;" 1
   assert_count "$t" "proxy_pass https://remote_upstream/mcp;" 1
 done
-# shellcheck disable=SC2016  # literal envsubst placeholder expected in the template.
-assert_count "$WORK/templates/dns-switch/default.conf.template" 'resolver ${NGINX_LOCAL_RESOLVERS} ipv6=off;' 1
+# shellcheck disable=SC2016  # literal unbraced envsubst name expected in the template.
+assert_count "$WORK/templates/dns-switch/default.conf.template" 'resolver $NGINX_LOCAL_RESOLVERS ipv6=off;' 1
 
 case "$MUTATION" in
   verify-off)
