@@ -30,8 +30,16 @@ For each remote McpServer, host-context-controller:
    cluster hosts (`*.svc`, `*.svc.cluster.local`, `kubernetes.default`) and
    private/link-local/loopback patterns rejected; the URL is reconstructed from
    parsed components so injected characters (e.g. newlines) are stripped.
+   The hostname must stay within `[a-z0-9._-]` after parsing (the CRD schema
+   enforces the same class at admission); it is rendered unquoted, where `;`
+   would end a directive and `$name` would be an NGINX variable.
    Query placeholders must be complete `${NAME}` values where `NAME` matches
-   `[A-Z_][A-Z0-9_]*` and is declared by `spec.env` or `spec.envSecret`. The
+   `[A-Za-z_][A-Za-z0-9_]*` (exact case) and is declared by `spec.env` or
+   `spec.envSecret`. A `spec.env` name HCC strips as forbidden
+   (`KUBERNETES_SERVICE_HOST`, `PATH`, ...) does not count as declared, and the
+   proxy env the platform sets (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS`,
+   `NGINX_ENVSUBST_FILTER`, `NGINX_LOCAL_RESOLVERS`) cannot be used: envsubst
+   would otherwise fill them from the container's own environment. The
    URL parser runs first: it strips TAB/CR/LF and percent-encodes spaces and
    other control characters, which are then accepted in encoded form. The query
    check then rejects any `$`, brace, backslash or semicolon outside a complete

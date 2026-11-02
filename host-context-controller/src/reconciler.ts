@@ -132,9 +132,36 @@ const HEADER_NAME_RE = /^[A-Za-z0-9-]+$/
 // Bound the value length so a pathological CRD cannot blow up the ConfigMap.
 const MAX_AUTH_HEADER_VALUE_LENGTH = 2048
 // Query placeholders are expanded by the image entrypoint after HCC has built
-// the ConfigMap. Restrict them to uppercase environment-variable names so an
-// unresolved value cannot become an arbitrary NGINX variable.
-const QUERY_PLACEHOLDER_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g
+// the ConfigMap. Restrict them to environment-variable names; a name must also
+// be declared by the CRD and survive into the proxy container (see
+// buildNginxConfigMap), so an unresolved name cannot become an NGINX variable.
+// envsubst and Kubernetes env names are case-sensitive and accept lowercase.
+const QUERY_PLACEHOLDER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
+// The URL parser lowercases ASCII hostnames and converts IDNs to punycode, but
+// it keeps `;`, `$` and braces. The hostname is rendered unquoted into NGINX
+// directives, so it must stay within the CRD schema's host character class.
+const REMOTE_HOSTNAME_RE = /^[a-z0-9._-]+$/
+// Env names a CRD may not set on a workload container (sanitizeCrdSpec strips
+// them from spec.env, compared in uppercase).
+const FORBIDDEN_CONTAINER_ENV = new Set([
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'PATH',
+  'NODE_OPTIONS',
+  'PYTHONPATH',
+  'JAVA_TOOL_OPTIONS',
+  'KUBECONFIG',
+  'KUBERNETES_SERVICE_HOST',
+  'KUBERNETES_SERVICE_PORT',
+])
+// Egress proxy env whose container value the platform sets after every CRD env
+// source (buildDeployment) or the image entrypoint exports itself
+// (15-local-resolvers.envsh). A CRD declaration does not control their value.
+const PLATFORM_OWNED_PROXY_ENV = new Set([
+  'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
+  'NGINX_ENVSUBST_FILTER',
+  'NGINX_LOCAL_RESOLVERS',
+])
 const WRC_OWNED_RUNTIME_READY_REASON = 'WrcOwnedRuntimeRegistered'
 // Keep fleet admission aligned with the external-egress convergence lane:
 // enough parallelism for independent servers without allocating one pending
@@ -974,6 +1001,16 @@ export class McpServerReconciler {
     if (/^[\d.:[\]]+$/.test(bareHost) || bareHost.includes(':')) {
       throw new Error(`remote.baseUrl must use a DNS hostname, not an IP address: ${host}`)
     }
+    // The hostname is rendered unquoted in `server`, `proxy_ssl_name`,
+    // `proxy_redirect` and the Host header, where `;` ends the directive and
+    // `$name` is an NGINX variable. The CRD schema already limits it to
+    // [a-zA-Z0-9._-]; repeat that here so the renderer does not depend on
+    // admission. The error does not echo the hostname.
+    if (!REMOTE_HOSTNAME_RE.test(host)) {
+      throw new Error(
+        'remote.baseUrl hostname contains a forbidden character (allowed: a-z, 0-9, ".", "-", "_")'
+      )
+    }
     // Block internal cluster services (SSRF prevention)
     if (
       host.endsWith('.svc.cluster.local') ||
@@ -988,8 +1025,8 @@ export class McpServerReconciler {
       throw new Error(`remote.baseUrl must not point to private/reserved IP ranges: ${host}`)
     }
     // Defense in depth for the generated NGINX directive: the query is rendered
-    // unquoted in `proxy_pass`/`proxy_redirect`, so only complete, uppercase
-    // placeholders may remain dynamic. The URL parser strips TAB/CR/LF and
+    // unquoted in `proxy_pass`/`proxy_redirect`, so only complete placeholders
+    // with environment-variable names may remain dynamic. The URL parser strips TAB/CR/LF and
     // percent-encodes spaces and other control characters, so in practice this
     // rejects `$`, braces, `\` and `;` outside a complete placeholder; undeclared
     // names are rejected below. The error does not echo the query.
@@ -997,7 +1034,7 @@ export class McpServerReconciler {
     if (/[\\;{}$\u0000-\u0020]/.test(queryWithoutPlaceholders)) {
       throw new Error(
         'remote.baseUrl query contains an invalid placeholder or forbidden character; ' +
-          'query placeholders must use ${NAME} with NAME matching [A-Z_][A-Z0-9_]*'
+          'query placeholders must use ${NAME} with NAME matching [A-Za-z_][A-Za-z0-9_]*'
       )
     }
     // The path is rendered unquoted in `location`, `proxy_pass` and
@@ -1080,14 +1117,28 @@ export class McpServerReconciler {
     // it case-insensitively as one of its own variables (for example
     // ${HTTP_AUTHORIZATION}); reject it here, with an error that never echoes the
     // query. The comparison is exact and case-sensitive, like envsubst's.
+    //
+    // Only names whose container value the CRD controls count as declared. A
+    // spec.env entry sanitizeCrdSpec strips (KUBERNETES_SERVICE_HOST, PATH, ...)
+    // and the proxy env the platform sets would otherwise pass this check and be
+    // filled by envsubst from the container's own environment, sending that
+    // value (for example the cluster API address) to the external upstream.
     const declaredEnvNames = new Set([
-      ...(server.spec.env ?? []).map(entry => entry.name),
+      ...(server.spec.env ?? [])
+        .map(entry => entry.name)
+        .filter(name => !FORBIDDEN_CONTAINER_ENV.has(name.toUpperCase())),
       ...(server.spec.envSecret?.keys ?? []).map(key => key.envVar),
     ])
     for (const match of upstreamSearch.matchAll(QUERY_PLACEHOLDER_RE)) {
+      if (PLATFORM_OWNED_PROXY_ENV.has(match[1])) {
+        throw new Error(
+          `remote.baseUrl query placeholder \${${match[1]}} names an egress proxy variable the platform sets`
+        )
+      }
       if (!declaredEnvNames.has(match[1])) {
         throw new Error(
-          `remote.baseUrl query placeholder \${${match[1]}} is not declared in spec.env or spec.envSecret`
+          `remote.baseUrl query placeholder \${${match[1]}} is not declared in spec.env or spec.envSecret` +
+            ' (spec.env names HCC strips as forbidden do not count)'
         )
       }
     }
@@ -1356,20 +1407,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     // ── HIGH: sanitize env vars — block dangerous names ──
-    const FORBIDDEN_ENV = new Set([
-      'LD_PRELOAD',
-      'LD_LIBRARY_PATH',
-      'PATH',
-      'NODE_OPTIONS',
-      'PYTHONPATH',
-      'JAVA_TOOL_OPTIONS',
-      'KUBECONFIG',
-      'KUBERNETES_SERVICE_HOST',
-      'KUBERNETES_SERVICE_PORT',
-    ])
     if (server.spec.env) {
       server.spec.env = server.spec.env.filter(e => {
-        if (FORBIDDEN_ENV.has(e.name.toUpperCase())) {
+        if (FORBIDDEN_CONTAINER_ENV.has(e.name.toUpperCase())) {
           hccLogger.warn('McpServer: env stripped (forbidden)', {
             scope: '[Security]',
             name: server.name,

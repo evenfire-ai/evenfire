@@ -430,6 +430,51 @@ describe('McpServerReconciler remote egress proxy', () => {
       )
     })
 
+    it('renders a lowercase query placeholder declared by spec.envSecret', () => {
+      // Kubernetes env names and envsubst are case-sensitive and accept
+      // lowercase; `dev` rendered and substituted this shape.
+      const placeholder = '$' + '{api_key}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?key=${placeholder}` },
+        envSecret: { name: 'remote-creds', keys: [{ secretKey: 'k', envVar: 'api_key' }] },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain(`proxy_pass https://remote_upstream/mcp?key=${placeholder};`)
+    })
+
+    it.each([['KUBERNETES_SERVICE_HOST'], ['PATH'], ['kubernetes_service_host']])(
+      'rejects a query placeholder whose spec.env declaration HCC strips (%s)',
+      name => {
+        // The entry is stripped from the container, so envsubst would fill the
+        // placeholder from the container's own environment (the kubelet-injected
+        // API address, the image PATH) and send it upstream.
+        const server = cloneServer(REMOTE_SERVER, {
+          remote: { baseUrl: `https://api.example.com/mcp?h=` + '$' + `{${name}}` },
+          env: [{ name, value: 'decoy' }],
+        })
+
+        expect(() => remoteConfig(reconciler, server)).toThrow(
+          `query placeholder \${${name}} is not declared`
+        )
+      }
+    )
+
+    it.each([
+      ['NGINX_LOCAL_RESOLVERS'],
+      ['NGINX_ENVSUBST_FILTER'],
+      ['NGINX_ENTRYPOINT_LOCAL_RESOLVERS'],
+    ])('rejects a query placeholder naming platform-owned proxy env (%s)', name => {
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?r=` + '$' + `{${name}}` },
+        env: [{ name, value: 'decoy' }],
+      })
+
+      expect(() => remoteConfig(reconciler, server)).toThrow(
+        'names an egress proxy variable the platform sets'
+      )
+    })
+
     it('should listen on the transport port', () => {
       const cm = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER)
       const conf = cm.data['default.conf.template']
@@ -1677,8 +1722,8 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it.each([
-      ['a lowercase placeholder', '?k=$' + '{alpha_key}'],
       ['a placeholder starting with a digit', '?k=$' + '{1A}'],
+      ['a placeholder with a hyphen', '?k=$' + '{A-B}'],
       ['a bare dollar', '?k=$ALPHA'],
       ['an unterminated placeholder', '?k=$' + '{ALPHA'],
       ['a brace expression', '?k={x}'],
@@ -1695,7 +1740,7 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(error).toBeInstanceOf(Error)
       const message = (error as Error).message
       expect(message).toMatch(/invalid placeholder|forbidden character/)
-      expect(message).toMatch(/\[A-Z_\]\[A-Z0-9_\]\*/)
+      expect(message).toMatch(/\[A-Za-z_\]\[A-Za-z0-9_\]\*/)
       expect(message).not.toContain(query)
       // The value alone must not be echoed either (it may be the credential).
       expect(message).not.toContain(query.slice(query.indexOf('=') + 1))
@@ -1703,6 +1748,7 @@ describe('McpServerReconciler remote egress proxy', () => {
 
     it.each([
       ['multiple uppercase placeholders', '?k=$' + '{A_1}&j=$' + '{B}'],
+      ['a lowercase placeholder', '?k=$' + '{alpha_key}'],
       ['a name that only contains a reserved word', '?k=$' + '{MY_PATH}&j=$' + '{XNGINX_A}'],
       ['a placeholder after literal values', '?a=1&k=$' + '{ALPHA_KEY}'],
       ['an encoded dollar sequence', '?k=%24%7BA%7D'],
@@ -1710,6 +1756,43 @@ describe('McpServerReconciler remote egress proxy', () => {
       const result = (reconciler as any).sanitizeRemoteUrl(`https://api.example.com/mcp${query}`)
       // Positive witness: the query survives verbatim for envsubst to resolve.
       expect(result.search).toBe(query)
+    })
+
+    it.each([
+      ['a semicolon', 'a;b.example.com'],
+      ['a dollar sign', 'a$host.example.com'],
+      ['braces', 'a{b}.example.com'],
+    ])('rejects %s in the remote URL hostname without echoing it', (_label, hostname) => {
+      // The URL parser keeps these characters in the hostname; rendered unquoted
+      // they end the `server` directive or become NGINX variables.
+      expect(new URL(`https://${hostname}/mcp`).hostname).toBe(hostname)
+      let error: unknown
+      try {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://${hostname}/mcp`)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain('remote.baseUrl hostname contains a forbidden character')
+      expect(message).not.toContain(hostname)
+    })
+
+    it.each([
+      [
+        'an uppercase hostname the parser lowercases',
+        'https://API.Example.com/mcp',
+        'api.example.com',
+      ],
+      [
+        'an IDN the parser converts to punycode',
+        'https://bücher.example/mcp',
+        'xn--bcher-kva.example',
+      ],
+      ['a hyphen and an underscore', 'https://my-api_v2.example.com/mcp', 'my-api_v2.example.com'],
+    ])('accepts %s', (_label, url, hostname) => {
+      expect((reconciler as any).sanitizeRemoteUrl(url).hostname).toBe(hostname)
     })
 
     it.each([
