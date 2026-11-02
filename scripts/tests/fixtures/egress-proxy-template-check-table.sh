@@ -33,11 +33,11 @@
 # the unquoted value class), conserv (REJECT although the syntax and the value
 # are intact: context rule), bad (ACCEPT but not intact).
 #
-# Exit: 0 only when ROWS=170, MISMATCH=0 and BAD=0.
+# Exit: 0 only when ROWS=172, MISMATCH=0 and BAD=0.
 set -u
 CHECK="${1:?usage: table.sh <egress-proxy-template-check>}"
 W=/tmp/egress-proxy-template-check-table
-EXPECTED_ROWS=170
+EXPECTED_ROWS=172
 
 for tool in awk envsubst nginx wget; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: $tool is required" >&2; exit 1; }
@@ -64,6 +64,12 @@ render() { # context -> template on stdout (V is the variable under test)
     # The reference is the whole first line, with no space between # and ${V}:
     # a comment starts only at a token start, so the per-file reset decides.
     first-line-comment) printf '%s\n' '#${V}' 'server { listen 127.0.0.1:8080; location = /p { default_type text/plain; return 200 "ok"; } }' ;;
+    # A braced placeholder that is not in the environment: a running pod can
+    # restart onto a template whose new placeholder its older env lacks. NGINX
+    # would read ${HTTP_X_UNDECLARED} as the client's X-Undeclared header, so the
+    # check must refuse it in either HCC position, whatever V holds.
+    undef-brace-quoted)   printf '%s\n' 'server { listen 127.0.0.1:8080; location = /p { default_type text/plain; return 200 "${HTTP_X_UNDECLARED}"; } }' ;;
+    undef-brace-unquoted) printf '%s\n' 'server { listen 127.0.0.1:8080; location = /p { proxy_pass http://127.0.0.1:8081/echo?k=${HTTP_X_UNDECLARED}; } }' ;;
   esac
 }
 
@@ -76,11 +82,13 @@ expected_body() {
     escaped)  printf 'x\\%s' "$2" ;;
     undef-argstart)     printf '%s' '127.0.0.1' ;;
     first-line-comment) printf '%s' 'ok' ;;
+    undef-brace-quoted)   printf '%s' '' ;;
+    undef-brace-unquoted) printf '%s' '<k=>' ;;
   esac
 }
 
 # The reviewed verdicts: the R1-M1 prototype's verdict column
-# (1240-scratch/table-tc-r1m1.tsv) for the 168 context rows, plus the two
+# (1240-scratch/table-tc-r1m1.tsv) for the 168 context rows, plus the four
 # special rows. The ACCEPT rows are listed; every other row is a REJECT.
 ACCEPT_ROWS="
 quoted:alnum quoted:unreserved quoted:empty quoted:space quoted:squote quoted:semicolon
@@ -188,8 +196,8 @@ flagged=0
 MAX_FLAGGED=20
 TAB="$(printf '\t')"
 LF="$(printf 'a\nb')"
-# The undef-argstart row depends on this name being absent from the environment.
-unset host 2>/dev/null || true
+# The undef-* rows depend on these names being absent from the environment.
+unset host HTTP_X_UNDECLARED 2>/dev/null || true
 
 for ctx in quoted unquoted argstart squote comment escaped bare; do
   run_case "$ctx" alnum "Ab0"
@@ -219,6 +227,8 @@ for ctx in quoted unquoted argstart squote comment escaped bare; do
 done
 run_case undef-argstart undef-argstart "Ab0"
 run_case first-line-comment first-line-comment "Ab0"
+run_case undef-brace-quoted undef-brace-quoted "Ab0"
+run_case undef-brace-unquoted undef-brace-unquoted "Ab0"
 
 if [ "$flagged" -gt "$MAX_FLAGGED" ]; then
   printf 'FLAGGED\t-\t-\t%s more row(s) not shown\n' "$((flagged - MAX_FLAGGED))"

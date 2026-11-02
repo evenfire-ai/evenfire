@@ -107,7 +107,12 @@ change the syntax there:
 A rejected value stops the container before NGINX starts (CrashLoopBackOff,
 readiness never passes). The log names the template file, the variable and the
 context, never the value. This includes a credential pasted with a trailing
-TAB or newline. Undefined variables are left untouched, as envsubst leaves them.
+TAB or newline. An undefined bare `$name` (NGINX's own `$host`, `$scheme`, …)
+is left untouched, as envsubst leaves it. An undefined braced `${NAME}` stops the
+container: HCC emits that form only for names it declared in the container env,
+and envsubst would leave it for NGINX to read as one of its own variables
+(`${HTTP_X}` is the client's `X` request header). That happens when a running
+pod restarts onto a template whose new placeholder its older env lacks.
 A `+` reaches a form-decoding upstream as a space, `&` starts a new parameter
 and `#` ends the value, so such a value is refused instead of being sent as
 something else.

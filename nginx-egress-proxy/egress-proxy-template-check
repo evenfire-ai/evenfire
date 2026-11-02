@@ -17,7 +17,14 @@
 #                                 an argument, inside '...', in a comment, or
 #                                 after a \ the value itself changes the syntax
 #
-# Undefined names are left alone, as envsubst leaves them. Values are only
+# An undefined braced reference, ${NAME}, is rejected wherever it sits. HCC
+# emits that form only for the placeholders it declared in the container env,
+# and envsubst leaves an undefined one in place, where NGINX reads it as one of
+# its own variables, case-insensitively: ${HTTP_X} becomes the client's X
+# request header. That happens when a running pod restarts after the kubelet
+# has swapped in a template whose new placeholder the pod's older env does not
+# define yet. An undefined bare $name (NGINX's own $host, $scheme, ...) is left
+# alone, as envsubst leaves it. Values are only
 # compared with index(), constant classes and a constant gsub() pattern: never
 # used as a regex or as an output format. On a rejection it prints the file, the
 # variable name and the context, never the value or the template line, and
@@ -38,8 +45,19 @@ function reject(name, where,    key) {
   print "egress-proxy-entrypoint: " FILENAME ": the value of " name " is not allowed in " where
 }
 
+function reject_undefined(name,    key) {
+  bad = 1
+  key = FILENAME SUBSEP name SUBSEP "undefined"
+  if (key in reported) return
+  reported[key] = 1
+  print "egress-proxy-entrypoint: " FILENAME ": ${" name "} is not defined in the environment"
+}
+
 function check(name, context,    value, rest) {
-  if (!(name in ENVIRON)) return
+  if (!(name in ENVIRON)) {
+    if (ref_braced) reject_undefined(name)
+    return
+  }
   value = ENVIRON[name]
   if (context == "quoted") {
     if (value ~ /[[:cntrl:]]/ || has_any(value, "\"$\\")) reject(name, "a quoted string")
@@ -53,14 +71,17 @@ function check(name, context,    value, rest) {
 }
 
 # The envsubst reference that starts at the "$" at position i of text: sets
-# ref_name ("" when the "$" does not start one) and ref_len (characters used).
+# ref_name ("" when the "$" does not start one), ref_len (characters used) and
+# ref_braced (1 for the ${NAME} form).
 function reference_at(text, i,    rest) {
   rest = substr(text, i + 1)
   ref_name = ""
   ref_len = 1
+  ref_braced = 0
   if (match(rest, /^\{[A-Za-z_][A-Za-z0-9_]*\}/)) {
     ref_name = substr(rest, 2, RLENGTH - 2)
     ref_len = RLENGTH + 1
+    ref_braced = 1
   } else if (match(rest, /^[A-Za-z_][A-Za-z0-9_]*/)) {
     ref_name = substr(rest, 1, RLENGTH)
     ref_len = RLENGTH + 1

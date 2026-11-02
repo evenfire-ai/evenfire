@@ -1753,7 +1753,7 @@ expect_value_reject() {
 # The check carries one rule per NGINX tokenizer context. The driver renders
 # each context, runs the check of this image on it, then lets real NGINX parse
 # the substituted template and serve the value, and compares the verdict with
-# the reviewed table: 7 contexts × 24 values plus two special rows.
+# the reviewed table: 7 contexts × 24 values plus four special rows.
 expect_template_check() {
   local case_name="template-check" driver="$REPO_ROOT/scripts/tests/fixtures/egress-proxy-template-check-table.sh"
   local out="$WORK/template-check.out" err="$WORK/template-check.err"
@@ -1781,8 +1781,8 @@ expect_template_check() {
   # FLAGGED echo lines are not counted here.
   flagged="$(awk -F'\t' 'NF == 8 && $8 != "-" { n++; if (n <= 20) printf "%s/%s(%s) ", $1, $2, $8 } END { if (n > 20) printf "(+%d more)", n - 20 }' "$out" 2>/dev/null || true)"
   in_rows="$(awk -F'\t' 'NF == 8 { n++ } END { print n + 0 }' "$out")"
-  if [ "$in_rows" != "170" ] || [ "$rows" != "170" ]; then
-    fail "$case_name: evaluated $in_rows row(s), summary ROWS=$rows, expected 170"
+  if [ "$in_rows" != "172" ] || [ "$rows" != "172" ]; then
+    fail "$case_name: evaluated $in_rows row(s), summary ROWS=$rows, expected 172"
   fi
   if [ "$mismatches" != "0" ]; then
     fail "$case_name: the driver reported MISMATCH=$mismatches; rows disagree with the reviewed table${flagged:+; flagged: $flagged}"
@@ -1806,7 +1806,7 @@ expect_template_check() {
     fail "$case_name: expected rows have accepts=$accepts rejects=$rejects"
   fi
   if [ "$failures" -eq "$failures_before" ]; then
-    echo "PASS: $case_name -> 170 rows, 7 contexts × 24 values, MISMATCH=0 BAD=0"
+    echo "PASS: $case_name -> 172 rows, 7 contexts × 24 values + 4 special, MISMATCH=0 BAD=0"
   fi
 }
 
