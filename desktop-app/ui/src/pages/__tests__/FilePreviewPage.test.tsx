@@ -109,20 +109,31 @@ function stubGfs(opts: {
 }
 
 function openPreviewActions(fileName: string) {
-  const heading = screen.getByRole('heading', { name: fileName, level: 2 })
-  const titleRow = heading.closest('.da-gfs-preview-title-row')
-  if (!titleRow) throw new Error(`Preview title actions are unavailable for ${fileName}`)
-  fireEvent.click(
-    within(titleRow as HTMLElement).getByRole('button', { name: `Options for ${fileName}` })
-  )
-  return screen.getByRole('menu', { name: `Actions for ${fileName}` })
+  screen.getByRole('heading', { name: fileName, level: 2 })
+  const actionsButton = screen.getByRole('button', { name: `Options for ${fileName}` })
+  const menuName = `Actions for ${fileName}`
+  const existingMenu = screen.queryByRole('menu', { name: menuName })
+  if (existingMenu) return existingMenu
+  fireEvent.click(actionsButton)
+  return screen.getByRole('menu', { name: menuName })
 }
 
-function clickPreviewAction(fileName: string, actionName: string) {
+async function openPreviewShareMenu(menu: HTMLElement) {
+  fireEvent.mouseEnter(within(menu).getByRole('menuitem', { name: 'Share' }))
+  const copyLink = await screen.findByRole('menuitem', { name: 'Copy link' })
+  const submenu = copyLink.closest<HTMLElement>('[role="menu"]')
+  if (!submenu) throw new Error('Share submenu was not rendered')
+  return submenu
+}
+
+function submitRenameForm(dialog: HTMLElement) {
+  fireEvent.submit(within(dialog).getByRole('form', { name: 'Rename file' }))
+}
+
+async function clickPreviewAction(fileName: string, actionName: string) {
   const menu = openPreviewActions(fileName)
   if (actionName === 'Copy link' || actionName === 'Copy file ID') {
-    fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
-    const shareMenu = screen.getByRole('menu', { name: `Share options for ${fileName}` })
+    const shareMenu = await openPreviewShareMenu(menu)
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: actionName }))
     return
   }
@@ -164,11 +175,9 @@ describe('FilePreviewPage', () => {
     // The preview page title is a page-level h2 (not a dialog h3).
     const title = screen.getByRole('heading', { name: 'diagram.png', level: 2 })
     expect(title).toBeTruthy()
-    const titleRow = title.closest('.da-gfs-preview-title-row')
-    expect(titleRow).toBeTruthy()
-    fireEvent.click(
-      within(titleRow as HTMLElement).getByRole('button', { name: 'Options for diagram.png' })
-    )
+    const actionsButton = screen.getByRole('button', { name: 'Options for diagram.png' })
+    expect(title.parentElement?.contains(actionsButton)).toBe(true)
+    fireEvent.click(actionsButton)
     expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
       'Share',
       'Rename',
@@ -183,7 +192,7 @@ describe('FilePreviewPage', () => {
     expect(within(menu).queryByRole('menuitem', { name: 'Open file from ID' })).toBeNull()
     expect(within(menu).getByRole('menuitem', { name: 'Copy content' })).toBeTruthy()
     fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
-    const shareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
+    const shareMenu = await openPreviewShareMenu(menu)
     expect(within(shareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
     expect(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
   })
@@ -217,10 +226,7 @@ describe('FilePreviewPage', () => {
       const menu = openPreviewActions('diagram.png')
       fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
       expect(
-        within(screen.getByRole('menu', { name: 'Share options for diagram.png' })).getByRole(
-          'menuitem',
-          { name: 'Copy link' }
-        )
+        within(await openPreviewShareMenu(menu)).getByRole('menuitem', { name: 'Copy link' })
       ).toBeTruthy()
     } finally {
       view.unmount()
@@ -271,15 +277,15 @@ describe('FilePreviewPage', () => {
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
-    clickPreviewAction('diagram.png', 'Rename')
-    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    await clickPreviewAction('diagram.png', 'Rename')
+    const dialog = await screen.findByRole('dialog', { name: /Rename/ })
     fireEvent.change(within(dialog).getByLabelText('New name'), {
       target: { value: 'renamed.png' },
     })
 
     act(() => {
-      fireEvent.submit(dialog)
-      fireEvent.submit(dialog)
+      submitRenameForm(dialog)
+      submitRenameForm(dialog)
     })
 
     await waitFor(() => expect(renameResource).toHaveBeenCalled())
@@ -290,11 +296,11 @@ describe('FilePreviewPage', () => {
       'main',
       7
     )
-    expect(screen.getByRole('dialog', { name: 'Rename file' })).toBeTruthy()
+    expect(screen.getByRole('dialog', { name: /Rename/ })).toBeTruthy()
     fireEvent.change(within(dialog).getByLabelText('New name'), {
       target: { value: 'renamed-again.png' },
     })
-    fireEvent.submit(dialog)
+    submitRenameForm(dialog)
     await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(2))
     expect(renameResource).toHaveBeenLastCalledWith(
       '0123456789abcdef0123456789abcdef',
@@ -349,16 +355,16 @@ describe('FilePreviewPage', () => {
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
-    clickPreviewAction('diagram.png', 'Rename')
-    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    await clickPreviewAction('diagram.png', 'Rename')
+    const dialog = await screen.findByRole('dialog', { name: /Rename/ })
     const submit = () =>
-      within(screen.getByRole('dialog', { name: 'Rename file' })).getByRole('button', {
-        name: 'Save',
+      within(screen.getByRole('dialog', { name: /Rename/ })).getByRole('button', {
+        name: /Save/,
       }) as HTMLButtonElement
     fireEvent.change(within(dialog).getByLabelText('New name'), {
       target: { value: 'renamed.png' },
     })
-    fireEvent.submit(dialog)
+    submitRenameForm(dialog)
     await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(1))
     expect(submit().disabled).toBe(true)
 
@@ -366,7 +372,7 @@ describe('FilePreviewPage', () => {
     view.rerender(<FilePreviewPage {...props} />)
     await waitFor(() => expect(submit().disabled).toBe(false))
     fireEvent.change(
-      within(screen.getByRole('dialog', { name: 'Rename file' })).getByLabelText('New name'),
+      within(screen.getByRole('dialog', { name: /Rename/ })).getByLabelText('New name'),
       {
         target: { value: 'renamed-again.png' },
       }
@@ -427,12 +433,12 @@ describe('FilePreviewPage', () => {
     const view = render(<FilePreviewPage {...props} />)
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
-    clickPreviewAction('diagram.png', 'Rename')
-    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    await clickPreviewAction('diagram.png', 'Rename')
+    const dialog = await screen.findByRole('dialog', { name: /Rename/ })
     fireEvent.change(within(dialog).getByLabelText('New name'), {
       target: { value: 'renamed.png' },
     })
-    fireEvent.submit(dialog)
+    submitRenameForm(dialog)
     await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
 
@@ -503,14 +509,9 @@ describe('FilePreviewPage', () => {
     )
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
-    clickPreviewAction('diagram.png', 'Share')
-    fireEvent.click(
-      within(screen.getByRole('menu', { name: 'Share options for diagram.png' })).getByRole(
-        'menuitem',
-        { name: 'Share' }
-      )
-    )
-    await screen.findByRole('dialog', { name: 'Share file diagram.png' })
+    const shareMenu = await openPreviewShareMenu(openPreviewActions('diagram.png'))
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+    await screen.findByRole('dialog', { name: /Share/ })
     await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(1))
     fireEvent.click(await screen.findByRole('button', { name: 'Actions for chatllm' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
@@ -586,14 +587,9 @@ describe('FilePreviewPage', () => {
     )
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
-    clickPreviewAction('diagram.png', 'Share')
-    fireEvent.click(
-      within(screen.getByRole('menu', { name: 'Share options for diagram.png' })).getByRole(
-        'menuitem',
-        { name: 'Share' }
-      )
-    )
-    await screen.findByRole('dialog', { name: 'Share file diagram.png' })
+    const shareMenu = await openPreviewShareMenu(openPreviewActions('diagram.png'))
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+    await screen.findByRole('dialog', { name: /Share/ })
     await waitFor(() => expect(listShares).toHaveBeenCalledTimes(1))
     fireEvent.click(await screen.findByRole('button', { name: 'Actions for chatllm' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
@@ -664,17 +660,17 @@ describe('FilePreviewPage', () => {
     try {
       expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
       await waitFor(() => expect(affordances).toHaveBeenCalled())
-      clickPreviewAction('diagram.png', 'Rename')
-      const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+      await clickPreviewAction('diagram.png', 'Rename')
+      const dialog = await screen.findByRole('dialog', { name: /Rename/ })
       fireEvent.change(within(dialog).getByLabelText('New name'), {
         target: { value: 'a'.repeat(260) + '.txt' },
       })
-      fireEvent.submit(dialog)
+      submitRenameForm(dialog)
       await digestFinished
-      const permissionReadsBeforeReplacement = affordances.mock.calls.length
-
       controllerState.sessionGeneration = 2
       view.rerender(<FilePreviewPage {...props} />)
+      await waitFor(() => expect(affordances.mock.calls.length).toBeGreaterThan(2))
+      const permissionReadsAfterGenerationChange = affordances.mock.calls.length
       await act(async () => releaseDigest(new ArrayBuffer(0)))
       await act(async () => {
         await Promise.resolve()
@@ -682,7 +678,7 @@ describe('FilePreviewPage', () => {
       })
 
       expect(renameResource).not.toHaveBeenCalled()
-      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeReplacement)
+      expect(affordances.mock.calls.length).toBe(permissionReadsAfterGenerationChange)
     } finally {
       releaseDigest(new ArrayBuffer(0))
       digestSpy.mockRestore()
@@ -736,7 +732,7 @@ describe('FilePreviewPage', () => {
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
-    clickPreviewAction('diagram.png', 'Delete')
+    await clickPreviewAction('diagram.png', 'Delete')
     const dialog = await screen.findByRole('dialog', { name: 'Delete diagram.png?' })
     const cancel = within(dialog).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement
     const confirm = within(dialog).getByRole('button', { name: 'Delete' }) as HTMLButtonElement
@@ -820,7 +816,7 @@ describe('FilePreviewPage', () => {
     const view = render(<FilePreviewPage {...props} />)
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() => expect(affordances).toHaveBeenCalled())
-    clickPreviewAction('diagram.png', 'Delete')
+    await clickPreviewAction('diagram.png', 'Delete')
     const dialog = await screen.findByRole('dialog', { name: 'Delete diagram.png?' })
     const now = Date.now()
     const advanceAuthorityAge = vi.spyOn(Date, 'now').mockReturnValue(now + 16_000)
@@ -888,7 +884,7 @@ describe('FilePreviewPage', () => {
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
-    clickPreviewAction('diagram.png', 'Delete')
+    await clickPreviewAction('diagram.png', 'Delete')
     const dialog = await screen.findByRole('dialog', { name: 'Delete diagram.png?' })
     const confirm = within(dialog).getByRole('button', { name: 'Delete' }) as HTMLButtonElement
 
@@ -982,11 +978,11 @@ describe('FilePreviewPage', () => {
     )
 
     await screen.findByRole('heading', { name: 'Hello' })
-    clickPreviewAction('Résumé # ? %.md', 'Copy link')
-    clickPreviewAction('Résumé # ? %.md', 'Copy file ID')
+    await clickPreviewAction('Résumé # ? %.md', 'Copy link')
+    await clickPreviewAction('Résumé # ? %.md', 'Copy file ID')
     const menu = openPreviewActions('Résumé # ? %.md')
     const copyContent = within(menu).getByRole('menuitem', { name: 'Copy content' })
-    await waitFor(() => expect((copyContent as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(copyContent.getAttribute('aria-disabled')).toBe('false'))
     fireEvent.click(copyContent)
 
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(uri))
@@ -1019,7 +1015,7 @@ describe('FilePreviewPage', () => {
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     const menu = openPreviewActions('diagram.png')
     const copyContent = within(menu).getByRole('menuitem', { name: 'Copy content' })
-    await waitFor(() => expect((copyContent as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(copyContent.getAttribute('aria-disabled')).toBe('false'))
     fireEvent.click(copyContent)
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('data:image/png;base64,AQID'))
@@ -1181,7 +1177,7 @@ describe('FilePreviewPage', () => {
     titlebarLeadingRoot.remove()
   })
 
-  it('keeps the canonical file ID action available without exposing an unavailable filename', () => {
+  it('keeps the canonical file ID action available without exposing an unavailable filename', async () => {
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
     const writeText = vi.fn(async () => undefined)
     Object.defineProperty(navigator, 'clipboard', {
@@ -1204,8 +1200,9 @@ describe('FilePreviewPage', () => {
     expect(screen.queryByText('secret.png')).toBeNull()
     expect(screen.getByRole('button', { name: 'Options for unavailable file' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Options for unavailable file' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy file ID' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for unavailable file' })
+    const shareMenu = await openPreviewShareMenu(menu)
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' }))
 
     expect(writeText).toHaveBeenCalledWith(uri)
   })
@@ -1319,7 +1316,7 @@ describe('FilePreviewPage', () => {
     expect(await screen.findByAltText('Preview of secret.png')).toBeTruthy()
     const menuBefore = openPreviewActions('secret.png')
     const copyBefore = within(menuBefore).getByRole('menuitem', { name: 'Copy content' })
-    await waitFor(() => expect((copyBefore as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(copyBefore.getAttribute('aria-disabled')).toBe('false'))
 
     // The file is unshared out-of-band → the next focus re-check 403s.
     fireEvent.focus(window)

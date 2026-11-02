@@ -100,7 +100,8 @@ describe('GfsGrantList', () => {
     expect(within(agentRow).queryByText('X')).toBeNull()
     const actions = within(agentRow).getByRole('button', { name: 'Actions for Chat LLM' })
     expect(actions.className).toContain('ant-btn')
-    expect(actions.querySelector('.anticon-ellipsis')).not.toBeNull()
+    expect(actions.querySelector('svg circle[cx="12"][cy="5"]')).not.toBeNull()
+    expect(actions.querySelector('svg circle[cx="12"][cy="19"]')).not.toBeNull()
 
     const userRow = screen.getByText('Test Two').closest<HTMLElement>('[role="listitem"]')!
     expect(userRow.querySelector('[data-subject-kind="user"] svg')).not.toBeNull()

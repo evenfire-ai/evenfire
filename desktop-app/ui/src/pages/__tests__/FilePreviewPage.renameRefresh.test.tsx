@@ -133,19 +133,18 @@ describe('preview rename refreshes the workspace title from GFS', () => {
 
     await screen.findByAltText('Preview of diagram.png')
     await waitFor(() => expect(affordances).toHaveBeenCalled())
-    const titleRow = screen
-      .getByRole('heading', { name: 'diagram.png', level: 2 })
-      .closest('.da-gfs-preview-title-row')
-    if (!titleRow) throw new Error('Preview title actions were not rendered')
-    fireEvent.click(
-      within(titleRow as HTMLElement).getByRole('button', { name: 'Options for diagram.png' })
-    )
+    const heading = screen.getByRole('heading', { name: 'diagram.png', level: 2 })
+    const actionsButton = screen.getByRole('button', { name: 'Options for diagram.png' })
+    if (!heading.parentElement?.contains(actionsButton)) {
+      throw new Error('Preview title actions were not rendered')
+    }
+    fireEvent.click(actionsButton)
     fireEvent.click(
       within(screen.getByRole('menu', { name: 'Actions for diagram.png' })).getByRole('menuitem', {
         name: 'Rename',
       })
     )
-    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    const dialog = await screen.findByRole('dialog', { name: /Rename/ })
     fireEvent.change(within(dialog).getByLabelText('New name'), {
       target: { value: 'renamed.png' },
     })
@@ -160,7 +159,7 @@ describe('preview rename refreshes the workspace title from GFS', () => {
     expect(screen.getByTestId('active-tab-uri').textContent).toBe(uri)
     expect(renamedUris).toEqual([uri])
     expect(resolve).toHaveBeenCalledWith(uri)
-    expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: /Rename/ })).toBeNull()
   })
 })
 
@@ -208,13 +207,13 @@ describe('FilePreviewPage unchanged rename', () => {
     await waitFor(() => expect(affordances).toHaveBeenCalledWith(id, 'main'))
     fireEvent.click(screen.getByRole('button', { name: 'Options for diagram.png' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    const dialog = await screen.findByRole('dialog', { name: /Rename/ })
     expect((within(dialog).getByLabelText('New name') as HTMLInputElement).value).toBe(
       'diagram.png'
     )
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
 
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /Rename/ })).toBeNull())
     expect(renameResource).not.toHaveBeenCalled()
     expect(pushToast).not.toHaveBeenCalled()
     queryClient.clear()

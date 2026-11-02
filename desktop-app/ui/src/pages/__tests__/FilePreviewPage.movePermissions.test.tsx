@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { ToastStack } from '@components/Common/ToastStack'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useToastController } from '@hooks/domain/useToastController'
@@ -177,17 +178,31 @@ function installController(
 }
 
 async function openPreviewActions() {
-  const heading = await screen.findByRole('heading', { name: 'diagram.png', level: 2 })
-  const titleRow = heading.closest('.da-gfs-preview-title-row')
-  if (!titleRow) throw new Error('Preview title actions are unavailable')
-  fireEvent.click(
-    within(titleRow as HTMLElement).getByRole('button', { name: 'Options for diagram.png' })
-  )
-  return screen.getByRole('menu', { name: 'Actions for diagram.png' })
+  await screen.findByRole('heading', { name: 'diagram.png', level: 2 })
+  const actionsButton = screen.getByRole('button', { name: 'Options for diagram.png' })
+  const menuName = 'Actions for diagram.png'
+  let menus = screen.queryAllByRole('menu', { name: menuName })
+  if (menus.length && actionsButton.getAttribute('aria-expanded') !== 'true') {
+    menus.forEach(menu => {
+      const dropdown = menu.closest('.ant-dropdown')
+      if (dropdown) fireEvent.transitionEnd(dropdown)
+    })
+    await waitFor(() => expect(screen.queryAllByRole('menu', { name: menuName })).toHaveLength(0))
+    menus = []
+  }
+  if (!menus.length) {
+    fireEvent.click(actionsButton)
+    await waitFor(() => expect(actionsButton.getAttribute('aria-expanded')).toBe('true'))
+    menus = [await screen.findByRole('menu', { name: menuName })]
+  }
+  const menu = menus[0]
+  if (!menu) throw new Error(`The Ant Design action menu ${menuName} did not open`)
+  return menu
 }
 
 describe('FilePreviewPage move permission contract', () => {
   it('keeps cached Preview actions visible during a background permission refetch', async () => {
+    const user = userEvent.setup()
     vi.useFakeTimers({ toFake: ['Date'] })
     let resourceReads = 0
     let sourceReads = 0
@@ -263,18 +278,24 @@ describe('FilePreviewPage move permission contract', () => {
       expect(affordances).toHaveBeenCalledTimes(4)
       expect(window.clerum.gfs.moveResource).not.toHaveBeenCalled()
 
-      fireEvent.click(screen.getByRole('button', { name: 'Close move dialog' }))
+      const moveDialog = screen.getByRole('dialog', { name: 'Move file diagram.png' })
+      fireEvent.click(within(moveDialog).getByRole('button', { name: 'Close move dialog' }))
+      fireEvent.transitionEnd(moveDialog)
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+      )
       const reopenedMenu = await openPreviewActions()
 
       // Rename also waits for the pending exact resource query before opening.
-      fireEvent.click(within(reopenedMenu).getByRole('menuitem', { name: 'Rename' }))
-      expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull()
+      const renameItem = within(reopenedMenu).getByRole('menuitem', { name: 'Rename' })
+      await user.click(renameItem)
+      expect(screen.queryByRole('dialog', { name: /Rename/ })).toBeNull()
       expect(affordances).toHaveBeenCalledTimes(4)
       await act(async () => {
         releaseResourceRefresh(permissionResponse)
         await Promise.resolve()
       })
-      await screen.findByRole('dialog', { name: 'Rename file' })
+      await screen.findByRole('dialog', { name: /Rename/ })
       expect(affordances).toHaveBeenCalledTimes(4)
     } finally {
       await act(async () => {
@@ -313,7 +334,7 @@ describe('FilePreviewPage move permission contract', () => {
       await waitFor(() => expect(resourceReads).toBe(1))
       const menu = await openPreviewActions()
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename' }))
-      const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+      const dialog = await screen.findByRole('dialog', { name: /Rename/ })
       fireEvent.change(within(dialog).getByRole('textbox', { name: 'New name' }), {
         target: { value: 'renamed.png' },
       })
@@ -338,7 +359,7 @@ describe('FilePreviewPage move permission contract', () => {
         )
       )
       expect(renameResource).not.toHaveBeenCalled()
-      expect(screen.getByRole('dialog', { name: 'Rename file' })).toBeTruthy()
+      expect(screen.getByRole('dialog', { name: /Rename/ })).toBeTruthy()
       expect(resourceReads).toBe(2)
     } finally {
       await act(async () => {
@@ -386,7 +407,7 @@ describe('FilePreviewPage move permission contract', () => {
       expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename' }))
       await waitFor(() => expect(resourceReads).toBe(3))
-      expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull()
+      expect(screen.queryByRole('dialog', { name: /Rename/ })).toBeNull()
       expect(renameResource).not.toHaveBeenCalled()
       await waitFor(() =>
         expect(pushToast).toHaveBeenCalledWith(
@@ -663,7 +684,7 @@ describe('FilePreviewPage move permission contract', () => {
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     expect(
@@ -695,7 +716,7 @@ describe('FilePreviewPage move permission contract', () => {
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     expect(
@@ -734,7 +755,7 @@ describe('FilePreviewPage move permission contract', () => {
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Move here (Archive)' })).toBeTruthy()
     )
@@ -787,7 +808,7 @@ describe('FilePreviewPage move permission contract', () => {
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     expect(
@@ -813,9 +834,7 @@ describe('FilePreviewPage move permission contract', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
       for (let index = 0; index < 10; index += 1) await Promise.resolve()
     })
-    expect(within(dialog).getByRole('status').textContent).toContain(
-      'Permissions verified. Select Move to confirm.'
-    )
+    expect(within(dialog).getByText('Permissions verified. Select Move to confirm.')).toBeTruthy()
     expect(moveResource).not.toHaveBeenCalled()
 
     await act(async () => {
@@ -856,7 +875,7 @@ describe('FilePreviewPage move permission contract', () => {
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     expect(
@@ -921,7 +940,7 @@ describe('FilePreviewPage move permission contract', () => {
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Move here (Archive)' })).toBeTruthy()
     )
@@ -977,7 +996,7 @@ describe('FilePreviewPage move permission contract', () => {
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     await waitFor(() =>
@@ -1024,7 +1043,7 @@ describe('FilePreviewPage move permission contract', () => {
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
     expect(
       await within(dialog).findByText(
@@ -1070,7 +1089,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
     await waitFor(() => expect(window.clerum.gfs.moveResource).toHaveBeenCalledTimes(1))
     return dialog
@@ -1118,7 +1137,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const menu = await openPreviewActions()
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
       const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
 
       resolve.mockClear()
       resolve
@@ -1323,29 +1342,28 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       await screen.findByAltText('Preview of diagram.png')
       const menu = await openPreviewActions()
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename' }))
-      const renameDialog = await screen.findByRole('dialog', { name: 'Rename file' })
+      const renameDialog = await screen.findByRole('dialog', { name: /Rename/ })
       fireEvent.change(within(renameDialog).getByLabelText('New name'), {
         target: { value: 'renamed.png' },
       })
       fireEvent.click(within(renameDialog).getByRole('button', { name: 'Save' }))
       await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(1))
 
-      const save = within(renameDialog).getByRole('button', { name: 'Save' })
+      const save = within(renameDialog).getByRole('button', { name: /Save/ })
       const cancel = within(renameDialog).getByRole('button', { name: 'Cancel' })
-      const close = within(renameDialog).getByRole('button', { name: 'Close rename dialog' })
       expect((save as HTMLButtonElement).disabled).toBe(true)
       expect((cancel as HTMLButtonElement).disabled).toBe(true)
-      expect((close as HTMLButtonElement).disabled).toBe(true)
+      expect(within(renameDialog).queryByRole('button', { name: 'Close rename dialog' })).toBeNull()
 
       await act(async () => settleMove(successfulMoveReceipt))
 
       expect((save as HTMLButtonElement).disabled).toBe(true)
       expect((cancel as HTMLButtonElement).disabled).toBe(true)
-      expect((close as HTMLButtonElement).disabled).toBe(true)
+      expect(within(renameDialog).queryByRole('button', { name: 'Close rename dialog' })).toBeNull()
       expect(renameResource).toHaveBeenCalledTimes(1)
 
       await act(async () => settleRename())
-      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull())
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: /Rename/ })).toBeNull())
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
       await act(async () => {
@@ -1386,7 +1404,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     try {
       const dialog = await dispatchArchiveMove()
       expect(moveResource).toHaveBeenCalledTimes(1)
-      expect(screen.queryByRole('alert')).toBeNull()
+      expect(document.querySelector('.toast-stack')).toBeNull()
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
       expect(screen.queryByRole('alert')).toBeNull()
@@ -1397,7 +1415,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(failure.textContent).toContain(
         'The server rejected this destination. Refresh and choose a different folder.'
       )
-      expect(failure.className).toBe('toast tone-error')
+      expect(failure.classList.contains('ant-alert-error')).toBe(true)
       expect(screen.getAllByRole('alert')).toHaveLength(1)
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
@@ -1478,7 +1496,9 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
         expect(
           screen
             .getByRole(expectedTone === 'error' ? 'alert' : 'status')
-            .className.endsWith(`tone-${expectedTone}`)
+            .classList.contains(
+              expectedTone === 'warn' ? 'ant-alert-warning' : `ant-alert-${expectedTone}`
+            )
         ).toBe(true)
         expect(screen.queryByText(failureMessage)).toBeNull()
         expect(moveResource).toHaveBeenCalledTimes(1)
@@ -1554,7 +1574,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
             'diagram.png → Archive: Couldn’t confirm the move. Refresh before trying again.'
           )
         ).toBeTruthy()
-        expect(screen.getByRole('status').className).toBe('toast tone-warn')
+        expect(document.querySelector('.toast-stack .ant-alert.ant-alert-warning')).not.toBeNull()
         expect(screen.queryByText(capturedTransportError.message)).toBeNull()
         expect(moveResource).toHaveBeenCalledTimes(1)
       } finally {
@@ -1669,7 +1689,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
         )
       ).toBeTruthy()
       expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBeTruthy()
-      expect(screen.queryByRole('alert')).toBeNull()
+      expect(document.querySelector('.toast-stack')).toBeNull()
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
       await act(async () => rejectMove(new Error(failureMessage)))
@@ -1704,7 +1724,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const menu = await openPreviewActions()
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
       const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
       await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
       await waitFor(() => expect(sourceReads).toBe(2))
 
@@ -2006,7 +2026,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const menu = await openPreviewActions()
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
       const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
       await waitFor(() => expect(sourceReads).toBe(2))
       expect(moveResource).not.toHaveBeenCalled()
@@ -2060,7 +2080,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const firstMenu = await openPreviewActions()
       fireEvent.click(within(firstMenu).getByRole('menuitem', { name: 'Move to' }))
       const firstDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-      await fireEvent.click(await within(firstDialog).findByRole('button', { name: 'Archive' }))
+      await fireEvent.click(await within(firstDialog).findByRole('treeitem', { name: 'Archive' }))
       await fireEvent.click(
         within(firstDialog).getByRole('button', { name: 'Move here (Archive)' })
       )
@@ -2070,7 +2090,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const secondMenu = await openPreviewActions()
       fireEvent.click(within(secondMenu).getByRole('menuitem', { name: 'Move to' }))
       const secondDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-      await fireEvent.click(await within(secondDialog).findByRole('button', { name: 'Work' }))
+      await fireEvent.click(await within(secondDialog).findByRole('treeitem', { name: 'Work' }))
       await fireEvent.click(within(secondDialog).getByRole('button', { name: 'Move here (Work)' }))
       await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(2))
       expect(moveResource.mock.calls[0]).toEqual([
@@ -2167,7 +2187,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const workMenu = await openPreviewActions()
       fireEvent.click(within(workMenu).getByRole('menuitem', { name: 'Move to' }))
       const workDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-      await fireEvent.click(await within(workDialog).findByRole('button', { name: 'Work' }))
+      await fireEvent.click(await within(workDialog).findByRole('treeitem', { name: 'Work' }))
       await fireEvent.click(within(workDialog).getByRole('button', { name: 'Move here (Work)' }))
       await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(2))
       expect(moveResource.mock.calls).toEqual([
@@ -2260,7 +2280,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const workMenu = await openPreviewActions()
       fireEvent.click(within(workMenu).getByRole('menuitem', { name: 'Move to' }))
       const workDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-      await fireEvent.click(await within(workDialog).findByRole('button', { name: 'Work' }))
+      await fireEvent.click(await within(workDialog).findByRole('treeitem', { name: 'Work' }))
       await fireEvent.click(within(workDialog).getByRole('button', { name: 'Move here (Work)' }))
       await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(2))
       expect(moveResource.mock.calls).toEqual([
@@ -2292,7 +2312,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
         )
       ).toBeTruthy()
       expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBeTruthy()
-      expect(screen.queryByRole('alert')).toBeNull()
+      expect(document.querySelector('.toast-stack')).toBeNull()
       expect(moveResource).toHaveBeenCalledTimes(2)
 
       await act(async () => finishPermissionRefresh(fullAccess))
@@ -2348,7 +2368,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const archiveMenu = await openPreviewActions()
       fireEvent.click(within(archiveMenu).getByRole('menuitem', { name: 'Move to' }))
       const archiveDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-      await fireEvent.click(await within(archiveDialog).findByRole('button', { name: 'Archive' }))
+      await fireEvent.click(await within(archiveDialog).findByRole('treeitem', { name: 'Archive' }))
       await fireEvent.click(
         within(archiveDialog).getByRole('button', { name: 'Move here (Archive)' })
       )
@@ -2358,7 +2378,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const workMenu = await openPreviewActions()
       fireEvent.click(within(workMenu).getByRole('menuitem', { name: 'Move to' }))
       const workDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
-      await fireEvent.click(await within(workDialog).findByRole('button', { name: 'Work' }))
+      await fireEvent.click(await within(workDialog).findByRole('treeitem', { name: 'Work' }))
       await fireEvent.click(within(workDialog).getByRole('button', { name: 'Move here (Work)' }))
       await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(2))
       expect(moveResource.mock.calls[0]).toEqual([
@@ -2386,7 +2406,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(queryClient.getQueryState(sourceChildrenKey)?.isInvalidated).toBe(false)
       await act(async () => rejectArchive(new Error(failureMessage)))
       const archiveFailure = await screen.findByRole('alert')
-      expect(archiveFailure.className).toBe('toast tone-error')
+      expect(archiveFailure.classList.contains('ant-alert-error')).toBe(true)
       expect(archiveFailure.textContent).toContain('diagram.png')
       expect(archiveFailure.textContent).toContain('Archive')
       expect(archiveFailure.textContent).toContain(
@@ -2403,7 +2423,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
         expect.stringContaining('Archive'),
         expect.stringContaining('Work'),
       ])
-      expect(failures.every(alert => alert.className === 'toast tone-error')).toBe(true)
+      expect(failures.every(alert => alert.classList.contains('ant-alert-error'))).toBe(true)
       expect(failures.every(alert => alert.textContent?.includes('diagram.png'))).toBe(true)
       expect(
         failures.every(alert =>

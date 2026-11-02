@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Button, EmptyState, StatusBanner } from '@components/Common'
+import { Alert, Button, Result, Typography } from 'antd'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
@@ -365,28 +365,38 @@ export function FilePreviewPage({
       <div className="da-gfs-preview-page">
         {previewResourceActions.dialogs}
         {previewResourceActions.permissionNotices.map(notice => (
-          <div key={notice.id} role={notice.pending ? 'status' : 'alert'}>
-            <StatusBanner tone={notice.pending ? 'info' : 'error'} text={notice.message} />
-            {!notice.pending ? (
-              <Button
-                onClick={() =>
-                  void Promise.resolve()
-                    .then(notice.retry)
-                    .catch(() => undefined)
-                }
-                size="sm"
-                variant="outline"
-              >
-                Retry permission check
-              </Button>
-            ) : null}
-          </div>
+          <Alert
+            key={notice.id}
+            role={notice.pending ? 'status' : 'alert'}
+            showIcon
+            type={notice.pending ? 'info' : 'error'}
+            title={notice.message}
+            action={
+              !notice.pending ? (
+                <Button
+                  htmlType="button"
+                  onClick={() =>
+                    void Promise.resolve()
+                      .then(notice.retry)
+                      .catch(() => undefined)
+                  }
+                  size="small"
+                >
+                  Retry permission check
+                </Button>
+              ) : null
+            }
+          />
         ))}
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
             <>
               <div className="da-gfs-preview-unavailable-actions">{fileActionsMenu}</div>
-              <EmptyState title="File unavailable" body="This item is no longer available." />
+              <Result
+                status="warning"
+                title={<Typography.Title level={3}>File unavailable</Typography.Title>}
+                subTitle="This item is no longer available."
+              />
             </>
           ) : (
             <>

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { QueryKey } from '@tanstack/react-query'
+import { Alert, Button, Flex, Input, Modal, Typography } from 'antd'
 import { normalizeGfsResourceName } from '@clerum/gfs-interaction-policy'
-import { Button, IconButton, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
-import { IconClose, IconShare } from '@components/SidebarNav/icons'
+import { IconShare } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import {
   desktopQueryKeys,
@@ -1555,145 +1555,126 @@ export function useFilePreviewResourceActions({
   const dialogs = (
     <>
       {canResolve && shareOpen && resource ? (
-        <div
-          className="da-gfs-manage-modal"
-          role="presentation"
-          onMouseDown={event => {
-            if (event.target === event.currentTarget) setShareOpen(false)
+        <Modal
+          open
+          onCancel={() => {
+            if (!mutationPending) setShareOpen(false)
           }}
+          aria-label={`Share file ${resource.name}`}
+          closable={mutationPending ? false : { 'aria-label': 'Close share dialog' }}
+          destroyOnHidden
+          footer={null}
+          keyboard={!mutationPending}
+          mask={{ closable: !mutationPending }}
+          title={
+            <Flex align="center" gap="small">
+              <IconShare aria-hidden="true" />
+              <Typography.Title level={4}>Share “{resource.name}”</Typography.Title>
+            </Flex>
+          }
         >
-          <section
-            className="da-gfs-manage-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-label={`Share file ${resource.name}`}
-          >
-            <header className="da-gfs-manage-dialog__header">
-              <span className="da-gfs-manage-dialog__icon" aria-hidden="true">
-                <IconShare />
-              </span>
-              <span className="da-gfs-manage-dialog__heading">
-                <h3>Share “{resource.name}”</h3>
-              </span>
-              <IconButton
-                autoFocus
-                label="Close share dialog"
-                onClick={() => setShareOpen(false)}
-                size="sm"
-                variant="ghost"
-              >
-                <IconClose />
-              </IconButton>
-            </header>
-            <div className="da-gfs-manage-dialog__body">
-              <section className="da-gfs-manage-section da-gfs-manage-section--access">
-                <div className="da-gfs-manage-section__header">
-                  <div>
-                    <h4>Add people, teams, or agents</h4>
-                  </div>
-                </div>
-                <GfsDelegationPanel
-                  affordances={sharePermissionAffordances}
-                  permissionPending={affordancesQuery.isFetching}
-                  permissionError={sharePermissionError}
-                  subjectOptions={shareSubjects}
-                  subjectOptionsLoading={teamsQuery.isFetching || agentsQuery.isFetching}
-                  subjectOptionsError={
-                    [teamsQuery.error, agentsQuery.error]
-                      .filter(Boolean)
-                      .map(errorMessage)
-                      .join(' · ') || null
-                  }
-                  isDirectory={false}
-                  onGrant={handleGrant}
-                />
-              </section>
-              <section className="da-gfs-manage-section da-gfs-manage-section--grants">
-                <div className="da-gfs-manage-section__header">
-                  <div>
-                    <h4>People with access</h4>
-                  </div>
-                </div>
-                <GfsGrantList
-                  agents={agents}
-                  derivationNotice={inheritedAccessNotice}
-                  derivationNoticeHint={inheritedAccessNoticeHint}
-                  error={grantsQuery.error ? describeGfsGrantError(grantsQuery.error) : null}
-                  inheritedItems={inheritedQuery.data?.items ?? []}
-                  items={grantsQuery.data ?? []}
-                  loading={
-                    grantsQuery.isFetching || sharesQuery.isFetching || inheritedQuery.isFetching
-                  }
-                  mergeInherited
-                  onChangeRole={handleAccessRoleChange}
-                  onRevoke={handleRevokeGrant}
-                  onRevokeShare={handleRevokeShare}
-                  revoking={revokingGrantId !== null}
-                  revokingShare={revokingShareId !== null}
-                  shareError={sharesQuery.error ? describeGfsGrantError(sharesQuery.error) : null}
-                  shares={sharesQuery.data ?? []}
-                  subjects={teams}
-                />
-              </section>
-            </div>
-          </section>
-        </div>
+          <Flex vertical gap="large">
+            <section>
+              <Typography.Title level={5}>Add people, teams, or agents</Typography.Title>
+              <GfsDelegationPanel
+                affordances={sharePermissionAffordances}
+                permissionPending={affordancesQuery.isFetching}
+                permissionError={sharePermissionError}
+                permissionCheckPending={affordancesQuery.isFetching}
+                permissionCheckFailed={Boolean(affordancesQuery.error)}
+                subjectOptions={shareSubjects}
+                subjectOptionsLoading={teamsQuery.isFetching || agentsQuery.isFetching}
+                subjectOptionsError={
+                  [teamsQuery.error, agentsQuery.error]
+                    .filter(Boolean)
+                    .map(errorMessage)
+                    .join(' · ') || null
+                }
+                isDirectory={false}
+                onGrant={handleGrant}
+              />
+            </section>
+            <section>
+              <Typography.Title level={5}>People with access</Typography.Title>
+              <GfsGrantList
+                agents={agents}
+                derivationNotice={inheritedAccessNotice}
+                derivationNoticeHint={inheritedAccessNoticeHint}
+                error={grantsQuery.error ? describeGfsGrantError(grantsQuery.error) : null}
+                inheritedItems={inheritedQuery.data?.items ?? []}
+                items={grantsQuery.data ?? []}
+                loading={
+                  grantsQuery.isFetching || sharesQuery.isFetching || inheritedQuery.isFetching
+                }
+                mergeInherited
+                onChangeRole={handleAccessRoleChange}
+                onRevoke={handleRevokeGrant}
+                onRevokeShare={handleRevokeShare}
+                revoking={revokingGrantId !== null}
+                revokingShare={revokingShareId !== null}
+                shareError={sharesQuery.error ? describeGfsGrantError(sharesQuery.error) : null}
+                shares={sharesQuery.data ?? []}
+                subjects={teams}
+              />
+            </section>
+          </Flex>
+        </Modal>
       ) : null}
       {canResolve && renameOpen && resource ? (
-        <div
-          className="da-gfs-manage-modal"
-          role="presentation"
-          onMouseDown={event => {
-            if (event.target === event.currentTarget && !mutationPending) setRenameOpen(false)
+        <Modal
+          open
+          onCancel={() => {
+            if (!mutationPending) setRenameOpen(false)
           }}
+          aria-label={`Rename file ${resource.name}`}
+          closable={mutationPending ? false : { 'aria-label': 'Close rename dialog' }}
+          destroyOnHidden
+          footer={null}
+          keyboard={!mutationPending}
+          mask={{ closable: !mutationPending }}
+          title={`Rename “${resource.name}”`}
         >
           <form
             aria-label="Rename file"
-            className="da-gfs-manage-dialog da-gfs-preview-rename"
-            role="dialog"
-            aria-modal="true"
             onSubmit={event => {
               event.preventDefault()
               void handleRename()
             }}
           >
-            <header className="da-gfs-manage-dialog__header">
-              <span className="da-gfs-manage-dialog__heading">
-                <h3>Rename “{resource.name}”</h3>
-              </span>
-              <IconButton
-                disabled={mutationPending}
-                label="Close rename dialog"
-                onClick={() => setRenameOpen(false)}
-                size="sm"
-                variant="ghost"
-              >
-                <IconClose />
-              </IconButton>
-            </header>
-            <div className="da-gfs-manage-dialog__body">
-              <TextInput
+            <Flex vertical gap="middle">
+              <label htmlFor="gfs-preview-rename-name">New name</label>
+              <Input
                 aria-label="New name"
+                autoComplete="off"
                 autoFocus
+                disabled={mutationPending}
+                id="gfs-preview-rename-name"
+                size="small"
                 value={renameName}
                 onChange={event => setRenameName(event.currentTarget.value)}
               />
-              <div className="confirm-dialog-actions">
+              <Flex justify="end" gap="small">
                 <Button
+                  htmlType="button"
                   disabled={mutationPending}
                   onClick={() => setRenameOpen(false)}
-                  type="button"
-                  variant="ghost"
+                  size="small"
                 >
                   Cancel
                 </Button>
-                <Button disabled={!renameName.trim()} loading={mutationPending} type="submit">
+                <Button
+                  htmlType="submit"
+                  disabled={!renameName.trim() || mutationPending}
+                  loading={mutationPending}
+                  size="small"
+                  type="primary"
+                >
                   Save
                 </Button>
-              </div>
-            </div>
+              </Flex>
+            </Flex>
           </form>
-        </div>
+        </Modal>
       ) : null}
       {canResolve && moveOpen && resource?.kind === 'file' ? (
         <GfsMoveDialog

@@ -14,6 +14,20 @@ import { GfsDelegationPanel } from '../delegation'
 
 const PICKER_LABEL = 'Add people, teams, or agents'
 
+async function clickAntdSelectOption(name: string | RegExp) {
+  const accessibleOption = await screen.findByRole('option', { name })
+  const dropdown = accessibleOption.closest('.ant-select-dropdown')
+  if (!(dropdown instanceof HTMLElement)) throw new Error('AntD Select popup is missing')
+  const visibleOption = Array.from(
+    dropdown.querySelectorAll<HTMLElement>('.ant-select-item-option')
+  ).find(option => {
+    const text = option.textContent ?? ''
+    return name instanceof RegExp ? name.test(text) : text.includes(name)
+  })
+  if (!visibleOption) throw new Error(`Visible AntD option ${String(name)} is missing`)
+  fireEvent.click(visibleOption)
+}
+
 afterEach(cleanup)
 
 describe('GfsDelegationPanel', () => {
@@ -30,7 +44,7 @@ describe('GfsDelegationPanel', () => {
     expect(screen.queryByRole('button', { name: 'Grant' })).toBeNull()
   })
 
-  it('does not present failed permission validation as settled read-only access', () => {
+  it('does not present failed permission validation as settled read-only access', async () => {
     const onGrant = vi.fn()
     const { container } = render(
       <GfsDelegationPanel
@@ -43,8 +57,8 @@ describe('GfsDelegationPanel', () => {
     )
 
     const picker = screen.getByRole('combobox', { name: PICKER_LABEL })
-    fireEvent.focus(picker)
-    fireEvent.click(screen.getByRole('option', { name: /User U/ }))
+    fireEvent.mouseDown(picker)
+    fireEvent.click(await screen.findByRole('option', { name: /User U/ }))
     expect(screen.queryByRole('note')).toBeNull()
     expect(screen.queryByText(/Your sharing permission changed/)).toBeNull()
     expect(screen.getByText('User U')).toBeTruthy()
@@ -72,10 +86,11 @@ describe('GfsDelegationPanel', () => {
     expect(screen.queryByRole('button', { name: 'Share' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Access role for selected recipients' })).toBeNull()
 
-    fireEvent.focus(screen.getByRole('combobox', { name: PICKER_LABEL }))
-    fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Access role for selected recipients' }))
-    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: PICKER_LABEL }))
+    await clickAntdSelectOption(/Delegate User/)
+    const rolePicker = screen.getByRole('combobox', { name: 'Access role for selected recipients' })
+    fireEvent.mouseDown(rolePicker)
+    await clickAntdSelectOption('Editor')
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
 
     // Files never send inherit.
@@ -101,8 +116,8 @@ describe('GfsDelegationPanel', () => {
         onGrant={onGrant}
       />
     )
-    fireEvent.focus(screen.getByRole('combobox', { name: PICKER_LABEL }))
-    fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: PICKER_LABEL }))
+    await clickAntdSelectOption(/Delegate User/)
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
 
     // The panel maps the server code via describeGfsGrantError — never the raw code.
@@ -126,7 +141,7 @@ describe('GfsDelegationPanel', () => {
     expect(screen.queryByPlaceholderText(/uuid/i)).toBeNull()
   })
 
-  it('exposes user, team, and agent options together without privileged subject types', () => {
+  it('exposes user, team, and agent options together without privileged subject types', async () => {
     render(
       <GfsDelegationPanel
         affordances={{ canDelegate: true, grantableBits: ['read'], canCreateShare: false }}
@@ -140,9 +155,11 @@ describe('GfsDelegationPanel', () => {
       />
     )
 
-    fireEvent.focus(screen.getByRole('combobox', { name: PICKER_LABEL }))
-    expect(screen.getByRole('option', { name: /Delegate User/ })).toBeTruthy()
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: PICKER_LABEL }))
+    expect(await screen.findByRole('option', { name: /Delegate User/ })).toBeTruthy()
     expect(screen.getByRole('option', { name: /Core Team/ })).toBeTruthy()
+    const picker = screen.getByRole('combobox', { name: PICKER_LABEL })
+    fireEvent.change(picker, { target: { value: 'chatllm' } })
     expect(screen.getByRole('option', { name: /chatllm/ })).toBeTruthy()
     expect(screen.queryByText('Operator')).toBeNull()
     expect(screen.queryByText('Context')).toBeNull()
@@ -165,9 +182,9 @@ describe('GfsDelegationPanel', () => {
     )
 
     const picker = screen.getByRole('combobox', { name: PICKER_LABEL })
-    fireEvent.focus(picker)
-    fireEvent.click(screen.getByRole('option', { name: /Successful User/ }))
-    fireEvent.click(screen.getByRole('option', { name: /Blocked Team/ }))
+    fireEvent.mouseDown(picker)
+    await clickAntdSelectOption(/Successful User/)
+    await clickAntdSelectOption(/Blocked Team/)
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
 
     await screen.findByText('Some selected subjects are invalid and were rejected.')
@@ -178,8 +195,14 @@ describe('GfsDelegationPanel', () => {
       false,
       expect.any(Function)
     )
-    expect(screen.getByRole('button', { name: 'Remove Successful User' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Remove Blocked Team' })).toBeTruthy()
+    expect(
+      screen.getByRole('option', { name: 'Successful User' }).getAttribute('aria-selected')
+    ).toBe('true')
+    expect(screen.getByRole('option', { name: 'Blocked Team' }).getAttribute('aria-selected')).toBe(
+      'true'
+    )
+    expect(screen.getAllByText('Successful User')).toHaveLength(2)
+    expect(screen.getAllByText('Blocked Team')).toHaveLength(2)
   })
 
   it('caps the whole grant to read/write when an agent is selected and strips incompatible bits', async () => {
@@ -199,13 +222,14 @@ describe('GfsDelegationPanel', () => {
       />
     )
 
-    fireEvent.focus(screen.getByRole('combobox', { name: PICKER_LABEL }))
-    fireEvent.click(screen.getByRole('option', { name: /chatllm/ }))
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: PICKER_LABEL }))
+    await clickAntdSelectOption(/chatllm/)
 
     expect(screen.getByText(/use read\/write access only/i)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Access role for selected recipients' }))
-    expect(screen.getByRole('option', { name: 'Read' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+    const rolePicker = screen.getByRole('combobox', { name: 'Access role for selected recipients' })
+    fireEvent.mouseDown(rolePicker)
+    expect(await screen.findByRole('option', { name: 'Read' })).toBeTruthy()
+    await clickAntdSelectOption('Editor')
 
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
     await waitFor(() =>
@@ -230,8 +254,8 @@ describe('GfsDelegationPanel', () => {
     )
 
     const picker = screen.getByRole('combobox', { name: PICKER_LABEL })
-    fireEvent.focus(picker)
-    fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
+    fireEvent.mouseDown(picker)
+    await clickAntdSelectOption(/Delegate User/)
     const toggle = screen.getByRole('checkbox', { name: 'Include contents of this folder' })
     expect(toggle).toHaveProperty('checked', true)
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
@@ -241,8 +265,8 @@ describe('GfsDelegationPanel', () => {
 
     // The panel clears the selection after a successful grant, so re-pick before
     // proving the unchecked toggle sends inherit=false.
-    fireEvent.focus(picker)
-    fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
+    fireEvent.mouseDown(picker)
+    await clickAntdSelectOption(/Delegate User/)
     const secondToggle = screen.getByRole('checkbox', { name: 'Include contents of this folder' })
     fireEvent.click(secondToggle)
     expect(secondToggle).toHaveProperty('checked', false)

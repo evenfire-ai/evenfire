@@ -1,14 +1,13 @@
 import { useState } from 'react'
+import { Alert, Button, Form, Input, Space } from 'antd'
 import { parseGfsResourceLink } from '@clerum/desktop-app-links'
-import { Button, Field, StatusBanner, TextInput } from '@components/Common'
 import type { GfsFilePickerProps } from './filePicker.types'
 
 /**
- * Desktop GFS link entry. Accepts a canonical gfs:// URI, an evenfire://files
- * handoff, or a Profile /open/files URL, then resolves only its canonical URI
- * through the authenticated GFS API.
+ * Desktop GFS link entry. Accepts canonical GFS URIs and the supported
+ * Evenfire/Profile handoffs, then resolves the canonical URI through the
+ * authenticated GFS API. Ant Design owns the visible controls.
  */
-
 export function GfsFilePicker({
   onOpen,
   onOpened,
@@ -39,30 +38,27 @@ export function GfsFilePicker({
         void submit()
       }}
     >
-      <Field label="URL" htmlFor="gfs-url-input">
-        <div className="da-gfs-file-picker__row">
-          <div className="da-gfs-file-picker__input">
-            <span className="da-gfs-file-picker__scheme" aria-hidden="true">
-              URL
-            </span>
-            <TextInput
-              autoFocus
-              id="gfs-url-input"
-              aria-label="URL"
-              placeholder="gfs://… or https://…/open/files?uri=…"
-              value={link}
-              onChange={e => {
-                setLink(e.target.value)
-                setInputError(null)
-              }}
-            />
-          </div>
-          <Button type="submit" disabled={busy || !valid} loading={busy}>
+      <Form.Item label="URL" htmlFor="gfs-url-input">
+        <Space.Compact block>
+          <Input
+            autoFocus
+            id="gfs-url-input"
+            aria-label="URL"
+            placeholder="gfs://… or https://…/open/files?uri=…"
+            value={link}
+            onChange={event => {
+              setLink(event.target.value)
+              setInputError(null)
+            }}
+          />
+          <Button type="primary" htmlType="submit" disabled={busy || !valid} loading={busy}>
             Open
           </Button>
-        </div>
-      </Field>
-      {error || inputError ? <StatusBanner tone="error" text={error || inputError || ''} /> : null}
+        </Space.Compact>
+      </Form.Item>
+      {error || inputError ? (
+        <Alert role="alert" showIcon type="error" title={error || inputError} />
+      ) : null}
     </form>
   )
 }

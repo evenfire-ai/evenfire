@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { StatusBanner } from '@components/Common'
+import { Alert, Button, Flex, Typography } from 'antd'
+import { IconCopy } from '@components/SidebarNav/icons'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { estimateBase64DecodedLength } from '@lib/base64Size'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
@@ -23,6 +24,7 @@ export function GfsImagePreviewBody({
   onDownloadError,
   onCopyContentReady,
   titleId,
+  hideTitle = false,
   titleActions,
   headerActions,
   headingLevel = 3,
@@ -32,9 +34,10 @@ export function GfsImagePreviewBody({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [sourceBlob, setSourceBlob] = useState<Blob | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
+  const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
   const onDownloadErrorRef = useRef(onDownloadError)
-  const HeadingTag = `h${headingLevel}` as const
 
   useEffect(() => {
     onDownloadErrorRef.current = onDownloadError
@@ -109,15 +112,29 @@ export function GfsImagePreviewBody({
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
     }
   }, [])
+
+  function markCopyState(state: 'copied' | 'error'): boolean {
+    if (!mountedRef.current) return false
+    setCopyState(state)
+    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    copyResetTimeoutRef.current = setTimeout(() => {
+      if (mountedRef.current) setCopyState('idle')
+    }, 2000)
+    return true
+  }
 
   const copyImageToClipboard = useCallback(async (): Promise<boolean> => {
     if (!sourceBlob || !mountedRef.current || previewError) return false
     try {
       const copied = await copyImageBlobToClipboard(sourceBlob, () => mountedRef.current)
+      if (copied && mountedRef.current) markCopyState('copied')
+      else if (mountedRef.current) markCopyState('error')
       return copied && mountedRef.current
     } catch {
+      if (mountedRef.current) markCopyState('error')
       return false
     }
   }, [previewError, sourceBlob])
@@ -129,17 +146,35 @@ export function GfsImagePreviewBody({
 
   return (
     <>
-      <header className="da-gfs-image-preview-dialog__header">
-        <div className="da-gfs-image-preview-dialog__header-main da-gfs-preview-title-row">
-          <HeadingTag className="da-gfs-preview-title" id={headingId}>
-            {fileName}
-          </HeadingTag>
+      <Flex align="center" justify="space-between" wrap>
+        <Flex align="center" gap="small">
+          {!hideTitle ? (
+            <Typography.Title id={headingId} level={headingLevel}>
+              {fileName}
+            </Typography.Title>
+          ) : null}
           {titleActions}
-        </div>
-        <div className="da-gfs-image-preview-dialog__header-actions">{headerActions}</div>
-      </header>
+        </Flex>
+        <Flex align="center" gap="small">
+          {!onCopyContentReady ? (
+            <Button
+              aria-label={
+                copyState === 'copied' ? 'Copied image to clipboard' : 'Copy image to clipboard'
+              }
+              disabled={!sourceBlob}
+              icon={<IconCopy aria-hidden="true" width={18} height={18} />}
+              onClick={() => void copyImageToClipboard()}
+              size="small"
+              type="text"
+            >
+              {copyState === 'copied' ? 'Copied' : 'Copy'}
+            </Button>
+          ) : null}
+          {headerActions}
+        </Flex>
+      </Flex>
       <div className="da-gfs-image-preview-dialog__body">
-        {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
+        {previewError ? <Alert showIcon title={previewError} type="error" /> : null}
         {!previewError && !previewUrl ? (
           <div className="da-gfs-image-preview-dialog__loading" role="status">
             Loading image preview…

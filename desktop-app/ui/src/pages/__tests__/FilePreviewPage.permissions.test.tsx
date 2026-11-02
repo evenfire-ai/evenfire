@@ -100,6 +100,13 @@ function openMenu() {
   return screen.getByRole('menu', { name: 'Actions for diagram.png' })
 }
 
+async function openShareSubmenu(menu: HTMLElement): Promise<HTMLElement> {
+  const shareTrigger = within(menu).getByRole('menuitem', { name: 'Share' })
+  fireEvent.mouseEnter(shareTrigger)
+  await waitFor(() => expect(screen.getAllByRole('menu')).toHaveLength(2))
+  return screen.getAllByRole('menu')[1] as HTMLElement
+}
+
 type InheritedAccessProducers = {
   resolve: (uri: string) => Promise<unknown>
   listGrants: (id: string, drive?: string) => Promise<unknown>
@@ -155,10 +162,9 @@ async function openShareDialogWithInheritedAccess(producers: InheritedAccessProd
   expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
   await waitFor(() => expect(affordances).toHaveBeenCalledWith(resourceId, 'main'))
   const menu = openMenu()
-  fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
-  const shareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
-  fireEvent.click(within(shareMenu).getByRole('menuitem', { name: /^Share$/ }))
-  const dialog = await screen.findByRole('dialog', { name: 'Share file diagram.png' })
+  const shareMenu = await openShareSubmenu(menu)
+  fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Share “diagram.png”' })
   return { controllerState, dialog, grant, listGrants, listShares, queryClient, resolve }
 }
 
@@ -231,7 +237,15 @@ describe('FilePreviewPage permission-derived actions', () => {
     })
     fireEvent.focus(picker)
     fireEvent.change(picker, { target: { value: 'chatllm' } })
-    fireEvent.click(await within(dialog).findByRole('option', { name: /chatllm/ }))
+    const option = await screen.findByRole('option', { name: /chatllm/ })
+    const dropdown = option.closest('.ant-select-dropdown')
+    if (!dropdown) throw new Error('Ant Design subject picker popup is missing')
+    const visibleOption = Array.from(
+      dropdown.querySelectorAll<HTMLElement>('.ant-select-item-option')
+    ).find(candidate => /chatllm/.test(candidate.textContent ?? ''))
+    if (!visibleOption) throw new Error('Ant Design chatllm option is missing')
+    fireEvent.click(visibleOption)
+    await within(dialog).findByRole('button', { name: 'Share' })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Share' }))
     await waitFor(() => expect(grant).toHaveBeenCalledOnce())
 
@@ -257,10 +271,7 @@ describe('FilePreviewPage permission-derived actions', () => {
     expect(within(readOnlyMenu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
     expect(within(readOnlyMenu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
     expect(within(readOnlyMenu).queryByRole('menuitem', { name: 'Delete' })).toBeNull()
-    fireEvent.click(within(readOnlyMenu).getByRole('menuitem', { name: 'Share' }))
-    const readOnlyShareMenu = screen.getByRole('menu', {
-      name: 'Share options for diagram.png',
-    })
+    const readOnlyShareMenu = await openShareSubmenu(readOnlyMenu)
     expect(within(readOnlyShareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
     expect(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
     expect(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
@@ -292,8 +303,7 @@ describe('FilePreviewPage permission-derived actions', () => {
     expect(within(ownerMenu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
     expect(within(ownerMenu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
     expect(within(ownerMenu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
-    fireEvent.click(within(ownerMenu).getByRole('menuitem', { name: 'Share' }))
-    const ownerShareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
+    const ownerShareMenu = await openShareSubmenu(ownerMenu)
     expect(within(ownerShareMenu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
   })
 
@@ -351,10 +361,10 @@ describe('FilePreviewPage permission-derived actions', () => {
       listShares,
     })
 
-    const notice = await within(dialog).findByText(
-      'There may be access from parent folders you cannot see.'
-    )
-    expect(notice.closest('.status-banner')?.getAttribute('title')).toBe(
+    const notice = await within(dialog).findByRole('alert')
+    expect(notice.textContent).toContain('There may be access from parent folders you cannot see.')
+    fireEvent.mouseEnter(notice.parentElement as HTMLElement)
+    expect((await screen.findByRole('tooltip')).textContent).toContain(
       'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
     )
     expect(within(dialog).queryByText('No one has access yet.')).toBeNull()
