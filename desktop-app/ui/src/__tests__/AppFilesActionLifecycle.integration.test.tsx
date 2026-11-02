@@ -2183,7 +2183,7 @@ describe('App → Files action lifecycle integration', () => {
     })
     renderApp()
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
-    const row = await screen.findByRole('treeitem', { name: /root-move\.txt/ })
+    await screen.findByRole('treeitem', { name: /root-move\.txt/ })
     const menu = await openRowActions('root-move.txt')
     expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
     expect(within(menu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
