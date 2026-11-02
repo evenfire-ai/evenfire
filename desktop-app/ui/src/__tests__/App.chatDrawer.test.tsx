@@ -1204,7 +1204,8 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3)', () => {
   let currentController: AppController
   let openGfsResourceCb:
-    ((resource: { kind: string; name: string; gfsUri: string; bytes: number }) => void) | null
+    | ((resource: { kind: string; name: string; gfsUri: string; bytes: number }) => void)
+    | null
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -1289,7 +1290,8 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
   const sessionScope = ':user-a:team-a'
   let currentController: AppController
   let openGfsResourceCb:
-    ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void) | null
+    | ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void)
+    | null
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -1588,7 +1590,8 @@ describe('App live GFS preview revalidation', () => {
   let currentController: AppController
   let dispatchEntityChange: ((event: unknown) => void) | null
   let openGfsResource:
-    ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void) | null
+    | ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void)
+    | null
 
   beforeEach(() => {
     vi.clearAllMocks()

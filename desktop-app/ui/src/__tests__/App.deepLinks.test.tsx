@@ -1740,14 +1740,16 @@ describe('App deep-link orchestration', () => {
       releaseTeamDRollback = resolve
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
-      ((teamId: string) => Promise<unknown>) | undefined
+      | ((teamId: string) => Promise<unknown>)
+      | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.teamDirectory.mockImplementation(async () => ({
       items: [],
       currentTeamId: activeTeamId,
     }))
     const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
-      (() => Promise<Record<string, unknown>>) | undefined
+      | (() => Promise<Record<string, unknown>>)
+      | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
@@ -2127,14 +2129,16 @@ describe('App deep-link orchestration', () => {
       releaseOriginRollback = resolve
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
-      ((teamId: string) => Promise<unknown>) | undefined
+      | ((teamId: string) => Promise<unknown>)
+      | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.teamDirectory.mockImplementation(async () => ({
       items: [],
       currentTeamId: activeTeamId,
     }))
     const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
-      (() => Promise<Record<string, unknown>>) | undefined
+      | (() => Promise<Record<string, unknown>>)
+      | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
@@ -2492,14 +2496,16 @@ describe('App deep-link orchestration', () => {
       releaseOriginRollback = resolve
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
-      ((teamId: string) => Promise<unknown>) | undefined
+      | ((teamId: string) => Promise<unknown>)
+      | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.teamDirectory.mockImplementation(async () => ({
       items: [],
       currentTeamId: activeTeamId,
     }))
     const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
-      (() => Promise<Record<string, unknown>>) | undefined
+      | (() => Promise<Record<string, unknown>>)
+      | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
@@ -2721,7 +2727,8 @@ describe('App deep-link orchestration', () => {
       releaseOriginRollback = resolve
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
-      ((teamId: string) => Promise<unknown>) | undefined
+      | ((teamId: string) => Promise<unknown>)
+      | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.teamDirectory.mockImplementation(async () => ({
       items: resetSessionWhilePending
@@ -2733,7 +2740,8 @@ describe('App deep-link orchestration', () => {
       currentTeamId: activeTeamId,
     }))
     const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
-      (() => Promise<Record<string, unknown>>) | undefined
+      | (() => Promise<Record<string, unknown>>)
+      | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
@@ -3130,14 +3138,16 @@ describe('App deep-link orchestration', () => {
       currentTeamId: activeTeamId,
     }))
     const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
-      (() => Promise<Record<string, unknown>>) | undefined
+      | (() => Promise<Record<string, unknown>>)
+      | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
       teamId: activeTeamId,
     }))
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
-      ((teamId: string) => Promise<unknown>) | undefined
+      | ((teamId: string) => Promise<unknown>)
+      | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.switchTeam.mockImplementation(async teamId => {
       activeTeamId = teamId
