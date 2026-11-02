@@ -342,8 +342,10 @@ hcc_log_has_resync() {
   local pod
   pod="$(hcc_pod)" || return 1
   [ -n "$pod" ] || return 1
+  # No grep -q here: under pipefail it closes the pipe on the first match and
+  # kubectl dies with SIGPIPE (141), reporting "not found" for a present line.
   kctl logs "$pod" -n "$HCC_NS" -c "$HCC_CONTAINER" --tail=5000 --request-timeout=30s 2>/dev/null |
-    grep -Fq 'periodic DNS resync enabled (every 10s'
+    grep -F 'periodic DNS resync enabled (every 10s' >/dev/null
 }
 
 hcc_env_json() {
