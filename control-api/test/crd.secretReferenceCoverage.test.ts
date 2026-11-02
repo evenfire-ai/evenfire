@@ -41,7 +41,6 @@ const NON_SECRET_REFERENCE_PATHS = new Set([
   'host.yaml:spec.model.connectionRef',
   'llmhook.yaml:spec.target.image.ref',
   'mcpserver.yaml:spec.auth.secretKey',
-  'mcpserver.yaml:spec.contextRef',
   'mcpserver.yaml:spec.envSecret.keys[].secretKey',
   'workflowrecipe.yaml:spec.agent.soulRef',
   'workflowrecipe.yaml:spec.agent.soulRef.storageRef',

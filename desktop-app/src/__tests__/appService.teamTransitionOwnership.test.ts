@@ -110,7 +110,7 @@ describe('AppService deliberate team transition ownership', () => {
     await getMeStarted.promise
     getMeResponse.resolve(me)
 
-    await expect(restore).resolves.toEqual({ authenticated: true, me })
+    await expect(restore).resolves.toEqual({ authenticated: true, me, sessionGeneration: 1 })
   })
 
   it('accepts Google login when RPC discovery enriches its captured REST profile', async () => {
@@ -163,7 +163,7 @@ describe('AppService deliberate team transition ownership', () => {
     await loginStarted.promise
     loginResponse.resolve(testLoginResult('synthetic-session-a', me))
 
-    await expect(login).resolves.toEqual({ authenticated: true, me })
+    await expect(login).resolves.toEqual({ authenticated: true, me, sessionGeneration: 2 })
   })
 
   it('persists RPC discovery after a saved-session restore advances the generation', async () => {
@@ -214,7 +214,7 @@ describe('AppService deliberate team transition ownership', () => {
       appName: 'Environment A',
     })
     await save
-    await expect(restore).resolves.toEqual({ authenticated: true, me })
+    await expect(restore).resolves.toEqual({ authenticated: true, me, sessionGeneration: 3 })
     expect(getDesktopEnvironment).toHaveBeenCalledOnce()
 
     expect(runtimeConfig.getDesktopRuntimeConfigState().currentConfig.rpcProxyBaseUrl).toBe(

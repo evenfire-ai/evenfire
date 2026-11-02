@@ -469,7 +469,7 @@ describe('resolver mirror of the remote CRD coherence rules', () => {
       const r = resolveServerOAuth(caseCr('srv', c))
       expect(r?.oauthClientId).toBe(c.oauth().id)
       expect(r?.grantScope).toBe('user')
-      expect(r?.contextRef).toBe(CONTEXT)
+      expect(r).not.toHaveProperty('contextRef')
     })
   }
 

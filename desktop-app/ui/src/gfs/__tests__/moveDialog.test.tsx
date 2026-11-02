@@ -17,6 +17,7 @@ import { GfsMoveDialog } from '../moveDialog'
 afterEach(cleanup)
 
 const target = { resourceId: 'file-1', name: 'notes.txt', kind: 'file' as const }
+const SESSION_GENERATION = 7
 
 function folder(id: string, name: string): GfsBrowserChild {
   return {
@@ -67,8 +68,11 @@ function renderDialog(
     <QueryClientProvider client={queryClient}>
       <GfsMoveDialog
         target={target}
+        sessionScope="anonymous"
+        sessionGeneration={SESSION_GENERATION}
         initialCrumbs={[]}
         onMove={vi.fn(async () => undefined)}
+        onRetryPermissionCheck={vi.fn(async () => undefined)}
         onClose={vi.fn()}
         {...props}
       />
@@ -76,6 +80,21 @@ function renderDialog(
   )
   return { ...rendered, queryClient }
 }
+
+describe('GfsMoveDialog unknown session generation', () => {
+  it('does not read destinations or enable Move without a published generation', async () => {
+    const listAccessible = vi.fn(async () => ({
+      items: [folder('dest', 'Destination')],
+      nextCursor: null,
+    }))
+    renderDialog({ listAccessible }, { sessionGeneration: null })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    expect(listAccessible).not.toHaveBeenCalled()
+    expect(within(dialog).queryByRole('button', { name: 'Destination' })).toBeNull()
+    expect(within(dialog).getByRole('button', { name: 'Move' }).hasAttribute('disabled')).toBe(true)
+  })
+})
 
 describe('GfsMoveDialog pagination', () => {
   it('purges cached destination rows after an expanded folder is denied', async () => {
@@ -92,14 +111,27 @@ describe('GfsMoveDialog pagination', () => {
     const { queryClient } = renderDialog({ listAccessible, listChildren })
 
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    await within(dialog).findByRole('button', { name: 'Product' })
+    expect(
+      queryClient.getQueryCache().find({
+        queryKey: desktopQueryKeys.gfsAccessible('anonymous', 'main', SESSION_GENERATION),
+        exact: true,
+      })
+    ).toBeDefined()
     const tree = within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })
     expect(await within(tree).findByRole('button', { name: 'Product' })).toBeTruthy()
     await fireEvent.click(within(tree).getByRole('button', { name: 'Expand Product' }))
     expect(await within(tree).findByRole('button', { name: 'Assets' })).toBeTruthy()
+    expect(
+      queryClient.getQueryCache().find({
+        queryKey: desktopQueryKeys.gfsChildren('anonymous', 'folder-1', 'main', SESSION_GENERATION),
+        exact: true,
+      })
+    ).toBeDefined()
 
     await act(async () => {
       await queryClient.invalidateQueries({
-        queryKey: desktopQueryKeys.gfsChildren('anonymous', 'folder-1', 'main'),
+        queryKey: desktopQueryKeys.gfsChildren('anonymous', 'folder-1', 'main', SESSION_GENERATION),
       })
     })
 

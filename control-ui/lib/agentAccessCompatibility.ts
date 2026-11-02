@@ -1,5 +1,4 @@
-import type { ContextResource, HostResource } from './api'
-import { contextAliases, contextForAlias, contextResourceName } from './contextIdentity'
+import type { HostResource } from './api'
 
 export type AgentAccessUpdatePlan = {
   agentNames: string[]
@@ -11,30 +10,19 @@ export type AgentAccessUpdatePlan = {
  * write. A stale Agent snapshot must fail before any Context grant can change.
  */
 export async function applyAgentAccessCompatibilityUpdate<AgentResult, ContextResult>(options: {
-  contexts: readonly ContextResource[]
   hosts: readonly HostResource[]
   loadCurrentContextIds: () => Promise<readonly string[]>
   nextGrantedAgentNames: readonly string[]
   updateAgents: (agentNames: string[]) => Promise<AgentResult>
   updateContexts: (contextIds: string[]) => Promise<ContextResult>
 }): Promise<[AgentResult, ContextResult]> {
-  const agentPlan = planAgentAccessUpdate(
-    [],
-    options.nextGrantedAgentNames,
-    options.hosts,
-    options.contexts
-  )
+  const agentPlan = planAgentAccessUpdate([], options.nextGrantedAgentNames, options.hosts)
   const updatedAgents = await options.updateAgents(agentPlan.agentNames)
   // Refresh after the Agent CAS. Hidden/unowned Context grants may have been
   // revoked by another admin since this page loaded and must not be restored
   // from the stale UI snapshot.
   const currentContextIds = await options.loadCurrentContextIds()
-  const contextPlan = planAgentAccessUpdate(
-    currentContextIds,
-    agentPlan.agentNames,
-    options.hosts,
-    options.contexts
-  )
+  const contextPlan = planAgentAccessUpdate(currentContextIds, agentPlan.agentNames, options.hosts)
   const updatedContexts = await options.updateContexts(contextPlan.contextIds)
   return [updatedAgents, updatedContexts]
 }
@@ -43,28 +31,23 @@ function hostName(host: HostResource): string {
   return String(host.metadata?.name ?? '').trim()
 }
 
+// Membership values and Host.spec.contextRef are both Context names, matched exactly as the
+// token broker does: an alias or a padded ref must not grant a different Context's Hosts.
 function hostContextRef(host: HostResource): string {
-  return String(host.spec?.contextRef ?? '').trim()
+  const contextRef = host.spec?.contextRef
+  return typeof contextRef === 'string' ? contextRef : ''
 }
 
 export function agentNamesForContextAccess(
   assignedContextIds: readonly string[],
-  hosts: readonly HostResource[],
-  contexts: readonly ContextResource[]
+  hosts: readonly HostResource[]
 ): string[] {
-  const assignedResourceNames = new Set(
-    assignedContextIds.map(contextId => {
-      const context = contextForAlias(contexts, contextId)
-      return context ? contextResourceName(context) : contextId.trim()
-    })
-  )
+  const assigned = new Set(assignedContextIds)
 
   return hosts
     .filter(host => {
       const contextRef = hostContextRef(host)
-      const context = contextForAlias(contexts, contextRef)
-      const resourceName = context ? contextResourceName(context) : contextRef
-      return assignedResourceNames.has(resourceName)
+      return contextRef !== '' && assigned.has(contextRef)
     })
     .map(hostName)
     .filter(Boolean)
@@ -75,17 +58,15 @@ export function effectiveAgentNamesForAccess({
   assignedAgentNames,
   assignedContextIds,
   hosts,
-  contexts,
 }: {
   assignedAgentNames: readonly string[]
   assignedContextIds: readonly string[]
   hosts: readonly HostResource[]
-  contexts: readonly ContextResource[]
 }): string[] {
   return Array.from(
     new Set([
       ...assignedAgentNames.map(value => value.trim()).filter(Boolean),
-      ...agentNamesForContextAccess(assignedContextIds, hosts, contexts),
+      ...agentNamesForContextAccess(assignedContextIds, hosts),
     ])
   ).sort((left, right) => left.localeCompare(right))
 }
@@ -101,19 +82,12 @@ export function effectiveAgentNamesForAccess({
 export function planAgentAccessUpdate(
   assignedContextIds: readonly string[],
   nextGrantedAgentNames: readonly string[],
-  hosts: readonly HostResource[],
-  contexts: readonly ContextResource[] = []
+  hosts: readonly HostResource[]
 ): AgentAccessUpdatePlan {
   const normalizedAgents = Array.from(
     new Set(nextGrantedAgentNames.map(value => value.trim()).filter(Boolean))
   ).sort((left, right) => left.localeCompare(right))
-  const ownedContextIds = new Set(
-    hosts.flatMap(host => {
-      const ref = hostContextRef(host)
-      const context = contextForAlias(contexts, ref)
-      return context ? contextAliases(context) : [ref]
-    })
-  )
+  const ownedContextIds = new Set(hosts.map(hostContextRef).filter(Boolean))
   const preservedUnownedContextIds = assignedContextIds.filter(
     contextId => contextId && !ownedContextIds.has(contextId)
   )
@@ -122,11 +96,7 @@ export function planAgentAccessUpdate(
   )
   const selectedAgentContextIds = normalizedAgents
     .map(agentName => hostByName.get(agentName))
-    .map(host => {
-      const ref = host ? hostContextRef(host) : ''
-      const context = contextForAlias(contexts, ref)
-      return context ? contextResourceName(context) : ref
-    })
+    .map(host => (host ? hostContextRef(host) : ''))
     .filter(Boolean)
 
   return {

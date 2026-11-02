@@ -50,8 +50,8 @@ function discovery(): DiscoveryResult {
 }
 
 /** Wrap a producer-emitted `spec.oauth` into a CR shape the resolver reads. */
-function serverFrom(oauth: Record<string, unknown>, contextRef = 'ctx-a'): McpServerOAuthSpecInput {
-  return { spec: { oauth, contextRef } }
+function serverFrom(oauth: Record<string, unknown>): McpServerOAuthSpecInput {
+  return { spec: { oauth } }
 }
 
 describe('resolveServerOAuthSubject — remote lane (real-producer fixtures, T1)', () => {
@@ -148,7 +148,7 @@ describe('resolveServerOAuthSubject — remote lane (real-producer fixtures, T1)
       cimdClientId: CIMD_SELF,
     })
     const r = resolveServerOAuth(serverFrom(oauth as unknown as Record<string, unknown>))
-    expect(r).toEqual({ oauthClientId: CIMD_SELF, grantScope: 'context', contextRef: 'ctx-a' })
+    expect(r).toEqual({ oauthClientId: CIMD_SELF, grantScope: 'context' })
     // Only a baked CR may see unsealed legacy grants.
     expect(r).not.toHaveProperty('legacyProvider')
   })

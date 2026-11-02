@@ -28,7 +28,6 @@ export type McpServerStatus = {
 
 export type McpServerSpec = {
   image?: string
-  contextRef?: string
   description?: string
   enabled?: boolean
   managed?: boolean

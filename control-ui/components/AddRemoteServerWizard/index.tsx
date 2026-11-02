@@ -1,15 +1,13 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useState } from 'react'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { useToast } from '@components/Toast'
 import { IconCopy } from '@components/icons'
 import { Button, CheckboxField, Field, SelectInput, TextInput } from '@components/ui'
-import { getContexts, isSilentApiError } from '@lib/api'
-import type { ContextResource } from '@lib/api'
+import { isSilentApiError } from '@lib/api'
 import { copyTextToClipboard } from '@lib/clipboard'
-import { contextResourceName } from '@lib/contextIdentity'
 import {
   buildRemoteInstallRequest,
   describeTransportProbe,
@@ -69,9 +67,6 @@ export function AddRemoteServerWizard({
   // Step 0 — identity
   const [baseUrl, setBaseUrl] = useState('')
   const [serverName, setServerName] = useState('')
-  const [contextRef, setContextRef] = useState('')
-  const [contexts, setContexts] = useState<ContextResource[]>([])
-  const [contextsError, setContextsError] = useState('')
 
   // Detection. Editing the URL clears `detected` (see the baseUrl onChange), so
   // a present `detected` always corresponds to the current URL (D-4: the pinned
@@ -112,31 +107,11 @@ export function AddRemoteServerWizard({
   const [unverifiedToConfirm, setUnverifiedToConfirm] = useState<string[]>([])
   const [unverifiedConfirmed, setUnverifiedConfirmed] = useState(false)
 
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const res = await getContexts()
-        if (!cancelled) setContexts(res.items ?? [])
-      } catch (e) {
-        if (isSilentApiError(e)) return
-        if (!cancelled) {
-          setContextsError(e instanceof Error ? e.message : 'Failed to load contexts')
-        }
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
   const serverNameError = serverName.length > 0 ? getRemoteServerNameError(serverName) : ''
   const trimmedBaseUrl = baseUrl.trim()
   const baseUrlError = baseUrl.length > 0 ? getRemoteBaseUrlError(trimmedBaseUrl) : ''
   const identifiersValid =
-    getRemoteBaseUrlError(trimmedBaseUrl) === '' &&
-    getRemoteServerNameError(serverName) === '' &&
-    contextRef !== ''
+    getRemoteBaseUrlError(trimmedBaseUrl) === '' && getRemoteServerNameError(serverName) === ''
   const tenantIdError = getEntraTenantIdError(tenantId)
   const tenantReady = !tenantPrompt || tenantIdError === ''
 
@@ -195,15 +170,6 @@ export function AddRemoteServerWizard({
     if (target === 1) return Boolean(detected) && identifiersValid
     return step1Valid
   }
-
-  const contextOptions = useMemo(
-    () =>
-      contexts
-        .map(context => contextResourceName(context))
-        .filter(name => name.length > 0)
-        .sort((left, right) => left.localeCompare(right)),
-    [contexts]
-  )
 
   function clearUnverifiedConfirmation() {
     setUnverifiedToConfirm([])
@@ -302,7 +268,6 @@ export function AddRemoteServerWizard({
     try {
       const body = buildRemoteInstallRequest({
         serverName,
-        contextRef,
         baseUrl: trimmedBaseUrl,
         mode: installMode,
         grantScope,
@@ -315,7 +280,10 @@ export function AddRemoteServerWizard({
         confirmedUnverifiedScopes: unverifiedConfirmed ? unverifiedToConfirm : undefined,
       })
       const res = await installRemoteServer(body)
-      showToast(`Remote server ${res.serverName} installed.`, { tone: 'success' })
+      showToast(
+        `Remote server ${res.serverName} installed. Give agents access from the Installed Connectors list whenever you’re ready.`,
+        { tone: 'success' }
+      )
       if (res.registrationMode === 'pre-registered' && res.redirectUri) {
         setInstalled({
           redirectUri: res.redirectUri,
@@ -424,28 +392,6 @@ export function AddRemoteServerWizard({
                   disabled={detecting}
                   value={serverName}
                 />
-              </Field>
-
-              <Field
-                description="The context this connector is attached to. Agents using this context can call it."
-                error={contextsError || undefined}
-                label="Context"
-                htmlFor="remote-context-ref"
-                required
-              >
-                <SelectInput
-                  id="remote-context-ref"
-                  onChange={event => setContextRef(event.target.value)}
-                  disabled={detecting || contextOptions.length === 0}
-                  value={contextRef}
-                >
-                  <option value="">Select a context…</option>
-                  {contextOptions.map(name => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </SelectInput>
               </Field>
 
               {discoverError ? (
@@ -658,8 +604,8 @@ export function AddRemoteServerWizard({
           {step === 2 && installed ? (
             <div className="cu-form-stack cu-agent-form-stack">
               <p className="cu-field__hint">
-                {serverName} is installed. Users can connect once this redirect URI is registered in
-                the provider’s OAuth client.
+                {serverName} is installed. Register this redirect URI in the provider’s OAuth
+                client, then give agents access from the Installed Connectors list.
               </p>
               {installed.changedSincePreview ? (
                 <div className="cu-banner cu-banner--warning" role="status">
@@ -679,10 +625,6 @@ export function AddRemoteServerWizard({
                 <div className="cu-summary-list__row">
                   <span>Server name</span>
                   <strong>{serverName}</strong>
-                </div>
-                <div className="cu-summary-list__row">
-                  <span>Context</span>
-                  <strong>{contextRef}</strong>
                 </div>
                 <div className="cu-summary-list__row">
                   <span>Remote URL</span>

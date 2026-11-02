@@ -26,6 +26,11 @@ export type RealMainOptions = {
   mint(recipeName: string, recipeNs: string): Response | Promise<Response>
   /** Everything main sends to the window the embed lives in. */
   onSend(channel: string, payload: unknown): void
+  /** Main's authoritative App-link queue reset and renderer notification. */
+  onSessionInvalidated?: (sessionGeneration: number) => {
+    appDeepLinkMinimumId: number
+    gfsDeepLinkMinimumId: number
+  }
   /** Every document load the driver starts; unset, a load never commits. */
   onLoad?(webContents: FakeWebContents, url: string): void
 }
@@ -40,7 +45,7 @@ export type RealMain = {
   /** Calls the real IPC handler of `channel` as the trusted renderer would. */
   invoke(channel: string, payload: unknown): Promise<unknown>
   /** What a logout or a login over the live session does to the embed. */
-  invalidateSession(): void
+  invalidateSession(sessionGeneration?: number): void
 }
 
 // rpc-proxy's mint contract: 204 + a Path-scoped Set-Cookie on success, any
@@ -104,10 +109,14 @@ export async function resetRealMain(): Promise<void> {
 /** Starts a main process with one trusted window. The previous one must have been reset. */
 export function startRealMain(options: RealMainOptions): RealMain {
   if (current) throw new Error('a main process is already running: await resetRealMain() first')
-  const service = new AppService()
+  let service!: AppService
+  service = new AppService({
+    onSandboxUiSessionInvalidated: () =>
+      options.onSessionInvalidated?.(service.getSessionGeneration()),
+  })
   ;(service as unknown as { sessionToken: string }).sessionToken = 'fake-session-token'
   const parent = new FakeParentWindow()
-  const sender = { id: 1 }
+  const sender = Object.assign(parent.webContents, { id: 1 })
   const mainWebContents = new FakeMainWebContents()
   const main: LiveMain = {
     service,
@@ -120,19 +129,24 @@ export function startRealMain(options: RealMainOptions): RealMain {
       const handler = electronMocks.ipcHandlers.get(channel)
       if (!handler) return Promise.reject(new Error(`no IPC handler for ${channel}`))
       try {
-        return handler({ sender, senderFrame: { url: 'file:///app/index.html' } }, payload)
+        return Promise.resolve(
+          handler({ sender, senderFrame: { url: 'file:///app/index.html' } }, payload)
+        )
       } catch (error) {
         return Promise.reject(error)
       }
     },
-    invalidateSession() {
+    invalidateSession(sessionGeneration) {
+      if (sessionGeneration !== undefined) {
+        ;(service as unknown as { sessionGeneration: number }).sessionGeneration = sessionGeneration
+      }
       ;(service as unknown as { invalidateSandboxUiSession(): void }).invalidateSandboxUiSession()
     },
   }
   initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir: options.userDataDir })
   electronMocks.ipcHandlers.clear()
   electronMocks.windowsBySender.clear()
-  registerIpcHandlers(service)
+  registerIpcHandlers(service, () => service.logout())
   electronMocks.windowsBySender.set(sender, parent)
   parent.webContents.send.mockImplementation((channel: string, payload: unknown) => {
     if (!main.dead) options.onSend(channel, payload)

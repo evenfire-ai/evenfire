@@ -184,6 +184,13 @@ function makeController(): AppController {
   const noop = vi.fn()
   let controller: AppController
   let tabSequence = 2
+  let navigationIntentSequence = 0
+  const beginNavigationIntent = () => {
+    navigationIntentSequence += 1
+    controller.navigationIntentSequence = navigationIntentSequence
+    forceControllerRender()
+    return navigationIntentSequence
+  }
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   const setWorkspaceTabs = vi.fn((updater: unknown) => {
     const next =
@@ -200,6 +207,7 @@ function makeController(): AppController {
     forceControllerRender()
   })
   const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
+    controller.beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openPreviewTab(state, {
@@ -214,12 +222,14 @@ function makeController(): AppController {
     )
   })
   const openFilesSection = vi.fn((path: string | null = null) => {
+    controller.beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openFilesTab(state, { id: nextWorkspaceTabId(), path })
     )
   })
   const showAppsPicker = vi.fn(() => {
+    controller.beginUserNavigationIntent()
     if (controller.appsPickerActive) return
     if (activeWorkspaceTab(controller.workspaceTabs)?.kind === 'app') return
     controller.appsPickerActive = true
@@ -235,6 +245,30 @@ function makeController(): AppController {
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',
+    navigationIntentSequence,
+    beginUserNavigationIntent: vi.fn(beginNavigationIntent),
+    isNavigationIntentCurrent: vi.fn(sequence => sequence === navigationIntentSequence),
+    captureWorkspaceNavigation: vi.fn(() => ({
+      workspaceTabs: controller.workspaceTabs,
+      selectedAgent: controller.selectedAgent,
+      selectedAgentRoute: controller.selectedAgentRoute,
+      appsPickerActive: controller.appsPickerActive,
+      lastActiveChatTabId:
+        activeWorkspaceTab(controller.workspaceTabs)?.kind === 'chat'
+          ? (activeWorkspaceTab(controller.workspaceTabs)?.id ?? null)
+          : null,
+    })),
+    restoreWorkspaceNavigation: vi.fn((snapshot, expectedIntentSequence) => {
+      if (expectedIntentSequence !== navigationIntentSequence) return null
+      const restoredIntent = beginNavigationIntent()
+      controller.workspaceTabs = snapshot.workspaceTabs
+      controller.selectedAgent = snapshot.selectedAgent
+      controller.selectedAgentRoute = snapshot.selectedAgentRoute
+      controller.appsPickerActive = snapshot.appsPickerActive
+      controller.lastActiveChatTabId = snapshot.lastActiveChatTabId
+      forceControllerRender()
+      return restoredIntent
+    }),
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
     selectedAgentRoute: null,
@@ -1125,6 +1159,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
   it('closes the view when a plugin hands off to a preview tab', async () => {
     await renderApp()
     await openFromSidebar(ALPHA, 1)
+    const navigationIntentBeforePlugin = controller.navigationIntentSequence
     const payload = await openGfsResourcePayload(
       resolvedFile('md1', 'README.md', { gfsUri: 'gfs://main/md1' })
     )
@@ -1132,6 +1167,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await flushMacrotask()
 
     expect(controller.navItem).toBe(DESKTOP_ROUTES.preview)
+    expect(controller.navigationIntentSequence).toBe(navigationIntentBeforePlugin + 1)
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: main.openCall(0).launchId })
     await act(() => main.settle())
     expect(machine().getSnapshot().views.size).toBe(0)

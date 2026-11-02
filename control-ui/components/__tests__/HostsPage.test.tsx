@@ -1,9 +1,13 @@
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import HostsPage from '../../app/hosts/page'
 import * as api from '../../lib/api'
-import { materializeHostResource } from '../../test/fixtures/contextResource'
+import {
+  buildContextList,
+  buildContextResource,
+  materializeHostResource,
+} from '../../test/fixtures/contextResource'
 
 const pushMock = vi.fn()
 
@@ -74,5 +78,35 @@ describe('HostsPage optional Context enrichment', () => {
     expect(screen.queryByText('Context service unavailable')).not.toBeInTheDocument()
     expect(api.getHosts).toHaveBeenCalledTimes(1)
     expect(api.getContexts).toHaveBeenCalledTimes(1)
+  })
+
+  it('counts the connectors of the Context the Host names, not of one aliased to it', async () => {
+    const host = materializeHostResource({
+      metadata: { name: 'agent-a' },
+      spec: {
+        host: 'Agent A',
+        contextRef: 'ctx-a',
+        secretRef: 'openai-secret',
+        channels: [],
+        model: { provider: 'openai', name: 'gpt-5.4-mini' },
+      },
+    })
+    vi.mocked(api.getHosts).mockResolvedValue({ items: [host] })
+    // ctx-b carries the Host's Context name only as its alias.
+    vi.mocked(api.getContexts).mockResolvedValue(
+      buildContextList([
+        buildContextResource({ metadata: { name: 'ctx-a' }, spec: { mcpServers: ['one'] } }),
+        buildContextResource({
+          metadata: { name: 'ctx-b' },
+          spec: { contextId: 'ctx-a', mcpServers: ['one', 'two', 'three'] },
+        }),
+      ])
+    )
+
+    render(<HostsPage />)
+
+    const row = (await screen.findByText('Agent A')).closest('tr') as HTMLElement
+    await waitFor(() => expect(within(row).getByText('1')).toBeInTheDocument())
+    expect(within(row).queryByText('3')).not.toBeInTheDocument()
   })
 })

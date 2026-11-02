@@ -57,7 +57,7 @@ function seedOauthServer(
       metadata: { name: opts.name },
       spec: {
         ...(opts.enabled !== undefined ? { enabled: opts.enabled } : {}),
-        // contextRef is CRD-required + singular — the AUTHORITATIVE Context.
+        // A stored CR may still carry the legacy field; the broker ignores it.
         contextRef: opts.contextRef ?? 'ctx-9',
         auth: { type: 'oauth' },
         oauth: {
@@ -541,9 +541,9 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     expect(res.body.error).toBe('not_oauth_server')
   })
 
-  // ── Rule 6: context-scope owner ───────────────────────────────────────────
+  // ── Rule 6: context-scope key is the Host Context ───────────────────────────────────────────
 
-  it('context flavor: key uses the Host Context (= owner), not the body; user_id NULL', async () => {
+  it('context flavor: key uses the Host Context, not the body; user_id NULL', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: HOST_CONTEXT })
     grantRows = [sharedGrantRow(HOST_CONTEXT, new Date(Date.now() + 3600_000))]
 
@@ -563,45 +563,41 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     ])
   })
 
-  it('R6: a context server owned by another Context → 404 server_not_found + metric, no grant read (I-1)', async () => {
-    // Before the binding, this request handed ctx-A's shared token to any Host.
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    grantRows = [sharedGrantRow('ctx-A', new Date(Date.now() + 3600_000))]
-    const before = await deniedCount('context_ref_mismatch')
-
-    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
-
-    expect(res.status).toBe(404)
-    expect(res.text).toBe('{"error":"server_not_found"}')
-    expect(grantQueries()).toHaveLength(0)
-    expect(await deniedCount('context_ref_mismatch')).toBe(before + 1)
-  })
-
-  it('R6: a context server without contextRef → the same 404, no grant read', async () => {
-    void gateway.createResource(
-      'mcpservers',
-      {
-        metadata: { name: 'no-ctx' },
-        spec: {
-          auth: { type: 'oauth' },
-          oauth: {
-            id: 'google-drive',
-            provider: 'google',
-            clientIdRef: { name: 'google-creds', key: 'client-id' },
-            clientSecretRef: { name: 'google-creds', key: 'client-secret' },
-            grantScope: 'context',
+  it.each([
+    ['still names another Context', 'ctx-A'],
+    ['names no Context', undefined],
+  ])(
+    'R6: a context server whose stored CR %s is keyed by the Host Context only (I-1)',
+    async (_label, legacyContextRef) => {
+      void gateway.createResource(
+        'mcpservers',
+        {
+          metadata: { name: 'gdrive' },
+          spec: {
+            ...(legacyContextRef !== undefined ? { contextRef: legacyContextRef } : {}),
+            auth: { type: 'oauth' },
+            oauth: {
+              id: 'google-drive',
+              provider: 'google',
+              clientIdRef: { name: 'google-creds', key: 'client-id' },
+              clientSecretRef: { name: 'google-creds', key: 'client-secret' },
+              grantScope: 'context',
+            },
           },
         },
-      },
-      MCP_NS
-    )
-    const res = await post({ mcpServerName: 'no-ctx', userId: USER_1 })
-    expect(res.status).toBe(404)
-    expect(res.text).toBe('{"error":"server_not_found"}')
-    expect(grantQueries()).toHaveLength(0)
-  })
+        MCP_NS
+      )
+      grantRows = [sharedGrantRow(HOST_CONTEXT, new Date(Date.now() + 3600_000))]
 
-  it('R6: a foreign-owned context server with an incoherent remote spec → the same 404, not a 409', async () => {
+      const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+
+      expect(res.status).toBe(200)
+      const contexts = grantQueries().map(([, values]) => (values as unknown[])[3])
+      expect(contexts).toEqual([HOST_CONTEXT])
+    }
+  )
+
+  it('R6: an incoherent remote context server outside the Host Context allowlist → 404, not a 409', async () => {
     // Derived from the real producer: the builder's confidential output with
     // clientMode flipped to public, an in-place edit the coherence check refuses.
     const outcome = await discoverRemoteOAuth(PILOTS.sentry.mcpUrl, {
@@ -618,27 +614,27 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
       }) as unknown as Record<string, unknown>),
       clientMode: 'public',
     }
-    const seed = (contextRef: string) =>
+    const seed = (name: string) =>
       gateway.createResource(
         'mcpservers',
         {
-          metadata: { name: 'gdrive' },
-          spec: { contextRef, auth: { type: 'oauth' }, oauth: incoherentOauth },
+          metadata: { name },
+          spec: { auth: { type: 'oauth' }, oauth: incoherentOauth },
         },
         MCP_NS
       )
 
-    // Control: owned by the Host Context, the same spec is refused as incoherent.
-    await seed(HOST_CONTEXT)
+    // Control: enabled in the Host Context, the same spec is refused as incoherent.
+    await seed('gdrive')
     const own = await post({ mcpServerName: 'gdrive', userId: USER_1 })
     expect(own.status).toBe(409)
     expect(own.body.error).toBe('remote_oauth_spec_incoherent')
 
-    await gateway.deleteResource('mcpservers', 'gdrive', MCP_NS)
-    await seed('ctx-A')
+    // `foreign` is not in the Host Context allowlist.
+    await seed('foreign')
     const secretReads = vi.spyOn(gateway, 'getSecret')
 
-    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    const res = await post({ mcpServerName: 'foreign', userId: USER_1 })
 
     expect(res.status).toBe(404)
     expect(res.text).toBe('{"error":"server_not_found"}')
@@ -1160,10 +1156,12 @@ describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (Host binding)', ()
     }
   )
 
-  it('R6: a context server owned by another Context, or without contextRef → false (I-1)', async () => {
+  it('R6: a grant of another Context never answers for the Host Context (I-1)', async () => {
+    // Stored CRs that still name a Context, or none: neither changes the key.
     seedContextServer('team-foreign', 'ctx-A')
     seedContextServer('team-noctx', undefined)
     granted.add('team-foreign|ctx-A')
+    granted.add('team-noctx|ctx-A')
     const res = await post({
       queries: [{ mcpServerName: 'team-foreign' }, { mcpServerName: 'team-noctx' }],
     })
@@ -1171,7 +1169,10 @@ describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (Host binding)', ()
       { mcpServerName: 'team-foreign', exists: false },
       { mcpServerName: 'team-noctx', exists: false },
     ])
-    expect(grantQueries()).toHaveLength(0)
+    expect(grantQueries().map(([, values]) => (values as unknown[])[3])).toEqual([
+      HOST_CONTEXT,
+      HOST_CONTEXT,
+    ])
   })
 
   it('R6b: a context server of the Host Context keys by that Context, ignoring the body contextId', async () => {

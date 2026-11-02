@@ -916,14 +916,14 @@ const OAUTH_USER_PARTITION_MAX = 500
  * oauth servers. Static servers do NOT use this (the manager builds their static
  * provider from the revision-locked getAuthToken route). The sabor is read from
  * the HCC v2 inventory field `server.authKind` (mini-spec §3.2) — never from
- * `auth.type`/`oauth.grantScope`/`contextRef`, which the v2 contract no longer
- * emits:
+ * `auth.type`/`oauth.grantScope`, which the v2 contract no longer emits:
  *
  *  - authKind='oauth-user', principal=userId  → broker (server, {userId})
  *  - authKind='oauth-user', principal=SHARED   → token-less representative
  *  - authKind='oauth-context', principal=any    → broker (server, {}); control-api
- *    resolves the shared grant by server.spec.contextRef server-side, so mcp-host
- *    transports NO context identity (invariant I1).
+ *    resolves the shared grant from the authenticated Host's context (its
+ *    `spec.contextRef`, bound server-side), so mcp-host transports NO context
+ *    identity (invariant I1).
  *  - anything else (static/none/absent)         → token-less; manager owns static.
  *
  * The broker is reached via the workflow-approval gateway (decision #6/B): a
@@ -933,8 +933,8 @@ function createMcpTokenProviderFactory(): McpTokenProviderFactory {
   return (server: McpServerInfo, principal: McpPrincipal): McpTokenProvider => {
     if (server.authKind === 'oauth-context') {
       // Shared identity — one broker grant per (server, context). control-api
-      // keys it by server.spec.contextRef (authoritative) and cross-checks the
-      // body, so mcp-host omits the contextId entirely.
+      // takes the context from the authenticated Host's binding (authoritative),
+      // so mcp-host omits the contextId entirely.
       return createBrokerTokenProvider(server, {}, brokerTokenProviderDeps())
     }
     if (server.authKind === 'oauth-user') {
@@ -3610,7 +3610,6 @@ async function main(): Promise<void> {
       const mcpClientFactory = (server: { name: string; url: string; authToken?: string }) => {
         const info = {
           name: server.name,
-          contextRef: '',
           transport: { type: 'streamableHttp' as const, url: server.url },
           enabled: true,
           status: { deployed: true, ready: true },

@@ -62,10 +62,6 @@ export const MCP_SERVERS_NAMESPACE = requireSafeName(
   'TEST_MCP_SERVERS_NAMESPACE',
   process.env.TEST_MCP_SERVERS_NAMESPACE ?? 'mcp-server'
 )
-export const TEST_CONTEXT_REF = requireSafeName(
-  'TEST_CONTEXT_REF',
-  process.env.TEST_CONTEXT_REF ?? 'context1'
-)
 export const MOCK_MCP_IMAGE = process.env.TEST_MOCK_MCP_IMAGE ?? 'clerum/mock-mcp-server:test'
 
 // Must match the identically-named constants in
@@ -625,7 +621,6 @@ metadata:
   name: ${name}
   namespace: ${namespace}
 spec:
-  contextRef: ${TEST_CONTEXT_REF}
   description: "issue #223 credential-rotation E2E fixture"
   image: ${image}
   transport:
@@ -683,7 +678,6 @@ metadata:
   name: ${name}
   namespace: ${namespace}
 spec:
-  contextRef: ${TEST_CONTEXT_REF}
   description: "issue #223 remote connector credential-rotation E2E fixture"
   image: placeholder-canonicalized-by-hcc
   transport:

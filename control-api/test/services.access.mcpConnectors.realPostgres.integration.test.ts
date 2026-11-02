@@ -111,7 +111,13 @@ describeRealPostgres('resolveConnectorsForAgents tri-state (real Postgres)', () 
   const statusOf = async (g: MockGateway, userId: string, serverName: string) => {
     const agents = await resolveConnectorsForAgents(
       g,
-      { mcpServersNamespace: NS, hostsNamespace: HOSTS_NS, agentNames: ['agent-a'], userId },
+      {
+        mcpServersNamespace: NS,
+        contextsNamespace: NS,
+        hostsNamespace: HOSTS_NS,
+        agentNames: ['agent-a'],
+        userId,
+      },
       db
     )
     return agents[0]?.connectors.find(c => c.name === serverName)?.status

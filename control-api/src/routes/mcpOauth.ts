@@ -76,9 +76,10 @@ import { extractBearerToken } from '../utils/extractBearerToken.js'
  *     from the request body.
  *
  * Flavor dispatch — read from the server's `spec.oauth.grantScope`:
- *   - `user`    → grant key `(server, userId)`   — per-user identity.
- *   - `context` → grant key `(server, contextRef)` — shared identity.
- * Both branches ship in v1; the `context` branch is governed/exercised by U6.
+ *   - `user`    → grant key `(server, userId)` — per-user identity.
+ *   - `context` → grant key `(server, Host's Context)` — shared identity: the
+ *     grant of the calling Host's Context, whichever Context the server is
+ *     also enabled in.
  */
 
 export interface McpServerResource {
@@ -87,10 +88,6 @@ export interface McpServerResource {
     enabled?: unknown
     auth?: { type?: unknown }
     oauth?: McpServerOAuthDecl
-    // `spec.contextRef` is REQUIRED + singular on the CRD ("the context this
-    // server belongs to", mcpserver.yaml). It is the AUTHORITATIVE Context of a
-    // context-identity server — the shared grant coordinate — never the body.
-    contextRef?: unknown
   }
 }
 
@@ -179,7 +176,6 @@ type BrokerDenialReason =
   | 'unauthenticated'
   | 'host_not_bound'
   | 'server_not_found'
-  | 'context_ref_mismatch'
   | 'no_grant'
   | 'unavailable'
 
@@ -203,8 +199,8 @@ export interface GrantExistsQuery {
   userId?: string
   /**
    * Accepted for API fidelity but NEVER used to key a lookup — `context`
-   * servers key by the server's authoritative `contextRef` (server-side). A
-   * lying value therefore cannot change the answer (no body-trust).
+   * servers key by the calling Host's Context (server-side). A lying value
+   * therefore cannot change the answer (no body-trust).
    */
   contextId?: string
 }
@@ -216,7 +212,7 @@ export interface GrantExistsQuery {
  * partitions of the SAME server (different `userId`) must stay distinguishable.
  * `userId`/`contextId` are echoed exactly as the caller sent them: values the
  * caller itself supplied, so echoing them leaks nothing (confirmed in review).
- * Never a token, never the server's authoritative contextRef, never a key.
+ * Never a token, never the Host's Context, never a key.
  */
 export interface GrantExistsResult {
   mcpServerName: string
@@ -271,7 +267,7 @@ function recordBrokerDenial(
 
 /** What one mcp-server contributes to every entry that names it in a batch. */
 type ServerVerdict =
-  | { kind: 'deny'; reason: 'server_not_found' | 'context_ref_mismatch' }
+  | { kind: 'deny'; reason: 'server_not_found' }
   // Cannot be decided now, or nothing to evict: keep the partition. `cause` is
   // set only for a transient read failure, which is reported per entry.
   | { kind: 'error'; cause?: { err: unknown } }
@@ -289,7 +285,6 @@ type ServerVerdict =
  *   - allowlisted but the CR is gone → true: an uninstall in flight is not
  *     this sweep's to evict (the uninstall itself purges grants);
  *   - read error, not an OAuth server, a per-user entry without userId → true;
- *   - context-scope owned by another Context or without one → false;
  *   - per-user: non-UUID userId or a user who cannot enter the Host → false,
  *     a DB error checking that → true;
  *   - otherwise the store decides (`oauthGrantExists`, never the token).
@@ -370,9 +365,6 @@ export async function resolveBatchGrantExistence(
       )
       return { kind: 'error' }
     }
-    if (resolved.grantScope === 'context' && resolved.contextRef !== binding.contextName) {
-      return { kind: 'deny', reason: 'context_ref_mismatch' }
-    }
     return { kind: 'resolved', resolved }
   }
 
@@ -449,10 +441,11 @@ export async function resolveBatchGrantExistence(
       mcpServerName,
       mcpServersNamespace: deps.mcpServersNamespace,
       userId,
+      contextId: binding.contextName,
     })
     if (!key) {
-      // Unreachable: a context server without contextRef was denied above and a
-      // per-user entry without userId answered already. Keep the partition.
+      // Unreachable: the binding always names its Context and a per-user entry
+      // without userId answered already. Keep the partition.
       results.push(echo(true))
       continue
     }
@@ -659,13 +652,6 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'not_oauth_server' })
         }
 
-        // Context-scope: the server's owner must be this Host's Context. Checked
-        // before remote coherence so a foreign owner gets the uniform 404, not
-        // a 409 that would reveal its spec. Any body `contextId` is ignored.
-        if (resolved.grantScope === 'context' && resolved.contextRef !== binding.contextName) {
-          return deny('context_ref_mismatch', 404, SERVER_NOT_FOUND, where)
-        }
-
         // Checked up front, not only through the refresh reader: a still-fresh
         // access token is served without ever reading the owner declaration.
         assertRemoteOAuthSpecCoherent(server, 'token')
@@ -701,15 +687,18 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
           }
           userForKey = userId
         }
+        // A context-scope token is the grant of the calling Host's Context; any
+        // body `contextId` is ignored.
         const key: OAuthGrantKey | null = buildMcpServerGrantKey(resolved, {
           mcpServerName,
           mcpServersNamespace: config.mcpServersNamespace,
           userId: userForKey,
+          contextId: binding.contextName,
         })
         if (!key) {
-          // Unreachable: the guards above already rejected the null cases (a
-          // context server without contextRef never equals the Host's Context).
-          // Fail closed defensively rather than mint against a malformed key.
+          // Unreachable: the binding always names its Context and the per-user
+          // userId was validated above. Fail closed defensively rather than mint
+          // against a malformed key.
           return res.status(400).json({ error: 'invalid_request' })
         }
 
@@ -733,6 +722,7 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
               mcpServerName,
               grantScope: resolved.grantScope,
               oauthClientId: resolved.oauthClientId,
+              ...(resolved.grantScope === 'context' ? { contextName: binding.contextName } : {}),
               outcome,
             },
             'mcp oauth user token issued'

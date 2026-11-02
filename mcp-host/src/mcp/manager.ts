@@ -1046,7 +1046,7 @@ export class McpManager {
    *   - `oauth-user`: every per-user partition (the token-less SHARED
    *     representative carries no grant, so it is deliberately skipped).
    *   - `oauth-context`: the single SHARED partition, which itself holds the
-   *     context grant (control-api keys it by the server's contextRef).
+   *     context grant (control-api keys it by the authenticated Host's context).
    * `static`/`none` servers contribute nothing.
    */
   listLiveOAuthPartitions(): LiveOAuthPartition[] {

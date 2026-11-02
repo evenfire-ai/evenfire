@@ -1,10 +1,28 @@
 // @vitest-environment jsdom
 import React from 'react'
+import type { PropsWithChildren, ReactElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { AuthContext } from '@contexts/AuthContext'
+import type { AuthContextValue } from '@contexts/AuthContext.types'
+import {
+  type RenderOptions,
+  cleanup,
+  screen,
+  render as testingLibraryRender,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { AppHeader } from '../index'
+
+function AuthContextTestWrapper({ children }: PropsWithChildren) {
+  return (
+    <AuthContext.Provider value={{ me: null } as AuthContextValue}>{children}</AuthContext.Provider>
+  )
+}
+
+function render(ui: ReactElement, options?: RenderOptions) {
+  return testingLibraryRender(ui, { ...options, wrapper: AuthContextTestWrapper })
+}
 
 // The titlebar search opens its reusable results surface on focus, even before
 // the user types. The input keeps the short titlebar label while the results

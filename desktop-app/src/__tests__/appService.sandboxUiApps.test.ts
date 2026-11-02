@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { AppService } from '../appService.js'
 import { config } from '../config.js'
 import { ApiError } from '../httpClient.js'
@@ -517,6 +518,29 @@ describe('AppService profile UI link authority', () => {
         '?path=%2Ftasks%2F42&team=team-1',
     })
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
+  })
+
+  it('creates a shareable GFS link with the canonical resource identity', async () => {
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      createGfsResourceDeepLink: (uri: string) => Promise<{ url: string }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn().mockResolvedValue({
+        profileUiBaseUrl: 'https://profile.tenant.example',
+      }),
+    }
+    const resourceUri = 'gfs://main/0123456789abcdef0123456789ABCDEF'
+
+    await expect(service.createGfsResourceDeepLink(resourceUri)).resolves.toEqual({
+      url: buildGfsResourceWebLink('https://profile.tenant.example', resourceUri),
+    })
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledOnce()
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledWith(
+      'user@tenant.example'
+    )
   })
 
   it('fails closed when the explicit Profile UI base is invalid', async () => {

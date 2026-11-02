@@ -13,6 +13,12 @@ import {
   sandboxUiMintFetch,
   startRealMain,
 } from '../../../../src/__tests__/__fixtures__/sandboxUiRealMain'
+import type {
+  GfsResourceDeepLinkQueue,
+  GfsUserNavigationGeneration,
+} from '../../../../src/gfsResourceDeepLinkQueue'
+import { registerDeepLinkAcknowledgmentHandlers } from '../../../../src/ipc'
+import type { SandboxUiDeepLinkQueue } from '../../../../src/sandboxUiDeepLinkQueue'
 import { getActiveSandboxUi, getActiveSandboxUiLocation } from '../../../../src/sandboxUiDriver'
 import {
   SANDBOX_UI_COOKIE_TTL_MS,
@@ -20,7 +26,7 @@ import {
   SANDBOX_UI_REFRESH_INTERVAL_MS,
   SANDBOX_UI_RETRY_GRACE_MS,
 } from '../../../../src/sandboxUiSessionRefresh'
-import type { SandboxUiReleasedEvent } from '../../../../src/types'
+import type { DeepLinkAcknowledgmentAuthority, SandboxUiReleasedEvent } from '../../../../src/types'
 
 /**
  * The trusted renderer's `window.clerum.sandboxUi` lifecycle bridge, backed by
@@ -59,6 +65,12 @@ type HeldMint = {
   recipe: { name: string; ns: string } | null
 }
 
+export type SandboxUiSessionInvalidation = {
+  sessionGeneration: number
+  appDeepLinkMinimumId: number
+  gfsDeepLinkMinimumId: number
+}
+
 // Captured before any test fakes timers: the wire runs on real macrotasks, so a
 // suite that fakes timers for its own clock does not freeze IPC.
 const realSetImmediate = globalThis.setImmediate.bind(globalThis)
@@ -74,6 +86,7 @@ export function createSandboxUiMainFake() {
     (event: { appRef: string; launchId: string; message: string }) => void
   >()
   const refreshRecoveredListeners = new Set<(event: { appRef: string; launchId: string }) => void>()
+  const sessionInvalidatedListeners = new Set<(event: SandboxUiSessionInvalidation) => void>()
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'clerum-sandbox-ui-main-'))
   const openMints: MintDecision[] = []
   let failNextMount: Error | null = null
@@ -130,6 +143,11 @@ export function createSandboxUiMainFake() {
         case 'sandboxUi:refreshRecovered':
           for (const listener of [...refreshRecoveredListeners]) {
             listener(payload as { appRef: string; launchId: string })
+          }
+          return
+        case 'sandboxUi:sessionInvalidated':
+          for (const listener of [...sessionInvalidatedListeners]) {
+            listener(payload as SandboxUiSessionInvalidation)
           }
       }
     })
@@ -189,7 +207,27 @@ export function createSandboxUiMainFake() {
       })
   }
 
-  const main: RealMain = startRealMain({ userDataDir, mint, onSend: fromMain, onLoad })
+  let clearSessionOwnedDeepLinks: () => {
+    appDeepLinkMinimumId: number
+    gfsDeepLinkMinimumId: number
+  } | void = () => ({
+    appDeepLinkMinimumId: 1,
+    gfsDeepLinkMinimumId: 1,
+  })
+  const main: RealMain = startRealMain({
+    userDataDir,
+    mint,
+    onSend: fromMain,
+    onLoad,
+    onSessionInvalidated: sessionGeneration => {
+      const queueFloors = clearSessionOwnedDeepLinks() ?? {
+        appDeepLinkMinimumId: 1,
+        gfsDeepLinkMinimumId: 1,
+      }
+      fromMain('sandboxUi:sessionInvalidated', { sessionGeneration, ...queueFloors })
+      return queueFloors
+    },
+  })
   vi.stubGlobal('fetch', sandboxUiMintFetch)
   const attach = main.parent.contentView.addChildView.getMockImplementation() as (
     view: unknown
@@ -235,6 +273,8 @@ export function createSandboxUiMainFake() {
   }
 
   return {
+    /** The actual AppService whose lifecycle produces session invalidation. */
+    service: main.service,
     bridge: {
       open,
       close,
@@ -261,6 +301,31 @@ export function createSandboxUiMainFake() {
           return () => refreshRecoveredListeners.delete(listener)
         }
       ),
+      onSessionInvalidated: vi.fn((listener: (event: SandboxUiSessionInvalidation) => void) => {
+        sessionInvalidatedListeners.add(listener)
+        return () => sessionInvalidatedListeners.delete(listener)
+      }),
+    },
+    useDeepLinkQueues(
+      appQueue: SandboxUiDeepLinkQueue,
+      gfsQueue: GfsResourceDeepLinkQueue,
+      navigation: GfsUserNavigationGeneration
+    ): void {
+      registerDeepLinkAcknowledgmentHandlers(main.service, () => main.parent as never, {
+        appQueue,
+        gfsQueue,
+        navigation,
+      })
+    },
+    acknowledgeHeldAppDeepLink: (id: number, authority: DeepLinkAcknowledgmentAuthority) =>
+      send('sandboxUi:acknowledgeDeepLink', { id, authority }) as Promise<boolean>,
+    acknowledgeHeldResourceDeepLink: (id: number, authority: DeepLinkAcknowledgmentAuthority) =>
+      send('gfs:acknowledgeDeepLink', { id, authority }) as Promise<boolean>,
+    /** The main bridge clears exactly the test queue owned by the prior session. */
+    setSessionInvalidationCleanup(
+      cleanup: () => { appDeepLinkMinimumId: number; gfsDeepLinkMinimumId: number } | void
+    ): void {
+      clearSessionOwnedDeepLinks = cleanup
     },
     /** The open request of the `index`-th open call. */
     openCall(index: number): SandboxUiOpenCall {
@@ -346,8 +411,8 @@ export function createSandboxUiMainFake() {
       return toRendererLane
     },
     /** The user signs out or signs in over the live session. */
-    endSession(): void {
-      main.invalidateSession()
+    endSession(sessionGeneration?: number): void {
+      main.invalidateSession(sessionGeneration)
     },
     /**
      * The live app changes its document title. Resolves once main's report of

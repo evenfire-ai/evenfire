@@ -39,7 +39,6 @@ function makeRemoteServer(): McpServerCRD {
     namespace: 'mcp-server',
     uid: 'test-uid-123',
     spec: {
-      contextRef: 'context1',
       image: 'clerum/nginx-egress-proxy:0.1.0',
       transport: { type: 'streamableHttp', port: 3000 },
       remote: { baseUrl: 'https://mcp.sentry.io/sse' },

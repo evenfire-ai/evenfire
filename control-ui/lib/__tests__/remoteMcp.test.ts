@@ -231,7 +231,6 @@ describe('buildRemoteInstallRequest', () => {
   it('omits credentials for non-pre-registered modes and trims fields', () => {
     const body = buildRemoteInstallRequest({
       serverName: '  notion-remote ',
-      contextRef: 'research',
       baseUrl: '  https://mcp.notion.com/mcp  ',
       mode: 'cimd',
       grantScope: 'user',
@@ -240,7 +239,6 @@ describe('buildRemoteInstallRequest', () => {
     })
     expect(body).toEqual({
       serverName: 'notion-remote',
-      contextRef: 'research',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'cimd',
       grantScope: 'user',
@@ -252,7 +250,6 @@ describe('buildRemoteInstallRequest', () => {
   it('includes credentials for the pre-registered mode', () => {
     const body = buildRemoteInstallRequest({
       serverName: 'atlassian',
-      contextRef: 'research',
       baseUrl: 'https://mcp.atlassian.com/mcp',
       mode: 'pre-registered',
       grantScope: 'context',
@@ -269,7 +266,6 @@ describe('buildRemoteInstallRequest', () => {
   it('sends the Entra fields only when set, and confirmations only when non-empty', () => {
     const base = {
       serverName: 'workiq',
-      contextRef: 'research',
       baseUrl: 'https://workiq.svc.cloud.microsoft/mcp',
       mode: 'pre-registered' as const,
       grantScope: 'user' as const,
