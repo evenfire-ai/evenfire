@@ -457,7 +457,6 @@ function fixture(
     db,
     engine: testEngine,
     createUncachedEngine: createEngine,
-    requestedUrls,
     rememberBrowserBinding(state: string, binding: string) {
       browserBindings.set(state, binding)
     },
