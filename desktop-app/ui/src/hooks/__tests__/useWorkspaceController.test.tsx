@@ -184,7 +184,7 @@ describe('useWorkspaceController', () => {
 
     await waitFor(() => expect(clerum.passwordLogin).toHaveBeenCalledWith('test@clerum.io', 'test'))
     await waitFor(() => expect(clerum.getSessionState).toHaveBeenCalledTimes(2))
-    await waitFor(() => expect(clerum.getDesktopReleaseStatus).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(clerum.getDesktopReleaseStatus).toHaveBeenCalledTimes(2))
 
     expect(screen.getByTestId('busy').textContent).toBe('true')
 
