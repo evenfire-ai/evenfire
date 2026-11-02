@@ -5,6 +5,7 @@ import { ConversationManager } from '../../core/conversation/conversation'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { ATTACHMENT_SAVE_INSTRUCTION } from '../../core/orchestration/turnContext'
 import { type ChatMessage, FinishReason, type ToolDefinition } from '../../core/types'
+import * as gfsClient from '../../internalTools/gfsClient'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { PNG_2X2_BASE64 } from '../../llm/__tests__/codexImageFixtures'
 import type { ImageInputResolver } from '../../llm/imageInput'
@@ -12,6 +13,11 @@ import type { SingleTurnProvider } from '../../llm/types'
 import { McpManager } from '../../mcp/manager'
 import type { Task } from '../../queue/types'
 import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
+
+vi.mock('../../internalTools/gfsClient', async importOriginal => {
+  const original = await importOriginal<typeof import('../../internalTools/gfsClient')>()
+  return { ...original, getGfsToolScopes: vi.fn(original.getGfsToolScopes) }
+})
 
 const ACCESS_ENV = `MCP_HOST_GFS_${String.fromCharCode(84, 79, 75, 69, 78)}`
 const previousAccess = process.env[ACCESS_ENV]
@@ -119,6 +125,8 @@ describe('attachment save context through a complete task', () => {
   }
 
   afterEach(() => {
+    // Restores the real implementation and drops unconsumed one-shot values.
+    vi.mocked(gfsClient.getGfsToolScopes).mockReset()
     Object.assign(appConfig, saved)
     if (previousAccess === undefined) delete process.env[ACCESS_ENV]
     else process.env[ACCESS_ENV] = previousAccess
@@ -158,5 +166,32 @@ describe('attachment save context through a complete task', () => {
     expect(providerTools[0]!.map(tool => tool.name)).toContain('clerum__gfs_read')
     expect(lastUserText(providerCalls[0]!)).toBe(userContent)
     expect(providerTools[0]!.map(tool => tool.name)).not.toContain('clerum__gfs_save_attachment')
+  })
+
+  it('offers the instruction exactly when the save tool is registered, even if scopes change mid-turn', async () => {
+    Object.assign(appConfig, {
+      enableApproval: false,
+      dynamicToolsEnabled: false,
+      promptCacheEnabled: false,
+    })
+    process.env[ACCESS_ENV] = encodedClaims(['gfs.read', 'gfs.write'])
+    // A token rotated mid-turn: the first scope lookup sees gfs.write, every
+    // later one sees gfs.read only. A turn that looked scopes up twice would
+    // offer the instruction without the tool.
+    vi.mocked(gfsClient.getGfsToolScopes)
+      .mockReturnValueOnce(new Set(['gfs.read', 'gfs.write'] as const))
+      .mockReturnValue(new Set(['gfs.read'] as const))
+    const { deps, executor, providerCalls, providerTools } = await runTask()
+
+    expect(deps.onFail).not.toHaveBeenCalled()
+    expect(executor.executorState).toBe('completed')
+    expect(providerCalls).toHaveLength(1)
+    // Witness: the registry looked scopes up and supplied GFS tools.
+    expect(gfsClient.getGfsToolScopes).toHaveBeenCalled()
+    const toolNames = providerTools[0]!.map(tool => tool.name)
+    expect(toolNames).toContain('clerum__gfs_read')
+    expect(lastUserText(providerCalls[0]!).includes(ATTACHMENT_SAVE_INSTRUCTION)).toBe(
+      toolNames.includes('clerum__gfs_save_attachment')
+    )
   })
 })

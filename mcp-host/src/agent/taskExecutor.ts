@@ -20,7 +20,6 @@ import {
   mergeAttachmentReadLedgerSnapshots,
   readAttachmentReadLedgerSnapshot,
 } from '../core/attachments/attachmentReadBudget'
-import { attachmentSaveAvailable } from '../core/attachments/attachmentSave'
 import { compactConversation } from '../core/conversation/compaction'
 import { ConversationManager } from '../core/conversation/conversation'
 import { deriveAutoTitle } from '../core/conversation/sessionTitle'
@@ -110,7 +109,7 @@ import type {
 import { ApprovalExpiredError } from '../core/types'
 import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
-import { getGfsToolScopes } from '../internalTools/gfsClient'
+import { GFS_SAVE_ATTACHMENT_TOOL } from '../internalTools/gfs'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
@@ -1257,19 +1256,19 @@ export class TaskExecutor {
     const hasFileAttachments =
       this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
     const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
-    const saveAvailable = attachmentSaveAvailable(
-      getGfsToolScopes({ get: key => process.env[key] }),
-      this.task.sourceMessage?.attachments
-    )
+    const promptAssemblyStart = Date.now()
+    const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
+    const promptAssemblyMs = Date.now() - promptAssemblyStart
+    // The save instruction follows the registry that was actually built, so it
+    // appears exactly when the model can call the tool.
+    const saveAvailable = loopConfig.toolRegistry.get(GFS_SAVE_ATTACHMENT_TOOL) !== null
     if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences || saveAvailable) {
       this.prependTurnContextBlock(messages, saveAvailable)
     }
-    const promptAssemblyStart = Date.now()
-    const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
     if (this.turnTiming) {
       // buildLoopConfig assembles the tool registry (MCP schemas) and the
       // system identity (workspace files / tiered prompt parts).
-      this.turnTiming.addPromptAssemblyMs(Date.now() - promptAssemblyStart)
+      this.turnTiming.addPromptAssemblyMs(promptAssemblyMs)
       let inputChars = 0
       for (const m of messages) {
         if (typeof m.content === 'string') inputChars += m.content.length

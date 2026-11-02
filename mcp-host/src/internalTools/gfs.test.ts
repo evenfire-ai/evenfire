@@ -13,7 +13,7 @@ import {
   buildGfsWriteTools,
 } from './gfs'
 import { GfscHttpError } from './gfsClient'
-import { GFS_LEGACY_WRITE_MAX_BYTES } from './gfsFilePolicy'
+import { GFS_JSON_WRITE_MAX_BODY_BYTES } from './gfsFilePolicy'
 
 /**
  * P3-S04 — agent gfs READ tools. Four read-only tools (list/read/stat/resolve)
@@ -347,30 +347,58 @@ describe('buildGfsWriteTools (P4)', () => {
       expect(c.createFileFromBytes).not.toHaveBeenCalled()
     })
 
-    it('rejects an attachment over the legacy write ceiling without writing', async () => {
+    it('rejects an attachment whose write request would exceed gfsc body bound', async () => {
+      // gfsc bounds the JSON body, not the decoded file: base64 plus the
+      // envelope must fit, so the largest saveable file is about 3/4 of it.
+      const envelope = Buffer.byteLength(
+        JSON.stringify({ name: file.filename, kind: 'file', contentBase64: '' })
+      )
+      const maxEncoded = Math.floor((GFS_JSON_WRITE_MAX_BODY_BYTES - envelope) / 4) * 4
+      const maxBytes = (maxEncoded / 4) * 3
       const c = writeClient()
-      const big = {
-        ...file,
-        id: 'big',
-        dataBase64: Buffer.alloc(GFS_LEGACY_WRITE_MAX_BYTES + 1).toString('base64'),
+      for (const bytes of [maxBytes + 1, GFS_JSON_WRITE_MAX_BODY_BYTES]) {
+        const big = { ...file, id: 'big', dataBase64: Buffer.alloc(bytes).toString('base64') }
+        const r = await tool(c, [big]).execute({ ...target, attachmentId: 'big' }, '')
+        expect(r).toEqual({ success: false, error: expect.stringMatching(/^limit_exceeded:/) })
       }
-      const r = await tool(c, [big]).execute({ ...target, attachmentId: 'big' }, '')
-      expect(r).toEqual({ success: false, error: expect.stringMatching(/^limit_exceeded:/) })
       expect(c.createFileFromBytes).not.toHaveBeenCalled()
-      // Boundary twin: exactly at the ceiling is written.
-      const atCap = {
-        ...file,
-        id: 'cap',
-        dataBase64: Buffer.alloc(GFS_LEGACY_WRITE_MAX_BYTES).toString('base64'),
-      }
+      // Boundary twin: the largest file whose body fits is written, and its
+      // body is exactly within the bound.
+      const atCap = { ...file, id: 'cap', dataBase64: Buffer.alloc(maxBytes).toString('base64') }
       const ok = await tool(c, [atCap]).execute({ ...target, attachmentId: 'cap' }, '')
       expect(ok.success).toBe(true)
       expect(c.createFileFromBytes).toHaveBeenCalledTimes(1)
+      const [args] = vi.mocked(c.createFileFromBytes).mock.calls[0]!
+      const body = JSON.stringify({
+        name: args.name,
+        kind: 'file',
+        contentBase64: args.contentBase64,
+      })
+      expect(Buffer.byteLength(body)).toBeLessThanOrEqual(GFS_JSON_WRITE_MAX_BODY_BYTES)
     })
 
-    it('rejects an attachment without a name or without bytes', async () => {
+    it('saves an image without a usable name under its generated name', async () => {
       const c = writeClient()
-      const unnamed = { ...image, id: 'unnamed', filename: undefined }
+      const unnamed = { ...image, id: 'pasted-1', filename: undefined }
+      const pathLike = { ...image, id: 'pasted-2', filename: 'shots/a.png' }
+      const t = tool(c, [unnamed, pathLike])
+      for (const [id, name] of [
+        ['pasted-1', 'image-pasted-1.png'],
+        ['pasted-2', 'image-pasted-2.png'],
+      ] as const) {
+        const r = await t.execute({ ...target, attachmentId: id }, '')
+        expect(r.success).toBe(true)
+        expect(JSON.parse(r.content!)).toMatchObject({ attachmentId: id, name })
+      }
+      expect(vi.mocked(c.createFileFromBytes).mock.calls.map(([args]) => args.name)).toEqual([
+        'image-pasted-1.png',
+        'image-pasted-2.png',
+      ])
+    })
+
+    it('rejects a file attachment without a usable name or without bytes', async () => {
+      const c = writeClient()
+      const unnamed = { ...file, id: 'unnamed', filename: undefined }
       const resumed = { ...file, id: 'resumed' } as Partial<Attachment>
       delete resumed.dataBase64
       const t = tool(c, [unnamed, resumed as Attachment])

@@ -228,7 +228,10 @@ export function installSignalRestore(target, restore, write = text => process.st
  * (ECONNRESET). No idle socket is kept across a blocking call.
  */
 export function controlApiFetch(url, init = {}) {
-  return fetch(url, { ...init, headers: { ...init.headers, connection: 'close' } })
+  // Headers accepts a plain object, a Headers instance or tuples alike.
+  const headers = new Headers(init.headers)
+  headers.set('connection', 'close')
+  return fetch(url, { ...init, headers })
 }
 
 function command(binary, args, { input, timeout = 60_000, env = process.env } = {}) {

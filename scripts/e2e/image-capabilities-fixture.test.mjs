@@ -423,3 +423,26 @@ test('control-api requests never reuse a socket across a blocking call', async (
     await new Promise(resolve => server.close(resolve))
   }
 })
+
+test('controlApiFetch keeps every caller header whatever form it is passed in', async () => {
+  const seen = []
+  const server = http.createServer((request, response) => {
+    seen.push({ cookie: request.headers.cookie, connection: request.headers.connection })
+    response.end('{}')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/`
+    for (const headers of [
+      { Cookie: 'session=1' },
+      new Headers({ Cookie: 'session=1' }),
+      [['Cookie', 'session=1']],
+    ]) {
+      const response = await controlApiFetch(url, { headers })
+      await response.text()
+    }
+    assert.deepEqual(seen, Array(3).fill({ cookie: 'session=1', connection: 'close' }))
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+  }
+})

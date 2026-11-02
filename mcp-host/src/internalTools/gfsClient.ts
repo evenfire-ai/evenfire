@@ -163,6 +163,21 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
   return withAbort(wait, signal).finally(() => clearTimeout(timer))
 }
 
+function createFileFromBytesPayload(name: string, contentBase64: string) {
+  return { name, kind: 'file' as const, contentBase64 }
+}
+
+/**
+ * Bytes of the JSON body `createFileFromBytes` sends, without building it.
+ * gfsc bounds that body (not the decoded file), and base64 characters need no
+ * JSON escaping, so the body is the empty-content body plus the encoded length.
+ */
+export function createFileFromBytesBodyBytes(name: string, contentBase64: string): number {
+  return (
+    Buffer.byteLength(JSON.stringify(createFileFromBytesPayload(name, ''))) + contentBase64.length
+  )
+}
+
 export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions): GfscWriteClient {
   const { maxRetryWaitMs, random = Math.random } = options
   if (!Number.isFinite(maxRetryWaitMs) || maxRetryWaitMs < 0) {
@@ -361,7 +376,7 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ name, kind: 'file', contentBase64 }),
+          body: JSON.stringify(createFileFromBytesPayload(name, contentBase64)),
         },
         call
       ),

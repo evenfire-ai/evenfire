@@ -7,6 +7,7 @@ import {
   type GfsRuntimeEnv,
   type GfsToolScopeInspection,
   GfscHttpError,
+  createFileFromBytesBodyBytes,
   createGfscClient,
   getGfsToolScopes,
   hasGfsRuntimeAccess,
@@ -254,6 +255,28 @@ describe('gfs runtime gfsc client', () => {
     expect(body).toEqual({ name: 'logo.png', kind: 'file', contentBase64 })
     expect(body).not.toHaveProperty('content')
     expect(Buffer.from(body.contentBase64, 'base64').equals(png)).toBe(true)
+  })
+
+  it('measures the exact body createFileFromBytes sends, escaped names included', async () => {
+    for (const name of ['logo.png', 'quote " and \\ back.png', 'caf\u00e9 \u{1F600}.bin', '']) {
+      for (const contentBase64 of ['', 'eA==', Buffer.alloc(1000, 7).toString('base64')]) {
+        const fetchFn = vi.fn(async (_input: string, _init?: RequestInit) =>
+          jsonResponse({ ok: true, data: {} })
+        )
+        const client = createGfscClient(
+          { get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined), fetch: fetchFn },
+          clientOptions
+        )
+        await client.createFileFromBytes({
+          drive: 'main',
+          parentResourceId: 'p',
+          name,
+          contentBase64,
+        })
+        const sent = Buffer.byteLength(String(fetchFn.mock.calls[0]?.[1]?.body))
+        expect(createFileFromBytesBodyBytes(name, contentBase64)).toBe(sent)
+      }
+    }
   })
 
   it('fails loud when the mounted runtime token file is empty', async () => {

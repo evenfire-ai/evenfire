@@ -1,6 +1,6 @@
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
-import { decodedBase64Length } from '../core/attachments/attachmentSave'
+import { attachmentSaveName } from '../core/attachments/attachmentSave'
 import type { Attachment } from '../core/types'
 import { logger } from '../logger'
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
@@ -12,7 +12,7 @@ import type {
   InternalToolExecutionOptions,
   InternalToolResult,
 } from '../workflow/types'
-import { GfscHttpError } from './gfsClient'
+import { GfscHttpError, createFileFromBytesBodyBytes } from './gfsClient'
 import { GfsDownloadError } from './gfsContentDownload'
 import type { GfsDownloadOptions, GfsDownloadResult } from './gfsContentDownload'
 import { type GfsMetadataSnapshot, normalizeRid } from './gfsContentRead'
@@ -23,7 +23,7 @@ import {
   recordGfsDownloadTransfer,
 } from './gfsDownloadMetrics'
 import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
-import { GFS_FILE_LIMITS, GFS_LEGACY_WRITE_MAX_BYTES } from './gfsFilePolicy'
+import { GFS_FILE_LIMITS, GFS_JSON_WRITE_MAX_BODY_BYTES } from './gfsFilePolicy'
 import {
   GFS_LOCAL_PROCESSING_GUIDANCE,
   type GfsFileContent,
@@ -1026,12 +1026,14 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
   ]
 }
 
+export const GFS_SAVE_ATTACHMENT_TOOL = 'clerum__gfs_save_attachment'
+
 /**
  * Saves an attachment of the turn's own message into a gfs folder. The Host
  * resolves the id against that message only and forwards the admitted base64
  * unchanged, so the model never carries the bytes and cannot write bytes it
- * was not given. The file keeps its attached name; rename afterwards with
- * clerum__gfs_rename.
+ * was not given. The file is named by attachmentSaveName, the name its
+ * turn-context line shows; rename afterwards with clerum__gfs_rename.
  */
 export function buildGfsAttachmentSaveTools(
   client: GfscWriteClient,
@@ -1039,10 +1041,10 @@ export function buildGfsAttachmentSaveTools(
 ): InternalToolDefinition[] {
   return [
     {
-      name: 'clerum__gfs_save_attachment',
+      name: GFS_SAVE_ATTACHMENT_TOOL,
       description:
         'Save a file or image attached to the current message into an existing gfs folder, byte for byte. ' +
-        'Pass the id of its attached_file or attached_image line. The new file keeps the attached name. ' +
+        'Pass the id of its attached_file or attached_image line. The new file is named as that line shows. ' +
         'If a file with that name already ' +
         'exists in the folder the save fails with conflict: tell the user and do not rename or replace ' +
         'their files unless they ask.',
@@ -1080,16 +1082,19 @@ export function buildGfsAttachmentSaveTools(
             'bytes_unavailable_after_restart: ask the user to attach the file again in a new message'
           )
         }
-        const name = attachment.filename?.trim()
-        if (!name) {
+        const name = attachmentSaveName(attachment)
+        if (name === null) {
           return invalidArgs(
             'attachment_name_missing: this attachment has no name to save it under'
           )
         }
-        const bytes = decodedBase64Length(attachment.dataBase64)
-        if (bytes > GFS_LEGACY_WRITE_MAX_BYTES) {
+        const bytes = Buffer.byteLength(attachment.dataBase64, 'base64')
+        if (
+          createFileFromBytesBodyBytes(name, attachment.dataBase64) > GFS_JSON_WRITE_MAX_BODY_BYTES
+        ) {
           return invalidArgs(
-            `limit_exceeded: attachments larger than ${GFS_LEGACY_WRITE_MAX_BYTES} bytes cannot be saved`
+            `limit_exceeded: this ${bytes}-byte attachment is too large to save; base64 content ` +
+              `must fit a ${GFS_JSON_WRITE_MAX_BODY_BYTES}-byte write request`
           )
         }
         try {
