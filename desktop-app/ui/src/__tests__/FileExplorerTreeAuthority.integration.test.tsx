@@ -93,7 +93,6 @@ let delivered: unknown
 let activeClient: GfsClient | null = null
 let releaseResponse: (() => void) | null = null
 let releaseMoveRetryResponse: (() => void) | null = null
-let releaseMoveCommitResponse: (() => void) | null = null
 const servers: Server[] = []
 
 const service = {
@@ -149,24 +148,11 @@ async function startChildServer(status: number, code: string, message: string) {
   releaseResponse = () => responseGate.resolve()
 }
 
-async function mountMoveRetryScenario(
-  retryFailure: {
-    status: number
-    code: string
-    message: string
-  },
-  raceCommit = false,
-  dragMode = false
-) {
+async function mountDragAuthorityScenario() {
   const retryGate = deferred<void>()
-  const commitGate = deferred<void>()
   let markRetryStarted!: () => void
-  let markMoveStarted!: () => void
   const retryStarted = new Promise<void>(resolve => {
     markRetryStarted = resolve
-  })
-  const moveStarted = new Promise<void>(resolve => {
-    markMoveStarted = resolve
   })
   let retryPhase = false
   let staleResponseServed = false
@@ -212,11 +198,11 @@ async function mountMoveRetryScenario(
         markRetryStarted()
         await retryGate.promise
         staleResponseServed = true
-        response.writeHead(retryFailure.status, { 'content-type': 'application/json' })
+        response.writeHead(401, { 'content-type': 'application/json' })
         response.end(
           JSON.stringify({
             ok: false,
-            error: { code: retryFailure.code, message: retryFailure.message },
+            error: { code: 'unauthenticated', message: 'unauthenticated' },
           })
         )
         return
@@ -233,18 +219,6 @@ async function mountMoveRetryScenario(
     }
     if (request.method === 'PATCH' && url.pathname.endsWith('/move-report')) {
       moveRequests += 1
-      if (raceCommit) {
-        markMoveStarted()
-        await commitGate.promise
-        response.writeHead(retryFailure.status, { 'content-type': 'application/json' })
-        response.end(
-          JSON.stringify({
-            ok: false,
-            error: { code: retryFailure.code, message: retryFailure.message },
-          })
-        )
-        return
-      }
       retryPhase = true
       response.writeHead(403, { 'content-type': 'application/json' })
       response.end(
@@ -269,7 +243,6 @@ async function mountMoveRetryScenario(
     fetchBytes: async () => new ArrayBuffer(0),
   })
   releaseMoveRetryResponse = () => retryGate.resolve()
-  releaseMoveCommitResponse = () => commitGate.resolve()
 
   Object.defineProperty(window, 'clerum', {
     configurable: true,
@@ -302,63 +275,35 @@ async function mountMoveRetryScenario(
       throw new Error(`Files location did not open; IPC errors: ${JSON.stringify(electron.errors)}`)
     }
   )
-  if (dragMode) {
-    await screen.findByRole('button', { name: 'Archive' })
-    return {
-      queryClient,
-      get moveRequests() {
-        return moveRequests
-      },
-      get currentAffordanceReads() {
-        return currentAffordanceReads
-      },
-      beginDrag: async () => {
-        retryPhase = true
-        const sourceButton = screen.getByRole('button', { name: 'Report.txt' })
-        const targetButton = screen.getByRole('button', { name: 'Archive' })
-        const targetRow = targetButton
-          .closest('[role="treeitem"]')!
-          .querySelector('.da-file-explorer__row')!
-        const dataTransfer = {
-          types: ['application/x-evenfire-gfs-resource'],
-          files: [],
-          effectAllowed: 'move',
-          dropEffect: 'none',
-          setData: vi.fn(),
-        }
-        fireEvent.dragStart(sourceButton, { dataTransfer })
-        fireEvent.dragEnter(targetRow, { dataTransfer })
-        fireEvent.dragOver(targetRow, { dataTransfer })
-        fireEvent.drop(targetRow, { dataTransfer })
-        await retryStarted
-      },
-      publishRenewedGeneration: () => {
-        generation = 8
-        auth.generation = 8
-        view.rerender(surface())
-      },
-    }
-  }
-  fireEvent.keyDown(screen.getByRole('button', { name: 'Report.txt' }), {
-    key: 'F10',
-    shiftKey: true,
-  })
-  const dialog = await screen.findByRole('dialog', { name: 'Move file Report.txt' })
-  fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
-  if (raceCommit) {
-    await moveStarted
-  } else {
-    fireEvent.click(await within(dialog).findByRole('button', { name: 'Retry permission check' }))
-    await retryStarted
-  }
-
+  await screen.findByRole('button', { name: 'Archive' })
   return {
     queryClient,
+    get moveRequests() {
+      return moveRequests
+    },
     get currentAffordanceReads() {
       return currentAffordanceReads
     },
-    releaseCommitResponse: () => commitGate.resolve(),
+    beginDrag: async () => {
+      retryPhase = true
+      const sourceButton = screen.getByRole('button', { name: 'Report.txt' })
+      const targetButton = screen.getByRole('button', { name: 'Archive' })
+      const targetRow = targetButton
+        .closest('[role="treeitem"]')!
+        .querySelector('.da-file-explorer__row')!
+      const dataTransfer = {
+        types: ['application/x-evenfire-gfs-resource'],
+        files: [],
+        effectAllowed: 'move',
+        dropEffect: 'none',
+        setData: vi.fn(),
+      }
+      fireEvent.dragStart(sourceButton, { dataTransfer })
+      fireEvent.dragEnter(targetRow, { dataTransfer })
+      fireEvent.dragOver(targetRow, { dataTransfer })
+      fireEvent.drop(targetRow, { dataTransfer })
+      await retryStarted
+    },
     publishRenewedGeneration: () => {
       generation = 8
       auth.generation = 8
@@ -395,8 +340,6 @@ afterEach(async () => {
   releaseResponse = null
   releaseMoveRetryResponse?.()
   releaseMoveRetryResponse = null
-  releaseMoveCommitResponse?.()
-  releaseMoveCommitResponse = null
   await Promise.all(
     servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))
   )
@@ -476,11 +419,7 @@ async function mount(status: number, code: string, message: string) {
 
 describe('FileExplorerTree expanded-folder authority handoff', () => {
   it('preserves sibling Files after a stale drag affordance 401', async () => {
-    const mounted = await mountMoveRetryScenario(
-      { status: 401, code: 'unauthenticated', message: 'unauthenticated' },
-      false,
-      true
-    )
+    const mounted = await mountDragAuthorityScenario()
     await mounted.beginDrag?.()
     generation = 8
     releaseMoveRetryResponse?.()
@@ -536,113 +475,6 @@ describe('FileExplorerTree expanded-folder authority handoff', () => {
     await waitFor(() => expect(delivered).toBeInstanceOf(Error))
     expect(screen.getByTestId('access').textContent).toBe('revoked')
     expect(screen.getByTestId('location').textContent).toBe('no-location')
-  })
-
-  it.each([
-    {
-      label: 'stale 401 after renewal',
-      failure: { status: 401, code: 'unauthenticated', message: 'unauthenticated' },
-      renew: true,
-      expectedAccess: 'active',
-      expectedLocation: currentUri,
-    },
-    {
-      label: 'current-session 401',
-      failure: { status: 401, code: 'unauthenticated', message: 'unauthenticated' },
-      renew: false,
-      expectedAccess: 'revoked',
-      expectedLocation: 'no-location',
-    },
-    {
-      label: 'current lifecycle 403',
-      failure: { status: 403, code: 'desktop_user_retired', message: 'desktop_user_retired' },
-      renew: false,
-      expectedAccess: 'revoked',
-      expectedLocation: 'no-location',
-    },
-    {
-      label: 'resource-local 403',
-      failure: { status: 403, code: 'forbidden', message: 'forbidden' },
-      renew: false,
-      expectedAccess: 'active',
-      expectedLocation: currentUri,
-    },
-    {
-      label: 'missing resource 404',
-      failure: { status: 404, code: 'not_found', message: 'not found' },
-      renew: false,
-      expectedAccess: 'active',
-      expectedLocation: currentUri,
-    },
-  ])(
-    'preserves Move retry authority semantics for $label',
-    async ({ failure, renew, expectedAccess, expectedLocation }) => {
-      const mounted = await mountMoveRetryScenario(failure)
-
-      if (renew) generation = 8
-      releaseMoveRetryResponse?.()
-      await waitFor(() =>
-        expect(
-          electron.errors.some(
-            message =>
-              message.includes('gfs:affordances') &&
-              (renew
-                ? message.includes('__CLERUM_GFS_STALE_AUTHORITY_V1__:stale:')
-                : message.includes(failure.code))
-          )
-        ).toBe(true)
-      )
-      await waitFor(() => expect(screen.getByTestId('access').textContent).toBe(expectedAccess))
-      await waitFor(() => expect(screen.getByTestId('location').textContent).toBe(expectedLocation))
-
-      if (renew) {
-        expect(screen.getByRole('dialog', { name: 'Move file Report.txt' })).toBeTruthy()
-        await mounted.publishRenewedGeneration()
-        await waitFor(() => expect(screen.getByTestId('access').textContent).toBe('active'))
-        await waitFor(() => expect(screen.getByTestId('location').textContent).toBe(currentUri))
-        const affordancesBeforeRetry = mounted.currentAffordanceReads
-        fireEvent.click(screen.getByRole('button', { name: 'Refresh current Files permissions' }))
-        await waitFor(() =>
-          expect(mounted.currentAffordanceReads).toBeGreaterThan(affordancesBeforeRetry)
-        )
-        expect(screen.getByTestId('access').textContent).toBe('active')
-        expect(screen.getByTestId('location').textContent).toBe(currentUri)
-      }
-    }
-  )
-
-  it('keeps a stale Move commit 401 from revoking sibling Files state', async () => {
-    const mounted = await mountMoveRetryScenario(
-      { status: 401, code: 'unauthenticated', message: 'unauthenticated' },
-      true
-    )
-    generation = 8
-    mounted.releaseCommitResponse?.()
-    await waitFor(() =>
-      expect(
-        electron.errors.some(
-          message =>
-            message.includes('gfs:moveResource') &&
-            message.includes('__CLERUM_GFS_STALE_AUTHORITY_V1__:stale:')
-        )
-      ).toBe(true)
-    )
-    await waitFor(() =>
-      expect(screen.queryByRole('dialog', { name: 'Move file Report.txt' })).toBeNull()
-    )
-    expect(screen.getByTestId('access').textContent).toBe('active')
-    expect(screen.getByTestId('location').textContent).toBe(currentUri)
-
-    await mounted.publishRenewedGeneration()
-    await waitFor(() => expect(screen.getByTestId('access').textContent).toBe('active'))
-    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe(currentUri))
-    const affordancesBeforeRetry = mounted.currentAffordanceReads
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh current Files permissions' }))
-    await waitFor(() =>
-      expect(mounted.currentAffordanceReads).toBeGreaterThan(affordancesBeforeRetry)
-    )
-    expect(screen.getByTestId('access').textContent).toBe('active')
-    expect(screen.getByTestId('location').textContent).toBe(currentUri)
   })
 
   it.each([

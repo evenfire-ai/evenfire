@@ -35,7 +35,6 @@ import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import { httpErrorStatus, isAuthorizationError, isNetworkError } from '@lib/format'
-import { recordLatestGfsConversationContext } from '@lib/gfsConversationPrefill'
 import type { GfsResourceActionId, GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import {
   type GfsResourceNavigationRequest,
@@ -749,15 +748,13 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   const isNavigationIntentCurrent = vi.fn(
     (sequence: number) => sequence === testNavigationIntentSequence
   )
-  const captureWorkspaceNavigation = vi.fn(
-    (): WorkspaceNavigationSnapshot => ({
-      workspaceTabs: controller.workspaceTabs,
-      selectedAgent: controller.selectedAgent,
-      selectedAgentRoute: controller.selectedAgentRoute,
-      appsPickerActive: controller.appsPickerActive,
-      lastActiveChatTabId: controller.lastActiveChatTabId,
-    })
-  )
+  const captureWorkspaceNavigation = vi.fn((): WorkspaceNavigationSnapshot => ({
+    workspaceTabs: controller.workspaceTabs,
+    selectedAgent: controller.selectedAgent,
+    selectedAgentRoute: controller.selectedAgentRoute,
+    appsPickerActive: controller.appsPickerActive,
+    lastActiveChatTabId: controller.lastActiveChatTabId,
+  }))
   const restoreWorkspaceNavigation = vi.fn(
     (snapshot: WorkspaceNavigationSnapshot, expectedIntentSequence: number) => {
       if (!isNavigationIntentCurrent(expectedIntentSequence)) return null
@@ -2635,7 +2632,6 @@ describe('App deep-link orchestration', () => {
               byteLength: 4,
             })
 
-      recordLatestGfsConversationContext(activeWorkspaceTab(workspaceTabs)!)
       const sendMessage = vi.fn().mockResolvedValue(undefined)
       currentController = makeController({
         initialExperienceLoading: false,
@@ -2650,8 +2646,7 @@ describe('App deep-link orchestration', () => {
       const composerSurface = screen
         .getAllByTestId('chat-page-surface')
         .find(element => element.getAttribute('data-composer-draft') === resource.gfsUri) as
-        | HTMLTextAreaElement
-        | undefined
+        HTMLTextAreaElement | undefined
       if (!composerSurface)
         throw new Error('The rendered composer did not receive the resource draft')
       expect(composerSurface.getAttribute('data-composer-draft')).toBe(resource.gfsUri)
@@ -2672,7 +2667,6 @@ describe('App deep-link orchestration', () => {
       id: 'files-tab',
       path: resource.gfsUri,
     })
-    recordLatestGfsConversationContext(activeWorkspaceTab(workspaceTabs)!)
     const sendMessage = vi.fn().mockResolvedValue(undefined)
     currentController = makeController({
       initialExperienceLoading: false,
@@ -2940,8 +2934,7 @@ describe('App deep-link orchestration', () => {
       agentDisplayByName: { [agentName]: agentName },
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as unknown as
-      | ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>)
-      | undefined
+      ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>) | undefined
     if (!switchTeamProducer) throw new Error('The team-switch producer was not installed')
     handle.switchTeam.mockImplementation(async (teamId: string) => {
       activeTeamId = teamId
@@ -3238,8 +3231,7 @@ describe('App deep-link orchestration', () => {
       currentTeamId: activeTeamId,
     }))
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as unknown as
-      | ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>)
-      | undefined
+      ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>) | undefined
     if (!switchTeamProducer) throw new Error('The team-switch producer was not installed')
     handle.switchTeam.mockImplementation(async (teamId: string) => {
       activeTeamId = teamId
@@ -3483,8 +3475,7 @@ describe('App deep-link orchestration', () => {
       return { items: [], currentTeamId: activeTeamId }
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as unknown as
-      | ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>)
-      | undefined
+      ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>) | undefined
     if (!switchTeamProducer) throw new Error('The team-switch producer was not installed')
     handle.switchTeam.mockImplementation(async (teamId: string) => {
       activeTeamId = teamId
@@ -3682,8 +3673,7 @@ describe('App deep-link orchestration', () => {
       return { items: [], currentTeamId: activeTeamId }
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as unknown as
-      | ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>)
-      | undefined
+      ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>) | undefined
     if (!switchTeamProducer) throw new Error('The team-switch producer was not installed')
     handle.switchTeam.mockImplementation(async (teamId: string) => {
       activeTeamId = teamId
@@ -4042,8 +4032,7 @@ describe('App deep-link orchestration', () => {
     )
 
     const catalogProducer = handle.refreshCatalog.getMockImplementation() as
-      | (() => Promise<AccessCatalog>)
-      | undefined
+      (() => Promise<AccessCatalog>) | undefined
     if (!catalogProducer) throw new Error('The shared catalog producer is unavailable')
     let rejectRefresh!: (error: Error) => void
     let pendingCatalogRefresh: Promise<AccessCatalog> | null = null

@@ -39,7 +39,6 @@ import {
   mapComposerAttachmentsToHostRequest,
 } from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
-import { clearLatestGfsConversationContext } from '@lib/gfsConversationPrefill'
 import {
   confirmHostModelSelectionFromSend,
   dropIgnoredHostModelIntent,
@@ -682,7 +681,6 @@ export function useAgentChatController({
     const scope = `${isAuthenticated}:${authenticatedScope}`
     if (lastRetentionScope.current === scope) return
     lastRetentionScope.current = scope
-    clearLatestGfsConversationContext()
     // The memo key already carries the scope; this frees the previous scope's entries.
     transcriptMemoRef.current?.clear()
     sendScopeGeneration.current += 1
@@ -1198,7 +1196,6 @@ export function useAgentChatController({
   const resetChat = useCallback(() => {
     beginSelectionIntent()
     clearAllComposerDrafts()
-    clearLatestGfsConversationContext()
     setActivityByAgentMessage({})
     setProgressByAgentMessage({})
     resetComposerAttachments()
@@ -3795,8 +3792,7 @@ export function useAgentChatController({
         if (!taskId) {
           // Synchronous (non-async) response — a direct reply or a structured error.
           const errorRecord = responseRecord.error as
-            | { message?: string; code?: string; provider?: string }
-            | undefined
+            { message?: string; code?: string; provider?: string } | undefined
           // Issue #654: a synchronous failure can arrive as `{error: …}` OR as
           // `{success: false}` without an error object. Both are failures — HTTP
           // 200 or a missing `success` boolean never imply success.

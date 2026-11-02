@@ -1,7 +1,18 @@
+import type { RefObject } from 'react'
 import type { GfsResourceAction } from '@lib/gfsResourceActions'
+
+export type GfsResourceMenuOpenRequest = {
+  id: number
+  clientX: number | null
+  clientY: number | null
+}
 
 export type GfsResourceMenuProps = {
   resourceName: string
+  /** Reuse the action menu without a visible button, opened by its owning row. */
+  triggerMode?: 'button' | 'context'
+  contextTargetRef?: RefObject<HTMLElement | null>
+  contextOpenRequest?: GfsResourceMenuOpenRequest | null
   actions?: GfsResourceAction[]
   onManage?: () => void
   onCopyLink?: () => void

@@ -77,6 +77,9 @@ function horizontalBounds(anchor: HTMLElement, edgeInset: number) {
 
 export function GfsResourceMenu({
   resourceName,
+  triggerMode = 'button',
+  contextTargetRef,
+  contextOpenRequest,
   actions,
   onManage,
   onCopyLink,
@@ -98,6 +101,8 @@ export function GfsResourceMenu({
   const submenuRef = useRef<HTMLDivElement | null>(null)
   const shareTriggerRef = useRef<HTMLButtonElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const lastContextRequestRef = useRef(0)
+  const contextPointRef = useRef<{ x: number; y: number } | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const restoreTriggerAfterActionRef = useRef(false)
   const [panelPosition, setPanelPosition] = useState<{ left: number; top: number } | null>(null)
@@ -106,6 +111,27 @@ export function GfsResourceMenu({
     setOpen(false)
     setShareOpen(false)
   }, [])
+  const focusReturnTarget = useCallback(() => {
+    if (triggerMode === 'context') {
+      if (contextTargetRef?.current?.isConnected) {
+        contextTargetRef.current.focus()
+      }
+      return
+    }
+    triggerRef.current?.focus()
+  }, [contextTargetRef, triggerMode])
+
+  useEffect(() => {
+    if (triggerMode !== 'context' || !contextOpenRequest) return
+    if (lastContextRequestRef.current === contextOpenRequest.id) return
+    lastContextRequestRef.current = contextOpenRequest.id
+    contextPointRef.current =
+      contextOpenRequest.clientX === null || contextOpenRequest.clientY === null
+        ? null
+        : { x: contextOpenRequest.clientX, y: contextOpenRequest.clientY }
+    restoreTriggerAfterActionRef.current = false
+    setOpen(true)
+  }, [contextOpenRequest, triggerMode])
   const onOpenChangeRef = useRef(onOpenChange)
   const prevOpenRef = useRef(false)
 
@@ -143,7 +169,7 @@ export function GfsResourceMenu({
   }, [closeMenu, open])
 
   const positionPanel = useCallback(() => {
-    const trigger = triggerRef.current
+    const trigger = triggerMode === 'context' ? contextTargetRef?.current : triggerRef.current
     const panel = panelRef.current
     if (!trigger || !panel) return
 
@@ -154,20 +180,25 @@ export function GfsResourceMenu({
     const viewportHeight = window.innerHeight
     const bounds = horizontalBounds(trigger, edgeInset)
     const maxLeft = Math.max(bounds.left, bounds.right - panelRect.width)
-    const left = Math.min(Math.max(bounds.left, triggerRect.right - panelRect.width), maxLeft)
+    const contextPoint = contextPointRef.current
+    const left = contextPoint
+      ? Math.min(Math.max(bounds.left, contextPoint.x), maxLeft)
+      : Math.min(Math.max(bounds.left, triggerRect.right - panelRect.width), maxLeft)
     const opensAbove =
       triggerRect.bottom + gap + panelRect.height > viewportHeight - edgeInset &&
       triggerRect.top - gap - panelRect.height >= edgeInset
-    const unclampedTop = opensAbove
-      ? triggerRect.top - panelRect.height - gap
-      : triggerRect.bottom + gap
+    const unclampedTop = contextPoint
+      ? contextPoint.y
+      : opensAbove
+        ? triggerRect.top - panelRect.height - gap
+        : triggerRect.bottom + gap
     const top = Math.min(
       Math.max(edgeInset, unclampedTop),
       Math.max(edgeInset, viewportHeight - panelRect.height - edgeInset)
     )
 
     setPanelPosition({ left, top })
-  }, [])
+  }, [contextTargetRef, triggerMode])
 
   useLayoutEffect(() => {
     if (!open) {
@@ -180,7 +211,7 @@ export function GfsResourceMenu({
     window.addEventListener('scroll', positionPanel, true)
     const resizeObserver =
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(positionPanel)
-    const trigger = triggerRef.current
+    const trigger = triggerMode === 'context' ? contextTargetRef?.current : triggerRef.current
     const drive = trigger?.closest<HTMLElement>('.da-gfs-drive')
     if (trigger) resizeObserver?.observe(trigger)
     if (drive) resizeObserver?.observe(drive)
@@ -190,7 +221,7 @@ export function GfsResourceMenu({
       window.removeEventListener('scroll', positionPanel, true)
       resizeObserver?.disconnect()
     }
-  }, [open, positionPanel])
+  }, [contextTargetRef, open, positionPanel, triggerMode])
 
   const positionSubmenu = useCallback(() => {
     const trigger = shareTriggerRef.current
@@ -251,13 +282,13 @@ export function GfsResourceMenu({
           shareTriggerRef.current?.focus()
         } else {
           closeMenu()
-          triggerRef.current?.focus()
+          focusReturnTarget()
         }
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeMenu, open, shareOpen])
+  }, [closeMenu, focusReturnTarget, open, shareOpen])
 
   useEffect(() => {
     if (open || !restoreTriggerAfterActionRef.current) return
@@ -273,10 +304,12 @@ export function GfsResourceMenu({
       ) {
         return
       }
-      if (triggerRef.current?.isConnected) triggerRef.current.focus()
+      if (triggerMode === 'context') {
+        if (contextTargetRef?.current?.isConnected) contextTargetRef.current.focus()
+      } else if (triggerRef.current?.isConnected) triggerRef.current.focus()
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [open])
+  }, [contextTargetRef, open, triggerMode])
 
   useEffect(() => {
     if (!shareOpen) return
@@ -407,30 +440,34 @@ export function GfsResourceMenu({
 
   return (
     <span
-      className={`da-gfs-resource-menu${open ? ' is-open' : ''}`}
+      className={`da-gfs-resource-menu${open ? ' is-open' : ''}${
+        triggerMode === 'context' ? ' da-gfs-resource-menu--context' : ''
+      }`}
       ref={menuRef}
       onKeyDown={handleMenuKeyDown}
     >
-      <IconButton
-        className="da-gfs-resource-menu__trigger"
-        label={`Options for ${resourceName}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={event => {
-          event.stopPropagation()
-          if (open) {
-            closeMenu()
-          } else {
-            restoreTriggerAfterActionRef.current = false
-            setOpen(true)
-          }
-        }}
-        ref={triggerRef}
-        size="sm"
-        variant="ghost"
-      >
-        <IconMoreVertical />
-      </IconButton>
+      {triggerMode === 'button' ? (
+        <IconButton
+          className="da-gfs-resource-menu__trigger"
+          label={`Options for ${resourceName}`}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={event => {
+            event.stopPropagation()
+            if (open) {
+              closeMenu()
+            } else {
+              restoreTriggerAfterActionRef.current = false
+              setOpen(true)
+            }
+          }}
+          ref={triggerRef}
+          size="sm"
+          variant="ghost"
+        >
+          <IconMoreVertical />
+        </IconButton>
+      ) : null}
       {open
         ? createPortal(
             <Fragment>

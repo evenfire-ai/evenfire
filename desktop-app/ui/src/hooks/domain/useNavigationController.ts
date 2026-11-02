@@ -1,9 +1,5 @@
 import { type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../constants/navigation'
-import {
-  clearLatestGfsConversationContext,
-  recordLatestGfsConversationContext,
-} from '../../lib/gfsConversationPrefill'
 import type { GfsPreviewResource } from '../../lib/gfsPreview'
 import {
   type GfsResourceNavigationContext,
@@ -61,24 +57,6 @@ export function useNavigationController() {
     const current = workspaceTabsRef.current
     const next = typeof action === 'function' ? action(current) : action
     if (next === current) return
-    const previousActiveTab = activeWorkspaceTab(current)
-    const nextActiveTab = activeWorkspaceTab(next)
-    if (nextActiveTab?.kind === 'files' || nextActiveTab?.kind === 'preview') {
-      recordLatestGfsConversationContext(nextActiveTab)
-    } else if (
-      !(
-        (previousActiveTab?.kind === 'files' || previousActiveTab?.kind === 'preview') &&
-        nextActiveTab?.kind === 'chat'
-      ) &&
-      (previousActiveTab?.kind !== nextActiveTab?.kind ||
-        previousActiveTab?.id !== nextActiveTab?.id ||
-        (previousActiveTab?.kind === 'chat' &&
-          nextActiveTab?.kind === 'chat' &&
-          (previousActiveTab.chat?.agentRef !== nextActiveTab.chat?.agentRef ||
-            previousActiveTab.chat?.chatId !== nextActiveTab.chat?.chatId)))
-    ) {
-      clearLatestGfsConversationContext()
-    }
     workspaceTabsRef.current = next
     setWorkspaceTabsState(next)
   }, [])
@@ -218,7 +196,6 @@ export function useNavigationController() {
   // the Apps route.
   const showAppsPicker = useCallback(() => {
     beginUserNavigationIntent()
-    clearLatestGfsConversationContext()
     setAppsPickerActive(activeWorkspaceTab(workspaceTabsRef.current)?.kind !== 'app')
   }, [beginUserNavigationIntent])
 
@@ -245,9 +222,6 @@ export function useNavigationController() {
       }
       const current = workspaceTabsRef.current
       const active = activeWorkspaceTab(current)
-      if (active?.kind !== 'files' && active?.kind !== 'preview') {
-        clearLatestGfsConversationContext()
-      }
       setAppsPickerActive(false)
       const lastActiveId = lastActiveChatTabIdRef.current
       const resumeTarget =

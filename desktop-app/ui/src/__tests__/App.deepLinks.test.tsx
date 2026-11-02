@@ -1027,6 +1027,335 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(embedPhase()).toBe('mounted'))
   }
 
+  async function mountSidebarMoveAuthorityScenario(
+    failure: { status: number; code: string; message: string },
+    raceCommit = false
+  ) {
+    const { userA, service, transportBoundaries } = installSameIdentityLoginFixture()
+    const rootId = 'a'.repeat(32)
+    const sourceId = 'b'.repeat(32)
+    const destinationId = 'c'.repeat(32)
+    const rootUri = `gfs://main/${rootId}`
+    const root = resolvedDirectory(rootId, 'Move parent', { gfsUri: rootUri })
+    const source = resolvedFile(sourceId, 'Report.txt', {
+      parentResourceId: rootId,
+      version: 4,
+    })
+    const destination = resolvedDirectory(destinationId, 'Archive', {
+      parentResourceId: rootId,
+    })
+    const sourceRow = childView(source.resourceId, source.name, 'file', {
+      parentResourceId: rootId,
+      version: 4,
+      path: '/Move parent/Report.txt',
+    })
+    const destinationRow = childView(destination.resourceId, destination.name, 'directory', {
+      parentResourceId: rootId,
+      path: '/Move parent/Archive',
+    })
+    let staleFailureServed = false
+    let moveRequests = 0
+    let parentAffordanceReads = 0
+    let markRetryStarted!: () => void
+    let markCommitStarted!: () => void
+    let releaseRetry!: () => void
+    let releaseCommit!: () => void
+    const retryStarted = new Promise<void>(resolve => {
+      markRetryStarted = resolve
+    })
+    const commitStarted = new Promise<void>(resolve => {
+      markCommitStarted = resolve
+    })
+    const retryGate = new Promise<void>(resolve => {
+      releaseRetry = resolve
+    })
+    const commitGate = new Promise<void>(resolve => {
+      releaseCommit = resolve
+    })
+    const observedErrors: Array<{ name?: string; code?: string; status?: number }> = []
+    const movePatches: Array<{ path: string; body: unknown }> = []
+    const requestJson = vi.fn(
+      async (method: string, input: string, options?: { body?: unknown }) => {
+        const url = new URL(input)
+        if (method === 'GET' && url.pathname === '/api/v1/me/gfs/resources') {
+          return {
+            ok: true,
+            data: { items: [accessibleResource(rootId, 'Move parent', 'directory')] },
+          }
+        }
+        if (method === 'GET' && url.pathname.endsWith('/resolve')) {
+          const uri = url.searchParams.get('uri') ?? ''
+          return {
+            ok: true,
+            data: uri.endsWith(sourceId)
+              ? source
+              : uri.endsWith(destinationId)
+                ? destination
+                : root,
+          }
+        }
+        if (method === 'GET' && url.pathname.endsWith('/children')) {
+          const items = url.pathname.includes(`/${rootId}/`) ? [sourceRow, destinationRow] : []
+          return { ok: true, data: { items, nextCursor: null } }
+        }
+        if (method === 'GET' && url.pathname.endsWith('/affordances')) {
+          if (url.pathname.includes(`/${rootId}/affordances`)) parentAffordanceReads += 1
+          if (
+            !raceCommit &&
+            parentAffordanceReads === 1 &&
+            !staleFailureServed &&
+            url.pathname.includes(`/${rootId}/affordances`)
+          ) {
+            const requestGeneration = service.getSessionGeneration()
+            markRetryStarted()
+            await retryGate
+            staleFailureServed = true
+            if (requestGeneration !== service.getSessionGeneration()) {
+              const stale = new Error('__CLERUM_GFS_STALE_AUTHORITY_V1__:stale:unauthenticated')
+              stale.name = 'GfsStaleSessionAuthorityError'
+              Object.assign(stale, { code: 'GFS_STALE_SESSION_AUTHORITY' })
+              observedErrors.push({ name: stale.name, code: 'GFS_STALE_SESSION_AUTHORITY' })
+              throw stale
+            }
+            const statusText = failure.status === 401 ? 'Unauthorized' : 'Forbidden'
+            const current = Object.assign(
+              new Error(`${failure.status} ${statusText}: ${failure.message}`),
+              {
+                status: failure.status,
+                code: failure.code,
+              }
+            )
+            observedErrors.push({ name: current.name, code: failure.code, status: failure.status })
+            throw current
+          }
+          return { held: ['read', 'write', 'delete'], isOperator: false }
+        }
+        if (method === 'PATCH' && url.pathname.endsWith(`/${sourceId}`)) {
+          moveRequests += 1
+          movePatches.push({ path: url.pathname, body: options?.body })
+          if (raceCommit) {
+            const requestGeneration = service.getSessionGeneration()
+            markCommitStarted()
+            await commitGate
+            if (requestGeneration !== service.getSessionGeneration()) {
+              const stale = new Error('__CLERUM_GFS_STALE_AUTHORITY_V1__:stale:unauthenticated')
+              stale.name = 'GfsStaleSessionAuthorityError'
+              Object.assign(stale, { code: 'GFS_STALE_SESSION_AUTHORITY' })
+              observedErrors.push({ name: stale.name, code: 'GFS_STALE_SESSION_AUTHORITY' })
+              throw stale
+            }
+            const statusText = failure.status === 401 ? 'Unauthorized' : 'Forbidden'
+            const current = Object.assign(
+              new Error(`${failure.status} ${statusText}: ${failure.message}`),
+              {
+                status: failure.status,
+                code: failure.code,
+              }
+            )
+            observedErrors.push({ name: current.name, code: failure.code, status: failure.status })
+            throw current
+          }
+          throw Object.assign(new Error('403 Forbidden: forbidden'), {
+            status: 403,
+            code: 'forbidden',
+          })
+        }
+        throw Object.assign(new Error('not found'), { status: 404, code: 'not_found' })
+      }
+    )
+    transportBoundaries.gfsClient = new GfsClient({
+      baseUrl: 'https://gfs.fixture.test',
+      requestJson: requestJson as GfsTransport['requestJson'],
+      fetchBytes: async () => new ArrayBuffer(0),
+    })
+    await service.googleLogin('fixture-google-A')
+    const publishedGeneration = service.getSessionGeneration()
+    filesPageHarness.renderActual = true
+    filesPageHarness.showAuthorityProbe = true
+    filesPageHarness.showMoveSidebarProbe = true
+    commonHarness.renderActualButtons = true
+    const { getController, queryClient, view } = await mountSessionBackedApp(
+      userA,
+      desktopQueryClient
+    )
+    window.clerum.gfs.resolve = uri =>
+      service.resolveGfsUri(uri) as ReturnType<Window['clerum']['gfs']['resolve']>
+    window.clerum.gfs.listAccessible = (drive, cursor) =>
+      service.listAccessibleGfsResources(drive, cursor)
+    window.clerum.gfs.listChildren = (id, drive, cursor) =>
+      service.listGfsChildren(id, drive, cursor)
+    const withCurrentGeneration = async <T,>(operation: () => Promise<T>): Promise<T> => {
+      const requestGeneration = service.getSessionGeneration()
+      try {
+        return await operation()
+      } catch (error) {
+        if (requestGeneration !== service.getSessionGeneration()) {
+          const stale = new Error('The GFS request belongs to a superseded session.')
+          stale.name = 'GfsStaleSessionAuthorityError'
+          Object.assign(stale, { code: 'GFS_STALE_SESSION_AUTHORITY' })
+          throw stale
+        }
+        throw error
+      }
+    }
+    window.clerum.gfs.affordances = (id, drive) =>
+      withCurrentGeneration(() => service.gfsAffordances(id, drive))
+    window.clerum.gfs.moveResource = (id, target, drive, ifMatch, newName, generation) =>
+      withCurrentGeneration(() =>
+        service.moveGfsResource(id, target, generation, drive, ifMatch, newName)
+      )
+    act(() => getController().openFilesSection(rootUri))
+    const sidebar = within(await view.findByTestId('lag-sidebar'))
+    fireEvent.click(await sidebar.findByRole('button', { name: 'Move parent' }))
+    const sourceButton = await sidebar.findByRole('button', { name: 'Report.txt' })
+    fireEvent.keyDown(sourceButton, { key: 'F10', shiftKey: true })
+    const menu = await view.findByRole('menu', { name: 'Actions for Report.txt' })
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    if (raceCommit) await view.findByRole('dialog', { name: 'Move file Report.txt' })
+    return {
+      commitStarted,
+      get moveRequests() {
+        return moveRequests
+      },
+      get observedErrors() {
+        return observedErrors
+      },
+      get movePatches() {
+        return movePatches
+      },
+      get parentAffordanceReads() {
+        return parentAffordanceReads
+      },
+      getController,
+      queryClient,
+      releaseCommit,
+      releaseRetry,
+      retryStarted,
+      rootUri,
+      service,
+      view,
+      publishedGeneration,
+      sourceId,
+      destinationId,
+      renewSession: () => service.googleLogin('fixture-google-B'),
+      chooseDestination: async () => {
+        const dialog = view.getByRole('dialog', { name: 'Move file Report.txt' })
+        fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+      },
+      async publishRenewedGeneration() {
+        const renewedGeneration = service.getSessionGeneration()
+        await act(async () => {
+          await getController().loadSession({ preserveNav: true })
+        })
+        return renewedGeneration
+      },
+    }
+  }
+
+  it.each([
+    {
+      label: 'stale source-parent 401 after renewal',
+      failure: { status: 401, code: 'unauthenticated', message: 'unauthenticated' },
+      renewDuringRetry: true,
+      expectedAccess: 'active',
+      expectedLocation: `gfs://main/${'a'.repeat(32)}`,
+    },
+    {
+      label: 'current-session 401',
+      failure: { status: 401, code: 'unauthenticated', message: 'Current session expired.' },
+      renewDuringRetry: false,
+      expectedAccess: 'revoked',
+      expectedLocation: 'no-location',
+    },
+    {
+      label: 'current lifecycle 403',
+      failure: { status: 403, code: 'desktop_user_retired', message: 'desktop_user_retired' },
+      renewDuringRetry: false,
+      expectedAccess: 'revoked',
+      expectedLocation: 'no-location',
+    },
+    {
+      label: 'resource-local 403',
+      failure: { status: 403, code: 'forbidden', message: 'Private folder details must not leak.' },
+      renewDuringRetry: false,
+      expectedAccess: 'active',
+      expectedLocation: `gfs://main/${'a'.repeat(32)}`,
+    },
+    {
+      label: 'missing resource 404',
+      failure: { status: 404, code: 'not_found', message: 'Missing folder details must not leak.' },
+      renewDuringRetry: false,
+      expectedAccess: 'active',
+      expectedLocation: `gfs://main/${'a'.repeat(32)}`,
+    },
+  ])(
+    'routes sidebar Move through the Files owner and preserves $label semantics',
+    async ({ failure, renewDuringRetry, expectedAccess, expectedLocation }) => {
+      const mounted = await mountSidebarMoveAuthorityScenario(failure)
+      await mounted.retryStarted
+      if (renewDuringRetry) await mounted.renewSession()
+      mounted.releaseRetry()
+      await waitFor(() => expect(mounted.observedErrors.length).toBe(1))
+      if (renewDuringRetry) {
+        expect(mounted.observedErrors[0]).toMatchObject({
+          name: 'GfsStaleSessionAuthorityError',
+          code: 'GFS_STALE_SESSION_AUTHORITY',
+        })
+      } else {
+        expect(mounted.observedErrors[0]).toMatchObject({ code: failure.code })
+      }
+      await waitFor(() => expect(proofGfsController?.accessState).toBe(expectedAccess))
+      await waitFor(() =>
+        expect(
+          activeWorkspaceTab(mounted.getController().workspaceTabs)?.files?.path ?? 'no-location'
+        ).toBe(expectedLocation)
+      )
+      expect(mounted.moveRequests).toBe(0)
+      if (expectedAccess === 'revoked') {
+        expect(mounted.view.queryByRole('dialog', { name: 'Move file Report.txt' })).toBeNull()
+      } else if (renewDuringRetry) {
+        const before = mounted.parentAffordanceReads
+        await mounted.publishRenewedGeneration()
+        await waitFor(() => expect(mounted.parentAffordanceReads).toBeGreaterThan(before))
+        const dialog = mounted.view.getByRole('dialog', { name: 'Move file Report.txt' })
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
+        expect(
+          within(dialog)
+            .getByRole('button', { name: 'Move here (Archive)' })
+            .hasAttribute('disabled')
+        ).toBe(false)
+      }
+      mounted.queryClient.clear()
+    }
+  )
+
+  it('does not replay a delayed Move commit 401 after the App owner observes renewal', async () => {
+    const mounted = await mountSidebarMoveAuthorityScenario(
+      { status: 401, code: 'unauthenticated', message: 'unauthenticated' },
+      true
+    )
+    await mounted.chooseDestination()
+    await mounted.commitStarted
+    await mounted.renewSession()
+    mounted.releaseCommit()
+    await waitFor(() => expect(mounted.observedErrors.length).toBe(1))
+    await waitFor(() =>
+      expect(mounted.view.queryByRole('dialog', { name: 'Move file Report.txt' })).toBeNull()
+    )
+    expect(mounted.moveRequests).toBe(1)
+    expect(mounted.movePatches).toEqual([
+      {
+        path: `/api/v1/me/gfs/resources/${mounted.sourceId}`,
+        body: { newParentId: mounted.destinationId, ifMatch: 4 },
+      },
+    ])
+    expect(mounted.observedErrors[0]).toMatchObject({ code: 'GFS_STALE_SESSION_AUTHORITY' })
+    await mounted.publishRenewedGeneration()
+    expect(mounted.moveRequests).toBe(1)
+    mounted.queryClient.clear()
+  })
+
   // With universal-tabs an open app is a `kind:'app'` tab in the global strip, so
   // opening/closing an app no longer auto-collapses or restores the sidebar. The
   // manual toggle and its persistence are the only things that move the sidebar.
@@ -1411,16 +1740,14 @@ describe('App deep-link orchestration', () => {
       releaseTeamDRollback = resolve
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
-      | ((teamId: string) => Promise<unknown>)
-      | undefined
+      ((teamId: string) => Promise<unknown>) | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.teamDirectory.mockImplementation(async () => ({
       items: [],
       currentTeamId: activeTeamId,
     }))
     const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
-      | (() => Promise<Record<string, unknown>>)
-      | undefined
+      (() => Promise<Record<string, unknown>>) | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
@@ -1800,16 +2127,14 @@ describe('App deep-link orchestration', () => {
       releaseOriginRollback = resolve
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
-      | ((teamId: string) => Promise<unknown>)
-      | undefined
+      ((teamId: string) => Promise<unknown>) | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.teamDirectory.mockImplementation(async () => ({
       items: [],
       currentTeamId: activeTeamId,
     }))
     const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
-      | (() => Promise<Record<string, unknown>>)
-      | undefined
+      (() => Promise<Record<string, unknown>>) | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
@@ -2167,16 +2492,14 @@ describe('App deep-link orchestration', () => {
       releaseOriginRollback = resolve
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
-      | ((teamId: string) => Promise<unknown>)
-      | undefined
+      ((teamId: string) => Promise<unknown>) | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.teamDirectory.mockImplementation(async () => ({
       items: [],
       currentTeamId: activeTeamId,
     }))
     const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
-      | (() => Promise<Record<string, unknown>>)
-      | undefined
+      (() => Promise<Record<string, unknown>>) | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
@@ -2398,8 +2721,7 @@ describe('App deep-link orchestration', () => {
       releaseOriginRollback = resolve
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
-      | ((teamId: string) => Promise<unknown>)
-      | undefined
+      ((teamId: string) => Promise<unknown>) | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.teamDirectory.mockImplementation(async () => ({
       items: resetSessionWhilePending
@@ -2411,8 +2733,7 @@ describe('App deep-link orchestration', () => {
       currentTeamId: activeTeamId,
     }))
     const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
-      | (() => Promise<Record<string, unknown>>)
-      | undefined
+      (() => Promise<Record<string, unknown>>) | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
@@ -2809,16 +3130,14 @@ describe('App deep-link orchestration', () => {
       currentTeamId: activeTeamId,
     }))
     const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
-      | (() => Promise<Record<string, unknown>>)
-      | undefined
+      (() => Promise<Record<string, unknown>>) | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
       teamId: activeTeamId,
     }))
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
-      | ((teamId: string) => Promise<unknown>)
-      | undefined
+      ((teamId: string) => Promise<unknown>) | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.switchTeam.mockImplementation(async teamId => {
       activeTeamId = teamId
@@ -5412,6 +5731,8 @@ describe('App deep-link orchestration', () => {
       const gesture = async (expectAdmission: boolean) => {
         if (surface === 'sidebar-dialog') {
           fireEvent.keyDown(sourceButton(), { key: 'F10', shiftKey: true })
+          const menu = await view.findByRole('menu', { name: `Actions for ${sourceName}` })
+          fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
           const dialog = await view.findByRole('dialog', { name: `Move file ${sourceName}` })
           fireEvent.click(await within(dialog).findByRole('button', { name: 'Target' }))
           fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Target)' }))

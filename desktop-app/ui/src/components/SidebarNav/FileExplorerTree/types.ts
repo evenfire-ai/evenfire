@@ -73,6 +73,4 @@ export interface FileExplorerNodeProps {
     event: ReactDragEvent<HTMLElement>,
     ancestorIds: readonly (string | null)[]
   ) => void
-  /** Open the existing Move dialog for this node (row action / Shift+F10). */
-  onRequestMove: (node: GfsBrowserChild, ancestorCrumbs: readonly GfsCrumb[]) => void
 }

@@ -626,14 +626,37 @@ async function chooseDeleteAction(resourceName: string) {
   await chooseRowAction(resourceName, 'Delete')
 }
 
-async function chooseRowAction(resourceName: string, actionName: string) {
-  const row = screen
-    .getAllByRole('treeitem')
-    .find(
-      item => item.querySelector('.da-file-explorer__name')?.textContent?.trim() === resourceName
-    )
+function getResourceTreeRow(resourceName: string): HTMLElement | null {
+  return (
+    screen
+      .queryAllByRole('treeitem')
+      .find(
+        item => item.querySelector('.da-file-explorer__name')?.textContent?.trim() === resourceName
+      ) ?? null
+  )
+}
+
+async function findResourceTreeRow(resourceName: string): Promise<HTMLElement> {
+  await waitFor(() => expect(getResourceTreeRow(resourceName)).toBeTruthy())
+  const row = getResourceTreeRow(resourceName)
   if (!row) throw new Error(`Could not find the exact sidebar row for ${resourceName}`)
-  fireEvent.click(within(row).getByRole('button', { name: `Options for ${resourceName}` }))
+  return row
+}
+
+async function openRowActions(resourceName: string) {
+  const row = await findResourceTreeRow(resourceName)
+  const rowLabel = row.querySelector<HTMLButtonElement>('.da-file-explorer__label')
+  if (!rowLabel) throw new Error(`The sidebar row label is unavailable for ${resourceName}`)
+  rowLabel.focus()
+  fireEvent.keyDown(rowLabel, {
+    key: 'F10',
+    shiftKey: true,
+  })
+  return screen.findByRole('menu', { name: `Actions for ${resourceName}` })
+}
+
+async function chooseRowAction(resourceName: string, actionName: string) {
+  await openRowActions(resourceName)
   if (['Copy link', 'Copy file ID', 'Copy folder ID'].includes(actionName)) {
     fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Share' }))
   }
@@ -700,7 +723,7 @@ async function openLiveTargetInSameFilesTab() {
   fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
   const sourceRow = await screen.findByRole('treeitem', { name: /Source folder/ })
   fireEvent.click(within(sourceRow).getByRole('button', { name: 'Expand Source folder' }))
-  await screen.findByRole('button', { name: 'Options for Target folder' })
+  await findResourceTreeRow('Target folder')
   const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
   fireEvent.click(within(filesBrowser).getByRole('button', { name: 'Target folder' }))
 
@@ -1065,10 +1088,7 @@ describe('App → Files action lifecycle integration', () => {
         .getAllByRole('treeitem')
         .find(item => item.textContent?.includes(resource.name))
       expect(row).toBeTruthy()
-      fireEvent.click(
-        within(row as HTMLElement).getByRole('button', { name: `Options for ${resource.name}` })
-      )
-      const menu = await screen.findByRole('menu', { name: `Actions for ${resource.name}` })
+      const menu = await openRowActions(resource.name)
       const expected = expectedFor(
         resource.kind === 'directory' ? 'directory' : 'file',
         resource.gfsUri
@@ -2127,7 +2147,7 @@ describe('App → Files action lifecycle integration', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
       const parentRow = await screen.findByRole('treeitem', { name: /Shared parent/ })
       fireEvent.click(within(parentRow).getByRole('button', { name: 'Expand Shared parent' }))
-      await screen.findByRole('button', { name: 'Options for unreadable-child.txt' })
+      await findResourceTreeRow('unreadable-child.txt')
       await chooseRowAction(target.name, 'Move to')
 
       const dialog = await screen.findByRole('dialog', { name: 'Move file unreadable-child.txt' })
@@ -2164,8 +2184,7 @@ describe('App → Files action lifecycle integration', () => {
     renderApp()
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     const row = await screen.findByRole('treeitem', { name: /root-move\.txt/ })
-    fireEvent.click(within(row).getByRole('button', { name: 'Options for root-move.txt' }))
-    const menu = await screen.findByRole('menu', { name: 'Actions for root-move.txt' })
+    const menu = await openRowActions('root-move.txt')
     expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
     expect(within(menu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
     expect(moveResource).not.toHaveBeenCalled()
