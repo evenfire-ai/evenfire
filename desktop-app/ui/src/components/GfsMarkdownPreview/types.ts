@@ -11,6 +11,7 @@ export type GfsMarkdownPreviewBodyProps = {
   gfsUri: string
   onDownloadError?: (error: unknown) => void
   onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
+  isScopeCurrent?: () => boolean
   titleId?: string
   titleActions?: ReactNode
   headerActions?: ReactNode

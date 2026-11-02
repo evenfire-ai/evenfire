@@ -68,8 +68,12 @@ export function FilePreviewPage({
   byteLength,
   reloadVersion,
   unavailable = false,
+  sessionScope,
+  isGfsPreviewSessionScopeCurrent,
   pushToast,
   onOpenRoute,
+  pendingResourceAction,
+  onPendingResourceActionHandled,
   onRenameCommitted,
   titlebarLeadingTarget,
 }: FilePreviewPageProps) {
@@ -78,9 +82,24 @@ export function FilePreviewPage({
   const [reloadToken, setReloadToken] = useState(0)
   const [denied, setDenied] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
-  const [copyContentReady, setCopyContentReady] = useState(false)
-  const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
+  const [copyContentReadyUri, setCopyContentReadyUri] = useState<string | null>(null)
+  const copyContentRef = useRef<{ gfsUri: string; run: () => Promise<boolean> } | null>(null)
+  const lastHandledResourceActionIdRef = useRef<number | null>(null)
   const accessRevoked = ctrl.accessState === 'revoked'
+  const isCurrentGfsPreviewScope = useCallback(
+    () =>
+      !accessRevoked &&
+      (sessionScope === undefined ||
+        isGfsPreviewSessionScopeCurrent === undefined ||
+        isGfsPreviewSessionScopeCurrent(sessionScope)),
+    [accessRevoked, isGfsPreviewSessionScopeCurrent, sessionScope]
+  )
+  const pendingResourceActionRef = useRef(pendingResourceAction)
+  pendingResourceActionRef.current =
+    pendingResourceAction?.id === lastHandledResourceActionIdRef.current
+      ? null
+      : pendingResourceAction
+
   const liveAuthorityRef = useRef({
     sessionScope: ctrl.sessionScope,
     sessionGeneration: ctrl.sessionGeneration,
@@ -94,10 +113,10 @@ export function FilePreviewPage({
   const capturedSessionGeneration = ctrl.sessionGeneration
   const handlePreviewAuthorityFailure = useCallback(
     (
-      message: string,
+      error: unknown,
       scope: string | null = capturedSessionScope,
       generation: number | null = capturedSessionGeneration
-    ) => ctrl.handleAuthorityFailure(message, 'operation', scope, generation),
+    ) => ctrl.handleAuthorityFailure(error, 'operation', scope, generation),
     [ctrl.handleAuthorityFailure, capturedSessionGeneration, capturedSessionScope]
   )
 
@@ -114,6 +133,21 @@ export function FilePreviewPage({
     pushToast,
   })
 
+  useEffect(
+    () => () => {
+      const request = pendingResourceActionRef.current
+      if (
+        request &&
+        request.id !== lastHandledResourceActionIdRef.current &&
+        request.actionId === 'copy-content' &&
+        request.targetUri === gfsUri
+      ) {
+        pendingResourceActionRef.current = null
+        onPendingResourceActionHandled?.(request.id)
+      }
+    },
+    [gfsUri, onPendingResourceActionHandled]
+  )
   // Each previewed resource starts from a clean per-resource verdict.
   useEffect(() => {
     setDenied(null)
@@ -147,7 +181,7 @@ export function FilePreviewPage({
       )
         return
       ctrl.handleAuthorityFailure(
-        toMessage(error),
+        error,
         'operation',
         capturedSessionScope,
         capturedSessionGeneration
@@ -189,7 +223,7 @@ export function FilePreviewPage({
       )
         return
       if (
-        !ctrl.handleAuthorityFailure(message, 'operation', scope, generation) &&
+        !ctrl.handleAuthorityFailure(error, 'operation', scope, generation) &&
         isPerResourceAccessDenial(message)
       ) {
         setDenied(message)
@@ -239,19 +273,36 @@ export function FilePreviewPage({
   }, [gfsUri, pushToast])
 
   const handleCopyContent = useCallback(async () => {
+    if (!isCurrentGfsPreviewScope()) return
     const copy = copyContentRef.current
-    if (!copy) return
-    const copied = await copy()
+    if (!copy || copy.gfsUri !== gfsUri) return
+    const copied = await copy.run()
+    if (!isCurrentGfsPreviewScope()) return
     pushToast?.(
       copied ? 'EvenDrive content copied' : 'Could not copy the EvenDrive content',
       copied ? 'success' : 'error'
     )
-  }, [pushToast])
+  }, [gfsUri, isCurrentGfsPreviewScope, pushToast])
 
-  const handleCopyContentReady = useCallback((copy: (() => Promise<boolean>) | null) => {
-    copyContentRef.current = copy
-    setCopyContentReady(Boolean(copy))
-  }, [])
+  const handleCopyContentReady = useCallback(
+    (copy: (() => Promise<boolean>) | null) => {
+      if (!isCurrentGfsPreviewScope()) {
+        copyContentRef.current = null
+        setCopyContentReadyUri(null)
+        return
+      }
+      if (copy) {
+        copyContentRef.current = { gfsUri, run: copy }
+        setCopyContentReadyUri(gfsUri)
+        return
+      }
+      if (copyContentRef.current?.gfsUri === gfsUri) copyContentRef.current = null
+      setCopyContentReadyUri(current => (current === gfsUri ? null : current))
+    },
+    [gfsUri, isCurrentGfsPreviewScope]
+  )
+
+  const copyContentReady = copyContentReadyUri === gfsUri && isCurrentGfsPreviewScope()
 
   const resourceActions = buildGfsResourceActions({
     kind: 'file',
@@ -265,6 +316,7 @@ export function FilePreviewPage({
         !denied &&
         !unavailable &&
         !accessRevoked &&
+        copyContentReady &&
         (fileKind === 'image' || fileKind === 'markdown')
           ? () => void handleCopyContent()
           : undefined,
@@ -284,8 +336,51 @@ export function FilePreviewPage({
     <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={menuResourceName} />
   )
 
+  useEffect(() => {
+    const request = pendingResourceAction
+    if (
+      !request ||
+      request.actionId !== 'copy-content' ||
+      request.targetUri !== gfsUri ||
+      lastHandledResourceActionIdRef.current === request.id
+    ) {
+      return
+    }
+    if (denied || unavailable || accessRevoked) {
+      lastHandledResourceActionIdRef.current = request.id
+      pendingResourceActionRef.current = null
+      onPendingResourceActionHandled?.(request.id)
+      pushToast?.('This file is no longer available for copying.', 'error')
+      return
+    }
+    if (!copyContentReady || !isCurrentGfsPreviewScope()) return
+    const action = resourceActions.find(candidate => candidate.id === request.actionId)
+    if (!action || action.disabled) return
+    lastHandledResourceActionIdRef.current = request.id
+    pendingResourceActionRef.current = null
+    onPendingResourceActionHandled?.(request.id)
+    action.run(request.file)
+  }, [
+    accessRevoked,
+    copyContentReady,
+    denied,
+    gfsUri,
+    isCurrentGfsPreviewScope,
+    onPendingResourceActionHandled,
+    pendingResourceAction,
+    pushToast,
+    resourceActions,
+    unavailable,
+  ])
+
   const revalidateAccess = useCallback(async () => {
-    if (denied || accessRevoked || !isGfsSessionGeneration(ctrl.sessionGeneration)) return
+    if (
+      denied ||
+      accessRevoked ||
+      !isCurrentGfsPreviewScope() ||
+      !isGfsSessionGeneration(ctrl.sessionGeneration)
+    )
+      return
     const capturedScope = ctrl.sessionScope
     const capturedGeneration = ctrl.sessionGeneration
     const resourceQueryKey = [
@@ -325,8 +420,7 @@ export function FilePreviewPage({
       // A session-authority failure revokes the shared session (H2 path); the
       // body then remounts and fails closed. A per-resource 403 is local to this
       // preview — drop its bytes here without touching the session.
-      if (ctrl.handleAuthorityFailure(message, 'operation', capturedScope, capturedGeneration))
-        return
+      if (ctrl.handleAuthorityFailure(error, 'operation', capturedScope, capturedGeneration)) return
       if (isPerResourceAccessDenial(message)) setDenied(message)
     }
   }, [
@@ -337,6 +431,7 @@ export function FilePreviewPage({
     denied,
     gfsUri,
     queryClient,
+    isCurrentGfsPreviewScope,
   ])
 
   useEffect(() => {
@@ -399,6 +494,7 @@ export function FilePreviewPage({
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
+                  isScopeCurrent={isCurrentGfsPreviewScope}
                   titleActions={fileActionsMenu}
                   headingLevel={2}
                 />
@@ -411,6 +507,7 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
+                  isScopeCurrent={isCurrentGfsPreviewScope}
                   titleActions={fileActionsMenu}
                   headingLevel={2}
                 />

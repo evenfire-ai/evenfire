@@ -355,6 +355,7 @@ export function openPreviewTab(
     gfsUri: input.gfsUri,
     fileKind: input.fileKind,
     byteLength: input.byteLength,
+    ...(input.sessionScope !== undefined ? { sessionScope: input.sessionScope } : {}),
     ...(input.resourceVersion !== undefined ? { resourceVersion: input.resourceVersion } : {}),
     ...(input.mimeType !== undefined ? { mimeType: input.mimeType } : {}),
   }
@@ -383,6 +384,7 @@ export function openPreviewTab(
       p.gfsUri === nextPreview.gfsUri &&
       p.fileKind === nextPreview.fileKind &&
       p.byteLength === nextPreview.byteLength &&
+      p.sessionScope === nextPreview.sessionScope &&
       p.mimeType === nextPreview.mimeType &&
       p.unavailable !== true &&
       p.reloadVersion === undefined &&
@@ -471,6 +473,7 @@ export function refreshPreviewTab(
         gfsUri,
         fileKind: refresh.fileKind,
         byteLength: refresh.byteLength,
+        ...(previous.sessionScope !== undefined ? { sessionScope: previous.sessionScope } : {}),
         ...(refresh.mimeType !== undefined ? { mimeType: refresh.mimeType } : {}),
         ...(refresh.resourceVersion !== undefined
           ? { resourceVersion: refresh.resourceVersion }
@@ -586,6 +589,13 @@ export function closeWorkspaceTab(state: WorkspaceTabsState, id: string): Worksp
   if (state.activeTabId !== id) return { tabs, activeTabId: state.activeTabId }
   const neighbor = tabs[Math.min(closingIndex, tabs.length - 1)]!
   return { tabs, activeTabId: neighbor.id }
+}
+
+/** Close every GFS Preview tab while preserving the active non-Preview selection. */
+export function closeAllPreviewTabs(state: WorkspaceTabsState): WorkspaceTabsState {
+  return [...state.tabs]
+    .reverse()
+    .reduce((next, tab) => (tab.kind === 'preview' ? closeWorkspaceTab(next, tab.id) : next), state)
 }
 
 // ---- reconcile (chat sub-slice; idempotent) ---------------------------------

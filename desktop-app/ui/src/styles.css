@@ -1908,6 +1908,10 @@ h3 {
   gap: var(--space-0-5);
 }
 
+.da-gfs-resource-menu--context {
+  display: none;
+}
+
 .da-file-explorer__toggle.ui-icon-button {
   width: 22px;
   min-width: 22px;

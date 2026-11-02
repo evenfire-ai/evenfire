@@ -21,6 +21,7 @@ import {
 } from './chatStoreBinding.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import { GFS_SESSION_AUTHORITY_ERROR_CODES } from './gfs/sessionAuthority.js'
 import {
   abortZipJob,
   appendZipEntry,
@@ -119,6 +120,34 @@ export function registerDeepLinkAcknowledgmentHandlers(
 
 function sanitizeString(input: unknown): string {
   return String(input || '').trim()
+}
+
+const STALE_GFS_AUTHORITY_MARKER = '__CLERUM_GFS_STALE_AUTHORITY_V1__:'
+const STALE_GFS_AUTHORITY_STALE_TAG = 'stale:'
+const STALE_GFS_AUTHORITY_MESSAGE_TAG = 'message:'
+
+function encodeGfsIpcErrorMessage(message: string): string {
+  return encodeURIComponent(JSON.stringify(message))
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error ?? 'Unknown GFS error')
+}
+
+function hasHttp401(error: unknown, depth = 0): boolean {
+  if (!error || typeof error !== 'object' || depth > 4) return false
+  const record = error as { status?: unknown; cause?: unknown }
+  return record.status === 401 || hasHttp401(record.cause, depth + 1)
+}
+
+function isGfsSessionAuthorityError(error: unknown): boolean {
+  if (hasHttp401(error)) return true
+  const message = errorMessage(error).toLowerCase()
+  return (
+    GFS_SESSION_AUTHORITY_ERROR_CODES.some(code => message.includes(code)) ||
+    message.includes('not authenticated') ||
+    message.includes('unauthenticated')
+  )
 }
 
 // The renderer names each sandbox-ui open so it can tell events of the view
@@ -444,6 +473,39 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
+  const handleGfs = <Args extends unknown[], Result>(
+    channel: `gfs:${string}`,
+    listener: (event: IpcMainInvokeEvent, ...args: Args) => Result | Promise<Result>
+  ): void => {
+    ipcMain.handle(channel, async (event, ...args: Args) => {
+      assertTrustedSender(event)
+      const requestGeneration = service.getSessionGeneration()
+      try {
+        return await listener(event, ...args)
+      } catch (error) {
+        const message = errorMessage(error)
+        if (
+          service.getSessionGeneration() !== requestGeneration &&
+          isGfsSessionAuthorityError(error)
+        ) {
+          // Electron transports the error message across the IPC boundary. The
+          // preload recognizes this private tagged message and restores the
+          // original operation message on an internal typed error.
+          throw new Error(
+            `${STALE_GFS_AUTHORITY_MARKER}${STALE_GFS_AUTHORITY_STALE_TAG}${encodeGfsIpcErrorMessage(message)}`
+          )
+        }
+        // API error codes are server-derived text. Escape a reserved-prefix
+        // collision so current request failures cannot impersonate this tag.
+        if (message.startsWith(STALE_GFS_AUTHORITY_MARKER)) {
+          throw new Error(
+            `${STALE_GFS_AUTHORITY_MARKER}${STALE_GFS_AUTHORITY_MESSAGE_TAG}${encodeGfsIpcErrorMessage(message)}`
+          )
+        }
+        throw error
+      }
+    })
+  }
 
   // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
   // R1-M1): the renderer attaches a requestId to an invoke and fires
@@ -694,17 +756,21 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     return service.listTeamMembers()
   })
-  ipcMain.handle('gfs:resolve', async (event, payload: { uri: string }) => {
+  handleGfs('gfs:resolve', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
   })
-  ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
+  handleGfs('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
     clipboard.writeText(result.url)
     return result
   })
-  ipcMain.handle(
+  handleGfs('gfs:getResourceProfileOrigin', async event => {
+    assertTrustedSender(event)
+    return service.getGfsResourceProfileOrigin()
+  })
+  handleGfs(
     'gfs:download',
     async (event, payload: { uri: string; maxBytes?: number; requestId?: string }) => {
       assertTrustedSender(event)
@@ -722,37 +788,31 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
-    'gfs:downloadPreview',
-    async (event, payload: { uri: string; maxBytes: number }) => {
-      assertTrustedSender(event)
-      // The preview path is bounded: a required ceiling caps the download so an
-      // oversized payload is rejected before it materializes (the save-to-disk
-      // 'gfs:download' path above stays intentionally uncapped).
-      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
-      if (maxBytes === undefined) {
-        throw new Error('maxBytes is required for a preview download')
-      }
-      // The renderer is untrusted: it may ask for a smaller per-type limit, but
-      // the ceiling is enforced here in main. Reject (not clamp) an over-cap
-      // request — a value above the app maximum is a bug or a tampered payload,
-      // consistent with the fail-loud missing-maxBytes guard above.
-      if (maxBytes > GFS_PREVIEW_MAX_BYTES) {
-        throw new Error('preview download limit exceeds the allowed maximum')
-      }
-      return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
+  handleGfs('gfs:downloadPreview', async (event, payload: { uri: string; maxBytes: number }) => {
+    assertTrustedSender(event)
+    // The preview path is bounded: a required ceiling caps the download so an
+    // oversized payload is rejected before it materializes (the save-to-disk
+    // 'gfs:download' path above stays intentionally uncapped).
+    const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+    if (maxBytes === undefined) {
+      throw new Error('maxBytes is required for a preview download')
     }
-  )
-  ipcMain.handle(
-    'gfs:listAccessible',
-    async (event, payload: { drive?: string; cursor?: string }) => {
-      assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
-      const cursor = payload?.cursor ? sanitizeString(payload.cursor) : undefined
-      return service.listAccessibleGfsResources(drive, cursor)
+    // The renderer is untrusted: it may ask for a smaller per-type limit, but
+    // the ceiling is enforced here in main. Reject (not clamp) an over-cap
+    // request — a value above the app maximum is a bug or a tampered payload,
+    // consistent with the fail-loud missing-maxBytes guard above.
+    if (maxBytes > GFS_PREVIEW_MAX_BYTES) {
+      throw new Error('preview download limit exceeds the allowed maximum')
     }
-  )
-  ipcMain.handle(
+    return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
+  })
+  handleGfs('gfs:listAccessible', async (event, payload: { drive?: string; cursor?: string }) => {
+    assertTrustedSender(event)
+    const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+    const cursor = payload?.cursor ? sanitizeString(payload.cursor) : undefined
+    return service.listAccessibleGfsResources(drive, cursor)
+  })
+  handleGfs(
     'gfs:listChildren',
     async (
       event,
@@ -767,14 +827,11 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
-    'gfs:affordances',
-    async (event, payload: { resourceId: string; drive?: string }) => {
-      assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
-      return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
-    }
-  )
+  handleGfs('gfs:affordances', async (event, payload: { resourceId: string; drive?: string }) => {
+    assertTrustedSender(event)
+    const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+    return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
+  })
   // Streamed, file-backed folder-zip assembly (R1-H2): entries append to a
   // main-process temp file, finish saves through a native dialog. All five
   // channels trust-check.
@@ -868,7 +925,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     await abortZipJob(sanitizeString(payload.jobId), zipJobOwnerId(event))
     return { aborted: true }
   })
-  ipcMain.handle(
+  handleGfs(
     'gfs:createFolder',
     async (event, payload: { parentResourceId: string; name: string; drive?: string }) => {
       assertTrustedSender(event)
@@ -880,7 +937,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
+  handleGfs(
     'gfs:createFile',
     async (
       event,
@@ -896,7 +953,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
+  handleGfs(
     'gfs:createFileFromPath',
     async (
       event,
@@ -912,7 +969,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
+  handleGfs(
     'gfs:startFileUpload',
     async (
       event,
@@ -938,7 +995,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
+  handleGfs(
     'gfs:startFileReplace',
     async (
       event,
@@ -964,7 +1021,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
+  handleGfs(
     'gfs:getUploadSnapshot',
     async (event, payload: { uploadId: string; drive?: string }) => {
       assertTrustedSender(event)
@@ -974,42 +1031,33 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle('gfs:listUploadSessions', async (event, payload?: { drive?: string }) => {
+  handleGfs('gfs:listUploadSessions', async (event, payload?: { drive?: string }) => {
     assertTrustedSender(event)
     return service.listGfsUploadSessions(payload?.drive ? sanitizeString(payload.drive) : undefined)
   })
-  ipcMain.handle(
-    'gfs:pauseUpload',
-    async (event, payload: { uploadId: string; drive?: string }) => {
-      assertTrustedSender(event)
-      return service.pauseGfsUpload(
-        sanitizeString(payload?.uploadId),
-        payload?.drive ? sanitizeString(payload.drive) : undefined
-      )
-    }
-  )
-  ipcMain.handle(
-    'gfs:resumeUpload',
-    async (event, payload: { uploadId: string; drive?: string }) => {
-      assertTrustedSender(event)
-      return service.resumeGfsUpload(
-        sanitizeString(payload?.uploadId),
-        payload?.drive ? sanitizeString(payload.drive) : undefined
-      )
-    }
-  )
-  ipcMain.handle(
-    'gfs:cancelUpload',
-    async (event, payload: { uploadId: string; drive?: string }) => {
-      assertTrustedSender(event)
-      await service.cancelGfsUpload(
-        sanitizeString(payload?.uploadId),
-        payload?.drive ? sanitizeString(payload.drive) : undefined
-      )
-      return { ok: true }
-    }
-  )
-  ipcMain.handle(
+  handleGfs('gfs:pauseUpload', async (event, payload: { uploadId: string; drive?: string }) => {
+    assertTrustedSender(event)
+    return service.pauseGfsUpload(
+      sanitizeString(payload?.uploadId),
+      payload?.drive ? sanitizeString(payload.drive) : undefined
+    )
+  })
+  handleGfs('gfs:resumeUpload', async (event, payload: { uploadId: string; drive?: string }) => {
+    assertTrustedSender(event)
+    return service.resumeGfsUpload(
+      sanitizeString(payload?.uploadId),
+      payload?.drive ? sanitizeString(payload.drive) : undefined
+    )
+  })
+  handleGfs('gfs:cancelUpload', async (event, payload: { uploadId: string; drive?: string }) => {
+    assertTrustedSender(event)
+    await service.cancelGfsUpload(
+      sanitizeString(payload?.uploadId),
+      payload?.drive ? sanitizeString(payload.drive) : undefined
+    )
+    return { ok: true }
+  })
+  handleGfs(
     'gfs:replaceFile',
     async (
       event,
@@ -1025,7 +1073,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
+  handleGfs(
     'gfs:replaceFileFromPath',
     async (
       event,
@@ -1041,7 +1089,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
+  handleGfs(
     'gfs:renameResource',
     async (
       event,
@@ -1057,7 +1105,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
+  handleGfs(
     'gfs:moveResource',
     async (
       event,
@@ -1090,7 +1138,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
+  handleGfs(
     'gfs:deleteResource',
     async (event, payload: { resourceId: string; drive?: string; ifMatch?: number }) => {
       assertTrustedSender(event)
@@ -1102,7 +1150,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
+  handleGfs(
     'gfs:grant',
     async (
       event,
@@ -1130,31 +1178,25 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  ipcMain.handle(
-    'gfs:listGrants',
-    async (event, payload: { resourceId: string; drive?: string }) => {
-      assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
-      return service.listGfsGrants(sanitizeString(payload?.resourceId), drive)
-    }
-  )
-  ipcMain.handle('gfs:revokeGrant', async (event, payload: { grantId: string }) => {
+  handleGfs('gfs:listGrants', async (event, payload: { resourceId: string; drive?: string }) => {
+    assertTrustedSender(event)
+    const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+    return service.listGfsGrants(sanitizeString(payload?.resourceId), drive)
+  })
+  handleGfs('gfs:revokeGrant', async (event, payload: { grantId: string }) => {
     assertTrustedSender(event)
     return service.revokeGfsGrant(sanitizeString(payload?.grantId))
   })
-  ipcMain.handle(
-    'gfs:listShares',
-    async (event, payload: { resourceId: string; drive?: string }) => {
-      assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
-      return service.listGfsShares(sanitizeString(payload?.resourceId), drive)
-    }
-  )
-  ipcMain.handle('gfs:revokeShare', async (event, payload: { shareId: string }) => {
+  handleGfs('gfs:listShares', async (event, payload: { resourceId: string; drive?: string }) => {
+    assertTrustedSender(event)
+    const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+    return service.listGfsShares(sanitizeString(payload?.resourceId), drive)
+  })
+  handleGfs('gfs:revokeShare', async (event, payload: { shareId: string }) => {
     assertTrustedSender(event)
     return service.revokeGfsShare(sanitizeString(payload?.shareId))
   })
-  ipcMain.handle(
+  handleGfs(
     'gfs:createShare',
     async (event, payload: { resourceId: string; subjectKeys: string[]; drive?: string }) => {
       assertTrustedSender(event)

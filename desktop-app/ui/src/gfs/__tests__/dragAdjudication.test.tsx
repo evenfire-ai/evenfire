@@ -74,7 +74,7 @@ function installClerumGfsBridge() {
 }
 
 function renderAdjudication(
-  handleAuthorityFailure?: (message: string, scope: string, generation: number) => boolean
+  handleAuthorityFailure?: (error: unknown, scope: string, generation: number) => boolean
 ) {
   const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
   const wrapper = ({ children }: { children: ReactNode }) => (
@@ -231,7 +231,8 @@ describe('useGfsDragAdjudication — required-probe drop admission (R1-H1)', () 
       code: 'unauthorized',
       message: 'session expired',
     })
-    probes = await grantedProbes({ 'dest-1': { error: new Error(message) } })
+    const error = new Error(message)
+    probes = await grantedProbes({ 'dest-1': { error } })
     const { result } = renderAdjudication()
 
     const decision = await result.current.adjudicateDrop(dragSource(), dropTarget())
@@ -367,22 +368,24 @@ describe('useGfsDragAdjudication — probe 401 revokes the session', () => {
       code: 'unauthorized',
       message: 'session expired',
     })
-    probes = await grantedProbes({ 'dest-1': { error: new Error(message) } })
+    const error = new Error(message)
+    probes = await grantedProbes({ 'dest-1': { error } })
     const handleAuthorityFailure = vi.fn(() => true)
     const { result } = renderAdjudication(handleAuthorityFailure)
 
     const decision = await result.current.adjudicateDrop(dragSource(), dropTarget())
 
     expect(decision).toEqual({ allowed: false, reason: 'session-lost' })
-    expect(handleAuthorityFailure).toHaveBeenCalledWith(message, SCOPE, SESSION_GENERATION)
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(error, SCOPE, SESSION_GENERATION)
   })
 
   it('reports a 401 from the direct source resolve to the fail-closed classifier', async () => {
     // An unknown source parent forces the direct resolve of the source; a 401
     // there must revoke, not just refuse the drop.
     const message = 'Error invoking remote method: Error: 401 Unauthorized httpStatus=401'
+    const error = new Error(message)
     resolve = vi.fn(async () => {
-      throw new Error(message)
+      throw error
     })
     probes = await grantedProbes()
     const handleAuthorityFailure = vi.fn(() => true)
@@ -394,13 +397,14 @@ describe('useGfsDragAdjudication — probe 401 revokes the session', () => {
     )
 
     expect(decision).toEqual({ allowed: false, reason: 'session-lost' })
-    expect(handleAuthorityFailure).toHaveBeenCalledWith(message, SCOPE, SESSION_GENERATION)
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(error, SCOPE, SESSION_GENERATION)
   })
 
   it('reports a 401 from the ancestor resolve to the fail-closed classifier', async () => {
     const message = 'Error invoking remote method: Error: 401 Unauthorized httpStatus=401'
+    const error = new Error(message)
     resolve = vi.fn(async () => {
-      throw new Error(message)
+      throw error
     })
     probes = await grantedProbes()
     const handleAuthorityFailure = vi.fn(() => true)
@@ -412,7 +416,7 @@ describe('useGfsDragAdjudication — probe 401 revokes the session', () => {
       { ...dropTarget(), ancestorIds: ['root-1'] }
     )
 
-    expect(handleAuthorityFailure).toHaveBeenCalledWith(message, SCOPE, SESSION_GENERATION)
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(error, SCOPE, SESSION_GENERATION)
     // A session failure is TERMINAL for the gesture: the ancestry read died
     // with the session, so the adjudication must not continue into the later
     // probes and answer "allowed" over a dead session (RP-002).

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
 import {
   activeWorkspaceTab,
+  closeAllPreviewTabs,
   closeWorkspaceTab,
   createEmptyWorkspaceTabsState,
   createFilesTab,
@@ -1248,6 +1249,56 @@ function applyOpens(ops: OpenOp[]): WorkspaceTabsState {
 }
 
 describe('workspaceTabs — T2 properties (§7)', () => {
+  it('property: closes every Preview and preserves non-Preview order and active selection', () => {
+    const kinds = ['chat', 'app', 'files', 'settings', 'preview'] as const
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom(...kinds), { maxLength: 24 }),
+        fc.integer({ min: 0, max: 23 }),
+        (tabKinds, activeRaw) => {
+          const tabs: WorkspaceTabsState['tabs'] = tabKinds.map((kind, index) => ({
+            id: `tab-${index}`,
+            kind,
+            title: `Tab ${index}`,
+            ...(kind === 'chat' ? { chat: { agentRef: null, chatId: null } } : {}),
+            ...(kind === 'app' ? { app: { appRef: `app-${index}` } } : {}),
+            ...(kind === 'files' ? { files: { path: `gfs://main/${index}` } } : {}),
+            ...(kind === 'settings' ? { settings: { section: 'settings' as const } } : {}),
+            ...(kind === 'preview'
+              ? {
+                  preview: {
+                    gfsUri: `gfs://main/${index}`,
+                    fileKind: 'markdown' as const,
+                    byteLength: 1,
+                  },
+                }
+              : {}),
+          }))
+          const activeIndex = tabs.length > 0 ? activeRaw % tabs.length : -1
+          const activeId = activeIndex >= 0 ? tabs[activeIndex]!.id : null
+          const state: WorkspaceTabsState = { tabs, activeTabId: activeId }
+          const activeBefore = activeWorkspaceTab(state)
+          const remaining = tabs.filter(tab => tab.kind !== 'preview')
+          const next = closeAllPreviewTabs(state)
+
+          expect(next.tabs.every(tab => tab.kind !== 'preview')).toBe(true)
+          expect(next.tabs.map(tab => tab.id)).toEqual(remaining.map(tab => tab.id))
+          if (activeBefore && activeBefore.kind !== 'preview') {
+            expect(next.activeTabId).toBe(activeBefore.id)
+          } else if (activeBefore?.kind === 'preview') {
+            const rightNeighbor = tabs.slice(activeIndex + 1).find(tab => tab.kind !== 'preview')
+            const leftNeighbor = [...tabs.slice(0, activeIndex)]
+              .reverse()
+              .find(tab => tab.kind !== 'preview')
+            expect(next.activeTabId).toBe(rightNeighbor?.id ?? leftNeighbor?.id ?? null)
+          } else {
+            expect(next.activeTabId).toBeNull()
+          }
+        }
+      )
+    )
+  })
+
   it('(2)+(3) no duplicate ids; chat/files/settings unique, apps multiple', () => {
     fc.assert(
       fc.property(fc.array(openOpArb, { maxLength: 40 }), ops => {

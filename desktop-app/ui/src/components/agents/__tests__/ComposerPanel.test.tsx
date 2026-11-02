@@ -358,7 +358,7 @@ describe('ComposerPanel EvenDrive picker', () => {
     expect(globalFilesMock.modalProps).toBeUndefined()
 
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: /EvenDrive/ }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Attach EvenDrive files/ }))
 
     expect(globalFilesMock.modalProps?.attachedIds).toEqual(['global-file:main:aaaa'])
   })

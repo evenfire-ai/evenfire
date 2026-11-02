@@ -6,6 +6,7 @@ import path from 'node:path'
 import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests } from '../chatStoreBinding.js'
+import { DesktopUploadCapabilityError } from '../gfs/upload.js'
 import { ApiError } from '../httpClient.js'
 import type { HostMessageAttachment } from '../types.js'
 
@@ -507,7 +508,7 @@ describe('AppService.invokeHostMessage', () => {
       service.runWithTeamContext('team-b', async () => {
         await expect(
           service.startGfsFileUpload('parent-a', 'upload.bin', 'upload.bin')
-        ).rejects.toThrow('GFS upload dispatch is unavailable during a transient team hop')
+        ).rejects.toThrow('GFS dispatch is unavailable during a transient team hop')
         return 'team-b-operation'
       })
     ).resolves.toBe('team-b-operation')
@@ -515,6 +516,399 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, 'team-a-token', 'team-b')
     expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-test-token', 'team-a')
     expect(service.gfsTransientTeamHopDepth).toBe(0)
+  })
+
+  it('does not dispatch API-backed GFS operations with a transient team token', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'team-a-token'
+    service.me = {
+      id: 'user-1',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    service.authClient = {
+      getMe: vi
+        .fn()
+        .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
+        .mockResolvedValueOnce(service.me),
+      switchTeam: vi.fn(async (_token: string, teamId: string) => ({
+        token: `${teamId}-test-token`,
+        team: { id: teamId, name: teamId === 'team-b' ? 'Team B' : 'Team A', role: 'member' },
+      })),
+    }
+    service.tokenStore = { setSessionToken: vi.fn() }
+    const gfsClient = Object.fromEntries(
+      [
+        'resolveUri',
+        'download',
+        'listChildren',
+        'listAccessible',
+        'affordances',
+        'grant',
+        'listGrants',
+        'revokeGrant',
+        'listShares',
+        'revokeShare',
+        'createShare',
+        'createResource',
+        'replaceFile',
+        'renameResource',
+        'moveResource',
+        'deleteResource',
+      ].map(name => [name, vi.fn().mockResolvedValue({})])
+    )
+    service.gfsClient = gfsClient
+
+    await expect(
+      service.runWithTeamContext('team-b', async () => {
+        const requests = [
+          () => service.resolveGfsUri('gfs://main/resource-a'),
+          () => service.downloadGfsUri('gfs://main/resource-a'),
+          () => service.listGfsChildren('resource-a'),
+          () => service.listAccessibleGfsResources(),
+          () => service.gfsAffordances('resource-a'),
+          () => service.grantGfs('resource-a', ['user:user-a'], ['read']),
+          () => service.listGfsGrants('resource-a'),
+          () => service.revokeGfsGrant('grant-a'),
+          () => service.listGfsShares('resource-a'),
+          () => service.revokeGfsShare('share-a'),
+          () => service.createGfsShare('resource-a', ['team:team-a']),
+          () => service.createGfsFolder('parent-a', 'folder'),
+          () => service.createGfsFile('parent-a', 'file.txt', 'ZGF0YQ=='),
+          () => service.replaceGfsFile('resource-a', 'ZGF0YQ=='),
+          () => service.renameGfsResource('resource-a', 'renamed'),
+          () =>
+            service.moveGfsResource('resource-a', 'destination-a', service.getSessionGeneration()),
+          () => service.deleteGfsResource('resource-a'),
+        ]
+
+        for (const request of requests) {
+          await expect(request()).rejects.toThrow(
+            'GFS dispatch is unavailable during a transient team hop'
+          )
+        }
+        return 'team-b-operation'
+      })
+    ).resolves.toBe('team-b-operation')
+
+    for (const request of Object.values(gfsClient) as ReturnType<typeof vi.fn>[]) {
+      expect(request).not.toHaveBeenCalled()
+    }
+    expect(service.me.teamId).toBe('team-a')
+    expect(service.gfsTransientTeamHopDepth).toBe(0)
+  })
+
+  it('keeps a GFS request dispatched before a team hop on its captured token', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'team-a-token'
+    service.me = {
+      id: 'user-1',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    service.authClient = {
+      getMe: vi
+        .fn()
+        .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
+        .mockResolvedValueOnce(service.me),
+      switchTeam: vi.fn(async (_token: string, teamId: string) => ({
+        token: `${teamId}-test-token`,
+        team: { id: teamId, name: teamId === 'team-b' ? 'Team B' : 'Team A', role: 'member' },
+      })),
+    }
+    service.tokenStore = { setSessionToken: vi.fn() }
+    let finishResolve!: (value: { resourceId: string }) => void
+    const resolveUri = vi.fn(
+      (_uri: string, _token: string) =>
+        new Promise<{ resourceId: string }>(resolve => {
+          finishResolve = resolve
+        })
+    )
+    service.gfsClient = { resolveUri }
+
+    const request = service.resolveGfsUri('gfs://main/resource-a')
+    expect(resolveUri).toHaveBeenCalledWith('gfs://main/resource-a', 'team-a-token')
+
+    await expect(
+      service.runWithTeamContext('team-b', async () => {
+        finishResolve({ resourceId: 'resource-a' })
+        await expect(request).resolves.toEqual({ resourceId: 'resource-a' })
+        return 'team-b-operation'
+      })
+    ).resolves.toBe('team-b-operation')
+
+    expect(resolveUri).toHaveBeenCalledTimes(1)
+    expect(service.me.teamId).toBe('team-a')
+    expect(service.gfsTransientTeamHopDepth).toBe(0)
+  })
+
+  it('does not start a legacy upload fallback when its capability failure arrives during a hop', async () => {
+    const service = new AppService() as any
+    const filePath = path.join(chatStoreBaseDir, 'legacy-fallback.bin')
+    await fs.writeFile(filePath, Buffer.from('legacy payload'))
+    service.sessionToken = 'team-a-token'
+    service.me = {
+      id: 'user-1',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    service.gfsScopeIdentity = {
+      ownerId: 'user-1',
+      teamId: 'team-a',
+      environmentKey: 'test-env',
+      baseUrl: 'https://external.example',
+    }
+    service.gfsAuthEpoch = 1
+    service.gfsDispatchBlocked = false
+    service.authClient = {
+      getMe: vi
+        .fn()
+        .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
+        .mockResolvedValueOnce(service.me),
+      switchTeam: vi.fn(async (_token: string, teamId: string) => ({
+        token: `${teamId}-test-token`,
+        team: { id: teamId, name: teamId, role: 'member' },
+      })),
+    }
+    service.tokenStore = { setSessionToken: vi.fn() }
+
+    let rejectCapability!: (error: unknown) => void
+    service.startDesktopGfsUpload = vi.fn(
+      () => new Promise((_resolve, reject) => (rejectCapability = reject))
+    )
+    service.gfsClient = { createResource: vi.fn().mockResolvedValue({ resourceId: 'created' }) }
+    const uploadResult = service
+      .startGfsFileUpload('parent-a', 'legacy-fallback.bin', filePath, 'main')
+      .then(
+        (value: unknown) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error })
+      )
+
+    await service.runWithTeamContext('team-b', async () => {
+      rejectCapability(
+        new DesktopUploadCapabilityError('resumable uploads are disabled', {
+          allowLegacyFallback: true,
+        })
+      )
+      return 'team-b-operation'
+    })
+
+    const result = await uploadResult
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toMatchObject({
+        message: 'GFS dispatch is unavailable during a transient team hop',
+      })
+    }
+    expect(service.gfsClient.createResource).not.toHaveBeenCalled()
+    expect(service.me.teamId).toBe('team-a')
+    expect(service.gfsTransientTeamHopDepth).toBe(0)
+  })
+
+  it('does not dispatch a legacy upload encoded while a transient team hop is active', async () => {
+    const service = new AppService() as any
+    const filePath = path.join(chatStoreBaseDir, 'legacy-fallback-during-hop.bin')
+    await fs.writeFile(filePath, Buffer.alloc(0))
+    service.sessionToken = 'team-a-token'
+    service.me = {
+      id: 'user-1',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    service.gfsScopeIdentity = {
+      ownerId: 'user-1',
+      teamId: 'team-a',
+      environmentKey: 'test-env',
+      baseUrl: 'https://external.example',
+    }
+    service.gfsAuthEpoch = 1
+    service.gfsDispatchBlocked = false
+    service.gfsPendingLegacyUploads = new Set()
+    service.authClient = {
+      getMe: vi
+        .fn()
+        .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
+        .mockResolvedValueOnce(service.me),
+      switchTeam: vi.fn(async (_token: string, teamId: string) => ({
+        token: `${teamId}-test-token`,
+        team: { id: teamId, name: teamId, role: 'member' },
+      })),
+    }
+    service.tokenStore = { setSessionToken: vi.fn() }
+    service.startDesktopGfsUpload = vi.fn().mockRejectedValue(
+      new DesktopUploadCapabilityError('resumable uploads are disabled', {
+        allowLegacyFallback: true,
+      })
+    )
+    service.gfsClient = { createResource: vi.fn().mockResolvedValue({ resourceId: 'created' }) }
+
+    let finishRead!: () => void
+    let readStarted!: () => void
+    const readStartedPromise = new Promise<void>(resolve => (readStarted = resolve))
+    const readGate = new Promise<void>(resolve => (finishRead = resolve))
+    vi.spyOn(fs, 'open').mockResolvedValue({
+      stat: vi.fn().mockResolvedValue({ isFile: () => true, size: 0 }),
+      read: vi.fn(async () => {
+        readStarted()
+        await readGate
+        return { bytesRead: 0 }
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as fs.FileHandle)
+
+    const upload = service
+      .startGfsFileUpload('parent-a', 'legacy-fallback-during-hop.bin', filePath, 'main')
+      .then(
+        (value: unknown) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error })
+      )
+    await readStartedPromise
+
+    let finishTeamHop!: () => void
+    const teamHopGate = new Promise<void>(resolve => (finishTeamHop = resolve))
+    const teamHop = service.runWithTeamContext('team-b', async () => {
+      await teamHopGate
+      return 'team-b-operation'
+    })
+    await vi.waitFor(() => expect(service.gfsTransientTeamHopDepth).toBeGreaterThan(0))
+
+    finishRead()
+    const result = await upload
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toMatchObject({
+        message: 'GFS dispatch is unavailable during a transient team hop',
+      })
+    }
+    expect(service.gfsClient.createResource).not.toHaveBeenCalled()
+
+    finishTeamHop()
+    await expect(teamHop).resolves.toBe('team-b-operation')
+    expect(service.me.teamId).toBe('team-a')
+    expect(service.gfsTransientTeamHopDepth).toBe(0)
+  })
+
+  it('does not dispatch persisted upload cancellation after a team hop starts during state read', async () => {
+    const service = new AppService() as any
+    const uploadId = '92929292-9292-4292-8292-929292929292'
+    const scope = {
+      ownerId: 'user-1',
+      teamId: 'team-a',
+      environmentKey: 'test-env',
+      baseUrl: 'https://external.example',
+      drive: 'main',
+      authEpoch: 1,
+    }
+    const session = {
+      uploadId,
+      drive: 'main',
+      operation: 'create',
+      expectedBytes: 4,
+      partBytes: 4,
+      partCount: 1,
+      state: 'uploading',
+      contiguousBytes: 0,
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }
+    service.sessionToken = 'team-a-token'
+    service.me = {
+      id: 'user-1',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    service.gfsScopeIdentity = {
+      ownerId: 'user-1',
+      teamId: 'team-a',
+      environmentKey: 'test-env',
+      baseUrl: 'https://external.example',
+    }
+    service.gfsAuthEpoch = 1
+    service.gfsDispatchBlocked = false
+    service.gfsUploadJobs = new Map()
+    service.clearDesktopGfsUpload = vi.fn()
+    let finishStateRead!: (state: unknown) => void
+    service.readDesktopGfsUploadState = vi.fn(
+      () => new Promise(resolve => (finishStateRead = resolve))
+    )
+    service.authClient = {
+      getMe: vi
+        .fn()
+        .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
+        .mockResolvedValueOnce(service.me),
+      switchTeam: vi.fn(async (_token: string, teamId: string) => ({
+        token: `${teamId}-test-token`,
+        team: { id: teamId, name: teamId, role: 'member' },
+      })),
+    }
+    service.tokenStore = { setSessionToken: vi.fn() }
+
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const cancelResult = service.cancelGfsUpload(uploadId, 'main').then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error })
+      )
+      await service.runWithTeamContext('team-b', async () => {
+        finishStateRead({
+          version: 2,
+          records: [
+            {
+              version: 2,
+              uploadId,
+              filePath: '/unused/payload.bin',
+              fileName: 'payload.bin',
+              fileSize: 4,
+              target: { operation: 'create', parentRid: 'parent-a' },
+              name: 'payload.bin',
+              session,
+              scope,
+              status: 'suspended_auth',
+              updatedAt: new Date().toISOString(),
+            },
+          ],
+          quarantined: [],
+        })
+        return 'team-b-operation'
+      })
+
+      const result = await cancelResult
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.error).toMatchObject({
+          message: 'GFS dispatch is unavailable during a transient team hop',
+        })
+      }
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(service.clearDesktopGfsUpload).not.toHaveBeenCalled()
+      expect(service.me.teamId).toBe('team-a')
+      expect(service.gfsTransientTeamHopDepth).toBe(0)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('keeps existing GFS controls usable through the real team-hop lifecycle', async () => {
@@ -740,7 +1134,7 @@ describe('AppService.invokeHostMessage', () => {
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {
       await expect(
         service.startGfsFileUpload('parent-a', 'upload.bin', 'upload.bin')
-      ).rejects.toThrow('GFS upload dispatch is unavailable during a transient team hop')
+      ).rejects.toThrow('GFS dispatch is unavailable during a transient team hop')
     })
     service.activateGfsAuthScope = vi.fn()
     service.stopAllStreams = vi.fn()

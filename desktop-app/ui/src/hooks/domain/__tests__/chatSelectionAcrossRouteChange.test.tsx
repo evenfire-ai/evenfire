@@ -482,4 +482,35 @@ describe('chat-route guard on the real selection entry points', () => {
     expect(result.current.activeChatId).toBe('c-old')
     expect(clerum.chat.setLastActive).not.toHaveBeenCalledWith('agent-x', 'c-newest')
   })
+  it.each([false, true])(
+    'loads the focused conversation with one intent (caller receipt: %s)',
+    async callerStarted => {
+      const { result } = await bootOnChatRoute()
+      act(() => result.current.activateWorkspaceChatTab('agent-x', 'c-newest', 'Newest chat', true))
+      const chatTabId = result.current.workspaceTabs.activeTabId
+      expect(
+        result.current.workspaceTabs.tabs.find(tab => tab.id === chatTabId)?.chat?.chatId
+      ).toBe('c-newest')
+      act(() => result.current.handleNavSelect(DESKTOP_ROUTES.files))
+      const before = result.current.navigationIntentSequence
+      clerum.chat.setLastActive.mockClear()
+      act(() => {
+        if (callerStarted) result.current.beginUserNavigationIntent()
+        result.current.handleNavSelect(
+          DESKTOP_ROUTES.chat,
+          callerStarted ? { navigationIntentAlreadyStarted: true } : {}
+        )
+      })
+      await waitFor(() => {
+        expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+        expect(result.current.activeChatId).toBe('c-newest')
+        expect(result.current.selectedAgent).toBe('agent-x')
+        expect(result.current.chatMessagesLoading).toBe(false)
+      }, SLOW)
+      await settle()
+      expect(result.current.workspaceTabs.activeTabId).toBe(chatTabId)
+      expect(clerum.chat.setLastActive).toHaveBeenCalledWith('agent-x', 'c-newest')
+      expect(result.current.navigationIntentSequence).toBe(before + 1)
+    }
+  )
 })

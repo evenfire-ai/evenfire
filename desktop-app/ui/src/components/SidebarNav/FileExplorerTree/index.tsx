@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
+import { GfsResourceMenu } from '@components/GfsResourceMenu'
+import type { GfsResourceMenuOpenRequest } from '@components/GfsResourceMenu/types'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
   GFS_DRIVE_MAIN,
@@ -13,14 +15,15 @@ import {
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
 import {
+  type GfsBrowserAffordances,
   type GfsBrowserChild,
   type GfsCrumb,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
-import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
-import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
+import { parseHttpStatus } from '@lib/gfsGrantErrors'
 import { resolveGfsPreview } from '@lib/gfsPreview'
+import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
@@ -35,10 +38,8 @@ import {
   presentGfsDropRefusal,
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
-import { toastMoveOutcome } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
-import { GfsMoveDialog } from '@/gfs/moveDialog'
 import { IconChevronRight, IconContexts } from '../icons'
 import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
 
@@ -47,10 +48,16 @@ import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
 // double-click cancel it first. Files have no such ambiguity — a single-click
 // activates them immediately — so this delay applies to folders only.
 const DOUBLE_CLICK_DELAY_MS = 250
+const TOUCH_MENU_DELAY_MS = 500
+const TOUCH_MENU_MOVEMENT_PX = 8
 
 function errorMessage(error: unknown): string | null {
   if (!error) return null
   return error instanceof Error ? error.message : String(error)
+}
+
+function hasBit(affordances: GfsBrowserAffordances | undefined, bit: string): boolean {
+  return Boolean(affordances?.held.includes(bit))
 }
 
 // A GFS name is externally controlled (anyone who can write to a shared drive the
@@ -99,25 +106,125 @@ function FileExplorerNode({
   onToggle,
   onActivateFolder,
   onActivateFile,
+  onResourceAction,
   onAuthorityFailure,
   onNodeDragStart,
   onNodeDragEnd,
   onNodeDragOver,
   onNodeDragLeave,
   onNodeDrop,
-  onRequestMove,
 }: FileExplorerNodeProps) {
   const queryClient = useQueryClient()
   const isDirectory = node.kind === 'directory'
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
   const label = displayName(node.name)
+  const [resourceMenuOpen, setResourceMenuOpen] = useState(false)
+  const [menuOpenRequest, setMenuOpenRequest] = useState<GfsResourceMenuOpenRequest | null>(null)
+  const menuRequestIdRef = useRef(0)
+  const rowLabelRef = useRef<HTMLButtonElement | null>(null)
+  const touchStartRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
+  const touchMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const touchMenuOpenedAtRef = useRef(0)
+  const suppressTouchClickRef = useRef(false)
+  const suppressTouchClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Server-computed: the row is visible but the session cannot read it (a
   // folder grant without inheritance; a file whose parent does not inherit).
   // Mark it so it does not look actionable, and let the activate handlers
   // refuse it with a toast instead of a later download/preview 403. Absent
   // (older servers) is treated as unknown, not unreadable.
   const isUnreadable = node.readable === false
+
+  const affordancesQuery = useQuery({
+    queryKey: desktopQueryKeys.gfsAffordances(
+      scope,
+      node.resourceId,
+      node.drive,
+      sessionGeneration
+    ),
+    queryFn: () => window.clerum.gfs.affordances(node.resourceId, node.drive),
+    enabled: resourceMenuOpen && accessActive && isGfsSessionGeneration(sessionGeneration),
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
+    staleTime: 0,
+  })
+  // Do not expose permission-gated operations from cached bits while a fresh
+  // menu-open/focus revalidation is in flight or after it fails. Move remains
+  // available because its authority is parent-relative and enforced by server.
+  const affordances =
+    affordancesQuery.isFetching || affordancesQuery.error ? undefined : affordancesQuery.data
+  useEffect(() => {
+    if (!affordancesQuery.error) return
+    if (isGfsSessionGeneration(sessionGeneration)) {
+      onAuthorityFailure(affordancesQuery.error, scope, sessionGeneration)
+    }
+  }, [affordancesQuery.error, onAuthorityFailure, scope, sessionGeneration])
+  const preview = useMemo(() => resolveGfsPreview(node), [node])
+  const canPreview = Boolean(preview && !isUnreadable)
+  const canCopyContent = Boolean(
+    canPreview && (preview?.kind === 'image' || preview?.kind === 'markdown')
+  )
+  const resourceActions = useMemo(
+    () =>
+      getGfsMenuActions(
+        buildGfsResourceActions({
+          kind: node.kind,
+          uri: node.gfsUri,
+          handlers: {
+            refresh:
+              accessActive && !isUnreadable ? () => onResourceAction(node, 'refresh') : undefined,
+            'copy-link': () => onResourceAction(node, 'copy-link'),
+            'copy-route': () => onResourceAction(node, 'copy-route'),
+            'open-route': () => onResourceAction(node, 'open-route'),
+            rename: () => onResourceAction(node, 'rename'),
+            move: () => onResourceAction(node, 'move'),
+            'new-folder': () => onResourceAction(node, 'new-folder'),
+            'upload-file': () => onResourceAction(node, 'upload-file'),
+            share: () => onResourceAction(node, 'share'),
+            'copy-content': canCopyContent
+              ? () => onResourceAction(node, 'copy-content')
+              : undefined,
+            preview: canPreview ? () => onActivateFile(node) : undefined,
+            download:
+              node.kind === 'file' && !isUnreadable
+                ? () => onResourceAction(node, 'download')
+                : undefined,
+            replace:
+              node.kind === 'file' && hasBit(affordances, 'write')
+                ? (file, context) => {
+                    if (file) onResourceAction(node, 'replace', file)
+                    else context?.requestFileSelection?.()
+                  }
+                : undefined,
+            'open-folder': isDirectory && !isUnreadable ? () => onActivateFolder(node) : undefined,
+            delete: () => onResourceAction(node, 'delete'),
+          },
+          canRename: hasBit(affordances, 'write'),
+          canMove: accessActive && node.parentResourceId != null,
+          canCreateFolder: isDirectory && hasBit(affordances, 'write'),
+          canUpload: isDirectory && hasBit(affordances, 'write'),
+          canShare: hasBit(affordances, 'manage_acl'),
+          canCopyContent,
+          canPreview,
+          canDownload: node.kind === 'file' && !isUnreadable,
+          canReplace: node.kind === 'file' && hasBit(affordances, 'write'),
+          canOpenFolder: isDirectory && !isUnreadable,
+          canDelete: hasBit(affordances, 'delete'),
+        })
+      ),
+    [
+      accessActive,
+      affordances,
+      canCopyContent,
+      canPreview,
+      isDirectory,
+      isUnreadable,
+      node,
+      onActivateFile,
+      onActivateFolder,
+      onResourceAction,
+    ]
+  )
 
   const childQueryKey = desktopQueryKeys.gfsChildren(
     scope,
@@ -145,9 +252,13 @@ function FileExplorerNode({
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
   const childDenied = isGfsChildrenDenied(childQuery.error, childQuery.data)
+  const childErrorMessage = errorMessage(childQuery.error)
+  const childHttpStatus = childErrorMessage ? parseHttpStatus(childErrorMessage) : null
   const childError = childDenied
     ? 'This folder is no longer available.'
-    : errorMessage(childQuery.error)
+    : childHttpStatus !== null
+      ? 'Unable to load folder contents.'
+      : childErrorMessage
   const childItems = useMemo(
     () =>
       childDenied ? [] : sortTreeItems((childQuery.data?.pages ?? []).flatMap(page => page.items)),
@@ -157,7 +268,7 @@ function FileExplorerNode({
   useEffect(() => {
     if (!childQuery.error || !isGfsSessionGeneration(sessionGeneration)) return
     purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError) onAuthorityFailure(childError, scope, sessionGeneration)
+    if (childError) onAuthorityFailure(childQuery.error, scope, sessionGeneration)
   }, [
     childError,
     childQuery.error,
@@ -176,6 +287,25 @@ function FileExplorerNode({
       clickTimerRef.current = null
     }
   }, [])
+  const clearTouchMenuTimer = useCallback(() => {
+    if (touchMenuTimerRef.current !== null) {
+      clearTimeout(touchMenuTimerRef.current)
+      touchMenuTimerRef.current = null
+    }
+  }, [])
+  const requestResourceMenu = useCallback((clientX: number | null, clientY: number | null) => {
+    menuRequestIdRef.current += 1
+    setMenuOpenRequest({ id: menuRequestIdRef.current, clientX, clientY })
+  }, [])
+  useEffect(
+    () => () => {
+      clearTouchMenuTimer()
+      if (suppressTouchClickTimerRef.current !== null) {
+        clearTimeout(suppressTouchClickTimerRef.current)
+      }
+    },
+    [clearTouchMenuTimer]
+  )
   useEffect(() => clearClickTimer, [clearClickTimer])
 
   const runActivate = useCallback(() => {
@@ -184,6 +314,14 @@ function FileExplorerNode({
   }, [isDirectory, node, onActivateFile, onActivateFolder])
 
   const handleRowClick = useCallback(() => {
+    if (suppressTouchClickRef.current) {
+      suppressTouchClickRef.current = false
+      if (suppressTouchClickTimerRef.current !== null) {
+        clearTimeout(suppressTouchClickTimerRef.current)
+        suppressTouchClickTimerRef.current = null
+      }
+      return
+    }
     clearClickTimer()
     // A file has no single/double-click ambiguity: single-click activates it
     // (open preview, or download when not previewable) immediately — no delay.
@@ -201,6 +339,65 @@ function FileExplorerNode({
     }, DOUBLE_CLICK_DELAY_MS)
   }, [clearClickTimer, isDirectory, node.resourceId, onToggle, runActivate])
 
+  const handleRowContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      event.preventDefault()
+      if (
+        touchMenuOpenedAtRef.current > 0 &&
+        Date.now() - touchMenuOpenedAtRef.current < TOUCH_MENU_DELAY_MS * 2
+      ) {
+        return
+      }
+      if (touchStartRef.current) return
+      clearClickTimer()
+      requestResourceMenu(event.clientX, event.clientY)
+    },
+    [clearClickTimer, requestResourceMenu]
+  )
+
+  const handleRowPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.pointerType !== 'touch') return
+      clearTouchMenuTimer()
+      touchStartRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+      touchMenuTimerRef.current = setTimeout(() => {
+        touchMenuTimerRef.current = null
+        const start = touchStartRef.current
+        if (!start || start.pointerId !== event.pointerId) return
+        touchMenuOpenedAtRef.current = Date.now()
+        suppressTouchClickRef.current = true
+        suppressTouchClickTimerRef.current = setTimeout(() => {
+          suppressTouchClickRef.current = false
+          suppressTouchClickTimerRef.current = null
+        }, 1000)
+        clearClickTimer()
+        requestResourceMenu(start.x, start.y)
+      }, TOUCH_MENU_DELAY_MS)
+    },
+    [clearClickTimer, clearTouchMenuTimer, requestResourceMenu]
+  )
+
+  const handleRowPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const start = touchStartRef.current
+      if (!start || start.pointerId !== event.pointerId) return
+      if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > TOUCH_MENU_MOVEMENT_PX) {
+        touchStartRef.current = null
+        clearTouchMenuTimer()
+      }
+    },
+    [clearTouchMenuTimer]
+  )
+
+  const handleRowPointerEnd = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (touchStartRef.current?.pointerId !== event.pointerId) return
+      touchStartRef.current = null
+      clearTouchMenuTimer()
+    },
+    [clearTouchMenuTimer]
+  )
+
   const handleRowDoubleClick = useCallback(() => {
     clearClickTimer()
     runActivate()
@@ -217,15 +414,13 @@ function FileExplorerNode({
         runActivate()
         return
       }
-      // Shift+F10 opens the Move dialog for the focused row — the keyboard
-      // path after the visible per-row Move button was rejected as clutter.
-      if (event.shiftKey && event.key === 'F10') {
+      if ((event.shiftKey && event.key === 'F10') || event.key === 'ContextMenu') {
         event.preventDefault()
         clearClickTimer()
-        onRequestMove(node, ancestorCrumbs)
+        requestResourceMenu(null, null)
       }
     },
-    [ancestorCrumbs, clearClickTimer, node, onRequestMove, runActivate]
+    [clearClickTimer, requestResourceMenu, runActivate]
   )
 
   const handleDragStart = useCallback(
@@ -353,6 +548,11 @@ function FileExplorerNode({
         data-drop-state={dropStateName}
         data-drop-reason={dropReason}
         title={dropReasonTooltip}
+        onContextMenu={handleRowContextMenu}
+        onPointerDown={handleRowPointerDown}
+        onPointerMove={handleRowPointerMove}
+        onPointerUp={handleRowPointerEnd}
+        onPointerCancel={handleRowPointerEnd}
         onDragEnter={isDirectory ? handleRowDragEnterOrOver : undefined}
         onDragOver={isDirectory ? handleRowDragEnterOrOver : undefined}
         onDragLeave={isDirectory ? handleRowDragLeave : undefined}
@@ -373,6 +573,7 @@ function FileExplorerNode({
           <span className="da-file-explorer__toggle-placeholder" aria-hidden="true" />
         )}
         <Button
+          ref={rowLabelRef}
           align="start"
           block
           className={`da-file-explorer__label${isSelected ? ' is-selected' : ''}${
@@ -400,6 +601,14 @@ function FileExplorerNode({
             </Badge>
           ) : null}
         </Button>
+        <GfsResourceMenu
+          actions={resourceActions}
+          contextOpenRequest={menuOpenRequest}
+          contextTargetRef={rowLabelRef}
+          onOpenChange={setResourceMenuOpen}
+          resourceName={label}
+          triggerMode="context"
+        />
       </div>
       {isExpanded ? (
         <div className="da-file-explorer__group" role="group">
@@ -424,13 +633,13 @@ function FileExplorerNode({
               node={child}
               onActivateFile={onActivateFile}
               onActivateFolder={onActivateFolder}
+              onResourceAction={onResourceAction}
               onAuthorityFailure={onAuthorityFailure}
               onNodeDragEnd={onNodeDragEnd}
               onNodeDragLeave={onNodeDragLeave}
               onNodeDragOver={onNodeDragOver}
               onNodeDragStart={onNodeDragStart}
               onNodeDrop={onNodeDrop}
-              onRequestMove={onRequestMove}
               onToggle={onToggle}
               scope={scope}
               sessionGeneration={sessionGeneration}
@@ -476,6 +685,7 @@ function FileExplorerNode({
 export function FileExplorerTree({
   onOpenFolder,
   onOpenPreview,
+  onResourceAction,
   pushToast,
 }: FileExplorerTreeProps) {
   const ctrl = useGfsBrowserController()
@@ -488,8 +698,8 @@ export function FileExplorerTree({
     resolve: (uri: string) => window.clerum.gfs.resolve(uri),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
-    handleAuthorityFailure: (message, scope, sessionGeneration) =>
-      ctrl.handleAuthorityFailure(message, 'operation', scope, sessionGeneration),
+    handleAuthorityFailure: (error, scope, sessionGeneration) =>
+      ctrl.handleAuthorityFailure(error, 'operation', scope, sessionGeneration),
   })
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -520,22 +730,7 @@ export function FileExplorerTree({
     authoritativeSessionGeneration: number
     destination: { resourceId: string; name: string }
   } | null>(null)
-  const [moveDialogTarget, setMoveDialogTarget] = useState<{
-    node: GfsBrowserChild
-    initialCrumbs: GfsCrumb[]
-  } | null>(null)
-  const moveDialogTargetRef = useRef(moveDialogTarget)
-  moveDialogTargetRef.current = moveDialogTarget
   const mountedRef = useRef(false)
-  const [movePermissionStatus, setMovePermissionStatus] = useState<'checking' | 'failed' | null>(
-    null
-  )
-
-  const closeMoveDialog = useCallback(() => {
-    moveDialogTargetRef.current = null
-    setMovePermissionStatus(null)
-    setMoveDialogTarget(null)
-  }, [])
 
   useEffect(() => {
     mountedRef.current = true
@@ -574,9 +769,6 @@ export function FileExplorerTree({
     setPendingFolderMove(null)
     setDropStatesByResourceId({})
     setDragSourceName(null)
-    moveDialogTargetRef.current = null
-    setMoveDialogTarget(null)
-    setMovePermissionStatus(null)
     // A NEW live session makes any session-ended refusal stale. A transition
     // TO revoked (scope null) must NOT clear it: that is exactly when the
     // message has to survive (A11), and the revoked surface below carries it.
@@ -995,117 +1187,6 @@ export function FileExplorerTree({
     ]
   )
 
-  const handleRequestMove = useCallback(
-    (node: GfsBrowserChild, ancestorCrumbs: readonly GfsCrumb[]) => {
-      const target = { node, initialCrumbs: [...ancestorCrumbs] }
-      moveDialogTargetRef.current = target
-      setMovePermissionStatus(null)
-      setMoveDialogTarget(target)
-    },
-    []
-  )
-
-  const handleRetryMovePermission = async (
-    destinationId: string,
-    _destinationName: string,
-    isDialogCurrent: () => boolean
-  ) => {
-    const target = moveDialogTarget
-    if (!target || !isDialogCurrent()) return
-    const scope = ctrl.sessionScope
-    const expectedScope = scope ?? 'anonymous'
-    const expectedGeneration = ctrl.sessionGeneration
-    const ownsRetry = () =>
-      moveDialogTargetRef.current === target &&
-      liveDragScopeRef.current === expectedScope &&
-      isGfsSessionAuthorityCurrent(
-        scope,
-        expectedGeneration,
-        liveAuthorityRef.current.scope,
-        liveAuthorityRef.current.generation
-      ) &&
-      isDialogCurrent()
-    const drive = target.node.drive || GFS_DRIVE_MAIN
-    setMovePermissionStatus('checking')
-
-    try {
-      if (!scope || !isGfsSessionGeneration(expectedGeneration)) {
-        throw new Error('Could not verify the source folder for this move.')
-      }
-      const destinationKey = desktopQueryKeys.gfsAffordances(
-        scope,
-        destinationId,
-        drive,
-        expectedGeneration
-      )
-      assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
-
-      if (!ownsRetry()) {
-        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
-        return
-      }
-      const resolvedSource = await window.clerum.gfs.resolve(target.node.gfsUri)
-      if (!ownsRetry()) {
-        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
-        return
-      }
-      if (resolvedSource.resourceId !== target.node.resourceId) {
-        throw new Error('Could not verify the source folder for this move.')
-      }
-      const sourceParentId = resolvedSource.parentResourceId
-      if (!sourceParentId) {
-        throw new Error('Could not verify the source folder for this move.')
-      }
-      const sourceKey = desktopQueryKeys.gfsAffordances(
-        scope,
-        sourceParentId,
-        drive,
-        expectedGeneration
-      )
-      assertGfsAuthorityRetryAllowed(queryClient, sourceKey)
-      assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
-
-      const [source, destination] = await Promise.all([
-        queryClient.fetchQuery({
-          queryKey: sourceKey,
-          queryFn: () => window.clerum.gfs.affordances(sourceParentId, drive),
-          staleTime: 0,
-          retry: false,
-        }),
-        queryClient.fetchQuery({
-          queryKey: destinationKey,
-          queryFn: () => window.clerum.gfs.affordances(destinationId, drive),
-          staleTime: 0,
-          retry: false,
-        }),
-      ])
-      if (!ownsRetry()) {
-        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
-        return
-      }
-      if (!hasGfsMoveSourcePermissions(source.held)) {
-        throw new Error('You do not have write and delete access to the source folder.')
-      }
-      if (!destination.held.includes('write')) {
-        throw new Error('You do not have write access to the destination folder.')
-      }
-      setMovePermissionStatus(null)
-    } catch (retryError) {
-      if (moveDialogTargetRef.current !== target) return
-      if (!ownsRetry()) {
-        setMovePermissionStatus(null)
-        return
-      }
-      const message = errorMessage(retryError) ?? String(retryError)
-      if (ctrl.handleAuthorityFailure(message, 'operation', scope, expectedGeneration)) {
-        closeMoveDialog()
-        return
-      }
-      setMovePermissionStatus('failed')
-      throw retryError
-    }
-  }
-
   const handleActivateFolder = useCallback(
     (node: GfsBrowserChild) => {
       // A folder grant without inheritance lists the folder but denies its
@@ -1122,7 +1203,7 @@ export function FileExplorerTree({
 
   const authorityFailure = ctrl.handleAuthorityFailure
   const handleAuthorityFailure = useCallback(
-    (message: string, scope: string, sessionGeneration: number) =>
+    (message: unknown, scope: string, sessionGeneration: number) =>
       authorityFailure(message, 'operation', scope, sessionGeneration),
     [authorityFailure]
   )
@@ -1159,7 +1240,7 @@ export function FileExplorerTree({
           pushToast(`Downloaded ${displayName(node.name)}`, 'success')
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          if (authorityFailure(message, 'operation')) return
+          if (authorityFailure(error, 'operation')) return
           pushToast(message, 'error')
         } finally {
           downloadsInFlight.current.delete(node.gfsUri)
@@ -1231,13 +1312,13 @@ export function FileExplorerTree({
               node={node}
               onActivateFile={handleActivateFile}
               onActivateFolder={handleActivateFolder}
+              onResourceAction={onResourceAction}
               onAuthorityFailure={handleAuthorityFailure}
               onNodeDragEnd={clearDragState}
               onNodeDragLeave={handleNodeDragLeave}
               onNodeDragOver={handleNodeDragOver}
               onNodeDragStart={handleNodeDragStart}
               onNodeDrop={handleNodeDrop}
-              onRequestMove={handleRequestMove}
               onToggle={handleToggle}
               scope={ctrl.sessionScope ?? 'anonymous'}
               sessionGeneration={ctrl.sessionGeneration}
@@ -1285,99 +1366,6 @@ export function FileExplorerTree({
               )
             }
           }}
-        />
-      ) : null}
-
-      {moveDialogTarget ? (
-        <GfsMoveDialog
-          busy={ctrl.mutating || movePermissionStatus === 'checking'}
-          initialCrumbs={moveDialogTarget.initialCrumbs}
-          onClose={closeMoveDialog}
-          onMoveWithOwnership={async (destinationId, destinationName, isDialogCurrent) => {
-            setMovePermissionStatus(null)
-            const target = moveDialogTargetRef.current
-            if (!target) return
-            const publishedGeneration = ctrl.sessionGeneration
-            const publishedScope = ctrl.sessionScope
-            const ownsPublishedAuthority = () =>
-              isGfsSessionAuthorityCurrent(
-                publishedScope,
-                publishedGeneration,
-                liveAuthorityRef.current.scope,
-                liveAuthorityRef.current.generation
-              )
-            if (!ownsPublishedAuthority()) return
-            const source: GfsDragSource = {
-              resourceId: target.node.resourceId,
-              gfsUri: target.node.gfsUri,
-              drive: target.node.drive || GFS_DRIVE_MAIN,
-              kind: target.node.kind === 'directory' ? 'directory' : 'file',
-              name: target.node.name,
-              ...(Number.isSafeInteger(target.node.version)
-                ? { version: target.node.version }
-                : {}),
-              parentKnown: target.node.parentResourceId != null,
-              parentResourceId: target.node.parentResourceId ?? null,
-              knownAncestorIds: [],
-              origin: 'sidebar',
-              scope: ctrl.sessionScope ?? 'anonymous',
-              generation: dragSessionEpochRef.current,
-            }
-            const isCurrent = () =>
-              ownsPublishedAuthority() &&
-              mountedRef.current &&
-              moveDialogTargetRef.current === target &&
-              liveDragScopeRef.current === source.scope &&
-              isDialogCurrent()
-            const isPresentationCurrent = () =>
-              ownsPublishedAuthority() &&
-              mountedRef.current &&
-              liveDragScopeRef.current === source.scope
-            const authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
-            if (authoritativeSessionGeneration !== publishedGeneration || !isCurrent()) return
-            const outcome = await commitMove(
-              source,
-              { resourceId: destinationId, name: destinationName },
-              isCurrent,
-              isPresentationCurrent,
-              false,
-              authoritativeSessionGeneration
-            )
-            if (outcome.status === 'gesture-lost') return
-            if (outcome.status === 'session-lost') {
-              if (moveDialogTargetRef.current === target) closeMoveDialog()
-              return
-            }
-            if (!isCurrent()) {
-              if (isPresentationCurrent()) {
-                toastMoveOutcome(pushToast, outcome, source.name, destinationName, source.kind)
-              }
-              return
-            }
-            if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
-              if (
-                moveDialogTargetRef.current === target &&
-                outcome.status === 'unconfirmed' &&
-                outcome.retryPermissionCheck === true
-              ) {
-                setMovePermissionStatus('failed')
-              }
-              throw new Error(outcome.message)
-            }
-            toastMoveOutcome(pushToast, outcome, source.name, destinationName, source.kind)
-            if (moveDialogTargetRef.current === target) closeMoveDialog()
-          }}
-          onRetryPermissionCheck={handleRetryMovePermission}
-          onAuthorityFailure={handleAuthorityFailure}
-          sessionScope={ctrl.sessionScope}
-          sessionGeneration={ctrl.sessionGeneration}
-          target={{
-            resourceId: moveDialogTarget.node.resourceId,
-            name: moveDialogTarget.node.name,
-            kind: moveDialogTarget.node.kind === 'directory' ? 'directory' : 'file',
-            parentResourceId: moveDialogTarget.node.parentResourceId ?? null,
-          }}
-          permissionStatus={movePermissionStatus}
         />
       ) : null}
     </div>

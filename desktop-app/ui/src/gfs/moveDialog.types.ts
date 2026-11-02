@@ -28,7 +28,7 @@ type GfsMoveDialogBaseProps = {
   /** Central fail-closed boundary (R4 spec §1): destination-listing authority
    *  failures must revoke the session even though the dialog owns these
    *  query observers. Policy verdicts return false and stay local. */
-  onAuthorityFailure?: (message: string, scope: string, sessionGeneration: number) => boolean
+  onAuthorityFailure?: (error: unknown, scope: string, sessionGeneration: number) => boolean
 }
 
 export type GfsNumberedNameConsent = (proposedName: string) => Promise<boolean>

@@ -230,7 +230,12 @@ for (const surface of ['sidebar', 'files'] as const) {
         <QueryClientProvider client={queryClient}>
           <GfsDragSessionProvider>
             {!mounted ? null : surface === 'sidebar' ? (
-              <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={toast} />
+              <FileExplorerTree
+                onOpenFolder={vi.fn()}
+                onOpenPreview={vi.fn()}
+                onResourceAction={vi.fn()}
+                pushToast={toast}
+              />
             ) : (
               <FilesPage pushToast={toast} />
             )}
@@ -525,14 +530,15 @@ for (const surface of ['sidebar', 'files'] as const) {
       // must be revoked, not left active over a dead session.
       const h = await setup('file')
       const message = 'Error invoking remote method: Error: 401 Unauthorized httpStatus=401'
+      const error = new Error(message)
       h.affordances.mockImplementation(async () => {
-        throw new Error(message)
+        throw error
       })
       h.start()
       h.drop()
       await waitFor(() =>
         expect(h.ctrl.handleAuthorityFailure).toHaveBeenCalledWith(
-          message,
+          expect.objectContaining({ message }),
           'operation',
           h.ctrl.sessionScope,
           h.ctrl.sessionGeneration
@@ -588,10 +594,11 @@ for (const surface of ['sidebar', 'files'] as const) {
 describe('files surface drop admission (RP-002)', () => {
   it('never dispatches the move when the ancestor resolve reports a session failure', async () => {
     const message = 'Error invoking remote method: Error: 401 Unauthorized httpStatus=401'
+    const error = new Error(message)
     const bits = await affordancesResult(heldAffordances(['read', 'write', 'delete']))
     const affordances = vi.fn(async () => bits)
     const resolve = vi.fn(async () => {
-      throw new Error(message)
+      throw error
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -630,7 +637,7 @@ describe('files surface drop admission (RP-002)', () => {
     // dispatch, nothing announced.
     await waitFor(() =>
       expect(ctrl.handleAuthorityFailure).toHaveBeenCalledWith(
-        message,
+        expect.objectContaining({ message }),
         'operation',
         ctrl.sessionScope,
         ctrl.sessionGeneration

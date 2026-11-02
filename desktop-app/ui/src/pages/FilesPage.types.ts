@@ -1,5 +1,6 @@
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import type { GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import type { Tone } from '@/uiTypes'
 
 export type GfsDriveResource = GfsBrowserChild & {
@@ -49,16 +50,25 @@ export interface FilesPageProps {
    * the file kind and hands the descriptor up to the tab store through this
    * callback. Absent ⇒ no preview surface is available (the file downloads).
    */
-  onOpenPreview?: (preview: GfsPreviewResource) => void | boolean
+  onOpenPreview?: (
+    preview: GfsPreviewResource,
+    originatingSessionScope?: string | null,
+    originatingSessionGeneration?: number | null
+  ) => void | boolean
   /** Guarded preview completion for the queued resource-link request. */
   onOpenPendingGfsPreview?: (
     id: number,
     preview: GfsPreviewResource,
-    returnLocation: { gfsUri: string | null; name: string | null }
+    returnLocation: { gfsUri: string | null; name: string | null },
+    originatingSessionScope?: string | null,
+    originatingSessionGeneration?: number | null
   ) => boolean
   /** Monotonic App request to open the existing route-entry dialog. */
   routeDialogRequestId?: number
   onRouteDialogRequestHandled?: (requestId: number) => void
+  /** One-shot action requested by a sidebar resource row. */
+  pendingResourceAction?: GfsResourceActionRequest | null
+  onPendingResourceActionHandled?: (requestId: number) => void
 }
 
 /**

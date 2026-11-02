@@ -1,3 +1,4 @@
+import type { GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import type { Tone } from '@/uiTypes'
 
 export interface FilePreviewPageProps {
@@ -13,8 +14,15 @@ export interface FilePreviewPageProps {
   reloadVersion?: number
   /** Set when an authoritative re-resolve denies access or the file is no longer previewable. */
   unavailable?: boolean
+  /** Exact GFS scope captured when this workspace Preview opened. */
+  sessionScope?: string
+  /** Reads App's current scope so retained actions cannot cross a scope change. */
+  isGfsPreviewSessionScopeCurrent?: (sessionScope: string) => boolean
   pushToast?: (message: string, tone: Tone) => void
   onOpenRoute?: () => void
+  /** One-shot Copy content action requested by a sidebar resource row. */
+  pendingResourceAction?: GfsResourceActionRequest | null
+  onPendingResourceActionHandled?: (requestId: number) => void
   /** Refresh the app-owned preview tab from the server after a successful rename. */
   onRenameCommitted?: (gfsUri: string) => void
   /** Native titlebar action slot supplied by the app shell. */

@@ -30,7 +30,8 @@ vi.mock('@hooks/domain/useTeamsDataController', () => ({
     ensureHydrated: vi.fn(async () => undefined),
   }),
 }))
-vi.mock('@contexts/AuthContext', () => ({
+vi.mock('@contexts/AuthContext', async importActual => ({
+  ...(await importActual<typeof import('@contexts/AuthContext')>()),
   useAuthContext: () => ({ me: null }),
 }))
 vi.mock('@hooks/domain/useMcpServersDataController', () => ({

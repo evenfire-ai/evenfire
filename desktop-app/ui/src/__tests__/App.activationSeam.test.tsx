@@ -190,13 +190,14 @@ function makeController(writes: StoreWrite[]): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
-  const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
+  const openPreviewSection = vi.fn((preview: GfsPreviewResource, sessionScope?: string) => {
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openPreviewTab(state, {
         id: nextWorkspaceTabId(),
         title: preview.name,
         gfsUri: preview.gfsUri,
+        ...(sessionScope !== undefined ? { sessionScope } : {}),
         fileKind: preview.kind,
         byteLength: preview.bytes,
         ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
@@ -223,6 +224,7 @@ function makeController(writes: StoreWrite[]): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 0,
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',

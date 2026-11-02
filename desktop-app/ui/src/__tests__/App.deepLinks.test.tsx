@@ -8,6 +8,7 @@ import {
   useLayoutEffect,
   useReducer,
 } from 'react'
+import { flushSync } from 'react-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -28,6 +29,7 @@ import {
 } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import { readGfsOpenLocations } from '@lib/gfsOpenLocations'
+import { resolveGfsPreview } from '@lib/gfsPreview'
 import {
   type GfsResourceNavigationRequest,
   assignGfsResourceNavigationOwner,
@@ -58,6 +60,7 @@ import {
   childView,
   gfsRouteFailureMessage,
   heldAffordances,
+  resolveResource,
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
@@ -186,6 +189,7 @@ const sidebarHarness = vi.hoisted(() => ({
     onCollapsedChange?: (next: boolean) => void
     availableSandboxUiApps?: SidebarLaunchApp[]
     onOpenSandboxUiApp?: (app: SidebarLaunchApp) => void
+    onGfsResourceAction?: Parameters<typeof FileExplorerTree>[0]['onResourceAction']
   },
 }))
 
@@ -351,6 +355,8 @@ vi.mock('@pages/FilesPage', async () => {
                 createElement(FileExplorerTree, {
                   onOpenFolder: () => undefined,
                   onOpenPreview: () => undefined,
+                  onResourceAction: (...args) =>
+                    sidebarHarness.props?.onGfsResourceAction?.(...args),
                   pushToast: () => undefined,
                 })
               )
@@ -516,36 +522,43 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     }
   )
   // Faithful nav: a store action; `navItem` is derived (useReactiveController).
-  const handleNavSelect = vi.fn((item: AppController['navItem']) => {
-    beginNavigationIntent()
-    if (item === DESKTOP_ROUTES.chat) {
-      controller.selectedAgent = null
-      clearAppsPicker()
-      setWorkspaceTabs((state: WorkspaceState) => {
-        const active = activeWorkspaceTab(state)
-        if (active?.kind === 'chat') return state
-        const lastChat = [...state.tabs].reverse().find(tab => tab.kind === 'chat')
-        return lastChat
-          ? { ...state, activeTabId: lastChat.id }
-          : newChatTab(state, nextWorkspaceTabId(), null)
-      })
-    } else if (item === DESKTOP_ROUTES.apps) {
-      showAppsPicker()
-    } else if (item === DESKTOP_ROUTES.files) {
-      clearAppsPicker()
-      setWorkspaceTabs((state: WorkspaceState) => openFilesTab(state, { id: nextWorkspaceTabId() }))
-    } else {
-      const section = settingsSectionForRoute(item)
-      if (section) {
-        if (section === 'agents') controller.selectedAgent = null
+  const handleNavSelect = vi.fn(
+    (
+      item: AppController['navItem'],
+      options: Parameters<AppController['handleNavSelect']>[1] = {}
+    ) => {
+      if (!options.navigationIntentAlreadyStarted) beginNavigationIntent()
+      if (item === DESKTOP_ROUTES.chat) {
+        controller.selectedAgent = null
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) => {
+          const active = activeWorkspaceTab(state)
+          if (active?.kind === 'chat') return state
+          const lastChat = [...state.tabs].reverse().find(tab => tab.kind === 'chat')
+          return lastChat
+            ? { ...state, activeTabId: lastChat.id }
+            : newChatTab(state, nextWorkspaceTabId(), null)
+        })
+      } else if (item === DESKTOP_ROUTES.apps) {
+        showAppsPicker()
+      } else if (item === DESKTOP_ROUTES.files) {
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
-          openSettingsTab(state, { id: nextWorkspaceTabId(), section })
+          openFilesTab(state, { id: nextWorkspaceTabId() })
         )
+      } else {
+        const section = settingsSectionForRoute(item)
+        if (section) {
+          if (section === 'agents') controller.selectedAgent = null
+          clearAppsPicker()
+          setWorkspaceTabs((state: WorkspaceState) =>
+            openSettingsTab(state, { id: nextWorkspaceTabId(), section })
+          )
+        }
       }
+      forceControllerRender()
     }
-    forceControllerRender()
-  })
+  )
   const handleSelectChatAgent = vi.fn(
     (
       agentName: string,
@@ -901,7 +914,8 @@ describe('App deep-link orchestration', () => {
 
   async function mountSessionBackedApp(
     me: NonNullable<AppController['me']>,
-    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+    onControllerRender?: (controller: AppController) => void
   ) {
     const actualControllerModule =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
@@ -930,6 +944,7 @@ describe('App deep-link orchestration', () => {
     })
     vi.mocked(useAppController).mockImplementation(() => {
       realController = actualControllerModule.useAppController()
+      onControllerRender?.(realController)
       return realController
     })
     commonHarness.renderWorkspaceSurfaces = true
@@ -1011,6 +1026,335 @@ describe('App deep-link orchestration', () => {
   async function waitForMounted() {
     await waitFor(() => expect(embedPhase()).toBe('mounted'))
   }
+
+  async function mountSidebarMoveAuthorityScenario(
+    failure: { status: number; code: string; message: string },
+    raceCommit = false
+  ) {
+    const { userA, service, transportBoundaries } = installSameIdentityLoginFixture()
+    const rootId = 'a'.repeat(32)
+    const sourceId = 'b'.repeat(32)
+    const destinationId = 'c'.repeat(32)
+    const rootUri = `gfs://main/${rootId}`
+    const root = resolvedDirectory(rootId, 'Move parent', { gfsUri: rootUri })
+    const source = resolvedFile(sourceId, 'Report.txt', {
+      parentResourceId: rootId,
+      version: 4,
+    })
+    const destination = resolvedDirectory(destinationId, 'Archive', {
+      parentResourceId: rootId,
+    })
+    const sourceRow = childView(source.resourceId, source.name, 'file', {
+      parentResourceId: rootId,
+      version: 4,
+      path: '/Move parent/Report.txt',
+    })
+    const destinationRow = childView(destination.resourceId, destination.name, 'directory', {
+      parentResourceId: rootId,
+      path: '/Move parent/Archive',
+    })
+    let staleFailureServed = false
+    let moveRequests = 0
+    let parentAffordanceReads = 0
+    let markRetryStarted!: () => void
+    let markCommitStarted!: () => void
+    let releaseRetry!: () => void
+    let releaseCommit!: () => void
+    const retryStarted = new Promise<void>(resolve => {
+      markRetryStarted = resolve
+    })
+    const commitStarted = new Promise<void>(resolve => {
+      markCommitStarted = resolve
+    })
+    const retryGate = new Promise<void>(resolve => {
+      releaseRetry = resolve
+    })
+    const commitGate = new Promise<void>(resolve => {
+      releaseCommit = resolve
+    })
+    const observedErrors: Array<{ name?: string; code?: string; status?: number }> = []
+    const movePatches: Array<{ path: string; body: unknown }> = []
+    const requestJson = vi.fn(
+      async (method: string, input: string, options?: { body?: unknown }) => {
+        const url = new URL(input)
+        if (method === 'GET' && url.pathname === '/api/v1/me/gfs/resources') {
+          return {
+            ok: true,
+            data: { items: [accessibleResource(rootId, 'Move parent', 'directory')] },
+          }
+        }
+        if (method === 'GET' && url.pathname.endsWith('/resolve')) {
+          const uri = url.searchParams.get('uri') ?? ''
+          return {
+            ok: true,
+            data: uri.endsWith(sourceId)
+              ? source
+              : uri.endsWith(destinationId)
+                ? destination
+                : root,
+          }
+        }
+        if (method === 'GET' && url.pathname.endsWith('/children')) {
+          const items = url.pathname.includes(`/${rootId}/`) ? [sourceRow, destinationRow] : []
+          return { ok: true, data: { items, nextCursor: null } }
+        }
+        if (method === 'GET' && url.pathname.endsWith('/affordances')) {
+          if (url.pathname.includes(`/${rootId}/affordances`)) parentAffordanceReads += 1
+          if (
+            !raceCommit &&
+            parentAffordanceReads === 1 &&
+            !staleFailureServed &&
+            url.pathname.includes(`/${rootId}/affordances`)
+          ) {
+            const requestGeneration = service.getSessionGeneration()
+            markRetryStarted()
+            await retryGate
+            staleFailureServed = true
+            if (requestGeneration !== service.getSessionGeneration()) {
+              const stale = new Error('__CLERUM_GFS_STALE_AUTHORITY_V1__:stale:unauthenticated')
+              stale.name = 'GfsStaleSessionAuthorityError'
+              Object.assign(stale, { code: 'GFS_STALE_SESSION_AUTHORITY' })
+              observedErrors.push({ name: stale.name, code: 'GFS_STALE_SESSION_AUTHORITY' })
+              throw stale
+            }
+            const statusText = failure.status === 401 ? 'Unauthorized' : 'Forbidden'
+            const current = Object.assign(
+              new Error(`${failure.status} ${statusText}: ${failure.message}`),
+              {
+                status: failure.status,
+                code: failure.code,
+              }
+            )
+            observedErrors.push({ name: current.name, code: failure.code, status: failure.status })
+            throw current
+          }
+          return { held: ['read', 'write', 'delete'], isOperator: false }
+        }
+        if (method === 'PATCH' && url.pathname.endsWith(`/${sourceId}`)) {
+          moveRequests += 1
+          movePatches.push({ path: url.pathname, body: options?.body })
+          if (raceCommit) {
+            const requestGeneration = service.getSessionGeneration()
+            markCommitStarted()
+            await commitGate
+            if (requestGeneration !== service.getSessionGeneration()) {
+              const stale = new Error('__CLERUM_GFS_STALE_AUTHORITY_V1__:stale:unauthenticated')
+              stale.name = 'GfsStaleSessionAuthorityError'
+              Object.assign(stale, { code: 'GFS_STALE_SESSION_AUTHORITY' })
+              observedErrors.push({ name: stale.name, code: 'GFS_STALE_SESSION_AUTHORITY' })
+              throw stale
+            }
+            const statusText = failure.status === 401 ? 'Unauthorized' : 'Forbidden'
+            const current = Object.assign(
+              new Error(`${failure.status} ${statusText}: ${failure.message}`),
+              {
+                status: failure.status,
+                code: failure.code,
+              }
+            )
+            observedErrors.push({ name: current.name, code: failure.code, status: failure.status })
+            throw current
+          }
+          throw Object.assign(new Error('403 Forbidden: forbidden'), {
+            status: 403,
+            code: 'forbidden',
+          })
+        }
+        throw Object.assign(new Error('not found'), { status: 404, code: 'not_found' })
+      }
+    )
+    transportBoundaries.gfsClient = new GfsClient({
+      baseUrl: 'https://gfs.fixture.test',
+      requestJson: requestJson as GfsTransport['requestJson'],
+      fetchBytes: async () => new ArrayBuffer(0),
+    })
+    await service.googleLogin('fixture-google-A')
+    const publishedGeneration = service.getSessionGeneration()
+    filesPageHarness.renderActual = true
+    filesPageHarness.showAuthorityProbe = true
+    filesPageHarness.showMoveSidebarProbe = true
+    commonHarness.renderActualButtons = true
+    const { getController, queryClient, view } = await mountSessionBackedApp(
+      userA,
+      desktopQueryClient
+    )
+    window.clerum.gfs.resolve = uri =>
+      service.resolveGfsUri(uri) as ReturnType<Window['clerum']['gfs']['resolve']>
+    window.clerum.gfs.listAccessible = (drive, cursor) =>
+      service.listAccessibleGfsResources(drive, cursor)
+    window.clerum.gfs.listChildren = (id, drive, cursor) =>
+      service.listGfsChildren(id, drive, cursor)
+    const withCurrentGeneration = async <T,>(operation: () => Promise<T>): Promise<T> => {
+      const requestGeneration = service.getSessionGeneration()
+      try {
+        return await operation()
+      } catch (error) {
+        if (requestGeneration !== service.getSessionGeneration()) {
+          const stale = new Error('The GFS request belongs to a superseded session.')
+          stale.name = 'GfsStaleSessionAuthorityError'
+          Object.assign(stale, { code: 'GFS_STALE_SESSION_AUTHORITY' })
+          throw stale
+        }
+        throw error
+      }
+    }
+    window.clerum.gfs.affordances = (id, drive) =>
+      withCurrentGeneration(() => service.gfsAffordances(id, drive))
+    window.clerum.gfs.moveResource = (id, target, drive, ifMatch, newName, generation) =>
+      withCurrentGeneration(() =>
+        service.moveGfsResource(id, target, generation, drive, ifMatch, newName)
+      )
+    act(() => getController().openFilesSection(rootUri))
+    const sidebar = within(await view.findByTestId('lag-sidebar'))
+    fireEvent.click(await sidebar.findByRole('button', { name: 'Move parent' }))
+    const sourceButton = await sidebar.findByRole('button', { name: 'Report.txt' })
+    fireEvent.keyDown(sourceButton, { key: 'F10', shiftKey: true })
+    const menu = await view.findByRole('menu', { name: 'Actions for Report.txt' })
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    if (raceCommit) await view.findByRole('dialog', { name: 'Move file Report.txt' })
+    return {
+      commitStarted,
+      get moveRequests() {
+        return moveRequests
+      },
+      get observedErrors() {
+        return observedErrors
+      },
+      get movePatches() {
+        return movePatches
+      },
+      get parentAffordanceReads() {
+        return parentAffordanceReads
+      },
+      getController,
+      queryClient,
+      releaseCommit,
+      releaseRetry,
+      retryStarted,
+      rootUri,
+      service,
+      view,
+      publishedGeneration,
+      sourceId,
+      destinationId,
+      renewSession: () => service.googleLogin('fixture-google-B'),
+      chooseDestination: async () => {
+        const dialog = view.getByRole('dialog', { name: 'Move file Report.txt' })
+        fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+      },
+      async publishRenewedGeneration() {
+        const renewedGeneration = service.getSessionGeneration()
+        await act(async () => {
+          await getController().loadSession({ preserveNav: true })
+        })
+        return renewedGeneration
+      },
+    }
+  }
+
+  it.each([
+    {
+      label: 'stale source-parent 401 after renewal',
+      failure: { status: 401, code: 'unauthenticated', message: 'unauthenticated' },
+      renewDuringRetry: true,
+      expectedAccess: 'active',
+      expectedLocation: `gfs://main/${'a'.repeat(32)}`,
+    },
+    {
+      label: 'current-session 401',
+      failure: { status: 401, code: 'unauthenticated', message: 'Current session expired.' },
+      renewDuringRetry: false,
+      expectedAccess: 'revoked',
+      expectedLocation: 'no-location',
+    },
+    {
+      label: 'current lifecycle 403',
+      failure: { status: 403, code: 'desktop_user_retired', message: 'desktop_user_retired' },
+      renewDuringRetry: false,
+      expectedAccess: 'revoked',
+      expectedLocation: 'no-location',
+    },
+    {
+      label: 'resource-local 403',
+      failure: { status: 403, code: 'forbidden', message: 'Private folder details must not leak.' },
+      renewDuringRetry: false,
+      expectedAccess: 'active',
+      expectedLocation: `gfs://main/${'a'.repeat(32)}`,
+    },
+    {
+      label: 'missing resource 404',
+      failure: { status: 404, code: 'not_found', message: 'Missing folder details must not leak.' },
+      renewDuringRetry: false,
+      expectedAccess: 'active',
+      expectedLocation: `gfs://main/${'a'.repeat(32)}`,
+    },
+  ])(
+    'routes sidebar Move through the Files owner and preserves $label semantics',
+    async ({ failure, renewDuringRetry, expectedAccess, expectedLocation }) => {
+      const mounted = await mountSidebarMoveAuthorityScenario(failure)
+      await mounted.retryStarted
+      if (renewDuringRetry) await mounted.renewSession()
+      mounted.releaseRetry()
+      await waitFor(() => expect(mounted.observedErrors.length).toBe(1))
+      if (renewDuringRetry) {
+        expect(mounted.observedErrors[0]).toMatchObject({
+          name: 'GfsStaleSessionAuthorityError',
+          code: 'GFS_STALE_SESSION_AUTHORITY',
+        })
+      } else {
+        expect(mounted.observedErrors[0]).toMatchObject({ code: failure.code })
+      }
+      await waitFor(() => expect(proofGfsController?.accessState).toBe(expectedAccess))
+      await waitFor(() =>
+        expect(
+          activeWorkspaceTab(mounted.getController().workspaceTabs)?.files?.path ?? 'no-location'
+        ).toBe(expectedLocation)
+      )
+      expect(mounted.moveRequests).toBe(0)
+      if (expectedAccess === 'revoked') {
+        expect(mounted.view.queryByRole('dialog', { name: 'Move file Report.txt' })).toBeNull()
+      } else if (renewDuringRetry) {
+        const before = mounted.parentAffordanceReads
+        await mounted.publishRenewedGeneration()
+        await waitFor(() => expect(mounted.parentAffordanceReads).toBeGreaterThan(before))
+        const dialog = mounted.view.getByRole('dialog', { name: 'Move file Report.txt' })
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
+        expect(
+          within(dialog)
+            .getByRole('button', { name: 'Move here (Archive)' })
+            .hasAttribute('disabled')
+        ).toBe(false)
+      }
+      mounted.queryClient.clear()
+    }
+  )
+
+  it('does not replay a delayed Move commit 401 after the App owner observes renewal', async () => {
+    const mounted = await mountSidebarMoveAuthorityScenario(
+      { status: 401, code: 'unauthenticated', message: 'unauthenticated' },
+      true
+    )
+    await mounted.chooseDestination()
+    await mounted.commitStarted
+    await mounted.renewSession()
+    mounted.releaseCommit()
+    await waitFor(() => expect(mounted.observedErrors.length).toBe(1))
+    await waitFor(() =>
+      expect(mounted.view.queryByRole('dialog', { name: 'Move file Report.txt' })).toBeNull()
+    )
+    expect(mounted.moveRequests).toBe(1)
+    expect(mounted.movePatches).toEqual([
+      {
+        path: `/api/v1/me/gfs/resources/${mounted.sourceId}`,
+        body: { newParentId: mounted.destinationId, ifMatch: 4 },
+      },
+    ])
+    expect(mounted.observedErrors[0]).toMatchObject({ code: 'GFS_STALE_SESSION_AUTHORITY' })
+    await mounted.publishRenewedGeneration()
+    expect(mounted.moveRequests).toBe(1)
+    mounted.queryClient.clear()
+  })
 
   // With universal-tabs an open app is a `kind:'app'` tab in the global strip, so
   // opening/closing an app no longer auto-collapses or restores the sidebar. The
@@ -5397,6 +5741,8 @@ describe('App deep-link orchestration', () => {
       const gesture = async (expectAdmission: boolean) => {
         if (surface === 'sidebar-dialog') {
           fireEvent.keyDown(sourceButton(), { key: 'F10', shiftKey: true })
+          const menu = await view.findByRole('menu', { name: `Actions for ${sourceName}` })
+          fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
           const dialog = await view.findByRole('dialog', { name: `Move file ${sourceName}` })
           fireEvent.click(await within(dialog).findByRole('button', { name: 'Target' }))
           fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Target)' }))
@@ -5483,14 +5829,17 @@ describe('App deep-link orchestration', () => {
       .mockImplementationOnce(() => pending)
     window.clerum.gfs.resolve = resolve
     act(() =>
-      getController().openPreviewSection({
-        kind: 'image',
-        gfsUri: uri,
-        name: 'Captured.png',
-        bytes: 128,
-        mimeType: 'image/png',
-        version: 1,
-      })
+      getController().openPreviewSection(
+        {
+          kind: 'image',
+          gfsUri: uri,
+          name: 'Captured.png',
+          bytes: 128,
+          mimeType: 'image/png',
+          version: 1,
+        },
+        `${getController().runtimeConfigState?.envKey ?? ''}:${userA.id}:${userA.teamId ?? ''}`
+      )
     )
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(queryClient.isFetching()).toBe(0))
@@ -7562,6 +7911,139 @@ describe('App deep-link orchestration', () => {
       await new Promise(resolve => window.setTimeout(resolve, 0))
     })
   }
+
+  it.each([false, true])(
+    'mounts the selected adjacent app after GFS scope cleanup unless later explicit navigation supersedes it (%s)',
+    async supersede => {
+      currentController = makeController({ initialExperienceLoading: false, sessionGeneration: 1 })
+      listApps.mockResolvedValue({ apps: [READY_APP] })
+      renderApp(<App />)
+      await launchAppFromSidebar()
+      const appTabId = activeWorkspaceTab(currentController.workspaceTabs)!.id
+      const resource = await resolveResource(
+        resolvedFile('d'.repeat(32), 'Scoped.png', { bytes: 128 })
+      )
+      const preview = resolveGfsPreview({
+        gfsUri: resource.gfsUri,
+        name: resource.name,
+        bytes: resource.bytes ?? 0,
+        version: resource.version,
+      })
+      if (!preview) throw new Error('The producer-backed image is not previewable')
+      const scope = `${currentController.runtimeConfigState?.envKey ?? ''}:${currentController.me!.id}:${currentController.me!.teamId ?? ''}`
+      act(() => {
+        currentController.beginUserNavigationIntent()
+        currentController.setWorkspaceTabs(state =>
+          openPreviewTab(state, {
+            id: 'scope-fallback-preview',
+            title: preview.name,
+            gfsUri: preview.gfsUri,
+            sessionScope: scope,
+            fileKind: preview.kind,
+            byteLength: preview.bytes,
+            ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+          })
+        )
+      })
+      await waitFor(() => expect(main.live()).toBeNull())
+      expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('preview')
+      const intentBeforeCleanup = currentController.navigationIntentSequence
+
+      act(() => {
+        flushSync(() => {
+          currentController.me = { ...currentController.me!, teamId: 'team-b' }
+          currentController.currentTeamId = 'team-b'
+          forceControllerRender()
+        })
+        if (supersede) workspaceTabStripHarness.props?.onSelect('chat-tab-1')
+      })
+
+      await waitFor(() =>
+        expect(
+          currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
+        ).toHaveLength(0)
+      )
+      if (supersede) {
+        expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+        await act(async () => {
+          await main.settle()
+        })
+        expect(openSandboxUi()).toHaveBeenCalledTimes(1)
+        expect(main.live()).toBeNull()
+      } else {
+        expect(currentController.workspaceTabs.activeTabId).toBe(appTabId)
+        await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(2))
+        await waitForMounted()
+        expect(main.live()).toMatchObject({ appRef: READY_APP.appRef })
+      }
+      expect(currentController.navigationIntentSequence).toBe(
+        intentBeforeCleanup + (supersede ? 1 : 0)
+      )
+    }
+  )
+
+  it.each([false, true])(
+    'publishes same-principal team and generation together before Preview cleanup fallback (app neighbor=%s)',
+    async appNeighbor => {
+      const { userA, service, transportBoundaries } = installSameIdentityLoginFixture()
+      await service.googleLogin('fixture-google-A')
+      const frames: Array<{ teamId: string | null | undefined; generation: number | null }> = []
+      listApps.mockResolvedValue({ apps: [READY_APP] })
+      const { getController } = await mountSessionBackedApp(
+        userA,
+        desktopQueryClient,
+        controller => {
+          frames.push({ teamId: controller.me?.teamId, generation: controller.sessionGeneration })
+        }
+      )
+      if (appNeighbor) await launchAppFromSidebar()
+      const appTabId = activeWorkspaceTab(getController().workspaceTabs)!.id
+      const resource = await resolveResource(
+        resolvedFile('e'.repeat(32), 'Renewed.png', { bytes: 128 })
+      )
+      const preview = resolveGfsPreview({
+        gfsUri: resource.gfsUri,
+        name: resource.name,
+        bytes: resource.bytes ?? 0,
+        version: resource.version,
+      })
+      if (!preview) throw new Error('The producer-backed image is not previewable')
+      const scope = `${getController().runtimeConfigState?.envKey ?? ''}:${userA.id}:${userA.teamId ?? ''}`
+      act(() => getController().openPreviewSection(preview, scope))
+      await waitFor(() => expect(main.live()).toBeNull())
+      expect(activeWorkspaceTab(getController().workspaceTabs)?.kind).toBe('preview')
+      const intentBeforeCleanup = getController().navigationIntentSequence
+
+      transportBoundaries.authClient.googleLogin.mockReset().mockResolvedValueOnce({
+        token: 'synthetic-session-permission-B',
+        me: { ...userA, teamId: 'team-b', teamName: 'Team B' },
+      })
+      await service.googleLogin('fixture-google-B')
+      await act(async () => {
+        await getController().loadSession({ preserveNav: true })
+      })
+      const publishedGeneration = service.getSessionGeneration()
+      await waitFor(() => expect(getController().me?.teamId).toBe('team-b'))
+      expect(getController().sessionGeneration).toBe(publishedGeneration)
+      const teamBFrames = frames.filter(frame => frame.teamId === 'team-b')
+      expect(teamBFrames.length).toBeGreaterThan(0)
+      expect(teamBFrames.every(frame => frame.generation === publishedGeneration)).toBe(true)
+      expect(getController().workspaceTabs.tabs.filter(tab => tab.kind === 'preview')).toHaveLength(
+        0
+      )
+      expect(getController().workspaceTabs.activeTabId).toBe(appTabId)
+      if (appNeighbor) {
+        await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(2))
+        await waitForMounted()
+        expect(main.live()).toMatchObject({ appRef: READY_APP.appRef })
+      } else {
+        expect(activeWorkspaceTab(getController().workspaceTabs)?.kind).toBe('chat')
+        expect(openSandboxUi()).not.toHaveBeenCalled()
+        expect(main.live()).toBeNull()
+      }
+      expect(getController().navigationIntentSequence).toBe(intentBeforeCleanup)
+    }
+  )
 
   it('restores the route an app tab was left on when it is reactivated', async () => {
     currentController = makeController({ initialExperienceLoading: false })

@@ -69,6 +69,7 @@ describe('producer-side abort through the real GfsClient (R1-M6)', () => {
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
   })
   const service = {
+    getSessionGeneration: () => 1,
     listGfsChildren: (resourceId: string, drive?: string, cursor?: string, signal?: AbortSignal) =>
       client.listChildren(resourceId, 'session-token', { drive, cursor, signal }),
   }
