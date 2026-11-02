@@ -13,6 +13,8 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, 'ui/src'),
+      // Match the renderer's ESM entry; X's CJS entry imports AntD ESM internals.
+      '@ant-design/x': path.resolve(__dirname, 'node_modules/@ant-design/x/es/index.js'),
       '@components': path.resolve(__dirname, 'ui/src/components'),
       '@constants': path.resolve(__dirname, 'ui/src/constants'),
       '@contexts': path.resolve(__dirname, 'ui/src/contexts'),

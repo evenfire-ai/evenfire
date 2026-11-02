@@ -824,7 +824,7 @@ export function ChatThread({
                                   <Alert
                                     type="error"
                                     showIcon
-                                    message={
+                                    title={
                                       <>
                                         {AGENT_ERROR_CODE_LABELS[message.errorCode ?? ''] ??
                                           'Error'}

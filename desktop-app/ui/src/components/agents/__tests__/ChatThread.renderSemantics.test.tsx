@@ -173,7 +173,7 @@ describe('ChatThread error code labels', () => {
     // Liveness witness: Ant Design Alert renders the error with alert semantics.
     expect(screen.getByRole('alert')).toBeTruthy()
     return {
-      label: container.querySelector('.ant-alert-message')?.textContent,
+      label: container.querySelector('.ant-alert-title')?.textContent,
       text: response.textContent,
     }
   }
