@@ -184,12 +184,10 @@ function requiredOrDefault(name: string, fallback: string): string {
   return value || fallback
 }
 
-function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
-  const explicit = process.env.PROFILE_UI_BASE_URL?.trim()
-  if (explicit) return explicit
-
+function profileUiBaseUrlFromExternalRestApi(externalRestApiBaseUrl: string): string | null {
   try {
     const url = new URL(externalRestApiBaseUrl)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
     url.username = ''
     url.password = ''
     url.pathname = ''
@@ -197,12 +195,6 @@ function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
     url.hash = ''
 
     if (url.hostname === 'example.com') {
-      url.hostname = 'example.com'
-      return url.toString().replace(/\/$/, '')
-    }
-
-    if (url.hostname === 'example.com') {
-      url.hostname = 'example.com'
       return url.toString().replace(/\/$/, '')
     }
 
@@ -216,14 +208,81 @@ function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
       return url.toString().replace(/\/$/, '')
     }
   } catch {
-    // Keep the local developer fallback when runtime config is invalid or unavailable.
+    // An unrecognized deployment must not be used as a shareable-link origin.
+  }
+  return null
+}
+
+function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
+  const explicit = process.env.PROFILE_UI_BASE_URL?.trim()
+  if (explicit) return explicit
+  return profileUiBaseUrlFromExternalRestApi(externalRestApiBaseUrl) || 'http://127.0.0.1:3001'
+}
+
+/** Resolve the Profile origin paired with the currently active Desktop deployment. */
+export function getActiveDeploymentProfileUiBaseUrl(): string {
+  const externalRestApiBaseUrl = config.externalRestApiBaseUrl
+  const profileUiBaseUrl = profileUiBaseUrlFromExternalRestApi(externalRestApiBaseUrl)
+  if (profileUiBaseUrl) {
+    const restUrl = new URL(externalRestApiBaseUrl)
+    const isLocalDeployment =
+      restUrl.hostname === '127.0.0.1' ||
+      restUrl.hostname === 'localhost' ||
+      restUrl.hostname === '[::1]'
+    if (
+      isLocalDeployment &&
+      config.desktopProfileUiBaseUrlExplicit &&
+      configuredProfileUiRestBaseUrl &&
+      sameDesktopRestEndpoint(externalRestApiBaseUrl, configuredProfileUiRestBaseUrl)
+    ) {
+      const explicitProfileUiBaseUrl = normalizeConfiguredProfileUiOrigin(
+        config.desktopProfileUiBaseUrl
+      )
+      if (!explicitProfileUiBaseUrl) {
+        throw new Error(
+          'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+        )
+      }
+      const explicitProfileUrl = new URL(explicitProfileUiBaseUrl)
+      if (
+        explicitProfileUrl.protocol !== restUrl.protocol ||
+        explicitProfileUrl.hostname !== restUrl.hostname
+      ) {
+        throw new Error(
+          'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+        )
+      }
+      return explicitProfileUiBaseUrl
+    }
+    return profileUiBaseUrl
   }
 
-  return 'http://127.0.0.1:3001'
+  throw new Error('Cannot resolve a shareable Profile UI link for the active desktop deployment')
 }
 
 function hasExplicitProfileUiBaseUrl(): boolean {
   return Boolean(process.env.PROFILE_UI_BASE_URL?.trim())
+}
+
+const configuredProfileUiRestBaseUrl = process.env.EXTERNAL_REST_API_BASE_URL?.trim() || null
+
+function normalizeConfiguredProfileUiOrigin(value: string): string | null {
+  try {
+    const url = new URL(value)
+    if (
+      !['http:', 'https:'].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash
+    ) {
+      return null
+    }
+    return url.origin
+  } catch {
+    return null
+  }
 }
 
 function runtimeConfigDirectoryPath(): string {

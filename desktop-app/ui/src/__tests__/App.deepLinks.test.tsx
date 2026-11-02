@@ -3420,6 +3420,121 @@ describe('App deep-link orchestration', () => {
     return gfsQueue.enqueue(target, 0)
   }
 
+  it('delivers a queued GFS protocol link from the initial renderer listing', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const link = produceGfsResourceDeepLink(uri)
+    main.useDeepLinkQueues(new SandboxUiDeepLinkQueue(), gfsQueue, mainNavigationGeneration)
+    let releaseInitialListing!: (value: { links: ReturnType<typeof gfsQueue.list> }) => void
+    const initialListing = new Promise<{ links: ReturnType<typeof gfsQueue.list> }>(resolve => {
+      releaseInitialListing = resolve
+    })
+    listPendingGfsDeepLinks.mockImplementationOnce(async () => initialListing)
+    renderApp(<App />)
+
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+    await waitFor(() => expect(listPendingGfsDeepLinks).toHaveBeenCalled())
+    act(() => emitGfsDeepLink?.(link))
+    releaseInitialListing({ links: gfsQueue.list() })
+    await waitFor(() =>
+      expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri })
+    )
+    expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: null },
+    })
+    expectNoResourceAcknowledgment(link.id)
+
+    act(() => {
+      filesPageHarness.props?.onLocationChange?.(uri, 'Shared document.md')
+      filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(link.id, 'opened')
+    })
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+    expect(acknowledgeGfsDeepLink.mock.calls.filter(([id]) => id === link.id)).toHaveLength(1)
+    expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: uri },
+    })
+    expect(gfsQueue.list()).toEqual([])
+  })
+
+  it('opens an app protocol link delivered by the initial renderer listing', async () => {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const sessionAuthority = main.service as unknown as {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: typeof userA | null
+    }
+    sessionAuthority.sessionGeneration = 1
+    sessionAuthority.sessionToken = 'session-a'
+    sessionAuthority.me = userA
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/cold-start',
+          title: 'Cold Start',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'cold-start',
+        path: '/requested-resource',
+        teamId: 'team-a',
+      })
+    )
+    if (!target) throw new Error('The shared App producer rejected the cold-start fixture')
+
+    const appQueue = new SandboxUiDeepLinkQueue()
+    main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
+    let releaseInitialListing!: (value: { links: ReturnType<typeof appQueue.list> }) => void
+    let markInitialListingStarted!: () => void
+    const initialListingStarted = new Promise<void>(resolve => {
+      markInitialListingStarted = resolve
+    })
+    const initialListing = new Promise<{ links: ReturnType<typeof appQueue.list> }>(resolve => {
+      releaseInitialListing = resolve
+    })
+    listPendingDeepLinks.mockImplementationOnce(async () => {
+      markInitialListingStarted()
+      return initialListing
+    })
+    listPendingDeepLinks.mockImplementation(async () => ({ links: appQueue.list() }))
+    acknowledgeDeepLink.mockImplementation(async id => appQueue.acknowledge(id))
+    const link = appQueue.enqueue(target, mainNavigationGeneration.current())
+    const { getController, queryClient } = await mountSessionBackedApp(userA)
+
+    await initialListingStarted
+    act(() => emitDeepLink?.(link))
+    releaseInitialListing({ links: appQueue.list() })
+    await waitFor(() => expect(listPendingDeepLinks).toHaveBeenCalled())
+    await confirmPendingAppLink()
+    await waitFor(() => expect(listApps).toHaveBeenCalled())
+    await waitForAppOpen()
+    await main.settle()
+    expect(main.live()).toMatchObject({
+      appRef: 'ns/cold-start',
+      routePath: '/requested-resource',
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === link.id)).toHaveLength(1)
+    expect(appQueue.list()).toEqual([])
+    expect(getController().workspaceTabs.tabs.some(tab => tab.kind === 'app')).toBe(true)
+    queryClient.clear()
+  })
+
   it('routes a shared GFS producer link to Files and acknowledges its resolved owner', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     renderApp(<App />)
@@ -6080,7 +6195,11 @@ describe('App deep-link orchestration', () => {
     sessionAuthority.sessionGeneration = 7
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
-    sessionAuthority.restoreSavedSession = async () => ({ authenticated: false, me: null })
+    sessionAuthority.restoreSavedSession = async () => ({
+      authenticated: false,
+      me: null,
+      sessionGeneration: sessionAuthority.sessionGeneration,
+    })
 
     const appQueue = new SandboxUiDeepLinkQueue()
     main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)

@@ -144,10 +144,10 @@ vi.mock('../ipc.js', async importOriginal => {
 })
 vi.mock('../mainWindowReadiness.js', () => ({ wireMainWindowRendererReadiness: vi.fn() }))
 vi.mock('../pluginSdkRuntime.js', () => ({ initPluginSdkRuntime: vi.fn() }))
-vi.mock('../protocolLaunchArgs.js', () => ({
-  collectInitialProtocolUrls: vi.fn(() => ({ evenfireUrls: [], clerumUrls: [] })),
-  shouldRegisterOsProtocols: vi.fn(() => false),
-}))
+vi.mock('../protocolLaunchArgs.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../protocolLaunchArgs.js')>()
+  return { ...original, shouldRegisterOsProtocols: vi.fn(() => false) }
+})
 vi.mock('../sandboxUiDeepLinks.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../sandboxUiDeepLinks.js')>()
   return { ...actual, parseSandboxUiDeepLink: harness.parseSandboxUiDeepLink }
@@ -409,4 +409,99 @@ describe('main.ts GFS navigation-generation composition', () => {
       harness.sessionGeneration = 0
     }
   )
+
+  it('retains a cold-start OS resource link until renderer readiness', async () => {
+    vi.resetModules()
+    harness.windows.length = 0
+    harness.appListeners.clear()
+    harness.onHandlers.clear()
+    harness.handleHandlers.clear()
+    harness.readyResolver = null
+    harness.sessionGeneration = 0
+    const uri = 'gfs://main/abcdef0123456789abcdef0123456789'
+    const protocolUrl = buildGfsResourceDeepLink(uri)
+    const originalArgv = process.argv
+    process.argv = [...originalArgv, protocolUrl]
+
+    try {
+      await import('../main.js')
+      harness.readyResolver?.()
+      await vi.waitFor(() => {
+        expect(harness.registeredLogout).toBeTypeOf('function')
+        expect(harness.windows).toHaveLength(1)
+      })
+      const ownContents = harness.windows[0]?.webContents
+      if (!ownContents) throw new Error('cold startup did not create its main BrowserWindow')
+      const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady')
+      await rendererReady(ipcEvent(ownContents))
+
+      const list = registeredHandler(harness.handleHandlers, 'gfs:listPendingDeepLinks') as (
+        event: MainEvent
+      ) => { links: Array<{ id: number; uri: string }> }
+      expect(list(ipcEvent(ownContents)).links).toEqual([
+        { id: 1, uri, userNavigationGenerationAtActivation: 0 },
+      ])
+      expect(
+        ownContents.send.mock.calls.filter(([channel]) => channel === 'gfs:deepLink')
+      ).toHaveLength(1)
+    } finally {
+      process.argv = originalArgv
+    }
+  })
+
+  it('retains a cold-start App link until renderer readiness', async () => {
+    vi.resetModules()
+    harness.windows.length = 0
+    harness.appListeners.clear()
+    harness.onHandlers.clear()
+    harness.handleHandlers.clear()
+    harness.readyResolver = null
+    harness.sessionGeneration = 0
+    harness.parseSandboxUiDeepLink.mockImplementation(parseSandboxUiDeepLink)
+    const protocolUrl = buildSandboxUiDeepLink({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'task-board',
+      path: '/tasks/42',
+    })
+    const originalArgv = process.argv
+    process.argv = [...originalArgv, protocolUrl]
+
+    try {
+      await import('../main.js')
+      harness.readyResolver?.()
+      await vi.waitFor(() => {
+        expect(harness.registeredLogout).toBeTypeOf('function')
+        expect(harness.windows).toHaveLength(1)
+      })
+      const ownContents = harness.windows[0]?.webContents
+      if (!ownContents) throw new Error('cold startup did not create its main BrowserWindow')
+      const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady')
+      await rendererReady(ipcEvent(ownContents))
+
+      const list = registeredHandler(harness.handleHandlers, 'sandboxUi:listPendingDeepLinks') as (
+        event: MainEvent
+      ) => {
+        links: Array<{
+          id: number
+          appRef: string
+          path: string
+          userNavigationGenerationAtActivation: number
+        }>
+      }
+      expect(list(ipcEvent(ownContents)).links).toEqual([
+        {
+          id: 1,
+          appRef: 'sandbox-recipes/task-board',
+          path: '/tasks/42',
+          userNavigationGenerationAtActivation: 0,
+        },
+      ])
+      expect(
+        ownContents.send.mock.calls.filter(([channel]) => channel === 'sandboxUi:deepLink')
+      ).toHaveLength(1)
+    } finally {
+      process.argv = originalArgv
+      harness.parseSandboxUiDeepLink.mockReturnValue(null)
+    }
+  })
 })
