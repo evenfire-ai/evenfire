@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom'
-import { IconButton } from '@components/Common'
+import { Button } from 'antd'
 import { IconCopy, IconOpenRoute, IconRefresh } from '@components/SidebarNav/icons'
 
 export type GfsResourceTitlebarActionsProps = {
@@ -26,44 +26,48 @@ export function GfsResourceTitlebarActions({
           className={`titlebar-leading-action${refreshing ? ' titlebar-leading-action--disabled' : ''}`}
           title={refreshing ? 'Refreshing EvenDrive' : undefined}
         >
-          <IconButton
+          <Button
             className="titlebar-leading-action__btn"
-            label="Refresh"
+            aria-label="Refresh"
+            title={refreshing ? 'Refreshing EvenDrive' : 'Refresh'}
             disabled={refreshing}
+            htmlType="button"
+            icon={<IconRefresh aria-hidden="true" />}
+            loading={refreshing}
             onClick={onRefresh}
-            size="sm"
-            variant="ghost"
-          >
-            <IconRefresh />
-          </IconButton>
+            size="small"
+            type="text"
+          />
         </span>
       ) : null}
       <span
         className={`titlebar-leading-action${onCopyLink ? '' : ' titlebar-leading-action--disabled'}`}
         title={onCopyLink ? undefined : 'No link is available on Shared with me'}
       >
-        <IconButton
+        <Button
           className="titlebar-leading-action__btn"
-          label="Copy link"
+          aria-label="Copy link"
+          title={onCopyLink ? 'Copy link' : 'No link is available on Shared with me'}
           disabled={!onCopyLink}
+          htmlType="button"
+          icon={<IconCopy aria-hidden="true" />}
           onClick={onCopyLink}
-          size="sm"
-          variant="ghost"
-        >
-          <IconCopy />
-        </IconButton>
+          size="small"
+          type="text"
+        />
       </span>
       {onOpenLink ? (
         <span className="titlebar-leading-action">
-          <IconButton
+          <Button
             className="titlebar-leading-action__btn"
-            label="Open link"
+            aria-label="Open link"
+            title="Open link"
+            htmlType="button"
+            icon={<IconOpenRoute aria-hidden="true" />}
             onClick={onOpenLink}
-            size="sm"
-            variant="ghost"
-          >
-            <IconOpenRoute />
-          </IconButton>
+            size="small"
+            type="text"
+          />
         </span>
       ) : null}
     </div>,

@@ -1,65 +1,21 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
-import { createPortal } from 'react-dom'
-import { IconButton, MenuItem } from '@components/Common'
+import { useEffect, useRef, useState } from 'react'
+import { Button, Dropdown } from 'antd'
+import type { MenuProps } from 'antd'
 import {
-  IconChevronRight,
-  IconContexts,
-  IconCopy,
-  IconDownload,
-  IconEdit,
-  IconEye,
-  IconMoreVertical,
-  IconPlus,
-  IconShare,
-  IconTrash,
-  IconUpload,
+  IconCopy as CopyOutlined,
+  IconTrash as DeleteOutlined,
+  IconDownload as DownloadOutlined,
+  IconEdit as EditOutlined,
+  IconMoreVertical as EllipsisOutlined,
+  IconEye as EyeOutlined,
+  IconPlus as FolderAddOutlined,
+  IconContexts as FolderOutlined,
+  IconChevronRight as RightOutlined,
+  IconShare as ShareAltOutlined,
+  IconUpload as UploadOutlined,
 } from '@components/SidebarNav/icons'
+import type { GfsResourceAction } from '@lib/gfsResourceActions'
 import type { GfsResourceMenuProps } from './types'
-
-type GfsResourceMenuAction = {
-  color?: 'neutral' | 'danger'
-  icon: ReactNode
-  key: string
-  label: string
-  onClick: () => void
-  submenu?: boolean
-  disabled?: boolean
-}
-
-function menuAction(
-  key: string,
-  label: string,
-  icon: ReactNode,
-  onClick: (() => void) | undefined,
-  options: Pick<GfsResourceMenuAction, 'color' | 'submenu' | 'disabled'> = {}
-): GfsResourceMenuAction | null {
-  return onClick ? { ...options, icon, key, label, onClick } : null
-}
-
-function isMenuAction(action: GfsResourceMenuAction | null): action is GfsResourceMenuAction {
-  return action !== null
-}
-
-function horizontalBounds(anchor: HTMLElement, edgeInset: number) {
-  const viewportLeft = edgeInset
-  const viewportRight = window.innerWidth - edgeInset
-  const drive = anchor.closest<HTMLElement>('.da-gfs-drive')
-  const driveRect = drive?.getBoundingClientRect()
-
-  // Breadcrumb menus live beside a persistent sidebar. Keep their portal
-  // inside the Files surface instead of allowing right-edge alignment to push
-  // the panel underneath that sidebar. Isolated consumers and zero-layout test
-  // environments fall back to the viewport.
-  if (!driveRect || driveRect.width <= 0) {
-    return { left: viewportLeft, right: viewportRight }
-  }
-
-  return {
-    left: Math.max(viewportLeft, driveRect.left),
-    right: Math.min(viewportRight, driveRect.right),
-  }
-}
 
 export function GfsResourceMenu({
   resourceName,
@@ -78,403 +34,319 @@ export function GfsResourceMenu({
   onReplace,
 }: GfsResourceMenuProps) {
   const [open, setOpen] = useState(false)
-  const [shareOpen, setShareOpen] = useState(false)
-  const menuRef = useRef<HTMLSpanElement | null>(null)
-  const panelRef = useRef<HTMLDivElement | null>(null)
-  const submenuRef = useRef<HTMLDivElement | null>(null)
-  const shareTriggerRef = useRef<HTMLButtonElement | null>(null)
-  const triggerRef = useRef<HTMLButtonElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
-  const [panelPosition, setPanelPosition] = useState<{ left: number; top: number } | null>(null)
-  const [submenuPosition, setSubmenuPosition] = useState<{ left: number; top: number } | null>(null)
-  const closeMenu = useCallback(() => {
-    setOpen(false)
-    setShareOpen(false)
-  }, [])
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const openRef = useRef(false)
+  const restoreFocusOnCloseRef = useRef(false)
   const onOpenChangeRef = useRef(onOpenChange)
-  const prevOpenRef = useRef(false)
+  const previousOpenRef = useRef(false)
 
   useEffect(() => {
     onOpenChangeRef.current = onOpenChange
   }, [onOpenChange])
 
   useEffect(() => {
-    if (prevOpenRef.current === open) return
-    prevOpenRef.current = open
+    if (previousOpenRef.current === open) return
+    previousOpenRef.current = open
     onOpenChangeRef.current?.(open)
+  }, [open])
+
+  useEffect(() => {
+    openRef.current = open
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      restoreFocusOnCloseRef.current = true
+      window.setTimeout(() => {
+        // Ant Design closes a nested submenu on its first Escape without
+        // closing the dropdown. Only return focus when Escape closed the root.
+        if (openRef.current) restoreFocusOnCloseRef.current = false
+      }, 0)
+    }
+    window.addEventListener('keydown', handleEscape, true)
+    return () => window.removeEventListener('keydown', handleEscape, true)
   }, [open])
 
   useEffect(
     () => () => {
-      if (prevOpenRef.current) onOpenChangeRef.current?.(false)
+      if (previousOpenRef.current) onOpenChangeRef.current?.(false)
     },
     []
   )
 
-  useEffect(() => {
-    if (!open) return
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node
-      if (
-        menuRef.current?.contains(target) ||
-        panelRef.current?.contains(target) ||
-        submenuRef.current?.contains(target)
-      )
-        return
-      closeMenu()
-    }
-    document.addEventListener('mousedown', handlePointerDown)
-    return () => document.removeEventListener('mousedown', handlePointerDown)
-  }, [closeMenu, open])
-
-  const positionPanel = useCallback(() => {
-    const trigger = triggerRef.current
-    const panel = panelRef.current
-    if (!trigger || !panel) return
-
-    const triggerRect = trigger.getBoundingClientRect()
-    const panelRect = panel.getBoundingClientRect()
-    const edgeInset = 8
-    const gap = 6
-    const viewportHeight = window.innerHeight
-    const bounds = horizontalBounds(trigger, edgeInset)
-    const maxLeft = Math.max(bounds.left, bounds.right - panelRect.width)
-    const left = Math.min(Math.max(bounds.left, triggerRect.right - panelRect.width), maxLeft)
-    const opensAbove =
-      triggerRect.bottom + gap + panelRect.height > viewportHeight - edgeInset &&
-      triggerRect.top - gap - panelRect.height >= edgeInset
-    const unclampedTop = opensAbove
-      ? triggerRect.top - panelRect.height - gap
-      : triggerRect.bottom + gap
-    const top = Math.min(
-      Math.max(edgeInset, unclampedTop),
-      Math.max(edgeInset, viewportHeight - panelRect.height - edgeInset)
-    )
-
-    setPanelPosition({ left, top })
-  }, [])
-
-  useLayoutEffect(() => {
-    if (!open) {
-      setPanelPosition(null)
-      return
-    }
-
-    positionPanel()
-    window.addEventListener('resize', positionPanel)
-    window.addEventListener('scroll', positionPanel, true)
-    const resizeObserver =
-      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(positionPanel)
-    const trigger = triggerRef.current
-    const drive = trigger?.closest<HTMLElement>('.da-gfs-drive')
-    if (trigger) resizeObserver?.observe(trigger)
-    if (drive) resizeObserver?.observe(drive)
-    if (panelRef.current) resizeObserver?.observe(panelRef.current)
-    return () => {
-      window.removeEventListener('resize', positionPanel)
-      window.removeEventListener('scroll', positionPanel, true)
-      resizeObserver?.disconnect()
-    }
-  }, [open, positionPanel])
-
-  const positionSubmenu = useCallback(() => {
-    const trigger = shareTriggerRef.current
-    const submenu = submenuRef.current
-    if (!trigger || !submenu) return
-
-    const triggerRect = trigger.getBoundingClientRect()
-    const submenuRect = submenu.getBoundingClientRect()
-    const edgeInset = 8
-    const gap = 6
-    const viewportHeight = window.innerHeight
-    const bounds = horizontalBounds(triggerRef.current ?? trigger, edgeInset)
-    const opensLeft = triggerRect.right + gap + submenuRect.width > bounds.right
-    const preferredLeft = opensLeft
-      ? triggerRect.left - submenuRect.width - gap
-      : triggerRect.right + gap
-    const maxLeft = Math.max(bounds.left, bounds.right - submenuRect.width)
-    const left = Math.min(Math.max(bounds.left, preferredLeft), maxLeft)
-    const maxTop = Math.max(edgeInset, viewportHeight - submenuRect.height - edgeInset)
-    const top = Math.min(Math.max(edgeInset, triggerRect.top), maxTop)
-
-    setSubmenuPosition({ left, top })
-  }, [])
-
-  useLayoutEffect(() => {
-    if (!shareOpen) {
-      setSubmenuPosition(null)
-      return
-    }
-
-    positionSubmenu()
-    window.addEventListener('resize', positionSubmenu)
-    window.addEventListener('scroll', positionSubmenu, true)
-    const resizeObserver =
-      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(positionSubmenu)
-    const trigger = triggerRef.current
-    const drive = trigger?.closest<HTMLElement>('.da-gfs-drive')
-    if (trigger) resizeObserver?.observe(trigger)
-    if (drive) resizeObserver?.observe(drive)
-    if (panelRef.current) resizeObserver?.observe(panelRef.current)
-    if (shareTriggerRef.current) resizeObserver?.observe(shareTriggerRef.current)
-    if (submenuRef.current) resizeObserver?.observe(submenuRef.current)
-    return () => {
-      window.removeEventListener('resize', positionSubmenu)
-      window.removeEventListener('scroll', positionSubmenu, true)
-      resizeObserver?.disconnect()
-    }
-  }, [panelPosition, positionSubmenu, shareOpen])
-
-  useEffect(() => {
-    if (!open) return
-    panelRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        if (shareOpen) {
-          event.preventDefault()
-          setShareOpen(false)
-          shareTriggerRef.current?.focus()
-        } else {
-          closeMenu()
-          triggerRef.current?.focus()
-        }
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeMenu, open, shareOpen])
-
-  useEffect(() => {
-    if (!shareOpen) return
-    submenuRef.current
-      ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
-      ?.focus()
-  }, [shareOpen])
-
-  const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (!open) return
-    if (event.key === 'ArrowRight' && event.target === shareTriggerRef.current) {
-      event.preventDefault()
-      setShareOpen(true)
-      return
-    }
-    if (
-      event.key === 'ArrowLeft' &&
-      shareOpen &&
-      submenuRef.current?.contains(document.activeElement)
-    ) {
-      event.preventDefault()
-      setShareOpen(false)
-      shareTriggerRef.current?.focus()
-      return
-    }
-    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
-    const items = Array.from(
-      event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
-    )
-    if (!items.length) return
-    event.preventDefault()
-    const activeIndex = items.findIndex(item => item === document.activeElement)
-    let nextIndex = activeIndex < 0 ? 0 : activeIndex
-    if (event.key === 'Home') nextIndex = 0
-    if (event.key === 'End') nextIndex = items.length - 1
-    if (event.key === 'ArrowDown') nextIndex = (nextIndex + 1) % items.length
-    if (event.key === 'ArrowUp') nextIndex = (nextIndex - 1 + items.length) % items.length
-    items[nextIndex]?.focus()
+  const actionHandlers = new Map<string, () => void>()
+  const addAction = (key: string, action: (() => void) | undefined) => {
+    if (action) actionHandlers.set(key, action)
   }
 
-  const runAction = (action: () => void) => {
-    closeMenu()
+  addAction('share-access', onManage)
+  addAction('copy-link', onCopyLink)
+  addAction('open-folder', onOpen)
+  addAction('preview', onPreview)
+  addAction('new-folder', onCreateFolder)
+  addAction('rename', onRename)
+  addAction('move', onMove)
+  addAction('download', onDownload)
+  addAction('download-zip', onDownloadZip)
+  addAction('replace', onReplace ? () => replaceInputRef.current?.click() : undefined)
+  addAction('delete', onDelete)
+
+  const menuActions = actions?.filter(action => action.menu) ?? []
+  for (const action of menuActions) {
+    const actionKey = action.id === 'share' ? 'share-access' : action.id
+    if (action.id === 'replace') {
+      actionHandlers.set(actionKey, () =>
+        action.run(undefined, {
+          requestFileSelection: () => replaceInputRef.current?.click(),
+        })
+      )
+    } else {
+      actionHandlers.set(actionKey, () => action.run())
+    }
+  }
+
+  const actionItem = (action: GfsResourceAction, key: string = action.id) => ({
+    key,
+    label: action.label,
+    icon: action.icon,
+    disabled: action.disabled || action.loading,
+    danger: action.id === 'delete',
+  })
+
+  const shareChildren = menuActions
+    .filter(action => ['share', 'copy-link', 'copy-route'].includes(action.id))
+    .map(action => actionItem(action, action.id === 'share' ? 'share-access' : action.id))
+  const sharedGroups: NonNullable<MenuProps['items']>[] = []
+  if (shareChildren.length) {
+    sharedGroups.push([
+      {
+        key: 'share',
+        label: 'Share',
+        icon: <ShareAltOutlined aria-hidden="true" width={18} height={18} />,
+        children: shareChildren,
+      },
+    ])
+  }
+  const resourceActions = menuActions
+    .filter(action => !['share', 'copy-link', 'copy-route', 'delete'].includes(action.id))
+    .map(action => actionItem(action))
+  if (resourceActions.length) sharedGroups.push(resourceActions)
+  const deleteActions = menuActions
+    .filter(action => action.id === 'delete')
+    .map(action => actionItem(action))
+  if (deleteActions.length) sharedGroups.push(deleteActions)
+
+  const groups: NonNullable<MenuProps['items']>[] = [
+    [
+      ...(onManage
+        ? [
+            {
+              key: 'share',
+              label: 'Share',
+              icon: <ShareAltOutlined aria-hidden="true" width={18} height={18} />,
+              children: [
+                {
+                  key: 'share-access',
+                  label: 'Share',
+                  icon: <ShareAltOutlined aria-hidden="true" width={18} height={18} />,
+                },
+                ...(onCopyLink
+                  ? [
+                      {
+                        key: 'copy-link',
+                        label: 'Copy link',
+                        icon: <CopyOutlined aria-hidden="true" width={18} height={18} />,
+                      },
+                    ]
+                  : []),
+              ],
+            },
+          ]
+        : onCopyLink
+          ? [
+              {
+                key: 'copy-link',
+                label: 'Copy link',
+                icon: <CopyOutlined aria-hidden="true" width={18} height={18} />,
+              },
+            ]
+          : []),
+      ...(onOpen
+        ? [
+            {
+              key: 'open-folder',
+              label: 'Open folder',
+              icon: <FolderOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
+        : []),
+      ...(onPreview
+        ? [
+            {
+              key: 'preview',
+              label: 'Preview',
+              icon: <EyeOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
+        : []),
+    ],
+    [
+      ...(onCreateFolder
+        ? [
+            {
+              key: 'new-folder',
+              label: 'New folder',
+              icon: <FolderAddOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
+        : []),
+      ...(onRename
+        ? [
+            {
+              key: 'rename',
+              label: 'Rename',
+              icon: <EditOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
+        : []),
+      ...(onMove
+        ? [
+            {
+              key: 'move',
+              label: 'Move to…',
+              icon: <FolderOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
+        : []),
+    ],
+    [
+      ...(onDownload
+        ? [
+            {
+              key: 'download',
+              label: 'Download',
+              icon: <DownloadOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
+        : []),
+      ...(onDownloadZip
+        ? [
+            {
+              key: 'download-zip',
+              label: 'Download as zip',
+              icon: <DownloadOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
+        : []),
+      ...(onReplace
+        ? [
+            {
+              key: 'replace',
+              label: 'Replace file',
+              icon: <UploadOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
+        : []),
+    ],
+    [
+      ...(onDelete
+        ? [
+            {
+              key: 'delete',
+              label: 'Delete',
+              icon: <DeleteOutlined aria-hidden="true" width={18} height={18} />,
+              danger: true,
+            },
+          ]
+        : []),
+    ],
+  ].filter(group => group.length > 0)
+
+  const items: NonNullable<MenuProps['items']> = (
+    actions !== undefined ? sharedGroups : groups
+  ).flatMap((group, index) => [
+    ...(index > 0 ? [{ type: 'divider' as const, key: `divider-${index}` }] : []),
+    ...group,
+  ])
+
+  const handleMenuKeyDown: NonNullable<MenuProps['onKeyDown']> = event => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    const menuItems = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        '[role="menuitem"]:not([aria-disabled="true"])'
+      )
+    )
+    if (menuItems.length === 0) return
+    event.preventDefault()
+    const activeIndex = menuItems.findIndex(item => item === document.activeElement)
+    let nextIndex = activeIndex < 0 ? 0 : activeIndex
+    if (event.key === 'Home') nextIndex = 0
+    if (event.key === 'End') nextIndex = menuItems.length - 1
+    if (event.key === 'ArrowDown') nextIndex = (nextIndex + 1) % menuItems.length
+    if (event.key === 'ArrowUp') nextIndex = (nextIndex - 1 + menuItems.length) % menuItems.length
+    menuItems[nextIndex]?.focus()
+  }
+
+  const handleMenuClick: MenuProps['onClick'] = ({ key }) => {
+    const action = actionHandlers.get(key)
+    if (!action) return
+    setOpen(false)
     action()
   }
 
-  const fallbackShareChildren = [
-    menuAction('share-access', 'Share', <IconShare />, onManage),
-    menuAction('copy-link', 'Copy link', <IconCopy />, onCopyLink),
-  ].filter(isMenuAction)
-  const fallbackShareGroup = fallbackShareChildren.length
-    ? [
-        menuAction('share', 'Share', <IconShare />, () => setShareOpen(true), {
-          submenu: true,
-        }),
-      ].filter(isMenuAction)
-    : []
-  const fallbackActionGroups = [
-    [
-      ...fallbackShareGroup,
-      menuAction('open-folder', 'Open folder', <IconContexts />, onOpen),
-      menuAction('preview', 'Preview', <IconEye />, onPreview),
-    ].filter(isMenuAction),
-    [
-      menuAction('new-folder', 'New folder', <IconPlus />, onCreateFolder),
-      menuAction('rename', 'Rename', <IconEdit />, onRename),
-      menuAction('move', 'Move to…', <IconContexts />, onMove),
-    ].filter(isMenuAction),
-    [
-      menuAction('download', 'Download', <IconDownload />, onDownload),
-      menuAction('download-zip', 'Download as zip', <IconDownload />, onDownloadZip),
-      menuAction(
-        'replace',
-        'Replace file',
-        <IconUpload />,
-        onReplace ? () => replaceInputRef.current?.click() : undefined
-      ),
-    ].filter(isMenuAction),
-    [menuAction('delete', 'Delete', <IconTrash />, onDelete, { color: 'danger' })].filter(
-      isMenuAction
-    ),
-  ].filter(group => group.length > 0)
-  const menuActions = actions?.filter(action => action.menu)
-  const sharedActions: GfsResourceMenuAction[] | undefined = menuActions?.map(action => ({
-    color: action.id === 'delete' ? 'danger' : undefined,
-    disabled: action.disabled,
-    icon: action.icon,
-    key: action.id,
-    label: action.label,
-    onClick:
-      action.id === 'replace'
-        ? () =>
-            action.run(undefined, {
-              requestFileSelection: () => replaceInputRef.current?.click(),
-            })
-        : () => action.run(),
-  }))
-  const shareMenuChildren =
-    actions !== undefined
-      ? (sharedActions ?? [])
-          .filter(action => ['share', 'copy-link', 'copy-route'].includes(action.key))
-          .map(action =>
-            action.key === 'share' ? { ...action, key: 'share-access', label: 'Share' } : action
-          )
-      : fallbackShareChildren
-  const hasShareSubmenu = shareMenuChildren.length > 0
-  const shareGroup = hasShareSubmenu
-    ? [
-        menuAction('share', 'Share', <IconShare />, () => setShareOpen(value => !value), {
-          submenu: true,
-        }),
-      ].filter(isMenuAction)
-    : []
-  const visibleSharedActions = sharedActions?.filter(
-    action => !['share', 'copy-link', 'copy-route', 'delete'].includes(action.key)
-  )
-  const actionGroups =
-    actions !== undefined
-      ? [
-          ...(shareGroup.length ? [shareGroup] : []),
-          ...(visibleSharedActions?.length ? [visibleSharedActions] : []),
-          ...(sharedActions?.some(action => action.key === 'delete')
-            ? [sharedActions.filter(action => action.key === 'delete')]
-            : []),
-        ].filter(group => group.length > 0)
-      : fallbackActionGroups
+  const handleDropdownOpenChange = (nextOpen: boolean) => {
+    setOpen(nextOpen)
+    openRef.current = nextOpen
+    if (!nextOpen && restoreFocusOnCloseRef.current) {
+      restoreFocusOnCloseRef.current = false
+      triggerRef.current?.focus()
+    }
+  }
 
   return (
-    <span
-      className={`da-gfs-resource-menu${open ? ' is-open' : ''}`}
-      ref={menuRef}
-      onKeyDown={handleMenuKeyDown}
-    >
-      <IconButton
-        className="da-gfs-resource-menu__trigger"
-        label={`Options for ${resourceName}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={event => {
-          event.stopPropagation()
-          if (open) {
-            closeMenu()
-          } else {
-            setOpen(true)
-          }
+    <>
+      <Dropdown
+        autoFocus
+        open={open}
+        onOpenChange={handleDropdownOpenChange}
+        menu={{
+          items,
+          className: 'gfs-resource-menu-antd',
+          onClick: handleMenuClick,
+          onKeyDown: handleMenuKeyDown,
+          expandIcon: (
+            <span aria-hidden="true">
+              <RightOutlined width={18} height={18} />
+            </span>
+          ),
+          'aria-label': `Actions for ${resourceName}`,
         }}
-        ref={triggerRef}
-        size="sm"
-        variant="ghost"
+        trigger={['click']}
+        placement="bottomRight"
+        autoAdjustOverflow
+        getPopupContainer={trigger =>
+          trigger.closest<HTMLElement>('[data-gfs-browser="true"]') ?? document.body
+        }
+        destroyOnHidden
       >
-        <IconMoreVertical />
-      </IconButton>
-      {open
-        ? createPortal(
-            <Fragment>
-              <div
-                className="da-gfs-resource-menu__panel"
-                ref={panelRef}
-                role="menu"
-                aria-label={`Actions for ${resourceName}`}
-                style={
-                  panelPosition
-                    ? { left: panelPosition.left, top: panelPosition.top }
-                    : { left: 0, top: 0, visibility: 'hidden' }
-                }
-                onKeyDown={handleMenuKeyDown}
-              >
-                {actionGroups.map((group, groupIndex) => (
-                  <Fragment key={`group-${groupIndex}`}>
-                    {groupIndex > 0 ? (
-                      <div className="da-gfs-resource-menu__separator" role="separator" />
-                    ) : null}
-                    {group.map(action => (
-                      <MenuItem
-                        aria-expanded={action.submenu ? shareOpen : undefined}
-                        aria-haspopup={action.submenu ? 'menu' : undefined}
-                        color={action.color}
-                        data-gfs-action={action.key}
-                        disabled={action.disabled}
-                        key={action.key}
-                        leadingIcon={action.icon}
-                        role="menuitem"
-                        ref={action.submenu ? shareTriggerRef : undefined}
-                        trailingIcon={action.submenu ? <IconChevronRight /> : undefined}
-                        onMouseEnter={action.submenu ? () => setShareOpen(true) : undefined}
-                        onClick={() => {
-                          if (action.disabled) return
-                          if (action.submenu) {
-                            action.onClick()
-                          } else {
-                            runAction(action.onClick)
-                          }
-                        }}
-                      >
-                        {action.label}
-                      </MenuItem>
-                    ))}
-                  </Fragment>
-                ))}
-              </div>
-              {shareOpen && hasShareSubmenu ? (
-                <div
-                  aria-label={`Share options for ${resourceName}`}
-                  className="da-gfs-resource-menu__submenu"
-                  ref={submenuRef}
-                  role="menu"
-                  style={
-                    submenuPosition
-                      ? { left: submenuPosition.left, top: submenuPosition.top }
-                      : { left: 0, top: 0, visibility: 'hidden' }
-                  }
-                  onKeyDown={handleMenuKeyDown}
-                >
-                  {shareMenuChildren.map(action => (
-                    <MenuItem
-                      data-gfs-action={action.key}
-                      disabled={action.disabled}
-                      key={action.key}
-                      leadingIcon={action.icon}
-                      role="menuitem"
-                      onClick={() => runAction(action.onClick)}
-                    >
-                      {action.label}
-                    </MenuItem>
-                  ))}
-                </div>
-              ) : null}
-            </Fragment>,
-            document.body
-          )
-        : null}
-      {menuActions?.some(action => action.id === 'replace') ||
-      (actions === undefined && onReplace) ? (
+        <Button
+          aria-label={`Options for ${resourceName}`}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          title={`Options for ${resourceName}`}
+          htmlType="button"
+          className="da-gfs-resource-menu__trigger"
+          icon={<EllipsisOutlined aria-hidden="true" width={16} height={16} />}
+          onClick={event => event.stopPropagation()}
+          ref={triggerRef}
+          size="small"
+          type="text"
+        />
+      </Dropdown>
+      {menuActions.some(action => action.id === 'replace') || onReplace ? (
         <input
           aria-label={`Replace ${resourceName}`}
           className="visually-hidden"
@@ -484,13 +356,16 @@ export function GfsResourceMenu({
             const file = event.currentTarget.files?.[0]
             event.currentTarget.value = ''
             if (!file) return
-            closeMenu()
-            const replaceAction = menuActions?.find(action => action.id === 'replace')
+            setOpen(false)
+            // Native file selection returns focus to the action that launched
+            // it, matching the keyboard flow of the previous Files menu.
+            triggerRef.current?.focus()
+            const replaceAction = menuActions.find(action => action.id === 'replace')
             if (replaceAction) replaceAction.run(file)
             else onReplace?.(file)
           }}
         />
       ) : null}
-    </span>
+    </>
   )
 }

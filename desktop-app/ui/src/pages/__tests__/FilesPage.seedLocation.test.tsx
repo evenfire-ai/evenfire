@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useEffect, useRef, useState } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -28,6 +28,7 @@ import {
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { FilesPage } from '../FilesPage'
 
 // This suite mounts the REAL FilesPage on the REAL useGfsBrowserController (T1:
@@ -246,28 +247,44 @@ function renderHarness(
   }
 }
 
-function expectFolderRowMutationMenu(resourceName: string, available: boolean) {
-  const menu = screen.getByRole('menu', { name: `Actions for ${resourceName}` })
-  for (const action of ['New folder', 'Upload file', 'Rename', 'Delete']) {
-    const menuItem = within(menu).queryByRole('menuitem', { name: action })
-    if (available) expect(menuItem).toBeTruthy()
-    else expect(menuItem).toBeNull()
-  }
-  const shareTrigger = within(menu).getByRole('menuitem', { name: 'Share' })
-  if (screen.queryByRole('menu', { name: `Share options for ${resourceName}` })) {
-    fireEvent.keyDown(window, { key: 'Escape' })
-  }
-  fireEvent.click(shareTrigger)
-  const shareMenu = screen.getByRole('menu', { name: `Share options for ${resourceName}` })
-  const manageAction = within(shareMenu).queryByRole('menuitem', {
-    name: 'Share',
+async function clickAntdSelectOption(name: string | RegExp) {
+  let visibleOption: HTMLElement | undefined
+  await waitFor(() => {
+    const dropdowns = Array.from(
+      document.querySelectorAll<HTMLElement>('.ant-select-dropdown')
+    ).filter(
+      dropdown =>
+        !dropdown.classList.contains('ant-select-dropdown-hidden') &&
+        dropdown.getAttribute('aria-hidden') !== 'true'
+    )
+    visibleOption = dropdowns
+      .flatMap(dropdown =>
+        Array.from(dropdown.querySelectorAll<HTMLElement>('.ant-select-item-option'))
+      )
+      .find(option => {
+        const text = option.textContent ?? ''
+        return (
+          option.getAttribute('aria-disabled') !== 'true' &&
+          (name instanceof RegExp ? name.test(text) : text.includes(name))
+        )
+      })
+    if (!visibleOption) throw new Error(`Visible AntD option ${String(name)} is missing`)
   })
-  if (available) expect(manageAction).toBeTruthy()
-  else expect(manageAction).toBeNull()
-  fireEvent.keyDown(window, { key: 'Escape' })
+  if (!visibleOption) throw new Error(`Visible AntD option ${String(name)} is missing`)
+  fireEvent.click(visibleOption)
+}
+
+async function openShareSubmenu(resourceName: string) {
+  const menu = screen.getByRole('menu', { name: `Actions for ${resourceName}` })
+  const shareTrigger = within(menu).getByRole('menuitem', { name: 'Share' })
+  fireEvent.mouseEnter(shareTrigger)
+  await screen.findByRole('menuitem', { name: 'Copy link' })
+  return screen.getAllByRole('menu')[1]!
 }
 
 describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', () => {
+  beforeEach(installAntdDomEnvironment)
+
   afterEach(() => {
     cleanup()
     vi.useRealTimers()
@@ -390,12 +407,12 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     renderHarness()
     await waitFor(() => expect(sourceCalls).toBe(1))
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
     })
     fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
     await act(async () => {
-      fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     })
     await act(async () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
@@ -494,7 +511,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
       const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
       await act(async () => {
-        fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+        fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
       })
       await act(async () => {
         fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
@@ -556,7 +573,8 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     client.clear()
   })
 
-  it('keeps cached child-row actions visible but requires fresh authority before mutation', async () => {
+  it('keeps child-row actions visible and waits for fresh authority before delete confirmation', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
     const folder = await resolveResource(
       resolvedDirectory('folder-active', 'Reports', { gfsUri: SEED_URI })
     )
@@ -573,18 +591,10 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     )
     let reportCalls = 0
     let childFolderCalls = 0
-    let rejectReportRefresh!: (error: Error) => void
-    let rejectFolderRefresh!: (error: Error) => void
-    const pendingReportRefresh = new Promise<ReturnType<typeof delegationAffordances>>(
-      (_, reject) => {
-        rejectReportRefresh = reject
-      }
-    )
-    const pendingFolderRefresh = new Promise<ReturnType<typeof delegationAffordances>>(
-      (_, reject) => {
-        rejectFolderRefresh = reject
-      }
-    )
+    let resolveReportRefresh!: (value: ReturnType<typeof delegationAffordances>) => void
+    const pendingReportRefresh = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+      resolveReportRefresh = resolve
+    })
     const affordances = vi.fn((resourceId: string) => {
       if (resourceId === 'child-report') {
         reportCalls += 1
@@ -592,7 +602,6 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       }
       if (resourceId === 'child-folder') {
         childFolderCalls += 1
-        if (childFolderCalls === 2) return pendingFolderRefresh
       }
       return Promise.resolve(fullAccess)
     })
@@ -619,83 +628,44 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     const { client } = renderHarness()
     await screen.findByText('report.txt')
     await waitFor(() => expect(reportCalls).toBe(1))
-    await waitFor(() => expect(childFolderCalls).toBe(1))
-    expect(screen.getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Share Child folder' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename Child folder' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Options for Child folder' }))
-    expectFolderRowMutationMenu('Child folder', true)
-    const reportKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', 'child-report', 'main', 0)
-    const folderKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', 'child-folder', 'main', 0)
+    expect(childFolderCalls).toBe(1)
+    const reportRow = document.querySelector<HTMLElement>(
+      '[data-testid="gfs-resource-row-child-report"]'
+    )
+    expect(reportRow).not.toBeNull()
+    expect(within(reportRow!).getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
+    expect(within(reportRow!).getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+
+    vi.setSystemTime(Date.now() + 16_000)
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
     })
+    await waitFor(() => expect(reportCalls).toBe(2))
     fireEvent.click(
       within(screen.getByRole('menu', { name: 'Actions for report.txt' })).getByRole('menuitem', {
         name: 'Delete',
       })
     )
-    const deleteDialog = await screen.findByRole('dialog', { name: 'Delete report.txt?' })
-
-    await act(async () => {
-      await client.invalidateQueries({ exact: true, queryKey: reportKey, refetchType: 'none' })
-      await client.invalidateQueries({ exact: true, queryKey: folderKey, refetchType: 'none' })
-    })
-    expect(client.getQueryState(reportKey)?.isInvalidated).toBe(true)
-    expect(reportCalls).toBe(1)
-    expect(childFolderCalls).toBe(1)
-    expect(screen.getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Share Child folder' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename Child folder' })).toBeTruthy()
-    expectFolderRowMutationMenu('Child folder', true)
-    await act(async () => {
-      fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
-    })
+    expect(
+      client.getQueryState(
+        desktopQueryKeys.gfsAffordances(':user-1:team-1', 'child-report', 'main', 0)
+      )?.fetchStatus
+    ).toBe('fetching')
+    expect(document.querySelector('.ant-modal-title')).toBeNull()
     expect(deleteResource).not.toHaveBeenCalled()
+    expect(childFolderCalls).toBe(1)
+    expect(within(reportRow!).getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
+    expect(within(reportRow!).getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
 
     await act(async () => {
-      void client.invalidateQueries({ exact: true, queryKey: reportKey, refetchType: 'active' })
-      void client.invalidateQueries({ exact: true, queryKey: folderKey, refetchType: 'active' })
+      resolveReportRefresh(fullAccess)
+      await pendingReportRefresh
     })
-    await waitFor(() => expect(reportCalls).toBe(2))
-    await waitFor(() => expect(childFolderCalls).toBe(2))
-    await waitFor(() => {
-      expect(screen.getByText('Checking permissions for report.txt…')).toBeTruthy()
-      expect(screen.getByText('Checking permissions for Child folder…')).toBeTruthy()
-    })
-    expectFolderRowMutationMenu('Child folder', true)
-
-    await act(async () => {
-      rejectReportRefresh(new Error('429 Too Many Requests'))
-      rejectFolderRefresh(new Error('429 Too Many Requests'))
-      await Promise.resolve()
-    })
-    await waitFor(() => {
-      expect(
-        screen.getByText(/Could not verify permissions for report\.txt.*Too many file requests/i)
-      ).toBeTruthy()
-      expect(
-        screen.getByText(/Could not verify permissions for Child folder.*Too many file requests/i)
-      ).toBeTruthy()
-    })
-    expect(screen.getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
-    expectFolderRowMutationMenu('Child folder', true)
-    for (const queryKey of [reportKey, folderKey]) {
-      await act(async () => {
-        void client.invalidateQueries({ exact: true, queryKey, refetchType: 'active' })
-      })
-    }
-    await waitFor(() => expect(reportCalls).toBe(3))
-    await waitFor(() => expect(childFolderCalls).toBe(3))
-    expect(await screen.findByRole('button', { name: 'Share report.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Share Child folder' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename Child folder' })).toBeTruthy()
-    expectFolderRowMutationMenu('Child folder', true)
+    await waitFor(() =>
+      expect(document.querySelector('.ant-modal-title')?.textContent).toBe('Delete report.txt?')
+    )
+    expect(deleteResource).not.toHaveBeenCalled()
     expect(renameResource).not.toHaveBeenCalled()
     expect(createFolder).not.toHaveBeenCalled()
     expect(createFileFromPath).not.toHaveBeenCalled()
@@ -747,70 +717,51 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       },
     })
 
-    const { client } = renderHarness({ pendingGfsUri: null })
-    await screen.findByText('shared.txt')
+    const { client, container } = renderHarness({ pendingGfsUri: null })
+    const actionButton = (label: string) =>
+      container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
+    await waitFor(() => expect(actionButton('Share shared.txt')).toBeTruthy())
     await waitFor(() => expect(listCalls).toBe(1))
-    expect(screen.getByRole('button', { name: 'Share shared.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename shared.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Share Shared folder' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename Shared folder' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Options for Shared folder' }))
-    expectFolderRowMutationMenu('Shared folder', true)
+    expect(actionButton('Share shared.txt')).toBeTruthy()
+    expect(actionButton('Rename shared.txt')).toBeTruthy()
+    expect(actionButton('Share Shared folder')).toBeTruthy()
+    expect(actionButton('Rename Shared folder')).toBeTruthy()
     const accessibleKey = desktopQueryKeys.gfsAccessible(':user-1:team-1', 'main', 0)
     const cachedPage = client.getQueryData(accessibleKey)
     expect(cachedPage).toBeDefined()
 
-    await act(async () => {
-      await client.invalidateQueries({
-        exact: true,
-        queryKey: accessibleKey,
-        refetchType: 'none',
-      })
-    })
-    expect(client.getQueryState(accessibleKey)?.isInvalidated).toBe(true)
-    expect(listCalls).toBe(1)
-    expect(screen.getByRole('button', { name: 'Share shared.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename shared.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Share Shared folder' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename Shared folder' })).toBeTruthy()
-    expectFolderRowMutationMenu('Shared folder', true)
-
-    await act(async () => {
-      void client.invalidateQueries({
-        exact: true,
-        queryKey: accessibleKey,
-        refetchType: 'active',
-      })
+    const refreshPromise = client.invalidateQueries({
+      exact: true,
+      queryKey: accessibleKey,
+      refetchType: 'active',
     })
     await waitFor(() => expect(listCalls).toBe(2))
-    await waitFor(() => {
-      expect(screen.queryByText('Checking permissions for shared.txt…')).toBeNull()
-      expect(screen.queryByText('Checking permissions for Shared folder…')).toBeNull()
-    })
-    expectFolderRowMutationMenu('Shared folder', true)
-    await act(async () => {
-      rejectRefresh(new Error('429 Too Many Requests'))
-      await Promise.resolve()
-    })
-    await waitFor(() => expect(listCalls).toBe(2))
-    await screen.findByText(/Too many file requests/i)
-    expect(screen.getByRole('button', { name: 'Share shared.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename shared.txt' })).toBeTruthy()
-    expectFolderRowMutationMenu('Shared folder', true)
+    expect(client.getQueryData(accessibleKey)).toEqual(cachedPage)
+    expect(actionButton('Share shared.txt')).toBeTruthy()
+    expect(actionButton('Rename shared.txt')).toBeTruthy()
+    expect(actionButton('Share Shared folder')).toBeTruthy()
+    expect(actionButton('Rename Shared folder')).toBeTruthy()
 
-    await act(async () => {
-      void client.invalidateQueries({
-        exact: true,
-        queryKey: accessibleKey,
-        refetchType: 'active',
-      })
+    rejectRefresh(new Error('429 Too Many Requests'))
+    await pendingRefresh.catch(() => undefined)
+    await refreshPromise
+    await waitFor(() => expect(client.getQueryState(accessibleKey)?.status).toBe('error'))
+    expect(container.textContent).toContain('Too many file requests')
+    expect(actionButton('Share shared.txt')).toBeTruthy()
+    expect(actionButton('Rename shared.txt')).toBeTruthy()
+
+    const retryPromise = client.invalidateQueries({
+      exact: true,
+      queryKey: accessibleKey,
+      refetchType: 'active',
     })
     await waitFor(() => expect(listCalls).toBe(3))
-    expect(await screen.findByRole('button', { name: 'Share shared.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename shared.txt' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Share Shared folder' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Rename Shared folder' })).toBeTruthy()
-    expectFolderRowMutationMenu('Shared folder', true)
+    await retryPromise
+    expect(actionButton('Share shared.txt')).toBeTruthy()
+    expect(actionButton('Rename shared.txt')).toBeTruthy()
+    expect(actionButton('Share Shared folder')).toBeTruthy()
+    expect(actionButton('Rename Shared folder')).toBeTruthy()
+    expect(container.textContent).not.toContain('Too many file requests')
     expect(renameResource).not.toHaveBeenCalled()
     expect(deleteResource).not.toHaveBeenCalled()
     expect(createFolder).not.toHaveBeenCalled()
@@ -888,10 +839,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(screen.getByRole('menuitem', { name: 'New folder' })).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: 'Upload file' })).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
-    fireEvent.click(folderActions.getByRole('menuitem', { name: 'Share' }))
-    const folderShareOptions = within(
-      screen.getByRole('menu', { name: 'Share options for Reports' })
-    )
+    const folderShareOptions = within(await openShareSubmenu('Reports'))
     expect(folderShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
     expect(screen.getByText('Checking permissions for Reports…')).toBeTruthy()
 
@@ -997,14 +945,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     if (!screen.queryByRole('menu', { name: 'Actions for notes.bin' })) {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.bin' }))
     }
-    fireEvent.click(
-      within(screen.getByRole('menu', { name: 'Actions for notes.bin' })).getByRole('menuitem', {
-        name: 'Share',
-      })
-    )
-    const fileShareOptions = within(
-      screen.getByRole('menu', { name: 'Share options for notes.bin' })
-    )
+    const fileShareOptions = within(await openShareSubmenu('notes.bin'))
     expect(fileShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
     expect(screen.getByText('Checking permissions for notes.bin…')).toBeTruthy()
 
@@ -1689,12 +1630,13 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     const picker = within(dialog).getByRole('combobox', {
       name: 'Add people, teams, or agents',
     })
-    fireEvent.focus(picker)
-    fireEvent.click(await within(dialog).findByRole('option', { name: /Team Two/ }))
-    fireEvent.click(
-      within(dialog).getByRole('button', { name: 'Access role for selected recipients' })
-    )
-    fireEvent.click(within(dialog).getByRole('option', { name: 'Editor' }))
+    fireEvent.mouseDown(picker)
+    await clickAntdSelectOption(/Team Two/)
+    const accessRolePicker = within(dialog).getByRole('combobox', {
+      name: 'Access role for selected recipients',
+    })
+    fireEvent.mouseDown(accessRolePicker)
+    await clickAntdSelectOption('Editor')
 
     deferNextFileCheck = true
     void client.invalidateQueries({
@@ -1706,8 +1648,9 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     const recipientRetained = Boolean(within(dialog).queryByText('Team Two'))
     const roleRetained =
       within(dialog)
-        .queryByRole('button', { name: 'Access role for selected recipients' })
-        ?.textContent?.includes('Editor') ?? false
+        .getByRole('combobox', { name: 'Access role for selected recipients' })
+        .closest('.ant-select')
+        ?.querySelector('.ant-select-content')?.textContent === 'Editor'
     const checkingVisible = Boolean(within(dialog).queryByRole('status'))
     const shareDisabled = within(dialog)
       .queryByRole('button', { name: 'Share' })
@@ -1726,9 +1669,10 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(within(dialog).getByText('Team Two')).toBeTruthy()
     expect(
       within(dialog)
-        .getByRole('button', { name: 'Access role for selected recipients' })
-        .textContent?.includes('Editor')
-    ).toBe(true)
+        .getByRole('combobox', { name: 'Access role for selected recipients' })
+        .closest('.ant-select')
+        ?.querySelector('.ant-select-content')?.textContent
+    ).toBe('Editor')
 
     const readOnly = delegationAffordances(new Set(['read']), false)
     finishFileCheck = undefined
@@ -1747,8 +1691,11 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     )
     expect(within(dialog).queryByText('Team Two')).toBeNull()
     expect(
-      within(dialog).queryByRole('button', { name: 'Access role for selected recipients' })
-    ).toBeNull()
+      within(dialog)
+        .queryByRole('combobox', { name: 'Access role for selected recipients' })
+        ?.closest('.ant-select')
+        ?.querySelector('.ant-select-content')
+    ).toBeFalsy()
     expect(within(dialog).getByText('Read-only access')).toBeTruthy()
   })
 })

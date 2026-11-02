@@ -64,7 +64,7 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
     // (1) Shell proof — the Files page heading and the GFS browser card always
     // render for an authenticated user, regardless of how much is shared.
     const filesHeading = page.getByRole('heading', { name: 'Files', exact: true })
-    const browserCard = page.locator('.da-gfs-drive')
+    const browserCard = page.locator('[data-gfs-browser="true"]')
     await expect(filesHeading).toBeVisible({ timeout: 20_000 })
     await expect(browserCard).toBeVisible({ timeout: 20_000 })
 
@@ -73,7 +73,7 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
     const loadingFiles = page.getByText('Loading files…', { exact: true })
     const emptyRoot = page.getByText('No shared files yet', { exact: true })
     const emptyFolder = page.getByText('This folder is empty', { exact: true })
-    const anyRow = page.locator('.da-gfs-drive__grid .da-grid__row').first()
+    const anyRow = page.locator('.gfs-resource-table [data-testid^="gfs-resource-row-"]').first()
     await expect(loadingFiles.or(emptyRoot).or(emptyFolder).or(anyRow)).toBeVisible({
       timeout: 20_000,
     })
@@ -114,7 +114,9 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
       // reports the folder is empty. The shell itself stays mounted (no crash).
       const insideLoading = page.getByText('Loading files…', { exact: true })
       const insideEmpty = page.getByText('This folder is empty', { exact: true })
-      const insideRow = page.locator('.da-gfs-drive__grid .da-grid__row').first()
+      const insideRow = page
+        .locator('.gfs-resource-table [data-testid^="gfs-resource-row-"]')
+        .first()
       await expect(insideLoading.or(insideEmpty).or(insideRow)).toBeVisible({
         timeout: 20_000,
       })

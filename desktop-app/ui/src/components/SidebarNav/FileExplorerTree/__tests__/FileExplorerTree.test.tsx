@@ -1,8 +1,17 @@
 // @vitest-environment jsdom
-import { useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import { FOLDER_HOVER_EXPAND_DELAY_MS } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
@@ -30,22 +39,38 @@ import {
 import { GfsDragSessionProvider, useGfsDragSession } from '@/gfs/dragSession'
 import { FileExplorerTree } from '..'
 
+const authScopeHarness = vi.hoisted(() => ({ envKey: 'test' }))
+const mockAuthContext = vi.hoisted(() => ({
+  isAuthenticated: true,
+  me: { id: 'user-1', teamId: 'team-1' },
+  sessionGeneration: 7,
+}))
+
 function SessionProbe({ onApi }: { onApi: (api: ReturnType<typeof useGfsDragSession>) => void }) {
   onApi(useGfsDragSession())
   return null
 }
 
-// useGfsBrowserController only reads { isAuthenticated, me, runtimeConfigState }
-// from AuthContext. Mock just those so the tree's controller instance stands up
-// without the full provider tree. The mutable team lets the ownership tests
-// exercise a same-principal team switch during an in-flight Move.
-const mockAuthContext = vi.hoisted(() => ({
-  isAuthenticated: true,
-  me: { id: 'user-1', teamId: 'team-1' },
-  runtimeConfigState: { envKey: 'test' },
-  sessionGeneration: 7,
+// The controller reads the mutable principal, environment and generation.
+vi.mock('@contexts/AuthContext', () => ({
+  useAuthContext: () => ({
+    ...mockAuthContext,
+    runtimeConfigState: { envKey: authScopeHarness.envKey },
+  }),
 }))
-vi.mock('@contexts/AuthContext', () => ({ useAuthContext: () => mockAuthContext }))
+
+function TreeScopeVisibilityProbe({
+  scope,
+  onCommit,
+}: {
+  scope: string
+  onCommit: (scope: string, oldChildVisible: boolean) => void
+}) {
+  useLayoutEffect(() => {
+    onCommit(scope, Boolean(document.querySelector('[data-resource-id="old-1"]')))
+  })
+  return null
+}
 
 // T1: every `window.clerum.gfs.*` value below is produced by the REAL main-process
 // producer (`GfsClient` in desktop-app/src, run through its transport seam and the
@@ -78,6 +103,16 @@ function installClerum(producers: Producers) {
   })
 }
 
+function treeRow(name: string | RegExp, root: HTMLElement = document.body) {
+  return within(root).getByRole('treeitem', { name })
+}
+
+function expandTreeRow(name: string | RegExp) {
+  const switcher = treeRow(name).querySelector<HTMLElement>('.ant-tree-switcher')
+  if (!switcher) throw new Error(`Tree row ${String(name)} has no Ant Design switcher`)
+  fireEvent.click(switcher)
+}
+
 function renderTree(
   props: Partial<Parameters<typeof FileExplorerTree>[0]> = {},
   productionQueryDefaults = false
@@ -103,6 +138,17 @@ function renderTree(
 }
 
 beforeEach(() => {
+  authScopeHarness.envKey = 'test'
+  mockAuthContext.me = { id: 'user-1', teamId: 'team-1' }
+  mockAuthContext.sessionGeneration = 7
+  vi.stubGlobal(
+    'ResizeObserver',
+    class ResizeObserverStub {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  )
   // jsdom has no object-URL implementation; the download fallback needs both.
   Object.defineProperty(URL, 'createObjectURL', {
     configurable: true,
@@ -113,12 +159,38 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
   vi.restoreAllMocks()
   mockAuthContext.me = { id: 'user-1', teamId: 'team-1' }
   mockAuthContext.sessionGeneration = 7
+  authScopeHarness.envKey = 'test'
 })
 
 describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
+  it('keeps the Ant Design tree surface transparent', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+      ),
+      listChildren: vi.fn(async () =>
+        listChildrenPage([childView('first', 'first.md', 'file')], 'next-page')
+      ),
+    })
+
+    renderTree()
+
+    await screen.findByRole('tree', { name: 'Shared files' })
+    const treeSurface = document.querySelector('.ant-tree')
+    expect(treeSurface).not.toBeNull()
+    expect((treeSurface as HTMLElement).style.background).toBe('transparent')
+
+    fireEvent.click(treeRow('Reports').querySelector('.ant-tree-switcher')!)
+    const loadMoreButton = await screen.findByRole('button', { name: 'Load more' })
+    expect(
+      window.getComputedStyle(loadMoreButton).getPropertyValue('--ant-color-bg-container')
+    ).not.toBe('transparent')
+  })
+
   it('keeps the sidebar empty node during a cached-empty root refetch', async () => {
     const emptyPage = await listAccessiblePage([])
     let resolveRefetch!: (page: Awaited<ReturnType<typeof listAccessiblePage>>) => void
@@ -164,19 +236,21 @@ describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
 
     renderTree()
 
-    await screen.findByRole('button', { name: 'Reports' })
+    await screen.findByRole('treeitem', { name: 'Reports' })
     // Lazy: the root list rendered without any per-node children fetch.
     expect(listChildren).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Expand Reports' }))
+    fireEvent.click(treeRow('Reports').querySelector('.ant-tree-switcher')!)
 
-    expect(await screen.findByRole('button', { name: 'Sub' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'r.md' })).toBeTruthy()
+    expect(await screen.findByRole('treeitem', { name: 'Sub' })).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: 'r.md' })).toBeTruthy()
     expect(listChildren).toHaveBeenCalledWith('reports', 'main', undefined)
 
     // Collapsing hides the children again (a container is collapsible at any level).
-    fireEvent.click(screen.getByRole('button', { name: 'Collapse Reports' }))
-    expect(screen.queryByRole('button', { name: 'Sub' })).toBeNull()
+    await screen.findByRole('treeitem', { name: 'Reports' })
+    fireEvent.click(treeRow('Reports').querySelector('.ant-tree-switcher')!)
+    expect(treeRow('Reports').getAttribute('aria-expanded')).toBe('false')
+    await waitFor(() => expect(screen.queryByRole('treeitem', { name: 'Sub' })).toBeNull())
   })
 })
 
@@ -198,7 +272,7 @@ describe('FileExplorerTree — sort ordering', () => {
     const tree = await screen.findByRole('tree', { name: 'Shared files' })
     const names = within(tree)
       .getAllByRole('treeitem')
-      .map(item => item.querySelector('.da-file-explorer__name')?.textContent)
+      .map(item => item.querySelector('[data-resource-id]')?.textContent)
     expect(names).toEqual(['Alpha', 'Zeta', 'a.txt', 'b.txt'])
   })
 })
@@ -216,9 +290,9 @@ describe('FileExplorerTree — sanitizes externally-controlled GFS names in chro
 
     // The visible label and the toggle's accessible name both show the sanitized
     // string; the raw bidi/zero-width variant never reaches the accessible tree.
-    expect(await screen.findByRole('button', { name: 'Reports' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Expand Reports' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: `Re‮ports​` })).toBeNull()
+    expect(await screen.findByRole('treeitem', { name: 'Reports' })).toBeTruthy()
+    expect(treeRow('Reports').getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('treeitem', { name: `Re‮ports​` })).toBeNull()
   })
 
   it('shows the cleaned name in the download toast while the raw name stays for the on-disk file', async () => {
@@ -231,7 +305,7 @@ describe('FileExplorerTree — sanitizes externally-controlled GFS names in chro
 
     const { pushToast } = renderTree()
 
-    fireEvent.click(await screen.findByRole('button', { name: 'archive.zip' }))
+    fireEvent.click(await screen.findByRole('treeitem', { name: 'archive.zip' }))
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
   })
 })
@@ -254,7 +328,7 @@ describe('FileExplorerTree — folder double-click cancels the deferred toggle',
 
     const { onOpenFolder } = renderTree()
 
-    const folderButton = await screen.findByRole('button', { name: 'Reports' })
+    const folderButton = await screen.findByRole('treeitem', { name: 'Reports' })
     const treeitem = folderButton.closest('[role="treeitem"]') as HTMLElement
 
     vi.useFakeTimers()
@@ -291,7 +365,7 @@ describe('FileExplorerTree — rapid double-click on a file', () => {
 
     renderTree({ onOpenPreview })
 
-    const fileButton = await screen.findByRole('button', { name: 'photo.png' })
+    const fileButton = await screen.findByRole('treeitem', { name: 'photo.png' })
 
     // Files have no single/double-click deferral, so a real double-click
     // (click → click → dblclick) activates more than once. Preview has no
@@ -325,7 +399,7 @@ describe('FileExplorerTree — rapid double-click on a file', () => {
 
     const { onOpenPreview, pushToast } = renderTree()
 
-    const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
+    const fileButton = await screen.findByRole('treeitem', { name: 'archive.zip' })
 
     // The real double-click sequence: two clicks then the dblclick, driven
     // synchronously so the in-flight download is still running when the later
@@ -354,7 +428,7 @@ describe('FileExplorerTree — Enter activates', () => {
 
     const { onOpenFolder } = renderTree()
 
-    const folderButton = await screen.findByRole('button', { name: 'Reports' })
+    const folderButton = await screen.findByRole('treeitem', { name: 'Reports' })
     const treeitem = folderButton.closest('[role="treeitem"]') as HTMLElement
 
     fireEvent.keyDown(folderButton, { key: 'Enter' })
@@ -374,7 +448,7 @@ describe('FileExplorerTree — Enter activates', () => {
 
     const { onOpenPreview } = renderTree()
 
-    const fileButton = await screen.findByRole('button', { name: 'photo.png' })
+    const fileButton = await screen.findByRole('treeitem', { name: 'photo.png' })
     fireEvent.keyDown(fileButton, { key: 'Enter' })
 
     expect(onOpenPreview).toHaveBeenCalledTimes(1)
@@ -394,7 +468,7 @@ describe('FileExplorerTree — file single-click activates', () => {
 
     const { onOpenPreview } = renderTree()
 
-    const fileButton = await screen.findByRole('button', { name: 'photo.png' })
+    const fileButton = await screen.findByRole('treeitem', { name: 'photo.png' })
     const treeitem = fileButton.closest('[role="treeitem"]') as HTMLElement
     expect(treeitem.getAttribute('aria-selected')).toBe('false')
 
@@ -420,7 +494,7 @@ describe('FileExplorerTree — file single-click activates', () => {
 
     const { onOpenPreview, pushToast } = renderTree()
 
-    const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
+    const fileButton = await screen.findByRole('treeitem', { name: 'archive.zip' })
     fireEvent.click(fileButton)
 
     await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
@@ -443,7 +517,7 @@ describe('FileExplorerTree — folder single-click toggles, not navigates', () =
 
     const { onOpenFolder } = renderTree()
 
-    const folderButton = await screen.findByRole('button', { name: 'Reports' })
+    const folderButton = await screen.findByRole('treeitem', { name: 'Reports' })
     const treeitem = folderButton.closest('[role="treeitem"]') as HTMLElement
 
     // The folder toggle is deferred; nothing happens until the 250ms window
@@ -519,14 +593,14 @@ describe('FileExplorerTree — folder activation focuses an existing files tab',
 
     // Double-clicking the folder that already has a files tab focuses it: no new
     // tab, and that tab becomes active.
-    fireEvent.doubleClick(within(tree).getByRole('button', { name: 'Reports' }))
+    fireEvent.doubleClick(within(tree).getByRole('treeitem', { name: 'Reports' }))
     await waitFor(() =>
       expect(screen.getByTestId('active-path').textContent).toBe('gfs://main/reports')
     )
     expect(screen.getByTestId('tab-count').textContent).toBe('2')
 
     // A folder with no existing tab creates one.
-    fireEvent.doubleClick(within(tree).getByRole('button', { name: 'Archive' }))
+    fireEvent.doubleClick(within(tree).getByRole('treeitem', { name: 'Archive' }))
     await waitFor(() =>
       expect(screen.getByTestId('active-path').textContent).toBe('gfs://main/archive')
     )
@@ -568,8 +642,9 @@ describe('FileExplorerTree — expanded folder revalidates its listing (R1-H5)',
       </QueryClientProvider>
     )
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Expand Reports' }))
-    expect(await screen.findByRole('button', { name: 'old.md' })).toBeTruthy()
+    await screen.findByRole('treeitem', { name: 'Reports' })
+    fireEvent.click(treeRow('Reports').querySelector('.ant-tree-switcher')!)
+    expect(await screen.findByRole('treeitem', { name: 'old.md' })).toBeTruthy()
 
     // Return focus to the window (force a false→true transition so the focus
     // listener fires). Under Infinity staleTime, only refetchOnWindowFocus:
@@ -582,8 +657,8 @@ describe('FileExplorerTree — expanded folder revalidates its listing (R1-H5)',
     try {
       // Observable output (T4): the tree renders the NEW child and drops the stale
       // one — not a refetch spy count.
-      expect(await screen.findByRole('button', { name: 'new.md' })).toBeTruthy()
-      await waitFor(() => expect(screen.queryByRole('button', { name: 'old.md' })).toBeNull())
+      expect(await screen.findByRole('treeitem', { name: 'new.md' })).toBeTruthy()
+      await waitFor(() => expect(screen.queryByRole('treeitem', { name: 'old.md' })).toBeNull())
     } finally {
       // Restore event-driven focus detection so this global state does not leak.
       focusManager.setFocused(undefined)
@@ -611,8 +686,9 @@ describe('FileExplorerTree — expanded folder revalidates its listing (R1-H5)',
       </QueryClientProvider>
     )
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Expand Reports' }))
-    expect(await screen.findByRole('button', { name: 'private.md' })).toBeTruthy()
+    await screen.findByRole('treeitem', { name: 'Reports' })
+    fireEvent.click(treeRow('Reports').querySelector('.ant-tree-switcher')!)
+    expect(await screen.findByRole('treeitem', { name: 'private.md' })).toBeTruthy()
 
     act(() => {
       focusManager.setFocused(false)
@@ -621,10 +697,69 @@ describe('FileExplorerTree — expanded folder revalidates its listing (R1-H5)',
 
     try {
       await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
-      await waitFor(() => expect(screen.queryByRole('button', { name: 'private.md' })).toBeNull())
+      await waitFor(() => expect(screen.queryByRole('treeitem', { name: 'private.md' })).toBeNull())
     } finally {
       focusManager.setFocused(undefined)
     }
+  })
+
+  it('does not show child snapshots from the previous environment while the new scope loads', async () => {
+    let childCalls = 0
+    let releaseNewChildren!: () => void
+    const listChildren = vi.fn((resourceId: string) => {
+      if (resourceId !== 'reports') return Promise.resolve(listChildrenPage([]))
+      childCalls += 1
+      if (childCalls === 1) {
+        return Promise.resolve(listChildrenPage([childView('old-1', 'Old destination', 'file')]))
+      }
+      return new Promise<unknown>(resolve => {
+        releaseNewChildren = () =>
+          resolve(listChildrenPage([childView('new-1', 'New destination', 'file')]))
+      })
+    })
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+      ),
+      listChildren,
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const onCommit = vi.fn()
+    const makeTree = () => (
+      <QueryClientProvider client={queryClient}>
+        <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={vi.fn()} />
+        <TreeScopeVisibilityProbe scope={authScopeHarness.envKey} onCommit={onCommit} />
+      </QueryClientProvider>
+    )
+    const view = render(makeTree())
+
+    await screen.findByRole('treeitem', { name: 'Reports' })
+    fireEvent.click(treeRow('Reports').querySelector('.ant-tree-switcher')!)
+    expect(await screen.findByRole('treeitem', { name: 'Old destination' })).toBeTruthy()
+
+    authScopeHarness.envKey = 'next-environment'
+    view.rerender(makeTree())
+
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(
+        onCommit.mock.calls.some(
+          ([scope, oldChildVisible]) => scope === 'next-environment' && !oldChildVisible
+        )
+      ).toBe(true)
+    )
+    expect(
+      onCommit.mock.calls.some(
+        ([scope, oldChildVisible]) => scope === 'next-environment' && oldChildVisible
+      )
+    ).toBe(false)
+
+    await act(async () => {
+      releaseNewChildren()
+    })
+    expect(await screen.findByRole('treeitem', { name: 'New destination' })).toBeTruthy()
+    expect(screen.queryByRole('treeitem', { name: 'Old destination' })).toBeNull()
   })
 })
 
@@ -651,17 +786,18 @@ describe('FileExplorerTree — unreadable rows refuse activation (R1-H1)', () =>
       download,
     })
     const handles = renderTree(props)
-    fireEvent.click(await screen.findByRole('button', { name: 'Expand Vault' }))
+    await screen.findByRole('treeitem', { name: 'Vault' })
+    fireEvent.click(treeRow('Vault').querySelector('.ant-tree-switcher')!)
     // Wait for the unreadable children to render (marked "No access"). The label
     // button's accessible name carries the file name plus the "No access" badge.
-    await screen.findByRole('button', { name: /secret\.pdf.*No access/ })
+    await screen.findByRole('treeitem', { name: /secret\.pdf.*No access/ })
     return { ...handles, download }
   }
 
   it('file: single-click and Enter on an unreadable file toast and never preview or download', async () => {
     const { onOpenPreview, pushToast, download } = await renderExpandedVault()
 
-    const fileButton = screen.getByRole('button', { name: /secret\.pdf.*No access/ })
+    const fileButton = screen.getByRole('treeitem', { name: /secret\.pdf.*No access/ })
 
     fireEvent.click(fileButton)
     fireEvent.keyDown(fileButton, { key: 'Enter' })
@@ -679,7 +815,8 @@ describe('FileExplorerTree — unreadable rows refuse activation (R1-H1)', () =>
   it('folder: double-click and Enter on an unreadable folder toast and never open a files tab', async () => {
     const { onOpenFolder, pushToast } = await renderExpandedVault()
 
-    const folderButton = screen.getByRole('button', { name: /^Locked.*No access/ })
+    const folderButton = screen.getByRole('treeitem', { name: /^Locked.*No access/ })
+    expect(folderButton.getAttribute('draggable')).toBe('false')
 
     fireEvent.doubleClick(folderButton)
     fireEvent.keyDown(folderButton, { key: 'Enter' })
@@ -732,11 +869,11 @@ describe('FileExplorerTree — shared revoked access across controller mounts (R
       </QueryClientProvider>
     )
 
-    await screen.findByRole('button', { name: 'Reports' })
+    await screen.findByRole('treeitem', { name: 'Reports' })
     expect(screen.getByTestId('probe-access').textContent).toBe('active')
 
     // Expand the folder → the tree's listChildren 401s → the tree revokes.
-    fireEvent.click(screen.getByRole('button', { name: 'Expand Reports' }))
+    fireEvent.click(treeRow('Reports').querySelector('.ant-tree-switcher')!)
 
     // (a) The tree shows the unauthorized + retry surface — NOT "No shared files
     // yet." (b) The independent second mount reads revoked (shared flag).
@@ -748,7 +885,7 @@ describe('FileExplorerTree — shared revoked access across controller mounts (R
     // queries, so discovery reloads and the tree renders its root again.
     fireEvent.click(screen.getByRole('button', { name: 'Retry file access' }))
     await waitFor(() => expect(screen.getByTestId('probe-access').textContent).toBe('active'))
-    expect(await screen.findByRole('button', { name: 'Reports' })).toBeTruthy()
+    expect(await screen.findByRole('treeitem', { name: 'Reports' })).toBeTruthy()
   })
 })
 
@@ -775,7 +912,7 @@ describe('FileExplorerTree — download-path authority wiring (R1-H8)', () => {
 
     const { onOpenPreview, pushToast } = renderTree()
 
-    const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
+    const fileButton = await screen.findByRole('treeitem', { name: 'archive.zip' })
     fireEvent.click(fileButton)
 
     // The download 401 is classified as session authority on the operation
@@ -871,7 +1008,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
   const sessionScope = 'test:user-1:team-1'
 
   async function openMoveDialog() {
-    const row = await screen.findByRole('button', { name: 'report.txt' })
+    const row = await screen.findByRole('treeitem', { name: 'report.txt' })
     fireEvent.keyDown(row, { key: 'F10', shiftKey: true })
     return screen.findByRole('dialog', { name: 'Move file report.txt' })
   }
@@ -934,7 +1071,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 
       try {
         const dialog = await openMoveDialog()
-        await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+        await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
         fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
         await resolveStarted
 
@@ -942,7 +1079,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
           fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
           expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
         } else {
-          await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
+          await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive B' }))
         }
 
         await act(async () => {
@@ -992,11 +1129,11 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 
     try {
       const dialog = await openMoveDialog()
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
       await moveStarted
 
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
+      await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive B' }))
       await act(async () => {
         finishMove()
         await moveGate
@@ -1054,7 +1191,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 
     try {
       const dialog = await openMoveDialog()
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
       await moveStarted
       invalidateQueries.mockClear()
@@ -1122,7 +1259,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 
     try {
       const dialog = await openMoveDialog()
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
       await moveStarted
 
@@ -1179,7 +1316,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 
     try {
       const dialog = await openMoveDialog()
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
       await moveStarted
       unmount()
@@ -1229,7 +1366,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 
     try {
       const dialog = await openMoveDialog()
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
 
       expect(await screen.findByText('File access is not authorized')).toBeTruthy()
@@ -1273,7 +1410,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 
     try {
       const dialog = await openMoveDialog()
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
 
       expect(
@@ -1337,10 +1474,10 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       resolve: vi.fn(async () => resolved),
       moveResource,
     })
-    const { pushToast } = renderTreeWithSession()
+    const { pushToast, queryClient } = renderTreeWithSession()
 
     const dialog = await openMoveDialog()
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
     await waitFor(() => {
       expect(dialog.querySelector('.status-banner')?.textContent?.trim()).not.toBe('')
@@ -1410,14 +1547,14 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     renderTreeWithSession()
 
     const dialog = await openMoveDialog()
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
     await within(dialog).findByText(
       'EvenDrive could not confirm permission for this move. Refresh and try again.'
     )
     fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
     await retryStarted
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive B' }))
     await act(async () => {
       finishRetry()
     })
@@ -1465,7 +1602,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     const { queryClient } = renderTreeWithSession()
 
     const dialog = await openMoveDialog()
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
     await within(dialog).findByText(
       'EvenDrive could not confirm permission for this move. Refresh and try again.'
@@ -1545,7 +1682,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     const { queryClient } = renderTreeWithSession()
 
     const dialog = await openMoveDialog()
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
     await within(dialog).findByText(
       'EvenDrive could not confirm permission for this move. Refresh and try again.'
@@ -1634,7 +1771,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     const { queryClient } = renderTreeWithSession()
 
     const dialog = await openMoveDialog()
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
     await within(dialog).findByText(
       'EvenDrive could not confirm permission for this move. Refresh and try again.'
@@ -1712,7 +1849,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     const { queryClient } = renderTreeWithSession()
 
     const dialog = await openMoveDialog()
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
     await within(dialog).findByText(
       'EvenDrive could not confirm permission for this move. Refresh and try again.'
@@ -1759,7 +1896,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     const { queryClient } = renderTreeWithSession()
 
     const dialog = await openMoveDialog()
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
     await within(dialog).findByText(
       'EvenDrive could not confirm permission for this move. Refresh and try again.'
@@ -1785,6 +1922,37 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 })
 
 describe('FileExplorerTree — drag-and-drop moves', () => {
+  it('cancels a folder hover expansion when the pointer leaves that row for another', async () => {
+    const listChildren = vi.fn(async () => listChildrenPage([]))
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('folder-a', 'A', 'directory'),
+          accessibleResource('folder-b', 'B', 'directory'),
+        ])
+      ),
+      listChildren,
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
+    const dataTransfer = dragTypes()
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragEnter(rowB, { dataTransfer })
+    const leaveEvent = createEvent.dragLeave(rowB, { dataTransfer })
+    Object.defineProperty(leaveEvent, 'relatedTarget', { value: rowA })
+    fireEvent(rowB, leaveEvent)
+
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, FOLDER_HOVER_EXPAND_DELAY_MS + 50))
+    })
+
+    expect(rowB.getAttribute('aria-expanded')).toBe('false')
+    expect(listChildren).not.toHaveBeenCalledWith('folder-b', 'main', undefined)
+    fireEvent.dragEnd(rowA, { dataTransfer })
+  })
+
   it('stops a file drag on a producer-derived conflict without numbered retry', async () => {
     const conflictMessage = await gfsRouteFailureMessage(
       client =>
@@ -1844,14 +2012,13 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     const { pushToast } = renderTreeWithSession()
 
+    const folderA = await screen.findByRole('treeitem', { name: 'A' })
     await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'Expand A' }))
+      fireEvent.click(folderA.querySelector('.ant-tree-switcher')!)
     })
-    const fileButton = await screen.findByRole('button', { name: 'report.txt' })
-    const folderButton = await screen.findByRole('button', { name: 'B' })
+    const fileButton = await screen.findByRole('treeitem', { name: 'report.txt' })
+    const folderButton = await screen.findByRole('treeitem', { name: 'B' })
     const folderRow = folderButton
-      .closest('[role="treeitem"]')!
-      .querySelector('.da-file-explorer__row')!
     const dataTransfer = dragTypes()
 
     fireEvent.dragStart(fileButton, { dataTransfer })
@@ -1912,11 +2079,11 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
     const dataTransfer = dragTypes()
-    const aRow = rowA.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const aRow = rowA.closest('[role="treeitem"]')!
+    const bRow = rowB.closest('[role="treeitem"]')!
 
     fireEvent.dragStart(rowA, { dataTransfer })
     fireEvent.dragOver(bRow, { dataTransfer })
@@ -1979,18 +2146,24 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       resolve,
       moveResource,
     })
-    const { pushToast } = renderTreeWithSession()
+    const { pushToast, queryClient } = renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
-    // Expand B so the destination already has children. A cached name list
-    // must not turn drag permission into consent for a numbered rename.
-    fireEvent.click(screen.getByRole('button', { name: 'Expand B' }))
-    await screen.findByRole('button', { name: 'A (1)' })
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
+    // Expand B so its children load into the shared children cache — the
+    // production path that makes the destination's names known.
+    fireEvent.click(treeRow('B'))
+    await screen.findByRole('treeitem', { name: 'A (1)' })
+    expect(
+      queryClient.getQueryCache().find({
+        queryKey: desktopQueryKeys.gfsChildren('test:user-1:team-1', 'folderb', 'main', 7),
+        exact: true,
+      })
+    ).toBeDefined()
 
     const dataTransfer = dragTypes()
-    const aRow = rowA.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const aRow = rowA.closest('[role="treeitem"]')!
+    const bRow = rowB.closest('[role="treeitem"]')!
     fireEvent.dragStart(rowA, { dataTransfer })
     fireEvent.dragOver(bRow, { dataTransfer })
     fireEvent.drop(bRow, { dataTransfer })
@@ -2049,11 +2222,11 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
-    const rowC = await screen.findByRole('button', { name: 'C' })
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
+    const rowC = await screen.findByRole('treeitem', { name: 'C' })
     const dataTransfer = dragTypes()
-    const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const cRow = rowC.closest('[role="treeitem"]')!
 
     // Gesture A starts and its dragend is LOST (no dragEnd fired here).
     fireEvent.dragStart(rowA, { dataTransfer })
@@ -2112,11 +2285,11 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
-    const rowC = await screen.findByRole('button', { name: 'C' })
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
+    const rowC = await screen.findByRole('treeitem', { name: 'C' })
     const dataTransfer = dragTypes()
-    const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const cRow = rowC.closest('[role="treeitem"]')!
 
     // Gesture A: its drop adjudication parks on the gated affordances probe.
     fireEvent.dragStart(rowA, { dataTransfer })
@@ -2199,10 +2372,10 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       </QueryClientProvider>
     )
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowC = await screen.findByRole('button', { name: 'C' })
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowC = await screen.findByRole('treeitem', { name: 'C' })
     const dataTransfer = dragTypes()
-    const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const cRow = rowC.closest('[role="treeitem"]')!
 
     // Gesture A (this surface): drop adjudication parks on the gated probe.
     fireEvent.dragStart(rowA, { dataTransfer })
@@ -2272,12 +2445,12 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     const { pushToast } = renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
     const dataTransfer = dragTypes()
 
     fireEvent.dragStart(rowA, { dataTransfer })
-    const bTreeItem = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const bTreeItem = rowB.closest('[role="treeitem"]')!
     fireEvent.dragEnter(bTreeItem, { dataTransfer })
 
     // Root-level folder sources resolve ancestry on DROP (bounded), not on
@@ -2330,9 +2503,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!
     const dataTransfer = dragTypes()
 
     // Authority unresolved (affordances never settle): the hover must stay
@@ -2349,10 +2522,10 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       fireEvent.click(rowA)
     })
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'C' })).toBeTruthy()
+      expect(screen.getByRole('treeitem', { name: 'C' })).toBeTruthy()
     })
-    const rowC = screen.getByRole('button', { name: 'C' })
-    const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const rowC = screen.getByRole('treeitem', { name: 'C' })
+    const cRow = rowC.closest('[role="treeitem"]')!
     fireEvent.dragOver(cRow, { dataTransfer })
     expect(cRow.getAttribute('data-drop-state')).toBe('denied')
     expect(cRow.getAttribute('data-drop-reason')).toBe('descendant')
@@ -2376,20 +2549,20 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     const { pushToast } = renderTreeWithSession()
 
-    await screen.findByRole('button', { name: 'P' })
+    await screen.findByRole('treeitem', { name: 'P' })
     // Expand P (single-click, deferred) to reveal A.
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'P' }))
+      fireEvent.click(screen.getByRole('treeitem', { name: 'P' }))
     })
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'A' })).toBeTruthy()
+      expect(screen.getByRole('treeitem', { name: 'A' })).toBeTruthy()
     })
 
-    const rowA = screen.getByRole('button', { name: 'A' })
-    const rowP = screen.getByRole('button', { name: 'P' })
+    const rowA = screen.getByRole('treeitem', { name: 'A' })
+    const rowP = screen.getByRole('treeitem', { name: 'P' })
     const dataTransfer = dragTypes()
     fireEvent.dragStart(rowA, { dataTransfer })
-    const pRow = rowP.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const pRow = rowP.closest('[role="treeitem"]')!
     fireEvent.dragOver(pRow, { dataTransfer })
     expect(pRow.getAttribute('data-drop-state')).toBe('denied')
     expect(pRow.getAttribute('data-drop-reason')).toBe('same-parent')
@@ -2419,17 +2592,17 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     renderTreeWithSession({ pushToast })
 
     await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'A' }))
+      fireEvent.click(await screen.findByRole('treeitem', { name: 'A' }))
     })
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'C' })).toBeTruthy()
+      expect(screen.getByRole('treeitem', { name: 'C' })).toBeTruthy()
     })
 
-    const rowA = screen.getByRole('button', { name: 'A' })
-    const rowC = screen.getByRole('button', { name: 'C' })
+    const rowA = screen.getByRole('treeitem', { name: 'A' })
+    const rowC = screen.getByRole('treeitem', { name: 'C' })
     const dataTransfer = dragTypes()
     fireEvent.dragStart(rowA, { dataTransfer })
-    const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const cRow = rowC.closest('[role="treeitem"]')!
     fireEvent.dragOver(cRow, { dataTransfer })
     expect(cRow.getAttribute('data-drop-state')).toBe('denied')
     expect(cRow.getAttribute('data-drop-reason')).toBe('descendant')
@@ -2459,8 +2632,8 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     const { pushToast } = renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const aRow = rowA.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const aRow = rowA.closest('[role="treeitem"]')!
     const dataTransfer = dragTypes()
     fireEvent.dragStart(rowA, { dataTransfer })
     fireEvent.dragOver(aRow, { dataTransfer })
@@ -2499,11 +2672,11 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     renderTreeWithSession()
 
     await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'A' }))
+      fireEvent.click(await screen.findByRole('treeitem', { name: 'A' }))
     })
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowF = await screen.findByRole('button', { name: 'f.md' })
-    const aRow = rowA.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowF = await screen.findByRole('treeitem', { name: 'f.md' })
+    const aRow = rowA.closest('[role="treeitem"]')!
     const dataTransfer = dragTypes()
 
     // Gesture 1: the file already lives in A → same-parent.
@@ -2511,7 +2684,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     fireEvent.dragOver(aRow, { dataTransfer })
     expect(aRow.getAttribute('data-drop-state')).toBe('denied')
     expect(aRow.getAttribute('data-drop-reason')).toBe('same-parent')
-    expect(aRow.getAttribute('title')).toBe('f.md is already in A.')
+    expect(aRow.querySelector('[data-resource-id]')?.getAttribute('title')).toBe(
+      'f.md is already in A.'
+    )
 
     // The browser lost gesture 1's dragend (R1-H2); gesture 2 supersedes it
     // and denies the same row as self — the reason must repaint.
@@ -2519,7 +2694,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     fireEvent.dragOver(aRow, { dataTransfer })
     expect(aRow.getAttribute('data-drop-state')).toBe('denied')
     expect(aRow.getAttribute('data-drop-reason')).toBe('self')
-    expect(aRow.getAttribute('title')).toBe('You cannot move A into itself.')
+    expect(aRow.querySelector('[data-resource-id]')?.getAttribute('title')).toBe(
+      'You cannot move A into itself.'
+    )
   })
 
   it('refuses a drop whose source parent lacks write, naming the folder that contains it (A7)', async () => {
@@ -2545,11 +2722,11 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     const { pushToast } = renderTreeWithSession()
 
     await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'P' }))
+      fireEvent.click(await screen.findByRole('treeitem', { name: 'P' }))
     })
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!
     const dataTransfer = dragTypes()
 
     fireEvent.dragStart(rowA, { dataTransfer })
@@ -2589,11 +2766,11 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     const { pushToast } = renderTreeWithSession()
 
     await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'P' }))
+      fireEvent.click(await screen.findByRole('treeitem', { name: 'P' }))
     })
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!
     const dataTransfer = dragTypes()
 
     fireEvent.dragStart(rowA, { dataTransfer })
@@ -2624,9 +2801,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     const { pushToast } = renderTreeWithSession()
 
-    const rowR = await screen.findByRole('button', { name: 'R' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const rowR = await screen.findByRole('treeitem', { name: 'R' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!
     const dataTransfer = dragTypes()
 
     fireEvent.dragStart(rowR, { dataTransfer })
@@ -2660,9 +2837,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     const { pushToast } = renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!
     const dataTransfer = dragTypes()
 
     fireEvent.dragStart(rowA, { dataTransfer })
@@ -2700,9 +2877,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     const { pushToast } = renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!
     const dataTransfer = dragTypes()
 
     fireEvent.dragStart(rowA, { dataTransfer })
@@ -2716,9 +2893,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       'Your session ended. Sign in again to continue moving files.'
     )
     expect(sessionEnded.length).toBeGreaterThanOrEqual(2)
-    expect(
-      sessionEnded.some(element => element.closest('.da-file-explorer__revoked') !== null)
-    ).toBe(true)
+    expect(sessionEnded.some(element => element.closest('[role="alert"]') !== null)).toBe(true)
     // The revoked surface stays visible alongside the refusal banner.
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
     // A dead session is not a one-shot toast.
@@ -2734,7 +2909,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
     const dataTransfer = dragTypes()
     fireEvent.click(rowA) // schedules the deferred toggle
     fireEvent.dragStart(rowA, { dataTransfer }) // drag cancels the timer
@@ -2780,10 +2955,10 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
     const dataTransfer = dragTypes()
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const bRow = rowB.closest('[role="treeitem"]')!
 
     fireEvent.dragStart(rowA, { dataTransfer })
     fireEvent.dragOver(bRow, { dataTransfer })
@@ -2823,10 +2998,10 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
     const dataTransfer = dragTypes()
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const bRow = rowB.closest('[role="treeitem"]')!
 
     fireEvent.dragStart(rowA, { dataTransfer })
     fireEvent.dragOver(bRow, { dataTransfer })
@@ -2868,10 +3043,10 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    const rowA = await screen.findByRole('button', { name: 'A' })
-    const rowB = await screen.findByRole('button', { name: 'B' })
+    const rowA = await screen.findByRole('treeitem', { name: 'A' })
+    const rowB = await screen.findByRole('treeitem', { name: 'B' })
     const dataTransfer = dragTypes()
-    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const bRow = rowB.closest('[role="treeitem"]')!
 
     // The hover-expand delay is the thing under test: fake the timers only
     // once the rows exist, so the queries above keep their real clock.
@@ -2888,8 +3063,8 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       })
 
       // B is still collapsed: the user never asked to open it.
-      expect(screen.getByRole('button', { name: 'Expand B' })).toBeTruthy()
-      expect(screen.queryByRole('button', { name: 'Collapse B' })).toBeNull()
+      expect(treeRow('B')?.getAttribute('aria-expanded')).toBe('false')
+      expect(screen.queryByRole('treeitem', { name: 'Grand' })).toBeNull()
     } finally {
       vi.useRealTimers()
     }
@@ -2904,11 +3079,11 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     renderTreeWithSession()
 
     // The rejected per-row Move affordance stays gone: no row button renders.
-    await screen.findByRole('button', { name: 'A' })
+    await screen.findByRole('treeitem', { name: 'A' })
     expect(screen.queryByRole('button', { name: 'Move A to another folder' })).toBeNull()
 
     await act(async () => {
-      fireEvent.keyDown(await screen.findByRole('button', { name: 'A' }), {
+      fireEvent.keyDown(await screen.findByRole('treeitem', { name: 'A' }), {
         key: 'F10',
         shiftKey: true,
       })
@@ -2978,15 +3153,14 @@ describe('FileExplorerTree — drag Move presentation lifetime', () => {
     const sourceCache = desktopQueryKeys.gfsChildren(sessionScope, 'foldera', 'main', 7)
 
     try {
+      const folderA = await screen.findByRole('treeitem', { name: 'A' })
       await act(async () => {
-        fireEvent.click(await screen.findByRole('button', { name: 'Expand A' }))
+        fireEvent.click(folderA.querySelector('.ant-tree-switcher')!)
       })
-      const source = await screen.findByRole('button', { name: 'report.txt' })
+      const source = await screen.findByRole('treeitem', { name: 'report.txt' })
       expect(queryClient.getQueryData(sourceCache)).toBeDefined()
-      const destination = await screen.findByRole('button', { name: 'B' })
+      const destination = await screen.findByRole('treeitem', { name: 'B' })
       const destinationRow = destination
-        .closest('[role="treeitem"]')!
-        .querySelector('.da-file-explorer__row')!
       const dataTransfer = dragTypes()
       fireEvent.dragStart(source, { dataTransfer })
       fireEvent.dragOver(destinationRow, { dataTransfer })
@@ -3053,12 +3227,10 @@ describe('FileExplorerTree — drag Move presentation lifetime', () => {
     const sourceCache = desktopQueryKeys.gfsAccessible(sessionScope, 'main', 7)
 
     try {
-      const source = await screen.findByRole('button', { name: 'A' })
-      const destination = await screen.findByRole('button', { name: 'B' })
+      const source = await screen.findByRole('treeitem', { name: 'A' })
+      const destination = await screen.findByRole('treeitem', { name: 'B' })
       const dataTransfer = dragTypes()
       const destinationRow = destination
-        .closest('[role="treeitem"]')!
-        .querySelector('.da-file-explorer__row')!
       fireEvent.dragStart(source, { dataTransfer })
       fireEvent.dragOver(destinationRow, { dataTransfer })
       fireEvent.drop(destinationRow, { dataTransfer })
@@ -3144,14 +3316,13 @@ describe('FileExplorerTree — sanitizes GFS names in Move outcome toasts', () =
     const pushToast = vi.fn<NonNullable<Parameters<typeof FileExplorerTree>[0]['pushToast']>>()
     renderTreeWithSession({ pushToast })
 
+    const folderA = await screen.findByRole('treeitem', { name: 'A' })
     await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'Expand A' }))
+      fireEvent.click(folderA.querySelector('.ant-tree-switcher')!)
     })
-    const source = await screen.findByRole('button', { name: 'report.txt' })
-    const destination = await screen.findByRole('button', { name: 'Archive' })
+    const source = await screen.findByRole('treeitem', { name: 'report.txt' })
+    const destination = await screen.findByRole('treeitem', { name: 'Archive' })
     const destinationRow = destination
-      .closest('[role="treeitem"]')!
-      .querySelector('.da-file-explorer__row')!
     const dataTransfer = dragTypes()
     fireEvent.dragStart(source, { dataTransfer })
     fireEvent.dragOver(destinationRow, { dataTransfer })

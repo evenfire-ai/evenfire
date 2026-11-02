@@ -292,7 +292,10 @@ describe('FilesPage current-file Replace permission freshness', () => {
     expect(scenario.replaceFileFromPath).not.toHaveBeenCalled()
 
     await scenario.user.keyboard('{Escape}')
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => {
+      const dialog = screen.getByRole('dialog')
+      expect(dialog.className.includes('ant-zoom-leave')).toBe(true)
+    })
     await scenario.user.click(screen.getByRole('button', { name: 'Shared with me' }))
     expect(
       (screen.getByRole('button', { name: 'Shared with me' }) as HTMLButtonElement).disabled

@@ -268,7 +268,7 @@ async function numberedMoveFixture(
     fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
     return dialog
   }
@@ -410,10 +410,10 @@ describe('FilesPage Move permission generation fencing', () => {
     const fixture = await numberedMoveFixture()
     try {
       const dialog = await fixture.startMove()
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Vault' }))
+      fireEvent.click(within(dialog).getByRole('treeitem', { name: 'Vault' }))
 
       expect(
-        within(dialog).getByRole('button', { name: 'Vault' }).getAttribute('aria-selected')
+        within(dialog).getByRole('treeitem', { name: 'Vault' }).getAttribute('aria-selected')
       ).toBe('true')
       expect(fixture.moveResource).toHaveBeenCalledTimes(1)
       expect(
@@ -490,12 +490,12 @@ describe('FilesPage Move permission generation fencing', () => {
       const dialog = await fixture.startMove()
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move as notes (1).txt' }))
       await fixture.freshPermissionStarted
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Vault' }))
+      fireEvent.click(within(dialog).getByRole('treeitem', { name: 'Vault' }))
       fixture.releaseFreshPermission()
 
       expect(fixture.moveResource).toHaveBeenCalledTimes(1)
       expect(
-        within(dialog).getByRole('button', { name: 'Vault' }).getAttribute('aria-selected')
+        within(dialog).getByRole('treeitem', { name: 'Vault' }).getAttribute('aria-selected')
       ).toBe('true')
       expect(
         await screen.findByText(
@@ -686,7 +686,7 @@ describe('FilesPage Move permission generation fencing', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Options for Projects' }))
       fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
       const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects' })
-      fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
       const confirmMove = within(dialog).getByRole('button', { name: 'Move here (Archive)' })
 
       failNextSourceParentRead = true
@@ -811,7 +811,7 @@ describe('FilesPage Move permission generation fencing', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Options for Projects' }))
       fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
       const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects' })
-      fireEvent.click(within(dialog).getAllByRole('button', { name: 'Archive' }).at(-1)!)
+      fireEvent.click(within(dialog).getAllByRole('treeitem', { name: 'Archive' }).at(-1)!)
       const moveButton = within(dialog).getByRole('button', { name: 'Move here (Archive)' })
       expect((moveButton as HTMLButtonElement).disabled).toBe(false)
       fireEvent.click(moveButton)
@@ -974,7 +974,7 @@ describe('FilesPage Move permission generation fencing', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
     await waitFor(() =>
       expect(moveResource).toHaveBeenCalledWith(
@@ -987,14 +987,18 @@ describe('FilesPage Move permission generation fencing', () => {
       )
     )
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Backup' }))
-    expect(within(dialog).getByText('Backup', { selector: 'strong' })).toBeTruthy()
+    fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Backup' }))
+    expect(
+      within(dialog).getByRole('treeitem', { name: 'Backup' }).getAttribute('aria-selected')
+    ).toBe('true')
     await act(async () => {
       rejectMove(new Error(staleVersionError))
     })
 
     const currentDialog = screen.getByRole('dialog', { name: 'Move file notes.txt' })
-    expect(within(currentDialog).getByText('Backup', { selector: 'strong' })).toBeTruthy()
+    expect(
+      within(currentDialog).getByRole('treeitem', { name: 'Backup' }).getAttribute('aria-selected')
+    ).toBe('true')
     expect(within(currentDialog).getByRole('button', { name: 'Move here (Backup)' })).toBeTruthy()
     const result = await screen.findByRole('alert')
     expect(
@@ -1119,7 +1123,7 @@ describe('FilesPage Move permission generation fencing', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
       fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
       const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-      fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
       await waitFor(() =>
         expect(moveResource).toHaveBeenCalledWith(
@@ -1232,7 +1236,7 @@ describe('FilesPage Move permission generation fencing', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
       fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
       const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-      fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
       await waitFor(() =>
         expect(moveResource).toHaveBeenCalledWith(
@@ -1334,7 +1338,7 @@ describe('FilesPage Move permission generation fencing', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Options for Projects' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects' })
-    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     await waitFor(() =>
@@ -1435,7 +1439,7 @@ describe('FilesPage Move permission generation fencing', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     await waitFor(() =>
@@ -1553,7 +1557,7 @@ describe('FilesPage Move permission generation fencing', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     await waitFor(() =>
@@ -1649,7 +1653,7 @@ describe('FilesPage Move permission generation fencing', () => {
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
 
     const dialog = await screen.findByRole('dialog', { name: 'Move file report.txt' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
     await waitFor(() => expect(affordances).toHaveBeenCalledWith('destination-1', 'main'))
     expect(within(dialog).getByText('Checking permissions…')).toBeTruthy()
@@ -1738,7 +1742,7 @@ describe('FilesPage Move permission generation fencing', () => {
     await waitFor(() => expect(screen.getByRole('menuitem', { name: 'Move to' })).toBeTruthy())
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file report.txt' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive A' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
     expect(
       await within(dialog).findByText(
@@ -1754,7 +1758,7 @@ describe('FilesPage Move permission generation fencing', () => {
       (within(dialog).getByRole('button', { name: 'Move here (Archive A)' }) as HTMLButtonElement)
         .disabled
     ).toBe(true)
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive B' }))
     await act(async () => {
       finishRetrySource()
     })

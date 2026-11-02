@@ -8,6 +8,7 @@ import {
   onlineManager,
 } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
@@ -155,17 +156,51 @@ async function createPage(
 
 async function selectAgent(dialog: HTMLElement) {
   const input = within(dialog).getByRole('combobox', { name: 'Add people, teams, or agents' })
-  fireEvent.focus(input)
+  fireEvent.mouseDown(input)
   fireEvent.change(input, { target: { value: 'chatllm' } })
-  fireEvent.click(await within(dialog).findByRole('option', { name: /chatllm/ }))
+  const option = await screen.findByRole('option', { name: /chatllm/ })
+  const dropdown = option.closest('.ant-select-dropdown')
+  if (!(dropdown instanceof HTMLElement)) throw new Error('AntD recipient popup is missing')
+  const visibleOption = Array.from(
+    dropdown.querySelectorAll<HTMLElement>('.ant-select-item-option')
+  ).find(item => (item.textContent ?? '').toLowerCase().includes('chatllm'))
+  if (!visibleOption) throw new Error('Visible chatllm recipient is missing')
+  fireEvent.click(visibleOption)
+  await waitFor(() => expect(dialog.querySelector('.ant-select-selection-item')).toBeTruthy())
   return input
 }
 
-async function setEditorRole(dialog: HTMLElement) {
-  const role = within(dialog).getByRole('button', { name: 'Access role for selected recipients' })
-  fireEvent.click(role)
-  fireEvent.click(await within(dialog).findByRole('option', { name: 'Editor' }))
+async function selectSubject(dialog: HTMLElement, label: string) {
+  const input = within(dialog).getByRole('combobox', { name: 'Add people, teams, or agents' })
+  fireEvent.mouseDown(input)
+  fireEvent.change(input, { target: { value: label } })
+  const option = await screen.findByRole('option', { name: new RegExp(label, 'i') })
+  const dropdown = option.closest('.ant-select-dropdown')
+  if (!(dropdown instanceof HTMLElement)) throw new Error('AntD recipient popup is missing')
+  const visibleOption = Array.from(
+    dropdown.querySelectorAll<HTMLElement>('.ant-select-item-option')
+  ).find(item => (item.textContent ?? '').toLowerCase().includes(label.toLowerCase()))
+  if (!visibleOption) throw new Error(`Visible ${label} recipient is missing`)
+  fireEvent.mouseDown(visibleOption)
+  fireEvent.click(visibleOption)
+  await waitFor(() => expect(dialog.querySelector('.ant-select-selection-item')).toBeTruthy())
+  return input
+}
+
+async function setRole(dialog: HTMLElement, label: string) {
+  const role = within(dialog).getByRole('combobox', {
+    name: 'Access role for selected recipients',
+  })
+  const user = userEvent.setup()
+  await user.click(role.closest('.ant-select')!)
+  await user.click(await screen.findByTitle(label))
   return role
+}
+
+const setEditorRole = (dialog: HTMLElement) => setRole(dialog, 'Editor')
+
+function selectedRoleLabel(select: HTMLElement): string {
+  return select.closest('.ant-select')?.querySelector('.ant-select-content')?.textContent ?? ''
 }
 
 function startPermissionRefresh(queryClient: QueryClient) {
@@ -195,7 +230,7 @@ describe('FilesPage delegation request lifecycle', () => {
 
     await selectAgent(dialog)
     const role = await setEditorRole(dialog)
-    expect(role.textContent).toContain('Editor')
+    expect(selectedRoleLabel(role)).toContain('Editor')
 
     const reducedPermission = deferred<typeof freshPositive>()
     setNextPermissionRefresh(reducedPermission.promise)
@@ -204,7 +239,7 @@ describe('FilesPage delegation request lifecycle', () => {
     await waitFor(() => expect(queryClient.getQueryData(AFFORDANCES_KEY)).toEqual(reducedPositive))
 
     const share = within(dialog).getByRole('button', { name: 'Share' }) as HTMLButtonElement
-    expect(role.textContent).not.toContain('Editor')
+    expect(selectedRoleLabel(role)).not.toContain('Editor')
     fireEvent.click(share)
     expect(grant).not.toHaveBeenCalled()
     expect(within(dialog).getByText('Choose an available role before sharing.')).toBeTruthy()
@@ -214,9 +249,8 @@ describe('FilesPage delegation request lifecycle', () => {
       within(dialog).getByRole('checkbox', { name: 'Include contents of this folder' })
     ).toHaveProperty('checked', true)
 
-    fireEvent.click(role)
-    fireEvent.click(await within(dialog).findByRole('option', { name: 'Read' }))
-    expect(role.textContent).toContain('Read')
+    await setRole(dialog, 'Read')
+    expect(selectedRoleLabel(role)).toContain('Read')
     expect(within(dialog).queryByText('Choose an available role before sharing.')).toBeNull()
     expect(share.disabled).toBe(false)
     fireEvent.click(share)
@@ -256,21 +290,14 @@ describe('FilesPage delegation request lifecycle', () => {
       teamDirectory,
     })
 
-    const picker = within(dialog).getByRole('combobox', {
-      name: 'Add people, teams, or agents',
-    })
-    fireEvent.focus(picker)
-    fireEvent.change(picker, { target: { value: 'User B' } })
-    fireEvent.click(await within(dialog).findByRole('option', { name: /User B/ }))
+    await selectSubject(dialog, 'User B')
     const role = await setEditorRole(dialog)
-    expect(role.textContent).toContain('Editor')
+    expect(selectedRoleLabel(role)).toContain('Editor')
 
-    fireEvent.focus(picker)
-    fireEvent.change(picker, { target: { value: 'chatllm' } })
-    fireEvent.click(await within(dialog).findByRole('option', { name: /chatllm/ }))
+    await selectSubject(dialog, 'chatllm')
 
     const share = within(dialog).getByRole('button', { name: 'Share' }) as HTMLButtonElement
-    expect(role.textContent).not.toContain('Editor')
+    expect(selectedRoleLabel(role)).not.toContain('Editor')
     expect(within(dialog).getByText('Choose an available role before sharing.')).toBeTruthy()
     expect(share.disabled).toBe(true)
     expect(within(dialog).getByText('User B')).toBeTruthy()
@@ -278,8 +305,7 @@ describe('FilesPage delegation request lifecycle', () => {
     fireEvent.click(share)
     expect(grant).not.toHaveBeenCalled()
 
-    fireEvent.click(role)
-    fireEvent.click(await within(dialog).findByRole('option', { name: 'Read' }))
+    await setRole(dialog, 'Read')
     fireEvent.click(share)
     await waitFor(() => expect(grant).toHaveBeenCalledOnce())
     expect(grant).toHaveBeenCalledWith(
@@ -369,7 +395,7 @@ describe('FilesPage delegation request lifecycle', () => {
       name: 'Include contents of this folder',
     }) as HTMLInputElement
     fireEvent.click(inheritance)
-    expect(role.textContent).toContain('Editor')
+    expect(selectedRoleLabel(role)).toContain('Editor')
     expect(inheritance.checked).toBe(false)
 
     const share = within(dialog).getByRole('button', { name: 'Share' }) as HTMLButtonElement
@@ -403,7 +429,7 @@ describe('FilesPage delegation request lifecycle', () => {
     await act(async () => pendingPermission.reject(new Error(permissionFailure)))
     expect(await screen.findByText(/permission check unavailable/)).toBeTruthy()
     expect(within(dialog).getByText('chatllm')).toBeTruthy()
-    expect(role.textContent).toContain('Editor')
+    expect(selectedRoleLabel(role)).toContain('Editor')
     expect(inheritance.checked).toBe(false)
     expect(grant).toHaveBeenCalledTimes(1)
 
@@ -437,7 +463,7 @@ describe('FilesPage delegation request lifecycle', () => {
     const freshInheritance = within(dialog).getByRole('checkbox', {
       name: 'Include contents of this folder',
     }) as HTMLInputElement
-    expect(freshRole.textContent).toContain('Editor')
+    expect(selectedRoleLabel(freshRole)).toContain('Editor')
     expect(freshInheritance.checked).toBe(true)
     fireEvent.click(within(dialog).getByRole('button', { name: 'Share' }))
     await waitFor(() => expect(grant).toHaveBeenCalledTimes(2))
@@ -516,6 +542,8 @@ describe('FilesPage delegation request lifecycle', () => {
     await waitFor(() => expect(grant).toHaveBeenCalledOnce())
 
     fireEvent.click(within(initialDialog).getByRole('button', { name: 'Close share dialog' }))
+    await waitFor(() => expect(initialDialog.classList.contains('ant-zoom-leave')).toBe(true))
+    fireEvent.transitionEnd(initialDialog)
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
 
     fireEvent.click(await screen.findByRole('button', { name: 'Share Folder A' }))

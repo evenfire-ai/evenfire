@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import {
   QueryClient,
@@ -8,6 +8,7 @@ import {
   onlineManager,
 } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
@@ -25,6 +26,7 @@ import {
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { desktopQueryKeys } from '@/hooks/domain/queryKeys'
 import { delegationAffordances } from '../../../../src/gfs/delegation'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { FilesPage } from '../FilesPage'
 
 /**
@@ -117,6 +119,8 @@ function deferred<T>() {
 }
 
 describe('FilesPage against the real GFS browser controller', () => {
+  beforeEach(installAntdDomEnvironment)
+
   afterEach(() => {
     cleanup()
     testQueryClients.forEach(queryClient => queryClient.clear())
@@ -437,7 +441,7 @@ describe('FilesPage against the real GFS browser controller', () => {
 
     expect(row.isConnected).toBe(true)
     expect(screen.getByRole('button', { name: 'Open Brief.md' })).toBe(row)
-    expect(screen.getByRole('button', { name: 'Load more' })).toBe(loadMore)
+    expect(screen.getByRole('button', { name: /Load more/ })).toBe(loadMore)
     expect(loadMore.disabled).toBe(true)
     expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
     expect(browser.getAttribute('aria-busy')).toBe('false')
@@ -449,7 +453,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     expect(await screen.findByText(/Next file page is temporarily unavailable/)).toBeTruthy()
     expect(row.isConnected).toBe(true)
     expect(screen.getByRole('button', { name: 'Open Brief.md' })).toBe(row)
-    expect(screen.getByRole('button', { name: 'Load more' })).toBe(loadMore)
+    expect(screen.getByRole('button', { name: /Load more/ })).toBe(loadMore)
     expect(loadMore.getAttribute('aria-busy')).toBeNull()
     expect(browser.getAttribute('aria-busy')).toBe('false')
   })
@@ -981,10 +985,17 @@ describe('FilesPage against the real GFS browser controller', () => {
     const subjectInput = await within(dialog).findByRole('combobox', {
       name: 'Add people, teams, or agents',
     })
-    fireEvent.focus(subjectInput)
+    fireEvent.mouseDown(subjectInput)
     fireEvent.change(subjectInput, { target: { value: 'chatllm' } })
-    fireEvent.click(await within(dialog).findByRole('option', { name: /chatllm/ }))
-    const selectedSubject = within(dialog).getByText('chatllm')
+    const option = await screen.findByRole('option', { name: /chatllm/ })
+    const dropdown = option.closest('.ant-select-dropdown')
+    if (!(dropdown instanceof HTMLElement)) throw new Error('AntD recipient popup is missing')
+    const visibleOption = Array.from(
+      dropdown.querySelectorAll<HTMLElement>('.ant-select-item-option')
+    ).find(item => (item.textContent ?? '').toLowerCase().includes('chatllm'))
+    if (!visibleOption) throw new Error('Visible chatllm recipient is missing')
+    fireEvent.click(visibleOption)
+    const selectedSubject = await within(dialog).findByText('chatllm')
     expect(subjectInput.isConnected).toBe(true)
 
     nextPermissionRefresh = permissionRefresh.promise
@@ -1031,20 +1042,39 @@ describe('FilesPage against the real GFS browser controller', () => {
     expect(emptyState.isConnected).toBe(true)
     expect(browser.getAttribute('aria-busy')).toBe('false')
 
-    const selectAgent = async (input = subjectInput) => {
-      fireEvent.focus(input)
-      fireEvent.change(input, { target: { value: 'chatllm' } })
-      fireEvent.click(await within(dialog).findByRole('option', { name: /chatllm/ }))
-      return within(dialog).getByText('chatllm')
+    const selectAgent = async (input?: HTMLElement) => {
+      const subjectInput =
+        input ??
+        within(dialog).getByRole('combobox', {
+          name: 'Add people, teams, or agents',
+        })
+      fireEvent.mouseDown(subjectInput)
+      fireEvent.change(subjectInput, { target: { value: 'chatllm' } })
+      const option = await screen.findByRole('option', { name: /chatllm/ })
+      const dropdown = option.closest('.ant-select-dropdown')
+      if (!(dropdown instanceof HTMLElement)) throw new Error('AntD recipient popup is missing')
+      const visibleOption = Array.from(
+        dropdown.querySelectorAll<HTMLElement>('.ant-select-item-option')
+      ).find(item => (item.textContent ?? '').toLowerCase().includes('chatllm'))
+      if (!visibleOption) throw new Error('Visible chatllm recipient is missing')
+      fireEvent.click(visibleOption)
+      return await within(dialog).findByText('chatllm')
     }
 
     const selectedAgain = await selectAgent()
-    const roleSelect = within(dialog).getByRole('button', {
+    const roleSelect = within(dialog).getByRole('combobox', {
       name: 'Access role for selected recipients',
     })
-    fireEvent.click(roleSelect)
-    fireEvent.click(await within(dialog).findByRole('option', { name: 'Editor' }))
-    expect(roleSelect.textContent).toContain('Editor')
+    const roleControl = roleSelect.closest('.ant-select')
+    if (!roleControl) throw new Error('AntD role selector is missing')
+    const user = userEvent.setup()
+    await user.click(roleControl)
+    await user.click(await screen.findByTitle('Editor'))
+    await waitFor(() => {
+      expect(roleControl.querySelector('.ant-select-content')?.textContent ?? '').toContain(
+        'Editor'
+      )
+    })
     const inheritanceCheckbox = within(dialog).getByRole('checkbox', {
       name: 'Include contents of this folder',
     }) as HTMLInputElement
@@ -1095,7 +1125,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     })
     expect(subjectInput.isConnected).toBe(true)
     expect(selectedAgain.isConnected).toBe(true)
-    expect(roleSelect.textContent).toContain('Editor')
+    expect(roleControl.querySelector('.ant-select-content')?.textContent ?? '').toContain('Editor')
     expect(inheritanceCheckbox.checked).toBe(false)
     expect(within(dialog).getByText(/share attempt failed/)).toBeTruthy()
     expect(shareButtonAgain.disabled).toBe(true)
@@ -1106,7 +1136,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     expect(await screen.findByText(/gfs controller failed/)).toBeTruthy()
     expect(subjectInput.isConnected).toBe(true)
     expect(selectedAgain.isConnected).toBe(true)
-    expect(roleSelect.textContent).toContain('Editor')
+    expect(roleControl.querySelector('.ant-select-content')?.textContent ?? '').toContain('Editor')
     expect(inheritanceCheckbox.checked).toBe(false)
     expect(within(dialog).getByText(/share attempt failed/)).toBeTruthy()
     expect(shareButtonAgain.disabled).toBe(true)
@@ -1124,7 +1154,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     })
     expect(subjectInput.isConnected).toBe(true)
     expect(selectedAgain.isConnected).toBe(true)
-    expect(roleSelect.textContent).toContain('Editor')
+    expect(roleControl.querySelector('.ant-select-content')?.textContent ?? '').toContain('Editor')
     expect(inheritanceCheckbox.checked).toBe(false)
     expect(within(dialog).getByText(/share attempt failed/)).toBeTruthy()
     expect(shareButtonAgain.disabled).toBe(true)
@@ -1159,10 +1189,12 @@ describe('FilesPage against the real GFS browser controller', () => {
     expect(within(dialog).queryByText(/share attempt failed/)).toBeNull()
     expect(await within(dialog).findByText('People with access')).toBeTruthy()
     await selectAgent(restoredInput)
-    const restoredRole = within(dialog).getByRole('button', {
+    const restoredRole = within(dialog).getByRole('combobox', {
       name: 'Access role for selected recipients',
     })
-    expect(restoredRole.textContent).toContain('Read')
+    expect(
+      restoredRole.closest('.ant-select')?.querySelector('.ant-select-content')?.textContent
+    ).toContain('Read')
     expect(
       (
         within(dialog).getByRole('checkbox', {

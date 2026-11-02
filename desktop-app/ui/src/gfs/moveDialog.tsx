@@ -1,6 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { Button, IconButton, StatusBanner } from '@components/Common'
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import { type InfiniteData, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
+import { Alert, Button, Empty, Flex, Modal, Spin, Tree, Typography } from 'antd'
+import type { DataNode } from 'antd/es/tree'
 import { IconCheck, IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import {
@@ -14,6 +23,87 @@ import { isGfsChildrenDenied, purgeDeniedGfsChildren } from './deniedChildren'
 import type { GfsMoveDialogProps, GfsNumberedNameConsent } from './moveDialog.types'
 
 type SelectedDestination = Pick<GfsBrowserChild, 'resourceId' | 'name'>
+
+interface GfsMoveTreeDataNode extends DataNode {
+  'aria-label'?: string
+  folder?: GfsBrowserChild
+}
+
+type GfsChildrenPage = Awaited<ReturnType<typeof window.clerum.gfs.listChildren>>
+
+interface GfsChildrenQuerySnapshot {
+  data?: InfiniteData<GfsChildrenPage, string | undefined>
+  error: unknown
+  isFetching: boolean
+  isFetchingNextPage: boolean
+  hasNextPage: boolean
+  fetchNextPage: () => Promise<unknown>
+}
+
+interface GfsMoveChildrenQueryObserverProps {
+  folder: GfsBrowserChild
+  scope: string
+  sessionGeneration: number | null
+  enabled: boolean
+  onResult: (
+    scope: string,
+    generation: number | null,
+    resourceId: string,
+    result: GfsChildrenQuerySnapshot
+  ) => void
+}
+
+function GfsMoveChildrenQueryObserver({
+  folder,
+  scope,
+  sessionGeneration,
+  enabled,
+  onResult,
+}: GfsMoveChildrenQueryObserverProps) {
+  const query = useInfiniteQuery<
+    GfsChildrenPage,
+    Error,
+    InfiniteData<GfsChildrenPage, string | undefined>,
+    ReturnType<typeof desktopQueryKeys.gfsChildren>,
+    string | undefined
+  >({
+    queryKey: desktopQueryKeys.gfsChildren(
+      scope,
+      folder.resourceId,
+      GFS_DRIVE_MAIN,
+      sessionGeneration
+    ),
+    queryFn: ({ pageParam }) =>
+      window.clerum.gfs.listChildren(folder.resourceId, GFS_DRIVE_MAIN, pageParam),
+    enabled: enabled && isGfsSessionGeneration(sessionGeneration),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
+  })
+
+  useEffect(() => {
+    onResult(scope, sessionGeneration, folder.resourceId, {
+      data: query.data,
+      error: query.error,
+      isFetching: query.isFetching,
+      isFetchingNextPage: query.isFetchingNextPage,
+      hasNextPage: query.hasNextPage,
+      fetchNextPage: query.fetchNextPage,
+    })
+  }, [
+    folder.resourceId,
+    onResult,
+    scope,
+    sessionGeneration,
+    query.data,
+    query.error,
+    query.fetchNextPage,
+    query.hasNextPage,
+    query.isFetching,
+    query.isFetchingNextPage,
+  ])
+
+  return null
+}
 
 /**
  * Both banners in this dialog show server verdicts that crossed Electron IPC,
@@ -34,183 +124,12 @@ function folderItems(items: GfsBrowserChild[], excludedIds: ReadonlySet<string>)
     .sort((left, right) => left.name.localeCompare(right.name))
 }
 
-type GfsMoveTreeFolderProps = {
-  folder: GfsBrowserChild
-  level: number
-  ancestors: ReadonlySet<string>
-  targetResourceId: string
-  scope: string
+function childQuerySnapshotKey(
+  scope: string,
+  resourceId: string,
   sessionGeneration: number | null
-  expandedFolderIds: ReadonlySet<string>
-  selectedDestination: SelectedDestination | null
-  onToggle: (resourceId: string) => void
-  onSelect: (folder: GfsBrowserChild) => void
-  onAuthorityFailure?: (message: string, scope: string, sessionGeneration: number) => boolean
-}
-
-function GfsMoveTreeFolder({
-  folder,
-  level,
-  ancestors,
-  targetResourceId,
-  scope,
-  sessionGeneration,
-  expandedFolderIds,
-  selectedDestination,
-  onToggle,
-  onSelect,
-  onAuthorityFailure,
-}: GfsMoveTreeFolderProps) {
-  const queryClient = useQueryClient()
-  const isExpanded = expandedFolderIds.has(folder.resourceId)
-  const childQueryKey = desktopQueryKeys.gfsChildren(
-    scope,
-    folder.resourceId,
-    GFS_DRIVE_MAIN,
-    sessionGeneration
-  )
-  const childQuery = useInfiniteQuery({
-    queryKey: childQueryKey,
-    queryFn: ({ pageParam }) =>
-      window.clerum.gfs.listChildren(folder.resourceId, GFS_DRIVE_MAIN, pageParam),
-    enabled: Boolean(scope) && isExpanded && isGfsSessionGeneration(sessionGeneration),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
-  })
-  const childDenied = isGfsChildrenDenied(childQuery.error, childQuery.data)
-  const childError = childDenied
-    ? 'This folder is no longer available.'
-    : errorMessage(childQuery.error)
-  const childFolders = useMemo(
-    () =>
-      childDenied
-        ? []
-        : folderItems(
-            (childQuery.data?.pages ?? []).flatMap(page => page.items),
-            new Set([targetResourceId, ...ancestors])
-          ),
-    [ancestors, childDenied, childQuery.data, targetResourceId]
-  )
-
-  const authorityRef = useRef({ scope, generation: sessionGeneration })
-  authorityRef.current = { scope, generation: sessionGeneration }
-  const isAuthorityCurrent = () =>
-    isGfsSessionGeneration(sessionGeneration) &&
-    isGfsSessionAuthorityCurrent(
-      scope,
-      sessionGeneration,
-      authorityRef.current.scope,
-      authorityRef.current.generation
-    )
-
-  useEffect(() => {
-    if (!isAuthorityCurrent()) return
-    if (childQuery.error) purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError && isGfsSessionGeneration(sessionGeneration)) {
-      onAuthorityFailure?.(childError, scope, sessionGeneration)
-    }
-  }, [
-    childError,
-    childQuery.error,
-    childQueryKey,
-    onAuthorityFailure,
-    queryClient,
-    scope,
-    sessionGeneration,
-  ])
-
-  const loadingChildren = Boolean(isExpanded && childQuery.isFetching && !childQuery.data)
-  const hasMoreChildren = Boolean(childQuery.hasNextPage)
-  const hasLoadedChildren = Boolean(childQuery.data)
-  const canExpand =
-    !hasLoadedChildren || loadingChildren || hasMoreChildren || childFolders.length > 0
-  const nextAncestors = new Set(ancestors)
-  nextAncestors.add(folder.resourceId)
-
-  return (
-    <div
-      aria-expanded={canExpand ? isExpanded : undefined}
-      aria-level={level}
-      aria-selected={selectedDestination?.resourceId === folder.resourceId}
-      className="da-gfs-move-dialog__tree-item"
-      role="treeitem"
-    >
-      <div className="da-gfs-move-dialog__tree-row">
-        {canExpand ? (
-          <IconButton
-            aria-expanded={isExpanded}
-            className={`da-gfs-move-dialog__tree-toggle${isExpanded ? ' is-expanded' : ''}`}
-            label={`${isExpanded ? 'Collapse' : 'Expand'} ${folder.name}`}
-            onClick={() => onToggle(folder.resourceId)}
-            size="sm"
-            variant="ghost"
-          >
-            <IconChevronRight />
-          </IconButton>
-        ) : (
-          <span className="da-gfs-move-dialog__tree-toggle-placeholder" aria-hidden="true" />
-        )}
-        <Button
-          align="start"
-          aria-selected={selectedDestination?.resourceId === folder.resourceId}
-          block
-          className="da-gfs-move-dialog__tree-select"
-          color="neutral"
-          onClick={() => onSelect(folder)}
-          variant="text"
-        >
-          <span className="da-gfs-move-dialog__tree-folder-icon" aria-hidden="true">
-            <IconContexts />
-          </span>
-          <span className="da-gfs-move-dialog__tree-folder-name">{folder.name}</span>
-          <span className="da-gfs-move-dialog__tree-selected-icon" aria-hidden="true">
-            {selectedDestination?.resourceId === folder.resourceId ? <IconCheck /> : null}
-          </span>
-        </Button>
-      </div>
-      {isExpanded ? (
-        <div className="da-gfs-move-dialog__tree-group" role="group">
-          {loadingChildren ? (
-            <p className="muted" role="status">
-              Loading subfolders…
-            </p>
-          ) : null}
-          {childError ? <StatusBanner tone="error" text={childError} /> : null}
-          {childFolders.map(child => (
-            <GfsMoveTreeFolder
-              ancestors={nextAncestors}
-              expandedFolderIds={expandedFolderIds}
-              folder={child}
-              key={child.resourceId}
-              level={level + 1}
-              onAuthorityFailure={onAuthorityFailure}
-              onSelect={onSelect}
-              onToggle={onToggle}
-              scope={scope}
-              sessionGeneration={sessionGeneration}
-              selectedDestination={selectedDestination}
-              targetResourceId={targetResourceId}
-            />
-          ))}
-          {hasMoreChildren ? (
-            <div className="da-gfs-move-dialog__tree-more">
-              <Button
-                loading={childQuery.isFetchingNextPage}
-                onClick={() => void childQuery.fetchNextPage()}
-                size="sm"
-                variant="outline"
-              >
-                Load more
-              </Button>
-            </div>
-          ) : null}
-          {!loadingChildren && !childError && !childFolders.length && !hasMoreChildren ? (
-            <p className="muted">No subfolders.</p>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  )
+): string {
+  return JSON.stringify([scope, sessionGeneration, resourceId])
 }
 
 /**
@@ -238,6 +157,18 @@ export function GfsMoveDialog({
   permissionStatus = null,
   onAuthorityFailure,
 }: GfsMoveDialogProps) {
+  const queryClient = useQueryClient()
+  const scope = sessionScope ?? ''
+  const authorityRef = useRef({ scope, generation: sessionGeneration })
+  authorityRef.current = { scope, generation: sessionGeneration }
+  const isAuthorityCurrent = () =>
+    Boolean(sessionScope) &&
+    isGfsSessionAuthorityCurrent(
+      sessionScope ?? null,
+      sessionGeneration,
+      authorityRef.current.scope,
+      authorityRef.current.generation
+    )
   const initialDestination = initialCrumbs[initialCrumbs.length - 1]
   // The folder that already contains the target. Row moves carry the real
   // parent id; for the current resource the sliced crumbs end at its parent.
@@ -254,21 +185,14 @@ export function GfsMoveDialog({
     initialDestination && initialDestination.resourceId === currentParentId
       ? initialDestination.name
       : null
-  const scope = sessionScope ?? ''
-  const authorityRef = useRef({ scope, generation: sessionGeneration })
-  authorityRef.current = { scope, generation: sessionGeneration }
-  const isAuthorityCurrent = () =>
-    Boolean(sessionScope) &&
-    isGfsSessionAuthorityCurrent(
-      sessionScope ?? null,
-      sessionGeneration,
-      authorityRef.current.scope,
-      authorityRef.current.generation
-    )
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(
     () => new Set(initialCrumbs.map(crumb => crumb.resourceId))
   )
-  const [selectedDestination, setSelectedDestination] = useState<SelectedDestination | null>(
+  const [scopedSelectedDestination, setScopedSelectedDestination] = useState<{
+    scope: string
+    generation: number | null
+    destination: SelectedDestination
+  } | null>(
     // Never preselect the target's own folder — in every entry path the last
     // crumb IS the current parent, so the old preselect only ever armed the
     // no-op move described above.
@@ -276,9 +200,21 @@ export function GfsMoveDialog({
       initialDestination &&
       initialDestination.resourceId !== target.resourceId &&
       initialDestination.resourceId !== currentParentId
-        ? { resourceId: initialDestination.resourceId, name: initialDestination.name }
+        ? {
+            scope,
+            generation: sessionGeneration,
+            destination: {
+              resourceId: initialDestination.resourceId,
+              name: initialDestination.name,
+            },
+          }
         : null
   )
+  const selectedDestination =
+    scopedSelectedDestination?.scope === scope &&
+    scopedSelectedDestination.generation === sessionGeneration
+      ? scopedSelectedDestination.destination
+      : null
   const [error, setError] = useState<string | null>(null)
   const [permissionCheckSucceeded, setPermissionCheckSucceeded] = useState(false)
   const [numberedNameProposal, setNumberedNameProposal] = useState<string | null>(null)
@@ -296,6 +232,16 @@ export function GfsMoveDialog({
   const dialogIdentityRef = useRef(dialogIdentity)
   const previousDialogIdentityRef = useRef(dialogIdentity)
   dialogIdentityRef.current = dialogIdentity
+  const settleNumberedNameConsent = useCallback((accepted: boolean) => {
+    const resolve = numberedNameConsentRef.current
+    numberedNameConsentRef.current = null
+    if (mountedRef.current) setNumberedNameProposal(null)
+    resolve?.(accepted)
+  }, [])
+  const closeDialog = () => {
+    settleNumberedNameConsent(false)
+    onClose()
+  }
   useEffect(() => {
     mountedRef.current = true
     return () => {
@@ -304,29 +250,19 @@ export function GfsMoveDialog({
       numberedNameConsentRef.current = null
     }
   }, [])
-  const settleNumberedNameConsent = useCallback((accepted: boolean) => {
-    const resolve = numberedNameConsentRef.current
-    numberedNameConsentRef.current = null
-    setNumberedNameProposal(null)
-    resolve?.(accepted)
-  }, [])
-  const closeDialog = () => {
-    settleNumberedNameConsent(false)
-    onClose()
-  }
   useEffect(() => {
-    const previousIdentity = previousDialogIdentityRef.current
-    const currentIdentity = dialogIdentityRef.current
+    const previous = previousDialogIdentityRef.current
+    const current = dialogIdentityRef.current
     if (
-      previousIdentity.scope !== currentIdentity.scope ||
-      previousIdentity.sessionGeneration !== currentIdentity.sessionGeneration ||
-      previousIdentity.resourceId !== currentIdentity.resourceId ||
-      previousIdentity.name !== currentIdentity.name ||
-      previousIdentity.kind !== currentIdentity.kind
+      previous.scope !== current.scope ||
+      previous.sessionGeneration !== current.sessionGeneration ||
+      previous.resourceId !== current.resourceId ||
+      previous.name !== current.name ||
+      previous.kind !== current.kind
     ) {
       settleNumberedNameConsent(false)
     }
-    previousDialogIdentityRef.current = currentIdentity
+    previousDialogIdentityRef.current = current
   }, [
     scope,
     sessionGeneration,
@@ -335,6 +271,45 @@ export function GfsMoveDialog({
     target.resourceId,
     settleNumberedNameConsent,
   ])
+  const [childQuerySnapshots, setChildQuerySnapshots] = useState(
+    () => new Map<string, GfsChildrenQuerySnapshot>()
+  )
+  const handleChildQueryResult = useCallback(
+    (
+      resultScope: string,
+      resultGeneration: number | null,
+      resourceId: string,
+      result: GfsChildrenQuerySnapshot
+    ) => {
+      if (
+        !isGfsSessionGeneration(resultGeneration) ||
+        !isGfsSessionAuthorityCurrent(resultScope, resultGeneration, scope, sessionGeneration)
+      ) {
+        return
+      }
+      setChildQuerySnapshots(previous => {
+        const key = childQuerySnapshotKey(resultScope, resourceId, resultGeneration)
+        const current = previous.get(key)
+        if (
+          current &&
+          current.data === result.data &&
+          current.error === result.error &&
+          current.isFetching === result.isFetching &&
+          current.isFetchingNextPage === result.isFetchingNextPage &&
+          current.hasNextPage === result.hasNextPage &&
+          current.fetchNextPage === result.fetchNextPage
+        ) {
+          return previous
+        }
+        const next = new Map(previous)
+        next.set(key, result)
+        return next
+      })
+    },
+    [scope, sessionGeneration]
+  )
+  const treeContainerRef = useRef<HTMLDivElement>(null)
+  const foldersByIdRef = useRef(new Map<string, GfsBrowserChild>())
   const accessibleQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsAccessible(scope, GFS_DRIVE_MAIN, sessionGeneration),
     queryFn: ({ pageParam }) => {
@@ -376,6 +351,28 @@ export function GfsMoveDialog({
     return folderItems(roots, new Set([target.resourceId]))
   }, [accessibleQuery.data, initialCrumbs, target.resourceId])
 
+  const directoryFolders: GfsBrowserChild[] = []
+  const collectDirectoryFolders = (
+    folders: readonly GfsBrowserChild[],
+    ancestors: ReadonlySet<string>
+  ) => {
+    for (const folder of folders) {
+      if (folder.kind !== 'directory') continue
+      directoryFolders.push(folder)
+      if (!expandedFolderIds.has(folder.resourceId)) continue
+      const cached = childQuerySnapshots.get(
+        childQuerySnapshotKey(scope, folder.resourceId, sessionGeneration)
+      )?.data
+      const excluded = new Set([target.resourceId, ...ancestors, folder.resourceId])
+      collectDirectoryFolders(
+        folderItems(cached?.pages.flatMap(page => page.items ?? []) ?? [], excluded),
+        new Set([...ancestors, folder.resourceId])
+      )
+    }
+  }
+  collectDirectoryFolders(rootFolders, new Set())
+  const childQueriesByResourceId = childQuerySnapshots
+
   const listError = errorMessage(accessibleQuery.error)
   const loadingRoots = accessibleQuery.isFetching && rootFolders.length === 0
   const pathPassesThroughTarget =
@@ -400,26 +397,206 @@ export function GfsMoveDialog({
     }
   }, [listError, onAuthorityFailure, sessionGeneration, sessionScope])
 
-  const toggleFolder = (resourceId: string) => {
-    setError(null)
-    setExpandedFolderIds(previous => {
-      const next = new Set(previous)
-      if (next.has(resourceId)) next.delete(resourceId)
-      else next.add(resourceId)
-      return next
+  const processedChildErrorsRef = useRef(new Map<string, unknown>())
+  useEffect(() => {
+    if (!isAuthorityCurrent() || !isGfsSessionGeneration(sessionGeneration) || !sessionScope) return
+    directoryFolders.forEach(folder => {
+      const result = childQueriesByResourceId.get(
+        childQuerySnapshotKey(scope, folder.resourceId, sessionGeneration)
+      )
+      const errorKey = childQuerySnapshotKey(scope, folder.resourceId, sessionGeneration)
+      if (!result?.error) {
+        processedChildErrorsRef.current.delete(errorKey)
+        return
+      }
+      if (processedChildErrorsRef.current.get(errorKey) === result.error) return
+      processedChildErrorsRef.current.set(errorKey, result.error)
+      const queryKey = desktopQueryKeys.gfsChildren(
+        scope,
+        folder.resourceId,
+        GFS_DRIVE_MAIN,
+        sessionGeneration
+      )
+      purgeDeniedGfsChildren(queryClient, queryKey, result.error)
+      const message = isGfsChildrenDenied(result.error, result.data)
+        ? 'This folder is no longer available.'
+        : errorMessage(result.error)
+      if (message) onAuthorityFailure?.(message, sessionScope, sessionGeneration)
     })
-  }
+  }, [
+    childQueriesByResourceId,
+    directoryFolders,
+    onAuthorityFailure,
+    queryClient,
+    scope,
+    sessionGeneration,
+    sessionScope,
+  ])
 
-  const selectFolder = (folder: GfsBrowserChild) => {
-    settleNumberedNameConsent(false)
-    setError(null)
-    setPermissionCheckSucceeded(false)
-    setSelectedDestination({ resourceId: folder.resourceId, name: folder.name })
-    setExpandedFolderIds(previous => {
-      if (previous.has(folder.resourceId)) return previous
-      return new Set(previous).add(folder.resourceId)
-    })
+  const selectFolder = useCallback(
+    (folder: GfsBrowserChild) => {
+      settleNumberedNameConsent(false)
+      setError(null)
+      setPermissionCheckSucceeded(false)
+      setScopedSelectedDestination({
+        scope,
+        generation: sessionGeneration,
+        destination: { resourceId: folder.resourceId, name: folder.name },
+      })
+      setExpandedFolderIds(previous => {
+        if (previous.has(folder.resourceId)) return previous
+        return new Set(previous).add(folder.resourceId)
+      })
+    },
+    [scope, sessionGeneration, settleNumberedNameConsent]
+  )
+
+  const handleTreeKeyDownCapture = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      const target = event.target
+      if (
+        target instanceof HTMLElement &&
+        target.closest('button,input,textarea,[role="button"]')
+      ) {
+        return
+      }
+      const tree = treeContainerRef.current?.querySelector<HTMLElement>(
+        '[role="tree"][aria-activedescendant]'
+      )
+      const activeId = tree?.getAttribute('aria-activedescendant')
+      const targetTreeItem =
+        target instanceof HTMLElement ? target.closest<HTMLElement>('[role="treeitem"]') : null
+      const activeNode = activeId ? document.getElementById(activeId) : null
+      const title =
+        targetTreeItem?.querySelector<HTMLElement>('[data-resource-id]') ??
+        (activeNode?.matches('[data-resource-id]')
+          ? activeNode
+          : activeNode?.querySelector<HTMLElement>('[data-resource-id]'))
+      const resourceId = title?.getAttribute('data-resource-id')
+      const folder = resourceId ? foldersByIdRef.current.get(resourceId) : undefined
+      if (!folder) return
+      event.preventDefault()
+      event.stopPropagation()
+      selectFolder(folder)
+    },
+    [selectFolder]
+  )
+  const handleTreeRowClickCapture = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+      if (target.closest('.ant-tree-switcher,button,input,textarea,[role="button"]')) return
+      if (target.closest('.ant-tree-node-content-wrapper')) return
+      const treeItem = target.closest<HTMLElement>('[role="treeitem"]')
+      const title = treeItem?.querySelector<HTMLElement>('[data-resource-id]')
+      const resourceId = title?.getAttribute('data-resource-id')
+      const folder = resourceId ? foldersByIdRef.current.get(resourceId) : undefined
+      if (folder) selectFolder(folder)
+    },
+    [selectFolder]
+  )
+
+  const foldersById = new Map<string, GfsBrowserChild>()
+  const buildFolderNode = (
+    folder: GfsBrowserChild,
+    ancestors: ReadonlySet<string>
+  ): GfsMoveTreeDataNode => {
+    foldersById.set(folder.resourceId, folder)
+    const isExpanded = expandedFolderIds.has(folder.resourceId)
+    const childQuery = childQueriesByResourceId.get(
+      childQuerySnapshotKey(scope, folder.resourceId, sessionGeneration)
+    )
+    const childDenied = isGfsChildrenDenied(childQuery?.error, childQuery?.data)
+    const childError = childDenied
+      ? 'This folder is no longer available.'
+      : errorMessage(childQuery?.error)
+    const childFolders =
+      childDenied || !childQuery?.data
+        ? []
+        : folderItems(
+            childQuery.data.pages.flatMap(page => page.items),
+            new Set([target.resourceId, ...ancestors])
+          )
+    const loadingChildren = Boolean(isExpanded && childQuery?.isFetching && !childQuery.data)
+    const hasMoreChildren = Boolean(childQuery?.hasNextPage)
+    const canExpand =
+      !childQuery?.data || loadingChildren || hasMoreChildren || childFolders.length > 0
+    const nextAncestors = new Set([...ancestors, folder.resourceId])
+    const children: GfsMoveTreeDataNode[] = []
+
+    if (isExpanded) {
+      if (loadingChildren) {
+        children.push({
+          key: `status:${folder.resourceId}:loading`,
+          selectable: false,
+          isLeaf: true,
+          title: (
+            <Flex align="center" gap="small" role="status" aria-live="polite">
+              <Spin size="small" />
+              <Typography.Text type="secondary">Loading subfolders…</Typography.Text>
+            </Flex>
+          ),
+        })
+      }
+      if (childError) {
+        children.push({
+          key: `status:${folder.resourceId}:error`,
+          selectable: false,
+          isLeaf: true,
+          title: <Alert type="error" showIcon title={childError} />,
+        })
+      }
+      children.push(...childFolders.map(child => buildFolderNode(child, nextAncestors)))
+      if (hasMoreChildren && childQuery) {
+        children.push({
+          key: `status:${folder.resourceId}:more`,
+          selectable: false,
+          isLeaf: true,
+          title: (
+            <Button
+              loading={childQuery.isFetchingNextPage}
+              onClick={event => {
+                event.stopPropagation()
+                void childQuery.fetchNextPage()
+              }}
+            >
+              Load more
+            </Button>
+          ),
+        })
+      }
+      if (!loadingChildren && !childError && childFolders.length === 0 && !hasMoreChildren) {
+        children.push({
+          key: `status:${folder.resourceId}:empty`,
+          selectable: false,
+          isLeaf: true,
+          title: <Typography.Text type="secondary">No subfolders.</Typography.Text>,
+        })
+      }
+    }
+
+    return {
+      key: folder.resourceId,
+      'aria-label': folder.name,
+      folder,
+      title: (
+        <Flex align="center" gap="small" data-resource-id={folder.resourceId}>
+          <span className="da-gfs-move-dialog__tree-folder-icon" aria-hidden="true">
+            <IconContexts aria-hidden="true" width={18} height={18} />
+          </span>
+          <Typography.Text>{folder.name}</Typography.Text>
+          {selectedDestination?.resourceId === folder.resourceId ? (
+            <IconCheck aria-label="Selected destination" width={16} height={16} />
+          ) : null}
+        </Flex>
+      ),
+      isLeaf: !canExpand,
+      children: children.length ? children : undefined,
+    }
   }
+  const treeData = rootFolders.map(folder => buildFolderNode(folder, new Set()))
+  foldersByIdRef.current = foldersById
 
   const isCurrentDestination = (destination: SelectedDestination) => {
     const expectedIdentity = dialogIdentityRef.current
@@ -493,190 +670,185 @@ export function GfsMoveDialog({
   }
 
   return (
-    <div
-      className="da-gfs-manage-modal"
-      role="presentation"
-      onMouseDown={event => {
-        if (event.target === event.currentTarget) closeDialog()
-      }}
-    >
-      <section
-        className="da-gfs-manage-dialog da-gfs-move-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Move ${target.kind === 'directory' ? 'folder' : 'file'} ${target.name}`}
-      >
-        <header className="da-gfs-manage-dialog__header">
-          <span className="da-gfs-manage-dialog__icon" aria-hidden="true">
-            <IconContexts />
-          </span>
-          <span className="da-gfs-manage-dialog__heading">
-            <h3>Move “{target.name}”</h3>
-          </span>
-          <span className="da-gfs-manage-dialog__top-actions">
-            <IconButton label="Close move dialog" onClick={closeDialog} size="sm" variant="ghost">
-              <IconClose />
-            </IconButton>
-          </span>
-        </header>
-        <div className="da-gfs-manage-dialog__body">
-          {permissionStatus === 'checking' ? (
-            <p className="muted" role="status">
-              Checking permissions…
-            </p>
-          ) : null}
-          {error ? <StatusBanner tone="error" text={error} /> : null}
-          {permissionCheckSucceeded ? (
-            <p className="muted" role="status">
-              Permissions verified. Select Move to confirm.
-            </p>
-          ) : null}
-          {permissionStatus === 'failed' ? (
-            <Button
-              disabled={busy || !selectedDestination || !isAuthorityCurrent()}
-              onClick={() => void retryPermissionCheck()}
-              size="sm"
-              variant="outline"
-            >
-              Retry permission check
+    <Modal
+      aria-label={`Move ${target.kind === 'directory' ? 'folder' : 'file'} ${target.name}`}
+      footer={
+        <Flex align="center" justify="space-between" gap="middle" wrap>
+          <Typography.Text role="status" aria-live="polite">
+            {selectedDestination
+              ? `Move to ${selectedDestination.name}`
+              : 'Select a destination folder'}
+          </Typography.Text>
+          <Flex gap="small">
+            <Button htmlType="button" onClick={closeDialog}>
+              Cancel
             </Button>
-          ) : null}
-          {numberedNameProposal ? (
-            <div
-              aria-label="Confirm numbered name for Move"
-              className="da-gfs-move-dialog__numbered-name-consent"
-              role="group"
+            <Button
+              aria-label={selectedDestination ? `Move here (${selectedDestination.name})` : 'Move'}
+              disabled={
+                busy ||
+                !isAuthorityCurrent() ||
+                numberedNameProposal !== null ||
+                !selectedDestination ||
+                pathPassesThroughTarget ||
+                isNoOpDestination
+              }
+              loading={busy}
+              htmlType="button"
+              onClick={() => void commit()}
+              type="primary"
             >
-              <p role="status">
-                This name already exists in {selectedDestination?.name}. Move it as{' '}
-                <strong>{numberedNameProposal}</strong>?
-              </p>
-              <div className="da-gfs-move-dialog__action-buttons">
-                <Button onClick={() => settleNumberedNameConsent(true)} type="button">
-                  Move as {numberedNameProposal}
-                </Button>
-                <Button
-                  onClick={() => settleNumberedNameConsent(false)}
-                  type="button"
-                  variant="outline"
-                >
-                  Keep current name
-                </Button>
-              </div>
-            </div>
-          ) : null}
-          {listError ? <StatusBanner tone="error" text={listError} /> : null}
-          <div className="da-gfs-move-dialog__current-location">
-            <span>Current location:</span>
-            <span className="da-gfs-move-dialog__location-pill">
-              <IconContexts />
-              <strong>
-                {currentParentName ??
-                  (currentParentId ? 'another shared folder' : 'Shared with me')}
-              </strong>
-            </span>
-          </div>
-          <div className="da-gfs-move-dialog__tree-heading">
-            <span className="da-gfs-move-dialog__tree-heading-copy">
-              <strong>Shared with me</strong>
-            </span>
-          </div>
-          <div
-            className="da-gfs-move-dialog__tree"
-            role="tree"
-            aria-label="EvenDrive destination folders"
+              Move
+            </Button>
+          </Flex>
+        </Flex>
+      }
+      onCancel={closeDialog}
+      closable={{
+        'aria-label': 'Close move dialog',
+        closeIcon: <IconClose aria-hidden="true" width={18} height={18} />,
+      }}
+      open
+      title={
+        <Flex align="center" gap="small">
+          <IconContexts aria-hidden="true" width={16} height={16} />
+          <Typography.Title
+            aria-label={`Move ${target.kind === 'directory' ? 'folder' : 'file'} ${target.name}`}
+            level={4}
           >
-            {loadingRoots ? (
-              <p className="muted" role="status">
-                Loading folders…
-              </p>
-            ) : rootFolders.length === 0 && !accessibleQuery.hasNextPage ? (
-              // A refused listing is not an absence of folders. The banner
-              // above already states the failure, so this only has to stop
-              // contradicting it — asserting "no folders" next to an error the
-              // user is reading is how a 429 ends up looking like an empty
-              // library.
-              <p className="muted">
-                {listError ? 'Destinations could not be listed.' : 'No folders here.'}
-              </p>
-            ) : (
-              <div className="da-gfs-move-dialog__tree-root">
-                {rootFolders.map(folder => (
-                  <GfsMoveTreeFolder
-                    ancestors={new Set()}
-                    expandedFolderIds={expandedFolderIds}
-                    folder={folder}
-                    key={folder.resourceId}
-                    level={1}
-                    onAuthorityFailure={onAuthorityFailure}
-                    onSelect={selectFolder}
-                    onToggle={toggleFolder}
-                    scope={scope}
-                    sessionGeneration={sessionGeneration}
-                    selectedDestination={selectedDestination}
-                    targetResourceId={target.resourceId}
-                  />
-                ))}
-                {accessibleQuery.hasNextPage ? (
-                  <div className="da-gfs-move-dialog__tree-more">
-                    <Button
-                      loading={accessibleQuery.isFetchingNextPage}
-                      onClick={() => void accessibleQuery.fetchNextPage()}
-                      size="sm"
-                      variant="outline"
-                    >
-                      Load more
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-            )}
-          </div>
-          <div className="da-gfs-move-dialog__actions">
-            <span className="da-gfs-move-dialog__selection" aria-live="polite">
-              {selectedDestination ? (
-                <>
-                  Move to <strong>{selectedDestination.name}</strong>
-                </>
-              ) : (
-                'Select a destination folder'
-              )}
-            </span>
-            <span className="da-gfs-move-dialog__action-buttons">
-              <Button onClick={closeDialog} type="button" variant="ghost">
-                Cancel
-              </Button>
-              <Button
-                aria-label={
-                  selectedDestination ? `Move here (${selectedDestination.name})` : 'Move'
-                }
-                disabled={
-                  busy ||
-                  !isAuthorityCurrent() ||
-                  numberedNameProposal !== null ||
-                  !selectedDestination ||
-                  pathPassesThroughTarget ||
-                  isNoOpDestination
-                }
-                loading={busy}
-                onClick={() => void commit()}
-                type="button"
-              >
-                Move
-              </Button>
-            </span>
-          </div>
-          {pathPassesThroughTarget ? (
-            <p className="muted">A folder can’t be moved into its own subtree.</p>
-          ) : null}
-          {isNoOpDestination ? (
-            <p className="muted">
-              {target.name} is already in {currentParentName ?? 'the folder you selected'} — pick a
-              different destination.
-            </p>
-          ) : null}
-        </div>
-      </section>
-    </div>
+            Move “{target.name}”
+          </Typography.Title>
+        </Flex>
+      }
+    >
+      <Flex
+        vertical
+        gap="middle"
+        ref={treeContainerRef}
+        onClickCapture={handleTreeRowClickCapture}
+        onKeyDownCapture={handleTreeKeyDownCapture}
+      >
+        {permissionStatus === 'checking' ? (
+          <Alert role="status" showIcon type="info" title="Checking permissions…" />
+        ) : null}
+        {error ? <Alert role="alert" showIcon type="error" title={error} /> : null}
+        {permissionCheckSucceeded ? (
+          <Alert
+            role="status"
+            showIcon
+            type="success"
+            title="Permissions verified. Select Move to confirm."
+          />
+        ) : null}
+        {permissionStatus === 'failed' ? (
+          <Button
+            htmlType="button"
+            disabled={busy || !selectedDestination || !isAuthorityCurrent()}
+            onClick={() => void retryPermissionCheck()}
+            size="small"
+          >
+            Retry permission check
+          </Button>
+        ) : null}
+        {numberedNameProposal ? (
+          <Alert
+            role="group"
+            aria-label="Confirm numbered name for Move"
+            type="warning"
+            showIcon
+            title={
+              <Flex vertical gap="small">
+                <Typography.Text role="status">
+                  This name already exists in {selectedDestination?.name}. Move it as{' '}
+                  <Typography.Text strong>{numberedNameProposal}</Typography.Text>?
+                </Typography.Text>
+                <Flex gap="small" wrap>
+                  <Button
+                    htmlType="button"
+                    disabled={busy || !isAuthorityCurrent()}
+                    onClick={() => settleNumberedNameConsent(true)}
+                    size="small"
+                    type="primary"
+                  >
+                    Move as {numberedNameProposal}
+                  </Button>
+                  <Button
+                    htmlType="button"
+                    disabled={busy}
+                    onClick={() => settleNumberedNameConsent(false)}
+                    size="small"
+                  >
+                    Keep current name
+                  </Button>
+                </Flex>
+              </Flex>
+            }
+          />
+        ) : null}
+        {listError ? <Alert role="alert" type="error" showIcon title={listError} /> : null}
+        <Flex align="center" gap="small">
+          <Typography.Text>Current location:</Typography.Text>
+          <Typography.Text strong>
+            <IconContexts aria-hidden="true" width={16} height={16} />{' '}
+            {currentParentName ?? (currentParentId ? 'another shared folder' : 'Shared with me')}
+          </Typography.Text>
+        </Flex>
+        <Typography.Text strong>Shared with me</Typography.Text>
+        {loadingRoots ? (
+          <Flex align="center" gap="small" role="status" aria-live="polite">
+            <Spin size="small" />
+            <Typography.Text>Loading folders…</Typography.Text>
+          </Flex>
+        ) : rootFolders.length === 0 && !accessibleQuery.hasNextPage ? (
+          <Empty
+            description={listError ? 'Destinations could not be listed.' : 'No folders here.'}
+          />
+        ) : rootFolders.length ? (
+          <>
+            {directoryFolders.map(folder => (
+              <GfsMoveChildrenQueryObserver
+                enabled={expandedFolderIds.has(folder.resourceId)}
+                sessionGeneration={sessionGeneration}
+                folder={folder}
+                key={folder.resourceId}
+                onResult={handleChildQueryResult}
+                scope={scope}
+              />
+            ))}
+            <Tree
+              aria-label="EvenDrive destination folders"
+              treeData={treeData}
+              virtual={false}
+              expandedKeys={[...expandedFolderIds]}
+              selectedKeys={selectedDestination ? [selectedDestination.resourceId] : []}
+              switcherIcon={<IconChevronRight aria-hidden="true" width={14} height={14} />}
+              onExpand={keys => setExpandedFolderIds(new Set(keys.map(String)))}
+              onSelect={(_keys, info) => {
+                const folder = foldersByIdRef.current.get(String(info.node.key))
+                if (folder) selectFolder(folder)
+              }}
+            />
+          </>
+        ) : null}
+        {accessibleQuery.hasNextPage ? (
+          <Button
+            loading={accessibleQuery.isFetchingNextPage}
+            onClick={() => void accessibleQuery.fetchNextPage()}
+          >
+            Load more
+          </Button>
+        ) : null}
+        {pathPassesThroughTarget ? (
+          <Alert type="warning" showIcon title="A folder can’t be moved into its own subtree." />
+        ) : null}
+        {isNoOpDestination ? (
+          <Alert
+            type="info"
+            showIcon
+            title={`${target.name} is already in ${currentParentName ?? 'the folder you selected'} — pick a different destination.`}
+          />
+        ) : null}
+      </Flex>
+    </Modal>
   )
 }

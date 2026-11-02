@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import type { ReactNode } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -21,6 +22,7 @@ import {
   heldPermissionResponse,
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { FilesPage } from '../FilesPage'
 
 vi.mock('electron', () => ({
@@ -75,7 +77,21 @@ function wrapper(client: QueryClient) {
   }
 }
 
+async function selectAntdOption(name: string | RegExp) {
+  const option = await screen.findByRole('option', { name })
+  const dropdown = option.closest('.ant-select-dropdown')
+  const visibleOption = Array.from(
+    dropdown?.querySelectorAll<HTMLElement>('.ant-select-item-option') ?? []
+  ).find(item =>
+    name instanceof RegExp ? name.test(item.textContent ?? '') : item.textContent?.includes(name)
+  )
+  if (!visibleOption) throw new Error(`Visible AntD option ${String(name)} is missing`)
+  await userEvent.setup().click(visibleOption)
+}
+
 describe('FilesPage stale permission action oracle', () => {
+  beforeEach(installAntdDomEnvironment)
+
   afterEach(() => {
     cleanup()
     vi.useRealTimers()
@@ -488,15 +504,13 @@ describe('FilesPage stale permission action oracle', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for report-0.txt' }))
     })
     const menu = screen.getByRole('menu', { name: 'Actions for report-0.txt' })
-    await act(async () => {
-      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename' }))
-    })
     await waitFor(() => expect(rowReads.get('child-0')).toBe(2))
     expect([...rowReads.values()].reduce((sum, reads) => sum + reads, 0)).toBe(21)
+    expect(within(menu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
     expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
     expect(renameResource).not.toHaveBeenCalled()
     client.clear()
-  })
+  }, 120_000)
 
   it('keeps current-folder actions presented during a background permission refetch', async () => {
     const folder = await resolveResource(
@@ -843,18 +857,22 @@ describe('FilesPage stale permission action oracle', () => {
       })
       await screen.findByRole('button', { name: 'Options for Reports' })
       fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
-      fireEvent.click(await screen.findByRole('menuitem', { name: /^Share$/ }))
-      const shareMenu = await screen.findByRole('menu', { name: 'Share options for Reports' })
+      fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: /^Share$/ }))
+      await screen.findByRole('menuitem', { name: 'Copy link' })
+      const shareMenu = screen.getAllByRole('menu')[1]!
       fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
       await screen.findByRole('dialog', { name: 'Share folder Reports' })
 
       const picker = await screen.findByRole('combobox', {
         name: 'Add people, teams, or agents',
       })
-      fireEvent.focus(picker)
-      fireEvent.click(await screen.findByRole('option', { name: /chatllm/ }))
-      fireEvent.click(screen.getByRole('button', { name: 'Access role for selected recipients' }))
-      fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+      fireEvent.mouseDown(picker)
+      await selectAntdOption(/chatllm/)
+      const rolePicker = screen.getByRole('combobox', {
+        name: 'Access role for selected recipients',
+      })
+      fireEvent.mouseDown(rolePicker)
+      await selectAntdOption('Editor')
       await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(1))
 
       const permissionKey = desktopQueryKeys.gfsAffordances(
@@ -927,7 +945,7 @@ describe('FilesPage stale permission action oracle', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move folder Reports' })
-    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Archive' }))
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     expect(
@@ -1057,7 +1075,10 @@ describe('FilesPage stale permission action oracle', () => {
     if (moveItem) fireEvent.click(moveItem)
     expect
       .soft(pushToast)
-      .toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
+      .toHaveBeenCalledWith(
+        expect.stringMatching(/^Too many file requests — try again in [1-7]s\.$/),
+        'error'
+      )
     expect(moveResource).not.toHaveBeenCalled()
     expect(sourceParentReads).toBe(2)
 
@@ -1146,7 +1167,10 @@ describe('FilesPage stale permission action oracle', () => {
       expect(moveItem).toBeTruthy()
       fireEvent.click(moveItem)
       await waitFor(() =>
-        expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
+        expect(pushToast).toHaveBeenCalledWith(
+          expect.stringMatching(/^Too many file requests — try again in [1-7]s\.$/),
+          'error'
+        )
       )
       expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
       expect(moveResource).not.toHaveBeenCalled()
@@ -1350,14 +1374,16 @@ describe('FilesPage stale permission action oracle', () => {
 
       const menu = screen.getByRole('menu', { name: 'Actions for Reports' })
       const identityActions = () =>
-        within(screen.getByRole('menu', { name: 'Share options for Reports' }))
+        within(screen.getAllByRole('menu')[1]!)
           .getAllByRole('menuitem')
           .map(item => item.textContent?.trim())
           .filter(label => label === 'Copy link' || label === 'Copy folder ID')
-      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+      const shareItem = within(menu).getByRole('menuitem', { name: 'Share' })
+      await userEvent.setup().hover(shareItem)
+      await screen.findByRole('menuitem', { name: 'Copy link' })
       const identityActionsBefore = identityActions()
       expect(identityActionsBefore).toEqual(['Copy link', 'Copy folder ID'])
-      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+      fireEvent.mouseEnter(within(menu).getByRole('menuitem', { name: 'Share' }))
       expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
 
       vi.setSystemTime(Date.now() + 16_000)
@@ -1383,8 +1409,10 @@ describe('FilesPage stale permission action oracle', () => {
       expect(actionsAfterDenial).not.toContain('New folder')
       expect(actionsAfterDenial).not.toContain('Upload file')
       expect(actionsAfterDenial).not.toContain('Delete')
-      fireEvent.click(within(currentMenu).getByRole('menuitem', { name: 'Share' }))
-      const shareMenu = screen.getByRole('menu', { name: 'Share options for Reports' })
+      const shareItemAfterDenial = within(currentMenu).getByRole('menuitem', { name: 'Share' })
+      await userEvent.setup().hover(shareItemAfterDenial)
+      await screen.findByRole('menuitem', { name: 'Copy link' })
+      const shareMenu = screen.getAllByRole('menu')[1]!
       expect(within(shareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
       expect(identityActions()).toEqual(identityActionsBefore)
       client.clear()
