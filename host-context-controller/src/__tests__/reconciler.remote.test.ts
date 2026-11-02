@@ -290,6 +290,19 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(conf).toContain(`proxy_pass https://api.example.com/mcp?apikey=${placeholder};`)
     })
 
+    it('renders a lowercase query placeholder declared by envSecret', () => {
+      // Kubernetes env names and envsubst are case-sensitive and accept
+      // lowercase; `dev` rendered and substituted this shape.
+      const placeholder = '$' + '{api_key}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?key=${placeholder}` },
+        envSecret: { name: 'remote-creds', keys: [{ secretKey: 'k', envVar: 'api_key' }] },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain(`proxy_pass https://api.example.com/mcp?key=${placeholder};`)
+    })
+
     it('rejects an undeclared query placeholder without echoing the query (A1.1)', () => {
       const marker = 'zz-undeclared-marker'
       const server = cloneServer(REMOTE_SERVER, {
@@ -313,11 +326,19 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('rejects a placeholder declared in a different case (A1.1)', () => {
+      const declared = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?apikey=` + '$' + '{ALPHA_KEY}' },
+        env: [{ name: 'ALPHA_KEY', value: '' }],
+      })
       const server = cloneServer(REMOTE_SERVER, {
         remote: { baseUrl: `https://api.example.com/mcp?apikey=` + '$' + '{ALPHA_KEY}' },
         env: [{ name: 'alpha_key', value: '' }],
       })
 
+      // Witness: the same placeholder renders when the declared name matches.
+      expect(remoteConfig(reconciler, declared)).toContain(
+        'proxy_pass https://api.example.com/mcp?apikey=${ALPHA_KEY};'
+      )
       expect(() => remoteConfig(reconciler, server)).toThrow(
         'query placeholder ${ALPHA_KEY} is not declared'
       )
@@ -390,6 +411,30 @@ describe('McpServerReconciler remote egress proxy', () => {
       } finally {
         warn.mockRestore()
       }
+    })
+
+    it.each([
+      ['NGINX_LOCAL_RESOLVERS'],
+      ['NGINX_ENVSUBST_FILTER'],
+      ['NGINX_ENTRYPOINT_LOCAL_RESOLVERS'],
+    ])('rejects a query placeholder naming platform-owned proxy env (%s)', name => {
+      const placeholder = '$' + `{${name}}`
+      const withoutPlaceholder = cloneServer(REMOTE_SERVER, {
+        env: [{ name, value: 'decoy' }],
+      })
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?r=${placeholder}` },
+        env: [{ name, value: 'decoy' }],
+      })
+
+      // Witness: the same CRD renders once the placeholder is gone, so the
+      // reject comes from the placeholder and not from the spec.env entry.
+      expect(remoteConfig(reconciler, withoutPlaceholder)).toContain(
+        'proxy_pass https://mcp.sentry.io/sse;'
+      )
+      expect(() => remoteConfig(reconciler, server)).toThrow(
+        'names an env var the egress-proxy platform sets, not the CRD'
+      )
     })
 
     it('should contain proxy_pass directive pointing to the remote baseUrl', () => {
@@ -811,6 +856,45 @@ describe('McpServerReconciler remote egress proxy', () => {
         expect(conf).not.toContain('evil')
         expect(warn).toHaveBeenCalledWith(expect.stringContaining('CR/LF/NUL'))
         warn.mockRestore()
+      })
+
+      it('drops authHeaders that reference a forbidden or platform-owned env name', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+          const server = buildWithAuth([
+            { header: 'X-Resolver', valueTemplate: '$' + '{NGINX_LOCAL_RESOLVERS}' },
+            { header: 'X-Path', valueTemplate: '$' + 'PATH' },
+            { header: 'Authorization', valueTemplate: 'Bearer ' + '$' + '{SENTRY_AUTH_TOKEN}' },
+          ])
+          const cm = (reconciler as any).buildNginxConfigMap(server)
+          const conf = cm.data['default.conf.template']
+          const deployment = (reconciler as any).buildDeployment(server)
+          const egressProxy = deployment.spec.template.spec.containers.find(
+            (candidate: any) => candidate.name === 'egress-proxy'
+          )
+          const names = (egressProxy.env ?? []).map((entry: any) => entry.name)
+
+          // Witness: the sibling header over a CRD-controlled env name renders.
+          expect(conf).toContain('proxy_set_header Authorization "Bearer ${SENTRY_AUTH_TOKEN}";')
+          expect(conf).not.toContain('proxy_set_header X-Resolver')
+          expect(conf).not.toContain('proxy_set_header X-Path')
+          // A dropped header must not leave its env name in the container either:
+          // the backfill must not create PATH='' or override a resolver variable.
+          expect(names).not.toContain('PATH')
+          expect(names).not.toContain('NGINX_LOCAL_RESOLVERS')
+          // Witness: the env the CRD does control is still present.
+          expect(names).toContain('SENTRY_AUTH_TOKEN')
+          // The warning names the header, never the value it referenced.
+          const rejected = warn.mock.calls
+            .map(args => args.map(String).join(' '))
+            .filter(line => line.includes('Rejecting authHeader'))
+          expect(rejected).toHaveLength(2)
+          expect(rejected.join('\n')).toContain('X-Resolver')
+          expect(rejected.join('\n')).toContain('X-Path')
+          expect(rejected.join('\n')).not.toContain('NGINX_LOCAL_RESOLVERS')
+        } finally {
+          warn.mockRestore()
+        }
       })
     })
   })
@@ -1688,14 +1772,20 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it.each([
-      ['a lowercase placeholder', '?k=$' + '{alpha_key}'],
       ['a placeholder starting with a digit', '?k=$' + '{1A}'],
+      ['a placeholder with a hyphen', '?k=$' + '{A-B}'],
       ['a bare dollar', '?k=$ALPHA'],
       ['an unterminated placeholder', '?k=$' + '{ALPHA'],
       ['a brace expression', '?k={x}'],
       ['a backslash', '?k=a' + String.fromCharCode(92) + 'b'],
       ['a semicolon', '?k=a;b'],
     ])('rejects %s in a remote URL query (Q2)', (_label, query) => {
+      // Witness: a complete placeholder over the same character class is kept.
+      expect(
+        (reconciler as any).sanitizeRemoteUrl('https://api.example.com/mcp?k=$' + '{Alpha_1}')
+          .search
+      ).toBe('?k=${Alpha_1}')
+
       let error: unknown
       try {
         ;(reconciler as any).sanitizeRemoteUrl(`https://api.example.com/mcp${query}`)
@@ -1706,7 +1796,7 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(error).toBeInstanceOf(Error)
       const message = (error as Error).message
       expect(message).toMatch(/invalid placeholder|forbidden character/)
-      expect(message).toMatch(/\[A-Z_\]\[A-Z0-9_\]\*/)
+      expect(message).toMatch(/\[A-Za-z_\]\[A-Za-z0-9_\]\*/)
       expect(message).not.toContain(query)
       // The value alone must not be echoed either (it may be the credential).
       expect(message).not.toContain(query.slice(query.indexOf('=') + 1))
@@ -1727,6 +1817,72 @@ describe('McpServerReconciler remote egress proxy', () => {
       const message = (error as Error).message
       expect(message).toContain('remote.baseUrl path contains a forbidden character')
       expect(message).not.toContain(path)
+    })
+
+    it.each([
+      ['a semicolon', 'a;b.example.com'],
+      ['a dollar sign', 'a$host.example.com'],
+      ['braces', 'a{b}.example.com'],
+    ])('rejects %s in the remote URL hostname without echoing it', (_label, hostname) => {
+      // The URL parser keeps these characters in the hostname; rendered unquoted
+      // they end the `server` directive or become NGINX variables.
+      expect(new URL(`https://${hostname}/mcp`).hostname).toBe(hostname)
+      // Witness: a host over the allowed character class is accepted.
+      expect((reconciler as any).sanitizeRemoteUrl('https://a-b.example.com/mcp').host).toBe(
+        'a-b.example.com'
+      )
+
+      let error: unknown
+      try {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://${hostname}/mcp`)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain('remote.baseUrl hostname contains characters outside [a-z0-9._-]')
+      expect(message).not.toContain(hostname)
+    })
+
+    it.each([
+      [
+        'an uppercase hostname the parser lowercases',
+        'https://API.Example.com/mcp',
+        'api.example.com',
+      ],
+      [
+        'an IDN the parser converts to punycode',
+        'https://bücher.example/mcp',
+        'xn--bcher-kva.example',
+      ],
+      ['a hyphen and an underscore', 'https://my-api_v2.example.com/mcp', 'my-api_v2.example.com'],
+    ])('accepts %s', (_label, url, hostname) => {
+      expect((reconciler as any).sanitizeRemoteUrl(url).host).toBe(hostname)
+    })
+
+    it.each([['sentry.svc.cluster.local.'], ['kubernetes.default.']])(
+      'rejects an internal cluster hostname written with a trailing dot (%s)',
+      hostname => {
+        // Witness: the same host without the dot is rejected for the same reason,
+        // so the trailing dot cannot be used to bypass the suffix check.
+        expect(() => (reconciler as any).sanitizeRemoteUrl(`https://${hostname}/sse`)).toThrow(
+          'must not point to internal cluster services'
+        )
+        expect(() =>
+          (reconciler as any).sanitizeRemoteUrl(`https://${hostname.slice(0, -1)}/sse`)
+        ).toThrow('must not point to internal cluster services')
+      }
+    )
+
+    it('canonicalizes one trailing dot so host and safeUrl are canonical', () => {
+      // Witness: a public host with the DNS root label is accepted, and the
+      // rendered URL no longer carries the dot (which NGINX would treat as part
+      // of the host in `proxy_pass`, `proxy_ssl_name` and the Host header).
+      const result = (reconciler as any).sanitizeRemoteUrl('https://api.example.com./mcp?k=1')
+
+      expect(result.host).toBe('api.example.com')
+      expect(result.safeUrl).toBe('https://api.example.com/mcp?k=1')
     })
 
     it('should reject all IP addresses including non-private ones', () => {
@@ -2020,10 +2176,25 @@ describe('remote reconcile security warnings', () => {
     const reconciler = buildReconciler(appsApi, coreApi, customApi)
     try {
       await reconciler.reconcile(
-        cloneServer(REMOTE_SERVER, { env: [{ name: 'LD_PRELOAD', value: '/x.so' }] })
+        cloneServer(REMOTE_SERVER, {
+          env: [
+            { name: 'SAFE_VAR', value: 'ok' },
+            { name: 'LD_PRELOAD', value: '/x.so' },
+          ],
+        })
       )
 
       expect(appsApi.createNamespacedDeployment).toHaveBeenCalledOnce()
+      // The created Deployment is the reviewed artifact: the forbidden name is
+      // gone from the container env, and the safe sibling is still there.
+      const deployment = appsApi.createNamespacedDeployment.mock.calls[0][0].body
+      const egressProxy = deployment.spec.template.spec.containers.find(
+        (candidate: any) => candidate.name === 'egress-proxy'
+      )
+      const envNames = (egressProxy.env ?? []).map((entry: any) => entry.name)
+      expect(envNames).toContain('SAFE_VAR')
+      expect(envNames).not.toContain('LD_PRELOAD')
+
       const stripped = warn.mock.calls.filter(args => {
         const line = args.map(String).join(' ')
         return line.includes('LD_PRELOAD') && line.includes('stripped (forbidden)')

@@ -28,23 +28,30 @@ in [host-context-controller](../host-context-controller/) (`src/reconciler.ts`).
 For each remote McpServer, host-context-controller:
 
 1. **Validates and sanitizes `spec.remote.baseUrl`** (`sanitizeRemoteUrl`):
-   HTTPS only; DNS hostnames only (IPv4/IPv6 literals rejected); internal
-   cluster hosts (`*.svc`, `*.svc.cluster.local`, `kubernetes.default`) and
+   HTTPS only; DNS hostnames only (IPv4/IPv6 literals rejected); the hostname
+   must stay within `[a-z0-9._-]` (the URL parser lowercases ASCII names and
+   converts IDNs to punycode), and trailing root-label dots are removed before
+   the host checks, so `sentry.svc.cluster.local.` is still rejected as internal
+   while `api.example.com.` renders as `api.example.com`. Internal cluster hosts
+   (`*.svc`, `*.svc.cluster.local`, `kubernetes.default`) and
    private/link-local/loopback patterns rejected; the URL is reconstructed from
    parsed components so injected characters (e.g. newlines) are stripped.
    Query placeholders must be complete `${NAME}` values where `NAME` matches
-   `[A-Z_][A-Z0-9_]*`; bare dollars, malformed braces, backslashes, and
+   `[A-Za-z_][A-Za-z0-9_]*`; bare dollars, malformed braces, backslashes, and
    semicolons are rejected. The URL parser strips TAB/CR/LF and percent-encodes
    other control characters and spaces before that check. A placeholder name is
    set in the egress-proxy container env (`spec.env`, except the names HCC
    strips as forbidden; `spec.envSecret`; `envMapping`; or a placeholder of
    `spec.remote.authHeaders`); an undeclared name is rejected, because it would
    otherwise survive into the rendered config, where NGINX resolves it as one of
-   its own variables. The path takes no placeholders. Before the path check,
-   the URL parser converts `\` to `/` and percent-encodes braces, spaces, and
-   control characters, so the check rejects `$` and `;` in practice because
-   they would change the unquoted NGINX template. The value of a query
-   placeholder must use only
+   its own variables. The platform-owned proxy env
+   (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS`, `NGINX_ENVSUBST_FILTER`,
+   `NGINX_LOCAL_RESOLVERS`) is never CRD-controlled, so those names cannot be
+   used as query placeholders or in an authHeader value. The path takes no
+   placeholders. Before the path check, the URL parser converts `\` to `/` and
+   percent-encodes braces, spaces, and control characters, so the check rejects
+   `$` and `;` in practice because they would change the unquoted NGINX
+   template. The value of a query placeholder must use only
    `[A-Za-z0-9._~-]` and complete `%XX` escapes; store any other character
    percent-encoded. The proxy never encodes a value, and an already
    percent-encoded value is passed through unchanged.
@@ -56,6 +63,9 @@ For each remote McpServer, host-context-controller:
    header names restricted to `[A-Za-z0-9-]`, values capped at 2048 chars,
    CR/LF/NUL rejected (HTTP request smuggling / nginx directive-injection
    defense), backslashes and quotes escaped for nginx's quoted-string context.
+   A value referencing a forbidden env name (`PATH`, `LD_PRELOAD`, ...) or a
+   platform-owned proxy env is dropped as a whole, and the name is not
+   backfilled into the container env.
 4. **Deploys this image as the only container** (`egress-proxy`) of the
    per-server Deployment. The ConfigMap mounts at `/etc/nginx/templates`, so
    `envsubst` resolves `${VAR}` placeholders in auth headers at pod start from
@@ -79,7 +89,7 @@ before closing the underlying issue:
    into an issue, PR, or log.
 2. Rotate each affected provider key, because the old value may already have
    reached a ConfigMap or the NGINX error log.
-3. Replace the literal query value with an uppercase `${NAME}` placeholder and
+3. Replace the literal query value with a complete `${NAME}` placeholder and
    provide the new value through `spec.envSecret`, not `spec.env`.
 4. Apply the updated CRD. HCC records the digest of the rendered NGINX template
    on the remote PodTemplate, so a ConfigMap-only URL change rolls the egress

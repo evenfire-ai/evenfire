@@ -135,10 +135,21 @@ const NGINX_CONFIG_REVISION_ANNOTATION = 'clerum.io/nginx-config-revision'
 const HEADER_NAME_RE = /^[A-Za-z0-9-]+$/
 // Bound the value length so a pathological CRD cannot blow up the ConfigMap.
 const MAX_AUTH_HEADER_VALUE_LENGTH = 2048
+// Env refs envsubst resolves in an authHeader value: braced `${NAME}` or bare
+// `$NAME`, exact case like envsubst. Extracted only to reject names the CRD
+// does not control; the value itself is never logged.
+const AUTH_HEADER_ENV_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
 // Query placeholders are expanded by the image entrypoint after HCC has built
-// the ConfigMap. Restrict them to uppercase environment-variable names so an
-// unresolved value cannot become an arbitrary NGINX variable.
-const QUERY_PLACEHOLDER_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g
+// the ConfigMap. Restrict them to environment-variable names; a name must also
+// be declared by the CRD and survive into the proxy container (see
+// buildNginxConfigMap), so an unresolved name cannot become an arbitrary NGINX
+// variable. envsubst and Kubernetes env names are case-sensitive and accept
+// lowercase.
+const QUERY_PLACEHOLDER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
+// The URL parser lowercases ASCII hostnames and converts IDNs to punycode, but
+// it keeps `;`, `$` and braces. The hostname is rendered unquoted into NGINX
+// directives, so it must stay within the CRD schema's host character class.
+const REMOTE_HOSTNAME_RE = /^[a-z0-9._-]+$/
 // CRD-supplied env names that could hijack the runtime (loader, interpreter or
 // cluster-access knobs). sanitizeCrdSpec strips them from spec.env.
 const FORBIDDEN_CRD_ENV_NAMES = new Set([
@@ -151,6 +162,16 @@ const FORBIDDEN_CRD_ENV_NAMES = new Set([
   'KUBECONFIG',
   'KUBERNETES_SERVICE_HOST',
   'KUBERNETES_SERVICE_PORT',
+])
+// Egress-proxy env whose value the platform owns: buildContainerEnv appends the
+// empty NGINX_ENVSUBST_FILTER after every CRD env source, and the image
+// entrypoint exports the resolver variables itself. A CRD declaration never
+// controls their value, so a placeholder naming one of them would resolve to a
+// platform value and be sent upstream.
+const PLATFORM_OWNED_PROXY_ENV = new Set([
+  'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
+  'NGINX_ENVSUBST_FILTER',
+  'NGINX_LOCAL_RESOLVERS',
 ])
 
 function withoutForbiddenCrdEnv<T extends { name: string }>(
@@ -968,12 +989,29 @@ export class McpServerReconciler {
     if (parsed.protocol !== 'https:') {
       throw new Error(`remote.baseUrl must use HTTPS (got ${parsed.protocol})`)
     }
-    const host = parsed.hostname
+    // Trailing dots are the DNS root label for the same name. Remove them
+    // before any host check so a suffixed internal name (for example
+    // `sentry.svc.cluster.local.`) cannot bypass the suffix checks, and write it
+    // back so parsed.host/origin — and therefore safeUrl — are canonical too.
+    // A single-label or otherwise odd host is out of scope here.
+    let host = parsed.hostname
+    if (host.endsWith('.')) {
+      host = host.replace(/\.+$/, '')
+      parsed.hostname = host
+    }
     // Block IP-literal URLs entirely (IPv4 and IPv6) — require DNS hostnames only
     // This prevents IPv6 SSRF bypasses (::1, ::ffff:7f00:1, fd00::, etc.)
     const bareHost = host.replace(/^\[|\]$/g, '')
     if (/^[\d.:[\]]+$/.test(bareHost) || bareHost.includes(':')) {
       throw new Error(`remote.baseUrl must use a DNS hostname, not an IP address: ${host}`)
+    }
+    // The hostname is rendered unquoted in `proxy_pass` (via safeUrl) and the
+    // Host header, where `;` ends the directive and
+    // `$name` is an NGINX variable. The CRD schema already limits it to
+    // [a-z0-9._-]; repeat that here so the renderer does not depend on
+    // admission. The error does not echo the hostname.
+    if (!REMOTE_HOSTNAME_RE.test(host)) {
+      throw new Error('remote.baseUrl hostname contains characters outside [a-z0-9._-]')
     }
     // Block internal cluster services (SSRF prevention)
     if (
@@ -989,16 +1027,17 @@ export class McpServerReconciler {
       throw new Error(`remote.baseUrl must not point to private/reserved IP ranges: ${host}`)
     }
     // Defense in depth for the generated NGINX directive: the query is rendered
-    // unquoted in `proxy_pass`, so only complete, uppercase
-    // placeholders may remain dynamic. The URL parser strips TAB/CR/LF and
-    // percent-encodes spaces and other control characters, so in practice this
-    // rejects `$`, braces, `\` and `;` outside a complete placeholder; undeclared
-    // names are rejected below. The error does not echo the query.
+    // unquoted in `proxy_pass`, so only complete placeholders with
+    // environment-variable names may remain dynamic. The URL parser strips
+    // TAB/CR/LF and percent-encodes spaces and other control characters, so in
+    // practice this rejects `$`, braces, `\` and `;` outside a complete
+    // placeholder; undeclared names are rejected below. The error does not echo
+    // the query.
     const queryWithoutPlaceholders = parsed.search.replace(QUERY_PLACEHOLDER_RE, '')
     if (/[\\;{}$\u0000-\u0020]/.test(queryWithoutPlaceholders)) {
       throw new Error(
         'remote.baseUrl query contains an invalid placeholder or forbidden character; ' +
-          'query placeholders must use ${NAME} with NAME matching [A-Z_][A-Z0-9_]*'
+          'query placeholders must use ${NAME} with NAME matching [A-Za-z_][A-Za-z0-9_]*'
       )
     }
     // The path is rendered unquoted in `location` and `proxy_pass`,
@@ -1052,6 +1091,22 @@ export class McpServerReconciler {
       })
       return null
     }
+    // The rendered `proxy_set_header` is envsubst-filled at pod start from the
+    // container env, so a reference to a forbidden name (stripped from
+    // spec.env) or to a platform-owned egress-proxy env would inject a platform
+    // value (the image PATH, the resolver variables) into the outbound request.
+    // Names are compared exact-case: a distinct lowercase name is another env.
+    // The warning names the header, never the value.
+    for (const match of h.valueTemplate.matchAll(AUTH_HEADER_ENV_REF_RE)) {
+      const referenced = match[1] ?? match[2] ?? ''
+      if (FORBIDDEN_CRD_ENV_NAMES.has(referenced) || PLATFORM_OWNED_PROXY_ENV.has(referenced)) {
+        hccLogger.warn(
+          `Rejecting authHeader referencing a forbidden or platform-owned env var for header: ${h.header}`,
+          { scope: '[HCC]' }
+        )
+        return null
+      }
+    }
     // Escape backslashes (first, to avoid double-escaping) then double quotes so
     // the value is safe inside nginx's `"..."` string context.
     const escaped = h.valueTemplate.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
@@ -1072,13 +1127,21 @@ export class McpServerReconciler {
     // query. The comparison is exact and case-sensitive, like envsubst's.
     // Declared means present in the env this reconcile gives the egress-proxy
     // container: envMapping, spec.env after the forbidden names are stripped,
-    // spec.envSecret, the authHeaders backfill and the platform entries.
+    // spec.envSecret and the authHeaders backfill. Platform-owned egress-proxy
+    // env is never CRD-controlled, so a placeholder naming one of those is
+    // rejected before the declared check.
     const declaredEnvNames = this.egressProxyEnvNames(server)
     for (const match of upstreamSearch.matchAll(QUERY_PLACEHOLDER_RE)) {
+      if (PLATFORM_OWNED_PROXY_ENV.has(match[1])) {
+        throw new Error(
+          `remote.baseUrl query placeholder \${${match[1]}} names an env var the ` +
+            'egress-proxy platform sets, not the CRD'
+        )
+      }
       if (!declaredEnvNames.has(match[1])) {
         throw new Error(
-          `remote.baseUrl query placeholder \${${match[1]}} is not declared in spec.env or ` +
-            'spec.envSecret, or its env entry was stripped as forbidden'
+          `remote.baseUrl query placeholder \${${match[1]}} is not declared in the ` +
+            'egress-proxy container env, or its env entry was stripped as forbidden'
         )
       }
     }
@@ -1375,27 +1438,21 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
 
   /**
    * Names of the env vars the egress-proxy container of a remote server
-   * receives. buildDeployment and this method share buildContainerEnv and the
-   * forbidden-name filter, so no second copy of those rules exists here. The
-   * filter runs silently: buildDeployment reports each stripped name once per
+   * receives. Derived from buildContainerEnv, the same function buildDeployment
+   * uses, so no second copy of those rules exists here. buildContainerEnv strips
+   * forbidden names silently; buildDeployment reports each one once per
    * reconcile, and this lookup must not report it again.
    */
   private egressProxyEnvNames(server: McpServerCRD): Set<string> {
-    const envSafe: McpServerCRD = {
-      ...server,
-      spec: {
-        ...server.spec,
-        env: server.spec.env && withoutForbiddenCrdEnv(server.spec.env),
-      },
-    }
-    return new Set(this.buildContainerEnv(envSafe).map(entry => entry.name))
+    return new Set(this.buildContainerEnv(server).map(entry => entry.name))
   }
 
   /**
    * Env for the server's main container (the egress proxy of a remote server):
    * envMapping, spec.env, spec.envSecret, then the remote authHeaders backfill
-   * and the platform-owned NGINX_ENVSUBST_FILTER. Expects spec.env already
-   * stripped of forbidden names.
+   * and the platform-owned NGINX_ENVSUBST_FILTER. Forbidden spec.env names are
+   * stripped here, silently, so no caller can deploy one; buildDeployment
+   * sanitizes first and reports each stripped name once per reconcile.
    */
   private buildContainerEnv(server: McpServerCRD): k8s.V1EnvVar[] {
     const transportPort = server.spec.transport.port || 3000
@@ -1436,9 +1493,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       }
     }
 
-    // Additional plain env vars from CRD (server-specific extras)
+    // Additional plain env vars from CRD (server-specific extras). The strip is
+    // the last line of defense: a caller that skipped sanitizeCrdSpec still
+    // cannot deploy a forbidden name. Order and duplicates are preserved.
     if (server.spec.env) {
-      for (const e of server.spec.env) {
+      for (const e of withoutForbiddenCrdEnv(server.spec.env)) {
         env.push({ name: e.name, value: e.value })
       }
     }
@@ -1461,6 +1520,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // Remote servers: ensure authHeaders ${VAR} placeholders have env vars
     // defined, even when credentials are optional and envSecret is absent.
     // Without this, nginx envsubst fails with "unknown variable" on startup.
+    // A name the authHeader guard rejects (forbidden or platform-owned) is never
+    // backfilled: the header is already dropped, and a `value: ''` entry would
+    // only override the container's own value (PATH, the resolver variables).
     if (isRemote && server.spec.remote?.authHeaders) {
       const definedVars = new Set(env.map(e => e.name))
       for (const ah of server.spec.remote.authHeaders) {
@@ -1468,6 +1530,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (!matches) continue
         for (const m of matches) {
           const varName = m.slice(2, -1)
+          if (FORBIDDEN_CRD_ENV_NAMES.has(varName) || PLATFORM_OWNED_PROXY_ENV.has(varName)) {
+            continue
+          }
           if (!definedVars.has(varName)) {
             env.push({ name: varName, value: '' })
             definedVars.add(varName)
