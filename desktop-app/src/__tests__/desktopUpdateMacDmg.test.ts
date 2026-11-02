@@ -6,6 +6,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -96,8 +97,13 @@ describe('verified macOS installer cache', () => {
     )
     expect(path.basename(saved.filePath)).toBe('Evenfire-v0.12.0.dmg')
     expect(saved.sha256).toBe(fixture.expectedSha256)
-    expect((await lstat(saved.filePath)).mode & 0o777).toBe(0o600)
-    expect(await readFile(saved.filePath)).toEqual(fixture.contents)
+    const savedInstaller = await open(saved.filePath, 'r')
+    try {
+      expect((await savedInstaller.stat()).mode & 0o777).toBe(0o600)
+      expect(await savedInstaller.readFile()).toEqual(fixture.contents)
+    } finally {
+      await savedInstaller.close()
+    }
     expect((await readdir(fixture.userDataPath)).sort()).toEqual([
       'auth',
       'runtime-configs',
