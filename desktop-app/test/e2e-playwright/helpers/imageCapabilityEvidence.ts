@@ -57,6 +57,13 @@ export const FIXTURE_RESPONSE_KIND = {
   // delivered.
   documentReadRequested: 'document-read-requested',
   documentAnswer: 'document-answer',
+  // Attachment save: discovery asks for `clerum__gfs_accessible`, the save asks
+  // for `clerum__gfs_save_attachment`, the answer reports its outcome, and the
+  // absent row proves the save tool was not offered on a turn without bytes.
+  attachmentSaveDiscoveryRequested: 'attachment-save-discovery-requested',
+  attachmentSaveRequested: 'attachment-save-requested',
+  attachmentSaveAnswer: 'attachment-save-answer',
+  attachmentSaveToolAbsent: 'attachment-save-tool-absent',
 } as const
 
 /**
@@ -85,6 +92,11 @@ export const FIXTURE_REJECTION_REASONS: readonly string[] = Object.freeze([
   'document-tool-output-unreadable',
   'document-page-range-malformed',
   'document-stream-unsupported',
+  'save-tool-output-malformed',
+  'save-folder-not-unique',
+  'save-folder-beyond-first-page',
+  'save-attachment-line-missing',
+  'save-write-tools-missing',
 ])
 
 /** The fixture's text-only answer. It names no image and no color. */
@@ -310,6 +322,11 @@ export interface FixtureProviderAttempt {
   byteRange?: { offset: number; length: number }
   /** Whether the Host delivered less than the whole file. Answer row only. */
   truncated?: boolean
+  /**
+   * Outcome of the save the fixture asked for: `success`, or the exact redacted
+   * mutation failure the Host returned. Present only on the save-answer row.
+   */
+  saveOutcome?: string
   /** One of {@link FIXTURE_REJECTION_REASONS}. Present only on rejected rows. */
   reason?: string
 }
@@ -431,6 +448,23 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
     throw new Error(
       `${source}: attempts[${index}].byteRange and truncated are only valid on a ` +
         `${FIXTURE_RESPONSE_KIND.documentAnswer} row`
+    )
+  }
+
+  // Present on every save-answer row and on no other row.
+  if (responseKind === FIXTURE_RESPONSE_KIND.attachmentSaveAnswer) {
+    const saveOutcome = value.saveOutcome
+    if (typeof saveOutcome !== 'string' || !saveOutcome) {
+      throw new Error(
+        `${source}: attempts[${index}].saveOutcome must be a non-empty string on a ` +
+          `${FIXTURE_RESPONSE_KIND.attachmentSaveAnswer} row`
+      )
+    }
+    row.saveOutcome = saveOutcome
+  } else if ('saveOutcome' in value) {
+    throw new Error(
+      `${source}: attempts[${index}].saveOutcome is only valid on a ` +
+        `${FIXTURE_RESPONSE_KIND.attachmentSaveAnswer} row`
     )
   }
 
@@ -623,7 +657,8 @@ export function appendedAttempts(
       current.reason !== row.reason ||
       current.byteRange?.offset !== row.byteRange?.offset ||
       current.byteRange?.length !== row.byteRange?.length ||
-      current.truncated !== row.truncated
+      current.truncated !== row.truncated ||
+      current.saveOutcome !== row.saveOutcome
     ) {
       throw new Error(
         `[image-capabilities] ledger row ${index} changed between reads; the ledger must be append-only.`
