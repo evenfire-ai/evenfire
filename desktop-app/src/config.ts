@@ -221,15 +221,68 @@ function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
 
 /** Resolve the Profile origin paired with the currently active Desktop deployment. */
 export function getActiveDeploymentProfileUiBaseUrl(): string {
-  const profileUiBaseUrl = profileUiBaseUrlFromExternalRestApi(config.externalRestApiBaseUrl)
-  if (!profileUiBaseUrl) {
-    throw new Error('Cannot resolve a shareable Profile UI link for the active desktop deployment')
+  const externalRestApiBaseUrl = config.externalRestApiBaseUrl
+  const profileUiBaseUrl = profileUiBaseUrlFromExternalRestApi(externalRestApiBaseUrl)
+  if (profileUiBaseUrl) {
+    const restUrl = new URL(externalRestApiBaseUrl)
+    const isLocalDeployment =
+      restUrl.hostname === '127.0.0.1' ||
+      restUrl.hostname === 'localhost' ||
+      restUrl.hostname === '[::1]'
+    if (
+      isLocalDeployment &&
+      config.desktopProfileUiBaseUrlExplicit &&
+      configuredProfileUiRestBaseUrl &&
+      sameDesktopRestEndpoint(externalRestApiBaseUrl, configuredProfileUiRestBaseUrl)
+    ) {
+      const explicitProfileUiBaseUrl = normalizeConfiguredProfileUiOrigin(
+        config.desktopProfileUiBaseUrl
+      )
+      if (!explicitProfileUiBaseUrl) {
+        throw new Error(
+          'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+        )
+      }
+      const explicitProfileUrl = new URL(explicitProfileUiBaseUrl)
+      if (
+        explicitProfileUrl.protocol !== restUrl.protocol ||
+        explicitProfileUrl.hostname !== restUrl.hostname
+      ) {
+        throw new Error(
+          'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+        )
+      }
+      return explicitProfileUiBaseUrl
+    }
+    return profileUiBaseUrl
   }
-  return profileUiBaseUrl
+
+  throw new Error('Cannot resolve a shareable Profile UI link for the active desktop deployment')
 }
 
 function hasExplicitProfileUiBaseUrl(): boolean {
   return Boolean(process.env.PROFILE_UI_BASE_URL?.trim())
+}
+
+const configuredProfileUiRestBaseUrl = process.env.EXTERNAL_REST_API_BASE_URL?.trim() || null
+
+function normalizeConfiguredProfileUiOrigin(value: string): string | null {
+  try {
+    const url = new URL(value)
+    if (
+      !['http:', 'https:'].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash
+    ) {
+      return null
+    }
+    return url.origin
+  } catch {
+    return null
+  }
 }
 
 function runtimeConfigDirectoryPath(): string {

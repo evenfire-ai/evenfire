@@ -100,6 +100,115 @@ describe('desktop runtime config', () => {
     )
   })
 
+  it('uses the paired configured local Profile port for real App and GFS share links', async () => {
+    process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:27191'
+    process.env.PROFILE_UI_BASE_URL = 'http://127.0.0.1:27101'
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: () => '/tmp/evenfire',
+        isPackaged: false,
+        isReady: () => false,
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+      safeStorage: {
+        isEncryptionAvailable: () => false,
+        encryptString: vi.fn(),
+        decryptString: vi.fn(),
+      },
+      shell: { openExternal: vi.fn() },
+    }))
+    const runtime = await import('../config.js')
+
+    vi.doMock('../sandboxUiDriver.js', () => ({
+      getActiveSandboxUi: vi.fn(),
+      getActiveSandboxUiLocation: vi.fn(() => ({
+        recipeNs: 'sandbox-recipes',
+        recipeName: 'task-board',
+        path: '/tasks/42',
+      })),
+      installSandboxUiCookie: vi.fn(),
+      mountSandboxUiView: vi.fn(),
+      unmountSandboxUiView: vi.fn(),
+    }))
+    vi.doMock('../sandboxUiSessionRefresh.js', () => ({
+      cancelSandboxUiRefresh: vi.fn(),
+      startSandboxUiRefresh: vi.fn(),
+    }))
+    vi.doMock('../rpcTokenManager.js', () => ({
+      RpcTokenManager: class {
+        getOrIssue = vi.fn()
+        clear = vi.fn()
+        getMetadata = vi.fn()
+      },
+    }))
+    vi.doMock('../rpcProxyClient.js', () => ({
+      RpcProxyClient: class {
+        health = vi.fn()
+        listSandboxUiApps = vi.fn()
+      },
+    }))
+    vi.doMock('../authClient.js', () => ({
+      AuthClient: class {
+        health = vi.fn()
+        getMe = vi.fn()
+      },
+    }))
+    vi.doMock('../tokenStore.js', () => ({
+      TokenStore: class {
+        getSessionToken = vi.fn()
+        setSessionToken = vi.fn()
+        clearSessionToken = vi.fn()
+      },
+    }))
+    const { AppService } = await import('../appService.js')
+    const service = new AppService() as unknown as {
+      me: { id: string; email: string }
+      sessionToken: string
+      createSandboxUiDeepLink: () => Promise<{ url: string }>
+      createGfsResourceDeepLink: (uri: string) => Promise<{ url: string }>
+    }
+    service.me = { id: 'local-user', email: 'local@example.test' }
+    service.sessionToken = 'session-token'
+
+    const resourceUri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const [app, gfs] = await Promise.all([
+      service.createSandboxUiDeepLink(),
+      service.createGfsResourceDeepLink(resourceUri),
+    ])
+
+    expect({ app: app.url, gfs: gfs.url }).toEqual({
+      app: 'http://127.0.0.1:27101/open/apps/sandbox-recipes/task-board?path=%2Ftasks%2F42',
+      gfs: 'http://127.0.0.1:27101/open/files?uri=' + encodeURIComponent(resourceUri),
+    })
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('http://127.0.0.1:27101')
+
+    for (const invalidOrigin of [
+      'https://unrelated.example.test',
+      'http://user:secret@127.0.0.1:27101',
+      'http://127.0.0.1:27101/profile',
+      'http://127.0.0.1:27101?tenant=one',
+      'http://127.0.0.1:27101#fragment',
+    ]) {
+      runtime.config.desktopProfileUiBaseUrl = invalidOrigin
+      expect(() => runtime.getActiveDeploymentProfileUiBaseUrl()).toThrow(
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+      )
+    }
+
+    runtime.config.desktopProfileUiBaseUrl = 'http://127.0.0.1:27101'
+    runtime.config.externalRestApiBaseUrl = 'http://localhost:27191'
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('http://localhost:3001')
+    runtime.config.externalRestApiBaseUrl = 'https://api.customer.example.test:8443/base'
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe(
+      'https://profile.customer.example.test:8443'
+    )
+    runtime.config.externalRestApiBaseUrl = 'https://customer.example.test'
+    expect(() => runtime.getActiveDeploymentProfileUiBaseUrl()).toThrow(
+      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+    )
+  })
+
   it('keeps same-named profiles independent when saved in the same millisecond', async () => {
     tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
     vi.doMock('electron', () => ({
