@@ -59,6 +59,10 @@ const harness = vi.hoisted(() => {
 })
 
 vi.mock('electron', () => ({
+  Menu: {
+    buildFromTemplate: vi.fn(() => ({})),
+    setApplicationMenu: vi.fn(),
+  },
   BrowserWindow: class {
     constructor() {
       return harness.createWindow?.()
@@ -117,6 +121,7 @@ vi.mock('../appService.js', () => ({
 vi.mock('../config.js', () => ({
   config: { appName: 'Evenfire', externalRestApiBaseUrl: '', rpcProxyBaseUrl: '' },
   getActiveEnvKey: vi.fn(() => 'test'),
+  getActiveRuntimeConfigOptionId: vi.fn(() => null),
   getDesktopRuntimeConfigState: vi.fn(() => ({ storagePath: '' })),
   hydrateDesktopRuntimeConfig: vi.fn(),
 }))
