@@ -13,7 +13,6 @@ import {
   buildGfsWriteTools,
 } from './gfs'
 import { GfscHttpError } from './gfsClient'
-import { GFS_JSON_WRITE_MAX_BODY_BYTES } from './gfsFilePolicy'
 
 /**
  * P3-S04 — agent gfs READ tools. Four read-only tools (list/read/stat/resolve)
@@ -347,34 +346,41 @@ describe('buildGfsWriteTools (P4)', () => {
       expect(c.createFileFromBytes).not.toHaveBeenCalled()
     })
 
-    it('rejects an attachment whose write request would exceed gfsc body bound', async () => {
-      // gfsc bounds the JSON body, not the decoded file: base64 plus the
-      // envelope must fit, so the largest saveable file is about 3/4 of it.
-      const envelope = Buffer.byteLength(
-        JSON.stringify({ name: file.filename, kind: 'file', contentBase64: '' })
-      )
-      const maxEncoded = Math.floor((GFS_JSON_WRITE_MAX_BODY_BYTES - envelope) / 4) * 4
-      const maxBytes = (maxEncoded / 4) * 3
+    it('leaves the size limit to gfsc and sends large attachments unchanged', async () => {
+      // gfsc's body bound is per deployment (GFS_MAX_WRITE_BODY_BYTES, 24 MiB in
+      // the base deploy) and invisible to the Host, so the Host sends every
+      // admitted attachment; a 413 comes back as limit_exceeded (next test).
+      // 13 MiB has a >16 MiB base64 body; 16 MiB + 1 exceeds the old decoded cap.
       const c = writeClient()
-      for (const bytes of [maxBytes + 1, GFS_JSON_WRITE_MAX_BODY_BYTES]) {
-        const big = { ...file, id: 'big', dataBase64: Buffer.alloc(bytes).toString('base64') }
-        const r = await tool(c, [big]).execute({ ...target, attachmentId: 'big' }, '')
-        expect(r).toEqual({ success: false, error: expect.stringMatching(/^limit_exceeded:/) })
+      const sizes = [13 * 1024 * 1024, 16 * 1024 * 1024 + 1]
+      for (const [i, bytes] of sizes.entries()) {
+        const big = {
+          ...file,
+          id: `big-${i}`,
+          dataBase64: Buffer.alloc(bytes, i).toString('base64'),
+        }
+        const r = await tool(c, [big]).execute({ ...target, attachmentId: big.id }, '')
+        expect(r.success).toBe(true)
+        expect(JSON.parse(r.content!)).toMatchObject({ attachmentId: big.id, bytes })
       }
-      expect(c.createFileFromBytes).not.toHaveBeenCalled()
-      // Boundary twin: the largest file whose body fits is written, and its
-      // body is exactly within the bound.
-      const atCap = { ...file, id: 'cap', dataBase64: Buffer.alloc(maxBytes).toString('base64') }
-      const ok = await tool(c, [atCap]).execute({ ...target, attachmentId: 'cap' }, '')
-      expect(ok.success).toBe(true)
-      expect(c.createFileFromBytes).toHaveBeenCalledTimes(1)
-      const [args] = vi.mocked(c.createFileFromBytes).mock.calls[0]!
-      const body = JSON.stringify({
-        name: args.name,
-        kind: 'file',
-        contentBase64: args.contentBase64,
+      expect(c.createFileFromBytes).toHaveBeenCalledTimes(sizes.length)
+      for (const [i, bytes] of sizes.entries()) {
+        const [args] = vi.mocked(c.createFileFromBytes).mock.calls[i]!
+        expect(args.contentBase64).toBe(Buffer.alloc(bytes, i).toString('base64'))
+      }
+    })
+
+    it('reports a transport failure as an untyped mutation failure', async () => {
+      // A gfsc 413 sent while the body is still uploading can reset the socket,
+      // so fetch fails without a status.
+      const c = writeClient({
+        createFileFromBytes: vi.fn(async () => {
+          throw new TypeError('fetch failed')
+        }),
       })
-      expect(Buffer.byteLength(body)).toBeLessThanOrEqual(GFS_JSON_WRITE_MAX_BODY_BYTES)
+      const r = await tool(c, [image]).execute({ ...target, attachmentId: 'img-1' }, '')
+      expect(c.createFileFromBytes).toHaveBeenCalledTimes(1)
+      expect(r).toEqual({ success: false, error: 'GFS mutation failed' })
     })
 
     it('saves an image without a usable name under its generated name', async () => {

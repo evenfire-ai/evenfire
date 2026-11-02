@@ -12,7 +12,7 @@ import type {
   InternalToolExecutionOptions,
   InternalToolResult,
 } from '../workflow/types'
-import { GfscHttpError, createFileFromBytesBodyBytes } from './gfsClient'
+import { GfscHttpError } from './gfsClient'
 import { GfsDownloadError } from './gfsContentDownload'
 import type { GfsDownloadOptions, GfsDownloadResult } from './gfsContentDownload'
 import { type GfsMetadataSnapshot, normalizeRid } from './gfsContentRead'
@@ -23,7 +23,7 @@ import {
   recordGfsDownloadTransfer,
 } from './gfsDownloadMetrics'
 import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
-import { GFS_FILE_LIMITS, GFS_JSON_WRITE_MAX_BODY_BYTES } from './gfsFilePolicy'
+import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 import {
   GFS_LOCAL_PROCESSING_GUIDANCE,
   type GfsFileContent,
@@ -1089,14 +1089,9 @@ export function buildGfsAttachmentSaveTools(
           )
         }
         const bytes = Buffer.byteLength(attachment.dataBase64, 'base64')
-        if (
-          createFileFromBytesBodyBytes(name, attachment.dataBase64) > GFS_JSON_WRITE_MAX_BODY_BYTES
-        ) {
-          return invalidArgs(
-            `limit_exceeded: this ${bytes}-byte attachment is too large to save; base64 content ` +
-              `must fit a ${GFS_JSON_WRITE_MAX_BODY_BYTES}-byte write request`
-          )
-        }
+        // No local size check: gfsc bounds the write body with a per-deployment
+        // GFS_MAX_WRITE_BODY_BYTES the Host cannot see, and answers 413, which
+        // mutationFail reports as limit_exceeded.
         try {
           const resource = await client.createFileFromBytes(
             { drive, parentResourceId, name, contentBase64: attachment.dataBase64 },

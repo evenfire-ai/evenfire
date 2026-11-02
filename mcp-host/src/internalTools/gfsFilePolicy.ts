@@ -3,15 +3,6 @@ const MIB = 1024 * 1024
 export const GFS_HOST_ACTIVE_DOWNLOADS = 2
 
 /**
- * gfsc's default bound on a JSON write request body (`DEFAULT_MAX_WRITE_BODY_BYTES`,
- * gfs-controller/src/api/serve.ts). It bounds the whole body, so base64 content
- * leaves about three quarters of it for the file. A deployment may raise it
- * with `GFS_MAX_WRITE_BODY_BYTES`, which the Host cannot see, so the Host
- * checks against this floor; gfsc remains the authority and answers 413.
- */
-export const GFS_JSON_WRITE_MAX_BODY_BYTES = 16 * MIB
-
-/**
  * Retained-storage variables of the fixed quota model, removed in #1028 when
  * the budget became a share of the workspace volume. A deployment that still
  * sets one is warned about at store startup, never failed.
