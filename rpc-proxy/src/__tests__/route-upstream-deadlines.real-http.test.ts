@@ -821,12 +821,14 @@ describe.each(HELD_ROUTES)('R3-L7 $label pins the hold deadline before host reso
 // For the continue route the hold deadline is pinned at arrival too, but the
 // Host admission floor means a hold that the slow resolution leaves below the
 // Host's admission wait starts NO post-wake POST. A deadline pinned after the
-// resolution would leave a full 11 s and start the retry, which never answers
+// resolution would leave a full 13 s and start the retry, which never answers
 // here and would end in a 504 once the deadline aborted it.
 describe('R3-L7 continue model step pins the hold deadline before host resolution', () => {
   it('charges a slow host resolution to the budget and withholds the retry', async () => {
     config.upstreamTimeoutMs = 30_000
-    config.wakeMaxHoldMs = 11_000
+    // Above the 12 s Host admission floor only until the 1.5 s resolution is
+    // charged to it: 13 s - 1.5 s leaves less than the floor.
+    config.wakeMaxHoldMs = 13_000
     const upstreamPath = '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue'
     await startUpstream((req, _res, index) => {
       if (index === 0) dropConnection(req) // first attempt: host down
@@ -852,8 +854,8 @@ describe('R3-L7 continue model step pins the hold deadline before host resolutio
     expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
     expect(seen.map(entry => entry.url)).toEqual([upstreamPath])
-    // Pinned at arrival: 1.5 s of an 11 s hold are gone, below the 10 s floor.
-    // Pinned after the resolution it would still have 11 s and would POST again.
+    // Pinned at arrival: 1.5 s of a 13 s hold are gone, below the 12 s floor.
+    // Pinned after the resolution it would still have 13 s and would POST again.
     expect(elapsed).toBeGreaterThanOrEqual(1_400)
     expect(elapsed).toBeLessThan(5_000)
   })
@@ -1112,22 +1114,53 @@ describe('R2-L2 post-wake continuation attempt floor', () => {
       .send({ version: 1 })
   }
 
-  it("pins the proxy's admission-budget copy to the Host's verdict bound", () => {
-    // Both services own their copy of the value (they share no package). This
-    // pins them to each other so a Host-side change cannot silently make the
-    // proxy start an attempt shorter than the Host's admission wait.
-    const hostSource = readFileSync(
+  /**
+   * The two services share no package, so each side's value is read from its
+   * own production source: the Host's verdict bound and the proxy's copy, its
+   * pre-verdict allowance and the floor composed from both.
+   */
+  function readHostVerdictBudgetMs(): number {
+    const source = readFileSync(
       new URL('../../../mcp-host/src/agent/modelStepContinuation.ts', import.meta.url),
       'utf8'
     )
-    const hostBound = hostSource.match(/MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS = ([\d_]+)/)
-    expect(hostBound).toBeTruthy()
-    const proxySource = readFileSync(new URL('../routes/rpc.ts', import.meta.url), 'utf8')
-    const proxyBound = proxySource.match(/HOST_CONTINUATION_ADMISSION_BUDGET_MS = ([\d_]+)/)
-    expect(proxyBound).toBeTruthy()
-    expect(Number(proxyBound![1]!.replaceAll('_', ''))).toBe(
-      Number(hostBound![1]!.replaceAll('_', ''))
+    const bound = source.match(/MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS = ([\d_]+)/)
+    expect(bound, 'MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS is declared').toBeTruthy()
+    return Number(bound![1]!.replaceAll('_', ''))
+  }
+
+  function readProxyContinuationBudgets(): {
+    verdict: number
+    allowance: number
+    floor: number
+  } {
+    const source = readFileSync(new URL('../routes/rpc.ts', import.meta.url), 'utf8')
+    const verdict = source.match(/HOST_CONTINUATION_VERDICT_BUDGET_MS = ([\d_]+)/)
+    const allowance = source.match(/HOST_CONTINUATION_PRE_VERDICT_ALLOWANCE_MS = ([\d_]+)/)
+    const floor = source.match(
+      /HOST_CONTINUATION_ADMISSION_BUDGET_MS =\s*HOST_CONTINUATION_VERDICT_BUDGET_MS \+ HOST_CONTINUATION_PRE_VERDICT_ALLOWANCE_MS/
     )
+    expect(verdict, 'HOST_CONTINUATION_VERDICT_BUDGET_MS is declared').toBeTruthy()
+    expect(allowance, 'HOST_CONTINUATION_PRE_VERDICT_ALLOWANCE_MS is declared').toBeTruthy()
+    expect(floor, 'the admission floor is the verdict wait plus the allowance').toBeTruthy()
+    return {
+      verdict: Number(verdict![1]!.replaceAll('_', '')),
+      allowance: Number(allowance![1]!.replaceAll('_', '')),
+      floor: Number(verdict![1]!.replaceAll('_', '')) + Number(allowance![1]!.replaceAll('_', '')),
+    }
+  }
+
+  it("sizes the proxy's admission floor above the Host's verdict bound", () => {
+    // Both services own their copy of the value (they share no package). The
+    // proxy must hold longer than the Host's verdict wait: the Host anchors
+    // that wait at receipt, so the answer still has to travel back, and the
+    // claim can outlive the deadline by one bounded sync write.
+    const hostVerdictTimeoutMs = readHostVerdictBudgetMs()
+    const { verdict, allowance, floor } = readProxyContinuationBudgets()
+
+    expect(verdict).toBe(hostVerdictTimeoutMs)
+    expect(allowance).toBeGreaterThan(0)
+    expect(floor).toBeGreaterThan(hostVerdictTimeoutMs)
   })
 
   it('starts no POST with 2 s of hold left and answers 503 host_waking', async () => {
@@ -1167,4 +1200,45 @@ describe('R2-L2 post-wake continuation attempt floor', () => {
       `POST ${continueUpstreamPath}`,
     ])
   })
+
+  it('relays the 202 of an attempt started at the floor with a Host that overshoots', async () => {
+    // Terra's boundary (WP-H13): the post-wake attempt starts with only the
+    // floor + 50 ms of hold left, and the Host spends 100 ms of pre-verdict
+    // work beyond its whole verdict wait. Without the pre-verdict allowance in
+    // the floor, this attempt is aborted after the claim landed and the caller
+    // never sees the 202; the allowance is what makes the relay possible.
+    const hostVerdictTimeoutMs = readHostVerdictBudgetMs()
+    const { floor } = readProxyContinuationBudgets()
+    config.wakeMaxHoldMs = floor + 50
+    const claimed = {
+      taskId: 'continued-task',
+      checkpointId: 'msc-1',
+      status: 'claimed',
+      replayed: false,
+    }
+    let answered = false
+    await startUpstream((req, res, index) => {
+      if (index === 0) {
+        dropConnection(req)
+        return
+      }
+      setTimeout(() => {
+        answered = true
+        res.writeHead(202, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(claimed))
+      }, hostVerdictTimeoutMs + 100)
+    })
+
+    const res = await continuePost().expect(202)
+
+    expect(res.body).toEqual(claimed)
+    // Witness: the second attempt is the one that answered, and in full — the
+    // proxy neither withheld it nor cut its answer off.
+    expect(answered).toBe(true)
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      `POST ${continueUpstreamPath}`,
+      `POST ${continueUpstreamPath}`,
+    ])
+    expect(seen.map(entry => entry.closedEarly)).toEqual([true, false])
+  }, 25_000)
 })

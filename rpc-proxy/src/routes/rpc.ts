@@ -60,16 +60,42 @@ const MESSAGES_LIMIT_CAP = 200
 
 /**
  * How long mcp-host may wait for a model-step continuation's admission verdict
- * before it answers 202 with the claimed task (`mcp-host`'s
- * MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS). The two services share no
- * package, so this is the proxy's own copy like the paging caps above.
- *
- * The Host claims the checkpoint BEFORE that wait, so a post-wake attempt that
- * starts with less hold than this can be aborted by the proxy after the write
- * took effect. Such an attempt is not started at all: the caller gets the
- * retryable 503 `host_waking` and a re-POST replays the claim.
+ * before it answers 202 with the claimed task, counted from the request's
+ * receipt (`mcp-host`'s MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS). The two
+ * services share no package, so this is the proxy's own copy like the paging
+ * caps above.
  */
-const HOST_CONTINUATION_ADMISSION_BUDGET_MS = 10_000
+const HOST_CONTINUATION_VERDICT_BUDGET_MS = 10_000
+
+/**
+ * Allowance on top of that verdict wait for everything the Host does around it
+ * inside the same call: the request's transit in, the claim and the source
+ * revalidation that run before admission, and the answer's serialization on
+ * the way back.
+ *
+ * Basis: `mcp-host`'s default durable-store sync timeout,
+ * CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS = 2000 ms (`mcp-host/src/config.ts`). The
+ * checkpoint claim is one such bounded sync write. It starts after receipt and
+ * normally fits inside the verdict wait, but when the session's write queue in
+ * front of it is slow the claim can return after the anchored deadline, and
+ * the Host then answers as soon as it does — that late write is the one
+ * bounded pre-verdict step that can make the answer land past the verdict
+ * wait. Transit and response serialization have no tighter published bound, so
+ * they are covered by the same figure.
+ */
+const HOST_CONTINUATION_PRE_VERDICT_ALLOWANCE_MS = 2_000
+
+/**
+ * Smallest hold remainder a post-wake continuation attempt may start with: the
+ * Host's whole admission (its anchored verdict wait plus the pre-verdict
+ * allowance above). The Host claims the checkpoint BEFORE it answers, so an
+ * attempt that starts below this can be aborted by the proxy after the claim
+ * wrote to disk. Such an attempt is not started at all: the caller gets the
+ * retryable 503 `host_waking` and a re-POST replays the claim (202 while the
+ * executor is live, else 503 `continuation_claim_settling`).
+ */
+const HOST_CONTINUATION_ADMISSION_BUDGET_MS =
+  HOST_CONTINUATION_VERDICT_BUDGET_MS + HOST_CONTINUATION_PRE_VERDICT_ALLOWANCE_MS
 
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (
@@ -1147,13 +1173,15 @@ export function createRpcRouter(): Router {
               // A live claim or completed result replays. After the claim lease
               // lapses, a new task may claim it; the old task loses its write fence.
               retryUntilDeadline: true,
-              // The Host claims the checkpoint before its admission verdict, so
-              // an attempt with less hold than that wait would be aborted after
-              // the claim landed. Below it answer 503 host_waking instead.
+              // The Host claims the checkpoint before its admission verdict, and
+              // its verdict deadline is anchored at receipt but does not cover
+              // the answer's travel back. An attempt with less hold than the
+              // whole admission would be aborted after the claim landed; below
+              // it, answer 503 host_waking instead.
               minAttemptBudgetMs: HOST_CONTINUATION_ADMISSION_BUDGET_MS,
               attemptUpstream: async (_timeoutMs, deadlineMs) => {
-                // The Host waits up to 10 s for its admission verdict. The
-                // generic wake attempt is capped by upstreamTimeoutMs (8 s
+                // The Host may wait its whole admission budget for a verdict.
+                // The generic wake attempt is capped by upstreamTimeoutMs (8 s
                 // by default), so use the remaining hold budget for this write.
                 const { response, body } = await forwardContinuation(
                   Math.max(1, deadlineMs - Date.now())
