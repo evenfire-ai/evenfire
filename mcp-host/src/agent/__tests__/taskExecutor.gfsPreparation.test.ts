@@ -547,9 +547,13 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     await test.executor.run()
 
     expect(test.executor.executorState).toBe('waiting_approval')
+    expect(test.releaseReceiptOwner).not.toHaveBeenCalled()
     await test.executor.deny()
 
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
+    expect(test.releaseReceiptOwner).toHaveBeenCalledExactlyOnceWith(
+      test.task.id,
+      UNIT_CALLER_STORE_KEY
+    )
     expect(test.onApprovalNeeded).toHaveBeenCalledExactlyOnceWith(
       test.executor.pendingApproval?.request_id ?? expect.any(String),
       test.task.id,

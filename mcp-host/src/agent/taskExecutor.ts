@@ -2150,10 +2150,17 @@ export class TaskExecutor {
         if (!failure) await this.abandonModelStepContinuation()
       }
       await this.abandonOriginCheckpoint()
-      await this.settleGfsRetentionOwner()
     } catch (error) {
       failure ??= error
     } finally {
+      // Denial ends the approval suspension even when settlement failed.
+      // The retention helper must still preserve genuinely suspended runs.
+      if (this.state === 'waiting_approval') this.state = 'processing'
+      try {
+        await this.settleGfsRetentionOwner()
+      } catch (error) {
+        failure ??= error
+      }
       if (this.deps.taskLifecycle.isTerminal(this.taskId)) {
         if (failure) {
           logger.error(

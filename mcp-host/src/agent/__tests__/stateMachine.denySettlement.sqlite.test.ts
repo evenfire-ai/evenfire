@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
+import * as fs from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import {
@@ -10,6 +13,7 @@ import { ModelStepCheckpointStore } from '../../core/conversation/persistence/mo
 import { SqliteColdStartLoader } from '../../core/conversation/persistence/sqliteColdStartLoader'
 import { LlmErrorCode } from '../../core/errors'
 import { FinishReason } from '../../core/types'
+import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import { logger } from '../../logger'
@@ -18,6 +22,7 @@ import { MessageQueue } from '../../queue/messageQueue'
 import { makeHandlers } from '../../server/__tests__/testHelpers'
 import { handleApprovalRoute } from '../../server/routes'
 import type { IncomingMessage } from '../../server/types'
+import { gfsStoreCallerIdentity } from '../gfsExecutionCapability'
 import { sourceMessageForResume } from '../sourceMessageForResume'
 import { AgentStateMachine } from '../stateMachine'
 import { TaskExecutor } from '../taskExecutor'
@@ -41,6 +46,28 @@ type Fixture = {
   provider: SingleTurnProvider
 }
 const openFixtures: Fixture[] = []
+const retentionStores: { store: GfsDownloadStore; root: string }[] = []
+
+async function attachRetentionStore(executor: TaskExecutor) {
+  const root = await fs.mkdtemp(join(tmpdir(), 'deny-gfs-owner-'))
+  const store = new GfsDownloadStore(root)
+  retentionStores.push({ store, root })
+  await store.initialize()
+  const release = vi.spyOn(store, 'releaseReceiptOwner')
+  ;(executor as unknown as { deps: { gfsDownloadStore: GfsDownloadStore } }).deps.gfsDownloadStore =
+    store
+  return release
+}
+
+function expectRetentionRelease(
+  release: Awaited<ReturnType<typeof attachRetentionStore>>,
+  executor: TaskExecutor
+) {
+  expect(release).toHaveBeenCalledExactlyOnceWith(
+    executor.sourceTask.id,
+    gfsStoreCallerIdentity(executor.sourceTask.sourceMessage)
+  )
+}
 
 function source(chat: string): IncomingMessage {
   return {
@@ -297,6 +324,10 @@ afterEach(async () => {
     }
     await f.handle.shutdown()
   }
+  for (const { store, root } of retentionStores.splice(0)) {
+    await store.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })
 
 describe('denial settlement with SQLite', () => {
@@ -310,6 +341,8 @@ describe('denial settlement with SQLite', () => {
       const active = await bootstrap(f)
       const executor = active.get(target.taskId)!
       expect(executor.executorState).toBe('waiting_approval')
+      const release = await attachRetentionStore(executor)
+      expect(release).not.toHaveBeenCalled()
       expect(
         f.handle.worker.db
           .prepare('SELECT request_id FROM pending_approvals WHERE request_id = ?')
@@ -354,7 +387,12 @@ describe('denial settlement with SQLite', () => {
         f.machine as unknown as { handleApprovalTimeout: (requestId: string) => void }
       ).handleApprovalTimeout(target.requestId)
       await executor.waitForCompletion()
-      await expect(deny.mock.results[0]!.value).rejects.toThrow()
+      await expect(deny.mock.results[0]!.value).rejects.toThrow(
+        continuation
+          ? 'timeout abandon unavailable'
+          : 'The tool call was cancelled, but the denial could not be saved.'
+      )
+      expectRetentionRelease(release, executor)
       await neighborCompletes(f)
 
       expect(
@@ -403,6 +441,8 @@ describe('denial settlement with SQLite', () => {
     await seedApproval(f, 'neighbor', true)
     const executor = (await bootstrap(f)).get(target.taskId)!
     expect(executor.executorState).toBe('waiting_approval')
+    const release = await attachRetentionStore(executor)
+    expect(release).not.toHaveBeenCalled()
     f.lifecycle.register(executor.sourceTask)
     expect(f.lifecycle.transition(target.taskId, 'processing', 'dispatched').kind).toBe('applied')
     const terminal = collectTerminalEvents(f.machine, target.taskId)
@@ -414,6 +454,7 @@ describe('denial settlement with SQLite', () => {
     ).handleApprovalTimeout(target.requestId)
     await executor.waitForCompletion()
     await expect(deny.mock.results[0]!.value).resolves.toBeUndefined()
+    expectRetentionRelease(release, executor)
     await neighborCompletes(f)
     expect(
       f.lifecycle
@@ -483,6 +524,8 @@ describe('denial settlement with SQLite', () => {
     const executor = active.get(target.taskId)!
     expect(f.lifecycle.get(target.taskId)).toBeNull()
     expect(executor.executorState).toBe('waiting_approval')
+    const release = await attachRetentionStore(executor)
+    expect(release).not.toHaveBeenCalled()
     expect(
       f.handle.worker.db
         .prepare('SELECT COUNT(*) AS n FROM pending_approvals WHERE request_id = ?')
@@ -504,6 +547,7 @@ describe('denial settlement with SQLite', () => {
     const terminal = collectTerminalEvents(f.machine, target.taskId)
     const response = await postDenial(f.machine, target.requestId)
     expect(write).toHaveBeenCalledOnce()
+    expectRetentionRelease(release, executor)
     expect(write.mock.calls[0]?.slice(0, 3)).toEqual([
       target.conversation,
       target.requestId,
@@ -543,6 +587,8 @@ describe('denial settlement with SQLite', () => {
     const executor = active.get(target.taskId)!
     expect(f.lifecycle.get(target.taskId)).toBeNull()
     expect(executor.executorState).toBe('waiting_approval')
+    const release = await attachRetentionStore(executor)
+    expect(release).not.toHaveBeenCalled()
     expect(
       f.handle.worker.db
         .prepare('SELECT COUNT(*) AS n FROM pending_approvals WHERE request_id = ?')
@@ -574,6 +620,7 @@ describe('denial settlement with SQLite', () => {
       expect.objectContaining({ checkpointId: 'checkpoint-continuation' }),
       expect.objectContaining({ to: 'abandoned' })
     )
+    expectRetentionRelease(release, executor)
     await neighborCompletes(f)
     expect.soft(response.status).toBeGreaterThanOrEqual(400)
     expect.soft(response.body.code).not.toBe('denial_not_saved')
