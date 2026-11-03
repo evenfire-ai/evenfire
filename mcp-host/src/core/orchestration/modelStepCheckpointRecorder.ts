@@ -10,6 +10,7 @@ import type {
   ModelStepCheckpointAttachmentInput,
   ModelStepCheckpointAttachmentRow,
   ModelStepCheckpointEntryInput,
+  ModelStepCheckpointEntryRow,
   ModelStepCheckpointFence,
   ModelStepCheckpointOpenHeader,
 } from '../../db/worker/modelStepCheckpointOps'
@@ -43,8 +44,11 @@ import { isModelStepCheckpointEligibleError } from './modelStepCheckpointEligibi
  * result and its tool message share one fenced append.
  *
  * A failed write poisons the recorder: the loop keeps running as it does
- * without a recorder, and the checkpoint can never become `resumable`. A
- * fence mismatch also calls `onFenceLost` so the task is cancelled.
+ * without a recorder, and the checkpoint can never become `resumable` —
+ * except in continuation mode, where `recordDispatch` throws instead: an
+ * unacknowledged dispatch means the tool's effect state is unknown, so the
+ * turn must stop before executing it. A fence mismatch also calls
+ * `onFenceLost` so the task is cancelled.
  */
 export interface ModelStepCheckpointRecorder {
   readonly checkpointId: string
@@ -57,6 +61,13 @@ export interface ModelStepCheckpointRecorder {
   syncMessages(messages: ChatMessage[]): Promise<void>
   /** Context management replaced the array; later pushes start at `length`. */
   rebase(length: number): void
+  /**
+   * Rebuilds the batch-scoped tool-message dedup set from the durable
+   * ordered ledger. A cold continuation must call this before `begin`:
+   * providers reuse call ids across batches, so only the messages after the
+   * last assistant tool-call envelope belong to the batch being resumed.
+   */
+  adoptRecordedToolMessages(entries: readonly ModelStepCheckpointEntryRow[]): void
   recordDispatch(call: ToolCall): Promise<void>
   recordResult(call: ToolCall, result: ToolResult): Promise<void>
   updateState(nextIteration: number): Promise<void>
@@ -259,8 +270,47 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     this.recordedUpTo = length
   }
 
+  adoptRecordedToolMessages(entries: readonly ModelStepCheckpointEntryRow[]): void {
+    if (this.opts.mode.kind !== 'continuation') {
+      throw new Error('Only a continuation recorder can adopt recorded tool messages')
+    }
+    this.recordedToolMessages.clear()
+    for (const entry of entries) {
+      if (entry.kind !== 'message') continue
+      if (entry.tool_call_id !== null) {
+        this.recordedToolMessages.add(entry.tool_call_id)
+        continue
+      }
+      let message: { role?: unknown; tool_calls?: unknown }
+      try {
+        message = JSON.parse(entry.payload) as { role?: unknown; tool_calls?: unknown }
+      } catch (err) {
+        throw new Error(
+          `Model-step checkpoint message entry ${entry.checkpoint_id}/${entry.seq} is not valid JSON`,
+          { cause: err }
+        )
+      }
+      if (
+        message.role === 'assistant' &&
+        Array.isArray(message.tool_calls) &&
+        message.tool_calls.length > 0
+      ) {
+        // Same batch boundary as `syncMessages`: ids from earlier batches may
+        // be reused and must stay recordable in the new batch.
+        this.recordedToolMessages.clear()
+      }
+    }
+  }
+
   async recordDispatch(call: ToolCall): Promise<void> {
-    if (this.isPoisoned) return
+    if (this.isPoisoned) {
+      if (this.opts.mode.kind === 'continuation') {
+        throw new Error(
+          'Model-step continuation dispatch is unknown after a failed checkpoint write'
+        )
+      }
+      return
+    }
     const dispatch = (): ModelStepCheckpointEntryInput => ({
       kind: 'tool_dispatch',
       toolCallId: call.id,
@@ -278,7 +328,10 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       })
       return
     }
-    await this.append(() => [dispatch()])
+    const acknowledged = await this.append(() => [dispatch()])
+    if (this.opts.mode.kind === 'continuation' && !acknowledged) {
+      throw new Error('Model-step continuation dispatch was not durably acknowledged')
+    }
   }
 
   /** Confirm the result only with the message Retry needs to reconstruct it. */

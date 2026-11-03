@@ -549,12 +549,18 @@ export class TaskExecutor {
       if (!this.restoreCheckpointAttachments(attachments)) {
         return 'attachment_expired'
       }
-      this.createContinuationRecorder(
+      const recorder = this.createContinuationRecorder(
         sessionKey,
         continuation,
         checkpoint.header.loop_state,
         checkpoint.tools.confirmed,
         attachments
+      )
+      // A cold resume replays a partial batch: seed the recorder's dedup set
+      // from the durable ledger so an already persisted sibling tool message
+      // is not appended twice (#1047 R3-M2).
+      recorder.adoptRecordedToolMessages(
+        await support.store.loadEntries(sessionKey, continuation.checkpointId)
       )
       this.startContinuationLease(sessionKey, continuation, checkpoint.header.claim_expires_at)
     }

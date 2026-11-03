@@ -268,9 +268,11 @@ describe('E2 poisoned continuation settlement with SQLite', () => {
         )
         const { verdict, executor } = await continueTurn(handle, original, originalDeps, resumed)
         expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
-        expect(resumed.calls()).toBe(2)
+        // R3-L1: the poisoned recorder stops the batch before its tool runs,
+        // so the failed continuation makes only its first model call.
+        expect(resumed.calls()).toBe(1)
         expect(append).toHaveBeenCalled()
-        expect(execution).toHaveBeenCalledTimes(2)
+        expect(execution).toHaveBeenCalledTimes(1)
         expect(transitions.mock.calls.filter(args => args[2].to === 'abandoned')).toHaveLength(2)
         expect(releasedBeforeCleanup).toEqual([false])
         expect(header(handle).status).toBe('abandoned')
@@ -283,4 +285,89 @@ describe('E2 poisoned continuation settlement with SQLite', () => {
     },
     AUTO_RETRY_TEST_TIMEOUT_MS
   )
+
+  it('R3-L1: a rejected continuation dispatch write stops before the tool effect', async () => {
+    Object.assign(appConfig, {
+      enableApproval: false,
+      dynamicToolsEnabled: true,
+      promptCacheEnabled: false,
+    })
+    vi.spyOn(Date, 'now').mockReturnValue(NOW)
+    const handle = makeSqliteStore()
+    try {
+      const manager = new McpManager()
+      const tool: McpTool = {
+        name: 'server__read',
+        serverName: 'server',
+        inputSchema: { type: 'object' },
+      }
+      vi.spyOn(manager, 'getAllTools').mockReturnValue([tool])
+      const execution = vi.spyOn(manager, 'callTool').mockResolvedValue({
+        toolName: tool.name,
+        result: { content: [{ type: 'text', text: 'read completed' }] },
+        isError: false,
+      })
+      const llm = provider('openai', (_messages, call) =>
+        call === 1
+          ? {
+              calls: [
+                {
+                  id: 'origin-call',
+                  name: 'clerum__tool_call',
+                  arguments: { name: tool.name, arguments: {} },
+                },
+              ],
+            }
+          : { error: new Error('upstream 503') }
+      )
+      const original = task('dispatch-gate-origin')
+      const originalDeps = deps(handle, llm, manager)
+      originalDeps.taskLifecycle.register(original)
+      await new TaskExecutor(original, originalDeps).run()
+      await handle.persistQueue.drain()
+      expect(header(handle).status).toBe('resumable')
+      expect(execution).toHaveBeenCalledTimes(1)
+
+      const store = originalDeps.modelStepCheckpoints!.store
+      const append = store.append.bind(store)
+      const dispatched = vi.fn()
+      vi.spyOn(store, 'append').mockImplementation(async (sessionKey, fence, entries) => {
+        if (entries.some(entry => entry.kind === 'tool_dispatch')) {
+          dispatched(entries)
+          throw new Error('SQLITE_IOERR dispatch')
+        }
+        return append(sessionKey, fence, entries)
+      })
+      const resumed = provider('openai', () => ({
+        calls: [
+          {
+            id: 'resumed-dispatch-call',
+            name: 'clerum__tool_call',
+            arguments: { name: tool.name, arguments: {} },
+          },
+        ],
+      }))
+      const { verdict, executor } = await continueTurn(handle, original, originalDeps, resumed)
+      expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
+      expect(dispatched).toHaveBeenCalledTimes(1)
+      expect(dispatched.mock.calls[0]![0]).toEqual([
+        expect.objectContaining({ kind: 'tool_dispatch', toolCallId: 'resumed-dispatch-call' }),
+      ])
+      // The origin effect is the only one; the resumed call never executed.
+      expect(execution).toHaveBeenCalledTimes(1)
+      // The origin's terminal 503 and the continuation's dispatch failure.
+      expect(originalDeps.onFail).toHaveBeenCalledTimes(2)
+      const continuationFailure = vi.mocked(originalDeps.onFail).mock.calls.at(-1)!
+      expect(continuationFailure[0].id).toBe('identity-continuation')
+      expect(continuationFailure[1]).toMatchObject({
+        message: expect.stringContaining('dispatch'),
+      })
+      expect(header(handle).status).toBe('abandoned')
+      expect(
+        (executor as unknown as { continuationClaimReleased: boolean }).continuationClaimReleased
+      ).toBe(true)
+    } finally {
+      await handle.shutdown()
+    }
+  })
 })

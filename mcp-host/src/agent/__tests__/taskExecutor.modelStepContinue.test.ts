@@ -2378,6 +2378,143 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     ).toHaveLength(1)
   })
 
+  it('11f. a cold approval resume does not duplicate a completed sibling message', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const fixture = await claimedCheckpoint({})
+    const initial = provider(undefined, () => ({
+      calls: [
+        { id: 'sibling-cold-dup', name: 'system_info', arguments: {} },
+        { id: 'approval-cold-dup', name: 'shell_exec', arguments: { command: 'printf cold' } },
+      ],
+    }))
+    const first = await runContinuation(fixture, initial, {
+      deps: {
+        approvalConfig: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          tools: { shell_exec: true },
+        },
+      },
+    })
+    await first.executor.run()
+    const pending = first.executor.pendingApproval!
+    expect(pending).toBeDefined()
+    expect(await fixture.checkpoints.bootReap('host-instance-cold-dup')).toEqual({
+      abandoned: 0,
+      reopened: 0,
+    })
+    const adopted = await fixture.checkpoints.loadLive(SESSION_KEY)
+    fixture.taskBudget = adopted!.header.task_budget!
+    fixture.confirmedResults = adopted!.tools.confirmed
+    const resumedProvider = provider(undefined, () => ({ content: 'cold approval completed' }))
+    const resumed = await runContinuation(fixture, resumedProvider, {
+      fence: {
+        checkpointId: 'checkpoint-b2',
+        owner: 'host-instance-cold-dup',
+        generation: 2,
+      },
+      deps: {
+        modelStepCheckpoints: {
+          store: fixture.checkpoints,
+          hostInstanceId: 'host-instance-cold-dup',
+          hostId: 'host-a',
+          resumableTtlMs: RESUMABLE_TTL_MS,
+          claimLeaseMs: LEASE_MS,
+          pendingApprovalTtlMs: RESUMABLE_TTL_MS,
+          attachmentTtlMs: ATTACHMENT_TTL_MS,
+        },
+      },
+    })
+    await resumed.executor.rehydrateWaitingApproval(SESSION_KEY, pending)
+    await resumed.executor.resumeAfterApproval(true)
+    expect(resumed.onComplete).toHaveBeenCalledTimes(1)
+    for (const toolCallId of ['sibling-cold-dup', 'approval-cold-dup']) {
+      expect(
+        fixture.handle.worker.db
+          .prepare(
+            `SELECT payload FROM model_step_checkpoint_entries
+             WHERE checkpoint_id = ? AND kind = 'message' AND tool_call_id = ?`
+          )
+          .all('checkpoint-b2', toolCallId)
+      ).toHaveLength(1)
+    }
+  })
+
+  it('11g. a cold resume keeps one message per call when providers reuse ids across batches', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const fixture = await claimedCheckpoint({})
+    const initial = provider(undefined, () => ({
+      calls: [
+        { id: 'reused-call-id', name: 'system_info', arguments: {} },
+        { id: 'approval-reuse', name: 'shell_exec', arguments: { command: 'printf reuse' } },
+      ],
+    }))
+    const first = await runContinuation(fixture, initial, {
+      deps: {
+        approvalConfig: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          tools: { shell_exec: true },
+        },
+      },
+    })
+    await first.executor.run()
+    const pending = first.executor.pendingApproval!
+    expect(pending).toBeDefined()
+    expect(await fixture.checkpoints.bootReap('host-instance-cold-reuse')).toEqual({
+      abandoned: 0,
+      reopened: 0,
+    })
+    const adopted = await fixture.checkpoints.loadLive(SESSION_KEY)
+    fixture.taskBudget = adopted!.header.task_budget!
+    fixture.confirmedResults = adopted!.tools.confirmed
+    let resumedCalls = 0
+    const resumedProvider = provider(undefined, () =>
+      ++resumedCalls === 1
+        ? {
+            calls: [{ id: 'reused-call-id', name: 'system_info', arguments: {} }],
+          }
+        : { content: 'reused id completed' }
+    )
+    const resumed = await runContinuation(fixture, resumedProvider, {
+      fence: {
+        checkpointId: 'checkpoint-b2',
+        owner: 'host-instance-cold-reuse',
+        generation: 2,
+      },
+      deps: {
+        modelStepCheckpoints: {
+          store: fixture.checkpoints,
+          hostInstanceId: 'host-instance-cold-reuse',
+          hostId: 'host-a',
+          resumableTtlMs: RESUMABLE_TTL_MS,
+          claimLeaseMs: LEASE_MS,
+          pendingApprovalTtlMs: RESUMABLE_TTL_MS,
+          attachmentTtlMs: ATTACHMENT_TTL_MS,
+        },
+      },
+    })
+    await resumed.executor.rehydrateWaitingApproval(SESSION_KEY, pending)
+    await resumed.executor.resumeAfterApproval(true)
+    expect(resumed.onComplete).toHaveBeenCalledTimes(1)
+    expect(
+      fixture.handle.worker.db
+        .prepare(
+          `SELECT payload FROM model_step_checkpoint_entries
+           WHERE checkpoint_id = ? AND kind = 'message' AND tool_call_id = ?`
+        )
+        .all('checkpoint-b2', 'reused-call-id')
+    ).toHaveLength(2)
+    expect(
+      fixture.handle.worker.db
+        .prepare(
+          `SELECT payload FROM model_step_checkpoint_entries
+           WHERE checkpoint_id = ? AND kind = 'message' AND tool_call_id = ?`
+        )
+        .all('checkpoint-b2', 'approval-reuse')
+    ).toHaveLength(1)
+  })
+
   it('11e. cancelling a suspended continuation releases approval, claim and session', async () => {
     Object.assign(appConfig, { enableApproval: true })
     const fixture = await claimedCheckpoint({})

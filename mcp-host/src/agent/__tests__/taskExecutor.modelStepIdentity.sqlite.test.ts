@@ -8,6 +8,8 @@ import { LlmError, LlmErrorCode } from '../../core/errors'
 import { AUTO_RETRY_TEST_TIMEOUT_MS } from '../../core/orchestration/__tests__/modelStepRetryTestTimeout'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { createModelStepCheckpointRecorder } from '../../core/orchestration/modelStepCheckpointRecorder'
+import { HttpRequestTool } from '../../core/tools/httpRequest'
+import { ShellTool } from '../../core/tools/shell'
 import {
   ApprovalExpiredError,
   type ChatMessage,
@@ -680,7 +682,10 @@ describe('real-producer checkpoint identity regressions', () => {
           f.task,
           expect.objectContaining({
             code: LlmErrorCode.ApiCallFailed,
-            message: `Model-step continuation approved ${kind === 'tool_dispatch' ? 'dispatch' : 'result'} could not be recorded`,
+            message:
+              kind === 'tool_dispatch'
+                ? 'Model-step continuation dispatch was not durably acknowledged'
+                : 'Model-step continuation approved result could not be recorded',
           })
         )
         expect(f.execute).toHaveBeenCalledTimes(kind === 'tool_dispatch' ? 0 : 1)
@@ -1041,6 +1046,97 @@ describe('real-producer checkpoint identity regressions', () => {
         expect(header(f.handle).status).toBe('completed')
       } finally {
         await f.handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
+
+  it(
+    'R2-L1: the retained origin recorder survives a second approval and still offers Retry',
+    async () => {
+      Object.assign(appConfig, {
+        enableApproval: true,
+        dynamicToolsEnabled: false,
+        promptCacheEnabled: false,
+        codexToolPresentation: 'direct',
+      })
+      vi.spyOn(Date, 'now').mockReturnValue(NOW)
+      const handle = makeSqliteStore()
+      // shell_exec and http_request are session-scoped approval tools: one
+      // plain approval covers only that tool, so the second tool must ask again.
+      const shellExecute = vi
+        .spyOn(ShellTool.prototype, 'execute')
+        .mockResolvedValue({ content: 'shell effect completed', duration_ms: 1, is_error: false })
+      const httpExecute = vi
+        .spyOn(HttpRequestTool.prototype, 'execute')
+        .mockResolvedValue({ content: 'http effect completed', duration_ms: 1, is_error: false })
+      const llm = provider('openai', (_messages, call) =>
+        call === 1
+          ? {
+              calls: [
+                { id: 'approval-shell', name: 'shell_exec', arguments: { command: 'printf r2l1' } },
+              ],
+            }
+          : call === 2
+            ? {
+                calls: [
+                  {
+                    id: 'approval-http',
+                    name: 'http_request',
+                    arguments: { url: 'https://example.test/' },
+                  },
+                ],
+              }
+            : { error: new Error('upstream 503') }
+      )
+      const original = task('approval-origin')
+      const originalDeps = deps(handle, llm)
+      originalDeps.taskLifecycle.register(original)
+      const executor = new TaskExecutor(original, originalDeps)
+      try {
+        await executor.run()
+        expect(executor.executorState).toBe('waiting_approval')
+        expect(shellExecute).not.toHaveBeenCalled()
+
+        // First approval: shell_exec runs once, then the model asks for
+        // http_request and suspends again on the same retained recorder.
+        await executor.resumeAfterApproval(false)
+        expect(executor.executorState).toBe('waiting_approval')
+        expect(shellExecute).toHaveBeenCalledTimes(1)
+        expect(httpExecute).not.toHaveBeenCalled()
+        const retained = header(handle)
+        expect(retained).toMatchObject({ status: 'open' })
+
+        // Second approval: http_request runs once, the third model step
+        // fails 503, and the same checkpoint becomes resumable with both
+        // confirmed effects available to Retry.
+        await executor.resumeAfterApproval(false)
+        await handle.persistQueue.drain()
+        expect(shellExecute).toHaveBeenCalledTimes(1)
+        expect(httpExecute).toHaveBeenCalledTimes(1)
+        const failed = header(handle)
+        expect(failed.checkpoint_id).toBe(retained.checkpoint_id)
+        expect(failed.version).toBeGreaterThan(retained.version)
+        expect(failed.status).toBe('resumable')
+        expect(
+          toModelStepCheckpointView(
+            (await originalDeps.modelStepCheckpoints!.store.loadLive(SESSION_KEY))!
+          )
+        ).toMatchObject({ retryAvailable: true, tools: { confirmed: 2 } })
+        expect(originalDeps.onFail).toHaveBeenCalledWith(
+          original,
+          expect.objectContaining({
+            code: LlmErrorCode.ModelOverloaded,
+            modelStepCheckpointId: failed.checkpoint_id,
+          })
+        )
+        // Both positive effects reached the model exactly once each.
+        expect(llm.requests.at(-1)!.filter(m => m.tool_call_id === 'approval-shell')).toHaveLength(
+          1
+        )
+        expect(llm.requests.at(-1)!.filter(m => m.tool_call_id === 'approval-http')).toHaveLength(1)
+      } finally {
+        await handle.shutdown()
       }
     },
     AUTO_RETRY_TEST_TIMEOUT_MS
