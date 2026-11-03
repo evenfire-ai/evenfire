@@ -547,4 +547,3 @@ if [ "$epvp_inconclusive" -gt 0 ]; then
 fi
 epvp_summary CLEAN
 exit 0
-

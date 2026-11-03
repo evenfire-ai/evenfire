@@ -140,9 +140,14 @@ the template path with `<namespace>/<name>`. A static `REJECT` prints one
 `INCONCLUSIVE` line names the reason and, for a per-name reason, the env var.
 Exit 0 is `CLEAN` (at least one server, all OK), 1 is `VALUES_REJECTED`, 2 is
 `ERROR`, 3 is `INCONCLUSIVE`, and 4 is `NO_REMOTE_SERVERS` (never a success).
-The script never prints a Secret value, a literal value, URL query or path
-text, the offending character, or the value's length, and it does not put a
-value in argv or on disk.
+The script never prints a Secret value, a resolved env value, a literal value,
+URL query or path text, the offending character, or the value's length, and it
+never puts a Secret value or a resolved env value in argv or on disk. No URL
+query or path text is printed or put in argv either. The rendered template does
+reach disk: it is CRD text, so a baseUrl query or path (or a literal
+valueTemplate) can appear in it. The script writes that file mode 0600 inside a
+0700 mktemp directory that the EXIT trap removes; a SIGKILL can leave the
+directory behind.
 
 Every enabled HCC-managed remote proxy rolls once at the paired upgrade. One
 Deployment replace carries the image, the exec liveness probe, the template

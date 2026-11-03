@@ -47,9 +47,10 @@
 #                  two X-Accel headers the generated template ignores: the
 #                  filtered log never holds a marker and each echo has its own
 #                  upstream access-log witness (#1240)
-#   filter-lines   the shipped filter program on fixed NGINX 1.30.6 lines a live
-#                  upstream fixture cannot produce (the no-context branch, a
-#                  non-quoting control), behind the audited-release gate (#1240)
+#   filter-lines   the shipped filter program on fixed NGINX 1.30.6 lines no live
+#                  upstream emits (S5, a quoting message with no context field,
+#                  and S6, a non-quoting message), behind the audited-release
+#                  gate (#1240)
 #   quoted-live    a raw TCP upstream sends an invalid Content-Length, an
 #                  unknown Transfer-Encoding and a header with a NUL byte: each
 #                  becomes a 502 whose filtered message is REDACTED, no marker
