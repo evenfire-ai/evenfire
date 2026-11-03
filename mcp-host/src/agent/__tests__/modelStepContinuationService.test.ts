@@ -312,6 +312,61 @@ describe('ModelStepContinuationService — RPC ingress (#1043)', () => {
     expect(call.taskId).toBe(body.taskId)
     expect(call.message.timestamp).toBe(received.timestamp)
   })
+
+  it('forces the Host receive time over a client-supplied timestamp', async () => {
+    const { handle, checkpoints, service, enqueue } = createHarness({
+      verdict: { kind: 'started' },
+    })
+    const runtimeCaller = { caller: 'rpc-proxy', hostRef: AGENT, userId: USER_ID }
+    const traceContext = {
+      version: 1,
+      runId: 'rpc-ingress-run',
+      sessionId: CHAT_ID,
+      origin: 'direct_chat',
+      correlationRefs: [],
+    }
+    const CLIENT_TIMESTAMP = '1999-01-01T00:00:00.000Z'
+    const rpcBody = {
+      content: 'summarize the repository',
+      channelType: 'rpc',
+      channelId: AGENT,
+      hostRef: AGENT,
+      sender: USER_ID,
+      messageId: 'message-rpc-with-timestamp',
+      metadata: {},
+      threadId: CHAT_ID,
+      traceContext,
+      timestamp: CLIENT_TIMESTAMP,
+    }
+    const messageHandler = vi.fn().mockResolvedValue({ success: true, status: 'completed' })
+    const ingressResponse = { writeHead: vi.fn(), end: vi.fn() }
+    await handleMessageRoute(
+      { runtimeCaller, body: rpcBody, query: {} } as unknown as Request,
+      ingressResponse as unknown as Response,
+      makeHandlers({ messageHandler })
+    )
+
+    // Liveness witness: the message was admitted, so the timestamp below is the
+    // route's verdict on this body, not a rejected request.
+    expect(ingressResponse.writeHead).toHaveBeenCalledWith(200, {
+      'Content-Type': 'application/json',
+    })
+    expect(messageHandler).toHaveBeenCalledTimes(1)
+    const received = messageHandler.mock.calls[0][0] as IncomingMessage
+    expect(received.timestamp).not.toBe(CLIENT_TIMESTAMP)
+    expect(Number.isFinite(Date.parse(received.timestamp))).toBe(true)
+
+    // The checkpoint's source message carries the forced receive time too.
+    const { version } = await openResumable(checkpoints, {
+      sourceMessage: JSON.stringify(sourceMessageForResume(received)),
+    })
+    expect(
+      JSON.parse(checkpointRow(handle, CHECKPOINT_ID).source_message as string).timestamp
+    ).toBe(received.timestamp)
+    const { status } = await service.continue(continuationRequest(version))
+    expect(status).toBe(202)
+    expect(enqueue).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('ModelStepContinuationService — status-first claim precedence (#1043)', () => {
