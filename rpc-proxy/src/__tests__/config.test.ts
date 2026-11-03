@@ -125,6 +125,7 @@ describe('config timeouts loaded from the environment', () => {
   const ENV_KEYS = [
     'RPC_PROXY_UPSTREAM_TIMEOUT_MS',
     'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
+    'RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST',
     'RPC_PROXY_WAKE_MAX_HOLD_MS',
   ] as const
   const saved = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]))
@@ -157,11 +158,31 @@ describe('config timeouts loaded from the environment', () => {
   )
 
   it('loads RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS and rejects an oversized one', async () => {
-    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS = '300000'
-    expect((await loadConfig()).artifactDownloadTimeoutMs).toBe(300_000)
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS = '120000'
+    expect((await loadConfig()).artifactDownloadTimeoutMs).toBe(120_000)
 
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS = '2147483648'
     await expect(loadConfig()).rejects.toThrow(/RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS/)
+  })
+
+  it('defaults both timeouts and the per-user-host activity stream cap to the minikube overlay values', async () => {
+    delete process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS
+    delete process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS
+    delete process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST
+    const loaded = await loadConfig()
+    expect(loaded.upstreamTimeoutMs).toBe(60_000)
+    expect(loaded.artifactDownloadTimeoutMs).toBe(300_000)
+    expect(loaded.activityStreamMaxPerUserHost).toBe(3)
+  })
+
+  it('an explicit value still overrides each of those defaults', async () => {
+    process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS = '8000'
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS = '60000'
+    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST = '1'
+    const loaded = await loadConfig()
+    expect(loaded.upstreamTimeoutMs).toBe(8_000)
+    expect(loaded.artifactDownloadTimeoutMs).toBe(60_000)
+    expect(loaded.activityStreamMaxPerUserHost).toBe(1)
   })
 
   it('clamps RPC_PROXY_WAKE_MAX_HOLD_MS above the cap in the loaded config', async () => {
@@ -200,7 +221,7 @@ describe('minikube rpc-proxy ConfigMap', () => {
     const timeoutMs = value('RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS')
     const maxMb = value('RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB')
     expect(maxMb).toBe(250)
-    // The 60 s default needs 4.2 MB/s to move 250 MB; the overlay must not.
+    // 60 s would need 4.2 MB/s to move 250 MB; the overlay must not.
     const requiredMbPerSecond = maxMb / (timeoutMs / 1000)
     expect(requiredMbPerSecond).toBeLessThanOrEqual(1)
     expect(timeoutMs).toBeGreaterThan(60_000)

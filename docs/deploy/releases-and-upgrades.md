@@ -233,3 +233,28 @@ Read the notes for every release you skip over, not only the target release.
 | [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.              |
 | [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential. |
 | [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.       |
+
+### rpc-proxy default changes
+
+The first release after v0.12.0 changes three rpc-proxy built-in defaults to the
+values that the minikube overlay already sets. A built-in default applies only
+when the variable is missing from `rpc-proxy-config`.
+
+| Variable                                      | Old default | New default |
+| --------------------------------------------- | ----------- | ----------- |
+| `RPC_PROXY_UPSTREAM_TIMEOUT_MS`               | `8000`      | `60000`     |
+| `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`      | `60000`     | `300000`    |
+| `RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST` | `1`         | `3`         |
+
+If your `rpc-proxy-config` sets all three, nothing changes. The common case is a
+ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, which was added in
+v0.11.0. rpc-proxy then gives the in-cluster transfer of an artifact body from
+the Host at most 60 s after the Host's response headers arrive. The Host serves
+artifact files of at most 50 MiB, so with the old default a 50 MiB artifact would
+be aborted if that transfer ran below about 0.83 MiB/s. With 300 s, the floor is
+about 0.17 MiB/s. The timer applies only to the transfer from the Host to
+rpc-proxy, not to the client's download from rpc-proxy.
+
+To keep an old value, set that variable in `rpc-proxy-config` before you roll out
+the new image. rpc-proxy reads the ConfigMap at startup, so the new defaults
+apply when the new pods start.

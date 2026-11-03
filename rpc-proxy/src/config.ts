@@ -218,7 +218,7 @@ export const config: Config = {
   jwtAudience: requiredOrDevDefault('RPC_PROXY_JWT_AUDIENCE', 'rpc-proxy'),
   upstreamTimeoutMs: parsePositiveIntMs(
     'RPC_PROXY_UPSTREAM_TIMEOUT_MS',
-    process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS || '8000'
+    process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS || '60000'
   ),
   maxTokenLength: Number(process.env.RPC_PROXY_MAX_TOKEN_LENGTH || 4096),
   allowedMethodPattern: new RegExp(
@@ -235,12 +235,15 @@ export const config: Config = {
   })(),
   controlApiServiceName: process.env.RPC_PROXY_CONTROL_API_SERVICE_NAME || 'rpc-proxy',
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
+  // The effective cap for artifact files is min(this value, the Host's 50 MiB artifact cap,
+  // MAX_ARTIFACT_BYTES in mcp-host/src/workflow/artifactPaths.ts): the Host answers 413
+  // above 50 MiB, so a larger value here admits no larger artifact.
   artifactDownloadMaxBytes: parseArtifactDownloadMaxBytes(
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB || '50'
   ),
   artifactDownloadTimeoutMs: parsePositiveIntMs(
     'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
-    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS || '60000'
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS || '300000'
   ),
   streamMaxLifetimeMs: Number(process.env.RPC_PROXY_STREAM_MAX_LIFETIME_MS || 600000),
   streamIntervalMs: Number(process.env.RPC_PROXY_STREAM_INTERVAL_MS || 3000),
@@ -259,7 +262,7 @@ export const config: Config = {
   activityStreamMaxConcurrent: Number(process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT || 1000),
   activityStreamMaxPerUser: Number(process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER || 3),
   activityStreamMaxPerUserHost: Number(
-    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST || 1
+    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST || 3
   ),
   wakeMaxHoldMs: parseWakeMaxHoldMs(process.env.RPC_PROXY_WAKE_MAX_HOLD_MS || '48000'),
   wakePollMs: parsePositiveIntMs(
