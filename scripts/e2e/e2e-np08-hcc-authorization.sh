@@ -360,6 +360,18 @@ spec:
   enabled: true
 YAML
 
+# HCC labels the per-(Context, McpServer) record with the Context's
+# spec.contextId, not its metadata.name, so read it once before mutating.
+if ! CONTEXT_A_ID="$(kctl -n "${MCP_NS}" get context "${CONTEXT_A}" \
+  -o jsonpath='{.spec.contextId}' 2>/dev/null)"; then
+  echo "FAIL: unable to read Context ${CONTEXT_A} before the fixture patch" >&2
+  exit 1
+fi
+if [[ -z "${CONTEXT_A_ID}" ]]; then
+  echo "FAIL: Context ${CONTEXT_A} has no spec.contextId; cannot prove HCC observed the fixture" >&2
+  exit 1
+fi
+
 # Append only the fixture owned by this test; cleanup removes only this
 # test's matching server entry and labeled resources.
 kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json \
@@ -368,13 +380,38 @@ fixture_context_patched=1
 kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json \
   -p="[{\"op\":\"add\",\"path\":\"/spec/mcpServers/-\",\"value\":\"${SERVER_C}\"}]" >/dev/null
 
-# The fixture patch makes HCC reconcile this Host, and a runtime-token
-# rotation rolls the pod by changing the template revision annotation. A
-# journey exec started in the outgoing pod dies with it (exit 137), so wait
-# for the triggered rollout to complete and the template to stop changing.
+# The patch does not necessarily rotate the runtime token: the scope hash only
+# moves for an enabled `auth.type: oauth` server
+# (host-context-controller/src/hostReconciler.ts:1290-1327,
+# k8sClient.ts:2529-2539), and these fixtures are bearer and no-auth. The
+# pre-patch Deployment is already complete, so a settle-only gate would certify
+# the state before HCC reacts and the journey exec would start in the outgoing
+# pod (observed exit 137). Require HCC's own record of the Context change
+# (the owned `context-allow` NetworkPolicy per appended McpServer) first.
+NP08_ROLLOUT_SETTLE_TIMEOUT_SECONDS="${NP08_ROLLOUT_SETTLE_TIMEOUT_SECONDS:-300}"
+NP08_ROLLOUT_POLL_SECONDS="${NP08_ROLLOUT_POLL_SECONDS:-5}"
+for fixture_server in "${SERVER_A}" "${SERVER_C}"; do
+  if ! np08_wait_hcc_context_recorded "${HOST_NS}" "${CONTEXT_A_ID}" "${fixture_server}" \
+    "${NP08_ROLLOUT_SETTLE_TIMEOUT_SECONDS}" "${NP08_ROLLOUT_POLL_SECONDS}"; then
+    echo 'FAIL: HCC did not record the Context change for a fixture server before the NP-08 journey' >&2
+    exit 1
+  fi
+done
+echo 'PASS HCC recorded the Context change for both fixture servers'
+
 if ! np08_wait_rollout_settled "${HOST_NS}" "${HOST_DEPLOYMENT}" \
-  "${NP08_ROLLOUT_SETTLE_TIMEOUT_SECONDS:-300}" 3 "${NP08_ROLLOUT_POLL_SECONDS:-5}"; then
+  "${NP08_ROLLOUT_SETTLE_TIMEOUT_SECONDS}" 3 "${NP08_ROLLOUT_POLL_SECONDS}"; then
   echo 'FAIL: mcp-host rollout did not settle before the NP-08 journey' >&2
+  exit 1
+fi
+# The certified snapshot must still be the live one: a template roll that
+# starts between the gate and the exec would kill the journey pod.
+if ! settled_now="$(np08_rollout_snapshot "${HOST_NS}" "${HOST_DEPLOYMENT}")"; then
+  echo 'FAIL: mcp-host rollout could not be re-read before the NP-08 journey' >&2
+  exit 1
+fi
+if [[ "${settled_now}" != "${NP08_ROLLOUT_CERTIFIED_SNAPSHOT}" ]]; then
+  echo 'FAIL: mcp-host rollout changed between the settle gate and the NP-08 journey' >&2
   exit 1
 fi
 echo 'PASS mcp-host rollout settled after the fixture patch'
