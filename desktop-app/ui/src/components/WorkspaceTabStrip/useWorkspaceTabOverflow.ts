@@ -134,9 +134,11 @@ export function useWorkspaceTabOverflow({
           : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
             ? scroller.clientWidth
             : 1
-      // Trackpads may report both axes for a diagonal gesture. Prefer the native
-      // horizontal component and translate vertical-only wheel input once.
-      const delta = event.deltaX !== 0 ? event.deltaX * scale : event.deltaY * scale
+      // Trackpads may report both axes for a diagonal gesture. Use the dominant
+      // component and resolve ties horizontally.
+      const axisDelta =
+        Math.abs(event.deltaX) >= Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+      const delta = axisDelta * scale
       if (delta === 0) return
       const nextScrollLeft = Math.max(0, Math.min(maximum, scroller.scrollLeft + delta))
       if (Math.abs(nextScrollLeft - scroller.scrollLeft) <= SCROLL_EPSILON) return

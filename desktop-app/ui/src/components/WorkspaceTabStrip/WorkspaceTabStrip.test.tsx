@@ -616,7 +616,7 @@ describe('WorkspaceTabStrip', () => {
 
     const diagonalTrackpad = createEvent.wheel(scroller, { deltaX: 10, deltaY: 20 })
     fireEvent(scroller, diagonalTrackpad)
-    expect(layout.scrollLeft()).toBe(42)
+    expect(layout.scrollLeft()).toBe(52)
     expect(diagonalTrackpad.defaultPrevented).toBe(true)
 
     const pageWheel = createEvent.wheel(scroller, {
@@ -624,19 +624,19 @@ describe('WorkspaceTabStrip', () => {
       deltaMode: WheelEvent.DOM_DELTA_PAGE,
     })
     fireEvent(scroller, pageWheel)
-    expect(layout.scrollLeft()).toBe(42 + layout.viewportWidth())
+    expect(layout.scrollLeft()).toBe(52 + layout.viewportWidth())
     expect(pageWheel.defaultPrevented).toBe(true)
 
     for (const modifier of ['altKey', 'ctrlKey', 'metaKey', 'shiftKey'] as const) {
       const zoomGesture = createEvent.wheel(scroller, { deltaY: 12, [modifier]: true })
       fireEvent(scroller, zoomGesture)
-      expect(layout.scrollLeft()).toBe(42 + layout.viewportWidth())
+      expect(layout.scrollLeft()).toBe(52 + layout.viewportWidth())
       expect(zoomGesture.defaultPrevented).toBe(false)
     }
 
     const outsideWheel = createEvent.wheel(document.body, { deltaY: 12 })
     fireEvent(document.body, outsideWheel)
-    expect(layout.scrollLeft()).toBe(42 + layout.viewportWidth())
+    expect(layout.scrollLeft()).toBe(52 + layout.viewportWidth())
     expect(outsideWheel.defaultPrevented).toBe(false)
 
     scroller.scrollLeft = 100

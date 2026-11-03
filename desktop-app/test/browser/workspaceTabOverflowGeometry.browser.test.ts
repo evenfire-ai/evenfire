@@ -127,6 +127,64 @@ describe('workspace tab overflow production geometry', () => {
     expect(afterFit.arrows, JSON.stringify(afterFit)).toBe(0)
     expect(afterFit.scrollLeft).toBe(0)
   })
+
+  it('uses the dominant wheel axis and preserves ties, delta modes, modifiers, and edge chaining', async () => {
+    await open(280)
+    const scroller = page.locator('.chat-view-tabs__scroller')
+    const sendWheel = async (deltaX: number, deltaY: number, deltaMode = 0, ctrlKey = false) =>
+      scroller.evaluate(
+        (node, input) => {
+          const event = new WheelEvent('wheel', {
+            deltaX: input.deltaX,
+            deltaY: input.deltaY,
+            deltaMode: input.deltaMode,
+            ctrlKey: input.ctrlKey,
+            bubbles: true,
+            cancelable: true,
+          })
+          node.dispatchEvent(event)
+          return event.defaultPrevented
+        },
+        { deltaX, deltaY, deltaMode, ctrlKey }
+      )
+
+    expect(await sendWheel(2, 50)).toBe(true)
+    expect((await settle()).scrollLeft).toBe(50)
+
+    await scroller.evaluate(node => {
+      node.scrollLeft = 0
+    })
+    await settle()
+    expect(await sendWheel(10, 10)).toBe(true)
+    expect((await settle()).scrollLeft).toBe(10)
+
+    await scroller.evaluate(node => {
+      node.scrollLeft = 0
+    })
+    await settle()
+    expect(await sendWheel(0, 2, 1)).toBe(true)
+    expect((await settle()).scrollLeft).toBe(32)
+
+    await scroller.evaluate(node => {
+      node.scrollLeft = 0
+    })
+    await settle()
+    const pageWidth = await scroller.evaluate(node => node.clientWidth)
+    const beforePage = await geometry()
+    expect(await sendWheel(0, 1, 2)).toBe(true)
+    expect((await settle()).scrollLeft).toBe(
+      Math.min(pageWidth, beforePage.scrollWidth - beforePage.viewportWidth)
+    )
+
+    await scroller.evaluate(node => {
+      node.scrollLeft = 0
+    })
+    await settle()
+    expect(await sendWheel(0, 80, 0, true)).toBe(false)
+    expect((await settle()).scrollLeft).toBe(0)
+    expect(await sendWheel(-40, 0)).toBe(false)
+    expect((await settle()).scrollLeft).toBe(0)
+  })
 })
 
 declare global {
