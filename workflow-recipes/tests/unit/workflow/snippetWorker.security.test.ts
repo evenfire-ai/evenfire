@@ -34,7 +34,6 @@ describe('snippet worker security guards', () => {
     const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-worker-'))
     const previousOutputDir = process.env.CLERUM_WORKFLOW_OUTPUT_DIR
     process.env.CLERUM_WORKFLOW_OUTPUT_DIR = outputDir
-    process.env.CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS = 'true'
     try {
       const request: SnippetExecuteRequest = {
         workflowName: 'wf',
@@ -65,7 +64,6 @@ describe('snippet worker security guards', () => {
     } finally {
       if (previousOutputDir === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_DIR
       else process.env.CLERUM_WORKFLOW_OUTPUT_DIR = previousOutputDir
-      delete process.env.CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS
       await fs.rm(outputDir, { recursive: true, force: true })
     }
   })
@@ -74,7 +72,6 @@ describe('snippet worker security guards', () => {
     const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-worker-'))
     const previousOutputDir = process.env.CLERUM_WORKFLOW_OUTPUT_DIR
     process.env.CLERUM_WORKFLOW_OUTPUT_DIR = outputDir
-    process.env.CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS = 'true'
     try {
       const request: SnippetExecuteRequest = {
         workflowName: 'wf',
@@ -105,7 +102,6 @@ describe('snippet worker security guards', () => {
     } finally {
       if (previousOutputDir === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_DIR
       else process.env.CLERUM_WORKFLOW_OUTPUT_DIR = previousOutputDir
-      delete process.env.CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS
       await fs.rm(outputDir, { recursive: true, force: true })
     }
   })

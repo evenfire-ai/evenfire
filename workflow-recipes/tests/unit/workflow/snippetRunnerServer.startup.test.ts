@@ -1,0 +1,80 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
+
+// Separate from snippetRunnerServer.test.ts, which imports the module statically:
+// these cases reset modules and mock node:child_process before importing it.
+describe('snippet runner startup Node permission check', () => {
+  let tokenDir: string
+  let outputDir: string
+
+  beforeEach(async () => {
+    tokenDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-runner-token-'))
+    outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-runner-output-'))
+    const tokenPath = path.join(tokenDir, 'token')
+    await fs.writeFile(tokenPath, 'runner-token\n', 'utf8')
+    vi.stubEnv('SNIPPET_RUNNER_TOKEN_FILE', tokenPath)
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_DIR', outputDir)
+  })
+
+  afterEach(async () => {
+    vi.resetModules()
+    vi.doUnmock('node:child_process')
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+    await fs.rm(tokenDir, { recursive: true, force: true })
+    await fs.rm(outputDir, { recursive: true, force: true })
+  })
+
+  it('refuses to start when the Node runtime rejects the permission flags', async () => {
+    const stderr = Buffer.from('node: bad option: --permission\n')
+    const spawnSync = vi.fn(() => ({
+      pid: 0,
+      output: [null, null, stderr],
+      stdout: null,
+      stderr,
+      status: 9,
+      signal: null,
+    }))
+    vi.doMock('node:child_process', async () => {
+      const actual =
+        await vi.importActual<typeof import('node:child_process')>('node:child_process')
+      return { ...actual, spawnSync }
+    })
+    const { createSnippetRunnerServer } = await import('../../../src/workflow/snippetRunnerServer')
+
+    let thrown: unknown
+    try {
+      createSnippetRunnerServer()
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toMatch(/Node permission model check failed \(status 9/)
+    expect((thrown as Error).message).toMatch(/bad option/)
+    // Liveness witnesses: the check ran once, with the grants for the output directory
+    // that resolveSnippetOutputDir() returns.
+    expect(spawnSync).toHaveBeenCalledOnce()
+    const [bin, args] = spawnSync.mock.calls[0] as unknown as [string, string[]]
+    expect(bin).toBe(process.execPath)
+    expect(args).toEqual(
+      expect.arrayContaining([
+        '--permission',
+        `--allow-fs-read=${outputDir}`,
+        `--allow-fs-write=${outputDir}`,
+      ])
+    )
+  })
+
+  it('starts on the pinned Node runtime with the real permission check', async () => {
+    const { createSnippetRunnerServer } = await import('../../../src/workflow/snippetRunnerServer')
+
+    const server = createSnippetRunnerServer()
+
+    expect(server).toBeInstanceOf(http.Server)
+    expect(server.listening).toBe(false)
+  })
+})

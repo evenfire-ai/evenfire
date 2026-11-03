@@ -233,3 +233,27 @@ Read the notes for every release you skip over, not only the target release.
 | [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.              |
 | [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential. |
 | [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.       |
+| [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.        |
+
+#### Snippet runner Node permissions
+
+The workflow snippet runner starts each snippet worker under the Node permission
+model with the `--permission` flag. Node 24 accepts only this flag name and
+rejects the earlier `--experimental-permission`. Each path has its own grant: a
+worker can read the runner's `dist/` and `node_modules/` directories and the
+workflow output directory, and can write only to the output directory.
+
+At startup the runner checks that its Node runtime provides the permission
+model. If it does not, the runner exits with an error and its Pod does not
+become Ready.
+
+`CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS` is removed. The workflow-recipes
+controller never passed it to snippet-runner Pods: it passes them only an
+allowlisted set of environment variables, and this variable is not in that set.
+
+No action is needed when you use the runner image built from this repository.
+If `CLERUM_SNIPPET_RUNNER_IMAGE` points at your own image, that image must run
+Node 24, as the repository images do. With Node 22.10 or older the runner exits
+at startup. With Node 26 the runner starts, but snippet workers cannot open
+network connections, because Node 26 also restricts network access under
+`--permission`.
