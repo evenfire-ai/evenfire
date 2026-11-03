@@ -200,6 +200,12 @@ describe('workspace tab overflow production geometry', () => {
     }
   })
 
+  it('reads active-tab flex shrink from the computed production style', async () => {
+    await open(100, 2)
+    const observed = await geometry()
+    expect(observed.activeFlexShrink).toBe('0.4')
+  })
+
   it('uses the dominant wheel axis and preserves ties, delta modes, modifiers, and edge chaining', async () => {
     await open(280)
     const scroller = page.locator('.chat-view-tabs__scroller')
