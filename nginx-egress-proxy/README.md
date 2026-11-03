@@ -44,28 +44,50 @@ For each remote McpServer, host-context-controller:
    strips as forbidden; `spec.envSecret`; `envMapping`; or a placeholder of
    `spec.remote.authHeaders`); an undeclared name is rejected, because it would
    otherwise survive into the rendered config, where NGINX resolves it as one of
-   its own variables. The platform-owned proxy env
-   (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS`, `NGINX_ENVSUBST_FILTER`,
-   `NGINX_LOCAL_RESOLVERS`) is never CRD-controlled, so those names cannot be
-   used as query placeholders or in an authHeader value. The path takes no
-   placeholders. Before the path check, the URL parser converts `\` to `/` and
-   percent-encodes braces, spaces, and control characters, so the check rejects
-   `$` and `;` in practice because they would change the unquoted NGINX
-   template. The value of a query placeholder must use only
-   `[A-Za-z0-9._~-]` and complete `%XX` escapes; store any other character
-   percent-encoded. The proxy never encodes a value, and an already
-   percent-encoded value is passed through unchanged.
+   its own variables. Eight reserved egress-proxy names cannot be query
+   placeholders or authHeader references. Six of them are pinned by the image
+   entrypoint before the template check, and HCC strips a CRD-supplied value of
+   any of those six from every remote-server env source:
+   `NGINX_ENVSUBST_TEMPLATE_DIR`, `NGINX_ENVSUBST_TEMPLATE_SUFFIX`,
+   `NGINX_ENVSUBST_OUTPUT_DIR`, `NGINX_ENVSUBST_STREAM_TEMPLATE_SUFFIX`,
+   `NGINX_ENVSUBST_STREAM_OUTPUT_DIR`, and `NGINX_ENVSUBST_FILTER`. The resolver
+   pair, `NGINX_ENTRYPOINT_LOCAL_RESOLVERS` and `NGINX_LOCAL_RESOLVERS`, is
+   reserved for a different reason: `15-local-resolvers.envsh` exports
+   `NGINX_LOCAL_RESOLVERS` after the template check when
+   `NGINX_ENTRYPOINT_LOCAL_RESOLVERS` is set, so a placeholder of either name
+   would be filled with a value the check never saw. HCC rejects both names as
+   placeholders and does not strip them. A CRD may still set them, and no
+   template HCC renders references them. The path takes no placeholders. Before
+   the path check, the URL parser converts `\` to `/` and percent-encodes
+   braces, spaces, and control characters, so the check rejects `$` and `;` in
+   practice because they would change the unquoted NGINX template. Literal query
+   text outside a complete `${NAME}` placeholder is also refused when it
+   contains `\`, `;`, `{`, `}`, or `$` (store `\` as `%5C`). A reference inside
+   an unquoted argument is in query position when an unescaped `?` occurs
+   earlier in the same argument. The resolved value there must use only
+   `[-A-Za-z0-9._~!'()*,=:@/?]` and complete `%XX` escapes, so `=`, `/`, `:`,
+   `@`, `?`, `,`, `!`, `'`, `(`, `)`, and `*` are accepted raw. Raw `+` is
+   refused (store `%2B`: a form-decoding upstream reads `+` as a space) and raw
+   `\` is refused (store `%5C`: NGINX unescapes `\\`, `\t`, `\n`, and `\r`
+   inside an unquoted argument, and a trailing `\` escapes the `;`). The proxy
+   never encodes a value, and an already percent-encoded value is passed
+   through unchanged. The value-class table below is the same contract as
+   [Value classes](../docs/crds/mcpserver.md#value-classes).
 2. **Renders a per-server `default.conf.template` ConfigMap** pinning
    `proxy_pass` to that single external base URL, with TLS to the upstream
    (`proxy_ssl_verify on`, SNI, system CA bundle), SSE-friendly settings
    (buffering/cache off, long read timeouts), and a local `/health` endpoint.
 3. **Sanitizes each `spec.remote.authHeaders` entry** (`sanitizeAuthHeader`):
-   header names restricted to `[A-Za-z0-9-]`, values capped at 2048 chars,
-   CR/LF/NUL rejected (HTTP request smuggling / nginx directive-injection
-   defense), backslashes and quotes escaped for nginx's quoted-string context.
-   A value referencing a forbidden env name (`PATH`, `LD_PRELOAD`, ...) or a
-   platform-owned proxy env is dropped as a whole, and the name is not
-   backfilled into the container env.
+   header names restricted to `[A-Za-z0-9-]`. The CRD-authored `valueTemplate`
+   is capped at 2048 characters, CR/LF/NUL are rejected in that text, and HCC
+   escapes `\` and `"` so the template stays inside nginx's quoted string. HCC
+   never escapes a resolved value. The bytes of a Secret, of `spec.env`, or of
+   `envMapping` are substituted as stored and must themselves be in the quoted
+   class below. A template that references a forbidden env name (`PATH`,
+   `LD_PRELOAD`, ...) or a reserved proxy env name is dropped as a whole, and
+   the name is not backfilled into the container env. A query placeholder that
+   names one of those is a reconcile failure (`Resource sync failed`); a dropped
+   authHeader means the upstream stops receiving that header.
 4. **Deploys this image as the only container** (`egress-proxy`) of the
    per-server Deployment. The ConfigMap mounts at `/etc/nginx/templates`, so
    `envsubst` resolves `${VAR}` placeholders in auth headers at pod start from
@@ -97,39 +119,177 @@ before closing the underlying issue:
    Deployment restarted with the new template digest, and the proxy becomes
    ready.
 
-HCC and this image must roll together in both directions. New HCC with an older
-image fails the exec liveness probe and restarts visibly; rolling only the image
-back removes the stderr filter while leaving the new probe. Preserve the previous
-compatible HCC/image pair for rollback.
+### Before upgrading
 
-Before NGINX starts, `egress-proxy-entrypoint` runs `egress-proxy-template-check`
-over the templates. envsubst substitutes every defined variable (`$NAME` and
-`${NAME}`), so the check reads each reference to a defined variable, works out
-where it sits the way NGINX's tokenizer does, and rejects a value that would
-change the syntax there:
+Run the inventory before the paired upgrade, and fix every `REJECT` and
+`INCONCLUSIVE` first. Both variables are required:
 
-| Where the reference sits                               | Rejected in the value                                                            |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| inside `"..."` (auth headers)                          | control characters (TAB, CR, LF, …), `"`, `$`, `\`                               |
-| inside an unquoted argument (the baseUrl query)        | anything outside `[A-Za-z0-9._~-]`, or a `%` that is not a complete `%XX` escape |
-| argument start, inside `'...'`, a comment, after a `\` | any value                                                                        |
+```
+CONTEXT=<kube-context> NAMESPACE=<mcp-server namespace> \
+  ./scripts/ops/egress-proxy-value-preflight.sh
+```
 
-A rejected value stops the container before NGINX starts (CrashLoopBackOff,
-readiness never passes). The log names the template file, the variable and the
-context, never the value. This includes a credential pasted with a trailing
-TAB or newline. An undefined bare `$name` (NGINX's own `$host`, `$scheme`, …)
-is left untouched, as envsubst leaves it. An undefined braced `${NAME}` stops the
-container: HCC emits that form only for names it declared in the container env,
-and envsubst would leave it for NGINX to read as one of its own variables
-(`${HTTP_X}` is the client's `X` request header). That happens when a running
-pod restarts onto a template whose new placeholder its older env lacks.
-A `+` reaches a form-decoding upstream as a space, `&` starts a new parameter
-and `#` ends the value, so such a value is refused instead of being sent as
-something else.
+The script is read-only. It prints one `server=<namespace>/<name> verdict=OK`,
+`REJECT`, or `INCONCLUSIVE` line per remote server, then one `VERDICT=` line
+(`CLEAN`, `VALUES_REJECTED`, `ERROR`, `INCONCLUSIVE`, or `NO_REMOTE_SERVERS`).
+A value `REJECT` repeats the template check's message, which names the variable
+and the context (`an unquoted query value`, `a quoted string`, …) and replaces
+the template path with `<namespace>/<name>`. A static `REJECT` prints one
+`static:` line: `S1` names the rule (`query` or `path`) and not the URL text;
+`S2` names the header or placeholder and the reserved or forbidden name. An
+`INCONCLUSIVE` line names the reason and, for a per-name reason, the env var.
+Exit 0 is `CLEAN` (at least one server, all OK), 1 is `VALUES_REJECTED`, 2 is
+`ERROR`, 3 is `INCONCLUSIVE`, and 4 is `NO_REMOTE_SERVERS` (never a success).
+The script never prints a Secret value, a literal value, URL query or path
+text, the offending character, or the value's length, and it does not put a
+value in argv or on disk.
 
-HCC appends an empty `NGINX_ENVSUBST_FILTER` after CRD-provided env and
-`spec.envSecret` entries. Kubernetes uses the last duplicate, so a CRD cannot
-restrict which declared names `envsubst` substitutes.
+Every enabled HCC-managed remote proxy rolls once at the paired upgrade. One
+Deployment replace carries the image, the exec liveness probe, the template
+digest annotation, `proxy_ignore_headers`, and the env after the reserved-name
+strip. Disabled servers and `managed: false` servers are not touched.
+
+Each of those rolls disconnects that server from mcp-host for a short window,
+including when every value is inside its class. Right after HCC replaces the
+Deployment, the rollout is not ready (`observedGeneration` is behind
+`generation`, or the replica counts differ). HCC publishes that status at once.
+mcp-host polls HCC every 30 seconds, drops a live connection whose status is
+not ready, and refuses new sessions with `MCP server not ready`. When the
+readiness poll (at most 24 × 5 s) sees the rollout converge, HCC publishes
+ready and mcp-host readmits the server on its next poll. The window is the
+roll's convergence time plus up to one poll interval; a roll that converges
+between two polls can go unseen. `maxUnavailable=0` keeps the old pod serving
+at the Kubernetes level. It does not keep mcp-host connected. A full reconcile
+handles up to 10 servers at once, so the windows overlap. The deploy workflows
+pin HCC and this image to one commit and apply them together. They do not
+restart the mcp-host fleet: those processes apply HCC's status in place. Their
+rollout check treats the `mcp-server` namespace as non-gating (60 seconds,
+warning only), so the windows are not a failed deploy. Run the paired upgrade
+in a maintenance window.
+
+A server whose values are outside the classes is not rolled. HCC leaves the
+ConfigMap and the Deployment unchanged, writes `EgressProxyValuesValid=False`
+with reason `ValueOutsideClass` and `Ready=False` with reason
+`EgressProxyValuesInvalid`, and mcp-host stays disconnected until the value is
+fixed. When `spec.envSecret` is set and the Secret exists with its keys,
+`SecretResolved` stays `True` with reason `SecretFound`. The condition message
+names the placeholder, the source, and the context. It never includes value
+bytes, the value's length, or the offending character. See
+[Value classes](../docs/crds/mcpserver.md#value-classes).
+
+If the new image starts under an HCC that does not run that preflight, the new
+pod refuses to start instead. The container log is the template check's line:
+it names the variable and the context and never the value. HCC then reports the
+rollout not ready and, after 24 × 5 s, writes `DeploymentReady=False` with
+reason `RolloutIncomplete`. There is no `EgressProxyValuesValid` condition on
+that path. Read the pod log for the variable name.
+
+HCC and this image ship together. The image reference is HCC configuration
+(`CONTEXT_MAPPER_EGRESS_PROXY_IMAGE`).
+
+| HCC | Image | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| old | old   | Previous behavior.                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| old | new   | Deployments keep the old shape: `httpGet` liveness, so a dead stderr filter does not restart the pod; no template-digest annotation, so a ConfigMap-only change does not roll; no reserved-name strip; no value preflight. The new image pins the six envsubst knobs and applies the classes below at every container start, so an out-of-class value makes that pod refuse to start, with the pod log and `RolloutIncomplete` above and no `EgressProxyValuesValid` condition. |
+| new | old   | The exec liveness binary is absent, so the probe fails and the kubelet restarts the container about every 45 s (failure threshold 3 × period 15 s). The preflight and the strip apply. The old image substitutes values without the template check.                                                                                                                                                                                                                             |
+| new | new   | Intended.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+Old HCC with the new image leaves an out-of-class value as a pod that never
+becomes ready. The check refuses the start, the log names the variable and the
+context, and the rollout ends `RolloutIncomplete` after the readiness budget.
+There is no status condition that names the class. New HCC with the old image
+restarts the container on the missing liveness binary, about every 45 seconds,
+while the preflight still blocks an out-of-class value before either object is
+written. The old image, if it does start, substitutes without the check.
+Rollback is the previous HCC together with its previous image reference, which
+rolls every remote proxy once more.
+
+### Value classes
+
+A value reaches the NGINX template through one of six channels. The image check
+and the HCC preflight enforce channels 2 and 3 with the same classes. HCC alone
+validates channels 1 and 4. An undefined braced `${NAME}` is rejected wherever
+it sits. An undefined bare `$name` is left alone.
+
+| #   | Channel                                                                                                          | Where it lands                                         | Class                                                                                                                                                                                         |
+| --- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Literal query text in `spec.remote.baseUrl`, outside `${NAME}`                                                   | `proxy_pass`, unquoted, after `?`                      | Parser output minus `\`, `;`, `{`, `}`, `$`, and U+0000–U+0020. Unchanged.                                                                                                                    |
+| 2   | Resolved value of the env var named by a query placeholder `${NAME}` (Secret, `spec.env`, or `envMapping`)       | `proxy_pass`, unquoted, after `?` in the same argument | Query class: `[-A-Za-z0-9._~!'()*,=:@/?]` plus complete `%XX` escapes.                                                                                                                        |
+| 3   | Resolved value of the env var referenced by `authHeaders[].valueTemplate` (`${NAME}` or `$NAME`). Never escaped. | `proxy_set_header`, inside `"…"`                       | Quoted class, byte-wise: reject bytes 0x01–0x1F, 0x7F, `"` (0x22), `$` (0x24), and `\` (0x5C). Accept every other byte, including every byte ≥ 0x80, whether or not the value is valid UTF-8. |
+| 4   | Literal text of `authHeaders[].valueTemplate` (CRD-authored). HCC escapes `\` and `"` in this text.              | `proxy_set_header`, inside `"…"`                       | At most 2048 characters; no CR, LF, or NUL; no reference to a forbidden or reserved name. Unchanged.                                                                                          |
+| 5   | A defined env var at any other unquoted position (not after `?`)                                                 | generic unquoted argument                              | `[A-Za-z0-9._~-]` plus complete `%XX` escapes. HCC never emits this position.                                                                                                                 |
+| 6   | A defined env var at an argument start, inside `'…'`, in a comment, or after `\`                                 | —                                                      | No defined value is accepted.                                                                                                                                                                 |
+
+Query position is an unescaped `?` earlier in the same unquoted argument.
+Characters the query class accepts raw include `=`, `/`, `:`, `@`, `?`, `,`,
+`!`, `'`, `(`, `)`, and `*`, plus `A–Z`, `a–z`, `0–9`, `-`, `.`, `_`, and `~`,
+and a complete `%XX` escape. Any byte ≥ 0x80 is rejected in a query value.
+In a quoted value, bytes ≥ 0x80 are accepted, including NEL (U+0085, bytes
+`C2 85`) and U+2028. The character-by-character query table is in
+[Value classes](../docs/crds/mcpserver.md#value-classes).
+
+The quoted rule compares bytes with `index()`. An earlier head of this PR used
+`[[:cntrl:]]`. In the image's C.UTF-8 locale, musl `regexec` reports no match
+for a whole value that contains an invalid UTF-8 byte, so a Secret value of
+`tok`, then byte 0xFF, then CR, LF, and `X-Injected: 1` passed the check,
+`nginx -t` passed, and the upstream received a second header line. The
+byte-wise rule rejects 0x01–0x1F and 0x7F in any locale, whether or not the
+value is valid UTF-8, which closes that gap. Writing the value still requires
+write access to the Secret, and each upstream request uses its own HTTP/1.0
+connection. A byte 0x00 cannot appear in an environment variable (a C string
+ends at NUL), so the image never sees it. The HCC preflight rejects a Secret
+value that contains 0x00, and it refuses a referenced literal that contains
+`$(` because it does not emulate Kubernetes' `$(NAME)` expansion.
+
+These shapes were substituted on the previous release and are refused now:
+
+| Shape                                                                                                         | Channel | Remediation                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| raw `+` in a query value (standard base64)                                                                    | 2       | Store `%2B`. `API_KEY='abc/def+gh=='` is refused. `API_KEY='abc/def%2Bgh=='` and `API_KEY='sk:live_1'` are accepted. A form-decoding upstream already read `+` as a space. |
+| `\` in a query value                                                                                          | 2       | Store `%5C`.                                                                                                                                                               |
+| any other character outside the query class                                                                   | 2       | Percent-encode it. Base64url, hex, JWT, `sk-…`, and `pk:…` contain none of the refused characters except raw `+` in standard base64.                                       |
+| a byte 0x01–0x1F or 0x7F in a header value, most often a trailing LF from `kubectl create secret --from-file` | 3       | Recreate the Secret without it: `--from-literal=<key>=<value>`, or `printf '%s'` into the file.                                                                            |
+| `"`, `$`, or `\` in a header value                                                                            | 3       | No encoding exists for a header value. That credential cannot go through an authHeader placeholder.                                                                        |
+| a `$(NAME)` reference in a literal `spec.env` or `envMapping` value whose env var a placeholder references    | 2, 3    | Blocked by design. Put the final value in the CRD or in a Secret.                                                                                                          |
+| `\`, `;`, `{`, `}`, or `$` in the literal query of `spec.remote.baseUrl`, outside a complete `${NAME}`        | 1       | Percent-encode it in the CRD (`\` as `%5C`).                                                                                                                               |
+| a query placeholder or an authHeader reference naming one of the eight reserved names or a forbidden name     | 2, 3    | Rename the env var. A query placeholder fails the reconcile. An authHeader is dropped.                                                                                     |
+
+Before NGINX starts, `egress-proxy-entrypoint` copies each mounted top-level
+`*.template` into a private directory and runs `egress-proxy-template-check` on
+that copy. `mktemp -d` creates `/tmp/egress-proxy-templates.XXXXXX` mode 0700
+with a new name on every start, so a restart that keeps the writable layer
+never reads the previous copy. Each file is one `cat` into a regular file.
+`umask 077` covers only that copy and is restored afterwards. Before the check,
+the entrypoint assigns and exports all six envsubst knobs:
+`NGINX_ENVSUBST_TEMPLATE_DIR` (the snapshot),
+`NGINX_ENVSUBST_TEMPLATE_SUFFIX=.template`,
+`NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx/conf.d`,
+`NGINX_ENVSUBST_STREAM_TEMPLATE_SUFFIX=.stream-template`,
+`NGINX_ENVSUBST_STREAM_OUTPUT_DIR=/etc/nginx/stream-conf.d`, and
+`NGINX_ENVSUBST_FILTER` empty. The assignments are plain, not `${VAR:-default}`,
+so a pod env cannot point envsubst at a directory the check did not read, skip
+the checked file, or leave a declared `${NAME}` unsubstituted. The pins do not
+touch the resolver pair. `15-local-resolvers.envsh` runs later, inside the
+official entrypoint.
+
+envsubst substitutes every defined variable (`$NAME` and `${NAME}`). The check
+reads each reference to a defined variable, works out where it sits the way
+NGINX's tokenizer does, and rejects a value outside the class for that
+position. A rejected value stops the container before NGINX starts
+(CrashLoopBackOff, readiness never passes). The log names the template file,
+the variable, and the context, never the value. An undefined bare `$name`
+(NGINX's own `$host`, `$scheme`, …) is left untouched. An undefined braced
+`${NAME}` stops the container: HCC emits that form only for names it declared,
+and envsubst would otherwise leave it for NGINX to read as one of its own
+variables (`${HTTP_X}` is the client's `X` request header). That happens when a
+running pod restarts onto a template whose new placeholder its older env lacks.
+
+HCC strips CRD-supplied values of the six `NGINX_ENVSUBST_*` names from every
+remote-server env source (`spec.env`, `spec.envSecret`, and `envMapping`), then
+appends one empty `NGINX_ENVSUBST_FILTER` last. The resolver pair is not
+stripped. Kubernetes uses the last duplicate, so that empty entry is the
+Deployment's value for the name even while an older image is still running. On
+this image the entrypoint also assigns the same empty filter before envsubst.
 
 NGINX's stderr (the error log) goes through `egress-proxy-log-filter`, which
 applies two rules to every line:
@@ -190,11 +350,14 @@ or encoded, lie inside the redacted span.
 
 The remote container's readiness probe remains the local `/health` HTTP probe.
 Its liveness probe runs `/usr/local/bin/egress-proxy-liveness <port>`. That
-script checks `/health` and that the stderr filter process is alive and not a
-zombie, so a dead filter causes a visible container restart (after about
-5 s + 3 × 15 s) instead of silently losing error logs. It does not measure
-whether the filter keeps reading: a filter that stays alive but stops reading
-blocks NGINX's error-log writes once the 64 KiB FIFO is full.
+script checks `/health` with `wget -Y off`, so a pod `http_proxy` does not
+divert the probe, and it checks that the stderr filter process is alive and
+not a zombie. A dead filter causes a visible container restart (after about
+5 s + 3 × 15 s) instead of silently losing error logs. `http_proxy` is not
+stripped: NGINX ignores it, and a tenant value can only make this probe miss.
+The script does not measure whether the filter keeps reading: a filter that
+stays alive but stops reading blocks NGINX's error-log writes once the 64 KiB
+FIFO is full.
 
 ## Configuration
 
@@ -212,10 +375,17 @@ desired state owned by the CRD author. Deployment rendering always stamps the
 configured platform image for remote egress proxies, so a remote CRD's
 `spec.image` is never what runs.
 
-HCC and this image must be upgraded together: the HCC liveness probe needs this
-layer's `egress-proxy-liveness` script, and the stderr filter exists only in this
-layer. An older image is expected to fail visibly (the exec probe fails and the
-container restarts) rather than silently fall back.
+HCC and this image are upgraded together. The same four pairings are in
+[Before upgrading](#before-upgrading):
+
+| HCC | Image | Result                                                                                                                                                                                                                                                                                                                                         |
+| --- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| old | old   | Previous behavior.                                                                                                                                                                                                                                                                                                                             |
+| old | new   | The new image applies the value classes and the six envsubst pins at every start. An out-of-class value refuses the pod. There is no `EgressProxyValuesValid` condition; the pod log names the variable and the context, and the rollout ends `RolloutIncomplete`. Liveness stays `httpGet`, so a dead stderr filter does not restart the pod. |
+| new | old   | The exec liveness binary is absent, so the kubelet restarts the container about every 45 s (failure threshold 3 × period 15 s). The preflight and the strip apply. The old image substitutes values without the template check.                                                                                                                |
+| new | new   | Intended.                                                                                                                                                                                                                                                                                                                                      |
+
+Rollback is the previous HCC with its previous image reference, together.
 
 ## Ports
 
