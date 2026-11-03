@@ -143,19 +143,16 @@ fail() {
   failures=$((failures + 1))
 }
 
+# The implementation lives in its own file so the replacement semantics can be
+# tested without Docker or any other harness prerequisite.
+# shellcheck source=scripts/tests/lib/replace-one-literal.sh
+. "$REPO_ROOT/scripts/tests/lib/replace-one-literal.sh"
+
 # Replaces the one literal occurrence of <from> with <to> in a file under
 # $WORK (a rendered template or a copy of the build context). Any other count
 # stops the run, so a mutation can never silently match nothing.
 mutate() {
-  local file="$1" from="$2" to="$3" count content
-  count="$(grep -cF -- "$from" "$file" || true)"
-  if [ "$count" != "1" ]; then
-    echo "FAIL: mutation expected one '$from' in $file, found $count" >&2
-    exit 1
-  fi
-  content="$(cat "$file"; printf x)"
-  content="${content%x}"
-  printf '%s' "${content/"$from"/"$to"}" >"$file"
+  replace_one_literal "$1" "$2" "$3"
 }
 
 # ─── Images ──────────────────────────────────────────────────────────────────
