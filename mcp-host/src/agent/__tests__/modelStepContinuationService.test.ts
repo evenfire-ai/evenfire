@@ -83,7 +83,7 @@ function readVector(name: string): Vector {
 }
 
 /**
- * R2-L7: the rpc-proxy's committed wire body for POST /messages. The proxy
+ * The rpc-proxy's committed wire body for POST /messages. The proxy
  * asserts its builder equals this vector; this suite feeds it through the real
  * Host ingress, so the two sides cannot drift apart silently.
  */
@@ -262,7 +262,7 @@ describe('ModelStepContinuationService — RPC ingress (#1043)', () => {
       verdict: { kind: 'started' },
     })
     const runtimeCaller = { caller: 'rpc-proxy', hostRef: AGENT, userId: USER_ID }
-    // R2-L7: the wire body is the rpc-proxy's committed builder output, not a
+    // The wire body is the rpc-proxy's committed builder output, not a
     // hand-typed copy. A field the proxy adds or drops turns this suite red.
     const vector = HOST_MESSAGE_VECTOR
     const traceContext = vector.input.traceContext

@@ -1,4 +1,4 @@
-// R2-M2 (Addendum 13): RAM, the store's reopened-turn mirror and the durable
+// RAM, the store's reopened-turn mirror and the durable
 // rows must agree after a rejected fenced write. A fenced completion rolls
 // RAM back on any rejection; fail/cancel keep the fence-only rule, and the
 // store mirror follows the manager.

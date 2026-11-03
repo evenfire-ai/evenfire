@@ -253,7 +253,7 @@ async function claimedCheckpoint(options: {
   recordedUserContent?: string
   recordedUserParts?: MessageContentPart[]
   /**
-   * Store and run the raw message exactly as passed (the pre-WP-H5 fixture
+   * Store and run the raw message exactly as passed (the legacy fixture
    * shape). Production stores `sourceMessageForResume(message)`.
    */
   storeRawSourceMessage?: boolean
@@ -2987,8 +2987,8 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     ])
   })
 
-  // R2-M2 (Addendum 13): a fenced completion rolls RAM back on any rejected
-  // write, and the executor then releases the turn on every ending path.
+  // A fenced completion rolls RAM back on any rejected write, and the executor
+  // then releases the turn on every ending path.
   function fencedSession(fixture: CheckpointFixture) {
     const conversation = fixture.manager.getSessionByKey(SESSION_KEY)
     if (!conversation) throw new Error('continuation conversation is missing')
@@ -3135,8 +3135,8 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
   })
 
   // Holds the worker's dispatch of one fenced assistant boundary so the real
-  // PersistQueue times out first (R3-M3). Releasing the gate lets the same
-  // in-flight op commit late or fail late, exactly as a busy worker would.
+  // PersistQueue times out first. Releasing the gate lets the same in-flight op
+  // commit late or fail late, exactly as a busy worker would.
   interface BoundaryGate {
     entered: Promise<void>
     release: () => void
@@ -3382,11 +3382,11 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// WP-H5 / R4-M1 — the continuation rebuilds the turn from one attachment
-// record. Image identity and digest live on the stored source message; the
-// bytes live in the checkpoint table, bound by that digest. The fixtures store
-// the production projection by default; a raw stored image without its digest
-// binding fails loud instead of silently losing the turn's attachment set.
+// The continuation rebuilds the turn from one attachment record. Image
+// identity and digest live on the stored source message; the bytes live in the
+// checkpoint table, bound by that digest. The fixtures store the production
+// projection by default; a raw stored image without its digest binding fails
+// loud instead of silently losing the turn's attachment set.
 // ---------------------------------------------------------------------------
 
 // A 1x1 PNG, enough for the attachment/image-part shape.

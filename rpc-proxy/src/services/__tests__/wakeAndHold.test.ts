@@ -753,7 +753,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(res.body).toMatchObject({ code: 'host_waking' })
   })
 
-  // R2-L2: the Host claims a model-step continuation BEFORE it emits the
+  // The Host claims a model-step continuation BEFORE it emits the
   // admission verdict, so a post-wake attempt that starts with less hold than
   // the Host's own 10 s verdict wait can be aborted by the proxy after the
   // claim landed. Such an attempt must not start; the caller gets the

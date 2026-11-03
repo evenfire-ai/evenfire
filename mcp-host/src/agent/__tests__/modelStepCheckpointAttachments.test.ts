@@ -1,5 +1,5 @@
 /**
- * #1043 (C3/C8) — the durable byte envelope: files and transcript images leave
+ * #1043 — the durable byte envelope: files and transcript images leave
  * the checkpoint entries as references, every byte set keeps the deadline of
  * its FIRST capture, and a restore either rebuilds fully valid runtime messages
  * or names the part that failed.
@@ -297,7 +297,7 @@ describe('createCheckpointImageCapture (#1043 C3/C8)', () => {
     const digest = sha256(bytes)
     const earliest = NOW + 60_000
     // The same bytes were captured twice; the later row must never extend the
-    // first window (C8).
+    // first window.
     const earlyRow: ModelStepCheckpointAttachmentRow = {
       attachment_id: 'att-early',
       digest_hex: digest,

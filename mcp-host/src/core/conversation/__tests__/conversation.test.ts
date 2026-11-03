@@ -212,7 +212,7 @@ describe('ConversationManager — state machine', () => {
         },
       })
     ).rejects.toThrow('sqlite busy')
-    // R2-M2: any rejected fenced completion restores the owned turn, so the
+    // Any rejected fenced completion restores the owned turn, so the
     // unpersisted answer never enters RAM history.
     expect(conv.state).toBe(ConversationState.Processing)
     expect(conv.activeTaskId).toBe('task-origin')

@@ -30,8 +30,8 @@ export type HostRuntimeMessageBodyInput = {
  * field allow-list, so an unlisted field is dropped rather than forwarded.
  *
  * Kept pure and exported because the Host's ingress test consumes the same
- * committed vector as the proxy (R2-L7): a field added or dropped here without
- * a matching Host change turns both suites red instead of producing a 500 on
+ * committed vector as the proxy: a field added or dropped here without a
+ * matching Host change turns both suites red instead of producing a 500 on
  * the first Retry after deploy.
  */
 export function buildHostRuntimeMessageRequest(

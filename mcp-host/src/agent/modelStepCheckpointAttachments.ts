@@ -15,7 +15,7 @@ import type { GfsImageSource } from '../visualInput/policy'
 type RuntimeImagePart = Extract<MessageContentPart, { type: 'image' }>
 
 /**
- * #1043 (C3/C8) — one inline image exactly as a checkpoint entry JSON stores
+ * #1043 — one inline image exactly as a checkpoint entry JSON stores
  * it. The bytes live in `model_step_checkpoint_attachments` under
  * `checkpointAttachmentId` and expire at `checkpointAttachmentExpiresAt`; the
  * entry itself never carries `data`.
@@ -244,7 +244,7 @@ export type SourceImageAttachmentRestoreResult =
   | { ok: false; failure: CheckpointAttachmentRestoreFailure }
 
 /**
- * #1043 WP-H5 — rehydrates a continuation's source-message image bytes from
+ * #1043 — rehydrates a continuation's source-message image bytes from
  * the checkpoint byte table before the tool registry is built. Files bind by
  * attachment id; images bind by the sha256 digest `sourceMessageForResume`
  * stamped on the stored metadata, the same key `createCheckpointImageCapture`

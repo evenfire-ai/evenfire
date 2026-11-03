@@ -84,14 +84,14 @@ export interface ModelStepCheckpointRecorder {
    */
   canResume(error: Error): boolean
   /**
-   * F6: this step's automatic retries started on `cause` and the step ended on
-   * `finalError`. `settle` keeps the checkpoint resumable when the retries end
-   * on the very same `finalError` object and that final error is itself
-   * retryable, so an eligible first failure still survives a retry that ends on
-   * another transient error, while a step whose retry ended without access is
-   * not offered a Retry. The memory is per step: it is overwritten by the next
-   * retried step and never matches another error object, so a failure the
-   * retries did not produce cannot use it.
+   * Records the failure that started this step's automatic retries and the
+   * error those retries ended on. `settle` keeps the checkpoint resumable when
+   * the retries end on the very same `finalError` object and that final error
+   * is itself retryable, so an eligible first failure still survives a retry
+   * that ends on another transient error, while a step whose retry ended
+   * without access is not offered a Retry. The memory is per step: it is
+   * overwritten by the next retried step and never matches another error
+   * object, so a failure the retries did not produce cannot use it.
    */
   noteModelStepRetry(cause: Error, finalError: Error): void
   /**
@@ -134,7 +134,7 @@ export type ModelStepCheckpointRecorderMode =
        * is started with — the executor's origin-capture boundary. It is frozen
        * into `loop_state.originUserMessageIndex`; the recorder never scans for
        * a user message, so an earlier turn's user message or a later
-       * loop-injected one can never be taken for the origin (C7).
+       * loop-injected one can never be taken for the origin.
        */
       originUserMessageIndex: number
     }
@@ -145,7 +145,7 @@ export type ModelStepCheckpointRecorderMode =
       confirmedResults: number
       /**
        * Durable `loop_state` of the checkpoint being continued. Its frozen
-       * origin-user index is retained by every state update (C7). A continuation
+       * origin-user index is retained by every state update. A continuation
        * is only built from a validated snapshot, whose loop state is present.
        */
       loopState: string
@@ -170,7 +170,7 @@ export interface ModelStepCheckpointRecorderOptions {
   /**
    * Byte rows a continuation restored from this checkpoint. Their identity and
    * first-capture deadlines are reused, so a retry can never extend retention
-   * — even after the sweep deleted the row (C8).
+   * — even after the sweep deleted the row.
    */
   restoredAttachments?: readonly ModelStepCheckpointAttachmentRow[]
   /** Lifetime of a first-captured byte set. */
@@ -195,7 +195,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   private preDispatchFailure: WriteFailure | undefined
   private dispatchFailed = false
   /**
-   * F6: the first failure that started this step's automatic retries and the
+   * The first failure that started this step's automatic retries and the
    * error those retries ended on. Overwritten by the next retried step.
    */
   private retriedStep: { cause: Error; finalError: Error } | undefined
@@ -205,7 +205,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   private readonly opts: Omit<ModelStepCheckpointRecorderOptions, 'restoredAttachments'>
   /**
    * 0-based index of the origin user message among the recorded message
-   * entries (C7). Frozen at the first recording of that message.
+   * entries. Frozen at the first recording of that message.
    */
   private originUserMessageIndex: number | undefined
 
@@ -259,7 +259,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     if (mode.kind === 'continuation' || this.originUserMessageIndex !== undefined) return
     // The origin identity comes from the executor's capture boundary, never
     // from scanning for a user message: history already contains earlier turns'
-    // user messages, and the loop appends synthetic ones later (C7).
+    // user messages, and the loop appends synthetic ones later.
     const originIndex = mode.originUserMessageIndex
     if (
       !Number.isSafeInteger(originIndex) ||
@@ -468,11 +468,11 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       return undefined
     }
 
-    // F6: an eligible failure keeps the checkpoint resumable either when it is
-    // the error the loop ended on, or when it is the failure this step's
-    // automatic retries started from, those retries ended on exactly this error
-    // object and that final error is itself retryable (R2-2: a later step's
-    // failure never latches onto it).
+    // An eligible failure keeps the checkpoint resumable either when it is the
+    // error the loop ended on, or when it is the failure this step's automatic
+    // retries started from, those retries ended on exactly this error object
+    // and that final error is itself retryable. The object identity is what
+    // keeps a later step's failure from latching onto the memory.
     const retried = this.retriedStep
     const stepError = result?.type === 'error' ? result.error : undefined
     const leavesResumable =
@@ -487,8 +487,9 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       let version: number | null | undefined
       const resumable = await this.write('transition', async () => {
         const bytes = this.pendingByteAttachments(now)
-        // The failed call's iterations and active time stay spent (C6). A null
-        // snapshot keeps the stored one instead of clearing it.
+        // The failed call's iterations and active time stay spent: the stored
+        // budget snapshot only moves forward. A null snapshot keeps the stored
+        // one instead of clearing it.
         const taskBudget = this.opts.taskBudget()
         version = await this.opts.store.transition(this.opts.sessionKey, fence, {
           from: [source],
@@ -628,7 +629,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     }
   }
 
-  /** `loop_state` with the frozen origin-user identity retained (C7). */
+  /** `loop_state` with the frozen origin-user identity retained. */
   private loopState(nextIteration: number): string {
     return serializeModelStepCheckpointLoopState({
       nextIteration,
@@ -643,7 +644,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
    * has already elapsed is left out: its recorded reference and rows stay
    * untouched, the header still goes `resumable`, and the next continuation
    * blocks `attachment_expired` exactly like an expired file attachment. The
-   * store refuses an expired insert, so the recorder never attempts one (C8).
+   * store refuses an expired insert, so the recorder never attempts one.
    */
   private pendingByteAttachments(now: number): ModelStepCheckpointAttachmentInput[] {
     const bytes = [
@@ -670,7 +671,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
 
   /**
    * Redacts model-authored text, then replaces inline image bytes with durable
-   * references: the entry JSON never carries `data` (C3).
+   * references: the entry JSON never carries `data`, only the binding digest.
    */
   private recordMessage(message: ChatMessage): RecordedCheckpointMessage {
     const sanitized = this.sanitizeMessage(message)

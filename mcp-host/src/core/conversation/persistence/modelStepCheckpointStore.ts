@@ -95,8 +95,8 @@ export class ModelStepCheckpointStore {
       expiresAt?: number
       blockedReason?: string
       /**
-       * Serialized `TaskExecutionBudget` snapshot taken with this transition
-       * (C6): a failed call's iterations and active time stay spent.
+       * Serialized `TaskExecutionBudget` snapshot taken with this transition:
+       * a failed call's iterations and active time stay spent.
        */
       taskBudget?: string
       /**

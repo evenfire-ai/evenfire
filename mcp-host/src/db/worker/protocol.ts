@@ -68,7 +68,7 @@ export function parseModelStepCheckpointLoopState(
 
 /**
  * A turn-boundary write that is only valid while this exact claim still owns
- * the reopened origin turn (#1043 C5). `activeTaskId` is the continuation task
+ * the reopened origin turn (#1043). `activeTaskId` is the continuation task
  * that reopened it.
  */
 export interface ModelStepTurnFence {
@@ -93,7 +93,7 @@ export function isModelStepTaskOwnerMismatch(err: unknown): boolean {
 }
 
 /**
- * WP-H2-001 — a fenced boundary write timed out, the worker later proved the
+ * A fenced boundary write timed out, the worker later proved the
  * transaction did NOT commit, and the store restored the reopened-turn marker.
  * The message is the worker's real error so callers keep the true cause (and a
  * late fence mismatch still matches `isModelStepFenceMismatch`); the class is
@@ -329,7 +329,7 @@ export type WorkerOp =
       /** undefined = keep, string = set, null = clear. */
       activeTraceContext?: string | null
       /**
-       * #1043 (C5) — when present, the dispatcher verifies inside this same
+       * #1043 — when present, the dispatcher verifies inside this same
        * transaction that the checkpoint still carries this id/owner/generation
        * at this origin turn number and that the session's live active task is
        * this continuation; a mismatch rolls the state write back.
@@ -424,7 +424,7 @@ export type WorkerOp =
        */
       completeModelStepCheckpoint?: ModelStepCheckpointFence
       /**
-       * #1043 (C5) — when present, the boundary message and the state flip only
+       * #1043 — when present, the boundary message and the state flip only
        * commit while this exact claim still owns the reopened origin turn; a
        * mismatch rolls the whole transaction back.
        */

@@ -988,7 +988,7 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     expect(header(worker)).toMatchObject({ status: 'resumable', version: 2 })
     const messageRows = entries(worker).filter(row => row.kind === 'message')
     const originPayload = messageRows[0]!.payload
-    // The entry keeps a typed reference; the base64 bytes never reach it (C3).
+    // The entry keeps a typed reference; the base64 bytes never reach it.
     expect(originPayload).not.toContain(imagePayload)
     const recorded = JSON.parse(originPayload) as { contentParts: Array<Record<string, unknown>> }
     const reference = recorded.contentParts.find(part => part.type === 'checkpoint-image')!
@@ -2969,7 +2969,7 @@ describe('G2 R4-M2: the in-place retry runs where no Retry would be offered', ()
 })
 
 /**
- * WP-H8 (Addendum A4, F6): the retried-step memory keeps a checkpoint
+ * The retried-step memory keeps a checkpoint
  * resumable only when the step's final error is itself retryable. A step that
  * starts on an eligible 503 and whose automatic retry ends on a terminal error
  * must not offer "Retry model step" after access was lost; the retryable end

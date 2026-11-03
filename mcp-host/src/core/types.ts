@@ -162,7 +162,7 @@ export interface Attachment {
 export type ResumeFileAttachment = Omit<Attachment, 'dataBase64'> & { kind: 'file' }
 
 /**
- * #1043 WP-H5 — image-attachment identity kept for a model-step checkpoint
+ * #1043 — image-attachment identity kept for a model-step checkpoint
  * resume. The digest is the sha256 of the decoded origin bytes (the value the
  * checkpoint byte table stores in `digest_hex`); it binds this metadata to the
  * byte row without persisting `dataBase64`.

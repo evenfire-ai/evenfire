@@ -36,7 +36,7 @@ export function sourceMessageForResume(
 }
 
 /**
- * #666 R4-M2 — the approval row's unchanged projection: files only. The
+ * #666 — the approval row's unchanged projection: files only. The
  * approval snapshot owns image bytes, so the row never carries image identity.
  */
 export function approvalSourceMessageForResume(
@@ -84,7 +84,7 @@ function fileWithoutBytes(attachment: Attachment): ResumeFileAttachment {
 }
 
 /**
- * #1043 WP-H5 — image metadata plus the sha256 digest of the decoded bytes.
+ * #1043 — image metadata plus the sha256 digest of the decoded bytes.
  * The digest equals the checkpoint byte table's `digest_hex`, so a
  * continuation can rehydrate `dataBase64` from that row without persisting
  * bytes on the source message.

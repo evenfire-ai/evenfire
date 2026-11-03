@@ -818,9 +818,9 @@ describe.each(HELD_ROUTES)('R3-L7 $label pins the hold deadline before host reso
   })
 })
 
-// R3-L7 for the continue route: the hold deadline is pinned at arrival too, but
-// R2-L2's floor means a hold that the slow resolution leaves below the Host's
-// admission wait starts NO post-wake POST. A deadline pinned after the
+// For the continue route the hold deadline is pinned at arrival too, but the
+// Host admission floor means a hold that the slow resolution leaves below the
+// Host's admission wait starts NO post-wake POST. A deadline pinned after the
 // resolution would leave a full 11 s and start the retry, which never answers
 // here and would end in a 504 once the deadline aborted it.
 describe('R3-L7 continue model step pins the hold deadline before host resolution', () => {
@@ -1095,10 +1095,10 @@ describe('R1-M3 continuation verdict after wake at production defaults', () => {
   }, 20_000)
 })
 
-// R2-L2: the continue route's post-wake attempt claims the checkpoint on the
-// Host BEFORE the Host answers, so an attempt that starts with less hold than
-// the Host's admission wait can be aborted by the proxy after the write landed.
-// It is not started: the caller gets the retryable 503 and a re-POST replays.
+// The continue route's post-wake attempt claims the checkpoint on the Host
+// BEFORE the Host answers, so an attempt that starts with less hold than the
+// Host's admission wait can be aborted by the proxy after the write landed. It
+// is not started: the caller gets the retryable 503 and a re-POST replays.
 describe('R2-L2 post-wake continuation attempt floor', () => {
   const continuePath =
     '/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue'

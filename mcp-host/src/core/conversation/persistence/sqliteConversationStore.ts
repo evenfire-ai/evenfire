@@ -739,7 +739,7 @@ export class SqliteConversationStore implements ConversationStore {
   }
 
   /**
-   * R3-M3 — a fenced boundary whose sync write timed out has an unknown
+   * A fenced boundary whose sync write timed out has an unknown
    * durable outcome while the worker keeps running the op. Await the queue's
    * per-id late settlement: it resolves only with the worker's authoritative
    * answer for this exact op, so a resolved settlement means the boundary
@@ -914,7 +914,7 @@ export class SqliteConversationStore implements ConversationStore {
       if (settled.committed) {
         // The worker answered after the caller's sync timeout: the boundary
         // transaction committed, so keep the reopened marker cleared and let
-        // the completion proceed instead of inventing a rollback (R3-M3).
+        // the completion proceed instead of inventing a rollback.
         if (this.reopenedTurnCompletionOwners.get(state) === completionOwner) {
           this.reopenedTurnCompletionOwners.delete(state)
         }
@@ -1031,10 +1031,10 @@ export class SqliteConversationStore implements ConversationStore {
         sessionKey
       )
     } catch (err) {
-      // R3-M3: await the late settlement first. Committed means the durable
-      // close happened after the caller's timeout; a rejected settlement
-      // proved the boundary did not commit, so — like a fence mismatch — the
-      // reopened turn is still open and the marker must be restored.
+      // Await the late settlement first. Committed means the durable close
+      // happened after the caller's timeout; a rejected settlement proved the
+      // boundary did not commit, so — like a fence mismatch — the reopened
+      // turn is still open and the marker must be restored.
       const uncertain = syncTimeoutLateSettlement(err) !== undefined
       const settled = await this.settleUncertainBoundary(err)
       if (settled.committed) {
@@ -1097,7 +1097,7 @@ export class SqliteConversationStore implements ConversationStore {
         sessionKey
       )
     } catch (err) {
-      // R3-M3: same rule as persistTurnCancel above.
+      // Same rule as persistTurnCancel above.
       const uncertain = syncTimeoutLateSettlement(err) !== undefined
       const settled = await this.settleUncertainBoundary(err)
       if (settled.committed) {

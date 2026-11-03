@@ -122,7 +122,8 @@ export async function callReasoningForIteration(
       }
       // Observe logical reasoning calls, excluding failures known to be pre-dispatch.
       // Dispatches within a failover chain are not observed individually here;
-      // their usage and latency are covered by follow-up issue 3 (R4-L3).
+      // a separate follow-up issue covers the usage and latency of each
+      // physical failover attempt.
       if (
         !(
           result.type === 'error' &&
@@ -159,11 +160,15 @@ export async function callReasoningForIteration(
 
     // #1043 — a failure that would leave a resumable checkpoint retries this
     // model step, inside the same heartbeat window, before the loop can settle
-    // the checkpoint. The gate is the recorder's own settle predicate, so a
-    // retry can only happen where a manual Retry model step would have been
-    // offered. Each retry uses its jittered schedule wait. The counter and
-    // 60 s deadline are per model step and consume no loop iteration. The
-    // transport retry above keeps its task signal and does not start the clock.
+    // the checkpoint. The gate is the recorder's own settle predicate, plus a
+    // failed attempt that is known to be pre-dispatch and an error that error
+    // recovery would answer, so a retry can only happen where a manual Retry
+    // model step would have been offered and where stopping now would not lose
+    // a workflow answer. Each retry uses its jittered schedule wait. The
+    // counter and the 60 s window are per model step and consume no loop
+    // iteration; the window only blocks starting a new retry, never cancels an
+    // attempt already in flight. The transport retry above keeps its task
+    // signal and does not start the clock.
     const checkpointRecorder = config.modelStepCheckpointRecorder
     const firstFailureAt = Date.now()
     const random = config.modelStepRetryRandom ?? Math.random
@@ -199,8 +204,8 @@ export async function callReasoningForIteration(
         break
       }
       modelStepRetries++
-      // F6: the first failure of this step is the one that keeps the checkpoint
-      // resumable when the retries end on another error.
+      // The first failure of this step is the one that keeps the checkpoint
+      // resumable when the retries end on another retryable error.
       retryCause ??= result.error
       logger.warn(
         {

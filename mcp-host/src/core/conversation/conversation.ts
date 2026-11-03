@@ -366,7 +366,7 @@ export class ConversationManager {
    * always durable. A rejected write propagates — never swallowed — and the
    * caller fails the turn (see TaskExecutor.handleLoopResult).
    *
-   * R3-M3: a sync-timeout rejection from the SQLite store reaches this method
+   * A sync-timeout rejection from the SQLite store reaches this method
    * only after the store awaited the queue's per-id late settlement. A
    * committed late answer resolves the store call (RAM keeps the answer and
    * the caller delivers it); a rejection proves the boundary did not commit or
@@ -410,11 +410,11 @@ export class ConversationManager {
     try {
       await Promise.resolve(this.store.persistTurnComplete(conversation, response, opts))
     } catch (err) {
-      // R2-M2: a fenced completion rolls RAM back on any rejected write, not
-      // only on a fence mismatch. The durable row is unchanged (or, after a
-      // sync timeout, unknown), so the unpersisted answer must not stay in
-      // RAM; the executor releases the restored turn. failTurn/cancelTurn
-      // keep the fence-only rollback below.
+      // A fenced completion rolls RAM back on any rejected write, not only on
+      // a fence mismatch. The durable row is unchanged (or, after a sync
+      // timeout, unknown), so the unpersisted answer must not stay in RAM; the
+      // executor releases the restored turn. failTurn/cancelTurn keep the
+      // fence-only rollback below.
       const rollbackFence =
         opts?.completeModelStepCheckpoint !== undefined || opts?.modelStepTurnFence !== undefined
       if (rollbackFence && currentTurn) {

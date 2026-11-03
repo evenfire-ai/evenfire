@@ -497,7 +497,7 @@ describe('dbWorker dispatcher', () => {
     // answer: `persist_turn_boundary` completes the checkpoint and stamps that
     // message in the same transaction (#1043). The claim is created through the
     // real open/transition/claim ops, so the row is exactly what production
-    // writes (R1-M6).
+    // writes.
     const fence = await seedClaimedCheckpoint(
       deps,
       session,

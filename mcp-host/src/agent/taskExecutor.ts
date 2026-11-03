@@ -680,7 +680,7 @@ export class TaskExecutor {
       )
       // A cold resume replays a partial batch: seed the recorder's dedup set
       // from the durable ledger so an already persisted sibling tool message
-      // is not appended twice (#1047 R3-M2).
+      // is not appended twice (#1047).
       recorder.adoptRecordedToolMessages(
         await support.store.loadEntries(sessionKey, continuation.checkpointId)
       )
@@ -910,8 +910,8 @@ export class TaskExecutor {
             { taskId: this.taskId, err: persistError },
             'Failed to persist task limit interruption'
           )
-          // TL (R2-M2): the fenced completion rolled RAM back to Processing,
-          // and this path has no other release. Release the restored turn
+          // The fenced completion rolled RAM back to Processing, and this
+          // task-limit path has no other release. Release the restored turn
           // even when the fence was just lost: failContinuationTurn then does
           // only the owner-guarded local release, which cannot touch a
           // replacement that already reopened the turn.
@@ -1265,9 +1265,9 @@ export class TaskExecutor {
     } catch (err) {
       if (!this.isContinuationFenceMismatch(err)) throw err
       this.continuationClaim.fenceLost = true
-      // FT (R2-M2): the release can mismatch because a timed-out completion
-      // committed late. RAM was rolled back to this task's turn, so re-enter
-      // once and take the local release above instead of leaving it stuck.
+      // The release can mismatch because a timed-out completion committed
+      // late. RAM was rolled back to this task's turn, so re-enter once and
+      // take the local release above instead of leaving it stuck.
       await this.failContinuationTurn()
     }
   }
@@ -2731,10 +2731,10 @@ export class TaskExecutor {
         if (this.task.modelStepContinuation && this.continuationClaim.fenceLost) {
           throw new Error('Model-step continuation lost its checkpoint completion fence')
         }
-        // RAM-owner check (R2-M2 extra): a replacement may have reopened this
-        // conversation while the model call was in flight. Do not write over
-        // its RAM and rely on the rollback to undo it. No await may sit
-        // between this check and completeTurn's synchronous RAM mutation.
+        // RAM-owner check: a replacement may have reopened this conversation
+        // while the model call was in flight. Do not write over its RAM and
+        // rely on the rollback to undo it. No await may sit between this check
+        // and completeTurn's synchronous RAM mutation.
         if (this.task.modelStepContinuation && this.conversation!.activeTaskId !== this.taskId) {
           this.continuationClaim.fenceLost = true
           throw new Error('Model-step continuation lost its checkpoint completion fence')
@@ -2803,7 +2803,7 @@ export class TaskExecutor {
           ...this.executionBudget.pause(),
           attachmentReadLedger,
         }
-        // #666 R4-M2 — persist the sanitized source message so a cold restart
+        // #666 — persist the sanitized source message so a cold restart
         // rebuilds the file-reference pins and attachment metadata. The inline
         // bytes (dataBase64) never persist in the approval row.
         result.approval.sourceMessage = approvalSourceMessageForResume(this.task.sourceMessage)

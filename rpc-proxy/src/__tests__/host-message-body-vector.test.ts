@@ -9,10 +9,10 @@ import {
   buildHostRuntimeMessageRequest,
 } from '../services/hostMessageBody.js'
 
-// R2-L7 (#1047): the rpc-proxy → mcp-host message envelope is a hand-typed seam
-// no more. The proxy's builder and the Host's ingress suite consume the SAME
-// committed vector, so a field added or dropped on either side turns one of the
-// two suites red instead of producing a 500 on the first Retry after deploy
+// The rpc-proxy → mcp-host message envelope is a hand-typed seam no more. The
+// proxy's builder and the Host's ingress suite consume the SAME committed
+// vector, so a field added or dropped on either side turns one of the two
+// suites red instead of producing a 500 on the first Retry after deploy
 // (exactly how `6c60bca3b`'s missing timestamp behaved).
 
 const authTokenMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))

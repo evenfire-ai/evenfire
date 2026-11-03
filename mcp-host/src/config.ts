@@ -149,7 +149,7 @@ export interface Config {
   modelStepAttachmentTtlMs: number
   // #1043 — how many times one failed model step is retried automatically,
   // when that failure would leave a resumable checkpoint. `0` disables the
-  // retry. Default 1; a value outside 0–5 stops the Host at config load.
+  // retry. Default 3; a value outside 0–5 stops the Host at config load.
   modelStepAutoRetries: number
 
   // Approval system (default ON; tools advertise requiresApproval()).

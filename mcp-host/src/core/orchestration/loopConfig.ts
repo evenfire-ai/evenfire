@@ -171,13 +171,15 @@ export interface LoopConfig {
   /**
    * #1043 — how many times one failed model step is retried automatically,
    * when that failure would leave a resumable checkpoint
-   * (`modelStepCheckpointRecorder.canResume`). Absent means no automatic retry.
-   * Set by `TaskExecutor.buildLoopConfig()` from
+   * (`modelStepCheckpointRecorder.canResume`), the failed attempt was not known
+   * to be pre-dispatch, and error recovery would not answer it. Absent means no
+   * automatic retry. Set by `TaskExecutor.buildLoopConfig()` from
    * `config.modelStepAutoRetries`; the retry stays inside the current loop
    * iteration and does not consume an iteration of the task budget. Retry k
-   * waits `MODEL_STEP_RETRY_DELAYS_MS[k]` shortened by up to 20 %; all retries
-   * of a step end `MODEL_STEP_RETRY_DEADLINE_MS` after the step's first
-   * `provider_unavailable`.
+   * waits `MODEL_STEP_RETRY_DELAYS_MS[k]` shortened by up to 20 %.
+   * `MODEL_STEP_RETRY_DEADLINE_MS` after the step's first
+   * `provider_unavailable` only blocks starting a new retry; an attempt already
+   * in flight runs to completion and its answer is the step's result.
    */
   modelStepAutoRetries?: number
 

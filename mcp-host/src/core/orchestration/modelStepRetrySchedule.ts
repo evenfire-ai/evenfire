@@ -10,7 +10,11 @@ export const MODEL_STEP_RETRY_DELAYS_MS: readonly number[] = Object.freeze([
 ])
 /** Upper bound of CLERUM_MODEL_STEP_AUTO_RETRIES: one wait per retry. */
 export const MODEL_STEP_AUTO_RETRIES_MAX = MODEL_STEP_RETRY_DELAYS_MS.length
-/** All model-step retries end 60 s after the first eligible provider_unavailable. */
+/**
+ * The window after the step's first eligible `provider_unavailable` in which a
+ * new model-step retry may start. It never cancels an attempt already in
+ * flight: that attempt runs to completion under its own provider timeouts.
+ */
 export const MODEL_STEP_RETRY_DEADLINE_MS = 60_000
 
 /**

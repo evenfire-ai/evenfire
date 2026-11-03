@@ -931,7 +931,7 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
         ) {
           return { outcome: 'not_found' }
         }
-        // C9 — the periodic sweep abandons an expired non-terminal row; a claim
+        // The periodic sweep abandons an expired non-terminal row; a claim
         // that arrives before the sweep must answer exactly the same way
         // instead of resurrecting it. A claimed row whose lease is still alive
         // keeps replaying: the in-flight continuation owns it, header expiry or

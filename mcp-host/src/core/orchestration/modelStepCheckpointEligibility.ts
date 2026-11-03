@@ -19,9 +19,10 @@ export const MODEL_STEP_ELIGIBLE_PROVIDER_CODE = 'provider_unavailable'
  *
  * This is the eligibility of one error, not the whole `resumable` rule: the
  * automatic model-step retry also keeps a checkpoint resumable when the step
- * began with an eligible failure and its retries ended on another error
- * (`ModelStepCheckpointRecorder.noteModelStepRetry`, F6). A rate limit that
- * arrives on its own therefore keeps today's behaviour.
+ * began with an eligible failure and its retries ended on another error that
+ * is itself retryable (`ModelStepCheckpointRecorder.noteModelStepRetry`). A
+ * rate limit that arrives on its own therefore keeps today's behaviour, and a
+ * step whose retry ended on a terminal error is not resumable.
  */
 export function isModelStepCheckpointEligibleError(error: Error): boolean {
   return (

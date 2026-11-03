@@ -120,7 +120,7 @@ export class PersistQueue {
    * stays here after its caller's timeout: the worker is still busy with it.
    */
   private readonly inFlight = new Set<string>()
-  /** Timed-out sync writes whose worker answer is still owed (R3-M3). */
+  /** Timed-out sync writes whose worker answer is still owed. */
   private readonly lateSettlements = new Map<string, LateSettlementEntry>()
   private inFlightWaiters: Array<() => void> = []
   /** The `awaitOpen()` ping was answered; the progress bound applies. */
