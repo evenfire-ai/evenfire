@@ -223,6 +223,75 @@ describe('r4 A6 real useAppController host-verification acceptance', () => {
     expect(app.result.current.isHostAccessBlocked('agent-x')).toBe(false)
   })
 
+  it('retires a suspended receipt when opening an Agent workspace changes the target', async () => {
+    const { clerum, app } = await mounted()
+    publishResource(app)
+    clerum.rpc.loadSessionMessages.mockResolvedValue(
+      await serverSessionMessages('agent-x', 'chat-1')
+    )
+    act(() =>
+      app.result.current.setWorkspaceTabs(state =>
+        openChatTab(state, {
+          id: 'chat-tab-c',
+          agentRef: 'agent-x',
+          chatId: 'chat-1',
+          title: 'Conversation C',
+        })
+      )
+    )
+    act(() =>
+      app.result.current.handleSelectChatAgent('agent-x', {
+        chatId: 'chat-1',
+        selectLatest: false,
+        keepNavItem: true,
+        activationOrigin: 'sidebar-session',
+      })
+    )
+    await waitFor(() => expect(app.result.current.activeChatId).toBe('chat-1'))
+    const receiptId = app.result.current.persistedConversationPrefillReceipt?.id
+    expect(receiptId).toBeDefined()
+
+    act(() =>
+      app.result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, {
+          id: 'files-v',
+          path: 'gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          title: 'Folder V',
+        })
+      )
+    )
+    await waitFor(() =>
+      expect(app.result.current.persistedConversationPrefillReceipt?.status).toBe(
+        'suspended-resource'
+      )
+    )
+
+    act(() => app.result.current.handleOpenAgentWorkspace('agent-y'))
+    await waitFor(() => expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.agents))
+    expect(app.result.current.persistedConversationPrefillReceipt).toMatchObject({
+      id: receiptId,
+      status: 'terminally-cancelled',
+    })
+
+    act(() => app.result.current.handleNavSelect(DESKTOP_ROUTES.chat))
+    await waitFor(() => expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.chat))
+    act(() =>
+      app.result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, {
+          id: 'files-u',
+          path: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          title: 'Folder U',
+        })
+      )
+    )
+    await waitFor(() =>
+      expect(app.result.current.persistedConversationPrefillReceipt).toMatchObject({
+        id: receiptId,
+        status: 'terminally-cancelled',
+      })
+    )
+  })
+
   it.each([
     ['newer verification first', [1, 0]],
     ['older verification first', [0, 1]],

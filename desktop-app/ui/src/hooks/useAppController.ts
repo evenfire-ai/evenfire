@@ -1200,6 +1200,15 @@ export function useAppController() {
   const openAgentWorkspace = useCallback(
     (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
       if (!agentName) return
+      const currentReceipt = prefillReceiptRef.current
+      if (
+        currentReceipt &&
+        !['consumed', 'superseded', 'terminally-cancelled', 'owner-destroyed'].includes(
+          currentReceipt.status
+        )
+      ) {
+        updatePrefillReceipt(currentReceipt.id, 'terminally-cancelled')
+      }
       chat.setPendingChatSelection(agentName, null)
       chat.clearActiveChat()
       // Open/focus the agents tab (single writer). It clears selectedAgent/route,
@@ -1214,6 +1223,7 @@ export function useAppController() {
       nav.handleNavSelect,
       nav.setSelectedAgent,
       nav.setSelectedAgentRoute,
+      updatePrefillReceipt,
     ]
   )
   const handleOpenAgentWorkspace = useCallback(
@@ -1691,7 +1701,6 @@ export function useAppController() {
             return
           }
         }
-
         if (stayInDrawer) {
           // handleSelectChatAgent(keepNavItem) sets the active chat without
           // flipping `navItem` (and imperatively switches for the same-agent
