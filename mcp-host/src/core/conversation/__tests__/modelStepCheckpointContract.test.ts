@@ -18,6 +18,7 @@ const VIEW_KEYS = new Set([
   'status',
   'retryAvailable',
   'originTaskId',
+  'originTurnNumber',
   'continuationTaskId',
   'provider',
   'model',
@@ -41,6 +42,10 @@ function assertView(value: unknown): asserts value is ModelStepCheckpointView {
   expect(MODEL_STEP_CHECKPOINT_VISIBLE_STATUSES).toContain(view.status)
   expect(view.retryAvailable).toBe(view.status === 'resumable')
   expect(view.originTaskId).toBeTypeOf('string')
+  expect(
+    Number.isSafeInteger(view.originTurnNumber) && (view.originTurnNumber as number) >= 1,
+    'originTurnNumber is a positive safe integer'
+  ).toBe(true)
   expect(view.continuationTaskId !== undefined).toBe(view.status === 'claimed')
   expect(view.blockedReason !== undefined).toBe(view.status === 'blocked')
   if (view.blockedReason !== undefined)

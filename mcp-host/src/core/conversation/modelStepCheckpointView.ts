@@ -43,6 +43,7 @@ export function toModelStepCheckpointView(
     status,
     retryAvailable: status === 'resumable',
     originTaskId: header.origin_task_id,
+    originTurnNumber: header.origin_turn_number,
     ...(status === 'claimed' && header.continuation_task_id
       ? { continuationTaskId: header.continuation_task_id }
       : {}),

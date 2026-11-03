@@ -55,6 +55,12 @@ export interface ModelStepCheckpointView {
   /** True only when `status === 'resumable'`. */
   retryAvailable: boolean
   originTaskId: string
+  /**
+   * The turn this checkpoint resumes, a positive safe integer. A continuation's
+   * reply is the assistant row of this turn: the Host writes it into that slot,
+   * and a client places it there instead of appending a new turn.
+   */
+  originTurnNumber: number
   /** Present when `status === 'claimed'`. */
   continuationTaskId?: string
   provider: string
