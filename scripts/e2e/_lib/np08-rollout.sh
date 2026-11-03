@@ -35,8 +35,7 @@
 # \t<runtime-token-revision>\t<owned-replicasets>", or returns non-zero when the
 # read fails or the Deployment is not in the response.
 # One combined request (N8), and the ReplicaSets are scoped to the Deployment's
-# ownerReference so a second workload in the namespace cannot block the gate
-# (R3-L6).
+# ownerReference so a second workload in the namespace cannot block the gate.
 np08_rollout_snapshot() {
   local namespace="$1"
   local deployment="$2"

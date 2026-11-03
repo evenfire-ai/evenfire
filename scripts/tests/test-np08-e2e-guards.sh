@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 E2E_SCRIPT="${ROOT}/scripts/e2e/e2e-np08-hcc-authorization.sh"
 RUNTIME_ACCESS_MODULE="${ROOT}/scripts/e2e/_lib/np08-runtime-access.mjs"
 RUNTIME_ACCESS_TEST="${ROOT}/scripts/tests/test-np08-runtime-access.mjs"
+# Current test count of the node sub-suite: `node --test` exits 0 on a file with
+# no tests, so the runner's exit code alone is never success.
+RUNTIME_ACCESS_MIN_TESTS=11
 T2_SCRIPT="${ROOT}/scripts/minikube/t2.sh"
 MAKEFILE="${ROOT}/Makefile"
 
@@ -229,8 +232,21 @@ fi
 pass 'CI validates NP-08 wiring statically without cluster writes'
 
 node --check "${RUNTIME_ACCESS_MODULE}"
-node --test "${RUNTIME_ACCESS_TEST}"
-pass 'NP-08 access selection and retry unit tests pass'
+if ! runtime_access_tap="$(node --test --test-reporter=tap "${RUNTIME_ACCESS_TEST}" 2>&1)"; then
+  printf '%s\n' "${runtime_access_tap}" >&2
+  fail 'the NP-08 access selection and retry unit tests failed'
+fi
+# `skipped` and `todo` are counted in `tests` but not in `pass`, so requiring
+# `pass == tests` also refuses a suite that silently stopped running its cases.
+runtime_access_tests="$(printf '%s\n' "${runtime_access_tap}" |
+  awk '/^# tests / { count = $3 } END { print count + 0 }')"
+runtime_access_pass="$(printf '%s\n' "${runtime_access_tap}" |
+  awk '/^# pass / { count = $3 } END { print count + 0 }')"
+[[ "${runtime_access_tests}" -ge "${RUNTIME_ACCESS_MIN_TESTS}" ]] ||
+  fail "the NP-08 node sub-suite ran ${runtime_access_tests} tests, below the ${RUNTIME_ACCESS_MIN_TESTS} it must run"
+[[ "${runtime_access_pass}" -eq "${runtime_access_tests}" ]] ||
+  fail "the NP-08 node sub-suite passed ${runtime_access_pass} of ${runtime_access_tests} tests"
+pass "NP-08 access selection and retry unit tests pass (${runtime_access_pass}/${runtime_access_tests})"
 
 # --- rollout settle gate (token-rotation rollout killed the journey exec) ---
 ROLLOUT_STATE_DIR="$(mktemp -d)"
@@ -432,10 +448,37 @@ if ROLLOUT_SCENARIO='record-error' \
 fi
 pass 'the HCC observation gate fails closed on a read error'
 
-if np08_hcc_context_recorded 'mcp-host' 'context1,other' 'server-a'; then
-  fail 'the HCC observation gate accepted an unselectable label value'
+# The stub answers every `get networkpolicy` with an empty list, so under the
+# default scenario this case would pass at the empty-list check even with the
+# selector guards deleted. Run it against a present record and require that the
+# rejected values are refused before any NetworkPolicy read happens.
+networkpolicy_read_count() {
+  awk '/get networkpolicy/ { n++ } END { print n + 0 }' "${ROLLOUT_STATE_DIR}/calls"
+}
+
+printf '0' >"${ROLLOUT_STATE_DIR}/clock"
+: >"${ROLLOUT_STATE_DIR}/calls"
+if ! ROLLOUT_SCENARIO='record-present' \
+  np08_hcc_context_recorded 'mcp-host' 'context1' 'server-a'; then
+  fail 'the unselectable-label case could not observe a present record (liveness)'
 fi
-pass 'the HCC observation gate refuses an unselectable label value'
+present_reads="$(networkpolicy_read_count)"
+[[ "${present_reads}" -eq 1 ]] ||
+  fail "the valid HCC observation issued ${present_reads} NetworkPolicy reads, expected 1"
+pass 'the HCC observation gate reads a present Context record (liveness)'
+
+if ROLLOUT_SCENARIO='record-present' \
+  np08_hcc_context_recorded 'mcp-host' 'context1,other' 'server-a'; then
+  fail 'the HCC observation gate accepted an unselectable Context label value'
+fi
+if ROLLOUT_SCENARIO='record-present' \
+  np08_hcc_context_recorded 'mcp-host' 'context1' 'server-a,other'; then
+  fail 'the HCC observation gate accepted an unselectable McpServer label value'
+fi
+refused_reads="$(networkpolicy_read_count)"
+[[ "${refused_reads}" -eq "${present_reads}" ]] ||
+  fail "an unselectable label value was still selected on a NetworkPolicy read (${present_reads} -> ${refused_reads})"
+pass 'the HCC observation gate refuses an unselectable label value without a read'
 
 # Ported G4-deepseek M4: the pre-patch chatllm deployment is already complete,
 # HCC records the Context change on the third read, and its Host reconcile rolls

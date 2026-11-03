@@ -12,7 +12,7 @@ set -euo pipefail
 # cleanup trap make accidental use outside the branch-owned Minikube lane a
 # hard failure.
 #
-# Known limit of the HCC gate (WP-T4 / D5): this journey waits for HCC's own
+# Known limit of the HCC gate: this journey waits for HCC's own
 # record of the Context change (the owned `context-allow` NetworkPolicy) and
 # then for the mcp-host rollout to settle and stay put. That still leaves one
 # race. HCC writes the NetworkPolicy inside `reconcileContext` and only then
