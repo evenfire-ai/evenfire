@@ -730,4 +730,69 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
     expect(disabledPatch[0].status).toBe('False')
     expect(persisted.map(condition => condition.type)).not.toContain('EgressProxyValuesValid')
   })
+
+  it('PF-17: a block that stops being current before setStatus publishes no status', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'abc/def+gh==' })
+    )
+    // The reconcile stays current through every condition write and stops
+    // being current right after the last one (Ready=False): the exact window
+    // between the block's writes and its setStatus(). Production's composed
+    // predicate turns false there when a newer generation or a delete
+    // replaced this desired revision; this test injects that state through
+    // the caller hook.
+    let current = true
+    let flippedAtLastWrite = false
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }: any) => {
+      const conditions = conditionsFromStatusPatch(body)
+      if (
+        !flippedAtLastWrite &&
+        conditions.some(
+          condition =>
+            condition.type === 'Ready' &&
+            condition.status === 'False' &&
+            condition.reason === 'EgressProxyValuesInvalid'
+        )
+      ) {
+        flippedAtLastWrite = true
+        current = false
+      }
+      return {}
+    })
+
+    await reconciler.reconcile(API_KEY_SERVER, { isCurrent: () => current })
+
+    // Life witness: the reconcile reached the block (Secret read, all three
+    // condition writes) before it stopped being current.
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledOnce()
+    expect(flippedAtLastWrite, 'the block never wrote Ready=False').toBe(true)
+    expect(allPatchedConditions(customApi)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'SecretResolved', status: 'True', reason: 'SecretFound' }),
+        expect.objectContaining({
+          type: 'EgressProxyValuesValid',
+          status: 'False',
+          reason: 'ValueOutsideClass',
+        }),
+        expect.objectContaining({
+          type: 'Ready',
+          status: 'False',
+          reason: 'EgressProxyValuesInvalid',
+        }),
+      ])
+    )
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+
+    // The guard: a block that is no longer current must not publish its
+    // refusal through setStatus(). Without it the in-memory status describes
+    // a reconcile a newer generation already replaced, and the next reader
+    // believes this CRD is blocked on the retired revision.
+    expect((reconciler as any).statusMap.has(API_KEY_SERVER.name)).toBe(false)
+    expect(reconciler.getStatus(API_KEY_SERVER)).toEqual({
+      deployed: false,
+      ready: false,
+      message: 'Not reconciled yet',
+      authoritative: false,
+    })
+  })
 })
