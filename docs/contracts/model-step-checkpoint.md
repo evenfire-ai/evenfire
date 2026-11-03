@@ -329,11 +329,23 @@ is wired, and continuations never fail over.
 | Codeless non-2xx proxy rejection (no string `error` in the body, status other than 413 or 429)              | No                         | No                                                                             | Follows the dispatched-503 row (the client maps it to `provider_unavailable`) | Yes on the final error                             | Yes                                    | As the dispatched-503 row                                                      | Yes                                                               | As the dispatched-503 row. Pre-existing mapping; a status-based classification is a follow-up issue                                                                                                               |
 | User cancel or lease loss                                                                                   | Every layer stops          | Every layer stops                                                              | Every layer stops                                                             | Not reached                                        | Not reached                            | No new call; the in-flight one is aborted                                      | An attempt already streamed may have been billed                  | `cancelled`; the checkpoint is abandoned                                                                                                                                                                          |
 
-A non-2xx proxy reply is classified by its body and status before this table applies: a
-string `error` in the body uses that code, status 413 maps to `payload_too_large`
-(terminal, `retryable: false`) and status 429 maps to `rate_limited` (the 429 row). Only
-the remaining codeless case falls back to `provider_unavailable`, and that fallback is
-what the follow-up issue is about.
+A non-2xx proxy reply is classified by its status and body before this table applies,
+and the two clients differ in one step:
+
+- Status 429, both clients: a machine code in the body's `error` is kept (for example
+  `budget_denied`, which is terminal); without one the code is `rate_limited` (the 429
+  row).
+- Status 413: the Codex client always maps it to `payload_too_large` (terminal,
+  `retryable: false`), even when the body carries a string `error`. The Grok client
+  uses a string `error` when present and maps a codeless 413 to `payload_too_large`.
+- Any other status: a string `error` in the body is the code; without one the code is
+  `provider_unavailable`.
+
+Only that last codeless case falls back to `provider_unavailable`, and that fallback is
+what the follow-up issue is about. Sources:
+[Codex proxy client](../../mcp-host/src/llm/codexLlmProxyClient.ts),
+[Grok proxy client](../../mcp-host/src/llm/grokLlmProxyClient.ts),
+[`rateLimitedCode`](../../mcp-host/src/llm/retryAfter.ts).
 
 ### Decision table: first eligible failure wins
 
