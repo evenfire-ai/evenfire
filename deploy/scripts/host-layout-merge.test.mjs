@@ -441,7 +441,27 @@ test('an orphan split PVC is reported without blocking the verdict (T9)', () => 
   const orphanPod = creates(r.calls).find(m => m.spec.volumes[0].persistentVolumeClaim.claimName === 'delta-workspace')
   assert.equal(orphanPod.spec.containers[0].image, 'registry.test/mcp-host:head')
   assert.equal(orphanPod.spec.containers[0].imagePullPolicy, 'Always')
-  assert.deepEqual(orphanPod.spec.imagePullSecrets, [{ name: 'clerum' }])
+  assert.deepEqual(orphanPod.spec.imagePullSecrets, [])
+})
+
+test('an orphan check Pod takes the HCC pull Secret: empty means none, a name is used', () => {
+  for (const [value, expected] of [
+    ['', []],
+    ['regcred', [{ name: 'regcred' }]],
+  ]) {
+    const f = fleet()
+    f.hcc = hcc([{ name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', value }])
+    f.pvcs.push(pvc('delta'))
+    f.checks['delta-workspace'] = { output: 'WILL_MERGE\n' }
+    const r = verify(f)
+    assert.equal(r.status, 0, `${JSON.stringify(value)}: ${r.stdout}${r.stderr}`)
+    assert.match(row(r.stdout, 'delta-workspace'), /host=delta kind=ORPHAN state=NO_HOST result=SPLIT$/)
+    const orphanPod = creates(r.calls).find(m => m.spec.volumes[0].persistentVolumeClaim.claimName === 'delta-workspace')
+    assert.deepEqual(orphanPod.spec.imagePullSecrets, expected)
+    // Witness: the check Pod carries the HCC image, so the settings resolved.
+    assert.equal(orphanPod.spec.containers[0].image, 'registry.test/mcp-host:head')
+    assert.doesNotMatch(r.stderr, /cannot resolve/)
+  }
 })
 
 test('r5 C1: a Host whose workspace PVC was not inspected fails both verdicts', () => {

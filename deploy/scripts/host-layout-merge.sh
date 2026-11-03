@@ -454,7 +454,7 @@ hcc_host_image() {
   secret="$(hcc_env CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET)"
   case "$image" in '' | '<unset>' | '<valueFrom>') die "cannot resolve CONTEXT_MAPPER_HOST_IMAGE ($image) for a check Pod" ;; esac
   case "$policy" in '<unset>') policy=Always ;; '' | '<valueFrom>') die "cannot resolve CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY ($policy)" ;; esac
-  case "$secret" in '<unset>') secret=clerum ;; '' | '<valueFrom>') die "cannot resolve CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET ($secret)" ;; esac
+  case "$secret" in '<unset>' | '') secret=- ;; '<valueFrom>') die "cannot resolve CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET ($secret)" ;; esac
   printf '%s\t%s\t%s\n' "$image" "$policy" "$secret"
 }
 

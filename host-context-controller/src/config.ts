@@ -705,7 +705,7 @@ export const config: Config = {
     | 'Always'
     | 'IfNotPresent'
     | 'Never',
-  hostImagePullSecretName: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', 'clerum')!,
+  hostImagePullSecretName: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', '')!,
   hostPort: getEnvInt('CONTEXT_MAPPER_HOST_PORT', 8080),
   hostConfigMapName: getEnv('CONTEXT_MAPPER_HOST_CONFIGMAP_NAME', 'mcp-host-config')!,
   hostServiceAccountName: getEnv('CONTEXT_MAPPER_HOST_SERVICE_ACCOUNT', 'mcp-host')!,
@@ -752,7 +752,7 @@ export const config: Config = {
     | 'Always'
     | 'IfNotPresent'
     | 'Never',
-  wfcImagePullSecretName: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET', 'clerum')!,
+  wfcImagePullSecretName: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET', '')!,
   wfcPort: getEnvInt('CONTEXT_MAPPER_WFC_PORT', 8086),
   wfcInitImage: getEnv('CONTEXT_MAPPER_WFC_INIT_IMAGE', 'busybox:1.36')!,
   wfcResources: {

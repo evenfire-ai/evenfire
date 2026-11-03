@@ -4,6 +4,7 @@ import {
   type AdministrativeOutcomeReporter,
   BoundedAdministrativeOutcomeReporter,
 } from '../src/administrativeOutcomeReporter'
+import { config } from '../src/config'
 import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
   DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES,
@@ -2760,5 +2761,25 @@ describe('HostReconciler.observeFrontsOAuthServer transient-blip retry (R4-M9)',
     })
     // Retried up to the bounded ceiling (3 total attempts).
     expect(calls).toBe(3)
+  })
+})
+
+describe('Host Deployment pull Secret from config', () => {
+  it('sets imagePullSecrets on the Host Deployment only for a non-empty Secret name', () => {
+    const original = config.hostImagePullSecretName
+    onTestFinished(() => {
+      config.hostImagePullSecretName = original
+    })
+    const { reconciler } = createReconciler()
+
+    config.hostImagePullSecretName = ''
+    const none = reconciler.buildDeployment(makeHost()).spec!.template!.spec!
+    expect(none.imagePullSecrets).toBeUndefined()
+    // Witness: the Deployment was built from this config.
+    expect(none.containers.find(c => c.name === 'mcp-host')?.image).toBe('clerum/mcp-host:0.6.0')
+
+    config.hostImagePullSecretName = 'regcred'
+    const named = reconciler.buildDeployment(makeHost()).spec!.template!.spec!
+    expect(named.imagePullSecrets).toEqual([{ name: 'regcred' }])
   })
 })
