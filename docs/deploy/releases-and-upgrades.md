@@ -227,18 +227,18 @@ Read the notes for every release you skip over, not only the target release.
 
 ### Feature-specific notes
 
-| Note                                                                               | Read it when                                                                                                                             |
-| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.                               |
-| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                                     |
-| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                        |
-| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                              |
-| [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set an invalid per-host activity stream cap. |
+| Note                                                                               | Read it when                                                                                                                     |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.                       |
+| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                             |
+| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                |
+| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                      |
+| [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap. |
 
 ### rpc-proxy default changes
 
 The first release after v0.12.0 changes one rpc-proxy built-in default and makes
-an invalid per-user-host activity stream cap stop startup. A built-in default
+an invalid status or activity stream cap stop startup. A built-in default
 applies when the variable is unset or empty in `rpc-proxy-config`.
 
 | Variable                                 | Old default       | New default         |
@@ -255,13 +255,24 @@ artifact files of at most 50 MiB; with the old 60 s default a 50 MiB artifact
 was aborted if that transfer ran below about 0.83 MiB/s, while the new 300 s
 lowers the floor to about 0.17 MiB/s.
 
-`RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST` keeps its default of `1`, but an
-invalid value is now a startup error: anything that is not a positive integer
-(`abc`, `0`, `-1`, `1.5`) stops rpc-proxy with an error naming the variable.
-Before this release `abc` parsed as `NaN` and disabled the per-Host cap, and `0`
-rejected every activity stream.
+The six stream caps below keep their defaults, but an invalid value is now a
+startup error: anything that is not a positive integer (`abc`, `0`, `-1`, `1.5`)
+stops rpc-proxy with an error naming the variable. Each cap counts the open
+streams of one rpc-proxy pod, and a new stream gets HTTP 429 once its count
+reaches the cap. Before this release `abc` parsed as `NaN` and turned that cap
+off, and `0` rejected every stream the cap covers.
+
+| Variable                                      | Limits                                  | Default |
+| --------------------------------------------- | --------------------------------------- | ------- |
+| `RPC_PROXY_STREAM_MAX_CONCURRENT`             | Host status streams, all users          | `1000`  |
+| `RPC_PROXY_STREAM_MAX_PER_USER`               | Host status streams per user            | `3`     |
+| `RPC_PROXY_STREAM_MAX_PER_USER_HOST`          | Host status streams per user and Host   | `1`     |
+| `RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT`    | Host activity streams, all users        | `1000`  |
+| `RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER`      | Host activity streams per user          | `3`     |
+| `RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST` | Host activity streams per user and Host | `1`     |
 
 To keep the old artifact download timeout, set
 `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` in `rpc-proxy-config` before you roll
-out the new image. rpc-proxy reads the ConfigMap at startup, so the new default
-applies when the new pods start.
+out the new image, and check that every stream cap the ConfigMap sets is a
+positive integer. rpc-proxy reads the ConfigMap at startup, so the new default
+and the cap check apply when the new pods start.

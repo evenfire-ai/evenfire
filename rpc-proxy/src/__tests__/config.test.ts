@@ -122,12 +122,24 @@ describe('parseWakeMaxHoldMs', () => {
 })
 
 describe('config values loaded from the environment', () => {
+  // Each stream admission cap is compared with `>=` in its route's 429 check
+  // (rpcHostStatusStream.ts, rpcHostActivityStream.ts): NaN turns the cap off and
+  // 0 rejects every stream, so anything but a positive integer must stop startup.
+  const STREAM_CAPS = [
+    ['RPC_PROXY_STREAM_MAX_CONCURRENT', 'streamMaxConcurrent', 1000],
+    ['RPC_PROXY_STREAM_MAX_PER_USER', 'streamMaxPerUser', 3],
+    ['RPC_PROXY_STREAM_MAX_PER_USER_HOST', 'streamMaxPerUserHost', 1],
+    ['RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT', 'activityStreamMaxConcurrent', 1000],
+    ['RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER', 'activityStreamMaxPerUser', 3],
+    ['RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST', 'activityStreamMaxPerUserHost', 1],
+  ] as const
+  const INVALID_STREAM_CAPS = ['abc', '0', '-1', '1.5']
   const ENV_KEYS = [
     'RPC_PROXY_UPSTREAM_TIMEOUT_MS',
     'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
-    'RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST',
     'RPC_PROXY_WAKE_MAX_HOLD_MS',
-  ] as const
+    ...STREAM_CAPS.map(([key]) => key),
+  ]
   const saved = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]))
 
   afterEach(() => {
@@ -185,17 +197,27 @@ describe('config values loaded from the environment', () => {
     expect(loaded.activityStreamMaxPerUserHost).toBe(2)
   })
 
-  it('trims and accepts a padded per-user-host cap', async () => {
-    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST = ' 2 '
-    expect((await loadConfig()).activityStreamMaxPerUserHost).toBe(2)
+  it.each(STREAM_CAPS)(
+    'defaults %s (config.%s) to %i when it is unset or empty',
+    async (key, field, defaultValue) => {
+      delete process.env[key]
+      expect((await loadConfig())[field]).toBe(defaultValue)
+      process.env[key] = ''
+      expect((await loadConfig())[field]).toBe(defaultValue)
+    }
+  )
+
+  it.each(STREAM_CAPS)('trims and accepts a padded %s (config.%s)', async (key, field) => {
+    process.env[key] = ' 7 '
+    expect((await loadConfig())[field]).toBe(7)
   })
 
-  it.each(['abc', '0', '-1', '1.5'])(
-    'fails loud on RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST=%s',
-    async value => {
-      process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST = value
+  it.each(STREAM_CAPS.flatMap(([key]) => INVALID_STREAM_CAPS.map(value => [key, value])))(
+    'fails loud on %s=%s',
+    async (key, value) => {
+      process.env[key] = value
       await expect(loadConfig()).rejects.toThrow(
-        /RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST.*must be a positive integer/
+        `${key} contains invalid value "${value}" (must be a positive integer)`
       )
     }
   )
