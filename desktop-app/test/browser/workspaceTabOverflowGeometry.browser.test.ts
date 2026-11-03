@@ -357,6 +357,53 @@ describe('workspace tab overflow production geometry', () => {
     expect(await sendWheel(-40, 0)).toBe(false)
     expect((await settle()).scrollLeft).toBe(0)
   })
+
+  it('uses horizontal dominance and the horizontal tie rule while chaining at both bounds', async () => {
+    await open(280)
+    const scroller = page.locator('.chat-view-tabs__scroller')
+    const sendWheel = async (deltaX: number, deltaY: number) =>
+      scroller.evaluate(
+        (node, input) => {
+          const event = new WheelEvent('wheel', {
+            deltaX: input.deltaX,
+            deltaY: input.deltaY,
+            bubbles: true,
+            cancelable: true,
+          })
+          node.dispatchEvent(event)
+          return event.defaultPrevented
+        },
+        { deltaX, deltaY }
+      )
+
+    const initial = await geometry()
+    const maximum = initial.scrollWidth - initial.viewportWidth
+    expect(maximum).toBeGreaterThan(40)
+
+    expect(await sendWheel(20, -10)).toBe(true)
+    expect((await settle()).scrollLeft).toBe(20)
+
+    await scroller.evaluate(node => {
+      node.scrollLeft = 20
+    })
+    await settle()
+    expect(await sendWheel(-10, 10)).toBe(true)
+    expect((await settle()).scrollLeft).toBe(10)
+
+    await scroller.evaluate(node => {
+      node.scrollLeft = 0
+    })
+    await settle()
+    expect(await sendWheel(-40, 0)).toBe(false)
+    expect((await settle()).scrollLeft).toBe(0)
+
+    await scroller.evaluate((node, max) => {
+      node.scrollLeft = max
+    }, maximum)
+    await settle()
+    expect(await sendWheel(40, 10)).toBe(false)
+    expect((await settle()).scrollLeft).toBe(maximum)
+  })
 })
 
 declare global {
