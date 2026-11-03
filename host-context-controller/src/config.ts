@@ -653,9 +653,14 @@ export const config: Config = {
   // (deploy/base/llm-hooks/networkpolicies.yaml: deny-all ingress + egress),
   // with per-pod-key ingress and scoped CoreDNS emitted by LlmHookReconciler
   // only for hooks that declare egressBindings.
+  //
+  // mcp-host is not listed either: an HCC deny-all there blocks mcp-host pods
+  // from reaching LLM APIs, so its policies are static
+  // (deploy/base/mcp-host/networkpolicies.yaml). The default equals the
+  // deploy/base value.
   runtimeNamespaces: getEnv(
     'CONTEXT_MAPPER_RUNTIME_NAMESPACES',
-    'mcp-server,mcp-host,sandbox-recipes,rpc-proxy'
+    'mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui'
   )!.split(','),
 
   // DNS infrastructure CIDR for GKE NodeLocal DNSCache / kube-dns. Empty
@@ -668,8 +673,9 @@ export const config: Config = {
   // allow-k8s-api. Use this for namespaces whose pods are not K8s clients
   // and don't consume the HCC discovery API (e.g. third-party UI workloads
   // that only need to serve HTTP back to a single ingress source).
-  // Empty by default → all runtime namespaces get the full infra set.
-  minimalInfraNamespaces: getEnv('CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES', '')!
+  // Defaults to sandbox-ui, matching deploy/base. Set "" to give every runtime
+  // namespace the full infra set.
+  minimalInfraNamespaces: getEnv('CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES', 'sandbox-ui')!
     .split(',')
     .map(s => s.trim())
     .filter(s => s.length > 0),
