@@ -183,8 +183,8 @@ by a `${NAME}` placeholder, not the literal URL text — may contain only
 0x80. The proxy does not encode values. A reference is in query position when
 an unescaped `?` occurs earlier in the same unquoted argument. Raw `+` is
 refused: store `%2B`, because a form-decoding upstream reads `+` as a space.
-`API_KEY='abc/def+gh=='` is refused; `API_KEY='abc/def%2Bgh=='` and
-`API_KEY='sk:live_1'` are accepted. Raw `\` is refused: store `%5C`, because
+`API_KEY='example/def+gh=='` is refused; `API_KEY='example/def%2Bgh=='` and
+`API_KEY='sk:example_1'` are accepted. Raw `\` is refused: store `%5C`, because
 NGINX unescapes `\\`, `\t`, `\n`, and `\r` inside an unquoted argument, and a
 trailing `\` escapes the `;`. HCC carries the rendered NGINX template digest
 on the remote PodTemplate, so a ConfigMap-only `baseUrl` migration rolls the

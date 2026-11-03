@@ -789,7 +789,10 @@ describe('PR-B B1 — validateSecret result shape', () => {
   it('returns ok:true and the content revision when all required keys are present', async () => {
     // The base64 value does not matter for key-presence validation, but it IS
     // what the revision hashes (issue #223).
-    coreApi.readNamespacedSecret.mockResolvedValueOnce({ data: { password: 'cGFzcw==' } })
+    const syntheticEncodedFixture = 'cGFzcw=='
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      data: { password: syntheticEncodedFixture },
+    })
 
     const server = makeServer({
       name: 'pg',
@@ -803,7 +806,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
     expect(result).toEqual({
       ok: true,
       revision: expect.stringMatching(/^[0-9a-f]{64}$/),
-      secretData: { password: 'cGFzcw==' },
+      secretData: { password: syntheticEncodedFixture },
     })
   })
 
