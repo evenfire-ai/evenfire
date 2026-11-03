@@ -11,6 +11,19 @@ set -euo pipefail
 # It is not a production/shared-cluster test. The explicit context guard and
 # cleanup trap make accidental use outside the branch-owned Minikube lane a
 # hard failure.
+#
+# Known limit of the HCC gate (WP-T4 / D5): this journey waits for HCC's own
+# record of the Context change (the owned `context-allow` NetworkPolicy) and
+# then for the mcp-host rollout to settle and stay put. That still leaves one
+# race. HCC writes the NetworkPolicy inside `reconcileContext` and only then
+# runs the Host reconcile (`reconcileHostsReferencingContext`), so a late Host
+# reconcile can roll the pod after the policy witness passed. The gate is
+# therefore strictly better than no wait, but not a proof that the Host has
+# observed the reconciled Context. This is pre-existing: on `562d2e480` the
+# journey waited for nothing at all, so the same race was wider. Closing it
+# needs a Host-level record of the reconciled Context generation; tracked as
+# "host-context-controller: record the reconciled Context generation on the
+# Host so gates can wait for it".
 
 usage() {
   cat >&2 <<'USAGE'
