@@ -173,6 +173,7 @@ import { fileReferenceCheckError } from './incomingAdmission'
 import {
   type RecordedCheckpointMessage,
   restoreCheckpointMessages,
+  restoreSourceImageAttachments,
 } from './modelStepCheckpointAttachments'
 import {
   type ProviderWorkflowAccessDenialReason,
@@ -182,7 +183,7 @@ import {
   looksLikeWorkflowTriggerSuccess,
   workflowAccessDeniedResponseForMessage,
 } from './providerWorkflowAccessGate'
-import { sourceMessageForResume } from './sourceMessageForResume'
+import { approvalSourceMessageForResume, sourceMessageForResume } from './sourceMessageForResume'
 import { TaskExecutionBudget, TaskLimitError } from './taskExecutionBudget'
 import { TurnTimingRecorder } from './turnTiming'
 import type { AgentConfig, ExecutorFailoverSupport, ModelStepCheckpointSupport } from './types'
@@ -1332,6 +1333,20 @@ export class TaskExecutor {
       }
       attachment.dataBase64 = bytes.toString('base64')
     }
+    const images = restoreSourceImageAttachments(
+      this.task.sourceMessage?.attachments,
+      rows,
+      Date.now()
+    )
+    if (!images.ok) {
+      if (images.failure.code === 'tampered') {
+        logger.error(
+          { taskId: this.taskId, attachmentId: images.failure.attachmentId },
+          'Model-step checkpoint image attachment digest or size mismatch'
+        )
+      }
+      return false
+    }
     return true
   }
 
@@ -2453,7 +2468,7 @@ export class TaskExecutor {
         // #666 R4-M2 — persist the sanitized source message so a cold restart
         // rebuilds the file-reference pins and attachment metadata. The inline
         // bytes (dataBase64) never persist in the approval row.
-        result.approval.sourceMessage = sourceMessageForResume(this.task.sourceMessage)
+        result.approval.sourceMessage = approvalSourceMessageForResume(this.task.sourceMessage)
         // Durable write FIRST: under sqlite/dual the suspend can reject. We
         // must not tell the client "suspended" (SSE) or register the approval
         // before the durable state lands — otherwise a rejected write leaves a

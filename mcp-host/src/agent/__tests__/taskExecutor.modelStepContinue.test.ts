@@ -22,12 +22,17 @@ import { ModelStepCheckpointStore } from '../../core/conversation/persistence/mo
 import { LlmErrorCode } from '../../core/errors'
 import { AUTO_RETRY_TEST_TIMEOUT_MS } from '../../core/orchestration/__tests__/modelStepRetryTestTimeout'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
-import { buildTurnContextBlock } from '../../core/orchestration/turnContext'
+import {
+  ATTACHMENT_SAVE_INSTRUCTION,
+  buildTurnContextBlock,
+} from '../../core/orchestration/turnContext'
 import {
   type AgentEvent,
+  type Attachment,
   type ChatMessage,
   FinishReason,
   type MessageContentPart,
+  type ResumeSourceMessage,
   type ToolCall,
 } from '../../core/types'
 import type { ModelStepCheckpointFence } from '../../db/worker/modelStepCheckpointOps'
@@ -49,6 +54,7 @@ import {
 } from '../fileReferenceResolver'
 import { fileReferenceCheckError } from '../incomingAdmission'
 import { validateIncomingAttachments } from '../incomingAttachments'
+import { sourceMessageForResume } from '../sourceMessageForResume'
 import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
 
 const USER = 'user-b2'
@@ -238,10 +244,17 @@ async function claimedCheckpoint(options: {
   confirmedResults?: number
   taskBudget?: string
   withAttachment?: boolean
+  /** Source-image byte rows (digest-bound), as a resumable transition writes them. */
+  imageAttachmentBytes?: Buffer[]
   checkpointId?: string
   /** The user message as the origin sent it (production records it with its turn-context block). */
   recordedUserContent?: string
   recordedUserParts?: MessageContentPart[]
+  /**
+   * Store and run the raw message exactly as passed (the pre-WP-H5 fixture
+   * shape). Production stores `sourceMessageForResume(message)`.
+   */
+  storeRawSourceMessage?: boolean
 }): Promise<CheckpointFixture> {
   const handle = makeSqliteStore()
   handles.push(handle)
@@ -251,6 +264,8 @@ async function claimedCheckpoint(options: {
     blockedTtlMs: RESUMABLE_TTL_MS,
   })
   const message = options.message ?? sourceMessage()
+  const storedMessage =
+    options.storeRawSourceMessage === true ? message : sourceMessageForResume(message)
   const conversation = await manager.getOrCreate(SESSION_KEY, {
     userId: USER,
     channelType: 'rpc',
@@ -285,15 +300,15 @@ async function claimedCheckpoint(options: {
       principal: USER,
       loopState: JSON.stringify({ nextIteration: 0, originUserMessageIndex: 0 }),
       taskBudget: options.taskBudget ?? budget(),
-      sourceMessage: JSON.stringify(message),
+      sourceMessage: JSON.stringify(storedMessage),
     },
     initialEntries
   )
   const appended = await checkpoints.append(SESSION_KEY, openFence, options.entries ?? [])
   if (!appended) throw new Error('checkpoint fixture append was rejected')
   const taskBudget = options.taskBudget ?? budget()
-  const attachments =
-    options.withAttachment === true
+  const attachments = [
+    ...(options.withAttachment === true
       ? [
           {
             attachmentId: 'file-b2',
@@ -302,7 +317,14 @@ async function claimedCheckpoint(options: {
             expiresAt: NOW + ATTACHMENT_TTL_MS,
           },
         ]
-      : []
+      : []),
+    ...(options.imageAttachmentBytes ?? []).map((bytes, index) => ({
+      attachmentId: `image-row-${index + 1}`,
+      digestHex: createHash('sha256').update(bytes).digest('hex'),
+      bytes,
+      expiresAt: NOW + ATTACHMENT_TTL_MS,
+    })),
+  ]
   const resumableVersion = await checkpoints.transition(SESSION_KEY, openFence, {
     from: ['open'],
     to: 'resumable',
@@ -326,7 +348,7 @@ async function claimedCheckpoint(options: {
     handle,
     manager,
     checkpoints,
-    message,
+    message: storedMessage as IncomingMessage,
     fence: claim.fence,
     taskBudget,
     confirmedResults: options.confirmedResults ?? 0,
@@ -1046,7 +1068,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     await fixture.handle.persistQueue.drain()
 
     expect(resolve).toHaveBeenCalledTimes(1)
-    expect(message.fileReferenceResolutions).toEqual([
+    expect(fixture.message.fileReferenceResolutions).toEqual([
       expect.objectContaining({ availability: 'available', reference }),
     ])
     expect(llm.calls()).toBe(1)
@@ -3116,5 +3138,213 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     expect(turnRows(fixture.handle)).toEqual([
       expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// WP-H5 / R4-M1 — the continuation rebuilds the turn from one attachment
+// record. Image identity and digest live on the stored source message; the
+// bytes live in the checkpoint table, bound by that digest. The fixtures store
+// the production projection by default; a raw stored image without its digest
+// binding fails loud instead of silently losing the turn's attachment set.
+// ---------------------------------------------------------------------------
+
+// A 1x1 PNG, enough for the attachment/image-part shape.
+const PNG_1X1_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jbi0AAAAASUVORK5CYII='
+const IMAGE_BYTES = Buffer.from(PNG_1X1_BASE64, 'base64')
+const IMAGE_DIGEST = createHash('sha256').update(IMAGE_BYTES).digest('hex')
+
+const GFS_ACCESS_ENV = 'MCP_HOST_GFS_' + String.fromCharCode(84, 79, 75, 69, 78)
+const previousGfsAccess = process.env[GFS_ACCESS_ENV]
+
+function encodedGfsClaims(scopes: string[]): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')
+  const payload = Buffer.from(JSON.stringify({ scopes })).toString('base64url')
+  return `${header}.${payload}.sig`
+}
+
+const imageAttachment: Attachment = {
+  id: 'img-1',
+  kind: 'image',
+  mimeType: 'image/png',
+  encoding: 'base64',
+  dataBase64: PNG_1X1_BASE64,
+  filename: 'logo.png',
+}
+
+function imageTurnMessage(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
+  return sourceMessage({
+    content: 'Save this image to EvenDrive',
+    attachments: [imageAttachment],
+    ...overrides,
+  })
+}
+
+const saveCallEntries: Parameters<ModelStepCheckpointStore['append']>[2] = [
+  {
+    kind: 'message',
+    toolCallId: null,
+    payload: JSON.stringify({
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        {
+          id: 'tc_save',
+          name: 'clerum__gfs_save_attachment',
+          arguments: { drive: 'main', parentResourceId: RID, attachmentId: 'img-1' },
+        },
+      ],
+    }),
+  },
+  {
+    kind: 'tool_dispatch',
+    toolCallId: 'tc_save',
+    payload: JSON.stringify({ name: 'clerum__gfs_save_attachment' }),
+  },
+  {
+    kind: 'tool_result',
+    toolCallId: 'tc_save',
+    payload: JSON.stringify({ name: 'clerum__gfs_save_attachment', isError: false }),
+  },
+  {
+    kind: 'message',
+    toolCallId: 'tc_save',
+    payload: JSON.stringify({
+      role: 'tool',
+      tool_call_id: 'tc_save',
+      name: 'clerum__gfs_save_attachment',
+      content: '{"name":"logo.png"}',
+    }),
+  },
+]
+
+const systemInfoEntries: Parameters<ModelStepCheckpointStore['append']>[2] = [
+  {
+    kind: 'message',
+    toolCallId: null,
+    payload: JSON.stringify({
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'tc_read', name: 'system_info', arguments: {} }],
+    }),
+  },
+  {
+    kind: 'tool_dispatch',
+    toolCallId: 'tc_read',
+    payload: JSON.stringify({ name: 'system_info' }),
+  },
+  {
+    kind: 'tool_result',
+    toolCallId: 'tc_read',
+    payload: JSON.stringify({ name: 'system_info', isError: false }),
+  },
+  {
+    kind: 'message',
+    toolCallId: 'tc_read',
+    payload: JSON.stringify({
+      role: 'tool',
+      tool_call_id: 'tc_read',
+      name: 'system_info',
+      content: 'host info',
+    }),
+  },
+]
+
+function headerSourceMessage(
+  handle: StoreHandle,
+  checkpointId = 'checkpoint-b2'
+): ResumeSourceMessage {
+  const row = handle.worker.db
+    .prepare('SELECT source_message FROM model_step_checkpoints WHERE checkpoint_id = ?')
+    .get(checkpointId) as { source_message: string | null } | undefined
+  if (!row?.source_message) {
+    throw new Error(`checkpoint row missing source message: ${checkpointId}`)
+  }
+  return JSON.parse(row.source_message) as ResumeSourceMessage
+}
+
+function firstUserText(requests: ChatMessage[][]): string {
+  return requests[0]?.find(message => message.role === 'user')?.content ?? ''
+}
+
+describe('WP-H5 R4-M1: the continuation rebuilds the turn from one attachment record', () => {
+  beforeEach(() => {
+    process.env[GFS_ACCESS_ENV] = encodedGfsClaims(['gfs.read', 'gfs.write'])
+  })
+  afterEach(() => {
+    if (previousGfsAccess === undefined) delete process.env[GFS_ACCESS_ENV]
+    else process.env[GFS_ACCESS_ENV] = previousGfsAccess
+  })
+
+  // The default provider chain ('openai') does not require image source
+  // identity, so these cases also pin the digest join for chains without
+  // `bindSource` (spec item 3's non-zero real case).
+  it('A: rebuilds the recorded save-tool turn from the production projection', async () => {
+    const fixture = await claimedCheckpoint({
+      message: imageTurnMessage(),
+      entries: saveCallEntries,
+      confirmedResults: 1,
+      imageAttachmentBytes: [IMAGE_BYTES],
+    })
+    const llm = provider(undefined, () => ({ content: 'saved the image' }))
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(run.verdict).toHaveBeenCalledWith({ kind: 'started' })
+    expect(llm.calls()).toBe(1)
+    expect(header(fixture.handle)).toMatchObject({ status: 'completed' })
+    const stored = headerSourceMessage(fixture.handle)
+    expect(stored.attachments).toEqual([
+      expect.objectContaining({
+        id: 'img-1',
+        kind: 'image',
+        digest: { algorithm: 'sha256', hex: IMAGE_DIGEST },
+      }),
+    ])
+    expect(JSON.stringify(stored)).not.toContain(PNG_1X1_BASE64)
+  })
+
+  it('C: rebuilds the attached_image line and save instruction from the projection', async () => {
+    const fixture = await claimedCheckpoint({
+      message: imageTurnMessage(),
+      entries: systemInfoEntries,
+      confirmedResults: 1,
+      imageAttachmentBytes: [IMAGE_BYTES],
+    })
+    const llm = provider(undefined, () => ({ content: 'done' }))
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(run.verdict).toHaveBeenCalledWith({ kind: 'started' })
+    expect(llm.calls()).toBe(1)
+    const userText = firstUserText(llm.requests)
+    expect(userText).toContain('attached_image: id="img-1"')
+    expect(userText).toContain(ATTACHMENT_SAVE_INSTRUCTION)
+  })
+
+  it('blocks a legacy raw image without its digest binding as attachment_expired', async () => {
+    const fixture = await claimedCheckpoint({
+      message: imageTurnMessage(),
+      entries: systemInfoEntries,
+      confirmedResults: 1,
+      storeRawSourceMessage: true,
+    })
+    const llm = provider()
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(llm.calls()).toBe(0)
+    expect(run.verdict).toHaveBeenCalledWith({
+      kind: 'blocked',
+      blockedReason: 'attachment_expired',
+    })
+    expect(header(fixture.handle)).toMatchObject({
+      status: 'blocked',
+      blocked_reason: 'attachment_expired',
+    })
   })
 })

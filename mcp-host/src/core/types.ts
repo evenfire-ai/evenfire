@@ -145,7 +145,11 @@ export interface Attachment {
   visualSource?: GfsImageSource
   /** Inline `kind:'file'` only: media type the host detected from the bytes. */
   detectedMediaType?: string
-  /** Inline `kind:'file'` only: digest the host recomputed and verified. */
+  /**
+   * Inline `kind:'file'` carries admission's verified digest; a resume image
+   * carries the digest the checkpoint projection stamps to bind its metadata
+   * to the checkpoint byte row.
+   */
   digest?: FileReferenceDigest
   /**
    * Inline `kind:'file'` only, set by admission. Internal: it is described to
@@ -158,11 +162,23 @@ export interface Attachment {
 export type ResumeFileAttachment = Omit<Attachment, 'dataBase64'> & { kind: 'file' }
 
 /**
+ * #1043 WP-H5 — image-attachment identity kept for a model-step checkpoint
+ * resume. The digest is the sha256 of the decoded origin bytes (the value the
+ * checkpoint byte table stores in `digest_hex`); it binds this metadata to the
+ * byte row without persisting `dataBase64`.
+ */
+export type ResumeImageAttachment = Omit<Attachment, 'dataBase64'> & {
+  kind: 'image'
+  digest: FileReferenceDigest
+}
+
+/**
  * #666 R4-M2 — the source message persisted with an approval so a cold
- * restart rebuilds the file-reference pins and attachment lines. Image
- * attachments are dropped (their content lives in the frozen snapshot) and
- * inline file bytes (dataBase64) never persist in the approval row. (#1043: a
- * resumable model-step checkpoint holds them separately for a short TTL.)
+ * restart rebuilds the file-reference pins and attachment lines; the approval
+ * row keeps the files-only projection. Inline bytes (dataBase64) never
+ * persist in either durable record. (#1043: a resumable model-step checkpoint
+ * keeps image identity on its source message and image bytes in its byte
+ * table, for at most its short TTL.)
  */
 export type ResumeSourceMessage = Pick<
   HostIncomingMessage,
@@ -179,7 +195,7 @@ export type ResumeSourceMessage = Pick<
 > & {
   /** Only the team scope survives; the channel's raw payload is not persisted. */
   metadata?: { teamId: string }
-  attachments?: ResumeFileAttachment[]
+  attachments?: Array<ResumeFileAttachment | ResumeImageAttachment>
 }
 
 // ─── Completion Types ───────────────────────────────────────

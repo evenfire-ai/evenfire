@@ -239,6 +239,52 @@ export function restoreCheckpointMessages(
   return { ok: true, messages: restored }
 }
 
+export type SourceImageAttachmentRestoreResult =
+  | { ok: true }
+  | { ok: false; failure: CheckpointAttachmentRestoreFailure }
+
+/**
+ * #1043 WP-H5 — rehydrates a continuation's source-message image bytes from
+ * the checkpoint byte table before the tool registry is built. Files bind by
+ * attachment id; images bind by the sha256 digest `sourceMessageForResume`
+ * stamped on the stored metadata, the same key `createCheckpointImageCapture`
+ * uses for its rows. The digest and size are verified against the row, so the
+ * registry, turn context and save tool read the turn's own attachment list.
+ */
+export function restoreSourceImageAttachments(
+  attachments: readonly Attachment[] | undefined,
+  rows: readonly ModelStepCheckpointAttachmentRow[],
+  now: number
+): SourceImageAttachmentRestoreResult {
+  for (const attachment of attachments ?? []) {
+    if (attachment.kind !== 'image') continue
+    const digestHex = attachment.digest?.hex
+    if (!digestHex) {
+      return { ok: false, failure: { code: 'tampered', attachmentId: attachment.id } }
+    }
+    const row = rows.find(
+      candidate => candidate.digest_hex === digestHex && candidate.expires_at > now
+    )
+    if (!row) {
+      return {
+        ok: false,
+        failure: { code: 'missing_or_expired', attachmentId: attachment.id },
+      }
+    }
+    const bytes = Buffer.from(row.bytes)
+    const rowDigestHex = createHash('sha256').update(bytes).digest('hex')
+    if (
+      bytes.byteLength !== row.size_bytes ||
+      rowDigestHex !== row.digest_hex ||
+      rowDigestHex !== digestHex
+    ) {
+      return { ok: false, failure: { code: 'tampered', attachmentId: attachment.id } }
+    }
+    attachment.dataBase64 = bytes.toString('base64')
+  }
+  return { ok: true }
+}
+
 type PartRestoreResult =
   | { ok: true; part: MessageContentPart }
   | { ok: false; failure: CheckpointAttachmentRestoreFailure }

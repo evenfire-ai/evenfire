@@ -1,9 +1,15 @@
-import type { Attachment, ResumeFileAttachment, ResumeSourceMessage } from '../core/types'
+import { createHash } from 'node:crypto'
+import type {
+  Attachment,
+  ResumeFileAttachment,
+  ResumeImageAttachment,
+  ResumeSourceMessage,
+} from '../core/types'
 import type { IncomingMessage } from '../server'
 
 /**
- * #666 R4-M2 — what a cold restart needs from the suspended turn's message, and
- * nothing else. Each field is read after a restart:
+ * What a durable resume needs from the suspended turn's message, and nothing
+ * else. Each field is read after a restart:
  *
  * - `sender`, `channelType`, `channelId`, `threadId`: the approval binding, the
  *   workspace root, `session_search`, `cron_manage` ownership and the rpc scope.
@@ -11,11 +17,12 @@ import type { IncomingMessage } from '../server'
  * - `content`: the provider-workflow access gate and the tool registry.
  * - `hostRef`, `messageId`, `timestamp`: Host attribution and the pins' identity.
  * - `imageModel`: the visual model the turn was pinned to.
- * - file attachments (metadata) and `fileReferenceResolutions`: the version pins
- *   and attachment lines. Image attachments are dropped (their content lives in
- *   the frozen snapshot) and inline bytes (dataBase64) never persist in the
- *   approval row. (#1043: a resumable model-step checkpoint holds inline file
- *   bytes separately, for at most its short byte TTL — migration 018.)
+ * - file attachments (metadata) and `fileReferenceResolutions`: the version
+ *   pins and attachment lines. Inline bytes (`dataBase64`) never persist in
+ *   either durable record. A model-step checkpoint also keeps image identity
+ *   and the sha256 digest that binds it to the checkpoint byte table; an
+ *   approval row keeps the #666 files-only projection (its images live in the
+ *   frozen snapshot).
  *
  * Everything else the channel delivered (the raw Slack, email or Telegram
  * payload in `metadata`, `providerIdentity`, `traceContext`, the model piggyback)
@@ -25,8 +32,32 @@ import type { IncomingMessage } from '../server'
 export function sourceMessageForResume(
   message: IncomingMessage | undefined
 ): ResumeSourceMessage | undefined {
+  return projectSourceMessageForResume(message, { keepImages: true })
+}
+
+/**
+ * #666 R4-M2 — the approval row's unchanged projection: files only. The
+ * approval snapshot owns image bytes, so the row never carries image identity.
+ */
+export function approvalSourceMessageForResume(
+  message: IncomingMessage | undefined
+): ResumeSourceMessage | undefined {
+  return projectSourceMessageForResume(message, { keepImages: false })
+}
+
+function projectSourceMessageForResume(
+  message: IncomingMessage | undefined,
+  options: { keepImages: boolean }
+): ResumeSourceMessage | undefined {
   if (!message) return undefined
-  const files = message.attachments?.filter(attachment => attachment.kind === 'file') ?? []
+  const attachments: Array<ResumeFileAttachment | ResumeImageAttachment> = []
+  for (const attachment of message.attachments ?? []) {
+    if (attachment.kind === 'file') {
+      attachments.push(fileWithoutBytes(attachment))
+    } else if (attachment.kind === 'image' && options.keepImages) {
+      attachments.push(imageWithoutBytes(attachment))
+    }
+  }
   const teamId = message.metadata?.teamId
   return {
     content: message.content,
@@ -39,7 +70,7 @@ export function sourceMessageForResume(
     ...(message.threadId !== undefined ? { threadId: message.threadId } : {}),
     ...(typeof teamId === 'string' ? { metadata: { teamId } } : {}),
     ...(message.imageModel ? { imageModel: message.imageModel } : {}),
-    ...(files.length ? { attachments: files.map(fileWithoutBytes) } : {}),
+    ...(attachments.length ? { attachments } : {}),
     ...(message.fileReferenceResolutions
       ? { fileReferenceResolutions: message.fileReferenceResolutions }
       : {}),
@@ -50,4 +81,23 @@ function fileWithoutBytes(attachment: Attachment): ResumeFileAttachment {
   const metadata: Partial<Attachment> = { ...attachment }
   delete metadata.dataBase64
   return metadata as ResumeFileAttachment
+}
+
+/**
+ * #1043 WP-H5 — image metadata plus the sha256 digest of the decoded bytes.
+ * The digest equals the checkpoint byte table's `digest_hex`, so a
+ * continuation can rehydrate `dataBase64` from that row without persisting
+ * bytes on the source message.
+ */
+function imageWithoutBytes(attachment: Attachment): ResumeImageAttachment {
+  const digestHex = createHash('sha256')
+    .update(Buffer.from(attachment.dataBase64, 'base64'))
+    .digest('hex')
+  const metadata: Partial<Attachment> = { ...attachment }
+  delete metadata.dataBase64
+  return {
+    ...(metadata as Omit<Attachment, 'dataBase64'>),
+    kind: 'image',
+    digest: { algorithm: 'sha256', hex: digestHex },
+  }
 }

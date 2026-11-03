@@ -3,9 +3,10 @@
  * cold restart rebuilds the file-reference pins and attachment lines.
  */
 import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import type { Attachment } from '../../core/types'
 import type { IncomingMessage } from '../../server'
-import { sourceMessageForResume } from '../sourceMessageForResume'
+import { approvalSourceMessageForResume, sourceMessageForResume } from '../sourceMessageForResume'
 
 const FILE_BYTES = Buffer.from('SENTINEL-666-file-bytes')
 const IMAGE_BYTES = Buffer.from('SENTINEL-666-image-bytes')
@@ -73,8 +74,38 @@ function sourceMessage(attachments: Attachment[]): IncomingMessage {
 }
 
 describe('sourceMessageForResume (#666 R4-M2)', () => {
-  it('keeps file metadata and reference resolutions, never inline bytes', () => {
+  it('keeps file and image identity for a checkpoint resume, never inline bytes', () => {
     const resumed = sourceMessageForResume(sourceMessage([fileAttachment(), imageAttachment()]))
+    expect(resumed?.attachments).toHaveLength(2)
+    const file = resumed?.attachments?.find(attachment => attachment.id === 'file-1')
+    expect(file).toMatchObject({
+      id: 'file-1',
+      kind: 'file',
+      filename: 'notes.txt',
+    })
+    expect(file).not.toHaveProperty('dataBase64')
+    const image = resumed?.attachments?.find(attachment => attachment.id === 'image-1')
+    expect(image).toMatchObject({
+      id: 'image-1',
+      kind: 'image',
+      mimeType: 'image/png',
+      filename: 'logo.png',
+    })
+    expect(image?.digest).toEqual({
+      algorithm: 'sha256',
+      hex: createHash('sha256').update(IMAGE_BYTES).digest('hex'),
+    })
+    expect(image).not.toHaveProperty('dataBase64')
+    expect(resumed?.fileReferenceResolutions?.[0]?.reference.id).toBe('gfs:main:123@v3')
+    expect(JSON.stringify(resumed)).not.toContain(FILE_BYTES.toString('base64'))
+    expect(JSON.stringify(resumed)).not.toContain(IMAGE_BYTES.toString('base64'))
+    expect(resumed?.messageId).toBe('message-1')
+  })
+
+  it('keeps the approval row files-only so its behavior is unchanged', () => {
+    const resumed = approvalSourceMessageForResume(
+      sourceMessage([fileAttachment(), imageAttachment()])
+    )
     expect(resumed?.attachments).toHaveLength(1)
     expect(resumed?.attachments?.[0]).toMatchObject({
       id: 'file-1',
@@ -82,11 +113,8 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
       filename: 'notes.txt',
     })
     expect(resumed?.attachments?.[0]).not.toHaveProperty('dataBase64')
-    expect(resumed?.attachments?.[0]?.id).not.toBe('image-1')
-    expect(resumed?.fileReferenceResolutions?.[0]?.reference.id).toBe('gfs:main:123@v3')
-    expect(JSON.stringify(resumed)).not.toContain(FILE_BYTES.toString('base64'))
+    expect(JSON.stringify(resumed)).not.toContain('image-1')
     expect(JSON.stringify(resumed)).not.toContain(IMAGE_BYTES.toString('base64'))
-    expect(resumed?.messageId).toBe('message-1')
   })
 
   it('persists only the fields a restart reads, not the raw channel payload', () => {
