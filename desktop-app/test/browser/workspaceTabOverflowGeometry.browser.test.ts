@@ -206,6 +206,44 @@ describe('workspace tab overflow production geometry', () => {
     expect(observed.activeFlexShrink).toBe('0.4')
   })
 
+  it('keeps active tabs above the shelf and overflow controls hit-testable', async () => {
+    await open(280)
+    const hits = await page.evaluate(() => {
+      const strip = document.querySelector<HTMLElement>('.chat-view-tabs')!
+      const active = strip.querySelector<HTMLElement>('.chat-view-tab.is-active')!
+      const arrow = strip.querySelector<HTMLElement>('.chat-view-tabs__scroll-button')!
+      const activeRect = active.getBoundingClientRect()
+      const arrowRect = arrow.getBoundingClientRect()
+      const hit = (x: number, y: number) => document.elementFromPoint(x, y)
+      return {
+        activeZIndex: getComputedStyle(active).zIndex,
+        shelfZIndex: getComputedStyle(strip, '::after').zIndex,
+        shelfPointerEvents: getComputedStyle(strip, '::after').pointerEvents,
+        activeCenter:
+          hit(
+            activeRect.left + activeRect.width / 2,
+            activeRect.top + activeRect.height / 2
+          )?.closest('.chat-view-tab.is-active') === active,
+        activeBottom:
+          hit(activeRect.left + activeRect.width / 2, activeRect.bottom - 0.5)?.closest(
+            '.chat-view-tab.is-active'
+          ) === active,
+        arrowCenter:
+          hit(arrowRect.left + arrowRect.width / 2, arrowRect.top + arrowRect.height / 2)?.closest(
+            '.chat-view-tabs__scroll-button'
+          ) === arrow,
+      }
+    })
+    expect(hits).toEqual({
+      activeZIndex: '1',
+      shelfZIndex: '-1',
+      shelfPointerEvents: 'none',
+      activeCenter: true,
+      activeBottom: true,
+      arrowCenter: true,
+    })
+  })
+
   it('uses the dominant wheel axis and preserves ties, delta modes, modifiers, and edge chaining', async () => {
     await open(280)
     const scroller = page.locator('.chat-view-tabs__scroller')
