@@ -51,10 +51,13 @@ async function geometry() {
     }
     const active = strip.querySelector<HTMLElement>('.chat-view-tab.is-active')
     const activeStyle = active ? getComputedStyle(active) : null
+    const viewportLeft = scroller.getBoundingClientRect().left + scroller.clientLeft
     return {
       width: strip.clientWidth,
       contentWidth: fullWidth,
       viewportWidth: scroller.clientWidth,
+      viewportLeft,
+      viewportRight: viewportLeft + scroller.clientWidth,
       scrollWidth: scroller.scrollWidth,
       scrollLeft: scroller.scrollLeft,
       arrows: strip.querySelectorAll('.chat-view-tabs__scroll-button').length,
@@ -126,6 +129,75 @@ describe('workspace tab overflow production geometry', () => {
     expect(afterFit.contentWidth).toBeLessThanOrEqual(afterFit.width + 1)
     expect(afterFit.arrows, JSON.stringify(afterFit)).toBe(0)
     expect(afterFit.scrollLeft).toBe(0)
+  })
+
+  it('uses producer geometry for first and last Files tabs across narrow viewport classes', async () => {
+    for (const width of [100, 144, 160]) {
+      await open(width, 2)
+      const scroller = page.locator('.chat-view-tabs__scroller')
+      const initial = await geometry()
+      const activeWidth = initial.tabs[0]?.width
+      expect(activeWidth).toBe(96)
+      expect(initial.arrows).toBe(2)
+      expect(initial.viewportWidth).toBeLessThanOrEqual(width)
+      if (width === 100) expect(initial.viewportWidth).toBeLessThan(activeWidth!)
+      if (width === 144) expect(initial.viewportWidth).toBe(activeWidth)
+      if (width === 160) expect(initial.viewportWidth).toBeGreaterThan(activeWidth!)
+
+      await page.evaluate(() => window.workspaceTabsFixture.selectTab(1))
+      await settle()
+      await scroller.evaluate(node => {
+        node.scrollLeft = 0
+      })
+      const beforeFirst = await settle()
+      const first = beforeFirst.tabs[0]!
+      const firstId = await page
+        .locator('.chat-view-tab')
+        .first()
+        .getAttribute('data-workspace-tab-id')
+      expect(first.right).toBeGreaterThan(beforeFirst.viewportLeft)
+      await page.evaluate(() => window.workspaceTabsFixture.selectTab(0))
+      const firstActive = await settle()
+      expect(firstActive.active).toBe(firstId)
+      const firstActiveTab = firstActive.tabs[0]!
+      const firstIntersection = Math.max(
+        0,
+        Math.min(firstActiveTab.right, firstActive.viewportRight) -
+          Math.max(firstActiveTab.left, firstActive.viewportLeft)
+      )
+      expect(firstIntersection).toBe(Math.min(firstActiveTab.width, firstActive.viewportWidth))
+
+      await scroller.evaluate(node => {
+        node.scrollLeft = 0
+      })
+      const beforeLast = await settle()
+      const last = beforeLast.tabs.at(-1)!
+      const lastId = await page
+        .locator('.chat-view-tab')
+        .last()
+        .getAttribute('data-workspace-tab-id')
+      const initialIntersection = Math.max(
+        0,
+        Math.min(last.right, beforeLast.viewportRight) -
+          Math.max(last.left, beforeLast.viewportLeft)
+      )
+      expect(initialIntersection).toBeLessThan(last.width)
+      await page.evaluate(() => window.workspaceTabsFixture.selectTab(1))
+      const lastActive = await settle()
+      const lastTab = lastActive.tabs.at(-1)!
+      expect(lastActive.active).toBe(lastId)
+      const lastIntersection = Math.max(
+        0,
+        Math.min(lastTab.right, lastActive.viewportRight) -
+          Math.max(lastTab.left, lastActive.viewportLeft)
+      )
+      expect(lastIntersection).toBe(Math.min(lastTab.width, lastActive.viewportWidth))
+      expect(lastActive.scrollLeft).toBeGreaterThanOrEqual(0)
+      expect(lastActive.scrollLeft).toBeLessThanOrEqual(
+        lastActive.scrollWidth - lastActive.viewportWidth
+      )
+      await page.close()
+    }
   })
 
   it('uses the dominant wheel axis and preserves ties, delta modes, modifiers, and edge chaining', async () => {
