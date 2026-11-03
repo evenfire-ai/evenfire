@@ -27,6 +27,7 @@ import type {
 import {
   ModelStepBoundaryNotCommittedError,
   isModelStepFenceMismatch,
+  isModelStepTaskOwnerMismatch,
 } from '../../../db/worker/protocol'
 import type { ModelStepTurnFence } from '../../../db/worker/protocol'
 import { logger } from '../../../logger'
@@ -1063,9 +1064,16 @@ export class SqliteConversationStore implements ConversationStore {
    * resurrect a 'processing' session with a dirty active_task_id. A rejected
    * write propagates to the caller — never swallowed — like its siblings.
    */
-  async persistTurnFail(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> {
+  async persistTurnFail(
+    conv: Conversation,
+    fence?: ModelStepTurnFence,
+    expectedTaskId?: string
+  ): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
-    if (!sessionKey) return
+    if (!sessionKey) {
+      if (expectedTaskId !== undefined) throw new Error('Cannot release an untracked session')
+      return
+    }
     this.reconcilePinning(sessionKey, conv)
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     // Reserve before the durability await. If persistTurnComplete already
@@ -1084,6 +1092,7 @@ export class SqliteConversationStore implements ConversationStore {
           activeTaskId: null, // D.1 — fail clears the in-flight task
           activeTraceContext: null,
           ...(fence ? { modelStepTurnFence: fence } : {}),
+          ...(expectedTaskId !== undefined ? { expectedTaskId } : {}),
         },
         sessionKey
       )
@@ -1096,8 +1105,9 @@ export class SqliteConversationStore implements ConversationStore {
         return
       }
       if (
-        fence !== undefined &&
-        (isModelStepFenceMismatch(settled.error) || uncertain) &&
+        (fence !== undefined || expectedTaskId !== undefined) &&
+        (isModelStepFenceMismatch(settled.error) ||
+          (uncertain && !isModelStepTaskOwnerMismatch(settled.error))) &&
         this.reopenedTurnCompletionOwners.get(state) === marker.owner
       ) {
         if (marker.previousReopenedTurnNumber !== undefined) {
@@ -1326,11 +1336,24 @@ export class SqliteConversationStore implements ConversationStore {
   async persistApprovalResolved(
     conv: Conversation,
     requestId: string,
-    decision: 'approve' | 'deny' | 'cancel'
+    decision: 'approve' | 'deny' | 'cancel',
+    expectedTaskId?: string
   ): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
+    if (!sessionKey && expectedTaskId !== undefined) {
+      throw new Error('Cannot resolve approval for an untracked session')
+    }
     if (sessionKey) this.reconcilePinning(sessionKey, conv)
-    await this.persistQueue.enqueueSync({ kind: 'delete_pending_approval', requestId }, sessionKey)
+    await this.persistQueue.enqueueSync(
+      {
+        kind: 'delete_pending_approval',
+        requestId,
+        ...(expectedTaskId !== undefined
+          ? { expectedTask: { sessionId: conv.id, taskId: expectedTaskId } }
+          : {}),
+      },
+      sessionKey
+    )
     await this.persistQueue.enqueueSync(
       {
         kind: 'update_session_state',
@@ -1342,6 +1365,7 @@ export class SqliteConversationStore implements ConversationStore {
         // deny/cancel are terminal (→ Idle): clear the in-flight task.
         activeTaskId: decision === 'approve' ? undefined : null,
         activeTraceContext: decision === 'approve' ? undefined : null,
+        ...(expectedTaskId !== undefined ? { expectedTaskId } : {}),
       },
       sessionKey
     )

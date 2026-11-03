@@ -87,6 +87,11 @@ export function isModelStepFenceMismatch(err: unknown): boolean {
   return err instanceof Error && MODEL_STEP_FENCE_MISMATCH_MESSAGES.has(err.message)
 }
 
+/** The checkpoint was lost and a different task now owns the durable session. */
+export function isModelStepTaskOwnerMismatch(err: unknown): boolean {
+  return err instanceof Error && err.message === 'model-step continuation task owner mismatch'
+}
+
 /**
  * WP-H2-001 — a fenced boundary write timed out, the worker later proved the
  * transaction did NOT commit, and the store restored the reopened-turn marker.
@@ -330,6 +335,8 @@ export type WorkerOp =
        * this continuation; a mismatch rolls the state write back.
        */
       modelStepTurnFence?: ModelStepTurnFence
+      /** Require the session to still belong to this task before changing it. */
+      expectedTaskId?: string
     }
   | { kind: 'reap_processing_sessions'; nowEpoch: number; chunkSize?: number }
   | {
@@ -431,7 +438,11 @@ export type WorkerOp =
       replaceRequestId?: string
       markAwaitingApproval?: boolean
     }
-  | { kind: 'delete_pending_approval'; requestId: string }
+  | {
+      kind: 'delete_pending_approval'
+      requestId: string
+      expectedTask?: { sessionId: string; taskId: string }
+    }
   | { kind: 'load_active_session'; sessionKey: string }
   | {
       kind: 'load_session_message_page'

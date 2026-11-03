@@ -1,5 +1,10 @@
-import { isModelStepBoundaryNotCommitted, isModelStepFenceMismatch } from '../../db/worker/protocol'
+import {
+  isModelStepBoundaryNotCommitted,
+  isModelStepFenceMismatch,
+  isModelStepTaskOwnerMismatch,
+} from '../../db/worker/protocol'
 import type { ModelSelectionWriteOutcome, ModelStepTurnFence } from '../../db/worker/protocol'
+import { logger } from '../../logger'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../errors'
@@ -26,7 +31,7 @@ import {
 } from './conversationStore'
 import { userIdFromRpcPrefix } from './sessionKeyParts'
 
-export { isModelStepFenceMismatch } from '../../db/worker/protocol'
+export { isModelStepFenceMismatch, isModelStepTaskOwnerMismatch } from '../../db/worker/protocol'
 
 /**
  * Manages conversation state and turn tracking.
@@ -629,7 +634,14 @@ export class ConversationManager {
    * under the SQLite store the state flip + `active_task_id` clear commit as
    * one awaited worker op. A rejected write propagates — never swallowed.
    */
-  async failTurn(conversation: Conversation, fence?: ModelStepTurnFence): Promise<void> {
+  async failTurn(
+    conversation: Conversation,
+    fence?: ModelStepTurnFence,
+    expectedTaskId?: string
+  ): Promise<void> {
+    if (expectedTaskId !== undefined && conversation.activeTaskId !== expectedTaskId) {
+      throw new Error('model-step continuation task owner mismatch')
+    }
     const previousState = conversation.state
     const previousPendingApproval = conversation.pending_approval
     const previousActiveTaskId = conversation.activeTaskId
@@ -647,11 +659,12 @@ export class ConversationManager {
     const writtenCompletedAt = new Date()
     if (currentTurn) currentTurn.completed_at = writtenCompletedAt
     try {
-      await Promise.resolve(this.store.persistTurnFail(conversation, fence))
+      await Promise.resolve(this.store.persistTurnFail(conversation, fence, expectedTaskId))
     } catch (err) {
       const rollbackFence =
-        fence !== undefined &&
-        (isModelStepFenceMismatch(err) || isModelStepBoundaryNotCommitted(err))
+        (fence !== undefined || expectedTaskId !== undefined) &&
+        (isModelStepFenceMismatch(err) ||
+          (isModelStepBoundaryNotCommitted(err) && !isModelStepTaskOwnerMismatch(err)))
       if (rollbackFence && currentTurn?.completed_at === writtenCompletedAt) {
         currentTurn.completed_at = previousCompletedAt
       }
@@ -878,7 +891,7 @@ export class ConversationManager {
    *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
-  async deny(conversation: Conversation): Promise<void> {
+  async deny(conversation: Conversation, expectedTaskId?: string): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
         `Cannot deny: conversation is ${conversation.state}`,
@@ -886,14 +899,20 @@ export class ConversationManager {
       )
     }
 
+    if (expectedTaskId !== undefined && conversation.activeTaskId !== expectedTaskId) {
+      throw new Error('model-step continuation task owner mismatch')
+    }
     const requestId = conversation.pending_approval?.request_id
+    if (expectedTaskId !== undefined && !requestId) {
+      throw new Error('Cannot resolve a continuation approval without a request id')
+    }
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — deny is terminal (→ Idle), no task in flight
     conversation.traceContext = null
     conversation.updated_at = new Date()
     if (requestId) {
-      await this.store.persistApprovalResolved(conversation, requestId, 'deny')
+      await this.store.persistApprovalResolved(conversation, requestId, 'deny', expectedTaskId)
     }
   }
 
@@ -907,13 +926,26 @@ export class ConversationManager {
    * Also resets conversation.state to Idle so the next startTurn can proceed
    * without throwing "Cannot start turn: conversation is awaiting_approval". (BUG-8)
    *
+   * Returns false without changing state if a different approval is current.
    * Safe on unknown sessionKey (no-op).
    *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
-  async clearPendingApproval(sessionKey: string, requestId?: string): Promise<void> {
+  async clearPendingApproval(sessionKey: string, requestId?: string): Promise<boolean> {
     const conv = this.store.get(sessionKey) ?? (await this.getSessionByKeyAsync(sessionKey))
-    if (!conv) return
+    if (!conv) return true
+    const currentRequestId = conv.pending_approval?.request_id
+    if (
+      requestId !== undefined &&
+      currentRequestId !== undefined &&
+      requestId !== currentRequestId
+    ) {
+      logger.warn(
+        { sessionKey, requestId, currentRequestId },
+        'Refusing to clear a different pending approval'
+      )
+      return false
+    }
     requestId ??= conv.pending_approval?.request_id
     conv.pending_approval = undefined
     conv.state = ConversationState.Idle // release the turn lock (BUG-8)
@@ -923,6 +955,7 @@ export class ConversationManager {
     if (requestId) {
       await this.store.persistApprovalResolved(conv, requestId, 'cancel')
     }
+    return true
   }
 
   /**

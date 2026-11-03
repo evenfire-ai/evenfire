@@ -980,7 +980,7 @@ describe('ConversationManager.clearPendingApproval', () => {
 
   it('is safe for unknown sessionKey (no throw)', async () => {
     const cm = new ConversationManager()
-    await expect(cm.clearPendingApproval('nonexistent-session')).resolves.toBeUndefined()
+    await expect(cm.clearPendingApproval('nonexistent-session')).resolves.toBe(true)
   })
 
   it('is idempotent on already-cleared conversation', async () => {

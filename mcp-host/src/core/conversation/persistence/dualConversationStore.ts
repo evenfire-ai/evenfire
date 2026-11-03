@@ -321,10 +321,14 @@ export class DualConversationStore implements ConversationStore {
     ])
   }
 
-  async persistTurnFail(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> {
+  async persistTurnFail(
+    conv: Conversation,
+    fence?: ModelStepTurnFence,
+    expectedTaskId?: string
+  ): Promise<void> {
     await Promise.all([
       Promise.resolve(this.memory.persistTurnFail(conv)),
-      Promise.resolve(this.sqlite.persistTurnFail(conv, fence)),
+      Promise.resolve(this.sqlite.persistTurnFail(conv, fence, expectedTaskId)),
     ])
   }
 
@@ -382,11 +386,12 @@ export class DualConversationStore implements ConversationStore {
   async persistApprovalResolved(
     conv: Conversation,
     requestId: string,
-    decision: 'approve' | 'deny' | 'cancel'
+    decision: 'approve' | 'deny' | 'cancel',
+    expectedTaskId?: string
   ): Promise<void> {
     await Promise.all([
       this.memory.persistApprovalResolved(conv, requestId, decision),
-      this.sqlite.persistApprovalResolved(conv, requestId, decision),
+      this.sqlite.persistApprovalResolved(conv, requestId, decision, expectedTaskId),
     ])
   }
 

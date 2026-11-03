@@ -207,7 +207,7 @@ describe('BUG-8: cancel releases conversation lock', () => {
   // ── Test 3: clearPendingApproval no-ops on unknown key ────────────────────
   it('clearPendingApproval no-ops safely on unknown session key', async () => {
     const cm = new ConversationManager()
-    await expect(cm.clearPendingApproval('does-not-exist')).resolves.toBeUndefined()
+    await expect(cm.clearPendingApproval('does-not-exist')).resolves.toBe(true)
   })
 })
 

@@ -339,7 +339,11 @@ export interface ConversationStore {
   /** Called when a turn is cancelled (synthetic response injected). */
   persistTurnCancel(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> | void
   /** Called when a turn fails (no response written). */
-  persistTurnFail(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> | void
+  persistTurnFail(
+    conv: Conversation,
+    fence?: ModelStepTurnFence,
+    expectedTaskId?: string
+  ): Promise<void> | void
   /**
    * #1043 — durable `turn_number` of the turn in flight (the one
    * `persistTurnStart` wrote). Only durable stores answer; `undefined` when the
@@ -408,7 +412,8 @@ export interface ConversationStore {
   persistApprovalResolved(
     conv: Conversation,
     requestId: string,
-    decision: 'approve' | 'deny' | 'cancel'
+    decision: 'approve' | 'deny' | 'cancel',
+    expectedTaskId?: string
   ): Promise<void>
 
   /** Optional shutdown drain. Implementations without a worker may no-op. */

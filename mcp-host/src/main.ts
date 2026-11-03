@@ -1746,6 +1746,7 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
  */
 async function initializeModelStepCheckpoints(handle: ConversationStoreHandle): Promise<void> {
   if (!agent) return
+  const continuationAgent = agent
   const persistQueue = handle.persistQueue
   if (!persistQueue) {
     throw new Error(
@@ -1773,10 +1774,11 @@ async function initializeModelStepCheckpoints(handle: ConversationStoreHandle): 
     fileReferenceGfsGate,
     gfsSurfaceRuntimeCapability,
   }
-  agent.setModelStepCheckpoints(support)
+  continuationAgent.setModelStepCheckpoints(support)
   modelStepContinuationService = new ModelStepContinuationService({
     checkpoints: support,
-    conversationManager: agent.getConversationManager(),
+    conversationManager: continuationAgent.getConversationManager(),
+    hasLiveExecutor: taskId => continuationAgent.hasLiveExecutor(taskId),
     enqueue: async (message, taskId, continuation) => {
       if (!messageQueue || !taskLifecycle || !sessionProcessor) {
         throw new Error('Model-step continuation async admission is not initialized')

@@ -1662,7 +1662,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
   })
 
   it.each(['initial preparation', 'pre-reopen preparation'] as const)(
-    'R2-M6 keeps a claimed checkpoint when %s renewal throws',
+    'R2-M6 releases the claim when %s renewal throws',
     async stage => {
       const fixture = await claimedCheckpoint({})
       const logged = vi.spyOn(logger, 'error').mockImplementation(() => {})
@@ -1697,15 +1697,16 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
       expect(run.admissionError.mock.calls[0]![0].message).toBe(
         'Model-step continuation lease renewal failed'
       )
-      expect(header(fixture.handle).status).toBe('claimed')
+      expect(header(fixture.handle).status).toBe('resumable')
       expect(
-        (run.executor as unknown as { continuationLeaseStop: unknown }).continuationLeaseStop
+        (run.executor as unknown as { continuationClaim: { leaseStop: unknown } }).continuationClaim
+          .leaseStop
       ).toBeUndefined()
     }
   )
 
   it.each(['before approval', 'before dispatch'] as const)(
-    'R2-M6 keeps the claimed checkpoint when approval renewal throws %s',
+    'R2-M6 releases the claim when approval renewal throws %s',
     async stage => {
       Object.assign(appConfig, { enableApproval: true })
       const fixture = await claimedCheckpoint({})
@@ -1750,7 +1751,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
         message: 'Model-step continuation lease renewal failed',
       })
       expect(llm.calls()).toBe(1)
-      expect(header(fixture.handle).status).toBe('claimed')
+      expect(header(fixture.handle).status).toBe('resumable')
       expect(
         fixture.handle.worker.db
           .prepare(
@@ -1759,7 +1760,8 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
           .all(fixture.fence.checkpointId, 'approval-renewal')
       ).toEqual([])
       expect(
-        (run.executor as unknown as { continuationLeaseStop: unknown }).continuationLeaseStop
+        (run.executor as unknown as { continuationClaim: { leaseStop: unknown } }).continuationClaim
+          .leaseStop
       ).toBeUndefined()
     }
   )
@@ -1849,9 +1851,13 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     Object.assign(appConfig, { enableApproval: true })
     const logged = vi.spyOn(logger, 'error')
     const fixture = await claimedCheckpoint({})
-    const append = vi
-      .spyOn(fixture.checkpoints, 'append')
-      .mockRejectedValueOnce(new Error('append failed'))
+    let sessionAtFailure: unknown
+    const append = vi.spyOn(fixture.checkpoints, 'append').mockImplementationOnce(async () => {
+      sessionAtFailure = fixture.handle.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+        .get(SESSION_KEY)
+      throw new Error('append failed')
+    })
     const transition = fixture.checkpoints.transition.bind(fixture.checkpoints)
     vi.spyOn(fixture.checkpoints, 'transition').mockImplementation((sessionKey, fence, input) => {
       if (input.to === 'abandoned') throw new Error('abandon failed')
@@ -1874,8 +1880,18 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     // #1157: the abandon failure is logged; the task still fails with its own error.
     await run.executor.run()
     expect(append).toHaveBeenCalled()
+    expect(sessionAtFailure).toEqual({ state: 'processing', active_task_id: run.task.id })
     expect(llm.calls()).toBe(1)
     expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(
+      fixture.handle.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+        .get(SESSION_KEY)
+    ).toEqual({ state: 'idle', active_task_id: null })
+    expect(fixture.manager.getSessionByKey(SESSION_KEY)).toMatchObject({
+      state: 'idle',
+      activeTaskId: undefined,
+    })
     expect(run.onFail.mock.calls[0]![1].message).toBe(
       'Model-step checkpoint abandonment did not release its claim'
     )
@@ -1890,11 +1906,10 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     )
     expect(header(fixture.handle).status).toBe('claimed')
     const internals = run.executor as unknown as {
-      continuationClaimReleased: boolean
-      continuationLeaseStop: unknown
+      continuationClaim: { claimReleased: boolean; leaseStop: unknown }
     }
-    expect(internals.continuationClaimReleased).toBe(false)
-    expect(internals.continuationLeaseStop).toBeUndefined()
+    expect(internals.continuationClaim.claimReleased).toBe(false)
+    expect(internals.continuationClaim.leaseStop).toBeUndefined()
 
     const healthy = await claimedCheckpoint({})
     const healthyRun = await runContinuation(
@@ -1916,9 +1931,17 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     expect(healthyRun.executor.executorState).toBe('waiting_approval')
     expect(header(healthy.handle).status).toBe('claimed')
     expect(
-      (healthyRun.executor as unknown as { continuationLeaseStop: unknown }).continuationLeaseStop
+      (healthyRun.executor as unknown as { continuationClaim: { leaseStop: unknown } })
+        .continuationClaim.leaseStop
     ).toBeTypeOf('function')
     await healthyRun.executor.deny()
+
+    const neighbor = await claimedCheckpoint({})
+    const neighborRun = await runContinuation(neighbor, provider())
+    await neighborRun.executor.run()
+    expect(neighborRun.onComplete).toHaveBeenCalledTimes(1)
+    expect(neighborRun.onFail).not.toHaveBeenCalled()
+    expect(header(neighbor.handle).status).toBe('completed')
   })
 
   it('11b3. W1 keeps a completed sibling through approval and a crash before approved dispatch', async () => {

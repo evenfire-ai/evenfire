@@ -58,6 +58,8 @@ export interface ModelStepCheckpointRecorder {
   readonly poisoned: boolean
   /** Whether settle applied a transition out of the continuation claim. */
   readonly claimReleased: boolean
+  /** The continuation transition durably applied by settle, if any. */
+  readonly appliedSettlement: 'resumable' | 'abandoned' | undefined
   begin(initialMessages: ChatMessage[]): Promise<void>
   syncMessages(messages: ChatMessage[]): Promise<void>
   /** Context management replaced the array; later pushes start at `length`. */
@@ -98,6 +100,29 @@ export interface ModelStepCheckpointRecorder {
    * executor can clean up the still-owned claim.
    */
   settle(result: LoopResult | undefined): Promise<string | undefined>
+}
+
+/** A continuation tool did not run because its dispatch was not acknowledged. */
+export class ModelStepContinuationDispatchError extends Error {
+  constructor(
+    readonly kind: 'operational' | 'lost',
+    cause?: unknown
+  ) {
+    super('Model-step continuation dispatch was not durably acknowledged', { cause })
+    this.name = 'ModelStepContinuationDispatchError'
+  }
+}
+
+/** A continuation could not durably settle after its model step failed. */
+export class ModelStepContinuationSettlementError extends Error {
+  constructor(
+    readonly kind: 'operational' | 'lost',
+    readonly loopError: Error,
+    cause?: unknown
+  ) {
+    super('Model-step continuation settlement was not durably acknowledged', { cause })
+    this.name = 'ModelStepContinuationSettlementError'
+  }
 }
 
 export type ModelStepCheckpointRecorderMode =
@@ -155,6 +180,7 @@ export interface ModelStepCheckpointRecorderOptions {
 }
 
 type WriteKind = 'open' | 'append' | 'update_state' | 'transition'
+type WriteFailure = { kind: 'lost' } | { kind: 'operational'; error: unknown }
 
 class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   readonly checkpointId: string
@@ -164,7 +190,10 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   private confirmedResults: number
   private isPoisoned = false
   private settled = false
-  private hasReleasedClaim = false
+  private appliedClaimSettlement: 'resumable' | 'abandoned' | undefined
+  private lastWriteFailure: WriteFailure | undefined
+  private preDispatchFailure: WriteFailure | undefined
+  private dispatchFailed = false
   /**
    * F6: the first failure that started this step's automatic retries and the
    * error those retries ended on. Overwritten by the next retried step.
@@ -216,7 +245,11 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   }
 
   get claimReleased(): boolean {
-    return this.hasReleasedClaim
+    return this.appliedClaimSettlement !== undefined
+  }
+
+  get appliedSettlement(): 'resumable' | 'abandoned' | undefined {
+    return this.appliedClaimSettlement
   }
 
   async begin(initialMessages: ChatMessage[]): Promise<void> {
@@ -253,7 +286,13 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       return
     }
     if (pending.length === 0) return
-    await this.append(() =>
+    const toolCallEnvelopesOnly = pending.every(
+      message =>
+        message.role === 'assistant' &&
+        Array.isArray(message.tool_calls) &&
+        message.tool_calls.length > 0
+    )
+    const written = await this.append(() =>
       pending
         .filter(message => {
           // Providers may restart call ids on each assistant response. Only
@@ -267,6 +306,11 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
         })
         .map(message => this.messageEntry(message))
     )
+    if (!written && this.opts.mode.kind === 'continuation' && toolCallEnvelopesOnly) {
+      // This write precedes dispatch. A failed result/state write is not safe
+      // to classify the same way: an earlier tool may already have run.
+      this.preDispatchFailure = this.lastWriteFailure
+    }
   }
 
   rebase(length: number): void {
@@ -308,6 +352,15 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   async recordDispatch(call: ToolCall): Promise<void> {
     if (this.isPoisoned) {
       if (this.opts.mode.kind === 'continuation') {
+        if (this.preDispatchFailure) {
+          this.dispatchFailed = true
+          throw new ModelStepContinuationDispatchError(
+            this.preDispatchFailure.kind,
+            this.preDispatchFailure.kind === 'operational'
+              ? this.preDispatchFailure.error
+              : undefined
+          )
+        }
         throw new Error(
           'Model-step continuation dispatch is unknown after a failed checkpoint write'
         )
@@ -333,7 +386,14 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     }
     const acknowledged = await this.append(() => [dispatch()])
     if (this.opts.mode.kind === 'continuation' && !acknowledged) {
-      throw new Error('Model-step continuation dispatch was not durably acknowledged')
+      const failure = this.lastWriteFailure
+      if (!failure)
+        throw new Error('Model-step continuation dispatch failed without a write outcome')
+      this.dispatchFailed = true
+      throw new ModelStepContinuationDispatchError(
+        failure.kind,
+        failure.kind === 'operational' ? failure.error : undefined
+      )
     }
   }
 
@@ -401,6 +461,13 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
 
     this.settled = true
 
+    // The tool did not run, and the claim owner must distinguish an unknown
+    // dispatch write from a lost fence before choosing the terminal transition.
+    if (this.dispatchFailed) {
+      this.imageCapture.clear()
+      return undefined
+    }
+
     // F6: an eligible failure keeps the checkpoint resumable either when it is
     // the error the loop ended on, or when it is the failure this step's
     // automatic retries started from, those retries ended on exactly this error
@@ -435,7 +502,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       })
       this.imageCapture.clear()
       if (resumable) {
-        this.hasReleasedClaim = source === 'claimed'
+        if (source === 'claimed') this.appliedClaimSettlement = 'resumable'
         logger.info(
           {
             component: 'ModelStepCheckpoint',
@@ -445,6 +512,16 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
           'model-step checkpoint left resumable'
         )
         return this.checkpointId
+      }
+      if (source === 'claimed') {
+        const failure = this.lastWriteFailure
+        if (!failure)
+          throw new Error('Model-step continuation settlement failed without a write outcome')
+        throw new ModelStepContinuationSettlementError(
+          failure.kind,
+          stepError!,
+          failure.kind === 'operational' ? failure.error : undefined
+        )
       }
       if (source === 'open' && version === undefined) {
         // The failed write left no expiry on this origin. Cleanup must never
@@ -483,7 +560,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       })
       return version !== null
     })
-    this.hasReleasedClaim = source === 'claimed' && abandoned
+    if (source === 'claimed' && abandoned) this.appliedClaimSettlement = 'abandoned'
     this.imageCapture.clear()
     // A continuation must enter the executor's cleanup if settlement failed;
     // otherwise an answered turn can retain a claim until checkpoint expiry.
@@ -509,8 +586,10 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
    * because the turn itself must not fail on its checkpoint (§5.3.5).
    */
   private async write(kind: WriteKind, op: () => Promise<boolean>): Promise<boolean> {
+    this.lastWriteFailure = undefined
     try {
       if (await op()) return true
+      this.lastWriteFailure = { kind: 'lost' }
       this.isPoisoned = true
       this.pendingMessages = []
       this.imageCapture.clear()
@@ -521,6 +600,9 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       this.opts.onFenceLost()
       return false
     } catch (err) {
+      // The onFenceLost callback can itself throw; it must not turn an
+      // already-established fence mismatch into an unknown write outcome.
+      if (!this.lastWriteFailure) this.lastWriteFailure = { kind: 'operational', error: err }
       this.isPoisoned = true
       this.pendingMessages = []
       this.imageCapture.clear()

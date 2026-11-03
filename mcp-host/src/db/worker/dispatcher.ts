@@ -42,6 +42,10 @@ interface DispatcherStatements {
   selectModelStepTurnFence: Statement
   /** The exact claim that may reopen the continuation's origin turn. */
   selectContinuationStartFence: Statement
+  /** The task currently owns the durable session, independently of its claim. */
+  selectExpectedSessionTask: Statement
+  /** Delete only the approval belonging to the expected task and session. */
+  deletePendingApprovalForTask: Statement
   /** The stamps a `replace_messages` rewrite must carry over. */
   selectStampedMessages: Statement
   /** Re-applies one carried-over checkpoint stamp. */
@@ -96,6 +100,12 @@ function prepareDispatcherStatements(db: Database): DispatcherStatements {
           AND c.claim_generation = ?
           AND c.origin_turn_number = ?
           AND c.status = 'claimed'`
+    ),
+    selectExpectedSessionTask: db.prepare(
+      'SELECT 1 FROM sessions WHERE id = ? AND active_task_id = ?'
+    ),
+    deletePendingApprovalForTask: db.prepare(
+      'DELETE FROM pending_approvals WHERE request_id = ? AND session_id = ? AND task_id = ?'
     ),
     selectStampedMessages: db.prepare(
       `SELECT role, content, timestamp, model_step_checkpoint_id
@@ -189,6 +199,12 @@ function assertModelStepTurnFence(
       )
   if (row === undefined) {
     throw new Error('model-step continuation fence mismatch')
+  }
+}
+
+function assertExpectedSessionTask(deps: DispatcherDeps, sessionId: string, taskId: string): void {
+  if (deps.dispatcherStatements.selectExpectedSessionTask.get(sessionId, taskId) === undefined) {
+    throw new Error('model-step continuation task owner mismatch')
   }
 }
 
@@ -286,6 +302,9 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'update_session_state':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
+          if (op.expectedTaskId !== undefined) {
+            assertExpectedSessionTask(deps, op.sessionId, op.expectedTaskId)
+          }
           if (op.modelStepTurnFence) {
             assertModelStepTurnFence(
               deps,
@@ -885,7 +904,16 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'delete_pending_approval':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
-          s.deletePendingApproval.run(op.requestId)
+          if (op.expectedTask) {
+            assertExpectedSessionTask(deps, op.expectedTask.sessionId, op.expectedTask.taskId)
+            deps.dispatcherStatements.deletePendingApprovalForTask.run(
+              op.requestId,
+              op.expectedTask.sessionId,
+              op.expectedTask.taskId
+            )
+          } else {
+            s.deletePendingApproval.run(op.requestId)
+          }
         })
         tx.immediate()
         return { ok: true }

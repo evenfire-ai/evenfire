@@ -214,7 +214,12 @@ interface Harness {
 }
 
 function createHarness(
-  options: { hostId?: string; verdict?: ModelStepContinuationVerdict; now?: () => number } = {}
+  options: {
+    hostId?: string
+    verdict?: ModelStepContinuationVerdict
+    now?: () => number
+    liveTaskIds?: string[]
+  } = {}
 ): Harness {
   const handle = makeSqliteStore()
   openHandles.push(handle)
@@ -245,6 +250,7 @@ function createHarness(
   const service = new ModelStepContinuationService({
     checkpoints: support,
     conversationManager: new ConversationManager(handle.store),
+    hasLiveExecutor: taskId => (options.liveTaskIds ?? []).includes(taskId),
     enqueue,
   })
   return { handle, checkpoints, service, enqueue, captured }
@@ -436,7 +442,7 @@ describe('ModelStepContinuationService — status-first claim precedence (#1043)
   })
 
   it('answers 202 replayed with the live claim task id', async () => {
-    const { checkpoints, service } = createHarness()
+    const { checkpoints, service } = createHarness({ liveTaskIds: ['task-live'] })
     const { version } = await openResumable(checkpoints)
     const claim = await checkpoints.claim({
       sessionKey: SESSION_KEY,
@@ -934,6 +940,7 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
         attachmentTtlMs: ATTACHMENT_TTL_MS,
       },
       conversationManager: new ConversationManager(handle.store),
+      hasLiveExecutor: () => false,
       enqueue,
     })
     const { version } = await openResumable(checkpoints)
@@ -977,6 +984,7 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
         attachmentTtlMs: ATTACHMENT_TTL_MS,
       },
       conversationManager: manager,
+      hasLiveExecutor: () => false,
       enqueue: async (_message, taskId, continuation) => {
         await manager.resumeTurnForContinuation(conversation, taskId, 1, null, undefined, {
           fence: continuation.fence,

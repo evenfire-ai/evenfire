@@ -354,6 +354,7 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
       const service = new ModelStepContinuationService({
         checkpoints: checkpointSupport,
         conversationManager: manager,
+        hasLiveExecutor: taskId => stateMachine.hasLiveExecutor(taskId),
         enqueue: async (sourceMessage, id, modelStepContinuation) => {
           const next: Task = {
             ...origin,
@@ -1060,6 +1061,7 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
     const service = new ModelStepContinuationService({
       checkpoints: support(handle, checkpoints),
       conversationManager: stateMachine.getConversationManager(),
+      hasLiveExecutor: taskId => stateMachine.hasLiveExecutor(taskId),
       enqueue: async (sourceMessage, id, continuation) => {
         const admitted = { ...task(continuation, responseCallback), id, sourceMessage }
         lifecycle.register(admitted)

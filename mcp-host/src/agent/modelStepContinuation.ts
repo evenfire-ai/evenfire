@@ -44,7 +44,7 @@ export interface ModelStepContinuationRequest {
 }
 
 export interface ModelStepContinuationResult {
-  status: 200 | 202 | 404 | 409
+  status: 200 | 202 | 404 | 409 | 503
   body: ModelStepContinueResponse
 }
 
@@ -55,6 +55,8 @@ export type ModelStepContinuationHandler = (
 export interface ModelStepContinuationServiceDeps {
   checkpoints: ModelStepCheckpointSupport
   conversationManager: ConversationManager
+  /** Includes executors rehydrated from durable pending approvals on boot. */
+  hasLiveExecutor: (taskId: string) => boolean
   /** Creates an indexed task and uses the ordinary async admission and result-delivery path. */
   enqueue: (
     message: IncomingMessage,
@@ -112,6 +114,9 @@ export class ModelStepContinuationService {
           },
         }
       case 'replayed':
+        if (!this.deps.hasLiveExecutor(claim.taskId)) {
+          return { status: 503, body: { code: MODEL_STEP_CONTINUE_ERROR_CODES.claimSettling } }
+        }
         return {
           status: 202,
           body: {

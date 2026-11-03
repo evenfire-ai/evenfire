@@ -60,6 +60,7 @@ import { resolveCallerRootBinding } from '../workspace/callerRootBinding'
 import type { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
 import { CronScheduler } from './cronScheduler'
 import {
+  DenialNotSavedError,
   type ModelStepCheckpointExecutionSupport,
   TaskExecutor,
   resolveTaskSessionKey,
@@ -961,6 +962,16 @@ export class AgentStateMachine extends EventEmitter {
     return this.conversationManager
   }
 
+  /** Includes executors suspended for approval and restored during bootstrap. */
+  hasLiveExecutor(taskId: string): boolean {
+    const executor = this.activeExecutors.get(taskId)
+    return (
+      !!executor &&
+      !executor.signal.aborted &&
+      (executor.executorState === 'processing' || executor.executorState === 'waiting_approval')
+    )
+  }
+
   /**
    * Gap 3 resolution: Public accessor for the core SimpleEventEmitter.
    *
@@ -1276,7 +1287,7 @@ export class AgentStateMachine extends EventEmitter {
     // Promise.resolve so legacy synchronous test doubles (which return void)
     // still flow through the same path.
     Promise.resolve(executor.deny()).catch(err => {
-      logger.error({ err: err }, `executor.deny() raised after timeout:`)
+      logger.error({ err, requestId, taskId: entry.taskId }, 'executor.deny() raised after timeout')
     })
   }
 
@@ -1366,7 +1377,7 @@ export class AgentStateMachine extends EventEmitter {
     requestId: string,
     channelType?: string,
     channelId?: string
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{ success: boolean; error?: string; code?: 'denial_not_saved' }> {
     const entry = this.approvalMap.get(requestId)
     if (!entry) {
       return { success: false, error: `No pending approval for request ${requestId}` }
@@ -1418,17 +1429,25 @@ export class AgentStateMachine extends EventEmitter {
       taskId: entry.taskId,
     })
 
-    // T2.1: deny() is now async. We await so the HTTP 200 only returns once
-    // the durable pending_approval row is gone (IronClaw write-through). A
-    // future restart cannot resurrect a phantom approval. Promise.resolve()
-    // wraps legacy synchronous test doubles.
+    // Wait for the executor's terminal outcome before answering. A settled
+    // cancellation whose denial was not saved is distinct from an uncertain
+    // continuation settlement, which must remain an operational failure.
     try {
       await Promise.resolve(executor.deny())
     } catch (err) {
-      logger.error({ err: err }, `executor.deny() failed:`)
+      logger.error({ err, requestId, taskId: entry.taskId }, 'executor.deny() failed')
+      if (err instanceof DenialNotSavedError) {
+        return {
+          success: false,
+          code: 'denial_not_saved',
+          error: 'The tool call was cancelled, but the denial could not be saved.',
+        }
+      }
+      throw new Error('The tool call denial could not be completed.', { cause: err })
+    } finally {
+      this.activeExecutors.delete(entry.taskId)
+      this.releaseSessionForTask(executor.sourceTask)
     }
-    this.activeExecutors.delete(entry.taskId)
-    this.releaseSessionForTask(executor.sourceTask)
 
     return { success: true }
   }

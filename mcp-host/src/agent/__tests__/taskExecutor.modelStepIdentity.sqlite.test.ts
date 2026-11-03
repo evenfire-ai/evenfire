@@ -437,7 +437,7 @@ describe('real-producer checkpoint identity regressions', () => {
             claim_generation: replacementFence.generation,
           })
           expect(replacementFence.generation).toBeGreaterThan(f.fence.generation)
-          expect(failTurn).toHaveBeenCalledExactlyOnceWith(conversation)
+          expect(failTurn).toHaveBeenCalledExactlyOnceWith(conversation, undefined, f.task.id)
         } else {
           expect(header(f.handle).status).toBe('abandoned')
           expect(failTurn).toHaveBeenCalledExactlyOnceWith(conversation, {
@@ -620,6 +620,62 @@ describe('real-producer checkpoint identity regressions', () => {
     AUTO_RETRY_TEST_TIMEOUT_MS
   )
 
+  it(
+    'R2-H1: fresh approval completes when its first checkpoint open rejects',
+    async () => {
+      const neighbor = await claimedContinuation(provider('openai', () => ({ content: 'done' })))
+      try {
+        await neighbor.executor.run()
+        expect(neighbor.deps.onComplete).toHaveBeenCalledTimes(1)
+        expect(neighbor.deps.onFail).not.toHaveBeenCalled()
+        expect(header(neighbor.handle).status).toBe('completed')
+      } finally {
+        await neighbor.handle.shutdown()
+      }
+
+      // The approved call is the first dispatch, so the header is still lazy.
+      const f = await waitingOrigin(false, { content: 'approved effect accepted' })
+      try {
+        const checkpoints = f.originalDeps.modelStepCheckpoints!.store
+        expect(header(f.handle)).toBeUndefined()
+        expect(f.execute).not.toHaveBeenCalled()
+        expect(
+          f.handle.worker.db.prepare('SELECT COUNT(*) AS count FROM pending_approvals').get()
+        ).toEqual({
+          count: 1,
+        })
+        const open = vi.spyOn(checkpoints, 'open').mockRejectedValueOnce(new Error('open failed'))
+        await f.executor.resumeAfterApproval(false)
+        await f.handle.persistQueue.drain()
+        expect(open).toHaveBeenCalledTimes(1)
+        expect(f.execute).toHaveBeenCalledTimes(1)
+        expect(f.llm.calls()).toBe(2)
+        expect(f.llm.requests[1]!.filter(m => m.tool_call_id === 'approved-write')).toEqual([
+          expect.objectContaining({
+            content: expect.stringContaining('approved effect completed'),
+          }),
+        ])
+        expect(f.originalDeps.onComplete).toHaveBeenCalledExactlyOnceWith(f.original)
+        expect(f.originalDeps.onFail).not.toHaveBeenCalled()
+        expect(
+          f.handle.worker.db.prepare('SELECT COUNT(*) AS count FROM pending_approvals').get()
+        ).toEqual({
+          count: 0,
+        })
+        expect(
+          f.handle.worker.db
+            .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+            .get(SESSION_KEY)
+        ).toEqual({ state: 'idle', active_task_id: null })
+        expect(await checkpoints.loadLive(SESSION_KEY)).toBeNull()
+        expect(header(f.handle)).toBeUndefined()
+      } finally {
+        await f.handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
+
   it.each(['tool_dispatch', 'tool_result'] as const)(
     'M-1: fresh approval completes when append rejects at %s',
     async kind => {
@@ -690,7 +746,7 @@ describe('real-producer checkpoint identity regressions', () => {
         )
         expect(f.execute).toHaveBeenCalledTimes(kind === 'tool_dispatch' ? 0 : 1)
         expect(llm.calls()).toBe(1)
-        expect(header(f.handle).status).toBe('abandoned')
+        expect(header(f.handle).status).toBe(kind === 'tool_dispatch' ? 'resumable' : 'abandoned')
         expect(f.deps.onComplete).not.toHaveBeenCalled()
       } finally {
         await f.handle.shutdown()

@@ -76,6 +76,7 @@ export const MODEL_STEP_CONTINUE_ERROR_CODES = {
   notFound: 'model_step_checkpoint_not_found',
   versionMismatch: 'model_step_checkpoint_version_mismatch',
   blocked: 'model_step_checkpoint_blocked',
+  claimSettling: 'continuation_claim_settling',
 } as const
 export type ModelStepContinueErrorCode =
   (typeof MODEL_STEP_CONTINUE_ERROR_CODES)[keyof typeof MODEL_STEP_CONTINUE_ERROR_CODES]
@@ -113,12 +114,18 @@ export interface ModelStepContinueBlocked {
   blockedReason: ModelStepBlockedReason
 }
 
+/** 503: the durable claim is live but its executor is not running on this Host. */
+export interface ModelStepContinueClaimSettling {
+  code: typeof MODEL_STEP_CONTINUE_ERROR_CODES.claimSettling
+}
+
 export type ModelStepContinueResponse =
   | ModelStepContinueClaimed
   | ModelStepContinueCompleted
   | ModelStepContinueNotFound
   | ModelStepContinueVersionMismatch
   | ModelStepContinueBlocked
+  | ModelStepContinueClaimSettling
 
 /** Runtime route on the Host, behind the same `rpc-proxy` edge guard as `/v1/runtime/messages`. */
 export const MODEL_STEP_CONTINUE_RUNTIME_ROUTE =

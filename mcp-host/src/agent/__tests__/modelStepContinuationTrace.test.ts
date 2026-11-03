@@ -139,9 +139,11 @@ describe('model-step continuation governed trace', () => {
     const onComplete = vi.fn()
     let task: Task | undefined
     let execution: Promise<void> | undefined
+    let executorLive = false
     const service = new ModelStepContinuationService({
       checkpoints,
       conversationManager: manager,
+      hasLiveExecutor: taskId => task?.id === taskId && executorLive,
       enqueue: (source, taskId, continuation) => {
         task = queue.createModelStepContinuationTask(source, taskId, continuation)
         expect(queue.admit(task).admitted).toBe(true)
@@ -173,7 +175,10 @@ describe('model-step continuation governed trace', () => {
             enqueue: enqueueEvent,
           } as unknown as TaskExecutorDeps['governedRunReporter'],
         })
-        execution = executor.run()
+        executorLive = true
+        execution = executor.run().finally(() => {
+          executorLive = false
+        })
       },
     })
     const result = await service.continue({
