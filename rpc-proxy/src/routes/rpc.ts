@@ -23,6 +23,7 @@ import {
   respondHostAccessDenied,
   withoutReservedHostAccessCode,
 } from '../services/hostAccessDenial.js'
+import { buildHostRuntimeMessageRequest } from '../services/hostMessageBody.js'
 import {
   type HostRuntimeMessageRequest,
   forwardCancelToHost,
@@ -490,28 +491,15 @@ export function createRpcRouter(): Router {
             .json({ error: 'invalid_attachments', message: 'Attachments must be a list.' })
           return
         }
-        const forwardedBody: HostRuntimeMessageRequest = {
-          content: body.content,
-          channelType: 'rpc',
-          channelId: hostRef,
+        const forwardedBody = buildHostRuntimeMessageRequest({
+          body,
           hostRef,
           sender: auth.sub,
-          messageId: deliveryMessageId,
+          deliveryMessageId,
+          desktopSessionId,
           metadata: rpcInvocationContext(auth),
-          threadId: desktopSessionId,
-          attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
-          ...(body.fileReferences === undefined ? {} : { fileReferences: body.fileReferences }),
-          ...(body.modelSelectionRevision === undefined
-            ? {}
-            : { modelSelectionRevision: body.modelSelectionRevision }),
           traceContext,
-          // R2 "Option A": thread the optional piggybacked per-session model.
-          // This body is an explicit field allow-list, so an unlisted field is
-          // dropped. Trimmed/empty values are omitted.
-          ...(typeof body.model === 'string' && body.model.trim()
-            ? { model: body.model.trim() }
-            : {}),
-        }
+        })
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {

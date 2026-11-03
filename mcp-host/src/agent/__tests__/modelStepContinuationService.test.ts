@@ -82,6 +82,20 @@ function readVector(name: string): Vector {
   return JSON.parse(fs.readFileSync(path.join(VECTOR_DIR, name), 'utf8')) as Vector
 }
 
+/**
+ * R2-L7: the rpc-proxy's committed wire body for POST /messages. The proxy
+ * asserts its builder equals this vector; this suite feeds it through the real
+ * Host ingress, so the two sides cannot drift apart silently.
+ */
+interface HostMessageVector {
+  input: { traceContext: IncomingMessage['traceContext'] }
+  body: IncomingMessage
+}
+
+const HOST_MESSAGE_VECTOR = JSON.parse(
+  fs.readFileSync(path.join(VECTOR_DIR, 'host-message-request.json'), 'utf8')
+) as HostMessageVector
+
 /** Key-set equality against a vector: the shape is the contract, the ids are not. */
 function expectKeysAsInVector(actual: unknown, vector: unknown, label: string): void {
   expect(Object.keys(actual as object).sort(), label).toEqual(Object.keys(vector as object).sort())
@@ -242,25 +256,12 @@ describe('ModelStepContinuationService — RPC ingress (#1043)', () => {
       verdict: { kind: 'started' },
     })
     const runtimeCaller = { caller: 'rpc-proxy', hostRef: AGENT, userId: USER_ID }
-    const traceContext = {
-      version: 1,
-      runId: 'rpc-ingress-run',
-      sessionId: CHAT_ID,
-      origin: 'direct_chat',
-      correlationRefs: [],
-    }
-    // The rpc-proxy wire key set has no timestamp; the Host owns receive time.
-    const rpcBody = {
-      content: 'summarize the repository',
-      channelType: 'rpc',
-      channelId: AGENT,
-      hostRef: AGENT,
-      sender: USER_ID,
-      messageId: 'message-rpc-without-timestamp',
-      metadata: {},
-      threadId: CHAT_ID,
-      traceContext,
-    }
+    // R2-L7: the wire body is the rpc-proxy's committed builder output, not a
+    // hand-typed copy. A field the proxy adds or drops turns this suite red.
+    const vector = HOST_MESSAGE_VECTOR
+    const traceContext = vector.input.traceContext
+    const rpcBody = structuredClone(vector.body)
+    // The rpc-proxy wire body has no timestamp; the Host owns receive time.
     expect(rpcBody).not.toHaveProperty('timestamp')
     const messageHandler = vi.fn().mockResolvedValue({ success: true, status: 'completed' })
     const ingressResponse = { writeHead: vi.fn(), end: vi.fn() }
@@ -274,6 +275,8 @@ describe('ModelStepContinuationService — RPC ingress (#1043)', () => {
     })
     expect(messageHandler).toHaveBeenCalledTimes(1)
     const received = messageHandler.mock.calls[0][0] as IncomingMessage
+    // Parity: the Host accepts every field of the proxy's wire body unchanged.
+    expect(received).toMatchObject(vector.body)
     // Keep both ingress and HTTP continuation failures observable in a RED run.
     expect.soft(typeof received.timestamp).toBe('string')
     expect.soft(Number.isFinite(Date.parse(received.timestamp))).toBe(true)

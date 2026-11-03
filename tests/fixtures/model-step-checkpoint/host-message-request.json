@@ -1,0 +1,42 @@
+{
+  "comment": "The rpc-proxy → mcp-host message envelope (R2-L7, #1047). Produced by rpc-proxy/src/services/hostMessageBody.ts and consumed verbatim as the Host ingress body by mcp-host's continuation service suite. Editing this vector means the Host accepted a changed wire body, not just the proxy.",
+  "input": {
+    "body": {
+      "content": "summarize the repository",
+      "threadId": "chat-1",
+      "model": "gpt-6.1-sol",
+      "modelSelectionRevision": 7
+    },
+    "hostRef": "agent-x",
+    "sender": "user-1043",
+    "deliveryMessageId": "message-rpc-vector-1",
+    "desktopSessionId": "chat-1",
+    "metadata": { "accessScope": "team", "teamId": "team-1" },
+    "traceContext": {
+      "version": 1,
+      "runId": "rpc-vector-run-1",
+      "sessionId": "chat-1",
+      "origin": "direct_chat",
+      "correlationRefs": []
+    }
+  },
+  "body": {
+    "content": "summarize the repository",
+    "channelType": "rpc",
+    "channelId": "agent-x",
+    "hostRef": "agent-x",
+    "sender": "user-1043",
+    "messageId": "message-rpc-vector-1",
+    "metadata": { "accessScope": "team", "teamId": "team-1" },
+    "threadId": "chat-1",
+    "model": "gpt-6.1-sol",
+    "modelSelectionRevision": 7,
+    "traceContext": {
+      "version": 1,
+      "runId": "rpc-vector-run-1",
+      "sessionId": "chat-1",
+      "origin": "direct_chat",
+      "correlationRefs": []
+    }
+  }
+}
