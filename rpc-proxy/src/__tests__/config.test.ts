@@ -5,6 +5,7 @@ import {
   MAX_REQUEST_HOLD_MS,
   MAX_TIMER_DELAY_MS,
   parseArtifactDownloadMaxBytes,
+  parsePositiveInt,
   parsePositiveIntMs,
   parseSandboxUiAllowedPorts,
   parseWakeMaxHoldMs,
@@ -51,6 +52,29 @@ describe('parseArtifactDownloadMaxBytes', () => {
 
   it('rejects non-numeric values', () => {
     expect(() => parseArtifactDownloadMaxBytes('big')).toThrow(/invalid value/)
+  })
+})
+
+describe('parsePositiveInt (stream admission caps)', () => {
+  it('accepts a positive integer', () => {
+    expect(parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', '7')).toBe(7)
+  })
+
+  it('trims surrounding whitespace', () => {
+    expect(parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', ' 7 ')).toBe(7)
+  })
+
+  it('rejects an invalid value and names the variable', () => {
+    expect(() => parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', 'abc')).toThrow(
+      'RPC_PROXY_STREAM_MAX_PER_USER contains invalid value "abc" (must be a positive integer)'
+    )
+    // The message echoes the trimmed input, so a whitespace-only value shows as empty.
+    expect(() => parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', ' ')).toThrow(
+      'RPC_PROXY_STREAM_MAX_PER_USER contains invalid value "" (must be a positive integer)'
+    )
+    expect(() => parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', 'Infinity')).toThrow(
+      'RPC_PROXY_STREAM_MAX_PER_USER contains invalid value "Infinity" (must be a positive integer)'
+    )
   })
 })
 
@@ -133,7 +157,9 @@ describe('config values loaded from the environment', () => {
     ['RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER', 'activityStreamMaxPerUser', 3],
     ['RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST', 'activityStreamMaxPerUserHost', 1],
   ] as const
-  const INVALID_STREAM_CAPS = ['abc', '0', '-1', '1.5']
+  // `' '` and `Infinity` were accepted before this change (cap 0 and no cap);
+  // both are startup errors now.
+  const INVALID_STREAM_CAPS = ['abc', '0', '-1', '1.5', ' ', 'Infinity']
   const ENV_KEYS = [
     'RPC_PROXY_UPSTREAM_TIMEOUT_MS',
     'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
@@ -216,8 +242,9 @@ describe('config values loaded from the environment', () => {
     'fails loud on %s=%s',
     async (key, value) => {
       process.env[key] = value
+      // The error echoes the trimmed input, so `' '` reports an empty value.
       await expect(loadConfig()).rejects.toThrow(
-        `${key} contains invalid value "${value}" (must be a positive integer)`
+        `${key} contains invalid value "${value.trim()}" (must be a positive integer)`
       )
     }
   )
