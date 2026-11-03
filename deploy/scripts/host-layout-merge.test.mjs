@@ -464,6 +464,22 @@ test('an orphan check Pod takes the HCC pull Secret: empty means none, a name is
   }
 })
 
+test('an unresolvable HCC pull Secret stops the run before the orphan check Pod', () => {
+  const f = fleet()
+  f.hcc = hcc([
+    { name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', valueFrom: { secretKeyRef: { name: 's', key: 'k' } } },
+  ])
+  f.pvcs.push(pvc('delta'))
+  f.checks['delta-workspace'] = { output: 'WILL_MERGE\n' }
+  const r = verify(f)
+  // Witness: the run reached hcc_host_image and stopped there.
+  assert.equal(r.status, 2, r.stdout + r.stderr)
+  assert.match(r.stderr, /cannot resolve CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET \(<valueFrom>\)/)
+  const claims = creates(r.calls).map(m => m.spec.volumes[0].persistentVolumeClaim.claimName)
+  assert.ok(!claims.includes('delta-workspace'), claims.join(','))
+  assert.doesNotMatch(r.stdout, /^HOST_LAYOUT_VERIFY=/m)
+})
+
 test('r5 C1: a Host whose workspace PVC was not inspected fails both verdicts', () => {
   // Witness: the unmodified fleet passes with all three claims read.
   assert.equal(verify(fleet()).status, 0)

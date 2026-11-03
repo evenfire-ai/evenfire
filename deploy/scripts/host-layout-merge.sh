@@ -500,7 +500,10 @@ while IFS=$'\t' read -r type pvc host kind state detail _subpath pods nodes merg
     fi
     if [ -z "$result" ]; then
       if [ "$image" = - ]; then
-        IFS=$'\t' read -r image policy secrets <<<"$(hcc_host_image)"
+        # An assignment keeps hcc_host_image's exit status under set -e; a
+        # here-string discards it and the check Pod would get empty fields.
+        host_image="$(hcc_host_image)"
+        IFS=$'\t' read -r image policy secrets <<<"$host_image"
       fi
       result="$(run_check "$pvc" "$node" "$image" "$policy" "$secrets" </dev/null)"
       # verify names a tree the merge will still change SPLIT.
