@@ -66,6 +66,22 @@ describe('workspace tab overflow browser focus', () => {
     await page.addStyleTag({ path: path.join(UI_ROOT, 'styles.css') })
     const pageErrors: Error[] = []
     page.on('pageerror', error => pageErrors.push(error))
+    await page.addScriptTag({
+      content: `
+        const NativeResizeObserver = window.ResizeObserver
+        window.ResizeObserver = class extends NativeResizeObserver {
+          constructor(callback) {
+            super((entries, observer) => {
+              callback(entries, observer)
+              if (window.focusOutsideAfterNextTabMeasure) {
+                window.focusOutsideAfterNextTabMeasure = false
+                document.getElementById('outside')?.focus()
+              }
+            })
+          }
+        }
+      `,
+    })
     await page.addScriptTag({ content: bundle })
     expect(pageErrors).toEqual([])
     await page.waitForSelector('.chat-view-tabs__scroll-button')
@@ -146,6 +162,17 @@ describe('workspace tab overflow browser focus', () => {
 
   it('does not steal focus from a control outside the toolbar during element resize', async () => {
     await page.locator('#outside').focus()
+    await resize(900)
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe('outside')
+  })
+
+  it('preserves external focus between observer measurement and React focus handoff', async () => {
+    await keyboardFocus('right')
+    await page.evaluate(() => {
+      ;(
+        window as Window & { focusOutsideAfterNextTabMeasure?: boolean }
+      ).focusOutsideAfterNextTabMeasure = true
+    })
     await resize(900)
     expect(await page.evaluate(() => document.activeElement?.id)).toBe('outside')
   })
