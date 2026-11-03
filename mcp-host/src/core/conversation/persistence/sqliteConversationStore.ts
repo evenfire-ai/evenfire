@@ -24,7 +24,10 @@ import type {
   ReapedSession,
   SessionRow,
 } from '../../../db/worker/protocol'
-import { isModelStepFenceMismatch } from '../../../db/worker/protocol'
+import {
+  ModelStepBoundaryNotCommittedError,
+  isModelStepFenceMismatch,
+} from '../../../db/worker/protocol'
 import type { ModelStepTurnFence } from '../../../db/worker/protocol'
 import { logger } from '../../../logger'
 import { parseSessionKey } from '../../../session/types'
@@ -1047,7 +1050,7 @@ export class SqliteConversationStore implements ConversationStore {
       } else {
         this.releaseReopenedTurnMarker(state, marker)
       }
-      throw settled.error
+      throw uncertain ? new ModelStepBoundaryNotCommittedError(settled.error) : settled.error
     }
     this.releaseReopenedTurnMarker(state, marker)
   }
@@ -1105,7 +1108,7 @@ export class SqliteConversationStore implements ConversationStore {
       } else {
         this.releaseReopenedTurnMarker(state, marker)
       }
-      throw settled.error
+      throw uncertain ? new ModelStepBoundaryNotCommittedError(settled.error) : settled.error
     }
     this.releaseReopenedTurnMarker(state, marker)
   }

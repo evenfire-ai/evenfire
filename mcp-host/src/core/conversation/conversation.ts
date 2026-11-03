@@ -1,4 +1,4 @@
-import { isModelStepFenceMismatch } from '../../db/worker/protocol'
+import { isModelStepBoundaryNotCommitted, isModelStepFenceMismatch } from '../../db/worker/protocol'
 import type { ModelSelectionWriteOutcome, ModelStepTurnFence } from '../../db/worker/protocol'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
@@ -649,7 +649,9 @@ export class ConversationManager {
     try {
       await Promise.resolve(this.store.persistTurnFail(conversation, fence))
     } catch (err) {
-      const rollbackFence = fence !== undefined && isModelStepFenceMismatch(err)
+      const rollbackFence =
+        fence !== undefined &&
+        (isModelStepFenceMismatch(err) || isModelStepBoundaryNotCommitted(err))
       if (rollbackFence && currentTurn?.completed_at === writtenCompletedAt) {
         currentTurn.completed_at = previousCompletedAt
       }
@@ -723,7 +725,9 @@ export class ConversationManager {
         }
       },
       err => {
-        const rollbackFence = fence !== undefined && isModelStepFenceMismatch(err)
+        const rollbackFence =
+          fence !== undefined &&
+          (isModelStepFenceMismatch(err) || isModelStepBoundaryNotCommitted(err))
         if (rollbackFence && currentTurn) {
           this.restoreTurnResponse(
             currentTurn,

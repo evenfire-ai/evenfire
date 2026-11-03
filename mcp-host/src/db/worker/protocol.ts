@@ -87,6 +87,26 @@ export function isModelStepFenceMismatch(err: unknown): boolean {
   return err instanceof Error && MODEL_STEP_FENCE_MISMATCH_MESSAGES.has(err.message)
 }
 
+/**
+ * WP-H2-001 — a fenced boundary write timed out, the worker later proved the
+ * transaction did NOT commit, and the store restored the reopened-turn marker.
+ * The message is the worker's real error so callers keep the true cause (and a
+ * late fence mismatch still matches `isModelStepFenceMismatch`); the class is
+ * the extra signal that RAM must be restored too. It must not be conflated
+ * with a fence mismatch: an operational late failure is not a lost fence.
+ */
+export class ModelStepBoundaryNotCommittedError extends Error {
+  constructor(cause: Error) {
+    super(cause.message, { cause })
+    this.name = 'ModelStepBoundaryNotCommittedError'
+  }
+}
+
+/** Matches the typed late non-commit signal thrown by the SQLite store. */
+export function isModelStepBoundaryNotCommitted(err: unknown): boolean {
+  return err instanceof ModelStepBoundaryNotCommittedError
+}
+
 // ─── Row shapes (DB-side representation) ───────────────────────────────
 
 export interface SessionRow {
