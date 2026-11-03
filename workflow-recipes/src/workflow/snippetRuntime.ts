@@ -8,6 +8,7 @@ const SNIPPET_WORKER_TIMEOUT_ENV_PASSTHROUGH = new Set([
   'CLERUM_MCP_TOOL_MAX_TOTAL_TIMEOUT_MS',
 ])
 const NODE_PERMISSION_MODEL_CHECK_SCRIPT = 'process.exit(process.permission ? 0 : 3)'
+const NODE_PERMISSION_MODEL_CHECK_TIMEOUT_MS = 10_000
 
 export function resolveSnippetOutputDir(): string {
   return process.env.CLERUM_WORKFLOW_OUTPUT_DIR || '/output'
@@ -98,8 +99,8 @@ function filterSnippetWorkerEnv(env: NodeJS.ProcessEnv): Record<string, string> 
 // - Modules are read at their realpath. node_modules/@clerum/* are symlinks to
 //   ../packages/*, outside these grants: a runtime import of an @clerum package from
 //   snippetWorker needs its own --allow-fs-read for that package directory.
-// - Node 24 does not gate network access under --permission. Node 26 does and needs
-//   --allow-net, which Node 24 rejects: a Node major bump of this image must add it.
+// - Node 24 does not gate network access under --permission. Node 25 and later do and
+//   need --allow-net, which Node 24 rejects: a Node major bump of this image must add it.
 export function buildPermissionArgs(outputDir: string): string[] {
   const distRoot = path.resolve(__dirname, '..')
   const nodeModules = path.resolve(__dirname, '..', '..', 'node_modules')
@@ -118,6 +119,9 @@ export function assertNodePermissionModel(outputDir: string): void {
     {
       env: { ...process.env, NODE_OPTIONS: '' },
       stdio: ['ignore', 'ignore', 'pipe'],
+      // A hung check must fail with the message below (status, signal, stderr) instead
+      // of leaving the runner alive but never listening.
+      timeout: NODE_PERMISSION_MODEL_CHECK_TIMEOUT_MS,
     }
   )
   if (result.status === 0) return

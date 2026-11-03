@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { rejectedNodeFlagSpawnSyncResult } from './rejectedNodeFlagSpawnSync'
 
 // Separate from snippetRunnerServer.test.ts, which imports the module statically:
 // these cases reset modules and mock node:child_process before importing it.
@@ -29,15 +30,10 @@ describe('snippet runner startup Node permission check', () => {
   })
 
   it('refuses to start when the Node runtime rejects the permission flags', async () => {
-    const stderr = Buffer.from('node: bad option: --permission\n')
-    const spawnSync = vi.fn(() => ({
-      pid: 0,
-      output: [null, null, stderr],
-      stdout: null,
-      stderr,
-      status: 9,
-      signal: null,
-    }))
+    // Shaped by a real `node --bogus` rejection, so the status, signal and stderr cannot
+    // drift from what spawnSync returns.
+    const rejected = rejectedNodeFlagSpawnSyncResult()
+    const spawnSync = vi.fn(() => rejected)
     vi.doMock('node:child_process', async () => {
       const actual =
         await vi.importActual<typeof import('node:child_process')>('node:child_process')
@@ -53,12 +49,18 @@ describe('snippet runner startup Node permission check', () => {
     }
 
     expect(thrown).toBeInstanceOf(Error)
-    expect((thrown as Error).message).toMatch(/Node permission model check failed \(status 9/)
-    expect((thrown as Error).message).toMatch(/bad option/)
+    expect((thrown as Error).message).toContain(
+      `Node permission model check failed (status ${rejected.status}`
+    )
+    expect((thrown as Error).message).toContain('bad option: --permission')
     // Liveness witnesses: the check ran once, with the grants for the output directory
-    // that resolveSnippetOutputDir() returns.
+    // that resolveSnippetOutputDir() returns, under a timeout.
     expect(spawnSync).toHaveBeenCalledOnce()
-    const [bin, args] = spawnSync.mock.calls[0] as unknown as [string, string[]]
+    const [bin, args, options] = spawnSync.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { timeout?: number },
+    ]
     expect(bin).toBe(process.execPath)
     const root = path.resolve(__dirname, '..', '..', '..')
     expect(args).toEqual([
@@ -69,6 +71,7 @@ describe('snippet runner startup Node permission check', () => {
       '-e',
       'process.exit(process.permission ? 0 : 3)',
     ])
+    expect(options.timeout).toBe(10_000)
   })
 
   it('starts on the pinned Node runtime with the real permission check', async () => {

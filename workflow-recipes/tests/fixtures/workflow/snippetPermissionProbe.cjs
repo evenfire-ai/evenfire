@@ -45,6 +45,11 @@ function readFromLoopback(port) {
 
 async function main() {
   const config = JSON.parse(process.argv[2])
+  if (config.hang) {
+    // Test-only: never report, so the caller's timeout path runs.
+    setInterval(() => {}, 1000)
+    return
+  }
   const { outputDir, distRoot, nodeModules, outsideFile, plantedLink, escapeName } = config
   const artifactPath = path.join(outputDir, 'probe.txt')
 

@@ -9,6 +9,7 @@ import type {
   SnippetExecuteRequest,
   SnippetExecuteResponse,
 } from '../../../src/workflow/snippetTypes'
+import { rejectedNodeFlagSpawnSyncResult } from './rejectedNodeFlagSpawnSync'
 
 const WORKFLOW_RECIPES_ROOT = path.resolve(__dirname, '..', '..', '..')
 const DIST_ROOT = path.join(WORKFLOW_RECIPES_ROOT, 'dist')
@@ -22,6 +23,8 @@ const PERMISSION_PROBE = path.resolve(
   'snippetPermissionProbe.cjs'
 )
 const CHECK_SCRIPT = 'process.exit(process.permission ? 0 : 3)'
+// Below vitest's 15 s test timeout, so a stuck probe fails with its own message first.
+const PERMISSION_PROBE_TIMEOUT_MS = 10_000
 // The dist/workflow modules that the compiled runtime and its worker fork load.
 const COMPILED_SNIPPET_MODULES = ['snippetRuntime', 'snippetWorker', 'snippetTypes']
 const nodeRequire = createRequire(__filename)
@@ -36,6 +39,8 @@ interface PermissionProbeConfig {
   plantedLink: string
   escapeName: string
   networkPort: number
+  // Test-only: never send a report, so the caller's timeout path runs.
+  hang?: boolean
 }
 
 interface PermissionProbeReport {
@@ -99,7 +104,9 @@ async function startLoopbackServer(): Promise<net.Server> {
 
 function runPermissionProbe(
   execArgv: string[],
-  config: PermissionProbeConfig
+  config: PermissionProbeConfig,
+  server: net.Server,
+  timeoutMs = PERMISSION_PROBE_TIMEOUT_MS
 ): Promise<PermissionProbeReport> {
   return new Promise((resolve, reject) => {
     // executeSnippetInWorker (src/workflow/snippetRuntime.ts) forks the worker with an
@@ -111,21 +118,48 @@ function runPermissionProbe(
     })
     let stderr = ''
     let report: PermissionProbeReport | undefined
+    let settled = false
+    const fail = (error: Error, killChild: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (killChild && !child.killed) child.kill('SIGKILL')
+      if (server.listening) server.close()
+      reject(error)
+    }
+    // A probe that never reports must not hold the test and the loopback server until
+    // vitest's own timeout: kill it, close the server and fail with this message.
+    const timer = setTimeout(() => {
+      fail(
+        new Error(
+          `permission probe did not report within ${timeoutMs} ms: killed the child with SIGKILL and closed the loopback server; stderr: ${stderr}`
+        ),
+        true
+      )
+    }, timeoutMs)
     child.stderr?.on('data', chunk => {
       stderr += String(chunk)
     })
     child.once('message', message => {
       report = message as PermissionProbeReport
     })
-    child.once('error', reject)
+    child.once('error', error => {
+      fail(error, true)
+    })
     child.once('exit', (code, signal) => {
-      if (report) resolve(report)
-      else
-        reject(
+      if (settled) return
+      if (report) {
+        settled = true
+        clearTimeout(timer)
+        resolve(report)
+      } else {
+        fail(
           new Error(
             `permission probe exited (code ${code}, signal ${signal}) without a report: ${stderr}`
-          )
+          ),
+          false
         )
+      }
     })
   })
 }
@@ -321,7 +355,7 @@ describe('snippet runtime Node permission model', () => {
     })
   })
 
-  it('lets a child forked with the compiled runtime grants write an artifact and open a TCP connection, and denies reads of the output directory, writes outside it, links and child processes', async () => {
+  it('on Node 24, lets a child forked with the compiled runtime grants write an artifact and open a TCP connection, and denies reads of the output directory, writes outside it, links and child processes', async () => {
     const runtime = await loadCompiledSnippetRuntime()
     const base = await makeOutputDir()
     const outputDir = path.join(base, 'output')
@@ -338,15 +372,19 @@ describe('snippet runtime Node permission model', () => {
     let report: PermissionProbeReport
     try {
       const { port } = server.address() as net.AddressInfo
-      report = await runPermissionProbe(runtime.buildPermissionArgs(outputDir), {
-        outputDir,
-        distRoot: DIST_ROOT,
-        nodeModules: NODE_MODULES,
-        outsideFile,
-        plantedLink,
-        escapeName,
-        networkPort: port,
-      })
+      report = await runPermissionProbe(
+        runtime.buildPermissionArgs(outputDir),
+        {
+          outputDir,
+          distRoot: DIST_ROOT,
+          nodeModules: NODE_MODULES,
+          outsideFile,
+          plantedLink,
+          escapeName,
+          networkPort: port,
+        },
+        server
+      )
     } finally {
       await new Promise(resolve => server.close(resolve))
       // Only a broken grant set creates these; remove them so no file stays in dist/
@@ -357,8 +395,8 @@ describe('snippet runtime Node permission model', () => {
     // One assertion, so a failure diff shows every field. permission, artifact,
     // readGranted and network are the liveness witnesses (the model is on and the
     // granted work succeeds under it); every other field is a negative assertion.
-    // On a Node major that gates network access under --permission, network turns red
-    // until the grants add --allow-net.
+    // Node 25 and later gate network access under --permission, so they turn network red
+    // until the grants add --allow-net; the repository image runs Node 24.
     expect(report).toEqual({
       permission: 'object',
       artifact: { sizeBytes: 2 },
@@ -376,6 +414,38 @@ describe('snippet runtime Node permission model', () => {
     })
   })
 
+  it('kills a permission probe that never reports, closes the loopback server and fails with the timeout', async () => {
+    const base = await makeOutputDir()
+    const outputDir = path.join(base, 'output')
+    const server = await startLoopbackServer()
+    const { port } = server.address() as net.AddressInfo
+
+    const thrown = await runPermissionProbe(
+      [],
+      {
+        outputDir,
+        distRoot: DIST_ROOT,
+        nodeModules: NODE_MODULES,
+        outsideFile: path.join(base, 'outside.txt'),
+        plantedLink: path.join(base, 'planted-link'),
+        escapeName: 'unused',
+        networkPort: port,
+        hang: true,
+      },
+      server,
+      250
+    ).then(
+      () => undefined,
+      (error: unknown) => error
+    )
+
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toMatch(
+      /permission probe did not report within 250 ms: killed the child with SIGKILL and closed the loopback server/
+    )
+    expect(server.listening).toBe(false)
+  })
+
   it('runs the real permission model check on the pinned Node runtime', async () => {
     const spawnSync = await spyOnRealSpawnSync()
     const { assertNodePermissionModel, buildPermissionArgs } =
@@ -386,9 +456,15 @@ describe('snippet runtime Node permission model', () => {
 
     // Liveness witnesses: the real check ran once, with the worker grants, and returned 0.
     expect(spawnSync).toHaveBeenCalledOnce()
-    const [bin, args] = spawnSync.mock.calls[0] as unknown as [string, string[]]
+    const [bin, args, options] = spawnSync.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { timeout?: number },
+    ]
     expect(bin).toBe(process.execPath)
     expect(args).toEqual([...buildPermissionArgs(outputDir), '-e', CHECK_SCRIPT])
+    // A hung check is killed and reported through the status/signal error message.
+    expect(options.timeout).toBe(10_000)
     expect((spawnSync.mock.results[0].value as { status: number | null }).status).toBe(0)
   })
 
@@ -411,21 +487,24 @@ describe('snippet runtime Node permission model', () => {
   })
 
   it('throws with the status, signal and first stderr line when the runtime rejects the flags', async () => {
+    // The status, signal and stderr come from a real `node --bogus` rejection; a second
+    // line proves only the first one reaches the error message.
+    const rejected = rejectedNodeFlagSpawnSyncResult()
+    const stderr = Buffer.concat([rejected.stderr, Buffer.from('more\n')])
     const spawnSync = await mockSpawnSync({
-      pid: 0,
-      output: [null, null, Buffer.from('node: bad option: --permission\nmore\n')],
-      stdout: null,
-      stderr: Buffer.from('node: bad option: --permission\nmore\n'),
-      status: 9,
-      signal: null,
+      ...rejected,
+      output: [null, rejected.stdout, stderr],
+      stderr,
     })
     const { assertNodePermissionModel } = await import('../../../src/workflow/snippetRuntime')
 
     const thrown = captureThrown(() => assertNodePermissionModel('/out'))
 
+    const firstStderrLine = rejected.stderr.toString('utf8').split('\n', 1)[0]
+    expect(firstStderrLine).toContain('bad option: --permission')
     expect(thrown).toBeInstanceOf(Error)
     expect((thrown as Error).message).toBe(
-      'snippet runner refuses to start: Node permission model check failed (status 9, signal null): node: bad option: --permission'
+      `snippet runner refuses to start: Node permission model check failed (status ${rejected.status}, signal ${rejected.signal}): ${firstStderrLine}`
     )
     expect(spawnSync).toHaveBeenCalledOnce()
   })
