@@ -81,6 +81,29 @@ interface PendingEntry {
   op: WorkerOp
 }
 
+/**
+ * A sync write that timed out while the worker still owns its op. The durable
+ * outcome stays unknown until `lateSettlement` settles with the worker's
+ * answer for that exact op: resolved means the op committed, rejected means it
+ * failed, the worker exited, or the progress bound terminated it.
+ */
+export interface PersistQueueSyncTimeout extends Error {
+  lateSettlement: Promise<unknown>
+}
+
+/** Returns the late settlement carried by a `PersistQueue` sync timeout. */
+export function syncTimeoutLateSettlement(err: unknown): Promise<unknown> | undefined {
+  if (!(err instanceof Error)) return undefined
+  const lateSettlement = (err as PersistQueueSyncTimeout).lateSettlement
+  return lateSettlement instanceof Promise ? lateSettlement : undefined
+}
+
+interface LateSettlementEntry {
+  resolve: (value: unknown) => void
+  reject: (reason: Error) => void
+  op: WorkerOp
+}
+
 export class PersistQueue {
   private readonly pending = new Map<string, PendingEntry>()
   private readonly writeChain = new Map<string, Promise<void>>()
@@ -97,6 +120,8 @@ export class PersistQueue {
    * stays here after its caller's timeout: the worker is still busy with it.
    */
   private readonly inFlight = new Set<string>()
+  /** Timed-out sync writes whose worker answer is still owed. */
+  private readonly lateSettlements = new Map<string, LateSettlementEntry>()
   private inFlightWaiters: Array<() => void> = []
   /** The `awaitOpen()` ping was answered; the progress bound applies. */
   private opened = false
@@ -125,7 +150,9 @@ export class PersistQueue {
         )
       }
       this.pending.clear()
-      this.settleInFlight()
+      this.settleInFlight(
+        op => new Error(`db worker exited (code=${code}) while op=${op.kind} was pending`)
+      )
       if (this.shutdownAcked) return
       if (this.opts.onExit) this.opts.onExit(code)
       this.recordFailure(new Error(`db worker exited (code=${code})`))
@@ -337,7 +364,11 @@ export class PersistQueue {
   }
 
   /** Forget every in-flight id (worker gone or stalled) and wake waiters. */
-  private settleInFlight(): void {
+  private settleInFlight(reason: (op: WorkerOp) => Error): void {
+    for (const [id, entry] of this.lateSettlements) {
+      this.lateSettlements.delete(id)
+      entry.reject(reason(entry.op))
+    }
     this.inFlight.clear()
     clearTimeout(this.stallTimer)
     this.stallTimer = undefined
@@ -396,7 +427,7 @@ export class PersistQueue {
       entry.reject(failure)
     }
     this.pending.clear()
-    this.settleInFlight()
+    this.settleInFlight(() => failure)
     // The failure is recorded first, so the exit that follows is not reported
     // as a second one. Not awaited: a wedged thread may take a while to stop.
     const terminated = this.worker.terminate()
@@ -454,7 +485,11 @@ export class PersistQueue {
                   )
                 }
               } else if (this.pending.delete(id)) {
-                reject(new Error(`db worker timeout (${timeoutMs}ms) for op=${op.kind}`))
+                const timeout = new Error(
+                  `db worker timeout (${timeoutMs}ms) for op=${op.kind}`
+                ) as PersistQueueSyncTimeout
+                timeout.lateSettlement = this.createLateSettlement(id, op)
+                reject(timeout)
               }
             }, timeoutMs)
       const entry: PendingEntry = {
@@ -493,7 +528,19 @@ export class PersistQueue {
       this.notifyInFlightSettled()
     }
     const entry = this.pending.get(reply.id)
-    if (!entry) return
+    if (!entry) {
+      const late = this.lateSettlements.get(reply.id)
+      if (!late) return
+      this.lateSettlements.delete(reply.id)
+      if (reply.ok) {
+        late.resolve(reply.result)
+      } else {
+        const err = new Error(reply.error?.message ?? 'unknown worker error')
+        ;(err as Error & { code?: string }).code = reply.error?.code
+        late.reject(err)
+      }
+      return
+    }
     clearTimeout(entry.timeoutHandle)
     this.pending.delete(reply.id)
     if (reply.ok) {
@@ -506,5 +553,22 @@ export class PersistQueue {
       ;(err as Error & { code?: string }).code = reply.error?.code
       entry.reject(err)
     }
+  }
+
+  private createLateSettlement(id: string, op: WorkerOp): Promise<unknown> {
+    let resolveLate!: (value: unknown) => void
+    let rejectLate!: (reason: Error) => void
+    const settlement = new Promise<unknown>((resolve, reject) => {
+      resolveLate = resolve
+      rejectLate = reject
+    })
+    // The queue always tracks the settlement; a caller that does not await it
+    // must not turn a late worker failure into a process-level unhandled
+    // rejection. Awaiting callers still observe the rejection.
+    settlement.catch(() => {
+      /* tracked above */
+    })
+    this.lateSettlements.set(id, { resolve: resolveLate, reject: rejectLate, op })
+    return settlement
   }
 }

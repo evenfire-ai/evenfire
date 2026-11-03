@@ -34,6 +34,35 @@ type LoopErrorRecoveryResult =
     }
   | { type: 'error' }
 
+/** True when recovery will return a workflow answer instead of settling an error. */
+export function recoveryAnswers(input: LoopErrorRecoveryInput): boolean {
+  const {
+    error,
+    continuingFromToolResults,
+    emptyResponseAfterToolResultsRecovered,
+    emptyInitialResponseRecovered,
+    lastCompletedToolResultsForFallback,
+    messages,
+  } = input
+  if (isEmptyResponseAfterToolResults(error)) {
+    if (continuingFromToolResults && !emptyResponseAfterToolResultsRecovered) return false
+    if (
+      !continuingFromToolResults &&
+      !emptyInitialResponseRecovered &&
+      !lastCompletedToolResultsForFallback &&
+      !messages.some(message => message.role === 'tool')
+    ) {
+      return false
+    }
+    return Boolean(buildWorkflowToolSuccessFallbackResponse(lastCompletedToolResultsForFallback))
+  }
+  return (
+    continuingFromToolResults &&
+    isRetryableLlmError(error) &&
+    Boolean(buildWorkflowToolSuccessFallbackResponse(lastCompletedToolResultsForFallback))
+  )
+}
+
 export function handleLoopErrorRecovery(input: LoopErrorRecoveryInput): LoopErrorRecoveryResult {
   const {
     error,
@@ -88,29 +117,16 @@ export function handleLoopErrorRecovery(input: LoopErrorRecoveryInput): LoopErro
         emptyInitialResponseRecovered: true,
       }
     }
-
-    const workflowFallback = buildWorkflowToolSuccessFallbackResponse(
-      lastCompletedToolResultsForFallback
-    )
-    if (workflowFallback) {
-      return {
-        type: 'response',
-        content: workflowFallback,
-        logMessage: `[NewCore:Loop] EXIT → workflow fallback after empty response, iterations=${iteration + 1}`,
-      }
-    }
   }
 
-  if (continuingFromToolResults && isRetryableLlmError(error)) {
-    const workflowFallback = buildWorkflowToolSuccessFallbackResponse(
-      lastCompletedToolResultsForFallback
-    )
-    if (workflowFallback) {
-      return {
-        type: 'response',
-        content: workflowFallback,
-        logMessage: `[NewCore:Loop] EXIT → workflow fallback after retryable LLM error, iterations=${iteration + 1}`,
-      }
+  const workflowFallback = buildWorkflowToolSuccessFallbackResponse(
+    lastCompletedToolResultsForFallback
+  )
+  if (workflowFallback && recoveryAnswers(input)) {
+    return {
+      type: 'response',
+      content: workflowFallback,
+      logMessage: `[NewCore:Loop] EXIT → workflow fallback after ${isEmptyResponseAfterToolResults(error) ? 'empty response' : 'retryable LLM error'}, iterations=${iteration + 1}`,
     }
   }
 

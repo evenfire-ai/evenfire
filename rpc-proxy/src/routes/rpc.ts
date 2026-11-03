@@ -23,6 +23,7 @@ import {
   respondHostAccessDenied,
   withoutReservedHostAccessCode,
 } from '../services/hostAccessDenial.js'
+import { buildHostRuntimeMessageRequest } from '../services/hostMessageBody.js'
 import {
   type HostRuntimeMessageRequest,
   forwardCancelToHost,
@@ -47,6 +48,7 @@ import {
   sanitizeHostRefForLog,
 } from '../services/wakeAndHold.js'
 import { mintOrReuseDirectTraceContext } from '../traceContext.js'
+import type { ResolvedServerConnection } from '../types.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
@@ -55,6 +57,45 @@ const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 // own copy (the two services share no package, so each names its own).
 const SESSIONS_LIMIT_CAP = 100
 const MESSAGES_LIMIT_CAP = 200
+
+/**
+ * How long mcp-host may wait for a model-step continuation's admission verdict
+ * before it answers 202 with the claimed task, counted from the request's
+ * receipt (`mcp-host`'s MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS). The two
+ * services share no package, so this is the proxy's own copy like the paging
+ * caps above.
+ */
+const HOST_CONTINUATION_VERDICT_BUDGET_MS = 10_000
+
+/**
+ * Allowance on top of that verdict wait for everything the Host does around it
+ * inside the same call: the request's transit in, the claim and the source
+ * revalidation that run before admission, and the answer's serialization on
+ * the way back.
+ *
+ * Basis: `mcp-host`'s default durable-store sync timeout,
+ * CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS = 2000 ms (`mcp-host/src/config.ts`). The
+ * checkpoint claim is one such bounded sync write. It starts after receipt and
+ * normally fits inside the verdict wait, but when the session's write queue in
+ * front of it is slow the claim can return after the anchored deadline, and
+ * the Host then answers as soon as it does — that late write is the one
+ * bounded pre-verdict step that can make the answer land past the verdict
+ * wait. Transit and response serialization have no tighter published bound, so
+ * they are covered by the same figure.
+ */
+const HOST_CONTINUATION_PRE_VERDICT_ALLOWANCE_MS = 2_000
+
+/**
+ * Smallest hold remainder a post-wake continuation attempt may start with: the
+ * Host's whole admission (its anchored verdict wait plus the pre-verdict
+ * allowance above). The Host claims the checkpoint BEFORE it answers, so an
+ * attempt that starts below this can be aborted by the proxy after the claim
+ * wrote to disk. Such an attempt is not started at all: the caller gets the
+ * retryable 503 `host_waking` and a re-POST replays the claim (202 while the
+ * executor is live, else 503 `continuation_claim_settling`).
+ */
+const HOST_CONTINUATION_ADMISSION_BUDGET_MS =
+  HOST_CONTINUATION_VERDICT_BUDGET_MS + HOST_CONTINUATION_PRE_VERDICT_ALLOWANCE_MS
 
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (
@@ -199,6 +240,27 @@ export function respondControlApiHostAccessRejection(
     return
   }
   res.status(409).json({ error: 'Direct run attribution conflict' })
+}
+
+/**
+ * The direct-run attribution binding is what lets control-api charge a run to
+ * the Desktop's trace. `unavailable` means the Host connection was resolved but
+ * the binding write did not land: the run still proceeds, and the condition is
+ * reported once per request as a structured operational error (never a token,
+ * a DSN or a prompt). Emitted for every route that resolves a direct-run
+ * binding, so the metric does not depend on which write started the turn.
+ */
+function warnIfAttributionBindingUnavailable(
+  host: Pick<ResolvedServerConnection, 'attributionBindingStatus'>
+): void {
+  if (host.attributionBindingStatus !== 'unavailable') return
+  console.warn(
+    JSON.stringify({
+      event: 'governed_trace_operational_error',
+      scope: 'agent_run',
+      reason: 'attribution_binding_unavailable',
+    })
+  )
 }
 
 /**
@@ -455,28 +517,15 @@ export function createRpcRouter(): Router {
             .json({ error: 'invalid_attachments', message: 'Attachments must be a list.' })
           return
         }
-        const forwardedBody: HostRuntimeMessageRequest = {
-          content: body.content,
-          channelType: 'rpc',
-          channelId: hostRef,
+        const forwardedBody = buildHostRuntimeMessageRequest({
+          body,
           hostRef,
           sender: auth.sub,
-          messageId: deliveryMessageId,
+          deliveryMessageId,
+          desktopSessionId,
           metadata: rpcInvocationContext(auth),
-          threadId: desktopSessionId,
-          attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
-          ...(body.fileReferences === undefined ? {} : { fileReferences: body.fileReferences }),
-          ...(body.modelSelectionRevision === undefined
-            ? {}
-            : { modelSelectionRevision: body.modelSelectionRevision }),
           traceContext,
-          // R2 "Option A": thread the optional piggybacked per-session model.
-          // This body is an explicit field allow-list, so an unlisted field is
-          // dropped. Trimmed/empty values are omitted.
-          ...(typeof body.model === 'string' && body.model.trim()
-            ? { model: body.model.trim() }
-            : {}),
-        }
+        })
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
@@ -495,15 +544,7 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (host.attributionBindingStatus === 'unavailable') {
-          console.warn(
-            JSON.stringify({
-              event: 'governed_trace_operational_error',
-              scope: 'agent_run',
-              reason: 'attribution_binding_unavailable',
-            })
-          )
-        }
+        warnIfAttributionBindingUnavailable(host)
 
         const isAsync = req.query.async === 'true'
         const attachmentCount = Array.isArray(forwardedBody.attachments)
@@ -998,6 +1039,165 @@ export function createRpcRouter(): Router {
             attemptUpstream: forwardTranscript,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
+        }
+      } catch (error) {
+        guardedNext(res, next, error)
+      }
+    }
+  )
+
+  // Continue a model-step checkpoint — the write half of the session read
+  // above. Scoped like POST /messages (host:message:invoke: a continuation
+  // starts a turn) and forwarded to mcp-host
+  // POST /v1/runtime/sessions/:agent/:chatId/model-step-checkpoints/:checkpointId/continue
+  // (§"Write: continuation" in docs/contracts/model-step-checkpoint.md).
+  //
+  // The proxy adds no state to the protocol: mcp-host owns the checkpoint
+  // state machine, the version comparison and the revalidation, so its
+  // 202/200/404/409 body answers the caller unchanged. A lifecycle drain
+  // fence or down Host enters the same wake-and-hold path as POST /messages.
+  // The forwarded body is the parsed `{version}` re-serialized verbatim;
+  // mcp-host answers its own 400 for a malformed value. Only host.headers
+  // carry the edge identity, so the client Authorization is never forwarded.
+  router.post(
+    '/rpc/hosts/:hostRef/sessions/:agent/:chatId/model-step-checkpoints/:checkpointId/continue',
+    requireRpcAuth,
+    requireScope('host:message:invoke'),
+    jsonBody,
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const hostRef = String(req.params.hostRef || '').trim()
+        const agent = String(req.params.agent || '').trim()
+        const chatId = String(req.params.chatId || '').trim()
+        const checkpointId = String(req.params.checkpointId || '').trim()
+        if (
+          !isSafeUpstreamPathSegment(hostRef) ||
+          !isSafeUpstreamAgentSegment(agent) ||
+          !isSafeUpstreamPathSegment(chatId) ||
+          !isSafeUpstreamPathSegment(checkpointId)
+        ) {
+          res.status(400).json({ error: 'Invalid hostRef, agent, chatId, or checkpointId' })
+          return
+        }
+        const deliveryId =
+          (typeof req.headers['idempotency-key'] === 'string'
+            ? req.headers['idempotency-key'].trim()
+            : '') || randomUUID()
+        const traceContext = mintOrReuseDirectTraceContext({
+          authorityScope: `${auth.sub}:${hostRef}`,
+          deliveryId,
+          sessionId: chatId,
+          requestId:
+            typeof req.headers['x-request-id'] === 'string'
+              ? req.headers['x-request-id'].trim()
+              : undefined,
+          origin: 'direct_chat',
+        })
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
+        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
+          teamId: auth.teamId,
+          directRunBinding: {
+            runId: traceContext.runId,
+            sessionId: chatId,
+            origin: traceContext.origin,
+          },
+        })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
+          return
+        }
+        warnIfAttributionBindingUnavailable(host)
+        const baseUrl = host.url.replace(/\/+$/, '')
+        // The segments are already control-char free (the guard above rejects
+        // the C0 range, CR/LF included); strip line breaks again as defense in
+        // depth so a logged value can never forge an extra log line. The body
+        // (the echoed `version`) is never logged.
+        const logAgent = agent.replace(/[\r\n]/g, '')
+        const logChatId = chatId.replace(/[\r\n]/g, '')
+        const logCheckpointId = checkpointId.replace(/[\r\n]/g, '')
+        console.info(
+          `[RPC_PROXY] user=${auth.sub} host=${sanitizeHostRefForLog(hostRef)} method=continue-model-step agent=${logAgent} chatId=${logChatId} checkpointId=${logCheckpointId}`
+        )
+        const upstreamUrl = `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/model-step-checkpoints/${encodeURIComponent(checkpointId)}/continue`
+        // Allow-list the forwarded body: `version` is the only field the
+        // contract defines, and mcp-host answers its own 400 for a malformed
+        // value. Caller identity and task ids stay in the edge headers, so a
+        // client body cannot inject them.
+        const parsed = req.body as Record<string, unknown>
+        const forwardedBody = JSON.stringify({ version: parsed.version })
+        const forwardContinuation = async (timeoutMs?: number) => {
+          const response = await fetch(upstreamUrl, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              ...host.headers,
+              'x-clerum-edge-trace-context': encodeURIComponent(JSON.stringify(traceContext)),
+            },
+            body: forwardedBody,
+            // No client-side deadline on the first attempt, like the message
+            // write path: mcp-host may already have claimed the checkpoint,
+            // so its own 202/404/409 answer must reach the caller instead
+            // of a proxy-generated 504. A client that leaves before the
+            // response still releases the upstream call (mutatingCallSignal).
+            signal: mutatingCallSignal(timeoutMs, res),
+          })
+          const body = await readMutatingResponseBody(response)
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          return { response, body }
+        }
+        try {
+          const { response, body } = await forwardContinuation()
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
+        } catch (error) {
+          console.warn(
+            `[RPC_PROXY] continue model step forward failed host=${sanitizeHostRefForLog(
+              hostRef
+            )} error=${describeErrorForLog(error)}`
+          )
+          if (isWakeEligibleHostError(error)) {
+            await respondWithWakeAndHold({
+              res,
+              hostRef,
+              host,
+              claims: auth,
+              rpcAccessToken,
+              deadlineMs: wakeDeadlineMs,
+              // A live claim or completed result replays. After the claim lease
+              // lapses, a new task may claim it; the old task loses its write fence.
+              retryUntilDeadline: true,
+              // The Host claims the checkpoint before its admission verdict, and
+              // its verdict deadline is anchored at receipt but does not cover
+              // the answer's travel back. An attempt with less hold than the
+              // whole admission would be aborted after the claim landed; below
+              // it, answer 503 host_waking instead.
+              minAttemptBudgetMs: HOST_CONTINUATION_ADMISSION_BUDGET_MS,
+              attemptUpstream: async (_timeoutMs, deadlineMs) => {
+                // The Host may wait its whole admission budget for a verdict.
+                // The generic wake attempt is capped by upstreamTimeoutMs (8 s
+                // by default), so use the remaining hold budget for this write.
+                const { response, body } = await forwardContinuation(
+                  Math.max(1, deadlineMs - Date.now())
+                )
+                sendUpstreamBody(
+                  res,
+                  response.status,
+                  body,
+                  response.headers.get('content-type') || 'application/json'
+                )
+              },
+              respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+            })
+            return
+          }
+          respondUpstreamUnavailable(res, error)
         }
       } catch (error) {
         guardedNext(res, next, error)

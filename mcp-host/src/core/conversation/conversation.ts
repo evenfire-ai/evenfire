@@ -1,4 +1,10 @@
-import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
+import {
+  isModelStepBoundaryNotCommitted,
+  isModelStepFenceMismatch,
+  isModelStepTaskOwnerMismatch,
+} from '../../db/worker/protocol'
+import type { ModelSelectionWriteOutcome, ModelStepTurnFence } from '../../db/worker/protocol'
+import { logger } from '../../logger'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../errors'
@@ -14,7 +20,7 @@ import {
   Turn,
   TurnToolCall,
 } from '../types'
-import type { SessionTokenUsage } from './conversationStore'
+import type { PersistTurnCompleteOptions, SessionTokenUsage } from './conversationStore'
 import {
   ConversationSessionSummary,
   ConversationStore,
@@ -24,6 +30,8 @@ import {
   SessionMessagesQuery,
 } from './conversationStore'
 import { userIdFromRpcPrefix } from './sessionKeyParts'
+
+export { isModelStepFenceMismatch, isModelStepTaskOwnerMismatch } from '../../db/worker/protocol'
 
 /**
  * Manages conversation state and turn tracking.
@@ -55,6 +63,22 @@ export class ConversationManager {
    * `session_key`, and the second insert fails on its unique index.
    */
   private readonly pendingCreates = new Map<string, Promise<Conversation>>()
+
+  private readonly turnCompletionOwners = new WeakMap<Conversation, object>()
+  private readonly turnResponseOwners = new WeakMap<Turn, object>()
+
+  private restoreTurnResponse(
+    turn: Turn,
+    owner: object,
+    writtenResponse: string,
+    previousResponse: string | undefined,
+    previousOwner: object | undefined
+  ): void {
+    if (this.turnResponseOwners.get(turn) !== owner) return
+    if (turn.response === writtenResponse) turn.response = previousResponse
+    if (previousOwner === undefined) this.turnResponseOwners.delete(turn)
+    else this.turnResponseOwners.set(turn, previousOwner)
+  }
 
   constructor(store: ConversationStore = new InMemoryConversationStore()) {
     this.store = store
@@ -277,6 +301,9 @@ export class ConversationManager {
 
     const previousTraceContext = conversation.traceContext
     const previousTitle = conversation.title
+    const previousCompletionOwner = this.turnCompletionOwners.get(conversation)
+    const startOwner = {}
+    this.turnCompletionOwners.set(conversation, startOwner)
     conversation.state = ConversationState.Processing
     // D.1 — record the in-flight task so it can be exposed via /sessions and
     // mirrored to sessions.active_task_id by persistTurnStart.
@@ -305,6 +332,7 @@ export class ConversationManager {
     try {
       await Promise.resolve(this.store.persistTurnStart(conversation, userInput))
     } catch (err) {
+      if (this.turnCompletionOwners.get(conversation) !== startOwner) throw err
       // Roll back the in-RAM mutation so the cached conversation is not left
       // poisoned in Processing — the next startTurn would otherwise throw
       // InvalidTransition forever. The ordinal consumed by the failed write
@@ -317,7 +345,12 @@ export class ConversationManager {
       // title that SQLite never persisted (would break dual-store parity).
       conversation.title = previousTitle
       conversation.updated_at = new Date()
+      if (previousCompletionOwner === undefined) this.turnCompletionOwners.delete(conversation)
+      else this.turnCompletionOwners.set(conversation, previousCompletionOwner)
       throw err
+    }
+    if (this.turnCompletionOwners.get(conversation) === startOwner) {
+      this.turnCompletionOwners.delete(conversation)
     }
     return turn
   }
@@ -332,8 +365,19 @@ export class ConversationManager {
    * BEFORE ACKing the client (`responseCallback`) so an acknowledged turn is
    * always durable. A rejected write propagates — never swallowed — and the
    * caller fails the turn (see TaskExecutor.handleLoopResult).
+   *
+   * A sync-timeout rejection from the SQLite store reaches this method
+   * only after the store awaited the queue's per-id late settlement. A
+   * committed late answer resolves the store call (RAM keeps the answer and
+   * the caller delivers it); a rejection proves the boundary did not commit or
+   * the worker died, and the fenced rollback below restores Processing so the
+   * session cannot start a conflicting write.
    */
-  async completeTurn(conversation: Conversation, response: string): Promise<void> {
+  async completeTurn(
+    conversation: Conversation,
+    response: string,
+    opts?: PersistTurnCompleteOptions
+  ): Promise<void> {
     if (conversation.state !== ConversationState.Processing) {
       throw new ConversationError(
         `Cannot complete turn: conversation is ${conversation.state}`,
@@ -342,9 +386,20 @@ export class ConversationManager {
     }
 
     const currentTurn = conversation.turns[conversation.turns.length - 1]
+    const previousResponse = currentTurn?.response
+    const previousResponseOwner = currentTurn && this.turnResponseOwners.get(currentTurn)
+    const previousCompletedAt = currentTurn?.completed_at
+    const previousPendingApproval = conversation.pending_approval
+    const previousActiveTaskId = conversation.activeTaskId
+    const previousTraceContext = conversation.traceContext
+    const previousUpdatedAt = conversation.updated_at
+    const completionOwner = {}
+    this.turnCompletionOwners.set(conversation, completionOwner)
+    const writtenCompletedAt = new Date()
     if (currentTurn) {
+      this.turnResponseOwners.set(currentTurn, completionOwner)
       currentTurn.response = response
-      currentTurn.completed_at = new Date()
+      currentTurn.completed_at = writtenCompletedAt
     }
 
     conversation.state = ConversationState.Idle
@@ -352,7 +407,124 @@ export class ConversationManager {
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
     conversation.traceContext = null
     conversation.updated_at = new Date()
-    await Promise.resolve(this.store.persistTurnComplete(conversation, response))
+    try {
+      await Promise.resolve(this.store.persistTurnComplete(conversation, response, opts))
+    } catch (err) {
+      // A fenced completion rolls RAM back on any rejected write, not only on
+      // a fence mismatch. The durable row is unchanged (or, after a sync
+      // timeout, unknown), so the unpersisted answer must not stay in RAM; the
+      // executor releases the restored turn. failTurn/cancelTurn keep the
+      // fence-only rollback below.
+      const rollbackFence =
+        opts?.completeModelStepCheckpoint !== undefined || opts?.modelStepTurnFence !== undefined
+      if (rollbackFence && currentTurn) {
+        this.restoreTurnResponse(
+          currentTurn,
+          completionOwner,
+          response,
+          previousResponse,
+          previousResponseOwner
+        )
+        if (currentTurn.completed_at === writtenCompletedAt) {
+          currentTurn.completed_at = previousCompletedAt
+        }
+      }
+      if (rollbackFence && this.turnCompletionOwners.get(conversation) === completionOwner) {
+        conversation.state = ConversationState.Processing
+        conversation.pending_approval = previousPendingApproval
+        conversation.activeTaskId = previousActiveTaskId
+        conversation.traceContext = previousTraceContext
+        conversation.updated_at = previousUpdatedAt
+      }
+      if (this.turnCompletionOwners.get(conversation) === completionOwner) {
+        this.turnCompletionOwners.delete(conversation)
+      }
+      if (currentTurn && this.turnResponseOwners.get(currentTurn) === completionOwner) {
+        this.turnResponseOwners.delete(currentTurn)
+      }
+      throw err
+    }
+    if (this.turnCompletionOwners.get(conversation) === completionOwner) {
+      this.turnCompletionOwners.delete(conversation)
+    }
+    if (currentTurn && this.turnResponseOwners.get(currentTurn) === completionOwner) {
+      this.turnResponseOwners.delete(currentTurn)
+    }
+  }
+
+  /**
+   * #1043 — reopen the failed turn `turnNumber` for a model-step continuation.
+   * Transitions: Idle → Processing, without a new turn or user row: the
+   * failed turn is still the last one and keeps its original user input.
+   * Like `startTurn`, the durable flip is awaited and a rejected write rolls
+   * the in-RAM state back.
+   */
+  async resumeTurnForContinuation(
+    conversation: Conversation,
+    taskId: string,
+    turnNumber: number,
+    traceContext: TraceContextV1 | null,
+    replaceActiveTaskId: string | undefined,
+    fence: ModelStepTurnFence
+  ): Promise<void> {
+    const replacingStaleTask =
+      conversation.state === ConversationState.Processing &&
+      replaceActiveTaskId !== undefined &&
+      conversation.activeTaskId === replaceActiveTaskId
+    if (conversation.state !== ConversationState.Idle && !replacingStaleTask) {
+      throw new ConversationError(
+        `Cannot reopen turn: conversation is ${conversation.state}`,
+        ConversationErrorCode.InvalidTransition
+      )
+    }
+    const currentTurn = conversation.turns[conversation.turns.length - 1]
+    if (
+      !currentTurn ||
+      currentTurn.number !== turnNumber ||
+      currentTurn.response !== undefined ||
+      (replacingStaleTask && currentTurn.completed_at !== undefined)
+    ) {
+      throw new ConversationError(
+        'Cannot reopen turn: the last turn is missing or already answered',
+        ConversationErrorCode.InvalidTransition
+      )
+    }
+    if (!this.store.persistContinuationStart) {
+      throw new Error('The conversation store cannot reopen a turn')
+    }
+    const previousTraceContext = conversation.traceContext
+    const previousCompletedAt = currentTurn.completed_at
+    const previousState = conversation.state
+    const previousActiveTaskId = conversation.activeTaskId
+    const previousCompletionOwner = this.turnCompletionOwners.get(conversation)
+    const continuationOwner = {}
+    this.turnCompletionOwners.set(conversation, continuationOwner)
+    conversation.state = ConversationState.Processing
+    conversation.activeTaskId = taskId
+    conversation.traceContext = traceContext
+    conversation.updated_at = new Date()
+    conversation.auto_approved_tools.delete('*')
+    currentTurn.completed_at = undefined
+    try {
+      await this.store.persistContinuationStart(conversation, turnNumber, fence)
+    } catch (err) {
+      if (this.turnCompletionOwners.get(conversation) === continuationOwner) {
+        conversation.state = previousState
+        conversation.activeTaskId = previousActiveTaskId
+        conversation.traceContext = previousTraceContext
+        currentTurn.completed_at = previousCompletedAt
+        conversation.updated_at = new Date()
+        if (previousCompletionOwner === undefined) {
+          this.turnCompletionOwners.delete(conversation)
+        } else {
+          this.turnCompletionOwners.set(conversation, previousCompletionOwner)
+        }
+      }
+      throw err
+    }
+    if (this.turnCompletionOwners.get(conversation) === continuationOwner) {
+      this.turnCompletionOwners.delete(conversation)
+    }
   }
 
   /**
@@ -448,6 +620,11 @@ export class ConversationManager {
     // `recordSessionUsage`). The turn lifecycle owns `updated_at`.
   }
 
+  /** #1043 — durable turn number of the turn in flight; see the store method. */
+  activeTurnNumber(conversation: Conversation): number | undefined {
+    return this.store.activeTurnNumber?.(conversation)
+  }
+
   /**
    * Fail the current turn.
    * Transitions: Processing → Idle
@@ -457,18 +634,56 @@ export class ConversationManager {
    * under the SQLite store the state flip + `active_task_id` clear commit as
    * one awaited worker op. A rejected write propagates — never swallowed.
    */
-  async failTurn(conversation: Conversation): Promise<void> {
+  async failTurn(
+    conversation: Conversation,
+    fence?: ModelStepTurnFence,
+    expectedTaskId?: string
+  ): Promise<void> {
+    if (expectedTaskId !== undefined && conversation.activeTaskId !== expectedTaskId) {
+      throw new Error('model-step continuation task owner mismatch')
+    }
+    const previousState = conversation.state
+    const previousPendingApproval = conversation.pending_approval
+    const previousActiveTaskId = conversation.activeTaskId
+    const previousTraceContext = conversation.traceContext
+    const previousUpdatedAt = conversation.updated_at
+    const currentTurn = conversation.turns[conversation.turns.length - 1]
+    const previousCompletedAt = currentTurn?.completed_at
+    const failOwner = {}
+    this.turnCompletionOwners.set(conversation, failOwner)
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
     conversation.traceContext = null
     conversation.updated_at = new Date()
-
-    const currentTurn = conversation.turns[conversation.turns.length - 1]
-    if (currentTurn) {
-      currentTurn.completed_at = new Date()
+    const writtenCompletedAt = new Date()
+    if (currentTurn) currentTurn.completed_at = writtenCompletedAt
+    try {
+      await Promise.resolve(this.store.persistTurnFail(conversation, fence, expectedTaskId))
+    } catch (err) {
+      const rollbackFence =
+        (fence !== undefined || expectedTaskId !== undefined) &&
+        (isModelStepFenceMismatch(err) ||
+          isModelStepTaskOwnerMismatch(err) ||
+          isModelStepBoundaryNotCommitted(err))
+      if (rollbackFence && currentTurn?.completed_at === writtenCompletedAt) {
+        currentTurn.completed_at = previousCompletedAt
+      }
+      if (rollbackFence && this.turnCompletionOwners.get(conversation) === failOwner) {
+        conversation.state = previousState
+        conversation.pending_approval = previousPendingApproval
+        conversation.activeTaskId = previousActiveTaskId
+        conversation.traceContext = previousTraceContext
+        conversation.updated_at = previousUpdatedAt
+      }
+      if (this.turnCompletionOwners.get(conversation) === failOwner) {
+        this.turnCompletionOwners.delete(conversation)
+      }
+      throw err
     }
-    await Promise.resolve(this.store.persistTurnFail(conversation))
+    if (this.turnCompletionOwners.get(conversation) === failOwner) {
+      this.turnCompletionOwners.delete(conversation)
+    }
   }
 
   /**
@@ -485,18 +700,71 @@ export class ConversationManager {
    *
    * Transitions: Processing | AwaitingApproval → Idle
    */
-  cancelTurn(conversation: Conversation): void {
+  cancelTurn(conversation: Conversation, fence?: ModelStepTurnFence): Promise<void> {
+    const previousState = conversation.state
+    const previousPendingApproval = conversation.pending_approval
+    const previousActiveTaskId = conversation.activeTaskId
+    const previousTraceContext = conversation.traceContext
+    const previousUpdatedAt = conversation.updated_at
+    const currentTurn = conversation.turns[conversation.turns.length - 1]
+    const previousResponse = currentTurn?.response
+    const previousResponseOwner = currentTurn && this.turnResponseOwners.get(currentTurn)
+    const previousCompletedAt = currentTurn?.completed_at
+    const cancelOwner = {}
+    this.turnCompletionOwners.set(conversation, cancelOwner)
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
     conversation.traceContext = null
     conversation.updated_at = new Date()
-    const currentTurn = conversation.turns[conversation.turns.length - 1]
+    const writtenResponse = '[Task cancelled by user before completion]'
+    const writtenCompletedAt = new Date()
     if (currentTurn) {
-      currentTurn.response = '[Task cancelled by user before completion]'
-      currentTurn.completed_at = new Date()
+      this.turnResponseOwners.set(currentTurn, cancelOwner)
+      currentTurn.response = writtenResponse
+      currentTurn.completed_at = writtenCompletedAt
     }
-    void this.store.persistTurnCancel(conversation)
+    const pending = Promise.resolve(this.store.persistTurnCancel(conversation, fence))
+    if (!fence) {
+      void pending
+      return Promise.resolve()
+    }
+    return pending.then(
+      () => {
+        if (this.turnCompletionOwners.get(conversation) === cancelOwner) {
+          this.turnCompletionOwners.delete(conversation)
+        }
+        if (currentTurn && this.turnResponseOwners.get(currentTurn) === cancelOwner) {
+          this.turnResponseOwners.delete(currentTurn)
+        }
+      },
+      err => {
+        const rollbackFence =
+          fence !== undefined &&
+          (isModelStepFenceMismatch(err) || isModelStepBoundaryNotCommitted(err))
+        if (rollbackFence && currentTurn) {
+          this.restoreTurnResponse(
+            currentTurn,
+            cancelOwner,
+            writtenResponse,
+            previousResponse,
+            previousResponseOwner
+          )
+          if (currentTurn.completed_at === writtenCompletedAt) {
+            currentTurn.completed_at = previousCompletedAt
+          }
+        }
+        if (rollbackFence && this.turnCompletionOwners.get(conversation) === cancelOwner) {
+          conversation.state = previousState
+          conversation.pending_approval = previousPendingApproval
+          conversation.activeTaskId = previousActiveTaskId
+          conversation.traceContext = previousTraceContext
+          conversation.updated_at = previousUpdatedAt
+          this.turnCompletionOwners.delete(conversation)
+        }
+        throw err
+      }
+    )
   }
 
   /**
@@ -624,7 +892,7 @@ export class ConversationManager {
    *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
-  async deny(conversation: Conversation): Promise<void> {
+  async deny(conversation: Conversation, expectedTaskId?: string): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
         `Cannot deny: conversation is ${conversation.state}`,
@@ -632,14 +900,48 @@ export class ConversationManager {
       )
     }
 
+    if (expectedTaskId !== undefined && conversation.activeTaskId !== expectedTaskId) {
+      throw new Error('model-step continuation task owner mismatch')
+    }
     const requestId = conversation.pending_approval?.request_id
+    if (expectedTaskId !== undefined && !requestId) {
+      throw new Error('Cannot resolve a continuation approval without a request id')
+    }
+    const previous = {
+      state: conversation.state,
+      pendingApproval: conversation.pending_approval,
+      activeTaskId: conversation.activeTaskId,
+      traceContext: conversation.traceContext,
+      updatedAt: conversation.updated_at,
+    }
+    const denyOwner = expectedTaskId !== undefined ? {} : undefined
+    if (denyOwner) this.turnCompletionOwners.set(conversation, denyOwner)
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — deny is terminal (→ Idle), no task in flight
     conversation.traceContext = null
     conversation.updated_at = new Date()
-    if (requestId) {
-      await this.store.persistApprovalResolved(conversation, requestId, 'deny')
+    try {
+      if (requestId) {
+        await this.store.persistApprovalResolved(conversation, requestId, 'deny', expectedTaskId)
+      }
+    } catch (err) {
+      if (
+        denyOwner &&
+        isModelStepTaskOwnerMismatch(err) &&
+        this.turnCompletionOwners.get(conversation) === denyOwner
+      ) {
+        conversation.state = previous.state
+        conversation.pending_approval = previous.pendingApproval
+        conversation.activeTaskId = previous.activeTaskId
+        conversation.traceContext = previous.traceContext
+        conversation.updated_at = previous.updatedAt
+      }
+      throw err
+    } finally {
+      if (denyOwner && this.turnCompletionOwners.get(conversation) === denyOwner) {
+        this.turnCompletionOwners.delete(conversation)
+      }
     }
   }
 
@@ -653,14 +955,35 @@ export class ConversationManager {
    * Also resets conversation.state to Idle so the next startTurn can proceed
    * without throwing "Cannot start turn: conversation is awaiting_approval". (BUG-8)
    *
+   * Returns false without changing state if a different approval is current.
+   * The refused request's own durable row is deleted in that case: the session
+   * belongs to the current approval, but the obsolete row must not outlive the
+   * cleanup that owns it.
    * Safe on unknown sessionKey (no-op).
    *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
-  async clearPendingApproval(sessionKey: string): Promise<void> {
-    const conv = this.store.get(sessionKey)
-    if (!conv) return
-    const requestId = conv.pending_approval?.request_id
+  async clearPendingApproval(sessionKey: string, requestId?: string): Promise<boolean> {
+    const conv = this.store.get(sessionKey) ?? (await this.getSessionByKeyAsync(sessionKey))
+    if (!conv) return true
+    const currentRequestId = conv.pending_approval?.request_id
+    if (
+      requestId !== undefined &&
+      currentRequestId !== undefined &&
+      requestId !== currentRequestId
+    ) {
+      logger.warn(
+        { sessionKey, requestId, currentRequestId },
+        'Refusing to clear a different pending approval'
+      )
+      // The durable session row belongs to the current approval's owner, so it
+      // must not move. This refused cleanup is the obsolete row's last owner:
+      // delete that row alone, or it would surface as the session's pending
+      // approval on every cold read until the next boot prune.
+      await this.store.deletePendingApproval?.(requestId, sessionKey)
+      return false
+    }
+    requestId ??= conv.pending_approval?.request_id
     conv.pending_approval = undefined
     conv.state = ConversationState.Idle // release the turn lock (BUG-8)
     conv.activeTaskId = undefined
@@ -669,6 +992,7 @@ export class ConversationManager {
     if (requestId) {
       await this.store.persistApprovalResolved(conv, requestId, 'cancel')
     }
+    return true
   }
 
   /**

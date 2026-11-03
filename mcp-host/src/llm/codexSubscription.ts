@@ -24,7 +24,12 @@ import { classifyUnknown } from './errorClassification'
 import { type ImageTransportOperation, transportSupportsImageInput } from './imageInput'
 import { IMAGE_SOURCE_INVALID, canonicalRefusalCode, projectMessage } from './imageSource'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
-import { authorizeRetryDelayMs, rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
+import {
+  authorizeRetryDelayMs,
+  providerUnavailableRetryDelayMs,
+  rateLimitRetryDelayMs,
+  waitBeforeRetry,
+} from './rateLimitRetry'
 import { type LlmProvider, descriptorFor } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
@@ -385,7 +390,6 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
   ): Promise<CompletionResponse> {
     const result = await this.execute(messages, undefined, options)
-    assertTerminalCodexOutcome(result)
     const usage = mapCodexUsage(result.usage)
     return {
       content: result.text,
@@ -408,7 +412,6 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     }
   ): Promise<ToolCompletionResponse> {
     const result = await this.execute(messages, tools, options)
-    assertTerminalCodexOutcome(result)
     const usage = mapCodexUsage(result.usage)
     return {
       content: result.text || null,
@@ -490,6 +493,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       throw new CodexAuthorizeError('no_grant', 'Codex catalog policy binding is missing')
     }
     const attempt = async (providerAttemptIndex: number) => {
+      options?.signal?.throwIfAborted()
       const authorized = await this.deps.authorizer.authorize(
         {
           request: wireRequest,
@@ -522,36 +526,51 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         request: wireRequest,
         signal: options?.signal,
       })
+      // The proxy client buffers all text and tool frames. No output reaches
+      // the caller until this attempt has a successful terminal outcome.
+      assertTerminalCodexOutcome(streamed)
       return {
         ...streamed,
         providerAttemptId: authorized.providerAttemptId,
         providerAttemptIndex,
       }
     }
-    try {
-      return await attempt(context.providerAttemptIndex ?? this.nextProviderAttemptIndex++)
-    } catch (err) {
-      // G1-9 (#720): a 429 that advised a short Retry-After is retried once,
-      // after that delay, under a new authorize: a redeemed ticket cannot be
-      // reused. The 429 may come from the proxy or from control-api's
-      // authorize limiter (G1-11). A caller that pins the attempt index owns
-      // its own retries. control-api's authorize_capacity_exceeded, refused
-      // before any read, is retried once the same way (M-A, review
-      // 5426789128); a proxy error of that name is not.
-      const waitMs =
-        context.providerAttemptIndex !== undefined
-          ? undefined
-          : err instanceof CodexAuthorizeError
-            ? authorizeRetryDelayMs(err.code, err.retryAfterMs)
-            : err instanceof CodexProxyError
-              ? rateLimitRetryDelayMs(err.code, err.retryAfterMs)
-              : undefined
-      if (waitMs === undefined) throw err
-      await waitBeforeRetry(waitMs, options?.signal)
-      // The wait stops watching the signal once its timer fires: an abort in
-      // that gap must not reach a second authorize (G1-12).
-      options?.signal?.throwIfAborted()
-      return attempt(this.nextProviderAttemptIndex++)
+    for (let retryIndex = 0; ; retryIndex++) {
+      const providerAttemptIndex = context.providerAttemptIndex ?? this.nextProviderAttemptIndex++
+      try {
+        return await attempt(providerAttemptIndex)
+      } catch (err) {
+        // A caller that pins the index owns its retries. Otherwise cap the
+        // entire model request at three attempts, each with a fresh ticket.
+        if (context.providerAttemptIndex !== undefined || retryIndex >= 2) throw err
+        const classified = this.classifyError(err)
+        const transientWaitMs = providerUnavailableRetryDelayMs(classified, retryIndex)
+        // Keep the existing single short-Retry-After retry for 429/capacity.
+        // A proxy's authorize_capacity_exceeded is still terminal.
+        const rateLimitWaitMs =
+          retryIndex !== 0
+            ? undefined
+            : err instanceof CodexAuthorizeError
+              ? authorizeRetryDelayMs(err.code, err.retryAfterMs)
+              : err instanceof CodexProxyError
+                ? rateLimitRetryDelayMs(err.code, err.retryAfterMs)
+                : undefined
+        const waitMs = transientWaitMs ?? rateLimitWaitMs
+        if (waitMs === undefined) throw err
+        logger.warn(
+          {
+            provider: this.getProviderType(),
+            providerAttemptIndex,
+            delayMs: waitMs,
+            errorCode: classified.providerCode,
+          },
+          'Retrying subscription provider attempt'
+        )
+        await waitBeforeRetry(waitMs, options?.signal)
+        // The wait drops its abort listener when its timer fires. Check again
+        // in that gap before the next attempt can authorize (G1-12).
+        options?.signal?.throwIfAborted()
+      }
     }
   }
 

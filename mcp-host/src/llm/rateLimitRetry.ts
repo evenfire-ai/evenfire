@@ -1,4 +1,6 @@
 import { withAbort } from '../core/adapters/abortableLlmPort'
+import { LlmErrorCode } from '../core/errors'
+import type { ClassifiedError } from './types'
 
 /**
  * G1-9 (#720): the longest Retry-After a subscription provider waits before its
@@ -36,6 +38,22 @@ export function authorizeRetryDelayMs(
   return code === 'rate_limited' || code === 'authorize_capacity_exceeded'
     ? boundedRetryDelayMs(retryAfterMs)
     : undefined
+}
+
+/** Two pre-dispatch outage retries, with 20% jitter around one and three seconds. */
+export function providerUnavailableRetryDelayMs(
+  error: ClassifiedError,
+  retryIndex: number
+): number | undefined {
+  if (
+    error.code !== LlmErrorCode.ModelOverloaded ||
+    !error.retryable ||
+    error.providerCode !== 'provider_unavailable' ||
+    error.providerDispatched !== false
+  )
+    return undefined
+  const delayMs = [1000, 3000][retryIndex]
+  return delayMs === undefined ? undefined : Math.round(delayMs * (0.8 + Math.random() * 0.4))
 }
 
 function boundedRetryDelayMs(retryAfterMs: number | undefined): number | undefined {

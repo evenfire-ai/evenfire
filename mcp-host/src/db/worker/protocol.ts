@@ -8,6 +8,112 @@
  * `error`/`result` payloads.
  */
 import type { ChatMessage, PendingApproval, ToolResult } from '../../core/types'
+import {
+  type ModelStepCheckpointFence,
+  type ModelStepCheckpointOp,
+  isModelStepCheckpointOp,
+  isModelStepCheckpointWriteOp,
+} from './modelStepCheckpointOps'
+
+// ─── Durable model-step loop state (#1043) ─────────────────────────────
+
+/**
+ * `model_step_checkpoints.loop_state`: recorder-owned progress plus the frozen
+ * identity of the origin user message. `originUserMessageIndex` is a 0-based
+ * index into the checkpoint's `kind === 'message'` entries, decided when the
+ * origin recorder first records that message. A later user-role, image or
+ * loop-injected message never moves it, so a continuation strips/prepends the
+ * turn-context block on the right entry by identity instead of by "last user".
+ */
+export interface ModelStepCheckpointLoopState {
+  nextIteration: number
+  originUserMessageIndex?: number
+}
+
+/** Serializes the frozen `loop_state` shape. */
+export function serializeModelStepCheckpointLoopState(state: ModelStepCheckpointLoopState): string {
+  return JSON.stringify(state)
+}
+
+/**
+ * Reads the durable loop state. A missing or malformed blob throws: a reader
+ * must fail loud rather than re-target the turn-context block by guesswork.
+ */
+export function parseModelStepCheckpointLoopState(
+  raw: string | null
+): ModelStepCheckpointLoopState {
+  if (raw === null) throw new Error('Model-step checkpoint has no loop state')
+  const parsed: unknown = JSON.parse(raw)
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Model-step checkpoint loop state is not an object')
+  }
+  const { nextIteration, originUserMessageIndex } = parsed as Record<string, unknown>
+  if (
+    typeof nextIteration !== 'number' ||
+    !Number.isSafeInteger(nextIteration) ||
+    nextIteration < 0
+  ) {
+    throw new Error('Model-step checkpoint loop state has no valid next iteration')
+  }
+  if (originUserMessageIndex === undefined) return { nextIteration }
+  if (
+    typeof originUserMessageIndex !== 'number' ||
+    !Number.isSafeInteger(originUserMessageIndex) ||
+    originUserMessageIndex < 0
+  ) {
+    throw new Error('Model-step checkpoint loop state has no valid origin user message index')
+  }
+  return { nextIteration, originUserMessageIndex }
+}
+
+/**
+ * A turn-boundary write that is only valid while this exact claim still owns
+ * the reopened origin turn (#1043). `activeTaskId` is the continuation task
+ * that reopened it.
+ */
+export interface ModelStepTurnFence {
+  fence: ModelStepCheckpointFence
+  activeTaskId: string
+  originTurnNumber: number
+}
+
+const MODEL_STEP_FENCE_MISMATCH_MESSAGES: ReadonlySet<string> = new Set([
+  'model-step continuation fence mismatch',
+  'model-step checkpoint fence mismatch on completion',
+])
+
+/** Matches the exact fence-mismatch errors produced by the SQLite worker. */
+export function isModelStepFenceMismatch(err: unknown): boolean {
+  return err instanceof Error && MODEL_STEP_FENCE_MISMATCH_MESSAGES.has(err.message)
+}
+
+/** The checkpoint was lost and a different task now owns the durable session. */
+export function isModelStepTaskOwnerMismatch(err: unknown): boolean {
+  return err instanceof Error && err.message === 'model-step continuation task owner mismatch'
+}
+
+/**
+ * A fenced boundary write did not commit and the store restored the
+ * reopened-turn marker. It covers two shapes: a write that timed out and was
+ * later proved not committed on the turn cancel and fail paths, and any
+ * not-committed rejection on the continuation start
+ * (`persistContinuationStart`), which does not require a timeout. The message
+ * is the worker's real error so callers keep the true cause (and a late fence
+ * mismatch still matches `isModelStepFenceMismatch`); the class is the extra
+ * signal that RAM must be restored too. It must not be conflated with a fence
+ * mismatch: an operational late failure is not a lost fence.
+ */
+export class ModelStepBoundaryNotCommittedError extends Error {
+  constructor(cause: Error) {
+    super(cause.message, { cause })
+    this.name = 'ModelStepBoundaryNotCommittedError'
+  }
+}
+
+/** Matches the typed late non-commit signal thrown by the SQLite store. */
+export function isModelStepBoundaryNotCommitted(err: unknown): boolean {
+  return err instanceof ModelStepBoundaryNotCommittedError
+}
 
 // ─── Row shapes (DB-side representation) ───────────────────────────────
 
@@ -225,6 +331,15 @@ export type WorkerOp =
       activeTaskId?: string | null
       /** undefined = keep, string = set, null = clear. */
       activeTraceContext?: string | null
+      /**
+       * #1043 — when present, the dispatcher verifies inside this same
+       * transaction that the checkpoint still carries this id/owner/generation
+       * at this origin turn number and that the session's live active task is
+       * this continuation; a mismatch rolls the state write back.
+       */
+      modelStepTurnFence?: ModelStepTurnFence
+      /** Require the session to still belong to this task before changing it. */
+      expectedTaskId?: string
     }
   | { kind: 'reap_processing_sessions'; nowEpoch: number; chunkSize?: number }
   | {
@@ -280,6 +395,13 @@ export type WorkerOp =
       sessionId: string
       state: string
       /**
+       * Clock for the checkpoint side effects of this same transaction (retire
+       * the session's live checkpoints, complete the continuation's checkpoint).
+       * Supplied by the caller like every `model_step_checkpoint_*` op's `now`,
+       * so the boundary and the checkpoint rows share one clock read.
+       */
+      now: number
+      /**
        * Same semantics as `update_session_state.activeTaskId`:
        * undefined = keep current, a string = set it, null = clear it.
        */
@@ -292,7 +414,26 @@ export type WorkerOp =
        * never overwrites, and a rename set earlier wins.
        */
       title?: string
+      /**
+       * #1043 — set on a turn start: every live model-step checkpoint of this
+       * session is retired (`abandoned`) in the same transaction, so a new
+       * turn can never coexist with a resumable one.
+       */
+      retireModelStepCheckpointsOf?: string
+      /**
+       * #1043 — set on the final message of a model-step continuation: the
+       * fenced checkpoint flips `claimed` → `completed` and stamps this message
+       * in the same transaction. A fence mismatch rolls the message back.
+       */
+      completeModelStepCheckpoint?: ModelStepCheckpointFence
+      /**
+       * #1043 — when present, the boundary message and the state flip only
+       * commit while this exact claim still owns the reopened origin turn; a
+       * mismatch rolls the whole transaction back.
+       */
+      modelStepTurnFence?: ModelStepTurnFence
     }
+  | ModelStepCheckpointOp
   | { kind: 'replace_messages'; sessionId: string; messages: MessageRow[] }
   | {
       kind: 'insert_pending_approval'
@@ -300,7 +441,11 @@ export type WorkerOp =
       replaceRequestId?: string
       markAwaitingApproval?: boolean
     }
-  | { kind: 'delete_pending_approval'; requestId: string }
+  | {
+      kind: 'delete_pending_approval'
+      requestId: string
+      expectedTask?: { sessionId: string; taskId: string }
+    }
   | { kind: 'load_active_session'; sessionKey: string }
   | {
       kind: 'load_session_message_page'
@@ -394,7 +539,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'sweep_closed_sessions':
       return true
     default:
-      return false
+      return isModelStepCheckpointOp(op) && isModelStepCheckpointWriteOp(op)
   }
 }
 

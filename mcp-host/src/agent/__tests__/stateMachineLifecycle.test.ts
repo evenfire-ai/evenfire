@@ -485,7 +485,7 @@ describe('AgentStateMachine — clearPendingApproval retry queue', () => {
     cm.clearPendingApproval = vi
       .fn()
       .mockRejectedValueOnce(new Error('transient'))
-      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(true)
     ;(agent as any).tryClearPendingApproval('session-Y')
     await new Promise(r => setImmediate(r))
     expect((agent as any).clearPendingApprovalRetries.has('session-Y')).toBe(true)
@@ -494,6 +494,28 @@ describe('AgentStateMachine — clearPendingApproval retry queue', () => {
     ;(agent as any).tryClearPendingApproval('session-Y')
     await new Promise(r => setImmediate(r))
     expect((agent as any).clearPendingApprovalRetries.has('session-Y')).toBe(false)
+  })
+
+  it('B5 — stops retrying when a stale approval cleanup is refused', async () => {
+    const { agent } = setupAgent()
+    const cm = (agent as any).conversationManager
+    cm.clearPendingApproval = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockResolvedValueOnce(false)
+    ;(agent as any).tryClearPendingApproval('session-stale', 'request-A')
+    await new Promise(r => setImmediate(r))
+    expect((agent as any).clearPendingApprovalRetries.has('session-stale')).toBe(true)
+    ;(agent as any).drainClearPendingApprovalRetries()
+    expect(cm.clearPendingApproval).toHaveBeenCalledTimes(1)
+    const entry = (agent as any).clearPendingApprovalRetries.get('session-stale')
+    entry.nextTry = Date.now()
+    ;(agent as any).drainClearPendingApprovalRetries()
+    await new Promise(r => setImmediate(r))
+    expect(cm.clearPendingApproval).toHaveBeenCalledTimes(2)
+    expect((agent as any).clearPendingApprovalRetries.has('session-stale')).toBe(false)
+    ;(agent as any).drainClearPendingApprovalRetries()
+    expect(cm.clearPendingApproval).toHaveBeenCalledTimes(2)
   })
 
   it('B5 — gives up after MAX_ATTEMPTS and logs the orphan', async () => {

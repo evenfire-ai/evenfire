@@ -1263,7 +1263,7 @@ describe('TaskExecutor', () => {
       .mockImplementationOnce(async config => {
         config.events.emit({
           type: 'llm:completed',
-          data: { iteration: 0, durationMs: 100 },
+          data: { iteration: 0, attempt: 1, durationMs: 100, status: 'succeeded' },
           timestamp: new Date('2026-07-14T14:59:59.000Z'),
         })
         return {
@@ -1292,7 +1292,7 @@ describe('TaskExecutor', () => {
       .mockImplementationOnce(async config => {
         config.events.emit({
           type: 'llm:completed',
-          data: { iteration: 0, durationMs: 100 },
+          data: { iteration: 0, attempt: 1, durationMs: 100, status: 'succeeded' },
           timestamp: new Date('2026-07-14T15:00:01.000Z'),
         })
         return { type: 'response', content: 'Done' } as any
@@ -1396,8 +1396,8 @@ describe('TaskExecutor', () => {
     expect(llmTraceEvents).toHaveLength(2)
     expect(new Set(llmTraceEvents.map(event => event.sourceEventId)).size).toBe(2)
     expect(llmTraceEvents.map(event => event.sourceEventId)).toEqual([
-      expect.stringMatching(/:llm:1784041199000-0$/),
-      expect.stringMatching(/:llm:1784041201000-0$/),
+      expect.stringMatching(/:llm:1784041199000-0-1$/),
+      expect.stringMatching(/:llm:1784041201000-0-1$/),
     ])
   })
 })

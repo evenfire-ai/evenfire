@@ -140,9 +140,30 @@ describe('clerum__attachment_read persistence boundary (#666)', () => {
       const tables = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
         .all() as Array<{ name: string }>
+      // #1043 — a BLOB comes back as a Buffer, which JSON.stringify turns into
+      // `{"type":"Buffer","data":[...]}` and would hide raw bytes from a
+      // base64 substring match. BLOBs are rendered as base64 and also searched
+      // for the raw upload bytes.
+      const rawUpload = Buffer.from(attachment.dataBase64, 'base64')
+      const blobsWithUpload: string[] = []
       const rows = tables.flatMap(({ name }) =>
-        (db.prepare(`SELECT * FROM "${name}"`).all() as unknown[]).map(row => JSON.stringify(row))
+        (db.prepare(`SELECT * FROM "${name}"`).all() as Array<Record<string, unknown>>).map(row =>
+          JSON.stringify(row, (_key, value: unknown) => {
+            if (
+              value &&
+              typeof value === 'object' &&
+              (value as { type?: unknown }).type === 'Buffer'
+            ) {
+              const blob = Buffer.from((value as { data: number[] }).data)
+              if (blob.indexOf(rawUpload) !== -1) blobsWithUpload.push(name)
+              return blob.toString('base64')
+            }
+            return value
+          })
+        )
       )
+      // Witness: the scan covers the checkpoint attachment table (migration 018).
+      expect(tables.map(t => t.name)).toContain('model_step_checkpoint_attachments')
       // The task path persists the user message and the final answer, not
       // tool rows. Witness: the persisted answer quotes the tool result, so
       // the page and its reference reached a row.
@@ -154,6 +175,7 @@ describe('clerum__attachment_read persistence boundary (#666)', () => {
       expect(answerRows[0]!.content).toContain(SENTINEL)
       expect(rows.length).toBeGreaterThan(0)
       expect(rows.filter(row => row.includes(attachment.dataBase64))).toEqual([])
+      expect(blobsWithUpload).toEqual([])
     } finally {
       await handle.shutdown()
     }

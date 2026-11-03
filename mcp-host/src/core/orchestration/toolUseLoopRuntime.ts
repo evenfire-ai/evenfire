@@ -1,5 +1,6 @@
 import type { TaskBrakeTrip } from '../../budget/taskBrake'
 import { logger } from '../../logger'
+import { LlmError } from '../errors'
 import { clerumCompactionTotal } from '../extensions/contextManager'
 import type {
   Attachment,
@@ -12,6 +13,8 @@ import type {
   ToolResult,
 } from '../types'
 import type { LoopConfig } from './loopConfig'
+import { MODEL_STEP_RETRY_DEADLINE_MS, modelStepRetryDelayMs } from './modelStepRetrySchedule'
+import { recoveryAnswers } from './toolUseLoopErrorRecovery'
 import { isRetryableLlmTransportError } from './toolUseLoopIntentRecovery'
 
 const LLM_TRANSPORT_RETRY_DELAY_MS = 350
@@ -75,7 +78,15 @@ export async function callReasoningForIteration(
   config: LoopConfig,
   context: ReasoningContext,
   lastToolResults: ToolResult[] | null,
-  iteration: number
+  iteration: number,
+  recovery: {
+    emptyResponseAfterToolResultsRecovered: boolean
+    emptyInitialResponseRecovered: boolean
+    workflowTriggerTextResponseRecovered: boolean
+    lastCompletedToolResultsForFallback: ToolResult[] | null
+    messages: ChatMessage[]
+    userRequestText: string
+  }
 ): Promise<{ result: RespondResult; continuingFromToolResults: boolean }> {
   const callStartedAt = Date.now()
   const heartbeatInterval = config.progressReporter
@@ -93,19 +104,48 @@ export async function callReasoningForIteration(
     : null
   try {
     const continuingFromToolResults = Boolean(lastToolResults)
-    const callReasoning = async (): Promise<RespondResult> => {
+    let attempt = 0
+    const callReasoning = async (signal: AbortSignal | undefined): Promise<RespondResult> => {
+      const attemptIndex = ++attempt
+      const startedAt = Date.now()
+      const attemptContext = { ...context, signal }
+      let result: RespondResult
       if (lastToolResults) {
         logger.debug(
           { iteration, resultCount: lastToolResults.length },
           'Continuing with tool results'
         )
-        return config.reasoning.continueWithToolResults(context, lastToolResults)
+        result = await config.reasoning.continueWithToolResults(attemptContext, lastToolResults)
+      } else {
+        logger.debug({ iteration }, 'Requesting model response')
+        result = await config.reasoning.respondWithTools(attemptContext)
       }
-      logger.debug({ iteration }, 'Requesting model response')
-      return config.reasoning.respondWithTools(context)
+      // Observe logical reasoning calls, excluding failures known to be pre-dispatch.
+      // Dispatches within a failover chain are not observed individually here;
+      // a separate follow-up issue covers the usage and latency of each
+      // physical failover attempt.
+      if (
+        !(
+          result.type === 'error' &&
+          result.error instanceof LlmError &&
+          result.error.providerDispatched === false
+        )
+      ) {
+        config.events.emit({
+          type: 'llm:completed',
+          data: {
+            iteration,
+            attempt: attemptIndex,
+            durationMs: Date.now() - startedAt,
+            status: result.type === 'error' ? 'failed' : 'succeeded',
+          },
+          timestamp: new Date(),
+        })
+      }
+      return result
     }
 
-    let result = await callReasoning()
+    let result = await callReasoning(context.signal)
     if (
       result.type === 'error' &&
       isRetryableLlmTransportError(result.error) &&
@@ -114,18 +154,79 @@ export async function callReasoningForIteration(
       logger.warn({ iteration, err: result.error }, 'Retrying model transport failure')
       await delay(LLM_TRANSPORT_RETRY_DELAY_MS, config.abortSignal)
       if (!config.abortSignal?.aborted) {
-        result = await callReasoning()
+        result = await callReasoning(context.signal)
       }
     }
 
-    // Latency attribution — one event per reasoning roundtrip (covers the
-    // single transport retry above when it fires). Consumed by the
-    // TaskExecutor [TurnTiming] recorder; with no subscriber this is a no-op.
-    config.events.emit({
-      type: 'llm:completed',
-      data: { iteration, durationMs: Date.now() - callStartedAt },
-      timestamp: new Date(),
-    })
+    // #1043 — a failure that would leave a resumable checkpoint retries this
+    // model step, inside the same heartbeat window, before the loop can settle
+    // the checkpoint. The gate is the recorder's own settle predicate, the
+    // failed attempt was not known to be pre-dispatch, and error recovery would
+    // not answer the failure, so a retry can only happen where a manual Retry
+    // model step would have been offered and where stopping now would not lose
+    // a workflow answer. Each retry uses its jittered schedule wait. The
+    // counter and the 60 s window are per model step and consume no loop
+    // iteration; the window only blocks starting a new retry, never cancels an
+    // attempt already in flight. The transport retry above keeps its task
+    // signal and does not start the clock.
+    const checkpointRecorder = config.modelStepCheckpointRecorder
+    const firstFailureAt = Date.now()
+    const random = config.modelStepRetryRandom ?? Math.random
+    let modelStepRetries = 0
+    let retryCause: Error | undefined
+    const logRetryDeadline = () =>
+      logger.warn(
+        {
+          iteration,
+          attempt: modelStepRetries,
+          deadlineMs: MODEL_STEP_RETRY_DEADLINE_MS,
+          checkpointId: checkpointRecorder?.checkpointId,
+        },
+        'Model step retry deadline reached'
+      )
+    while (
+      result.type === 'error' &&
+      modelStepRetries < (config.modelStepAutoRetries ?? 0) &&
+      checkpointRecorder !== undefined &&
+      checkpointRecorder.canResume(result.error) &&
+      (!(result.error instanceof LlmError) || result.error.providerDispatched !== false) &&
+      !recoveryAnswers({
+        ...recovery,
+        error: result.error,
+        continuingFromToolResults,
+        iteration,
+      }) &&
+      !config.abortSignal?.aborted
+    ) {
+      const delayMs = modelStepRetryDelayMs(modelStepRetries, random)
+      if (Date.now() + delayMs >= firstFailureAt + MODEL_STEP_RETRY_DEADLINE_MS) {
+        logRetryDeadline()
+        break
+      }
+      modelStepRetries++
+      // The first failure of this step is the one that keeps the checkpoint
+      // resumable when the retries end on another retryable error.
+      retryCause ??= result.error
+      logger.warn(
+        {
+          iteration,
+          attempt: modelStepRetries,
+          limit: config.modelStepAutoRetries,
+          delayMs,
+          checkpointId: checkpointRecorder.checkpointId,
+        },
+        'Retrying model step after provider_unavailable'
+      )
+      await delay(delayMs, config.abortSignal)
+      if (config.abortSignal?.aborted) break
+      const retried = await callReasoning(config.abortSignal)
+      if (config.abortSignal?.aborted) break
+      result = retried
+    }
+    if (retryCause !== undefined && result.type === 'error') {
+      checkpointRecorder?.noteModelStepRetry(retryCause, result.error)
+    }
+
     return { result, continuingFromToolResults }
   } finally {
     if (heartbeatInterval) clearInterval(heartbeatInterval)

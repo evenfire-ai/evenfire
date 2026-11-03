@@ -1,0 +1,6 @@
+{
+  "httpStatus": 404,
+  "body": {
+    "code": "model_step_checkpoint_not_found"
+  }
+}

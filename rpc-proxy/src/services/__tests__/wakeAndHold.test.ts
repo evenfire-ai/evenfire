@@ -753,6 +753,54 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(res.body).toMatchObject({ code: 'host_waking' })
   })
 
+  // The Host claims a model-step continuation BEFORE it emits the
+  // admission verdict, so a post-wake attempt that starts with less hold than
+  // the Host's own 10 s verdict wait can be aborted by the proxy after the
+  // claim landed. Such an attempt must not start; the caller gets the
+  // retryable 503 and a re-POST replays the claim.
+  it('skips a route-specific admission attempt when the remaining hold is below its budget', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {})
+    const pending = respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true }),
+      deadlineMs: Date.now() + 2_000,
+      minAttemptBudgetMs: 10_000,
+    })
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    await pending
+
+    expect(attemptUpstream).not.toHaveBeenCalled()
+    // Witness: the hold itself resolved `proceed` (the wake was requested), so
+    // the withheld attempt is the budget decision, not a hold that never ended.
+    expect(requestWake).toHaveBeenCalledTimes(1)
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ code: 'host_waking', hostRef: 'chatllm' })
+  })
+
+  it('starts a route-specific admission attempt when the hold covers its budget', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {
+      res.status(202).json({ status: 'claimed' })
+    })
+    const pending = respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true }),
+      deadlineMs: Date.now() + 30_000,
+      minAttemptBudgetMs: 10_000,
+    })
+
+    await pending
+
+    // Witness: the same option that withholds the 2 s attempt forwards this one.
+    expect(attemptUpstream).toHaveBeenCalledTimes(1)
+    expect(attemptUpstream.mock.calls[0]![0]).toBe(config.upstreamTimeoutMs)
+    expect(res.statusCode).toBe(202)
+  })
+
   it('lets a deliberately short upstream timeout retry below the 1 s floor', async () => {
     const { coordinator, requestWake } = makeCoordinator()
     requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })

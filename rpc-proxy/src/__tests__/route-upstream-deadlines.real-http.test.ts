@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { readFileSync } from 'node:fs'
 import {
   type IncomingMessage,
   type Server,
@@ -459,6 +460,75 @@ describe('R1-M12 /messages keeps the retry-until-deadline loop (it carries a mes
   })
 })
 
+describe('R1-H3 model-step continuation wakes a sleeping or draining Host', () => {
+  const path = '/rpc/hosts/chatllm/sessions/chatllm/c1/model-step-checkpoints/msc-1/continue'
+  const upstreamPath = '/v1/runtime/sessions/chatllm/c1/model-step-checkpoints/msc-1/continue'
+
+  it('wakes after a dropped Host socket and relays the retry result', async () => {
+    let retriedBody = ''
+    await startUpstream((req, res, index) => {
+      if (index === 0) {
+        dropConnection(req)
+        return
+      }
+      req.setEncoding('utf8')
+      req.on('data', chunk => {
+        retriedBody += chunk
+      })
+      req.on('end', () => {
+        res.writeHead(202, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ taskId: 'continuation-1', status: 'claimed' }))
+      })
+    })
+
+    const response = await request(makeApp())
+      .post(path)
+      .set('authorization', 'Bearer tok')
+      .send({ version: 3 })
+      .expect(202)
+
+    expect(response.body).toEqual({ taskId: 'continuation-1', status: 'claimed' })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      `POST ${upstreamPath}`,
+      `POST ${upstreamPath}`,
+    ])
+    expect(JSON.parse(retriedBody)).toEqual({ version: 3 })
+  })
+
+  it('wakes after host_draining and relays the retry result', async () => {
+    await startUpstream((_req, res, index) => {
+      res.writeHead(index === 0 ? 503 : 202, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(index === 0 ? { code: 'host_draining' } : { status: 'claimed' }))
+    })
+
+    const response = await request(makeApp())
+      .post(path)
+      .set('authorization', 'Bearer tok')
+      .send({ version: 3 })
+      .expect(202)
+
+    expect(response.body).toEqual({ status: 'claimed' })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => entry.url)).toEqual([upstreamPath, upstreamPath])
+  })
+
+  it('returns a sanitized failure when the Host is down and cannot be woken', async () => {
+    controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({ kind: 'not-stateless' })
+    await startUpstream(req => dropConnection(req))
+
+    const response = await request(makeApp())
+      .post(path)
+      .set('authorization', 'Bearer tok')
+      .send({ version: 3 })
+      .expect(502)
+
+    expect(response.body).toEqual({ error: 'Upstream host unavailable' })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([`POST ${upstreamPath}`])
+  })
+})
+
 describe('artifact download deadlines (NEW-rpx-1)', () => {
   const DOWNLOAD_PATH = '/rpc/hosts/chatllm/artifacts/report.bin/download'
   const UPSTREAM_DOWNLOAD_PATH = '/v1/runtime/artifacts/report.bin/download'
@@ -748,6 +818,49 @@ describe.each(HELD_ROUTES)('R3-L7 $label pins the hold deadline before host reso
   })
 })
 
+// For the continue route the hold deadline is pinned at arrival too, but the
+// Host admission floor means a hold that the slow resolution leaves below the
+// Host's admission wait starts NO post-wake POST. A deadline pinned after the
+// resolution would leave a full 13 s and start the retry, which never answers
+// here and would end in a 504 once the deadline aborted it.
+describe('R3-L7 continue model step pins the hold deadline before host resolution', () => {
+  it('charges a slow host resolution to the budget and withholds the retry', async () => {
+    config.upstreamTimeoutMs = 30_000
+    // Above the 12 s Host admission floor only until the 1.5 s resolution is
+    // charged to it: 13 s - 1.5 s leaves less than the floor.
+    config.wakeMaxHoldMs = 13_000
+    const upstreamPath = '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue'
+    await startUpstream((req, _res, index) => {
+      if (index === 0) dropConnection(req) // first attempt: host down
+      // the wake retry would never be answered
+    })
+    const { port } = server!.address() as AddressInfo
+    serviceMock.resolveHostConnectionForUser.mockImplementation(async () => {
+      await new Promise(resolve => setTimeout(resolve, 1_500))
+      return { name: 'chatllm', url: `http://127.0.0.1:${port}`, headers: {} }
+    })
+
+    const startedAt = Date.now()
+    const res = await request(makeApp())
+      .post('/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue')
+      .set('authorization', 'Bearer tok')
+      .send({ version: 1 })
+      .expect(503)
+    const elapsed = Date.now() - startedAt
+
+    expect(res.body).toMatchObject({ code: 'host_waking', hostRef: 'chatllm' })
+    // Witness: the slow resolution ran, the first attempt reached the upstream
+    // and the wake was requested; the withheld retry is why only one POST exists.
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => entry.url)).toEqual([upstreamPath])
+    // Pinned at arrival: 1.5 s of a 13 s hold are gone, below the 12 s floor.
+    // Pinned after the resolution it would still have 13 s and would POST again.
+    expect(elapsed).toBeGreaterThanOrEqual(1_400)
+    expect(elapsed).toBeLessThan(5_000)
+  })
+})
+
 // R3-L6: the first attempt of a mutating call has no client-side timeout (an
 // abort after the upstream applied it would answer 504 for a change that took
 // effect), but a client that is gone must still release the upstream socket.
@@ -766,6 +879,13 @@ const DISCONNECT_ROUTES = [
     path: '/rpc/hosts/chatllm/sessions/chatllm/chat-1/name',
     body: { title: 'Renamed chat' },
     upstreamPath: '/v1/runtime/sessions/chatllm/chat-1/name',
+  },
+  {
+    label: 'continue model step',
+    method: 'POST',
+    path: '/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue',
+    body: { version: 1 },
+    upstreamPath: '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue',
   },
 ] as const
 
@@ -928,4 +1048,225 @@ describe('R3-L4 task cancel first attempt has no client-side timeout', () => {
     ])
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
+})
+
+// The Host verdict bound is intentionally tested in wall time over real HTTP.
+// Keep this tied to the production Host constant, rather than a shorter test timer.
+describe('R1-M3 continuation verdict after wake at production defaults', () => {
+  it('relays 202 just below the Host verdict bound after the first connection drops', async () => {
+    const hostSource = readFileSync(
+      new URL('../../../mcp-host/src/agent/modelStepContinuation.ts', import.meta.url),
+      'utf8'
+    )
+    const bound = hostSource.match(/MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS = ([\d_]+)/)
+    expect(bound).toBeTruthy()
+    const hostVerdictTimeoutMs = Number(bound![1]!.replaceAll('_', ''))
+    config.upstreamTimeoutMs = 8_000
+    config.wakeMaxHoldMs = 48_000
+    const upstreamPath = '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue'
+    const claimed = {
+      taskId: 'continued-task',
+      checkpointId: 'msc-1',
+      status: 'claimed',
+      replayed: false,
+    }
+    let replied = false
+    await startUpstream((req, res, index) => {
+      if (index === 0) {
+        dropConnection(req)
+        return
+      }
+      setTimeout(() => {
+        replied = true
+        res.writeHead(202, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(claimed))
+      }, hostVerdictTimeoutMs - 100)
+    })
+
+    const result = await request(makeApp())
+      .post('/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue')
+      .set('authorization', 'Bearer tok')
+      .send({ version: 1 })
+
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => entry.url)).toEqual([upstreamPath, upstreamPath])
+    expect(result.status).toBe(202)
+    expect(result.body).toEqual(claimed)
+    expect(replied).toBe(true)
+    expect(seen[1]!.closedEarly).toBe(false)
+  }, 20_000)
+})
+
+// The continue route's post-wake attempt claims the checkpoint on the Host
+// BEFORE the Host answers, so an attempt that starts with less hold than the
+// Host's admission wait can be aborted by the proxy after the write landed. It
+// is not started: the caller gets the retryable 503 and a re-POST replays.
+describe('R2-L2 post-wake continuation attempt floor', () => {
+  const continuePath =
+    '/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue'
+  const continueUpstreamPath =
+    '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue'
+
+  function continuePost() {
+    return request(makeApp())
+      .post(continuePath)
+      .set('authorization', 'Bearer tok')
+      .send({ version: 1 })
+  }
+
+  /**
+   * The two services share no package, so each side's value is read from its
+   * own production source: the Host's verdict bound and its default durable
+   * store sync timeout, then the proxy's copy of the verdict wait, its
+   * pre-verdict allowance and the floor composed from both.
+   */
+  function readHostVerdictBudgetMs(): number {
+    const source = readFileSync(
+      new URL('../../../mcp-host/src/agent/modelStepContinuation.ts', import.meta.url),
+      'utf8'
+    )
+    const bound = source.match(/MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS = ([\d_]+)/)
+    expect(bound, 'MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS is declared').toBeTruthy()
+    return Number(bound![1]!.replaceAll('_', ''))
+  }
+
+  /**
+   * The proxy's stated basis for the allowance is the Host's DEFAULT durable
+   * store sync timeout, which is what a deployment gets unless it sets the
+   * variable: no chart, compose file or manifest in this repository sets
+   * `CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS`. The checkpoint claim is one such
+   * bounded sync write, so raising this default widens the window the
+   * allowance exists to cover. The field name is part of the match because the
+   * stall-timeout default below it reads the same variable and must not answer
+   * here instead.
+   */
+  function readHostDbPersistSyncTimeoutDefaultMs(): number {
+    const source = readFileSync(new URL('../../../mcp-host/src/config.ts', import.meta.url), 'utf8')
+    const declared = source.match(
+      /dbPersistSyncTimeoutMs:\s*parseInt\(\s*getEnv\('CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS',\s*'(\d+)'\)/
+    )
+    expect(
+      declared,
+      'dbPersistSyncTimeoutMs declares the CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS default'
+    ).toBeTruthy()
+    return Number(declared![1])
+  }
+
+  function readProxyContinuationBudgets(): {
+    verdict: number
+    allowance: number
+    floor: number
+  } {
+    const source = readFileSync(new URL('../routes/rpc.ts', import.meta.url), 'utf8')
+    const verdict = source.match(/HOST_CONTINUATION_VERDICT_BUDGET_MS = ([\d_]+)/)
+    const allowance = source.match(/HOST_CONTINUATION_PRE_VERDICT_ALLOWANCE_MS = ([\d_]+)/)
+    const floor = source.match(
+      /HOST_CONTINUATION_ADMISSION_BUDGET_MS =\s*HOST_CONTINUATION_VERDICT_BUDGET_MS \+ HOST_CONTINUATION_PRE_VERDICT_ALLOWANCE_MS/
+    )
+    expect(verdict, 'HOST_CONTINUATION_VERDICT_BUDGET_MS is declared').toBeTruthy()
+    expect(allowance, 'HOST_CONTINUATION_PRE_VERDICT_ALLOWANCE_MS is declared').toBeTruthy()
+    expect(floor, 'the admission floor is the verdict wait plus the allowance').toBeTruthy()
+    return {
+      verdict: Number(verdict![1]!.replaceAll('_', '')),
+      allowance: Number(allowance![1]!.replaceAll('_', '')),
+      floor: Number(verdict![1]!.replaceAll('_', '')) + Number(allowance![1]!.replaceAll('_', '')),
+    }
+  }
+
+  it("sizes the proxy's admission floor above the Host's verdict bound", () => {
+    // Both services own their copy of the value (they share no package). The
+    // proxy must hold longer than the Host's verdict wait: the Host anchors
+    // that wait at receipt, so the answer still has to travel back, and the
+    // claim can outlive the deadline by one bounded sync write.
+    const hostVerdictTimeoutMs = readHostVerdictBudgetMs()
+    const hostSyncTimeoutDefaultMs = readHostDbPersistSyncTimeoutDefaultMs()
+    const { verdict, allowance, floor } = readProxyContinuationBudgets()
+
+    expect(verdict).toBe(hostVerdictTimeoutMs)
+    expect(allowance).toBeGreaterThan(0)
+    expect(floor).toBeGreaterThan(hostVerdictTimeoutMs)
+    // The allowance's stated basis is that bounded sync write, so it must still
+    // cover the Host default after the default changes: pinning the allowance
+    // to a literal alone would absorb a raise silently.
+    expect(allowance).toBeGreaterThanOrEqual(hostSyncTimeoutDefaultMs)
+  })
+
+  it('starts no POST with 2 s of hold left and answers 503 host_waking', async () => {
+    config.wakeMaxHoldMs = 2_000
+    await startUpstream(req => dropConnection(req))
+
+    const res = await continuePost().expect(503)
+
+    expect(res.body).toMatchObject({ code: 'host_waking', hostRef: 'chatllm' })
+    // Witness: the FIRST attempt reached the upstream and the wake was
+    // requested, so the single POST is that attempt and the retry was withheld.
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      `POST ${continueUpstreamPath}`,
+    ])
+  })
+
+  it('starts exactly one POST with 30 s of hold left and relays its 202', async () => {
+    config.wakeMaxHoldMs = 30_000
+    await startUpstream((req, res, index) => {
+      if (index === 0) {
+        dropConnection(req)
+        return
+      }
+      res.writeHead(202, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({ status: 'claimed', checkpointId: 'msc-1', taskId: 't-1', replayed: false })
+      )
+    })
+
+    const res = await continuePost().expect(202)
+
+    expect(res.body).toMatchObject({ status: 'claimed', taskId: 't-1' })
+    // Witness: the same route that withheld the 2 s attempt forwards this one.
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      `POST ${continueUpstreamPath}`,
+      `POST ${continueUpstreamPath}`,
+    ])
+  })
+
+  it('relays the 202 of an attempt started at the floor with a Host that overshoots', async () => {
+    // Terra's boundary (WP-H13): the post-wake attempt starts with only the
+    // floor + 50 ms of hold left, and the Host spends 100 ms of pre-verdict
+    // work beyond its whole verdict wait. Without the pre-verdict allowance in
+    // the floor, this attempt is aborted after the claim landed and the caller
+    // never sees the 202; the allowance is what makes the relay possible.
+    const hostVerdictTimeoutMs = readHostVerdictBudgetMs()
+    const { floor } = readProxyContinuationBudgets()
+    config.wakeMaxHoldMs = floor + 50
+    const claimed = {
+      taskId: 'continued-task',
+      checkpointId: 'msc-1',
+      status: 'claimed',
+      replayed: false,
+    }
+    let answered = false
+    await startUpstream((req, res, index) => {
+      if (index === 0) {
+        dropConnection(req)
+        return
+      }
+      setTimeout(() => {
+        answered = true
+        res.writeHead(202, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(claimed))
+      }, hostVerdictTimeoutMs + 100)
+    })
+
+    const res = await continuePost().expect(202)
+
+    expect(res.body).toEqual(claimed)
+    // Witness: the second attempt is the one that answered, and in full — the
+    // proxy neither withheld it nor cut its answer off.
+    expect(answered).toBe(true)
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      `POST ${continueUpstreamPath}`,
+      `POST ${continueUpstreamPath}`,
+    ])
+    expect(seen.map(entry => entry.closedEarly)).toEqual([true, false])
+  }, 25_000)
 })

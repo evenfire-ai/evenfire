@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 E2E_SCRIPT="${ROOT}/scripts/e2e/e2e-np08-hcc-authorization.sh"
 RUNTIME_ACCESS_MODULE="${ROOT}/scripts/e2e/_lib/np08-runtime-access.mjs"
 RUNTIME_ACCESS_TEST="${ROOT}/scripts/tests/test-np08-runtime-access.mjs"
+# Current test count of the node sub-suite: `node --test` exits 0 on a file with
+# no tests, so the runner's exit code alone is never success.
+RUNTIME_ACCESS_MIN_TESTS=11
 T2_SCRIPT="${ROOT}/scripts/minikube/t2.sh"
 MAKEFILE="${ROOT}/Makefile"
 
@@ -12,6 +15,8 @@ MAKEFILE="${ROOT}/Makefile"
 source "${ROOT}/scripts/e2e/_lib/np08-cleanup.sh"
 # shellcheck source=scripts/e2e/_lib/np08-provenance.sh
 source "${ROOT}/scripts/e2e/_lib/np08-provenance.sh"
+# shellcheck source=scripts/e2e/_lib/np08-rollout.sh
+source "${ROOT}/scripts/e2e/_lib/np08-rollout.sh"
 
 # Consumed dynamically by the sourced cleanup helper.
 # shellcheck disable=SC2034
@@ -227,5 +232,294 @@ fi
 pass 'CI validates NP-08 wiring statically without cluster writes'
 
 node --check "${RUNTIME_ACCESS_MODULE}"
-node --test "${RUNTIME_ACCESS_TEST}"
-pass 'NP-08 access selection and retry unit tests pass'
+if ! runtime_access_tap="$(node --test --test-reporter=tap "${RUNTIME_ACCESS_TEST}" 2>&1)"; then
+  printf '%s\n' "${runtime_access_tap}" >&2
+  fail 'the NP-08 access selection and retry unit tests failed'
+fi
+# `skipped` and `todo` are counted in `tests` but not in `pass`, so requiring
+# `pass == tests` also refuses a suite that silently stopped running its cases.
+runtime_access_tests="$(printf '%s\n' "${runtime_access_tap}" |
+  awk '/^# tests / { count = $3 } END { print count + 0 }')"
+runtime_access_pass="$(printf '%s\n' "${runtime_access_tap}" |
+  awk '/^# pass / { count = $3 } END { print count + 0 }')"
+[[ "${runtime_access_tests}" -ge "${RUNTIME_ACCESS_MIN_TESTS}" ]] ||
+  fail "the NP-08 node sub-suite ran ${runtime_access_tests} tests, below the ${RUNTIME_ACCESS_MIN_TESTS} it must run"
+[[ "${runtime_access_pass}" -eq "${runtime_access_tests}" ]] ||
+  fail "the NP-08 node sub-suite passed ${runtime_access_pass} of ${runtime_access_tests} tests"
+pass "NP-08 access selection and retry unit tests pass (${runtime_access_pass}/${runtime_access_tests})"
+
+# --- rollout settle gate (token-rotation rollout killed the journey exec) ---
+ROLLOUT_STATE_DIR="$(mktemp -d)"
+trap 'rm -rf "${ROLLOUT_STATE_DIR}"' EXIT
+
+deploy_item() {
+  local generation="$1" observed="$2" ready="$3" updated="$4" revision="$5"
+  printf '%s' "{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"metadata\":{\"name\":\"chatllm\",\"uid\":\"uid-chatllm\",\"generation\":${generation}},\"status\":{\"observedGeneration\":${observed},\"readyReplicas\":${ready},\"updatedReplicas\":${updated}},\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"clerum.io/runtime-token-revision\":\"${revision}\"}}}}}"
+}
+
+replicaset_item() {
+  local name="$1" owner="$2" replicas="$3"
+  printf '%s' "{\"apiVersion\":\"apps/v1\",\"kind\":\"ReplicaSet\",\"metadata\":{\"name\":\"${name}\",\"ownerReferences\":[{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"name\":\"${owner}\",\"uid\":\"uid-${owner}\"}]},\"spec\":{\"replicas\":${replicas}}}"
+}
+
+context_policy_item() {
+  local context_id="$1" server_name="$2"
+  printf '%s' "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"NetworkPolicy\",\"metadata\":{\"name\":\"ctx-${context_id}-${server_name}-egress\",\"namespace\":\"mcp-host\",\"labels\":{\"clerum.io/managed-by\":\"host-context-controller\",\"clerum.io/policy-type\":\"context-allow\",\"clerum.io/context\":\"${context_id}\",\"clerum.io/mcpserver\":\"${server_name}\"}}}"
+}
+
+emit_list() {
+  local item out=''
+  for item in "$@"; do
+    out="${out}${out:+,}${item}"
+  done
+  printf '{"apiVersion":"v1","kind":"List","items":[%s]}' "${out}"
+}
+
+rollout_index() {
+  local name="$1" index=0
+  [[ -f "${ROLLOUT_STATE_DIR}/${name}" ]] && index="$(cat "${ROLLOUT_STATE_DIR}/${name}")"
+  index=$((index + 1))
+  printf '%s' "${index}" >"${ROLLOUT_STATE_DIR}/${name}"
+  printf '%s' "${index}"
+}
+
+kctl() {
+  local args="$*" clock
+  printf '%s\n' "${args}" >>"${ROLLOUT_STATE_DIR}/calls"
+  # One logical clock for every read, so a scenario can model "HCC records the
+  # change, then its Host reconcile rolls the template".
+  clock="$(rollout_index clock)"
+  case "${args}" in
+    *'get networkpolicy'*)
+      case "${ROLLOUT_SCENARIO:-settle}" in
+        record-present)
+          emit_list "$(context_policy_item 'context1' 'server-a')"
+          ;;
+        record-error)
+          printf '%s\n' 'simulated networkpolicy read error' >&2
+          return 42
+          ;;
+        hcc-reaction)
+          # HCC records the Context change on the third read; the deployment
+          # template rolls one read later.
+          if [[ "${clock}" -ge 3 ]]; then
+            emit_list "$(context_policy_item 'context1' 'server-a')"
+          else
+            emit_list
+          fi
+          ;;
+        *)
+          emit_list
+          ;;
+      esac
+      ;;
+    *'get deploy,rs'*)
+      local index
+      index="$(rollout_index deploy-index)"
+      case "${ROLLOUT_SCENARIO:-settle}" in
+        settle)
+          # rolling, revision A complete, revision B (rotation), then B stable
+          case "${index}" in
+            1) emit_list "$(deploy_item 5 4 1 0 'rev-a')" "$(replicaset_item 'chatllm-5f' 'chatllm' 1)" ;;
+            2) emit_list "$(deploy_item 5 5 1 1 'rev-a')" "$(replicaset_item 'chatllm-5f' 'chatllm' 1)" ;;
+            *) emit_list "$(deploy_item 6 6 1 1 'rev-b')" "$(replicaset_item 'chatllm-6f' 'chatllm' 1)" ;;
+          esac
+          ;;
+        foreign-rs)
+          # A second Deployment in the same namespace owns a ReplicaSet with a
+          # replica. The gate under test owns only chatllm.
+          emit_list \
+            "$(deploy_item 6 6 1 1 'rev-b')" \
+            "$(replicaset_item 'chatllm-6f' 'chatllm' 1)" \
+            "$(replicaset_item 'workflow-recipes-7c' 'workflow-recipes' 1)"
+          ;;
+        two-owned-rs)
+          # Two ReplicaSets of the SAME Deployment are still rolling: the gate
+          # must not treat that as settled.
+          emit_list \
+            "$(deploy_item 6 6 1 1 'rev-b')" \
+            "$(replicaset_item 'chatllm-5f' 'chatllm' 1)" \
+            "$(replicaset_item 'chatllm-6f' 'chatllm' 1)"
+          ;;
+        hcc-reaction)
+          if [[ "${clock}" -ge 4 ]]; then
+            emit_list "$(deploy_item 7 7 1 1 'rev-c')" "$(replicaset_item 'chatllm-next' 'chatllm' 1)"
+          else
+            emit_list "$(deploy_item 6 6 1 1 'rev-b')" "$(replicaset_item 'chatllm-6f' 'chatllm' 1)"
+          fi
+          ;;
+        unstable)
+          emit_list "$(deploy_item "${index}" "${index}" 1 1 "rev-${index}")" \
+            "$(replicaset_item 'chatllm-current' 'chatllm' 1)"
+          ;;
+        never-ready)
+          emit_list "$(deploy_item 5 5 0 1 'rev-a')" "$(replicaset_item 'chatllm-current' 'chatllm' 1)"
+          ;;
+        error)
+          return 42
+          ;;
+      esac
+      ;;
+    *)
+      return 99
+      ;;
+  esac
+}
+
+ROLLOUT_SCENARIO='settle' \
+  np08_wait_rollout_settled 'mcp-host' 'chatllm' 30 3 0 ||
+  fail 'rollout settle rejected a rollout that completes and then stays stable'
+[[ "$(cat "${ROLLOUT_STATE_DIR}/deploy-index")" == '5' ]] ||
+  fail 'rollout settle did not wait for three identical complete snapshots'
+pass 'rollout settle waits out a token-rotation rollout and then requires stability'
+
+# N8: the deployment and its ReplicaSets are read by ONE combined request, and
+# the ReplicaSets are scoped to the Deployment's ownerReference (R3-L6). The
+# stub answers only the combined form, so a split read fails loud here.
+if grep -Fq 'get deployment ' "${ROLLOUT_STATE_DIR}/calls" ||
+  grep -Fq 'get replicaset' "${ROLLOUT_STATE_DIR}/calls" ||
+  ! grep -Fq 'get deploy,rs -o json' "${ROLLOUT_STATE_DIR}/calls"; then
+  fail 'rollout settle did not read the deployment and its ReplicaSets in one combined request'
+fi
+pass 'rollout settle reads the deployment and its ReplicaSets in one request'
+
+printf '0' >"${ROLLOUT_STATE_DIR}/deploy-index"
+ROLLOUT_SCENARIO='foreign-rs' \
+  np08_wait_rollout_settled 'mcp-host' 'chatllm' 30 2 0 ||
+  fail 'a ReplicaSet owned by another Deployment in the same namespace blocked the gate (R3-L6)'
+[[ "${NP08_ROLLOUT_CERTIFIED_SNAPSHOT%%$'\t'*}" == '6' ]] ||
+  fail 'the gate did not certify the settled generation of the owned Deployment'
+pass 'rollout settle ignores a ReplicaSet owned by another Deployment (R3-L6)'
+
+printf '0' >"${ROLLOUT_STATE_DIR}/deploy-index"
+if ROLLOUT_SCENARIO='two-owned-rs' np08_wait_rollout_settled 'mcp-host' 'chatllm' 1 2 0 >/dev/null 2>&1; then
+  fail 'rollout settle accepted two ReplicaSets of the same Deployment as settled'
+fi
+pass 'rollout settle still requires exactly one ReplicaSet of the owned Deployment'
+
+printf '0' >"${ROLLOUT_STATE_DIR}/deploy-index"
+if ROLLOUT_SCENARIO='unstable' np08_wait_rollout_settled 'mcp-host' 'chatllm' 1 3 0 >/dev/null 2>&1; then
+  fail 'rollout settle accepted a deployment whose token revision keeps changing'
+fi
+pass 'rollout settle fails closed while the token revision keeps changing'
+
+printf '0' >"${ROLLOUT_STATE_DIR}/deploy-index"
+if ROLLOUT_SCENARIO='never-ready' np08_wait_rollout_settled 'mcp-host' 'chatllm' 0 3 0 >/dev/null 2>&1; then
+  fail 'rollout settle accepted a deployment that never becomes ready'
+fi
+pass 'rollout settle fails closed while the deployment is not ready'
+
+printf '0' >"${ROLLOUT_STATE_DIR}/deploy-index"
+if ROLLOUT_SCENARIO='error' np08_wait_rollout_settled 'mcp-host' 'chatllm' 0 3 0 >/dev/null 2>&1; then
+  fail 'rollout settle accepted a failed deployment read'
+fi
+pass 'rollout settle fails closed on a deployment read error'
+
+# --- HCC's recorded observation of the Context change (R3-L7) ---
+# The fixture Context patch appends two McpServer names. HCC records the change
+# as one owned `context-allow` NetworkPolicy per (Context, McpServer) pair in
+# the Host namespace, so its presence is the field the gate can read.
+printf '0' >"${ROLLOUT_STATE_DIR}/clock"
+: >"${ROLLOUT_STATE_DIR}/calls"
+if ROLLOUT_SCENARIO='record-absent' \
+  np08_hcc_context_recorded 'mcp-host' 'context1' 'server-a'; then
+  fail 'an absent HCC record was treated as an observed Context change'
+fi
+grep -Fq 'get networkpolicy' "${ROLLOUT_STATE_DIR}/calls" ||
+  fail 'the HCC observation gate did not read the owned NetworkPolicies (liveness)'
+grep -Fq 'clerum.io/managed-by=host-context-controller' "${ROLLOUT_STATE_DIR}/calls" ||
+  fail 'the HCC observation gate did not require HCC ownership of the record'
+grep -Fq 'clerum.io/policy-type=context-allow' "${ROLLOUT_STATE_DIR}/calls" ||
+  fail 'the HCC observation gate did not require the context-allow policy type'
+grep -Fq 'clerum.io/context=context1' "${ROLLOUT_STATE_DIR}/calls" ||
+  fail 'the HCC observation gate did not scope the record to the Context'
+grep -Fq 'clerum.io/mcpserver=server-a' "${ROLLOUT_STATE_DIR}/calls" ||
+  fail 'the HCC observation gate did not scope the record to the appended McpServer'
+pass 'the HCC observation gate reads the owned, context-scoped NetworkPolicy record'
+
+ROLLOUT_SCENARIO='record-present' \
+  np08_hcc_context_recorded 'mcp-host' 'context1' 'server-a' ||
+  fail 'a present HCC record was not accepted as an observed Context change'
+pass 'the HCC observation gate accepts the owned Context record'
+
+if ROLLOUT_SCENARIO='record-error' \
+  np08_hcc_context_recorded 'mcp-host' 'context1' 'server-a'; then
+  fail 'a failed NetworkPolicy read was treated as an observed Context change'
+fi
+pass 'the HCC observation gate fails closed on a read error'
+
+# The stub answers every `get networkpolicy` with an empty list, so under the
+# default scenario this case would pass at the empty-list check even with the
+# selector guards deleted. Run it against a present record and require that the
+# rejected values are refused before any NetworkPolicy read happens.
+networkpolicy_read_count() {
+  awk '/get networkpolicy/ { n++ } END { print n + 0 }' "${ROLLOUT_STATE_DIR}/calls"
+}
+
+printf '0' >"${ROLLOUT_STATE_DIR}/clock"
+: >"${ROLLOUT_STATE_DIR}/calls"
+if ! ROLLOUT_SCENARIO='record-present' \
+  np08_hcc_context_recorded 'mcp-host' 'context1' 'server-a'; then
+  fail 'the unselectable-label case could not observe a present record (liveness)'
+fi
+present_reads="$(networkpolicy_read_count)"
+[[ "${present_reads}" -eq 1 ]] ||
+  fail "the valid HCC observation issued ${present_reads} NetworkPolicy reads, expected 1"
+pass 'the HCC observation gate reads a present Context record (liveness)'
+
+if ROLLOUT_SCENARIO='record-present' \
+  np08_hcc_context_recorded 'mcp-host' 'context1,other' 'server-a'; then
+  fail 'the HCC observation gate accepted an unselectable Context label value'
+fi
+if ROLLOUT_SCENARIO='record-present' \
+  np08_hcc_context_recorded 'mcp-host' 'context1' 'server-a,other'; then
+  fail 'the HCC observation gate accepted an unselectable McpServer label value'
+fi
+refused_reads="$(networkpolicy_read_count)"
+[[ "${refused_reads}" -eq "${present_reads}" ]] ||
+  fail "an unselectable label value was still selected on a NetworkPolicy read (${present_reads} -> ${refused_reads})"
+pass 'the HCC observation gate refuses an unselectable label value without a read'
+
+# Ported G4-deepseek M4: the pre-patch chatllm deployment is already complete,
+# HCC records the Context change on the third read, and its Host reconcile rolls
+# the template one read later. The composite gate (record, then settle) must
+# certify the post-reaction snapshot; a settle-only gate certifies generation 6
+# and the following read already sees generation 7 (the journey exec would start
+# in the outgoing pod).
+printf '0' >"${ROLLOUT_STATE_DIR}/clock"
+printf '0' >"${ROLLOUT_STATE_DIR}/deploy-index"
+ROLLOUT_SCENARIO='hcc-reaction' \
+  np08_wait_hcc_context_recorded 'mcp-host' 'context1' 'server-a' 30 0 ||
+  fail 'the composite gate did not wait for the HCC record of the Context change'
+ROLLOUT_SCENARIO='hcc-reaction' \
+  np08_wait_rollout_settled 'mcp-host' 'chatllm' 30 3 0 ||
+  fail 'the composite gate did not settle after the HCC record'
+certified_generation="${NP08_ROLLOUT_CERTIFIED_SNAPSHOT%%$'\t'*}"
+post_snapshot="$(ROLLOUT_SCENARIO='hcc-reaction' np08_rollout_snapshot 'mcp-host' 'chatllm')" ||
+  fail 'the composite gate could not re-read the deployment after certifying it'
+[[ "${post_snapshot%%$'\t'*}" == '7' ]] ||
+  fail 'the rollout timeline did not roll after the HCC record (vacuity witness)'
+[[ "${certified_generation}" == "${post_snapshot%%$'\t'*}" ]] ||
+  fail 'the gate certified a snapshot that changed before the journey exec (R3-L7)'
+[[ "${certified_generation}" == '7' ]] ||
+  fail 'the gate certified the pre-reaction generation as settled (R3-L7)'
+pass 'the composite gate certifies only the post-reaction snapshot (R3-L7)'
+
+if ! grep -Fq 'np08_wait_rollout_settled' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'np08_wait_hcc_context_recorded' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'np08_rollout_snapshot' "${E2E_SCRIPT}" ||
+  ! grep -Fq '_lib/np08-rollout.sh' "${E2E_SCRIPT}"; then
+  fail 'the deployed E2E is not wired to the HCC observation and rollout settle gates'
+fi
+patch_line="$(grep -n -m1 'fixture_context_patched=1' "${E2E_SCRIPT}" | cut -d: -f1)"
+observe_line="$(grep -n -m1 'np08_wait_hcc_context_recorded' "${E2E_SCRIPT}" | cut -d: -f1)"
+settle_line="$(grep -n -m1 'np08_wait_rollout_settled' "${E2E_SCRIPT}" | cut -d: -f1)"
+recheck_line="$(grep -n -m1 'np08_rollout_snapshot' "${E2E_SCRIPT}" | cut -d: -f1)"
+journey_line="$(grep -n -m1 'NP08_RUNTIME_ACTION=journey' "${E2E_SCRIPT}" | cut -d: -f1)"
+if [[ -z "${patch_line}" || -z "${observe_line}" || -z "${settle_line}" ||
+  -z "${recheck_line}" || -z "${journey_line}" ||
+  "${patch_line}" -ge "${observe_line}" || "${observe_line}" -ge "${settle_line}" ||
+  "${settle_line}" -ge "${recheck_line}" || "${recheck_line}" -ge "${journey_line}" ]]; then
+  fail 'the journey exec does not wait for the HCC record, the settle and a stable re-read after the fixture patch'
+fi
+pass 'the journey exec waits for HCC to record the change, the rollout, and a stable re-read'
