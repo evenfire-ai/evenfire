@@ -60,13 +60,15 @@ describe('snippet runner startup Node permission check', () => {
     expect(spawnSync).toHaveBeenCalledOnce()
     const [bin, args] = spawnSync.mock.calls[0] as unknown as [string, string[]]
     expect(bin).toBe(process.execPath)
-    expect(args).toEqual(
-      expect.arrayContaining([
-        '--permission',
-        `--allow-fs-read=${outputDir}`,
-        `--allow-fs-write=${outputDir}`,
-      ])
-    )
+    const root = path.resolve(__dirname, '..', '..', '..')
+    expect(args).toEqual([
+      '--permission',
+      `--allow-fs-read=${path.join(root, 'src')}`,
+      `--allow-fs-read=${path.join(root, 'node_modules')}`,
+      `--allow-fs-write=${outputDir}`,
+      '-e',
+      'process.exit(process.permission ? 0 : 3)',
+    ])
   })
 
   it('starts on the pinned Node runtime with the real permission check', async () => {

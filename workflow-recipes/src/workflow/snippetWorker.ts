@@ -839,12 +839,20 @@ async function writeArtifact(
   const outputDir = payload.outputDir
   const target = path.join(outputDir, name)
   await fs.mkdir(outputDir, { recursive: true })
-  await fs.writeFile(target, redactString(body, payload.env), 'utf8')
-  const stat = await fs.stat(target)
+  // The worker can write the output directory but not read it (buildPermissionArgs in
+  // snippetRuntime.ts), so the size comes from the open handle instead of a path stat.
+  const handle = await fs.open(target, 'w')
+  let sizeBytes: number
+  try {
+    await handle.writeFile(redactString(body, payload.env), 'utf8')
+    sizeBytes = (await handle.stat()).size
+  } finally {
+    await handle.close()
+  }
   return {
     name,
     format,
-    sizeBytes: stat.size,
+    sizeBytes,
     path: `/output/${name}`,
     createdAt: new Date().toISOString(),
   }

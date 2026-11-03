@@ -3,7 +3,7 @@
 // Forked by tests/unit/workflow/snippetRuntime.test.ts with buildPermissionArgs(outputDir)
 // as execArgv. It does what a snippet worker fork does under the permission model:
 // loads the worker's external modules (src/workflow/snippetWorker.ts imports), runs the
-// writeArtifact fs sequence (mkdir, writeFile, stat), opens a TCP connection as the
+// writeArtifact fs sequence (mkdir, open, write, stat of the handle), opens a TCP connection as the
 // MongoDB, PostgreSQL and MCP clients do, and reads one path outside every grant.
 // Each step reports its own result so a failure names the step that broke.
 const fs = require('node:fs/promises')
@@ -57,8 +57,13 @@ async function main() {
   try {
     const target = path.join(outputDir, 'probe.txt')
     await fs.mkdir(outputDir, { recursive: true })
-    await fs.writeFile(target, 'ok', 'utf8')
-    artifact = { sizeBytes: (await fs.stat(target)).size }
+    const handle = await fs.open(target, 'w')
+    try {
+      await handle.writeFile('ok', 'utf8')
+      artifact = { sizeBytes: (await handle.stat()).size }
+    } finally {
+      await handle.close()
+    }
   } catch (error) {
     artifact = { error: errorCode(error) }
   }

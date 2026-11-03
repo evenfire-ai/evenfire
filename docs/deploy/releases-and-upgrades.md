@@ -240,8 +240,10 @@ Read the notes for every release you skip over, not only the target release.
 The workflow snippet runner starts each snippet worker under the Node permission
 model with the `--permission` flag. Node 24 accepts only this flag name and
 rejects the earlier `--experimental-permission`. Each path has its own grant: a
-worker can read the runner's `dist/` and `node_modules/` directories and the
-workflow output directory, and can write only to the output directory.
+worker can read the runner's `dist/` and `node_modules/` directories, and can
+write to the workflow output directory but not read it. Other workloads share
+the output volume, and Node follows a symlink inside a granted directory, so a
+read grant would let a snippet read the target of a link placed there.
 
 At startup the runner checks that its Node runtime provides the permission
 model. If it does not, the runner exits with an error and its Pod does not

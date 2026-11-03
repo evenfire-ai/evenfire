@@ -162,7 +162,6 @@ describe('snippet runtime Node permission model', () => {
       '--permission',
       `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'src')}`,
       `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'node_modules')}`,
-      '--allow-fs-read=/out',
       '--allow-fs-write=/out',
     ])
   })
@@ -206,7 +205,6 @@ describe('snippet runtime Node permission model', () => {
       '--permission',
       `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'src')}`,
       `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'node_modules')}`,
-      `--allow-fs-read=${outputDir}`,
       `--allow-fs-write=${outputDir}`,
     ])
   })

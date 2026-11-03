@@ -89,6 +89,9 @@ function filterSnippetWorkerEnv(env: NodeJS.ProcessEnv): Record<string, string> 
 
 // Node permission model grants for the forked snippet worker. Each path takes its own
 // flag: a comma-separated value is one literal path.
+// - outputDir is write-only. Other workloads share the output volume and can place
+//   symlinks in it; Node follows a symlink inside a granted directory, so a read grant
+//   would let a snippet read whatever such a link points at.
 // - Node adds the implicit "/*" to a directory grant only when the directory exists at
 //   process start. The runner Pod mounts outputDir when the recipe has an output volume;
 //   without one the path does not exist, the worker still starts, and artifact writes fail.
@@ -104,7 +107,6 @@ export function buildPermissionArgs(outputDir: string): string[] {
     '--permission',
     `--allow-fs-read=${distRoot}`,
     `--allow-fs-read=${nodeModules}`,
-    `--allow-fs-read=${outputDir}`,
     `--allow-fs-write=${outputDir}`,
   ]
 }
