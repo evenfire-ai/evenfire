@@ -223,6 +223,69 @@ describe('r4 A6 real useAppController host-verification acceptance', () => {
     expect(app.result.current.isHostAccessBlocked('agent-x')).toBe(false)
   })
 
+  it('does not let a verified HeaderActions target overwrite a newer Sidebar activation', async () => {
+    const { clerum, app } = await mounted()
+    publishResource(app)
+    await holdHost(clerum, app)
+    const verification = deferred<SessionsListResult>()
+    clerum.rpc.listSessions.mockImplementation(async (_host, _team, query) =>
+      query?.limit === 1 ? verification.promise : sessions([])
+    )
+    clerum.rpc.loadSessionMessages.mockImplementation(async (_agent, _team, chatId) =>
+      serverSessionMessages(chatId === 'chat-y' ? 'agent-y' : 'agent-x', chatId)
+    )
+
+    let headerOpen: Promise<void> | undefined
+    act(() => {
+      headerOpen = app.result.current.handleOpenNotification(
+        {
+          id: 'notif-held-x',
+          kind: 'assistant_reply',
+          agentName: 'agent-x',
+          chatId: 'chat-x',
+          teamId: 'team-1',
+          text: 'Open held conversation',
+          timestamp: 1,
+          read: false,
+        } as Parameters<typeof app.result.current.handleOpenNotification>[0],
+        { keepNavItem: true }
+      )
+    })
+    await waitFor(() =>
+      expect(clerum.rpc.listSessions).toHaveBeenCalledWith('agent-x', undefined, {
+        agent: 'agent-x',
+        limit: 1,
+      })
+    )
+
+    act(() =>
+      app.result.current.handleSelectChatAgent('agent-y', {
+        chatId: 'chat-y',
+        selectLatest: false,
+        keepNavItem: true,
+        activationOrigin: 'sidebar-session',
+      })
+    )
+    await waitFor(() => expect(app.result.current.activeChatId).toBe('chat-y'))
+
+    await act(async () => {
+      verification.resolve(sessions([{ agent: 'agent-x', chatId: 'chat-x' }]))
+      await headerOpen
+    })
+
+    expect({
+      selectedAgent: app.result.current.selectedAgent,
+      activeChatId: app.result.current.activeChatId,
+      receiptAgent: app.result.current.persistedConversationPrefillReceipt?.agentRef,
+      receiptChat: app.result.current.persistedConversationPrefillReceipt?.chatId,
+    }).toEqual({
+      selectedAgent: 'agent-y',
+      activeChatId: 'chat-y',
+      receiptAgent: 'agent-y',
+      receiptChat: 'chat-y',
+    })
+  })
+
   it('retires a suspended receipt when opening an Agent workspace changes the target', async () => {
     const { clerum, app } = await mounted()
     publishResource(app)

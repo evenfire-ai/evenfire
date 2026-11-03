@@ -1651,7 +1651,9 @@ export function useAppController() {
               options.activationOrigin
             )
           : null
-      const activationIntentEpoch = activationReceipt
+      const hasQualifyingActivation = Boolean(targetChatId && options.activationOrigin)
+      const activationIntentSequence = qualifyingActivationSequenceRef.current
+      const activationIntentEpoch = hasQualifyingActivation
         ? ++navigationIntentEpochRef.current
         : navigationIntentEpochRef.current
       const activationIsCurrent = () =>
@@ -1673,6 +1675,13 @@ export function useAppController() {
           updatePrefillReceipt(activationReceipt.id, 'terminally-cancelled')
         }
       }
+      const activationWasSuperseded = () =>
+        Boolean(
+          hasQualifyingActivation &&
+          (qualifyingActivationSequenceRef.current !== activationIntentSequence ||
+            navigationIntentEpochRef.current !== activationIntentEpoch ||
+            (activationReceipt && prefillReceiptRef.current?.id !== activationReceipt.id))
+        )
       const navigationIntentSequence = nav.beginUserNavigationIntent()
       // minispec 04 approach C: when the app embed is live (App requests
       // `keepNavItem`) and no team switch is needed, surface the conversation IN
@@ -1700,6 +1709,10 @@ export function useAppController() {
             cancelActivation()
             return
           }
+        }
+        if (activationWasSuperseded()) {
+          cancelActivation()
+          return
         }
         if (stayInDrawer) {
           // handleSelectChatAgent(keepNavItem) sets the active chat without
