@@ -8,7 +8,7 @@ import {
   reorderWorkspaceTab,
 } from '@lib/workspaceTabs'
 import { WorkspaceTabStrip } from '.'
-import { installTabStripLayout } from './__fixtures__/tabStripLayout'
+import { installSyntheticTabStripLayout } from './__fixtures__/tabStripLayout'
 
 const observers: ElementResizeObserver[] = []
 class ElementResizeObserver {
@@ -54,8 +54,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('WorkspaceTabStrip element measurement', () => {
-  it('observes the scroller and list and responds to element widths without window resize', () => {
+describe('WorkspaceTabStrip synthetic geometry and observer ownership', () => {
+  it('observes the scroller/list and responds to assigned widths without window resize', () => {
     const onSelect = vi.fn()
     const view = render(
       <WorkspaceTabStrip
@@ -68,7 +68,7 @@ describe('WorkspaceTabStrip element measurement', () => {
     )
     const scroller = view.container.querySelector('.chat-view-tabs__scroller') as HTMLElement
     const list = scroller.firstElementChild!
-    const layout = installTabStripLayout(view.container, [96, 140, 120], 248)
+    const layout = installSyntheticTabStripLayout(view.container, [96, 140, 120], 248)
     const observer = observers.at(-1)!
     expect([...observer.targets]).toEqual([scroller, list])
     const resizeListener = vi.fn()
@@ -101,12 +101,12 @@ describe('WorkspaceTabStrip element measurement', () => {
     }
   })
 
-  it('refreshes measured boundaries after store-produced insertion, reorder and removal', () => {
+  it('refreshes synthetic boundaries after store-produced insertion, reorder and removal', () => {
     let state = makeTabs(2)
     const props = { activeTabId: null, onSelect: vi.fn(), onClose: vi.fn(), onReorder: vi.fn() }
     const view = render(<WorkspaceTabStrip {...props} tabs={state.tabs} />)
     const scroller = view.container.querySelector('.chat-view-tabs__scroller') as HTMLElement
-    const layout = installTabStripLayout(view.container, [96, 140], 248)
+    const layout = installSyntheticTabStripLayout(view.container, [96, 140], 248)
     const restoreRects = layout.trackFutureTabRects()
     try {
       observers.at(-1)!.notify(scroller)
@@ -120,7 +120,7 @@ describe('WorkspaceTabStrip element measurement', () => {
       expect([...observers.at(-1)!.targets]).toEqual([scroller, scroller.firstElementChild])
       observers.at(-1)!.notify(scroller.firstElementChild!)
       fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs right' }))
-      expect(layout.scrollLeft()).toBe(44)
+      expect(layout.scrollLeft()).toBe(42)
       state = reorderWorkspaceTab(state, 'inserted', 0)
       layout.setWidths([120, 96, 140])
       view.rerender(<WorkspaceTabStrip {...props} tabs={state.tabs} />)
@@ -133,7 +133,7 @@ describe('WorkspaceTabStrip element measurement', () => {
       layout.setScrollLeft(0)
       observers.at(-1)!.notify(scroller.firstElementChild!)
       fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs right' }))
-      expect(layout.scrollLeft()).toBe(24)
+      expect(layout.scrollLeft()).toBe(22)
       state = closeWorkspaceTab(closeWorkspaceTab(state, 'observer-0'), 'observer-1')
       layout.setWidths([120])
       view.rerender(<WorkspaceTabStrip {...props} tabs={state.tabs} />)

@@ -1,32 +1,44 @@
+/**
+ * Synthetic jsdom geometry only: widths are assigned rectangles, NOT CSS flex bases.
+ * No browser flex layout, min/max clamp, intrinsic sizing, native scroll, or CSS parsing
+ * is simulated. In particular, 60/95px widths are deliberately impossible below the
+ * production 96px minimum. Production geometry is accepted separately in Chromium.
+ * Height 28, zero viewports and omitted active IDs are defensive hook-boundary inputs;
+ * omitted IDs do not represent a valid selected-tab response from the real store.
+ */
 import { vi } from 'vitest'
 import { fireEvent } from '@testing-library/react'
+
+// Gap/control dimensions agree with production tokens/styles; the browser contract
+// checks this agreement. The synthetic height is intentionally not a CSS claim.
+export const SYNTHETIC_TAB_STRIP_METRICS = { gap: 6, controlWidth: 24, height: 28 } as const
 
 const makeRect = (left: number, width: number): DOMRect =>
   ({
     left,
     right: left + width,
     top: 0,
-    bottom: 28,
+    bottom: SYNTHETIC_TAB_STRIP_METRICS.height,
     width,
-    height: 28,
+    height: SYNTHETIC_TAB_STRIP_METRICS.height,
     x: left,
     y: 0,
     toJSON: () => ({}),
   }) as DOMRect
 
-export const installTabStripLayout = (
+export const installSyntheticTabStripLayout = (
   container: HTMLElement,
-  initialWidths: number[],
+  initialAssignedWidths: number[],
   initialStripWidth: number
 ) => {
   const scroller = container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement
   const strip = container.querySelector('.chat-view-tabs') as HTMLDivElement
   const list = scroller.firstElementChild as HTMLDivElement
-  let widths = initialWidths
+  let widths = initialAssignedWidths
   let stripWidth = initialStripWidth
   let scrollLeft = 0
-  const gap = 8
-  const scrollButtonWidth = 24 // IconButton size="xs" in the live Common styles.
+  const gap = SYNTHETIC_TAB_STRIP_METRICS.gap
+  const scrollButtonWidth = SYNTHETIC_TAB_STRIP_METRICS.controlWidth
   const getScrollButtonCount = () =>
     container.querySelectorAll('.chat-view-tabs__scroll-button').length
   const getViewportLeft = () => (getScrollButtonCount() > 0 ? scrollButtonWidth : 0)
@@ -40,6 +52,7 @@ export const installTabStripLayout = (
   Object.defineProperty(list, 'scrollWidth', {
     configurable: true,
     get: () => {
+      // Recognize the hook request as a synthetic input, not proof that CSS parses it.
       const temporaryWidth = list
         .getAttribute('style')
         ?.match(/(?:^|;)\s*width:\s*([\d.]+)px\s*!important\s*;?/i)?.[1]

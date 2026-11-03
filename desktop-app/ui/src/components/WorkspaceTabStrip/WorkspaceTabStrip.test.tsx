@@ -21,7 +21,7 @@ import {
 } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import { WorkspaceTabStrip } from '.'
-import { installTabStripLayout } from './__fixtures__/tabStripLayout'
+import { installSyntheticTabStripLayout } from './__fixtures__/tabStripLayout'
 
 afterEach(cleanup)
 
@@ -42,7 +42,7 @@ const twoChatTabs = newChatTab(
 
 describe('WorkspaceTabStrip', () => {
   it.each([1, 3])(
-    'retains a pending active reveal until its tab mounts (%i initial tabs)',
+    'synthetic defensive omitted-ID stress: retains reveal until mount (%i initial tabs)',
     initialCount => {
       let state = createEmptyWorkspaceTabsState()
       for (let index = 0; index < 4; index += 1) {
@@ -61,7 +61,11 @@ describe('WorkspaceTabStrip', () => {
           tabs={state.tabs.slice(0, initialCount)}
         />
       )
-      const layout = installTabStripLayout(view.container, Array(initialCount).fill(96), 248)
+      const layout = installSyntheticTabStripLayout(
+        view.container,
+        Array(initialCount).fill(96),
+        248
+      )
       const restoreRects = layout.trackFutureTabRects()
       try {
         layout.measure()
@@ -94,7 +98,7 @@ describe('WorkspaceTabStrip', () => {
   )
 
   it.each([null, 'stale-0'])(
-    'cancels a pending reveal when the active ID changes to %s',
+    'synthetic defensive omitted-ID stress: supersedes pending reveal with %s',
     nextActiveId => {
       let state = createEmptyWorkspaceTabsState()
       for (let index = 0; index < 4; index += 1) {
@@ -108,7 +112,7 @@ describe('WorkspaceTabStrip', () => {
       const view = render(
         <WorkspaceTabStrip {...props} activeTabId="stale-0" tabs={state.tabs.slice(0, 1)} />
       )
-      const layout = installTabStripLayout(view.container, [96], 248)
+      const layout = installSyntheticTabStripLayout(view.container, [96], 248)
       const restoreRects = layout.trackFutureTabRects()
       try {
         layout.measure()
@@ -128,7 +132,7 @@ describe('WorkspaceTabStrip', () => {
     }
   )
 
-  it('supersedes a missing active target with the latest missing target', () => {
+  it('synthetic defensive omitted-ID stress: retains only the latest missing target', () => {
     let state = createEmptyWorkspaceTabsState()
     for (let index = 0; index < 5; index += 1) {
       state = openAppTab(state, {
@@ -141,7 +145,7 @@ describe('WorkspaceTabStrip', () => {
     const view = render(
       <WorkspaceTabStrip {...props} activeTabId="latest-0" tabs={state.tabs.slice(0, 1)} />
     )
-    const layout = installTabStripLayout(view.container, [96], 248)
+    const layout = installSyntheticTabStripLayout(view.container, [96], 248)
     const restoreRects = layout.trackFutureTabRects()
     try {
       layout.measure()
@@ -164,7 +168,7 @@ describe('WorkspaceTabStrip', () => {
     }
   })
 
-  it('waits for a measurable viewport before consuming an active reveal', () => {
+  it('synthetic zero-viewport stress: waits before consuming an active reveal', () => {
     let state = createEmptyWorkspaceTabsState()
     for (let index = 0; index < 4; index += 1) {
       state = openAppTab(state, {
@@ -175,7 +179,7 @@ describe('WorkspaceTabStrip', () => {
     }
     const props = { onClose: vi.fn(), onReorder: vi.fn(), onSelect: vi.fn() }
     const view = render(<WorkspaceTabStrip {...props} activeTabId={null} tabs={state.tabs} />)
-    const layout = installTabStripLayout(view.container, [96, 96, 96, 96], 48)
+    const layout = installSyntheticTabStripLayout(view.container, [96, 96, 96, 96], 48)
     layout.measure()
     view.rerender(<WorkspaceTabStrip {...props} activeTabId="hidden-3" tabs={state.tabs} />)
     expect(layout.viewportWidth()).toBe(0)
@@ -190,7 +194,7 @@ describe('WorkspaceTabStrip', () => {
     { direction: 'right', widths: [160, 96, 120], expected: 90 },
     { direction: 'left', widths: [160, 96, 120], expected: 0 },
   ])(
-    'moves $direction using oversized variable-width tab boundaries ($widths)',
+    'synthetic oversized-rectangle stress: moves $direction at tab boundaries ($widths)',
     ({ direction, widths, expected }) => {
       let state = createEmptyWorkspaceTabsState()
       widths.forEach((_, index) => {
@@ -210,7 +214,7 @@ describe('WorkspaceTabStrip', () => {
           tabs={state.tabs}
         />
       )
-      const layout = installTabStripLayout(view.container, widths, 118)
+      const layout = installSyntheticTabStripLayout(view.container, widths, 118)
       layout.measure()
       expect(layout.viewportWidth()).toBe(70)
       layout.setScrollLeft(10)
@@ -303,7 +307,7 @@ describe('WorkspaceTabStrip', () => {
     expect(styles).toMatch(/\.chat-view-tab__label\s*\{[^}]*text-overflow:\s*ellipsis;/s)
   })
 
-  it('shows arrows only for overflow and updates them after resize, insertion, and removal', () => {
+  it('synthetic assigned geometry: updates overflow after resize, insertion, and removal', () => {
     let state = openAppTab(createEmptyWorkspaceTabsState(), {
       id: 'tab-one',
       appRef: 'example/app',
@@ -322,7 +326,7 @@ describe('WorkspaceTabStrip', () => {
         tabs={state.tabs}
       />
     )
-    const layout = installTabStripLayout(view.container, [120, 120], 300)
+    const layout = installSyntheticTabStripLayout(view.container, [120, 120], 300)
     layout.measure()
     expect(screen.queryByRole('button', { name: 'Scroll tabs left' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
@@ -380,7 +384,7 @@ describe('WorkspaceTabStrip', () => {
     expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
   })
 
-  it('restores the future-tab rect spy when an insertion rerender throws', () => {
+  it('synthetic assigned geometry: restores the future-tab rect spy after rerender failure', () => {
     let state = openAppTab(createEmptyWorkspaceTabsState(), {
       id: 'throw-tab-one',
       appRef: 'example/app',
@@ -391,7 +395,7 @@ describe('WorkspaceTabStrip', () => {
     const view = render(
       <WorkspaceTabStrip {...props} activeTabId={state.activeTabId} tabs={state.tabs} />
     )
-    const layout = installTabStripLayout(view.container, [120, 120], 300)
+    const layout = installSyntheticTabStripLayout(view.container, [120, 120], 300)
     const originalDescriptor = Object.getOwnPropertyDescriptor(
       HTMLElement.prototype,
       'getBoundingClientRect'
@@ -432,7 +436,7 @@ describe('WorkspaceTabStrip', () => {
     expect(descriptorAfterFailedRerender).toEqual(originalDescriptor)
   })
 
-  it('does not reveal the unchanged active tab when resizing back into overflow', () => {
+  it('synthetic assigned geometry: preserves manual scroll on unchanged-ID resize', () => {
     let state = createEmptyWorkspaceTabsState()
     for (let index = 0; index < 3; index += 1) {
       state = openAppTab(state, {
@@ -450,7 +454,7 @@ describe('WorkspaceTabStrip', () => {
         tabs={state.tabs}
       />
     )
-    const layout = installTabStripLayout(view.container, [110, 110, 110], 300)
+    const layout = installSyntheticTabStripLayout(view.container, [110, 110, 110], 300)
     layout.measure()
     layout.setScrollLeft(0)
     fireEvent.scroll(view.container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement)
@@ -473,8 +477,9 @@ describe('WorkspaceTabStrip', () => {
     ).toBe(false)
   })
 
-  it('reveals measured tabs, follows active changes, and leaves manual scroll alone', () => {
+  it('synthetic sub-minimum variable rectangles: reveal identity once and preserve manual scroll', () => {
     let state = createEmptyWorkspaceTabsState()
+    // Assigned rectangles include 95px, below the real CSS minimum; no flex solver runs.
     const widths = [110, 135, 95, 160, 125]
     for (let index = 0; index < widths.length; index += 1) {
       state = openAppTab(state, {
@@ -493,7 +498,7 @@ describe('WorkspaceTabStrip', () => {
         tabs={state.tabs}
       />
     )
-    const layout = installTabStripLayout(view.container, widths, 300)
+    const layout = installSyntheticTabStripLayout(view.container, widths, 300)
     layout.measure()
     const left = screen.getByRole('button', { name: 'Scroll tabs left' })
     const right = screen.getByRole('button', { name: 'Scroll tabs right' })
@@ -501,9 +506,9 @@ describe('WorkspaceTabStrip', () => {
     expect(right.matches('[aria-disabled="true"]')).toBe(false)
 
     fireEvent.click(right)
-    expect(layout.scrollLeft()).toBe(104)
+    expect(layout.scrollLeft()).toBe(100)
     fireEvent.click(right)
-    expect(layout.scrollLeft()).toBe(272)
+    expect(layout.scrollLeft()).toBe(266)
     expect(onSelect).not.toHaveBeenCalled()
 
     for (let click = 0; click < 5 && !right.matches('[aria-disabled="true"]'); click += 1) {
@@ -514,7 +519,7 @@ describe('WorkspaceTabStrip', () => {
     expect(left.matches('[aria-disabled="true"]')).toBe(false)
 
     fireEvent.click(left)
-    expect(layout.scrollLeft()).toBe(364)
+    expect(layout.scrollLeft()).toBe(358)
     expect(left.matches('[aria-disabled="true"]')).toBe(false)
     expect(onSelect).not.toHaveBeenCalled()
 
@@ -555,7 +560,7 @@ describe('WorkspaceTabStrip', () => {
     expect(layout.scrollLeft()).toBe(100)
   })
 
-  it('uses measured nearest-tab boundaries after reorder with edge controls present', () => {
+  it('synthetic sub-minimum rectangles: use nearest boundaries after reorder', () => {
     let state = createEmptyWorkspaceTabsState()
     for (const id of ['a', 'b', 'c', 'd']) {
       state = openAppTab(state, { id, appRef: 'example/app', title: id })
@@ -573,7 +578,7 @@ describe('WorkspaceTabStrip', () => {
         tabs={state.tabs}
       />
     )
-    const layout = installTabStripLayout(view.container, [60, 60, 60, 60], 150)
+    const layout = installSyntheticTabStripLayout(view.container, [60, 60, 60, 60], 150)
     layout.measure()
     expect(layout.viewportWidth()).toBe(102)
     expect(
@@ -581,7 +586,7 @@ describe('WorkspaceTabStrip', () => {
     ).toBe(true)
 
     fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs right' }))
-    expect(layout.scrollLeft()).toBe(26)
+    expect(layout.scrollLeft()).toBe(24)
 
     state = reorderWorkspaceTab(state, 'd', 0)
     view.rerender(
@@ -607,13 +612,13 @@ describe('WorkspaceTabStrip', () => {
       screen.getByRole('button', { name: 'Scroll tabs right' }).matches('[aria-disabled="true"]')
     ).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs right' }))
-    expect(layout.scrollLeft()).toBe(94)
+    expect(layout.scrollLeft()).toBe(90)
     fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs left' }))
-    expect(layout.scrollLeft()).toBe(68)
+    expect(layout.scrollLeft()).toBe(66)
     expect(onSelect).not.toHaveBeenCalled()
   })
 
-  it('keeps overflow controls keyboard reachable and scrolls on Enter', async () => {
+  it('synthetic sub-minimum rectangles: keep controls keyboard reachable and scroll on Enter', async () => {
     let state = createEmptyWorkspaceTabsState()
     for (let index = 0; index < 4; index += 1) {
       state = openAppTab(state, {
@@ -632,7 +637,7 @@ describe('WorkspaceTabStrip', () => {
         tabs={state.tabs}
       />
     )
-    const layout = installTabStripLayout(view.container, [60, 60, 60, 60], 150)
+    const layout = installSyntheticTabStripLayout(view.container, [60, 60, 60, 60], 150)
     layout.measure()
     const right = screen.getByRole('button', { name: 'Scroll tabs right' })
     expect(right.tagName).toBe('BUTTON')
@@ -641,11 +646,11 @@ describe('WorkspaceTabStrip', () => {
 
     await userEvent.setup().keyboard('{Enter}')
 
-    expect(layout.scrollLeft()).toBe(26)
+    expect(layout.scrollLeft()).toBe(24)
     expect(onSelect).not.toHaveBeenCalled()
   })
 
-  it('normalizes unmodified wheel input once, passes modifiers through, and refreshes manual-scroll state', () => {
+  it('synthetic assigned geometry: normalize wheel once and preserve modifier/manual-scroll behavior', () => {
     let state = createEmptyWorkspaceTabsState()
     for (let index = 0; index < 4; index += 1) {
       state = openAppTab(state, {
@@ -664,7 +669,7 @@ describe('WorkspaceTabStrip', () => {
         tabs={state.tabs}
       />
     )
-    const layout = installTabStripLayout(view.container, [110, 110, 110, 110], 200)
+    const layout = installSyntheticTabStripLayout(view.container, [110, 110, 110, 110], 200)
     layout.measure()
     const scroller = view.container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement
 
@@ -969,8 +974,8 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     { id: 'c', appRef: 'ns/x', title: 'Charlie' }
   ).tabs
 
-  // jsdom returns a zeroed rect from getBoundingClientRect, so the drop side is
-  // computed as 'after' for any clientX >= 0. Pin a real 100px-wide rect (midpoint
+  // Synthetic drag boundary: jsdom returns a zeroed rect, so the drop side is
+  // computed as 'after' for any clientX >= 0. Assign a synthetic 100px-wide rect (midpoint
   // at x=50) on every element so `clientX` selects the half deterministically:
   // clientX < 50 → 'before', >= 50 → 'after'.
   let rectSpy: ReturnType<typeof vi.spyOn> | undefined
