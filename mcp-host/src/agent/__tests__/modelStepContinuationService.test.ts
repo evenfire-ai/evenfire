@@ -88,7 +88,7 @@ function readVector(name: string): Vector {
  * Host ingress, so the two sides cannot drift apart silently.
  */
 interface HostMessageVector {
-  input: { traceContext: IncomingMessage['traceContext'] }
+  input: { traceContext: NonNullable<IncomingMessage['traceContext']> }
   body: IncomingMessage
 }
 
