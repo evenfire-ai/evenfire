@@ -963,11 +963,16 @@ export class SqliteConversationStore implements ConversationStore {
         sessionKey
       )
     } catch (err) {
+      const settled = await this.settleUncertainBoundary(err)
+      if (settled.committed) {
+        this.releaseReopenedTurnMarker(state, marker)
+        return
+      }
       if (this.reopenedTurnCompletionOwners.get(state) === marker.owner) {
         state.reopenedTurnNumber = marker.previousReopenedTurnNumber
         this.restoreReopenedTurnMarker(state, marker)
       }
-      throw err
+      throw new ModelStepBoundaryNotCommittedError(settled.error)
     }
     this.releaseReopenedTurnMarker(state, marker)
   }

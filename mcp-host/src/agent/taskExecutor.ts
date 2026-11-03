@@ -128,6 +128,7 @@ import type {
 } from '../db/worker/modelStepCheckpointOps'
 import type { ModelStepTurnFence } from '../db/worker/protocol'
 import {
+  isModelStepBoundaryNotCommitted,
   isModelStepFenceMismatch,
   isModelStepTaskOwnerMismatch,
   parseModelStepCheckpointLoopState,
@@ -1426,18 +1427,27 @@ export class TaskExecutor {
       return undefined
     }
     this.emitContinuationVerdict({ kind: 'started' })
-    await this.deps.conversationManager.resumeTurnForContinuation(
-      this.conversation,
-      this.taskId,
-      continuation.originTurnNumber,
-      this.task.traceContext ?? null,
-      this.conversation.state === 'processing' ? this.conversation.activeTaskId : undefined,
-      {
-        fence: this.continuationClaim.fence!,
-        activeTaskId: this.taskId,
-        originTurnNumber: continuation.originTurnNumber,
+    try {
+      await this.deps.conversationManager.resumeTurnForContinuation(
+        this.conversation,
+        this.taskId,
+        continuation.originTurnNumber,
+        this.task.traceContext ?? null,
+        this.conversation.state === 'processing' ? this.conversation.activeTaskId : undefined,
+        {
+          fence: this.continuationClaim.fence!,
+          activeTaskId: this.taskId,
+          originTurnNumber: continuation.originTurnNumber,
+        }
+      )
+    } catch (error) {
+      if (isModelStepFenceMismatch(error) || isModelStepTaskOwnerMismatch(error)) {
+        this.continuationClaim.fenceLost = true
+        throw error
       }
-    )
+      if (isModelStepBoundaryNotCommitted(error)) throw new ContinuationOperationalError(error)
+      throw error
+    }
     this.turnTiming?.addSessionLoadMs(Date.now() - sessionLoadStart)
     this.captureTaskTokenBaseline()
     this.enqueueGovernedRunEvent('run_start', `task:${this.taskId}:start`)

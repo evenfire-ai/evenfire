@@ -2,20 +2,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
+import { toModelStepCheckpointView } from '../../core/conversation/modelStepCheckpointView'
 import {
   type StoreHandle,
   makeSqliteStore,
 } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
+import { syncTimeoutLateSettlement } from '../../core/conversation/persistence/persistQueue'
 import { SqliteColdStartLoader } from '../../core/conversation/persistence/sqliteColdStartLoader'
 import { SqliteConversationStore } from '../../core/conversation/persistence/sqliteConversationStore'
 import { LlmErrorCode } from '../../core/errors'
 import { FinishReason } from '../../core/types'
+import type { WorkerMessage, WorkerOp } from '../../db/worker/protocol'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import { McpManager } from '../../mcp/manager'
 import { MessageQueue } from '../../queue/messageQueue'
-import type { ModelStepContinuationRef, Task } from '../../queue/types'
+import type { ModelStepContinuationRef, Task, TaskResponsePayload } from '../../queue/types'
 import { makeHandlers } from '../../server/__tests__/testHelpers'
 import { handleModelStepContinuationRoute } from '../../server/routes'
 import type { IncomingMessage } from '../../server/types'
@@ -124,8 +127,13 @@ async function resumable(
   return { sessionKey, checkpointId, conversation, version, source }
 }
 
-function fixture() {
-  const handle = makeSqliteStore()
+function fixture(
+  options: {
+    storeOptions?: Parameters<typeof makeSqliteStore>[0]
+    detached?: boolean
+  } = {}
+) {
+  const handle = makeSqliteStore(options.storeOptions)
   handles.push(handle)
   const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
     now: () => now,
@@ -174,7 +182,8 @@ function fixture() {
     contextWindowTokens: 100_000,
   }))
   stateMachine.setModelStepCheckpoints(support)
-  const responses = vi.fn(async () => {})
+  const responses = vi.fn(async (_payload: TaskResponsePayload) => {})
+  const executions: Array<Promise<boolean>> = []
   const enqueue = vi.fn(
     async (sourceMessage: IncomingMessage, id: string, continuation: ModelStepContinuationRef) => {
       const task: Task = {
@@ -189,7 +198,10 @@ function fixture() {
         modelStepContinuation: continuation,
       }
       lifecycle.register(task)
-      await stateMachine.executeTask(task)
+      if (options.detached) lifecycle.transition(task.id, 'processing', 'dispatched')
+      const execution = stateMachine.executeTask(task)
+      executions.push(execution)
+      if (!options.detached) await execution
     }
   )
   const hasLiveExecutor = (taskId: string) => stateMachine.hasLiveExecutor(taskId)
@@ -215,6 +227,7 @@ function fixture() {
     service,
     enqueue,
     responses,
+    executions,
     modelCalls,
     hasLiveExecutor,
     row,
@@ -239,6 +252,306 @@ async function continueHealthy(f: ReturnType<typeof fixture>, chatId: string) {
 }
 
 describe('Model-step continuation live replay (SQLite)', () => {
+  it.each(['committed', 'not committed', 'reclaimed'] as const)(
+    'WP-H11: a late continuation start %s after HTTP 202',
+    async outcome => {
+      let release!: () => void
+      let enter!: () => void
+      const held = new Promise<void>(resolve => {
+        release = resolve
+      })
+      const entered = new Promise<void>(resolve => {
+        enter = resolve
+      })
+      const isStart = (op: WorkerOp) =>
+        op.kind === 'update_session_state' &&
+        op.state === 'processing' &&
+        op.activeTaskId !== 'replacement-task' &&
+        !!op.modelStepTurnFence
+      const f = fixture({
+        detached: true,
+        storeOptions: {
+          persistQueue: { syncTimeoutMs: 25 },
+          holdOps: op => {
+            if (!isStart(op)) return Promise.resolve()
+            enter()
+            return held
+          },
+        },
+      })
+      const chatId = `late-start-${outcome.replace(' ', '-')}`
+      const cp = await resumable(f.stateMachine.getConversationManager(), f.checkpoints, chatId)
+      const initialSession = f.handle.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+        .get(cp.sessionKey)
+
+      let timeoutReached!: () => void
+      const timedOut = new Promise<void>(resolve => {
+        timeoutReached = resolve
+      })
+      const enqueueSync = f.handle.persistQueue.enqueueSync.bind(f.handle.persistQueue)
+      vi.spyOn(f.handle.persistQueue, 'enqueueSync').mockImplementation(((
+        op: WorkerOp,
+        key?: string
+      ) => {
+        const result = enqueueSync(op, key)
+        if (isStart(op)) {
+          result.catch(error => {
+            if (syncTimeoutLateSettlement(error)) timeoutReached()
+          })
+        }
+        return result
+      }) as typeof f.handle.persistQueue.enqueueSync)
+
+      let startId: string | undefined
+      let replyReceived!: (reply: { ok: boolean; error?: { message?: string } }) => void
+      const lateReply = new Promise<{ ok: boolean; error?: { message?: string } }>(resolve => {
+        replyReceived = resolve
+      })
+      const postMessage = f.handle.worker.worker.postMessage.bind(f.handle.worker.worker)
+      vi.spyOn(f.handle.worker.worker, 'postMessage').mockImplementation(
+        (message: WorkerMessage) => {
+          if (isStart(message.op)) startId = message.id
+          postMessage(message)
+        }
+      )
+      f.handle.worker.worker.on('message', reply => {
+        if (reply.id === startId) replyReceived(reply)
+      })
+
+      const res = { writeHead: vi.fn(), end: vi.fn() }
+      const request = handleModelStepContinuationRoute(
+        {
+          params: { agent: AGENT, chatId, checkpointId: cp.checkpointId },
+          body: { version: cp.version },
+          runtimeCaller: { caller: 'rpc-proxy', userId: USER, hostRef: HOST },
+          headers: {
+            'x-clerum-edge-trace-context': encodeURIComponent(
+              JSON.stringify({
+                version: 1,
+                runId: 'late-start',
+                sessionId: chatId,
+                origin: 'direct_chat',
+                correlationRefs: [],
+              })
+            ),
+          },
+        } as unknown as Request,
+        res as unknown as Response,
+        makeHandlers({ modelStepContinuationHandler: request => f.service.continue(request) })
+      )
+      let responsesBeforeReply = -1
+      let statusBeforeReply: unknown
+      let replacementConversation:
+        | Awaited<ReturnType<ConversationManager['getOrCreate']>>
+        | undefined
+      let staleExecutor: { continuationClaim: { fenceLost: boolean } } | undefined
+      try {
+        await entered
+        await request
+        await timedOut
+        responsesBeforeReply = f.responses.mock.calls.length
+        statusBeforeReply = f.row(cp.checkpointId)
+        if (outcome === 'not committed') {
+          f.handle.worker.db.exec(`
+            CREATE TRIGGER reject_late_start BEFORE UPDATE OF state ON sessions
+            WHEN NEW.state = 'processing'
+            BEGIN SELECT RAISE(ABORT, 'late start rejected'); END;
+          `)
+        }
+        if (outcome === 'reclaimed') {
+          const body = JSON.parse(res.end.mock.calls[0]![0])
+          staleExecutor = (
+            f.stateMachine as unknown as {
+              activeExecutors: Map<string, { continuationClaim: { fenceLost: boolean } }>
+            }
+          ).activeExecutors.get(body.taskId)
+          if (!staleExecutor) throw new Error('Original executor is not live at reclaim')
+          now += LEASE + 1
+          const claim = await f.checkpoints.claim({
+            sessionKey: cp.sessionKey,
+            checkpointId: cp.checkpointId,
+            version: cp.version,
+            hostInstanceId: 'replacement-owner',
+            newTaskId: 'replacement-task',
+            leaseMs: LEASE,
+          })
+          if (claim.outcome !== 'claimed') throw new Error(`Replacement claim: ${claim.outcome}`)
+          expect(claim.fence.owner).toBe('replacement-owner')
+          expect(claim.fence.generation).toBe(2)
+          const replacementManager = new ConversationManager(
+            new SqliteConversationStore(f.handle.persistQueue, { cacheSize: 8 })
+          )
+          replacementConversation = await replacementManager.getOrCreate(cp.sessionKey)
+          await replacementManager.resumeTurnForContinuation(
+            replacementConversation,
+            'replacement-task',
+            1,
+            null,
+            undefined,
+            { fence: claim.fence, activeTaskId: 'replacement-task', originTurnNumber: 1 }
+          )
+          expect(
+            f.handle.worker.db
+              .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+              .get(cp.sessionKey)
+          ).toEqual({ state: 'processing', active_task_id: 'replacement-task' })
+          expect(f.responses).not.toHaveBeenCalled()
+        }
+      } finally {
+        release()
+      }
+      const reply = await lateReply
+      await Promise.all(f.executions)
+      await f.handle.persistQueue.drain()
+
+      // Witness the actual worker reply, not merely the timer or a mocked outcome.
+      expect(startId).toBeDefined()
+      expect(reply.ok).toBe(outcome === 'committed')
+      if (outcome === 'not committed') expect(reply.error?.message).toContain('late start rejected')
+      if (outcome === 'reclaimed')
+        expect(reply.error?.message).toBe('model-step continuation fence mismatch')
+      expect(res.writeHead).toHaveBeenCalledWith(202, { 'Content-Type': 'application/json' })
+      const body = JSON.parse(res.end.mock.calls[0]![0])
+      expect(body).toMatchObject({
+        checkpointId: cp.checkpointId,
+        status: 'claimed',
+        replayed: false,
+      })
+      expect(responsesBeforeReply).toBe(0)
+      expect(statusBeforeReply).toMatchObject({ status: 'claimed' })
+
+      if (outcome === 'not committed') {
+        expect(f.modelCalls).not.toHaveBeenCalled()
+        expect(f.responses).toHaveBeenCalledTimes(1)
+        expect(f.responses.mock.calls[0]![0]).toEqual(
+          expect.objectContaining({ error: expect.anything() })
+        )
+        expect(
+          f.lifecycle.get(body.taskId)?.history.filter(event => event.to === 'failed')
+        ).toHaveLength(1)
+        expect(
+          f.handle.worker.db
+            .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+            .get(cp.sessionKey)
+        ).toEqual(initialSession)
+        expect(f.row(cp.checkpointId)).toMatchObject({ status: 'resumable' })
+        const snapshot = await f.checkpoints.loadLive(cp.sessionKey)
+        if (!snapshot) throw new Error('Expected a live resumable checkpoint')
+        expect(toModelStepCheckpointView(snapshot)).toMatchObject({
+          status: 'resumable',
+          retryAvailable: true,
+        })
+      } else if (outcome === 'reclaimed') {
+        expect(staleExecutor?.continuationClaim.fenceLost).toBe(true)
+        expect(f.modelCalls).not.toHaveBeenCalled()
+        expect(f.responses).toHaveBeenCalledTimes(1)
+        expect(f.responses.mock.calls[0]![0]).toEqual(
+          expect.objectContaining({ error: expect.anything() })
+        )
+        expect(
+          f.lifecycle.get(body.taskId)?.history.filter(event => event.to === 'failed')
+        ).toHaveLength(1)
+        expect(f.row(cp.checkpointId)).toMatchObject({
+          status: 'claimed',
+          continuation_task_id: 'replacement-task',
+          claim_generation: 2,
+        })
+        expect(
+          f.handle.worker.db
+            .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+            .get(cp.sessionKey)
+        ).toEqual({ state: 'processing', active_task_id: 'replacement-task' })
+        expect(replacementConversation).toMatchObject({
+          state: 'processing',
+          activeTaskId: 'replacement-task',
+        })
+      } else {
+        expect(f.modelCalls).toHaveBeenCalledTimes(1)
+        expect(f.responses).toHaveBeenCalledTimes(1)
+        expect(f.responses.mock.calls[0]![0]).toEqual(
+          expect.objectContaining({ response: 'Healthy continuation completed' })
+        )
+        expect(f.row(cp.checkpointId)).toMatchObject({ status: 'completed' })
+        expect(
+          f.handle.worker.db
+            .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+            .get(cp.sessionKey)
+        ).toEqual({ state: 'idle', active_task_id: null })
+        expect(
+          f.handle.worker.db
+            .prepare('SELECT role, content FROM messages WHERE session_id = ? ORDER BY ordinal')
+            .all(cp.conversation.id)
+        ).toEqual([
+          { role: 'user', content: cp.source.content },
+          { role: 'assistant', content: 'Healthy continuation completed' },
+        ])
+      }
+    }
+  )
+
+  it.each([
+    ['direct storage rejection', 'start write rejected', 'resumable'],
+    ['fence mismatch', 'model-step continuation fence mismatch', 'abandoned'],
+    ['owner mismatch', 'model-step continuation task owner mismatch', 'abandoned'],
+  ] as const)(
+    'WP-H11: %s at start has the correct claim classification',
+    async (_label, reason, status) => {
+      const f = fixture({ detached: true })
+      const cp = await resumable(
+        f.stateMachine.getConversationManager(),
+        f.checkpoints,
+        'direct-start'
+      )
+      f.handle.worker.db.exec(`
+      CREATE TRIGGER reject_direct_start BEFORE UPDATE OF state ON sessions
+      WHEN NEW.state = 'processing'
+      BEGIN SELECT RAISE(ABORT, '${reason}'); END;
+    `)
+      const reply = vi.fn()
+      let startId: string | undefined
+      const postMessage = f.handle.worker.worker.postMessage.bind(f.handle.worker.worker)
+      vi.spyOn(f.handle.worker.worker, 'postMessage').mockImplementation(
+        (message: WorkerMessage) => {
+          if (
+            message.op.kind === 'update_session_state' &&
+            message.op.modelStepTurnFence &&
+            message.op.state === 'processing'
+          ) {
+            startId = message.id
+          }
+          postMessage(message)
+        }
+      )
+      f.handle.worker.worker.on('message', message => {
+        if (message.id === startId) reply(message)
+      })
+      const result = await f.service.continue({
+        userId: USER,
+        agent: AGENT,
+        chatId: 'direct-start',
+        checkpointId: cp.checkpointId,
+        version: cp.version,
+      })
+      await Promise.all(f.executions)
+      await f.handle.persistQueue.drain()
+
+      expect(reply).toHaveBeenCalledTimes(1)
+      expect(reply.mock.calls[0]![0]).toMatchObject({ ok: false, error: { message: reason } })
+      expect(result.status).toBe(202)
+      expect(f.responses).toHaveBeenCalledTimes(1)
+      expect(f.responses.mock.calls[0]![0]).toEqual(
+        expect.objectContaining({ error: expect.anything() })
+      )
+      expect(f.modelCalls).not.toHaveBeenCalled()
+      expect(f.row(cp.checkpointId)).toMatchObject({ status })
+      const row = f.handle.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+        .get(cp.sessionKey)
+      expect(row).toEqual({ state: 'idle', active_task_id: null })
+    }
+  )
+
   it('returns 503 when a failed executor is still registered for a live claim', async () => {
     const f = fixture()
     const cp = await resumable(f.stateMachine.getConversationManager(), f.checkpoints, 'terminal')
