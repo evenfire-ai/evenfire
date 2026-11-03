@@ -243,10 +243,10 @@ export const config: Config = {
   controlApiServiceName: process.env.RPC_PROXY_CONTROL_API_SERVICE_NAME || 'rpc-proxy',
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
   // The Host refuses artifact files above 50 MiB (MAX_ARTIFACT_BYTES in
-  // mcp-host/src/workflow/artifactPaths.ts) before it redacts them, and redaction
-  // can make the response slightly longer than the file
-  // (mcp-host/src/artifacts/artifactRedaction.ts), so a value below 50 rejects
-  // files the Host serves. The default matches the Host's cap.
+  // mcp-host/src/workflow/artifactPaths.ts) and checks that size before it redacts
+  // the file. Redaction can make the response slightly longer than the file
+  // (mcp-host/src/artifacts/artifactRedaction.ts), so with this default a file at the
+  // Host's cap can still be rejected here; a value below 50 rejects files the Host serves.
   artifactDownloadMaxBytes: parseArtifactDownloadMaxBytes(
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB || '50'
   ),
