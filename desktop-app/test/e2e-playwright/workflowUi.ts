@@ -419,7 +419,7 @@ async function pacedPasswordLogin(
     await awaitPasswordPace()
     return apiRequest(
       'POST',
-      `${EXT_API}/api/v1/auth/password-login`,
+      `${EXT_API}/api/v1/auth/v2/password-login`,
       JSON.stringify({ email, password })
     )
   }

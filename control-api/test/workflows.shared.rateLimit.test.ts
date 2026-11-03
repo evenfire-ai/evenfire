@@ -351,6 +351,8 @@ describe('routes/workflows/shared/rateLimit', () => {
   ] as const)(
     'allows the increased %s capacity through both gates',
     async (_family, limit, factory) => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(1_800_000_000_000)
       mockVerifyAdminToken.mockImplementation(() => signedClaims('capacity-fixture'))
       countRequests()
       const app = express()
@@ -498,6 +500,10 @@ describe('routes/workflows/shared/rateLimit', () => {
   })
 
   beforeEach(() => {
+    // Capacity assertions must stay within one database wall-clock window.
+    // Tests for reset behavior move this clock explicitly after setup.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_800_000_000_000)
     mockVerifyAdminToken.mockImplementation((token: string) =>
       token.startsWith('signed-') ? signedClaims(token.slice('signed-'.length)) : null
     )

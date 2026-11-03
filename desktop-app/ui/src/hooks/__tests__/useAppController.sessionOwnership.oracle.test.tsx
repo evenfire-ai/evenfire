@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider, useAgentTaskTracker } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   getComposerDraft,
@@ -12,6 +12,12 @@ import {
 } from '@lib/composerDraftStore'
 import { activeWorkspaceTab } from '@lib/workspaceTabs'
 import {
+  cleanupNativeCommitTestHarness,
+  createNativeCommitTestHarness,
+} from '../../../../testSupport/appService.nativeCommitTestHarness.js'
+import { testLoginResult, testSessionMe } from '../../../../testSupport/authTestFixtures.js'
+import {
+  type AppControllerDesktopEnvironmentHandoffProducer,
   HARNESS_ME,
   installAppControllerClerum,
 } from '../domain/__tests__/__fixtures__/appControllerHarness'
@@ -34,15 +40,42 @@ function installCoordinatorHarness() {
   return { ...rendered, queryClient }
 }
 
+async function installNativeLogoutOwner(
+  options: { userId?: string; keytarAvailable?: boolean } = {}
+) {
+  const native = await createNativeCommitTestHarness({
+    keytarAvailable: options.keytarAvailable ?? true,
+  })
+  const userId = options.userId ?? 'user-a'
+  const user = testSessionMe({ id: userId, email: `${userId}@example.test` })
+  const getMe = vi.fn().mockResolvedValue(user)
+  native.service.authClient = {
+    googleLogin: vi.fn().mockResolvedValue(testLoginResult(undefined, user)),
+    getMe,
+  } as never
+  await native.service.googleLogin('initial-login')
+
+  const { handle } = installAppControllerClerum({
+    desktopEnvironmentHandoffProducer:
+      native.service as unknown as AppControllerDesktopEnvironmentHandoffProducer,
+  })
+  const app = installCoordinatorHarness()
+  await waitFor(() => expect(app.result.current.controller.isAuthenticated).toBe(true))
+  await waitFor(() => expect(app.result.current.controller.initialExperienceLoading).toBe(false))
+  return { ...native, handle, app, user }
+}
+
 describe('useAppController session ownership oracle', () => {
   let tracker: ReturnType<typeof useAgentTaskTracker> | null = null
 
-  afterEach(() => {
+  afterEach(async () => {
+    cleanup()
     tracker?.releaseAll()
     tracker = null
     vi.restoreAllMocks()
     uninstallMockClerum()
     resetComposerDraftStore()
+    await cleanupNativeCommitTestHarness()
   })
 
   it('tears down old-team task ownership while preserving same-principal tabs and drafts', async () => {
@@ -280,12 +313,8 @@ describe('useAppController session ownership oracle', () => {
   })
 
   it('continues logout cleanup when one query-cache reset throws', async () => {
-    const { handle } = installAppControllerClerum()
-    const app = installCoordinatorHarness()
+    const { service, handle, app } = await installNativeLogoutOwner({ keytarAvailable: false })
     tracker = app.result.current.tracker
-
-    await waitFor(() => expect(app.result.current.controller.isAuthenticated).toBe(true))
-    await waitFor(() => expect(app.result.current.controller.initialExperienceLoading).toBe(false))
     act(() => {
       app.result.current.controller.handleSelectChatAgent('agent-x', {
         chatId: 'logout-cleanup-chat',
@@ -306,12 +335,19 @@ describe('useAppController session ownership oracle', () => {
       return removeQueries(filters)
     })
     const clearCache = vi.spyOn(app.queryClient, 'clear')
-    handle.logout.mockResolvedValue({ ok: true, sessionGeneration: 3 })
-
     await act(async () => {
       await app.result.current.controller.handleLogout()
     })
 
+    expect(handle.logout).toHaveBeenCalledOnce()
+    await expect(handle.logout.mock.results[0]?.value).resolves.toMatchObject({
+      kind: 'committed',
+      cleanup: 'not-required',
+    })
+    await expect(service.getSessionState()).resolves.toMatchObject({
+      authenticated: false,
+      me: null,
+    })
     expect(failedCleanup).toHaveBeenCalledWith({ queryKey: desktopQueryKeys.gfsRoot })
     expect(clearCache).toHaveBeenCalledOnce()
     expect(app.result.current.controller.isAuthenticated).toBe(false)
@@ -322,5 +358,172 @@ describe('useAppController session ownership oracle', () => {
       kind: 'chat',
       chat: { agentRef: null, chatId: null },
     })
+    expect(app.result.current.controller.statusText).toContain(
+      'Signed out, but some local cleanup failed'
+    )
+    expect(app.result.current.controller.statusTone).toBe('warn')
+  })
+
+  it('shows the normal success status for a committed logout without cleanup debt', async () => {
+    const { handle, app } = await installNativeLogoutOwner({ keytarAvailable: false })
+    tracker = app.result.current.tracker
+
+    await act(async () => {
+      await app.result.current.controller.handleLogout()
+    })
+
+    await expect(handle.logout.mock.results[0]?.value).resolves.toMatchObject({
+      kind: 'committed',
+      cleanup: 'not-required',
+    })
+    expect(app.result.current.controller.statusText).toBe('Logged out.')
+    expect(app.result.current.controller.statusTone).toBe('success')
+  })
+
+  it('shows secure credential cleanup pending when local cleanup succeeds', async () => {
+    const { service, handle, app } = await installNativeLogoutOwner()
+    tracker = app.result.current.tracker
+    service.tokenStore.clearSessionTokenStrictly = vi
+      .fn()
+      .mockRejectedValue(new Error('keychain unavailable'))
+
+    await act(async () => {
+      await app.result.current.controller.handleLogout()
+    })
+
+    await expect(handle.logout.mock.results[0]?.value).resolves.toMatchObject({
+      kind: 'committed',
+      cleanup: 'pending',
+    })
+    expect(app.result.current.controller.statusText).toBe(
+      'Logged out. Secure credential cleanup is pending.'
+    )
+    expect(app.result.current.controller.statusTone).toBe('success')
+  })
+
+  it('does not show logout success when the actual durable acceptance CAS loses', async () => {
+    const { service, handle, app } = await installNativeLogoutOwner()
+    tracker = app.result.current.tracker
+    const tokenStore = service.tokenStore as unknown as {
+      applySessionAuthorityMarkerCas: (...args: unknown[]) => boolean
+    }
+    vi.spyOn(tokenStore, 'applySessionAuthorityMarkerCas').mockReturnValue(false)
+
+    await act(async () => {
+      await app.result.current.controller.handleLogout()
+    })
+
+    await expect(handle.logout.mock.results[0]?.value).resolves.toMatchObject({
+      kind: 'not-committed',
+    })
+    const authoritativeSession = (await service.getSessionState()) as { authenticated: boolean }
+    expect(app.result.current.controller.isAuthenticated).toBe(authoritativeSession.authenticated)
+    expect(app.result.current.controller.statusText).not.toBe('Logged out.')
+    expect(app.result.current.controller.statusTone).not.toBe('success')
+  })
+
+  it('preserves pending credential cleanup disclosure when local cache cleanup also fails', async () => {
+    const { service, handle, app } = await installNativeLogoutOwner()
+    tracker = app.result.current.tracker
+    service.tokenStore.clearSessionTokenStrictly = vi
+      .fn()
+      .mockRejectedValue(new Error('keychain unavailable'))
+
+    const removeQueries = app.queryClient.removeQueries.bind(app.queryClient)
+    vi.spyOn(app.queryClient, 'removeQueries').mockImplementation(filters => {
+      if (JSON.stringify(filters?.queryKey) === JSON.stringify(desktopQueryKeys.gfsRoot)) {
+        throw new Error('diagnostic cache cleanup failure')
+      }
+      return removeQueries(filters)
+    })
+
+    await act(async () => {
+      await app.result.current.controller.handleLogout()
+    })
+
+    expect(handle.logout).toHaveBeenCalledOnce()
+    await expect(handle.logout.mock.results[0]?.value).resolves.toMatchObject({
+      kind: 'committed',
+      cleanup: 'pending',
+    })
+    await expect(service.getSessionState()).resolves.toMatchObject({
+      authenticated: false,
+      me: null,
+    })
+    expect(app.result.current.controller.isAuthenticated).toBe(false)
+    expect(app.result.current.controller.statusTone).toBe('warn')
+    expect(app.result.current.controller.statusText).toContain('credential cleanup is pending')
+    expect(app.result.current.controller.statusText).toContain('local cleanup failed')
+    expect(app.result.current.controller.statusText).toContain('diagnostic cache cleanup failure')
+  })
+
+  it('does not apply an old local-cleanup warning after a newer owner is accepted', async () => {
+    const { service, handle, app } = await installNativeLogoutOwner()
+    tracker = app.result.current.tracker
+    const removeQueries = app.queryClient.removeQueries.bind(app.queryClient)
+    vi.spyOn(app.queryClient, 'removeQueries').mockImplementation(filters => {
+      if (JSON.stringify(filters?.queryKey) === JSON.stringify(desktopQueryKeys.gfsRoot)) {
+        throw new Error('diagnostic cache cleanup failure')
+      }
+      return removeQueries(filters)
+    })
+
+    let releaseLogout!: () => void
+    const logoutResponseHeld = new Promise<void>(resolve => {
+      releaseLogout = resolve
+    })
+    const realLogout = service.logout.bind(service)
+    const logoutProducer = vi.fn(async () => {
+      const outcome = await realLogout()
+      await logoutResponseHeld
+      return outcome
+    })
+    const realGetSessionState = service.getSessionState.bind(service)
+    const producerService = service as unknown as Omit<
+      AppControllerDesktopEnvironmentHandoffProducer,
+      'logout'
+    >
+    const producer: AppControllerDesktopEnvironmentHandoffProducer = {
+      getSessionState: () =>
+        realGetSessionState() as Promise<{ authenticated: boolean; me: unknown | null }>,
+      getSessionGeneration: () => producerService.getSessionGeneration(),
+      getRuntimeConfigState: () => producerService.getRuntimeConfigState(),
+      selectRuntimeConfigForHandoff: (optionId, expectedGeneration) =>
+        producerService.selectRuntimeConfigForHandoff(optionId, expectedGeneration),
+      logout: logoutProducer,
+    }
+    handle.logout.mockImplementation(async () => {
+      const outcome = await producer.logout()
+      return outcome
+    })
+
+    let pendingLogout!: Promise<void>
+    act(() => {
+      pendingLogout = app.result.current.controller.handleLogout()
+    })
+    await waitFor(async () => {
+      expect(await realGetSessionState()).toMatchObject({ authenticated: false, me: null })
+    })
+    const newUser = testSessionMe({ id: 'user-b', email: 'user-b@example.test' })
+    const getMe = service.authClient.getMe
+    getMe.mockResolvedValue(newUser)
+    service.authClient.googleLogin.mockResolvedValue(testLoginResult(undefined, newUser))
+    await service.googleLogin('replacement-login')
+    handle.emitSessionStateChanged()
+    await waitFor(() => expect(app.result.current.controller.isAuthenticated).toBe(true))
+    const replacementGeneration = service.getSessionGeneration()
+    await waitFor(() =>
+      expect(app.result.current.controller.sessionGeneration).toBe(replacementGeneration)
+    )
+
+    releaseLogout()
+    await act(async () => pendingLogout)
+
+    expect(app.result.current.controller.isAuthenticated).toBe(true)
+    expect(app.result.current.controller.me?.id).toBe('user-b')
+    expect(app.result.current.controller.sessionGeneration).toBe(replacementGeneration)
+    expect(app.result.current.controller.statusText).not.toContain(
+      'diagnostic cache cleanup failure'
+    )
   })
 })

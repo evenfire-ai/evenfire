@@ -806,6 +806,23 @@ if ! grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/bearer-boundary.out"; then
   echo 'FAIL: marked synthetic bearer fixture passed without PUBLIC_BOUNDARY_PASS' >&2
   exit 1
 fi
+r23_bearer_fixture_path='desktop-app/src/__tests__/appService.rpcLease.regression.test.ts'
+r23_bearer_fixture="$bearer_repo/$r23_bearer_fixture_path"
+r23_bearer_fixture_value='derived-rpc-bearer-shared'
+r23_bearer_fixture_line="  '${bearer_prefix}${r23_bearer_fixture_value}' // $bearer_marker"
+mkdir -p "$(dirname "$r23_bearer_fixture")"
+printf '%s\n' "$r23_bearer_fixture_line" >"$r23_bearer_fixture"
+if ! T2_PUBLIC_ROOT="$bearer_repo" T2_PUBLIC_BASE_REF="$bearer_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
+    >"$tmp/bearer-boundary.out" 2>"$tmp/bearer-boundary.err"; then
+  echo 'FAIL: public boundary rejected the exact marked Desktop synthetic bearer fixture' >&2
+  cat "$tmp/bearer-boundary.err" >&2
+  exit 1
+fi
+if ! grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/bearer-boundary.out"; then
+  echo 'FAIL: marked Desktop bearer fixture passed without PUBLIC_BOUNDARY_PASS' >&2
+  exit 1
+fi
 reject_bearer_fixture() {
   local relative_path="$1"
   shift
@@ -825,6 +842,9 @@ reject_bearer_fixture() {
     exit 1
   fi
 }
+reject_bearer_fixture "$r23_bearer_fixture_path" \
+  "  '${bearer_prefix}${r23_bearer_fixture_value}'"
+echo 'PASS: public boundary accepts only the exact marked Desktop synthetic bearer fixture'
 unmarked_bearer_line="const syntheticBearer = '${bearer_prefix}${bearer_value}'"
 reject_bearer_fixture "$bearer_fixture_path" "$unmarked_bearer_line"
 reject_bearer_fixture "$bearer_other_path" "$exact_bearer_line"

@@ -1,21 +1,58 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { testSessionTokenWithExpiry } from '../../testSupport/authTestFixtures.js'
 import { AppService } from '../appService.js'
-import { config } from '../config.js'
+import { getActiveEnvKey, saveDesktopRuntimeConfig } from '../config.js'
 import { ApiError } from '../httpClient.js'
+import { TokenStore } from '../tokenStore.js'
 import type { EntityChangeStreamEvent } from '../types.js'
 
+const credentialFixture = vi.hoisted(() => ({
+  directory: `${process.cwd()}/.uninitialized-entity-fixture`,
+  keychain: new Map<string, string>(),
+}))
+vi.mock('keytar', () => ({
+  getPassword: vi.fn(
+    async (service: string, account: string) =>
+      credentialFixture.keychain.get(`${service}::${account}`) ?? null
+  ),
+  setPassword: vi.fn(async (service: string, account: string, token: string) => {
+    credentialFixture.keychain.set(`${service}::${account}`, token)
+  }),
+  deletePassword: vi.fn(async (service: string, account: string) =>
+    credentialFixture.keychain.delete(`${service}::${account}`)
+  ),
+}))
 vi.mock('electron', () => ({
   app: {
-    isReady: vi.fn(() => false),
-    getPath: vi.fn(() => '/tmp/clerum-desktop-test'),
+    isReady: vi.fn(() => true),
+    getPath: vi.fn(() => credentialFixture.directory),
   },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn(),
     decryptString: vi.fn(),
   },
   shell: { openExternal: vi.fn() },
 }))
+
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
+
+beforeEach(async () => {
+  credentialFixture.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-entity-source-'))
+  credentialFixture.keychain.clear()
+})
+afterEach(async () => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+  await fs.rm(credentialFixture.directory, { recursive: true, force: true })
+})
 
 async function flushAsyncWork(iterations = 6): Promise<void> {
   for (let index = 0; index < iterations; index += 1) await Promise.resolve()
@@ -24,6 +61,7 @@ async function flushAsyncWork(iterations = 6): Promise<void> {
 function mutableServiceState(service: object): {
   sessionToken?: string | null
   entityChangeSessionToken?: string | null
+  entityChangeSessionRequestContext?: unknown
   entityChangeSessionGeneration?: number
 } {
   return service as unknown as {
@@ -37,23 +75,32 @@ function setSyntheticSessionToken(service: object, value: string): void {
   const state = mutableServiceState(service)
   state.sessionToken = value
   state.entityChangeSessionToken = value
+  state.entityChangeSessionRequestContext = { syntheticOwner: value }
 }
 
 function setSyntheticEntityChangeSession(service: object, value: string, generation: number): void {
   const state = mutableServiceState(service)
   state.entityChangeSessionToken = value
+  state.entityChangeSessionRequestContext = { syntheticOwner: value, generation }
   state.entityChangeSessionGeneration = generation
 }
 
 describe('AppService entity-change fan-out', () => {
-  it('rebinds a live subscriber after expiry through public Google login', async () => {
+  it('rebinds a live subscriber after expiry through public password login', async () => {
     const service = new AppService() as any
+    const nextToken = testSessionTokenWithExpiry()
+    const nextMe = { id: 'user-1', teamId: 'team-1' }
+    await saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'http://rest.entity-change.test',
+      rpcProxyBaseUrl: 'http://proxy.entity-change.test',
+      appName: 'Entity change test',
+    })
+    vi.spyOn(service, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
     setSyntheticSessionToken(service, 'old-committed-token')
     service.me = null
     service.beginPrewarmAuthTransition = () => () => undefined
-    service.bindCurrentChatStore = vi.fn().mockResolvedValue(undefined)
-    service.activateGfsAuthScope = vi.fn()
-    service.tokenStore = { setSessionToken: vi.fn().mockResolvedValue(undefined) }
+    service.tokenStore = new TokenStore({ isolatedUserDataPath: credentialFixture.directory })
+    await service.tokenStore.setSessionToken('old-committed-token', getActiveEnvKey())
     service.rpcTokenManager = { clear: vi.fn() }
     const opened: Array<{
       token: string
@@ -62,10 +109,8 @@ describe('AppService entity-change fan-out', () => {
       signal: AbortSignal
     }> = []
     service.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({
-        token: 'synthetic-new-committed-token',
-        me: { id: 'user-1', teamId: 'team-1' },
-      }),
+      passwordLogin: vi.fn().mockResolvedValue({ token: nextToken, me: nextMe }),
+      getMe: vi.fn().mockResolvedValue(nextMe),
       openEntityChangeStream: vi.fn((token, cursor, onEvent, signal) => {
         opened.push({ token, cursor, onEvent, signal })
         return new Promise<void>(resolve => {
@@ -87,13 +132,30 @@ describe('AppService entity-change fan-out', () => {
     await flushAsyncWork()
     expect(service.entityChangeSubscribers.size).toBe(1)
 
-    await service.googleLogin('id-token')
+    await service.passwordLogin('user-1@example.test', 'fixture-password')
     await flushAsyncWork()
 
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const selected = await readSessionAuthoritySourceSelection({
+      tokenStore: service.tokenStore,
+      envKey: getActiveEnvKey(),
+    })
+    expect(selected).toEqual({ status: 'denied', frameMode: 'memory-only' })
+    expect(service.sessionToken).toBe(nextToken)
+    expect(service.memoryOnlySession).toMatchObject({ envKey: getActiveEnvKey() })
+    // The legacy bytes are intentionally preserved, but the new authority does not select or
+    // restore them. Presence in an old selector is not session authority.
+    expect(await service.tokenStore.getSessionToken(getActiveEnvKey())).toBe('old-committed-token')
+
     expect(opened[0]?.signal.aborted).toBe(true)
-    expect(opened[1]).toMatchObject({ token: 'synthetic-new-committed-token', cursor: null })
+    expect(opened[1]).toMatchObject({ token: nextToken, cursor: null })
     expect(service.entityChangeSubscribers.size).toBe(1)
     service.stopEntityChangeStream('stream-1', 7)
+
+    const restarted = new AppService() as any
+    const restartedGetMe = vi.spyOn(restarted.authClient, 'getMe')
+    await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    expect(restartedGetMe).not.toHaveBeenCalled()
   })
 
   it('owns one session stream and fans validated invalidations to two renderers', async () => {
@@ -401,7 +463,7 @@ describe('AppService entity-change reconnect behavior', () => {
 
   it('does not strand subscribers when expiry is deferred through a transient hop', async () => {
     const service = new AppService() as any
-    setSyntheticSessionToken(service, 'committed-session-token')
+    setSyntheticSessionToken(service, 'fixture-committed-session-token')
     let publish!: (event: EntityChangeStreamEvent) => void
     service.authClient = {
       openEntityChangeStream: vi.fn((_token, _cursor, onEvent, signal) => {
@@ -440,15 +502,15 @@ describe('AppService entity-change stream team-context lifecycle', () => {
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(0)
     const service = new AppService() as any
-    setSyntheticSessionToken(service, 'committed-session-token')
-    service.me = { id: 'user-1', teamId: 'team-a' }
-    service.gfsScopeIdentity = {}
-    service.bindCurrentChatStore = vi.fn()
-    service.tokenStore = { setSessionToken: vi.fn() }
+    service.tokenStore = new TokenStore()
 
     const opened: Array<{ token: string; signal: AbortSignal }> = []
     let finishFirstStream!: () => void
     service.authClient = {
+      passwordLogin: vi.fn(async () => ({
+        token: 'fixture-committed-session-token',
+        me: { id: 'user-1', teamId: 'team-a' },
+      })),
       openEntityChangeStream: vi.fn((token, _cursor, _onEvent, signal) => {
         opened.push({ token, signal })
         return new Promise<void>(resolve => {
@@ -469,13 +531,22 @@ describe('AppService entity-change stream team-context lifecycle', () => {
     const operationGate = new Promise<void>(resolve => {
       finishOperation = resolve
     })
+    let markOperationEntered!: () => void
+    const operationEntered = new Promise<void>(resolve => {
+      markOperationEntered = resolve
+    })
+    let teamOperation: Promise<void> | undefined
     try {
+      await service.passwordLogin('user@example.test', 'fixture-password')
       service.startEntityChangeStream('stream-1', 7, vi.fn())
       await flushAsyncWork()
-      expect(opened[0]?.token).toBe('committed-session-token')
+      expect(opened[0]?.token).toBe('fixture-committed-session-token')
 
-      const teamOperation = service.runWithTeamContext('team-b', async () => operationGate)
-      await flushAsyncWork(20)
+      teamOperation = service.runWithTeamContext('team-b', async () => {
+        markOperationEntered()
+        await operationGate
+      })
+      await Promise.race([operationEntered, teamOperation])
       expect(service.sessionToken).toBe('transient-team-context-token')
 
       finishFirstStream()
@@ -490,6 +561,8 @@ describe('AppService entity-change stream team-context lifecycle', () => {
       expect(opened.map(entry => entry.token)).toContain('restored-session-token')
     } finally {
       service.stopEntityChangeStream('stream-1', 7)
+      finishOperation()
+      await teamOperation?.catch(() => undefined)
       vi.useRealTimers()
       vi.restoreAllMocks()
     }

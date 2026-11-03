@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   type FakeWebContents,
+  configureElectronAppForTest,
   electronMocks,
 } from '../../../../src/__tests__/__fixtures__/sandboxUiElectronFakes'
 import {
@@ -26,6 +27,7 @@ import {
   SANDBOX_UI_REFRESH_INTERVAL_MS,
   SANDBOX_UI_RETRY_GRACE_MS,
 } from '../../../../src/sandboxUiSessionRefresh'
+import { TokenStore } from '../../../../src/tokenStore'
 import type { DeepLinkAcknowledgmentAuthority, SandboxUiReleasedEvent } from '../../../../src/types'
 
 /**
@@ -77,7 +79,7 @@ const realSetImmediate = globalThis.setImmediate.bind(globalThis)
 const macrotask = () => new Promise<void>(resolve => realSetImmediate(resolve))
 const realDateNow = Date.now.bind(Date)
 
-export function createSandboxUiMainFake() {
+export function createSandboxUiMainFake(options: { useRealTokenStore?: boolean } = {}) {
   const releasedListeners = new Set<(event: SandboxUiReleasedEvent) => void>()
   const titleListeners = new Set<
     (event: { appRef: string; launchId: string; title: string }) => void
@@ -88,6 +90,7 @@ export function createSandboxUiMainFake() {
   const refreshRecoveredListeners = new Set<(event: { appRef: string; launchId: string }) => void>()
   const sessionInvalidatedListeners = new Set<(event: SandboxUiSessionInvalidation) => void>()
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'clerum-sandbox-ui-main-'))
+  if (options.useRealTokenStore) configureElectronAppForTest({ userDataPath: userDataDir })
   const openMints: MintDecision[] = []
   let failNextMount: Error | null = null
   let crashNextMount = false
@@ -216,6 +219,9 @@ export function createSandboxUiMainFake() {
   })
   const main: RealMain = startRealMain({
     userDataDir,
+    ...(options.useRealTokenStore
+      ? { tokenStore: new TokenStore({ isolatedUserDataPath: userDataDir }) }
+      : {}),
     mint,
     onSend: fromMain,
     onLoad,
@@ -275,6 +281,7 @@ export function createSandboxUiMainFake() {
   return {
     /** The actual AppService whose lifecycle produces session invalidation. */
     service: main.service,
+    setSessionGenerationForTest: main.setSessionGenerationForTest,
     bridge: {
       open,
       close,
@@ -495,6 +502,7 @@ export function createSandboxUiMainFake() {
     async dispose(): Promise<void> {
       await resetRealMain()
       rmSync(userDataDir, { recursive: true, force: true })
+      if (options.useRealTokenStore) configureElectronAppForTest()
     },
   }
 }

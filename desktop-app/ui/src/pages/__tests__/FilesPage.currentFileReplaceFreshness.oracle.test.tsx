@@ -35,6 +35,7 @@ function authFor(teamId: string): AuthContextValue {
     statusTone: 'info',
     isAuthenticated: true,
     sessionGeneration: 1,
+    temporarySessionExpiresAt: null,
     me: member(teamId, 'user-a'),
     email: 'user-a@example.test',
     password: '',

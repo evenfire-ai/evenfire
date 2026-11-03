@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { verifyRpcToken } from './authToken.js'
+import { config } from './config.js'
 
 const jwtMock = vi.hoisted(() => ({ verify: vi.fn() }))
 
@@ -15,10 +16,14 @@ const BASE_PAYLOAD = {
   jti: 'rpc-token-1',
   iat: 1,
   exp: 2,
+  authProtocolVersion: 2,
 }
 
 describe('verifyRpcToken access scope binding', () => {
-  beforeEach(() => jwtMock.verify.mockReset())
+  beforeEach(() => {
+    jwtMock.verify.mockReset()
+    config.authProtocolCutoverEnabled = false
+  })
 
   it('accepts an explicit user-scoped token without a team id', () => {
     jwtMock.verify.mockReturnValue({
@@ -65,6 +70,40 @@ describe('verifyRpcToken access scope binding', () => {
       hostRefs: ['pro-agent', '*'],
     })
     expect(verifyRpcToken('token')).toBeNull()
+  })
+
+  it('rejects a user token minted before the test-fleet authentication cutover', () => {
+    jwtMock.verify.mockReturnValue({
+      ...BASE_PAYLOAD,
+      authProtocolVersion: 1,
+      accessScope: 'user',
+      teamId: null,
+    })
+
+    expect(verifyRpcToken('legacy-token')).toBeNull()
+  })
+
+  it('preserves an unversioned legacy claim when cutover is disabled', () => {
+    const { authProtocolVersion: _ignored, ...legacyPayload } = BASE_PAYLOAD
+    jwtMock.verify.mockReturnValue({
+      ...legacyPayload,
+      accessScope: 'user',
+      teamId: null,
+    })
+
+    expect(verifyRpcToken('legacy-token')).not.toHaveProperty('authProtocolVersion')
+  })
+
+  it('rejects an unversioned user token when the test-fleet cutover is enabled', () => {
+    const { authProtocolVersion: _ignored, ...legacyPayload } = BASE_PAYLOAD
+    config.authProtocolCutoverEnabled = true
+    jwtMock.verify.mockReturnValue({
+      ...legacyPayload,
+      accessScope: 'user',
+      teamId: null,
+    })
+
+    expect(verifyRpcToken('legacy-token')).toBeNull()
   })
 })
 

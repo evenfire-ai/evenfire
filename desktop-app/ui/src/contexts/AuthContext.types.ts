@@ -16,6 +16,7 @@ export interface AuthContextValue {
   isAuthenticated: boolean
   sessionGeneration?: number | null
   me: SessionMe | null
+  temporarySessionExpiresAt: number | null
   email: string
   password: string
   desktopSetupAuthorizationToken: string

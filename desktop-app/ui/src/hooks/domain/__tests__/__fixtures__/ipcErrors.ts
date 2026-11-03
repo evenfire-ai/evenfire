@@ -74,19 +74,22 @@ async function rejectionOf(
   throw new Error(`producer resolved for HTTP ${response.status}; expected a rejection`)
 }
 
-function callFor(channel: RpcChannel): (client: RpcProxyClient) => Promise<unknown> {
+function callFor(
+  channel: RpcChannel,
+  token = RPC_TOKEN
+): (client: RpcProxyClient) => Promise<unknown> {
   switch (channel) {
     case 'rpc:listSessions':
-      return client => client.listSessions(RPC_TOKEN, 'agent-x', { agent: 'agent-x', limit: 1 })
+      return client => client.listSessions(token, 'agent-x', { agent: 'agent-x', limit: 1 })
     case 'rpc:loadSessionMessages':
-      return client => client.loadSessionMessages(RPC_TOKEN, 'agent-x', 'agent-x', 'chat-1')
+      return client => client.loadSessionMessages(token, 'agent-x', 'agent-x', 'chat-1')
     case 'rpc:renameSession':
-      return client => client.renameSession(RPC_TOKEN, 'agent-x', 'agent-x', 'chat-1', 'Title')
+      return client => client.renameSession(token, 'agent-x', 'agent-x', 'chat-1', 'Title')
     case 'rpc:invokeHostMessage':
       return client =>
-        client.invokeHostMessage(RPC_TOKEN, 'agent-x', { content: 'hello' }, { async: true })
+        client.invokeHostMessage(token, 'agent-x', { content: 'hello' }, { async: true })
     case 'rpc:getTaskResult':
-      return client => client.getTaskResult(RPC_TOKEN, 'agent-x', 'task-1')
+      return client => client.getTaskResult(token, 'agent-x', 'task-1')
   }
 }
 
@@ -125,10 +128,15 @@ export async function ipcHostAccessDenied(channel: RpcChannel): Promise<Error> {
  * A 403 that does not confirm revocation: an arbitrary upstream 403 body
  * (for example a scope denial passed through from mcp-host).
  */
-export async function ipcGenericForbidden(channel: RpcChannel): Promise<Error> {
+/**
+ * A generic RPC 403. Callers with an active main-process owner may supply that
+ * accepted session credential so the real final-dispatch guard admits the
+ * fixture request; ordinary callers retain the RPC-token default.
+ */
+export async function ipcGenericForbidden(channel: RpcChannel, token = RPC_TOKEN): Promise<Error> {
   const error = await rejectionOf(
     jsonResponse(403, 'Forbidden', { error: 'missing send scope' }),
-    callFor(channel)
+    callFor(channel, token)
   )
   return wrapLikeElectronIpc(channel, error)
 }

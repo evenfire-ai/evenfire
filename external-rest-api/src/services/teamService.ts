@@ -7,6 +7,7 @@ type AuthContext = {
   teamId: string
   role: TeamRole
   sessionToken: string
+  authProtocolVersion?: 2
 }
 
 function canInvite(role: TeamRole): boolean {
@@ -34,7 +35,7 @@ export async function getCurrentTeam(auth: AuthContext) {
 }
 
 export async function createTeamForUser(
-  auth: Pick<AuthContext, 'userId' | 'email' | 'sessionToken'>,
+  auth: Pick<AuthContext, 'userId' | 'email' | 'sessionToken' | 'authProtocolVersion'>,
   name: string
 ) {
   const team = await controlApiRequest<{ id: string; name: string }>('POST', '/external/teams', {
@@ -54,6 +55,7 @@ export async function createTeamForUser(
         email: auth.email,
         teamId: team.id,
         role: 'admin',
+        ...(auth.authProtocolVersion === 2 ? { authProtocolVersion: 2 } : {}),
       },
     }
   )

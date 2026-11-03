@@ -6,6 +6,7 @@ import {
   __setChatStoreBaseDirForTests,
   bindChatStoreForUser,
   getChatStoreBindingGeneration,
+  prepareChatStoreBindingForUser,
   requireChatStore,
   requireChatStoreForBindingGeneration,
   unbindChatStore,
@@ -39,6 +40,29 @@ describe('chatStoreBinding', () => {
 
   it('requireChatStore throws Not authenticated before any bind', () => {
     expect(() => requireChatStore()).toThrow(/Not authenticated/)
+  })
+
+  it('keeps a prepared chat binding inaccessible until synchronous publication', async () => {
+    const prepared = await prepareChatStoreBindingForUser('user-prepared', ENV_A)
+
+    expect(prepared.canPublish()).toBe(true)
+    expect(() => requireChatStore()).toThrow(/Not authenticated/)
+
+    const publish = prepared.reservePublication()
+    expect(publish).not.toBeNull()
+    expect(publish?.()).toBe(getChatStoreBindingGeneration())
+    expect(requireChatStore()).toBeDefined()
+  })
+
+  it('rejects a prepared binding after another owner changes the generation', async () => {
+    const prepared = await prepareChatStoreBindingForUser('user-prepared', ENV_A)
+
+    await bindChatStoreForUser('new-owner', ENV_A)
+
+    expect(prepared.canPublish()).toBe(false)
+    expect(prepared.reservePublication()).toBeNull()
+    prepared.discard()
+    expect(requireChatStore()).toBeDefined()
   })
 
   it('fences destructive work to the binding that issued it', async () => {

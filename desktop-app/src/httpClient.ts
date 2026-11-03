@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { config } from './config.js'
 import { boundedErrorExcerpt, hostAccessDenialMessage } from './upstreamErrors.js'
 
@@ -15,6 +16,47 @@ export class ApiError extends Error {
 }
 
 const TRANSIENT_RETRY_DELAY_MS = 250
+let sessionInvalidationHandler: ((token: string, requestOwner?: unknown) => void) | undefined
+let sessionRequestGuard: ((token: string, requestContext?: unknown) => unknown) | undefined
+const sessionRequestContext = new AsyncLocalStorage<unknown>()
+
+/** The main-process session coordinator owns invalidation for every authenticated client. */
+export function setSessionInvalidationHandler(
+  handler?: (token: string, requestOwner?: unknown) => void,
+  requestGuard?: (token: string, requestContext?: unknown) => unknown
+): void {
+  sessionInvalidationHandler = handler
+  sessionRequestGuard = requestGuard
+}
+
+/** Keep token-bearing raw-fetch clients on the same 401 invalidation contract. */
+export function reportSessionUnauthorized(
+  token: string,
+  status: number,
+  requestOwner?: unknown
+): void {
+  if (status === 401) sessionInvalidationHandler?.(token, requestOwner)
+}
+
+/** Recheck volatile-session ownership at the final request-dispatch boundary. */
+export function assertSessionRequestAllowed(token: string): unknown {
+  return sessionRequestGuard?.(token, sessionRequestContext.getStore())
+}
+
+/** Bind the authenticated owner to work that may await before reaching HTTP dispatch. */
+export function enterSessionRequestContext(requestContext: unknown): void {
+  sessionRequestContext.enterWith(requestContext)
+}
+
+/** Read the owner already bound to the current asynchronous producer, if any. */
+export function getSessionRequestContext(): unknown {
+  return sessionRequestContext.getStore()
+}
+
+/** Give an unaccepted candidate credential a narrow, producer-scoped request context. */
+export function runWithSessionRequestContext<T>(requestContext: unknown, operation: () => T): T {
+  return sessionRequestContext.run(requestContext, operation)
+}
 
 /**
  * Wrap an optional caller signal with the app-wide client timeout
@@ -133,6 +175,7 @@ export async function requestJson<T>(
   }
 
   const performRequest = async (): Promise<T> => {
+    const requestOwner = options?.token ? assertSessionRequestAllowed(options.token) : undefined
     const response = await fetch(url, {
       method,
       headers,
@@ -142,6 +185,9 @@ export async function requestJson<T>(
 
     const raw = await response.text()
     if (!response.ok) {
+      if (options?.token) {
+        reportSessionUnauthorized(options.token, response.status, requestOwner)
+      }
       const retryAfter = response.headers.get('retry-after')
       const hostAccessMessage = hostAccessDenialMessage(response.status, raw)
       if (hostAccessMessage) {
@@ -175,6 +221,10 @@ export async function requestJson<T>(
       throw error
     }
     await sleep(TRANSIENT_RETRY_DELAY_MS)
-    return performRequest()
+    try {
+      return await performRequest()
+    } catch (retryError) {
+      throw retryError
+    }
   }
 }

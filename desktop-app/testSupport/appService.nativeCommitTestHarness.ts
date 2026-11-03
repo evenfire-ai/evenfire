@@ -2,12 +2,12 @@ import { vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import type { DesktopLogoutOutcome } from '../src/types.js'
 
-vi.mock('../src/chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../src/chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('./chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 
 export type Deferred<T> = {
   promise: Promise<T>
@@ -23,9 +23,14 @@ export function deferred<T>(): Deferred<T> {
 }
 
 export type NativeCommitTestService = {
-  authClient: { googleLogin: ReturnType<typeof vi.fn> }
+  authClient: {
+    googleLogin: ReturnType<typeof vi.fn>
+    passwordLogin: ReturnType<typeof vi.fn>
+    getMe: ReturnType<typeof vi.fn>
+  }
   tokenStore: {
     clearSessionToken: ReturnType<typeof vi.fn>
+    clearSessionTokenStrictly: ReturnType<typeof vi.fn>
     getSessionToken: ReturnType<typeof vi.fn>
     setSessionToken: ReturnType<typeof vi.fn>
   }
@@ -33,9 +38,11 @@ export type NativeCommitTestService = {
   me: { id: string } | null
   gfsScopeIdentity: { ownerId: string; environmentKey: string; baseUrl: string } | null
   googleLogin: (token: string) => Promise<unknown>
-  logout: () => Promise<number>
+  passwordLogin: (email: string, password: string) => Promise<unknown>
+  logout: () => Promise<DesktopLogoutOutcome>
   selectRuntimeConfig: (optionId: string) => Promise<unknown>
   getSessionState: () => Promise<unknown>
+  getSessionGeneration: () => number
   getCachedUserId: () => string | null
   listGfsUploadSessions: () => Promise<unknown>
 }
@@ -49,7 +56,7 @@ const originalEnvironment = {
 }
 const tempDirs = new Set<string>()
 
-export async function createNativeCommitTestHarness() {
+export async function createNativeCommitTestHarness(options: { keytarAvailable?: boolean } = {}) {
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-native-commit-'))
   tempDirs.add(userDataDir)
   delete process.env.CLERUM_DESKTOP_CONFIG_PATH
@@ -67,10 +74,32 @@ export async function createNativeCommitTestHarness() {
       setName: vi.fn(),
       setPath: vi.fn(),
     },
+    safeStorage: {
+      isEncryptionAvailable: vi.fn(() => false),
+      getSelectedStorageBackend: vi.fn(() => 'basic_text'),
+      encryptString: vi.fn((value: string) => Buffer.from(value)),
+      decryptString: vi.fn((value: Uint8Array) => Buffer.from(value).toString()),
+    },
   }))
+  if (options.keytarAvailable) {
+    const keychain = new Map<string, string>()
+    const keyOf = (service: string, account: string) => `${service}::${account}`
+    vi.doMock('keytar', () => ({
+      getPassword: vi.fn(
+        async (service: string, account: string) => keychain.get(keyOf(service, account)) ?? null
+      ),
+      setPassword: vi.fn(async (service: string, account: string, token: string) => {
+        keychain.set(keyOf(service, account), token)
+      }),
+      deletePassword: vi.fn(async (service: string, account: string) =>
+        keychain.delete(keyOf(service, account))
+      ),
+    }))
+  }
 
-  const [{ AppService }, runtimeConfig] = await Promise.all([
+  const [{ AppService }, { TokenStore }, runtimeConfig] = await Promise.all([
     import('../src/appService.js'),
+    import('../src/tokenStore.js'),
     import('../src/config.js'),
   ])
   const restA = 'https://api-a.example.test'
@@ -94,13 +123,22 @@ export async function createNativeCommitTestHarness() {
   if (!optionA || !optionB) throw new Error('test runtime profiles were not created')
   await runtimeConfig.selectDesktopRuntimeConfigOption(optionA.id)
 
-  const service = new AppService() as unknown as NativeCommitTestService
-  service.tokenStore = {
-    clearSessionToken: vi.fn().mockResolvedValue(undefined),
-    getSessionToken: vi.fn().mockResolvedValue(null),
-    setSessionToken: vi.fn().mockResolvedValue(undefined),
-  } as never
-  return { service, runtimeConfig, restA, restB, optionA, optionB }
+  const tokenStore = options.keytarAvailable
+    ? new TokenStore()
+    : new TokenStore({ isolatedUserDataPath: userDataDir })
+  const service = new AppService({
+    tokenStore,
+    getUserDataDirectory: () => userDataDir,
+  }) as unknown as NativeCommitTestService
+  const clearSessionToken = tokenStore.clearSessionToken.bind(tokenStore)
+  const clearSessionTokenStrictly = tokenStore.clearSessionTokenStrictly.bind(tokenStore)
+  const getSessionToken = tokenStore.getSessionToken.bind(tokenStore)
+  const setSessionToken = tokenStore.setSessionToken.bind(tokenStore)
+  vi.spyOn(tokenStore, 'clearSessionToken').mockImplementation(clearSessionToken)
+  vi.spyOn(tokenStore, 'clearSessionTokenStrictly').mockImplementation(clearSessionTokenStrictly)
+  vi.spyOn(tokenStore, 'getSessionToken').mockImplementation(getSessionToken)
+  vi.spyOn(tokenStore, 'setSessionToken').mockImplementation(setSessionToken)
+  return { service, runtimeConfig, restA, restB, optionA, optionB, userDataDir }
 }
 
 export async function cleanupNativeCommitTestHarness(): Promise<void> {

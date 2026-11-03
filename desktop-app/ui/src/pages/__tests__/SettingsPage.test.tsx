@@ -27,6 +27,7 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
     teamName: null,
     role: null,
   },
+  temporarySessionExpiresAt: null,
   email: 'user@example.com',
   password: '',
   desktopSetupAuthorizationToken: '',

@@ -142,6 +142,7 @@ const osxNotarize = resolveOsxNotarizeConfig()
 module.exports = {
   packagerConfig: {
     asar: true,
+    ignore: [/^\/testSupport\//],
     // npm installs internal file: dependencies as symlinks. Copy their contents
     // into the staging app so ASAR never contains links to the monorepo outside
     // desktop-app (which Electron correctly rejects as an escaping symlink).
@@ -150,7 +151,11 @@ module.exports = {
     name: 'Evenfire',
     icon: './assets/icon',
     darwinDarkModeSupport: true,
-    extraResource: ['./assets/icon-light.png', './assets/icon-dark.png'],
+    extraResource: [
+      './assets/icon-light.png',
+      './assets/icon-dark.png',
+      ...(process.platform === 'win32' ? ['./resources/WindowsSessionAuthorityNative.dll'] : []),
+    ],
     afterCopyExtraResources: [compileMacAdaptiveIcon],
     appBundleId: process.env.APPLE_BUNDLE_ID || defaultAppleBundleId,
     appCategoryType: 'public.app-category.productivity',

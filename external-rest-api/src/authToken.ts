@@ -13,12 +13,15 @@ export function verifyToken(token: string): AuthClaims | null {
     }) as jwt.JwtPayload & Omit<AuthClaims, 'exp'>
 
     const teamId = payload?.teamId
+    const authProtocolVersion = payload?.authProtocolVersion
     if (
       typeof payload?.userId !== 'string' ||
       typeof payload?.email !== 'string' ||
       (teamId !== null && typeof teamId !== 'string') ||
       typeof payload?.role !== 'string' ||
-      typeof payload?.exp !== 'number'
+      typeof payload?.exp !== 'number' ||
+      (authProtocolVersion !== undefined && authProtocolVersion !== 2) ||
+      (config.authProtocolCutoverEnabled && authProtocolVersion !== 2)
     ) {
       return null
     }
@@ -34,6 +37,7 @@ export function verifyToken(token: string): AuthClaims | null {
       // for existing callers that require an explicit team id.
       teamId: teamId || '',
       role: payload.role as AuthClaims['role'],
+      ...(authProtocolVersion === 2 ? { authProtocolVersion: 2 } : {}),
       exp: payload.exp,
     }
   } catch {

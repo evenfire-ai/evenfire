@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
+import { invitationResponse } from '../src/services/directory/invitationStore.js'
 import {
   MemberRegistrationUnavailableError,
   memberRegistrationErrorResponse,
@@ -61,6 +62,27 @@ function app(): express.Express {
   return a
 }
 
+function resetInvitationPreview(status: 'pending' | 'accepted' = 'pending') {
+  return invitationResponse(
+    {
+      id: 'database-row-1',
+      team_id: null,
+      invitee_name: null,
+      email: 'member@example.invalid',
+      role: 'member',
+      token: 'Synthetic-producer-token-1',
+      status,
+      purpose: 'password_reset',
+      created_at: new Date('2026-10-27T00:00:00.000Z'),
+      expires_at: new Date('2026-10-29T00:00:00.000Z'),
+      accepted_at: status === 'accepted' ? new Date('2026-10-27T00:00:00.000Z') : null,
+      accepted_user_id: status === 'accepted' ? 'user-1' : null,
+      team_name: null,
+    },
+    null
+  )
+}
+
 describe('external invitation routes when the hub is unavailable', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -94,13 +116,7 @@ describe('external invitation routes when the hub is unavailable', () => {
       email: 'member@example.invalid',
       invitationUuid: 'Synthetic-producer-token-1',
     })
-    directory.getInvitationByToken.mockResolvedValue({
-      id: 'database-row-1',
-      token: 'Synthetic-producer-token-1',
-      email: 'member@example.invalid',
-      purpose: 'password_reset',
-      status: 'pending',
-    })
+    directory.getInvitationByToken.mockResolvedValue(resetInvitationPreview())
     directory.setInvitationPasswordForEmail.mockResolvedValue({
       data: {
         id: 'database-row-1',
@@ -172,13 +188,7 @@ describe('external invitation routes when the hub is unavailable', () => {
       email: 'member@example.invalid',
       invitationUuid: 'Synthetic-producer-token-1',
     })
-    directory.getInvitationByToken.mockResolvedValue({
-      id: 'database-row-1',
-      token: 'Synthetic-producer-token-1',
-      email: 'member@example.invalid',
-      purpose: 'password_reset',
-      status: 'accepted',
-    })
+    directory.getInvitationByToken.mockResolvedValue(resetInvitationPreview('accepted'))
     await request(app())
       .post('/external/invitations/password-token')
       .send({
@@ -192,13 +202,7 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
     expect(sessionToken.signExternalSessionToken).not.toHaveBeenCalled()
 
-    directory.getInvitationByToken.mockReset().mockResolvedValue({
-      id: 'database-row-1',
-      token: 'Synthetic-producer-token-1',
-      email: 'member@example.invalid',
-      purpose: 'password_reset',
-      status: 'pending',
-    })
+    directory.getInvitationByToken.mockReset().mockResolvedValue(resetInvitationPreview())
     directory.setInvitationPasswordForEmail.mockResolvedValue({ error: 'not_pending' })
     await request(app())
       .post('/external/invitations/password-token')
@@ -217,13 +221,7 @@ describe('external invitation routes when the hub is unavailable', () => {
       email: 'member@example.invalid',
       invitationUuid: 'Synthetic-producer-token-1',
     })
-    directory.getInvitationByToken.mockResolvedValue({
-      id: 'database-row-1',
-      token: 'Synthetic-producer-token-1',
-      email: 'member@example.invalid',
-      purpose: 'password_reset',
-      status: 'pending',
-    })
+    directory.getInvitationByToken.mockResolvedValue(resetInvitationPreview())
 
     const res = await request(app())
       .post('/external/invitations/password-token')

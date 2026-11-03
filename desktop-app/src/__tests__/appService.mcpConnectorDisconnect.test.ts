@@ -32,6 +32,7 @@ vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => '/tmp/clerum-desktop-test') },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn(),
     decryptString: vi.fn(),
   },
@@ -41,7 +42,9 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../config.js', () => ({
+  getActiveEnvKey: () => 'test_env-000000000000',
   getActiveRuntimeConfigOptionId: () => null,
+  getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -75,14 +78,6 @@ vi.mock('../authClient.js', () => ({
   },
 }))
 
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
-  },
-}))
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const SERVER = 'shared-drive'
 const HOST_REF = 'agent-alpha'
@@ -96,6 +91,10 @@ const RPC_TOKEN = 'rpc-token'
 function makeService(): AppService {
   const svc = new AppService()
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
+  ;(svc as unknown as { me: { id: string; teamId: string } }).me = {
+    id: 'mcp-connector-test-user',
+    teamId: 'team-1',
+  }
   // Pin the token lane: these tests are about the dialog + DELETE, not minting.
   ;(
     svc as unknown as {

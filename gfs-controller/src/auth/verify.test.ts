@@ -52,6 +52,7 @@ const goodPayload = {
   drive: "main",
   scopes: ["gfs.read"],
   pathBindings: [{ path: "/org", permissions: ["read"] }],
+  authProtocolVersion: 2,
 };
 
 const DESKTOP_USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -73,12 +74,42 @@ describe("loadVerificationKey", () => {
 });
 
 describe("verifyGfsToken", () => {
+  it("rejects an explicitly unsupported user protocol version", () => {
+    const legacyPayload: Record<string, unknown> = {
+      ...goodPayload,
+      authGeneration: 1,
+      authProtocolVersion: 1,
+    };
+    expect(() => verifyGfsToken(sign(legacyPayload), { key, audience: AUD })).toThrow(
+      /authProtocolVersion 2/
+    );
+  });
+
+  it("accepts a legacy user token while cutover is disabled", () => {
+    const { authProtocolVersion: _ignored, ...legacyPayload } = goodPayload;
+    const claims = verifyGfsToken(
+      sign({ ...legacyPayload, authGeneration: 1, principalType: "user" }),
+      { key, audience: AUD }
+    );
+    expect(claims.sub).toBe("user-1");
+    expect(claims).not.toHaveProperty("authProtocolVersion");
+  });
+
+  it("rejects an unversioned user token when test-fleet cutover is enabled", () => {
+    const { authProtocolVersion: _ignored, ...legacyPayload } = goodPayload;
+    const token = sign({ ...legacyPayload, authGeneration: 1, principalType: "user" });
+    expect(() =>
+      verifyGfsToken(token, { key, audience: AUD, authProtocolCutoverEnabled: true })
+    ).toThrow(/authProtocolVersion 2/);
+  });
+
   it("accepts a well-formed token and returns the claims", () => {
     const claims = verifyGfsToken(sign(goodPayload), { key, audience: AUD });
     expect(claims.sub).toBe("user-1");
     expect(claims.drive).toBe("main");
     expect(claims.scopes).toEqual(["gfs.read"]);
     expect(claims.pathBindings).toEqual([{ path: "/org", permissions: ["read"] }]);
+    expect(claims.authProtocolVersion).toBe(2);
     expect(claims.exp - claims.iat).toBe(300);
   });
 

@@ -31,6 +31,7 @@ vi.mock('electron', () => ({
 vi.mock('../appService.js', () => ({ AppService: class {} }))
 
 const service = {
+  captureGfsRequestContext: vi.fn(() => ({ kind: 'accepted-session' })),
   downloadGfsUriInto: vi.fn(async () => ({ resource: {}, bytes: 0 })),
 }
 
@@ -180,9 +181,12 @@ describe('gfs:zipStream IPC boundary (R3-M1, R3-M2)', () => {
     })) as { name: string; bytes: number }
 
     expect(result).toEqual({ name: 'Docs/big.bin', bytes: 14 })
+    expect(service.captureGfsRequestContext).toHaveBeenCalledTimes(1)
     expect(service.downloadGfsUriInto).toHaveBeenCalledTimes(1)
-    const [uri, maxBytes] = service.downloadGfsUriInto.mock.calls[0] as [string, number]
+    const [uri, maxBytes, _signal, _onChunk, requestContext] = service.downloadGfsUriInto.mock
+      .calls[0] as [string, number, AbortSignal | undefined, unknown, unknown]
     expect(uri).toBe('gfs://main/big')
     expect(maxBytes).toBe(1024)
+    expect(requestContext).toEqual({ kind: 'accepted-session' })
   })
 })

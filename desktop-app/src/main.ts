@@ -30,10 +30,19 @@ import {
   registerDeepLinkAcknowledgmentHandlers,
   registerIpcHandlers,
 } from './ipc.js'
-import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
+import {
+  createDeferredExternalLogoutFailureHandler,
+  createDeferredExternalLogoutStateRefreshHandler,
+  createMainWindowCoordinator,
+  createRetryableInitializer,
+  isQuitAdmissionClosedError,
+  registerQuitDrain,
+  retryPendingExternalLogoutAfterQuitCancellation,
+} from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
 import { initPluginSdkRuntime } from './pluginSdkRuntime.js'
+import { wireMemoryOnlySessionPowerLifecycle } from './powerMonitorSessionLifecycle.js'
 import { collectInitialProtocolUrls, shouldRegisterOsProtocols } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
 import {
@@ -76,27 +85,71 @@ process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
+const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
+const gfsUserNavigationGeneration = new GfsUserNavigationGeneration()
 const appService = new AppService({
   ...(devIsolationPlan
     ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
     : {}),
-  onSandboxUiSessionInvalidated: () => {
+  reportDeferredLogoutFailure: error => {
+    const errorName = error instanceof Error && error.name ? error.name : typeof error
+    console.error(`[Desktop] Could not apply deferred external logout (${errorName}).`)
+  },
+  notifySessionExpired: sessionGeneration => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('auth:sessionExpired', sessionGeneration)
+    }
+  },
+  onSandboxUiSessionInvalidated: sessionGeneration => {
     const appDeepLinkMinimumId = sandboxUiDeepLinkQueue.clear()
     const gfsDeepLinkMinimumId = gfsResourceDeepLinkQueue.clear()
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('sandboxUi:sessionInvalidated', {
-        sessionGeneration: appService.getSessionGeneration(),
+        sessionGeneration,
         appDeepLinkMinimumId,
         gfsDeepLinkMinimumId,
       })
     }
   },
 })
-const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
-const gfsUserNavigationGeneration = new GfsUserNavigationGeneration()
 const logoutAndClearGfsResourceDeepLinks = createLogoutWithGfsResourceDeepLinkClear(
   gfsResourceDeepLinkQueue,
   () => appService.logout()
+)
+registerQuitDrain(
+  app,
+  () => appService.prepareForQuit(),
+  () => {
+    retryPendingExternalLogoutAfterQuitCancellation(
+      () => appService.cancelQuitPreparation(),
+      () => appService.applyPendingExternalLogoutIntent(),
+      () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('auth:externalLogout')
+        }
+      },
+      createDeferredExternalLogoutFailureHandler({
+        getCachedUserId: () => appService.getCachedUserId(),
+        getWindow: () => mainWindow,
+        reportFailure: error => {
+          const errorName = error instanceof Error && error.name ? error.name : typeof error
+          console.error(`[Desktop] Deferred external logout failed (${errorName}).`)
+        },
+      }),
+      createDeferredExternalLogoutStateRefreshHandler({
+        getCachedUserId: () => appService.getCachedUserId(),
+        getWindow: () => mainWindow,
+      }),
+      createDeferredExternalLogoutStateRefreshHandler({
+        getCachedUserId: () => appService.getCachedUserId(),
+        getWindow: () => mainWindow,
+      })
+    )
+  },
+  error => {
+    const errorName = error instanceof Error && error.name ? error.name : typeof error
+    console.error(`[Desktop] Quit preparation failed; continuing quit (${errorName}).`)
+  }
 )
 registerDeepLinkAcknowledgmentHandlers(appService, () => mainWindow, {
   appQueue: sandboxUiDeepLinkQueue,
@@ -183,13 +236,14 @@ function emitWindowControlsState(win: BrowserWindow): void {
  * sleep is re-minted now instead of whenever its timer catches up.
  */
 function wirePowerMonitor(): void {
-  const emit = () => {
+  // performance.now() is not a suspend-inclusive clock on macOS. End an
+  // in-memory-only session before sleep rather than allowing paused elapsed
+  // time to extend local authority; the resume check handles interrupted wake.
+  wireMemoryOnlySessionPowerLifecycle(powerMonitor, appService, () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('system:resume')
     }
-  }
-  powerMonitor.on('resume', emit)
-  powerMonitor.on('unlock-screen', emit)
+  })
   powerMonitor.on('resume', notifySandboxUiHostResumed)
   powerMonitor.on('unlock-screen', notifySandboxUiHostResumed)
 }
@@ -288,7 +342,6 @@ ipcMain.handle('sandboxUi:clearPendingDeepLinks', event => {
   assertTrustedSender(event)
   sandboxUiDeepLinkQueue.clear()
 })
-
 ipcMain.handle('gfs:listPendingDeepLinks', event => {
   assertTrustedSender(event)
   return { links: gfsResourceDeepLinkQueue.list() }
@@ -323,7 +376,6 @@ ipcMain.handle('gfs:clearPendingDeepLinks', event => {
   assertTrustedSender(event)
   return gfsResourceDeepLinkQueue.clear()
 })
-
 function focusMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (mainWindow.isMinimized()) mainWindow.restore()
@@ -374,11 +426,21 @@ const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   appProtocol: DESKTOP_SETUP_PROTOCOL,
   focusMainWindow,
   getWindow: () => mainWindow,
+  getSessionState: async () => ({ authenticated: Boolean(appService.getCachedUserId()) }),
   handleSandboxUiDeepLink,
   handleGfsResourceDeepLink,
   gfsResourceDeepLinkHost: GFS_RESOURCE_DEEP_LINK_HOST,
   isRendererReady: () => mainWindowRendererReady,
   logout: logoutAndClearGfsResourceDeepLinks,
+  // AppService records the environment-scoped marker before rejecting this
+  // shutdown-time logout. The router treats that rejection as deferred work.
+  deferLogout: isQuitAdmissionClosedError,
+  reportLogoutFailure: error => {
+    // The main-process bootstrap has no service logger; log only the safe error
+    // name because native storage errors must not leak credential or URL data.
+    const errorName = error instanceof Error ? error.name : typeof error
+    console.error('[Desktop] External logout failed', { errorName })
+  },
   requestMainWindow,
   sandboxUiDeepLinkHost: SANDBOX_UI_DEEP_LINK_HOST,
   shouldAcceptSandboxUiProtocolLink,

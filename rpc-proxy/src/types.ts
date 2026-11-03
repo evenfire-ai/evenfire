@@ -26,6 +26,8 @@ export type RpcAccessClaims = {
   jti: string
   iat: number
   exp: number
+  /** Required on user-issued RPC leases after the test-fleet auth cutover. */
+  authProtocolVersion?: 2
   service?: string
   role?: string
 }

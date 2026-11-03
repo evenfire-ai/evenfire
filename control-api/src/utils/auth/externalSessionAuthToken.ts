@@ -25,6 +25,7 @@ export function signExternalSessionToken(
     {
       ...claims,
       authGeneration,
+      ...(claims.authProtocolVersion === 2 ? { authProtocolVersion: 2 } : {}),
     },
     config.sessionJwtPrivateKey,
     {
@@ -47,12 +48,15 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
 
     const teamId = payload?.teamId
     const authGeneration = payload?.authGeneration
+    const authProtocolVersion = payload?.authProtocolVersion
     if (
       typeof payload?.userId !== 'string' ||
       typeof payload?.email !== 'string' ||
       (teamId !== null && typeof teamId !== 'string') ||
       typeof payload?.role !== 'string' ||
       typeof payload?.exp !== 'number' ||
+      (authProtocolVersion !== undefined && authProtocolVersion !== 2) ||
+      (config.authProtocolCutoverEnabled && authProtocolVersion !== 2) ||
       !Number.isSafeInteger(authGeneration) ||
       Number(authGeneration) < 1
     ) {
@@ -68,6 +72,7 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       teamId,
       role: payload.role as AuthClaims['role'],
       authGeneration: Number(authGeneration),
+      ...(authProtocolVersion === 2 ? { authProtocolVersion: 2 } : {}),
       exp: payload.exp,
     }
   } catch {

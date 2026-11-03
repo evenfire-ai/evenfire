@@ -33,6 +33,7 @@ const authValue: AuthContextValue = {
   statusTone: 'info',
   isAuthenticated: true,
   sessionGeneration: 1,
+  temporarySessionExpiresAt: null,
   me,
   email: me.email,
   password: '',

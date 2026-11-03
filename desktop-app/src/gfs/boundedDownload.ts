@@ -1,4 +1,4 @@
-import { ApiError } from '../httpClient.js'
+import { ApiError, assertSessionRequestAllowed, reportSessionUnauthorized } from '../httpClient.js'
 
 /** The dependency seam so the bound can be tested with a fabricated response. */
 export interface BoundedDownloadDeps {
@@ -38,6 +38,7 @@ export async function streamBoundedBytes(
 ): Promise<number> {
   const maxBytes = opts.maxBytes
   const controller = new AbortController()
+  const requestOwner = assertSessionRequestAllowed(token)
   if (opts.signal) {
     if (opts.signal.aborted) controller.abort()
     else opts.signal.addEventListener('abort', () => controller.abort(), { once: true })
@@ -47,6 +48,7 @@ export async function streamBoundedBytes(
     signal: controller.signal,
   })
   if (!res.ok) {
+    reportSessionUnauthorized(token, res.status, requestOwner)
     throw new ApiError(
       `gfs download failed: ${res.status}`,
       res.status,
@@ -121,6 +123,7 @@ export async function fetchBoundedBytes(
 ): Promise<ArrayBuffer> {
   const maxBytes = opts?.maxBytes
   const controller = new AbortController()
+  const requestOwner = assertSessionRequestAllowed(token)
   // An external signal (producer-side cancellation, R1-M1) funnels into the
   // same controller that bounds the body: aborting it ends the fetch.
   if (opts?.signal) {
@@ -132,6 +135,7 @@ export async function fetchBoundedBytes(
     signal: controller.signal,
   })
   if (!res.ok) {
+    reportSessionUnauthorized(token, res.status, requestOwner)
     // Keep the body AND Retry-After. `surfaceGfsGrantError` reads the retry
     // window from `{ retryAfterSeconds }` in the body and falls back to the
     // header when the 429 came from an upstream proxy whose body it cannot

@@ -15,6 +15,7 @@ afterEach(() => {
     delete process.env[key]
   }
   delete process.env.CONTEXT_MAPPER_GFSC_IMAGE_PULL_POLICY
+  delete process.env.CONTEXT_MAPPER_GFSC_AUTH_PROTOCOL_CUTOVER_ENABLED
   delete process.env.CONTEXT_MAPPER_NODELOCAL_DNS_CIDR
   delete process.env.CONTEXT_MAPPER_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA
   delete process.env.CONTEXT_MAPPER_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA
@@ -72,6 +73,7 @@ describe('gfsDefaultFactoryConfig', () => {
     expect(c.gfscPort).toBe(8087)
     expect(c.driveName).toBe('main')
     expect(c.tokenAudience).toBe('gfs-controller')
+    expect(c.authProtocolCutoverEnabled).toBe(false)
     expect(c.postgresPort).toBe(5432)
     expect(c.postgresPodLabels).toEqual({ app: 'control-postgres' })
     expect(c.gfscImagePullPolicy).toBe('IfNotPresent')
@@ -83,6 +85,13 @@ describe('gfsDefaultFactoryConfig', () => {
     expect(c.syncCopyTimeoutMs).toBeUndefined()
     expect(c.maxWriteBodyBytes).toBeUndefined()
     expect(c.uploadV2Enabled).toBeUndefined()
+  })
+
+  it('enables cutover only when the test-fleet operator sets the exact true value', () => {
+    process.env.CONTEXT_MAPPER_GFSC_AUTH_PROTOCOL_CUTOVER_ENABLED = 'true'
+    expect(gfsDefaultFactoryConfig().authProtocolCutoverEnabled).toBe(true)
+    process.env.CONTEXT_MAPPER_GFSC_AUTH_PROTOCOL_CUTOVER_ENABLED = 'false'
+    expect(gfsDefaultFactoryConfig().authProtocolCutoverEnabled).toBe(false)
   })
 
   it('passes synchronous copy limits through verbatim, including explicit empty values', () => {

@@ -124,12 +124,17 @@ for line in diff.splitlines():
     if not line.startswith("+") or line.startswith("+++"):
         continue
     value = line[1:]
-    # Only this fully matched fixture line may contain a bearer-looking value.
+    # Only exact fully marked fixture lines may contain a bearer-looking value.
     synthetic_bearer_fixture_line = (
         current == "tests/e2e/playwright/profile-ui-recovery-fixture.mjs"
         and value
         == "const syntheticBearer = 'Bearer "
         "synthetic-profile-recovery-token' // PUBLIC_SYNTHETIC_BEARER_FIXTURE"
+    )
+    synthetic_rpc_bearer_fixture_line = (
+        current == "desktop-app/src/__tests__/appService.rpcLease.regression.test.ts"
+        and value.strip()
+        == "'" + "Bearer " + "derived-rpc-bearer-shared' // PUBLIC_SYNTHETIC_BEARER_FIXTURE"
     )
     # The boundary is intended to catch materialized credentials, not source
     # identifiers or test fixtures.  The old expression accepted an optional
@@ -183,7 +188,9 @@ for line in diff.splitlines():
             if match is None:
                 break
             position = match.end()
-            if reason == "bearer token" and synthetic_bearer_fixture_line:
+            if reason == "bearer token" and (
+                synthetic_bearer_fixture_line or synthetic_rpc_bearer_fixture_line
+            ):
                 continue
             if reason == "private key" and "evidence-scanner" in current:
                 continue

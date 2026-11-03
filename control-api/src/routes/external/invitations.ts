@@ -157,7 +157,15 @@ export function createExternalInvitationsRouter(): Router {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
 
-        const sessionToken = signExternalSessionToken(session)
+        // Invitation proof does not establish which client protocol made the request.
+        // Keep this session unversioned so invitation redemption cannot attest v2.
+        const sessionToken = signExternalSessionToken({
+          userId: session.userId,
+          email: session.email,
+          teamId: session.teamId || null,
+          role: session.role,
+          authGeneration: session.authGeneration,
+        })
         const { sessionContext: _sessionContext, ...response } = result.data
 
         return res.status(200).json({
@@ -321,6 +329,8 @@ export function createExternalInvitationsRouter(): Router {
         ) {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
+        // This legacy invitation endpoint has no versioned caller contract.
+        // Keep its new session unversioned; cutover consumers will reject it.
         const sessionToken = signExternalSessionToken({
           userId: result.data.userId,
           email: result.data.email,

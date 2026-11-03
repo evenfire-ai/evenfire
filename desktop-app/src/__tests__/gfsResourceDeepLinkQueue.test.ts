@@ -123,4 +123,19 @@ describe('GfsResourceDeepLinkQueue', () => {
     )
     expect(queue.list()).toEqual([postLogoutLink])
   })
+
+  it('preserves the exact logout error while still clearing the owned queue', async () => {
+    const queue = new GfsResourceDeepLinkQueue()
+    queue.enqueue(parseProducedUri('gfs://main/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'))
+    const failure = new Error('durable logout was not committed')
+    const logout = vi.fn(async () => {
+      throw failure
+    })
+    const logoutAndClear = createLogoutWithGfsResourceDeepLinkClear(queue, logout)
+
+    await expect(logoutAndClear()).rejects.toBe(failure)
+
+    expect(logout).toHaveBeenCalledOnce()
+    expect(queue.list()).toEqual([])
+  })
 })

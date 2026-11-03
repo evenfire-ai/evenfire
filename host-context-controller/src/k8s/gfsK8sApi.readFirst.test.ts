@@ -374,6 +374,7 @@ const readerProducerConfig: GfsFactoryConfig = {
   readerPgSecretKey: 'connection-string',
   driveName: 'main',
   tokenAudience: 'gfs-controller',
+  authProtocolCutoverEnabled: false,
   agentReadRlPerMinPerReplica: 300,
   agentWriteRlPerMinPerReplica: 120,
 }

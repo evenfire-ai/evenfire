@@ -1,5 +1,10 @@
 import { config } from './config.js'
-import { ApiError, requestJson } from './httpClient.js'
+import {
+  ApiError,
+  assertSessionRequestAllowed,
+  reportSessionUnauthorized,
+  requestJson,
+} from './httpClient.js'
 import { boundedErrorExcerpt } from './upstreamErrors.js'
 
 export type ContextSharedFilesystemSummary = {
@@ -90,11 +95,13 @@ export class SharedFilesClient {
         `/api/v1/me/contexts/${encodeURIComponent(contextId)}/shared-filesystems/` +
           `${encodeURIComponent(sfsName)}/proxy/v1/files/download`
       ) + `?path=${encodeURIComponent(relPath)}`
+    const requestOwner = assertSessionRequestAllowed(sessionToken)
     const response = await fetch(target, {
       method: 'GET',
       headers: { authorization: `Bearer ${sessionToken}` },
     })
     if (!response.ok) {
+      reportSessionUnauthorized(sessionToken, response.status, requestOwner)
       const body = await response.text()
       throw new ApiError(
         `${response.status} ${response.statusText}: ${boundedErrorExcerpt(body)}`,

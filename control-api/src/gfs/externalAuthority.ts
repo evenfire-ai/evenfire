@@ -11,6 +11,7 @@ export type ExternalGfsUserAuthority = {
   desktopUserId: string
   tokenSubject: string
   authGeneration?: number
+  authProtocolVersion?: 2
 }
 
 export type ExternalGfsLinkedAdminAuthority = {
@@ -163,9 +164,14 @@ export async function attachExternalGfsAuthority(
   try {
     const authority = await resolveExternalGfsAuthority(desktopUserId)
     if (authority.kind === 'user-session') {
-      const generation = (req as Request & { externalAuth?: { authGeneration?: number } })
-        .externalAuth?.authGeneration
+      const session = (
+        req as Request & {
+          externalAuth?: { authGeneration?: number; authProtocolVersion?: 2 }
+        }
+      ).externalAuth
+      const generation = session?.authGeneration
       if (generation !== undefined) authority.authGeneration = generation
+      if (session?.authProtocolVersion === 2) authority.authProtocolVersion = 2
     }
     ;(req as RequestWithExternalGfsAuthority).gfsAuthority = authority
     next()

@@ -1,4 +1,4 @@
-import { Request, Response, Router } from 'express'
+import { type NextFunction, Request, Response, Router } from 'express'
 import { OAuth2Client } from 'google-auth-library'
 import { config } from '../config.js'
 import { ControlApiError } from '../controlApiClient.js'
@@ -76,48 +76,66 @@ async function verifyGoogleToken(idToken: string): Promise<GooglePayload> {
 export function createAuthRouter(): Router {
   const router = Router()
 
-  router.post('/auth/google', async (req, res, next) => {
-    try {
-      const idToken = String(req.body?.idToken || '')
-      if (!idToken) {
-        res.status(400).json({ error: 'idToken is required' })
-        return
-      }
+  const googleLogin =
+    (protocolVersion: 1 | 2) => async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const idToken = String(req.body?.idToken || '')
+        if (!idToken) {
+          res.status(400).json({ error: 'idToken is required' })
+          return
+        }
 
-      await verifyGoogleToken(idToken)
-      const result = await loginWithGoogle({ idToken })
-      sendLoginResponse(req, res, result)
-    } catch (error) {
-      if (isControlApiStatus(error, 404)) {
-        res.status(404).json({ error: 'user_not_found' })
-        return
+        await verifyGoogleToken(idToken)
+        const result = await loginWithGoogle({ idToken }, protocolVersion)
+        sendLoginResponse(req, res, result)
+      } catch (error) {
+        if (isControlApiStatus(error, 404)) {
+          res.status(404).json({ error: 'user_not_found' })
+          return
+        }
+        if (isControlApiStatus(error, 403)) {
+          res.status(403).json({ error: 'membership_not_found' })
+          return
+        }
+        next(error)
       }
-      if (isControlApiStatus(error, 403)) {
-        res.status(403).json({ error: 'membership_not_found' })
-        return
-      }
-      next(error)
     }
+  router.post('/auth/v2/google', googleLogin(2))
+  router.post('/auth/google', (req, res, next) => {
+    if (config.authProtocolCutoverEnabled) {
+      res.status(426).json({ error: 'supported_client_upgrade_required' })
+      return
+    }
+    return googleLogin(1)(req, res, next)
   })
 
-  router.post('/auth/password-login', async (req, res, next) => {
-    try {
-      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
-      const password = typeof req.body?.password === 'string' ? req.body.password : ''
-      if (!email || !password || email.length > 320 || password.length > 256) {
-        res.status(400).json({ error: 'invalid_request' })
-        return
+  const passwordLogin =
+    (protocolVersion: 1 | 2) => async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
+        const password = typeof req.body?.password === 'string' ? req.body.password : ''
+        if (!email || !password || email.length > 320 || password.length > 256) {
+          res.status(400).json({ error: 'invalid_request' })
+          return
+        }
+        const result = await loginWithPassword(email, password, protocolVersion)
+        sendLoginResponse(req, res, result)
+      } catch (error) {
+        if (error instanceof ControlApiError && [401, 403, 409].includes(error.status)) {
+          res.status(401).json({ error: 'invalid_credentials' })
+          return
+        }
+        if (sendPasswordAuthorityError(error, res)) return
+        next(error)
       }
-      const result = await loginWithPassword(email, password)
-      sendLoginResponse(req, res, result)
-    } catch (error) {
-      if (error instanceof ControlApiError && [401, 403, 409].includes(error.status)) {
-        res.status(401).json({ error: 'invalid_credentials' })
-        return
-      }
-      if (sendPasswordAuthorityError(error, res)) return
-      next(error)
     }
+  router.post('/auth/v2/password-login', passwordLogin(2))
+  router.post('/auth/password-login', (req, res, next) => {
+    if (config.authProtocolCutoverEnabled) {
+      res.status(426).json({ error: 'supported_client_upgrade_required' })
+      return
+    }
+    return passwordLogin(1)(req, res, next)
   })
 
   router.post('/auth/password-reset/request', passwordResetRateLimit, async (req, res, next) => {

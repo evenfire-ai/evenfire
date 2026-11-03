@@ -267,4 +267,102 @@ describe('routes/access forwarding', () => {
     const app = appWith(createMeRouter)
     await request(app).get('/me/contexts').set('authorization', 'Bearer bad-token').expect(401)
   })
+
+  it('forwards the authenticated protocol version when switching teams', async () => {
+    authTokenMock.verifyToken.mockReturnValue({ ...claims, authProtocolVersion: 2 })
+    meServiceMock.switchTeam.mockResolvedValue({
+      team: { id: 'team-2', name: 'Beta', role: 'member' },
+      token: 'fixture-next-session-token',
+    })
+    const app = appWith(createMeRouter)
+
+    await request(app)
+      .post('/me/switch-team')
+      .set('authorization', 'Bearer v2-session-token')
+      .send({ teamId: 'team-2' })
+      .expect(200)
+
+    expect(meServiceMock.switchTeam).toHaveBeenCalledWith(
+      'user-1',
+      'user@example.com',
+      'team-2',
+      'v2-session-token',
+      2
+    )
+  })
+
+  it('preserves an absent protocol version when switching legacy sessions', async () => {
+    authTokenMock.verifyToken.mockReturnValue(claims)
+    meServiceMock.switchTeam.mockResolvedValue({
+      team: { id: 'team-2', name: 'Beta', role: 'member' },
+      token: 'fixture-next-session-token',
+    })
+    const app = appWith(createMeRouter)
+
+    await request(app)
+      .post('/me/switch-team')
+      .set('authorization', 'Bearer legacy-session-token')
+      .send({ teamId: 'team-2' })
+      .expect(200)
+
+    expect(meServiceMock.switchTeam).toHaveBeenCalledWith(
+      'user-1',
+      'user@example.com',
+      'team-2',
+      'legacy-session-token',
+      undefined
+    )
+  })
+
+  it('forwards protocol v2 claims to the public create-team producer', async () => {
+    authTokenMock.verifyToken.mockReturnValue({ ...claims, authProtocolVersion: 2 })
+    teamServiceMock.createTeamForUser.mockResolvedValue({
+      team: { id: 'team-2', name: 'Beta', role: 'admin' },
+      token: 'fixture-next-session-token',
+    })
+    const app = appWith(createTeamRouter)
+
+    await request(app)
+      .post('/team')
+      .set('authorization', 'Bearer v2-session-token')
+      .send({ name: 'Beta' })
+      .expect(201)
+
+    expect(teamServiceMock.createTeamForUser).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        email: 'user@example.com',
+        teamId: 'team-1',
+        role: 'member',
+        authProtocolVersion: 2,
+        sessionToken: 'v2-session-token',
+      }),
+      'Beta'
+    )
+  })
+
+  it('preserves an absent protocol claim through the public legacy create-team producer', async () => {
+    authTokenMock.verifyToken.mockReturnValue(claims)
+    teamServiceMock.createTeamForUser.mockResolvedValue({
+      team: { id: 'team-2', name: 'Beta', role: 'admin' },
+      token: 'fixture-next-session-token',
+    })
+    const app = appWith(createTeamRouter)
+
+    await request(app)
+      .post('/team')
+      .set('authorization', 'Bearer legacy-session-token')
+      .send({ name: 'Beta' })
+      .expect(201)
+
+    const forwardedAuth = teamServiceMock.createTeamForUser.mock.calls[0][0]
+    expect(forwardedAuth).toMatchObject({
+      userId: 'user-1',
+      email: 'user@example.com',
+      teamId: 'team-1',
+      role: 'member',
+      sessionToken: 'legacy-session-token',
+    })
+    expect(forwardedAuth).not.toHaveProperty('authProtocolVersion')
+  })
 })

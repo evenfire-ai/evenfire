@@ -50,6 +50,7 @@ export interface GfsUploadConfig {
 }
 
 export interface GfsConfig {
+  authProtocolCutoverEnabled: boolean
   port: number
   /** Path where the drive PVC is mounted (writer RW, readers RO). */
   storageMountPath: string
@@ -382,6 +383,7 @@ function uploadConfig(): GfsUploadConfig {
 export function loadConfig(): GfsConfig {
   const devMode = process.env.GFS_DEV_MODE === 'true'
   return {
+    authProtocolCutoverEnabled: process.env.AUTH_PROTOCOL_CUTOVER_ENABLED === 'true',
     port: Number(process.env.GFS_PORT || 8087),
     storageMountPath: required('GFS_STORAGE_PATH', devMode, '/tmp/gfs-data'),
     storageRole: storageRole(),

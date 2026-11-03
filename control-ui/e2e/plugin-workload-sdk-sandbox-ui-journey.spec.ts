@@ -48,7 +48,7 @@ async function postJson(
 }
 
 async function passwordLogin(): Promise<string> {
-  const { status, text } = await postJson(`${EXT_API}/api/v1/auth/password-login`, {
+  const { status, text } = await postJson(`${EXT_API}/api/v1/auth/v2/password-login`, {
     email: USER_EMAIL,
     password: USER_PASSWORD,
   })

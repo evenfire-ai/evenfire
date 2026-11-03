@@ -46,7 +46,7 @@ import {
   type GfsTransport,
   type ResolvedGfsResource,
 } from '../../../../src/gfs/uriHandler.js'
-import { requestJson } from '../../../../src/httpClient.js'
+import { requestJson, runWithSessionRequestContext } from '../../../../src/httpClient.js'
 
 // listChildren/listAccessible bind cleanly to the renderer boundary types (the
 // `.d.ts` the tree consumes), so a drift between the producer's emitted page and
@@ -221,7 +221,8 @@ export async function resolveDeniedMessage(
     code: 'forbidden',
     message: 'not authorized to read this resource',
   },
-  status = 403
+  status = 403,
+  request: { sessionToken?: string; context?: unknown } = {}
 ): Promise<string> {
   const server = createServer((_req, res) => {
     res.writeHead(status, { 'content-type': 'application/json' })
@@ -236,7 +237,9 @@ export async function resolveDeniedMessage(
       requestJson,
       fetchBytes: async () => new ArrayBuffer(0),
     })
-    await client.resolveUri(gfsUri, SESSION_TOKEN)
+    const operation = () => client.resolveUri(gfsUri, request.sessionToken ?? SESSION_TOKEN)
+    if (request.context === undefined) await operation()
+    else await runWithSessionRequestContext(request.context, operation)
     throw new Error(`expected resolve to reject with a ${status} denial`)
   } catch (error) {
     if (!(error instanceof Error)) return String(error)
@@ -410,9 +413,11 @@ export async function gfsRouteFailureMessage(
     code: 'forbidden',
     message: 'not authorized',
   },
-  headers: Record<string, string> = {}
+  headers: Record<string, string> = {},
+  onRequest?: () => void
 ): Promise<string> {
   const server = createServer((_req, res) => {
+    onRequest?.()
     res.writeHead(status, { 'content-type': 'application/json', ...headers })
     res.end(JSON.stringify({ ok: false, error: body }))
   })

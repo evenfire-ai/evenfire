@@ -92,6 +92,7 @@ const factoryConfig: GfsFactoryConfig = {
   readerPgSecretKey: 'connection-string',
   driveName: 'main',
   tokenAudience: 'gfs-controller',
+  authProtocolCutoverEnabled: false,
   // Distinct values, so each budget's env entry is found by its value.
   agentReadRlPerMinPerReplica: 4321,
   agentWriteRlPerMinPerReplica: 1234,

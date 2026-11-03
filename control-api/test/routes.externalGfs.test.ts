@@ -212,6 +212,8 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 const auth = () => mockVerifyExternalSessionToken.mockReturnValue(SESSION)
+const authV2 = () =>
+  mockVerifyExternalSessionToken.mockReturnValue({ ...SESSION, authProtocolVersion: 2 })
 
 function activeSessionLifecycleResult(
   text: string
@@ -973,6 +975,29 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     })
   })
 
+  it('propagates protocol-v2 session claims into user-plane GFS tokens', async () => {
+    mockVerifyExternalSessionToken.mockReturnValue({
+      ...SESSION,
+      authProtocolVersion: 2,
+    })
+    const app = await buildApp()
+
+    const res = await request(app)
+      .post('/external/gfs/token')
+      .set('x-user-session-token', 'v2-session-token')
+      .send({ scopes: ['gfs.read'] })
+
+    expect(res.status).toBe(200)
+    expect(mockSignGfsToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subject: U1,
+        authGeneration: 1,
+        authProtocolVersion: 2,
+        principalType: 'user',
+      })
+    )
+  })
+
   it('denies token minting for a retired Desktop user before signing a user-plane token', async () => {
     auth()
     mockIsDesktopUserActive.mockResolvedValue(false)
@@ -1371,7 +1396,7 @@ describe('indexed upload relay canonical drive', () => {
   })
 
   it('signs and forwards every lifecycle request from one non-main canonical drive', async () => {
-    auth()
+    authV2()
     const uploadId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       if (init.body && typeof init.body !== 'string') {
@@ -1424,6 +1449,7 @@ describe('indexed upload relay canonical drive', () => {
         drive: 'archive',
         scopes: ['gfs.write'],
         authGeneration: 1,
+        authProtocolVersion: 2,
         principalType: 'user',
       })
     }
@@ -2277,7 +2303,7 @@ describe('user resource mutations via gfsc proxy', () => {
   })
 
   it('creates a child with a user gfs.write token', async () => {
-    auth()
+    authV2()
     const fetchMock = vi.fn(
       async () =>
         new Response(JSON.stringify({ ok: true, data: { resourceId: R2 } }), {
@@ -2298,6 +2324,7 @@ describe('user resource mutations via gfsc proxy', () => {
       drive: 'main',
       scopes: ['gfs.write'],
       authGeneration: 1,
+      authProtocolVersion: 2,
       principalType: 'user',
     })
     expect(fetchMock).toHaveBeenCalledWith(
@@ -2701,7 +2728,7 @@ describe('user read proxy via gfsc (GET /external/gfs/proxy/:rid)', () => {
   const readPath = `/external/gfs/proxy/${R}`
 
   it('streams a 200 body and forwards content headers with a read gfs.read token', async () => {
-    auth()
+    authV2()
     const fetchMock = vi.fn(
       async () =>
         new Response('file-bytes-here', {
@@ -2727,6 +2754,7 @@ describe('user read proxy via gfsc (GET /external/gfs/proxy/:rid)', () => {
       drive: 'main',
       scopes: ['gfs.read'],
       authGeneration: 1,
+      authProtocolVersion: 2,
       principalType: 'user',
     })
     expect(fetchMock).toHaveBeenCalledWith(

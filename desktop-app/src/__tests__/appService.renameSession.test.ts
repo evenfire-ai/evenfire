@@ -17,8 +17,12 @@ function renameService() {
     issueRpcTokenForHostRefs: typeof issueRpcTokenForHostRefs
     rpcClient: typeof rpcClient
     rpcTokenManager: { clear: () => void }
+    sessionToken: string
+    me: { id: string; teamId: string }
     renameSession: AppService['renameSession']
   }
+  service.sessionToken = 'session-token'
+  service.me = { id: 'rename-session-test-user', teamId: 'team-1' }
   service.issueRpcTokenForHostRefs = issueRpcTokenForHostRefs
   service.rpcClient = rpcClient
   service.rpcTokenManager = { clear: vi.fn() }

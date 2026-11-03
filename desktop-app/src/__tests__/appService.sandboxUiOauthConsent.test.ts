@@ -29,6 +29,7 @@ vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => '/tmp/clerum-desktop-test') },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn(),
     decryptString: vi.fn(),
   },
@@ -38,7 +39,9 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../config.js', () => ({
+  getActiveEnvKey: () => 'test_env-000000000000',
   getActiveRuntimeConfigOptionId: () => null,
+  getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -71,19 +74,12 @@ vi.mock('../authClient.js', () => ({
   },
 }))
 
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
-  },
-}))
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function makeService(): AppService {
   const svc = new AppService()
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
+  ;(svc as unknown as { me: unknown }).me = { id: 'test-user', teamId: 'team-1' }
   return svc
 }
 
@@ -97,7 +93,7 @@ const AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth?...'
 describe('AppService.requestSandboxUiOauthAuthorize', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.getOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mocks.getOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
     mocks.requestSandboxUiOauthAuthorizeUrl.mockResolvedValue({ authorizeUrl: AUTHORIZE_URL })
     mocks.getFocusedWindow.mockReturnValue(null)
     // Default: user clicks Allow (response=1)
@@ -122,7 +118,7 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
     await svc.requestSandboxUiOauthAuthorize(RECIPE_NS, RECIPE_NAME, CLIENT_ID, true)
 
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenCalledWith(
-      'rpc-token',
+      'fixture-rpc-token',
       RECIPE_NS,
       RECIPE_NAME,
       CLIENT_ID,
@@ -153,7 +149,7 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
 
     expect(mocks.showMessageBox).not.toHaveBeenCalled()
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenCalledWith(
-      'rpc-token',
+      'fixture-rpc-token',
       RECIPE_NS,
       RECIPE_NAME,
       CLIENT_ID,
@@ -241,8 +237,8 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
       .mockRejectedValueOnce(new ApiError('Unauthorized', 401, ''))
       .mockResolvedValueOnce({ authorizeUrl: AUTHORIZE_URL })
     mocks.getOrIssue
-      .mockResolvedValueOnce({ token: 'rpc-token-old' })
-      .mockResolvedValueOnce({ token: 'rpc-token-new' })
+      .mockResolvedValueOnce({ token: 'fixture-rpc-token-old', expiresInSeconds: 300 })
+      .mockResolvedValueOnce({ token: 'fixture-rpc-token-new', expiresInSeconds: 300 })
     mocks.showMessageBox.mockResolvedValue({ response: 1 })
 
     const svc = makeService()
@@ -251,7 +247,7 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
     expect(mocks.rpcTokenManagerClear).toHaveBeenCalledOnce()
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenCalledTimes(2)
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenLastCalledWith(
-      'rpc-token-new',
+      'fixture-rpc-token-new',
       RECIPE_NS,
       RECIPE_NAME,
       CLIENT_ID,

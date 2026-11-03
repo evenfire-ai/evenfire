@@ -7,6 +7,8 @@ const mockRequestJson = vi.fn()
 
 vi.mock('../src/httpClient.js', () => ({
   requestJson: (...args: unknown[]) => mockRequestJson(...args),
+  assertSessionRequestAllowed: vi.fn(),
+  reportSessionUnauthorized: vi.fn(),
   ApiError: class ApiError extends Error {
     status: number
     bodyText: string
@@ -55,14 +57,14 @@ describe('AuthClient — googleLogin()', () => {
 
     expect(mockRequestJson).toHaveBeenCalledWith(
       'POST',
-      'http://localhost:8091/api/v1/auth/google',
+      'http://localhost:8091/api/v1/auth/v2/google',
       expect.objectContaining({ body: { idToken: 'google-id-token-123' } })
     )
   })
 })
 
 describe('AuthClient — passwordLogin()', () => {
-  it('posts to /api/v1/auth/password-login with email and password', async () => {
+  it('posts to the v2 password-login protocol with email and password', async () => {
     mockRequestJson.mockResolvedValueOnce({ token: 'session-pw' })
 
     const client = new AuthClient()
@@ -70,7 +72,7 @@ describe('AuthClient — passwordLogin()', () => {
 
     expect(mockRequestJson).toHaveBeenCalledWith(
       'POST',
-      'http://localhost:8091/api/v1/auth/password-login',
+      'http://localhost:8091/api/v1/auth/v2/password-login',
       expect.objectContaining({ body: { email: 'alice@example.com', password: 'hunter2pw' } })
     )
   })

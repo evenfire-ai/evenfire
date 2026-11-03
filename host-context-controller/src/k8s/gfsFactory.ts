@@ -100,6 +100,8 @@ export interface GfsFactoryConfig {
   driveName: string
   /** Expected audience on inbound gfs access tokens. */
   tokenAudience: string
+  /** Require v2 user claims on generated GFS workloads during test-fleet cutover. */
+  authProtocolCutoverEnabled: boolean
   /** Agent (host principal) read budget per minute per gfsc replica; set on every pod. */
   agentReadRlPerMinPerReplica: number
   /** Agent (host principal) write budget per minute per gfsc replica; set on every pod. */
@@ -329,6 +331,10 @@ function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
     { name: 'GFS_STORAGE_ROLE', value: role },
     { name: 'GFS_DRIVE_NAME', value: config.driveName },
     { name: 'GFS_TOKEN_AUDIENCE', value: config.tokenAudience },
+    {
+      name: 'AUTH_PROTOCOL_CUTOVER_ENABLED',
+      value: String(config.authProtocolCutoverEnabled),
+    },
     // Both roles serve agent traffic, so both carry both budgets.
     {
       name: 'GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA',

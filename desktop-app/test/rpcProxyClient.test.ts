@@ -7,6 +7,8 @@ const mockRequestJson = vi.fn()
 
 vi.mock('../src/httpClient.js', () => ({
   requestJson: (...args: unknown[]) => mockRequestJson(...args),
+  assertSessionRequestAllowed: () => undefined,
+  reportSessionUnauthorized: () => undefined,
   // §4.5-6: the raw-fetch methods wrap their signal with `withTimeout`; the mock
   // passes the (optional) signal through — the stubbed `fetch` ignores it.
   withTimeout: (signal?: AbortSignal) => signal,

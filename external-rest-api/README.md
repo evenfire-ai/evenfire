@@ -12,7 +12,7 @@
 
 ## Key Endpoints
 
-- `POST /api/v1/auth/google` - login with Google ID token
+- `POST /api/v1/auth/v2/google` - supported-client login with Google ID token
 - `GET /api/v1/me` - current user + team + profile
 - `GET /api/v1/me/contexts` - contexts authorized for the authenticated user
 - `GET /api/v1/me/agents` - agents authorized for the authenticated user
@@ -53,6 +53,8 @@ Environment variables:
 - `EXTERNAL_REST_API_JWT_PUBLIC_KEY`: RSA public key used to verify session JWTs locally in `external-rest-api` (RS256).
 - `EXTERNAL_REST_API_JWT_ISSUER`: Expected `iss` claim for session JWT verification.
 - `EXTERNAL_REST_API_JWT_AUDIENCE`: Expected `aud` claim for session JWT verification.
+- `AUTH_PROTOCOL_CUTOVER_ENABLED`: Reject pre-cutover user sessions and legacy login routes;
+  enable consistently only for the managed test fleet.
 
 Session JWT issuance is centralized in `control-api`. `external-rest-api` verifies session JWTs locally with a public key and still uses `control-api` for internal profile/team operations.
 
@@ -60,7 +62,7 @@ Session JWT issuance is centralized in `control-api`. `external-rest-api` verifi
 
 `external-rest-api` uses a delegated security model where identity and session authority remain in `control-api`, while `external-rest-api` enforces request-level guards for public endpoints.
 
-- **Edge identity proof (Google)**: `POST /api/v1/auth/google` verifies the Google ID token with `google-auth-library` using `EXTERNAL_REST_API_GOOGLE_CLIENT_ID` as audience.
+- **Edge identity proof (Google)**: `POST /api/v1/auth/v2/google` verifies the Google ID token with `google-auth-library` using `EXTERNAL_REST_API_GOOGLE_CLIENT_ID` as audience.
 - **Session issuance authority**: after Google token verification, `external-rest-api` calls `control-api` internal auth endpoints, and `control-api` mints Clerum session tokens.
 - **Local session verification**: protected routes in `external-rest-api` validate bearer tokens locally using `EXTERNAL_REST_API_JWT_PUBLIC_KEY` (RS256) with issuer and audience checks.
 - **Internal service authentication**: calls from `external-rest-api` to `control-api` include `Authorization: Bearer <service-token>` plus `x-service-token: <service-name>`, and are checked by `control-api` internal middleware.

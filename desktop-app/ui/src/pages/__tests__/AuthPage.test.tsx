@@ -27,6 +27,7 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   statusTone: 'info',
   isAuthenticated: false,
   me: null,
+  temporarySessionExpiresAt: null,
   email: '',
   password: '',
   desktopSetupAuthorizationToken: '',

@@ -34,6 +34,12 @@ const mockBrowserWindow = vi.fn(createMockBrowserWindow)
 const mockFromPartition = vi.fn().mockReturnValue({
   cookies: { set: mockSetCookie },
 })
+const testOwnerContext = Object.freeze({ owner: 'desktop-window-test' })
+const testOwnerArgs = {
+  requestOwnerContext: testOwnerContext,
+  sessionRequestContextsMatchOwner: (left: unknown, right: unknown) => left === right,
+  assertRequestOwnerCurrent: () => undefined,
+}
 
 vi.mock('electron', () => ({
   BrowserWindow: mockBrowserWindow,
@@ -84,6 +90,7 @@ describe('desktopWindow', () => {
       hostRef: 'chatllm',
       jwt: 'test-jwt',
       rpcProxyUrl: 'http://localhost:8094',
+      ...testOwnerArgs,
     })
 
     expect(mockRpcProxyEndpointProvider).toHaveBeenCalledOnce()
@@ -112,8 +119,18 @@ describe('desktopWindow', () => {
         'clerum_desktop_session=abc; Path=/api/v1/desktop/chatllm; HttpOnly; SameSite=Strict; Max-Age=3600',
     })
 
-    await openDesktopWindow({ hostRef: 'chatllm', jwt: 'j1', rpcProxyUrl: 'http://localhost:8094' })
-    await openDesktopWindow({ hostRef: 'chatllm', jwt: 'j2', rpcProxyUrl: 'http://localhost:8094' })
+    await openDesktopWindow({
+      hostRef: 'chatllm',
+      jwt: 'j1',
+      rpcProxyUrl: 'http://localhost:8094',
+      ...testOwnerArgs,
+    })
+    await openDesktopWindow({
+      hostRef: 'chatllm',
+      jwt: 'j2',
+      rpcProxyUrl: 'http://localhost:8094',
+      ...testOwnerArgs,
+    })
 
     expect(mockBrowserWindow).toHaveBeenCalledTimes(1)
     expect(mockFocus).toHaveBeenCalledTimes(1)
@@ -126,8 +143,18 @@ describe('desktopWindow', () => {
       setCookie: 'clerum_desktop_session=abc; Path=/x; HttpOnly; SameSite=Strict; Max-Age=3600',
     })
 
-    await openDesktopWindow({ hostRef: 'chatllm', jwt: 'j1', rpcProxyUrl: 'http://localhost:8094' })
-    await openDesktopWindow({ hostRef: 'agent2', jwt: 'j2', rpcProxyUrl: 'http://localhost:8094' })
+    await openDesktopWindow({
+      hostRef: 'chatllm',
+      jwt: 'j1',
+      rpcProxyUrl: 'http://localhost:8094',
+      ...testOwnerArgs,
+    })
+    await openDesktopWindow({
+      hostRef: 'agent2',
+      jwt: 'j2',
+      rpcProxyUrl: 'http://localhost:8094',
+      ...testOwnerArgs,
+    })
 
     expect(mockBrowserWindow).toHaveBeenCalledTimes(2)
   })
@@ -138,7 +165,12 @@ describe('desktopWindow', () => {
       hostRef: 'chatllm',
       setCookie: 'clerum_desktop_session=abc; Path=/x; HttpOnly; SameSite=Strict; Max-Age=3600',
     })
-    await openDesktopWindow({ hostRef: 'chatllm', jwt: 'j1', rpcProxyUrl: 'http://localhost:8094' })
+    await openDesktopWindow({
+      hostRef: 'chatllm',
+      jwt: 'j1',
+      rpcProxyUrl: 'http://localhost:8094',
+      ...testOwnerArgs,
+    })
     closeDesktopWindow('chatllm')
     expect(mockClose).toHaveBeenCalled()
   })
@@ -146,7 +178,12 @@ describe('desktopWindow', () => {
   it('throws when session exchange fails', async () => {
     mockPostDesktopSession.mockRejectedValueOnce(new Error('503 Desktop not running'))
     await expect(
-      openDesktopWindow({ hostRef: 'chatllm', jwt: 'j', rpcProxyUrl: 'http://localhost:8094' })
+      openDesktopWindow({
+        hostRef: 'chatllm',
+        jwt: 'j',
+        rpcProxyUrl: 'http://localhost:8094',
+        ...testOwnerArgs,
+      })
     ).rejects.toThrow('503 Desktop not running')
     expect(mockBrowserWindow).not.toHaveBeenCalled()
   })
@@ -158,7 +195,12 @@ describe('desktopWindow', () => {
       setCookie: 'some-other-cookie=x; Path=/',
     })
     await expect(
-      openDesktopWindow({ hostRef: 'chatllm', jwt: 'j', rpcProxyUrl: 'http://localhost:8094' })
+      openDesktopWindow({
+        hostRef: 'chatllm',
+        jwt: 'j',
+        rpcProxyUrl: 'http://localhost:8094',
+        ...testOwnerArgs,
+      })
     ).rejects.toThrow(/session cookie/i)
   })
 
@@ -175,6 +217,7 @@ describe('desktopWindow', () => {
       hostRef: 'chatllm',
       jwt: 'j',
       rpcProxyUrl: 'http://localhost:8094',
+      ...testOwnerArgs,
       onClose,
     })
 

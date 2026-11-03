@@ -73,7 +73,8 @@ export async function switchTeam(
   userId: string,
   email: string,
   nextTeamId: string,
-  sessionToken: string
+  sessionToken: string,
+  authProtocolVersion?: 2
 ) {
   let membership: { team_id: string; role: TeamRole; team_name: string }
   try {
@@ -96,6 +97,7 @@ export async function switchTeam(
         email,
         teamId: membership.team_id,
         role,
+        ...(authProtocolVersion === 2 ? { authProtocolVersion: 2 } : {}),
       },
     }
   )

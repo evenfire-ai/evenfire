@@ -12,6 +12,7 @@ import {
   within,
 } from '@testing-library/react'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
@@ -660,6 +661,7 @@ describe('FilePreviewPage', () => {
       byteLength: 1,
     } as const
     const view = render(<FilePreviewPage {...props} />)
+    const queryClient = queryClients.at(-1)!
 
     try {
       expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
@@ -671,10 +673,28 @@ describe('FilePreviewPage', () => {
       })
       fireEvent.submit(dialog)
       await digestFinished
-      const permissionReadsBeforeReplacement = affordances.mock.calls.length
 
       controllerState.sessionGeneration = 2
       view.rerender(<FilePreviewPage {...props} />)
+
+      const resourcePermissionsKey = desktopQueryKeys.gfsAffordances(
+        controllerState.sessionScope,
+        '0123456789abcdef0123456789abcdef',
+        'main',
+        2
+      )
+      const parentPermissionsKey = desktopQueryKeys.gfsAffordances(
+        controllerState.sessionScope,
+        'preview-parent',
+        'main',
+        2
+      )
+      await waitFor(() => {
+        expect(queryClient.getQueryData(resourcePermissionsKey)).toEqual(activeAffordances)
+        expect(queryClient.getQueryData(parentPermissionsKey)).toEqual(activeAffordances)
+      })
+      const permissionReadsAfterReplacementRefresh = affordances.mock.calls.length
+
       await act(async () => releaseDigest(new ArrayBuffer(0)))
       await act(async () => {
         await Promise.resolve()
@@ -682,7 +702,7 @@ describe('FilePreviewPage', () => {
       })
 
       expect(renameResource).not.toHaveBeenCalled()
-      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeReplacement)
+      expect(affordances.mock.calls.length).toBe(permissionReadsAfterReplacementRefresh)
     } finally {
       releaseDigest(new ArrayBuffer(0))
       digestSpy.mockRestore()

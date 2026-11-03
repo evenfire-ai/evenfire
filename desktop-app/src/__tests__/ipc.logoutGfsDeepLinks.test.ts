@@ -5,6 +5,7 @@ import {
   GfsResourceDeepLinkQueue,
   createLogoutWithGfsResourceDeepLinkClear,
 } from '../gfsResourceDeepLinkQueue.js'
+import type { DesktopLogoutOutcome } from '../types.js'
 
 type Handler = (event: unknown, payload: unknown) => Promise<unknown>
 
@@ -27,7 +28,13 @@ vi.mock('electron', () => ({
 vi.mock('../appService.js', () => ({ AppService: class {} }))
 
 const queue = new GfsResourceDeepLinkQueue()
-const service = { logout: vi.fn(async () => 7) }
+const service = {
+  logout: vi.fn(async () => ({
+    kind: 'committed' as const,
+    sessionGeneration: 7,
+    cleanup: 'not-required' as const,
+  })),
+}
 const logoutWithQueueCleanup = createLogoutWithGfsResourceDeepLinkClear(queue, () =>
   service.logout()
 )
@@ -62,7 +69,7 @@ describe('auth:logout GFS deep-link queue cleanup', () => {
     const result = await handler('auth:logout')(trusted, undefined)
 
     expect(service.logout).toHaveBeenCalledOnce()
-    expect(result).toEqual({ ok: true, sessionGeneration: 7 })
+    expect(result).toEqual({ kind: 'committed', sessionGeneration: 7, cleanup: 'not-required' })
     expect(queue.list()).toEqual([])
     const userBLink = queue.enqueue(producedTarget('gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'))
     expect(userBLink.id).toBeGreaterThan(userALink.id)
@@ -84,8 +91,9 @@ describe('auth:logout GFS deep-link queue cleanup', () => {
     let finishLogout!: () => void
     service.logout.mockImplementationOnce(
       () =>
-        new Promise<number>(resolve => {
-          finishLogout = () => resolve(8)
+        new Promise<DesktopLogoutOutcome>(resolve => {
+          finishLogout = () =>
+            resolve({ kind: 'committed', sessionGeneration: 8, cleanup: 'not-required' })
         })
     )
     queue.enqueue(producedTarget('gfs://main/dddddddddddddddddddddddddddddddd'))
@@ -97,7 +105,11 @@ describe('auth:logout GFS deep-link queue cleanup', () => {
     expect(queue.list()).toEqual([duringLogout])
 
     finishLogout()
-    await expect(logoutOperation).resolves.toEqual({ ok: true, sessionGeneration: 8 })
+    await expect(logoutOperation).resolves.toEqual({
+      kind: 'committed',
+      sessionGeneration: 8,
+      cleanup: 'not-required',
+    })
     expect(queue.list()).toEqual([])
     expect(service.logout).toHaveBeenCalledOnce()
 

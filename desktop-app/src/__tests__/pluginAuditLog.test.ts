@@ -1,8 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { AUDIT_MAX_BYTES, type AuditEntry, PluginAuditLog, shapeOf } from '../pluginAuditLog.js'
+
+vi.mock('../pluginStorageWindowsAcl.js', async () => {
+  const { PluginStoragePrivacyUnitFixture } =
+    await import('../../testSupport/pluginStoragePrivacyUnitFixture.js')
+  return { PluginStoragePrivacyGuard: PluginStoragePrivacyUnitFixture }
+})
 
 const ENV_KEY = 'testenv-0123456789ab'
 
@@ -53,7 +59,8 @@ describe('PluginAuditLog', () => {
     expect(entries.map(item => item.capability)).toEqual(['org.read', 'identity.read'])
   })
 
-  it('writes the file 0600', async () => {
+  // Node mode bits do not prove Windows ACL privacy; native Windows coverage lives separately.
+  it.skipIf(process.platform === 'win32')('writes the file with POSIX mode 0600', async () => {
     await log.append(ENV_KEY, entry())
     const stat = await fs.stat(path.join(tmpDir, `${ENV_KEY}.jsonl`))
     expect(stat.mode & 0o777).toBe(0o600)

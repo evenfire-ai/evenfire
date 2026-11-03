@@ -120,6 +120,7 @@ See `.env.example`.
 
 Critical variables:
 
+- `AUTH_PROTOCOL_CUTOVER_ENABLED` (default `false`; test-fleet deployments only)
 - `RPC_PROXY_JWT_PUBLIC_KEY`
 - `RPC_PROXY_JWT_ISSUER`
 - `RPC_PROXY_JWT_AUDIENCE`

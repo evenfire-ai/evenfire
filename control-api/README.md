@@ -168,6 +168,8 @@ Resource/namespace controls:
 
 Auth settings:
 
+- `AUTH_PROTOCOL_CUTOVER_ENABLED` (default `false`; rejects pre-cutover user sessions and legacy
+  login routes when enabled for the managed test fleet)
 - `CONTROL_API_SESSION_JWT_PRIVATE_KEY`: RSA private key used to sign external REST API session JWTs (`/external/auth/*`) with RS256.
 
 For local development, leave the signing-key env vars unset and start

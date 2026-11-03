@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type {
   AccessCatalog,
+  DesktopLogoutOutcome,
   PendingWorkflowApproval,
   WorkflowApprovalDecisionResult,
   WorkflowRecipeListResult,
@@ -175,6 +176,8 @@ export function useAppController() {
   // Use a ref so the stable onSessionNeedsLoad callback can call the real loadSession
   // without creating a circular dependency (loadSession is defined after auth+session).
   const loadSessionRef = useRef(async (_options?: { preserveNav?: boolean }) => {})
+  const clearSessionReloadFailureStateRef = useRef<() => void>(() => {})
+  const onSessionReloadFailed = useCallback(() => clearSessionReloadFailureStateRef.current(), [])
   const activeAuthenticatedSessionIdentityRef = useRef<string | null>(null)
   const authenticatedSessionIdentityRef = useRef<string | null>(null)
   const sessionGenerationRef = useRef<number | null>(null)
@@ -197,11 +200,11 @@ export function useAppController() {
     () => logoutForEnvironmentMismatchRef.current(),
     []
   )
-
   // ─── Auth ───
   const auth = useAuthController({
     setStatus: fullSetStatus,
     onSessionNeedsLoad,
+    onSessionReloadFailed,
     onSessionEnded: onExternalSessionEnded,
     logoutForEnvironmentMismatch,
   })
@@ -608,6 +611,23 @@ export function useAppController() {
     queryClient.removeQueries({ queryKey: ['desktop-app', 'workflow-runs'] })
   }, [queryClient])
 
+  clearSessionReloadFailureStateRef.current = () => {
+    setPostPaintDataReady(false)
+    catalogRefreshPromiseRef.current = null
+    agentsData.reset()
+    contextsData.reset()
+    mcpServersData.reset()
+    connectorsData.reset()
+    teamsData.reset()
+    resetWorkflowsData()
+    queryClient.clear()
+    chat.resetChat()
+    notif.resetNotifications()
+    activeAuthenticatedSessionIdentityRef.current = null
+    authenticatedSessionIdentityRef.current = null
+    void chat.stopAllActivityStreams().catch(() => undefined)
+  }
+
   const refreshAuthenticatedData = useCallback(
     async (options: { initialLoad?: boolean; sessionIdentity?: string } = {}) => {
       const refreshTeams = options.initialLoad
@@ -899,6 +919,11 @@ export function useAppController() {
         }
         auth.setIsAuthenticated(authenticated)
         auth.setMe(sessionState.me)
+        auth.setTemporarySessionExpiresAt(
+          authenticated && sessionState.sessionMode === 'temporary'
+            ? (sessionState.expiresAt ?? null)
+            : null
+        )
         currentTeamIdRef.current = authenticated ? String(sessionState.me?.teamId ?? '').trim() : ''
         sessionGenerationRef.current = authenticated ? nextSessionGeneration : null
         setPublishedSessionGeneration(sessionGenerationRef.current)
@@ -1013,110 +1038,166 @@ export function useAppController() {
   loadSessionRef.current = loadSession
 
   // ─── Cross-domain: handleLogout ───
-  const logoutAndGetSessionGeneration = useCallback(async (): Promise<number | null> => {
-    let logoutGeneration: number | null = null
-    const reflectSignedOutState = () => {
-      auth.setIsAuthenticated(false)
-      auth.setMe(null)
-      auth.setPassword('')
-    }
-    try {
-      auth.setBusy(true)
-      const logoutResult = await window.clerum.auth.logout()
-      logoutGeneration = logoutResult.sessionGeneration
+  const logoutAndGetSessionGeneration =
+    useCallback(async (): Promise<DesktopLogoutOutcome | null> => {
+      let committedOutcome: Extract<DesktopLogoutOutcome, { kind: 'committed' }> | null = null
+      const logoutSessionGeneration = sessionGenerationRef.current
+      const logoutSessionIdentity = activeAuthenticatedSessionIdentityRef.current
+      let newerAcceptedSessionObserved = false
+      const newerAcceptedSessionIsVisible = () => {
+        if (newerAcceptedSessionObserved) return true
+        const currentGeneration = sessionGenerationRef.current
+        const currentIdentity = activeAuthenticatedSessionIdentityRef.current
+        return (
+          (currentGeneration !== null && currentGeneration !== logoutSessionGeneration) ||
+          (currentIdentity !== null && currentIdentity !== logoutSessionIdentity)
+        )
+      }
+      const publishLogoutStatus = (message: string, tone: Tone) => {
+        if (!newerAcceptedSessionIsVisible()) fullSetStatus(message, tone)
+      }
+      const reflectSignedOutState = () => {
+        if (newerAcceptedSessionIsVisible()) return
+        auth.setIsAuthenticated(false)
+        auth.setMe(null)
+        auth.setPassword('')
+      }
       const cleanupErrors: unknown[] = []
-      const attemptCleanup = async (cleanup: () => unknown | Promise<unknown>) => {
+      const attemptCleanup = (cleanup: () => void) => {
         try {
-          await cleanup()
+          cleanup()
         } catch (error) {
           cleanupErrors.push(error)
         }
       }
-
-      await attemptCleanup(() => chat.stopAllActivityStreams())
-      catalogRefreshPromiseRef.current = null
-      await attemptCleanup(() => agentsData.reset())
-      await attemptCleanup(() => contextsData.reset())
-      await attemptCleanup(() => mcpServersData.reset())
-      await attemptCleanup(() => connectorsData.reset())
-      await attemptCleanup(() => teamsData.reset())
-      await attemptCleanup(() => resetWorkflowsData())
-      await attemptCleanup(() => queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot }))
-      // Drop ALL cached queries on confirmed logout: the singleton
-      // desktopQueryClient uses staleTime:Infinity, so any env-scoped data left
-      // in cache would otherwise bleed into the next login (possibly a different
-      // environment, since the env is chosen pre-login).
-      await attemptCleanup(() => queryClient.clear())
-      activeAuthenticatedSessionIdentityRef.current = null
-      authenticatedSessionIdentityRef.current = null
-      sessionGenerationRef.current = null
-      setPublishedSessionGeneration(null)
-      await attemptCleanup(() => nav.resetSessionNavigation())
-      await attemptCleanup(() => auth.setDesktopReleaseStatus(null))
-      await attemptCleanup(() => setPostPaintDataReady(false))
-      await attemptCleanup(() => reflectSignedOutState())
-      await attemptCleanup(() => chat.resetChat())
-      await attemptCleanup(() => notif.resetNotifications())
-      if (cleanupErrors.length > 0) {
-        const error = cleanupErrors[0]
-        fullSetStatus(
-          `Signed out, but some local cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-          'warn'
-        )
-        return logoutGeneration
-      }
-      fullSetStatus('Logged out.', 'success')
       try {
-        await loadSession()
+        auth.setBusy(true)
+        // Render the signed-out state before awaiting main-process persistence or native cleanup.
+        // The main process fences the old lease synchronously when this IPC call begins.
+        attemptCleanup(reflectSignedOutState)
+        catalogRefreshPromiseRef.current = null
+        attemptCleanup(() => agentsData.reset())
+        attemptCleanup(() => contextsData.reset())
+        attemptCleanup(() => mcpServersData.reset())
+        attemptCleanup(() => connectorsData.reset())
+        attemptCleanup(() => teamsData.reset())
+        attemptCleanup(() => resetWorkflowsData())
+        attemptCleanup(() => queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot }))
+        attemptCleanup(() => queryClient.clear())
+        activeAuthenticatedSessionIdentityRef.current = null
+        authenticatedSessionIdentityRef.current = null
+        sessionGenerationRef.current = null
+        setPublishedSessionGeneration(null)
+        attemptCleanup(() => nav.resetSessionNavigation())
+        attemptCleanup(() => auth.setDesktopReleaseStatus(null))
+        attemptCleanup(() => setPostPaintDataReady(false))
+        attemptCleanup(() => chat.resetChat())
+        attemptCleanup(() => notif.resetNotifications())
+        void chat.stopAllActivityStreams().catch(error => {
+          publishLogoutStatus(
+            `Signed out, but chat cleanup did not complete: ${error instanceof Error ? error.message : String(error)}`,
+            'warn'
+          )
+        })
+
+        const logoutResult = await window.clerum.auth.logout()
+        if (logoutResult.kind === 'not-committed') {
+          if (logoutResult.reason === 'superseded') {
+            const sessionState = await window.clerum.auth.getSessionState().catch(() => null)
+            if (sessionState?.authenticated) {
+              const sessionIdentity =
+                sessionState.me &&
+                `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+              newerAcceptedSessionObserved = Boolean(
+                sessionState.authenticated &&
+                ((Number.isSafeInteger(sessionState.sessionGeneration) &&
+                  sessionState.sessionGeneration !== logoutSessionGeneration) ||
+                  (sessionIdentity && sessionIdentity !== logoutSessionIdentity))
+              )
+              auth.setIsAuthenticated(true)
+              auth.setMe(sessionState.me)
+            }
+          }
+          publishLogoutStatus(
+            logoutResult.reason === 'superseded'
+              ? 'Logout was superseded by a newer session change; no environment handoff was made.'
+              : 'Signed out locally, but durable logout was not committed; no environment handoff was made.',
+            logoutResult.reason === 'superseded' ? 'error' : 'warn'
+          )
+          return logoutResult
+        }
+
+        committedOutcome = logoutResult
+        if (!newerAcceptedSessionIsVisible()) {
+          attemptCleanup(reflectSignedOutState)
+          attemptCleanup(() => chat.resetChat())
+          attemptCleanup(() => notif.resetNotifications())
+        }
+        if (cleanupErrors.length > 0) {
+          const error = cleanupErrors[0]
+          const localCleanupMessage = `Signed out, but some local cleanup failed: ${error instanceof Error ? error.message : String(error)}`
+          publishLogoutStatus(
+            logoutResult.cleanup === 'pending'
+              ? `${localCleanupMessage} Secure credential cleanup is pending.`
+              : localCleanupMessage,
+            'warn'
+          )
+        } else {
+          publishLogoutStatus(
+            logoutResult.cleanup === 'pending'
+              ? 'Logged out. Secure credential cleanup is pending.'
+              : 'Logged out.',
+            'success'
+          )
+        }
+        return logoutResult
       } catch (error) {
-        reflectSignedOutState()
-        fullSetStatus(
-          `Signed out, but could not refresh the desktop session: ${error instanceof Error ? error.message : String(error)}`,
-          'warn'
+        if (committedOutcome) {
+          reflectSignedOutState()
+          const followUpMessage = `Signed out, but logout follow-up failed: ${error instanceof Error ? error.message : String(error)}`
+          publishLogoutStatus(
+            committedOutcome.cleanup === 'pending'
+              ? `${followUpMessage} Secure credential cleanup is pending.`
+              : followUpMessage,
+            'warn'
+          )
+          return committedOutcome
+        }
+        publishLogoutStatus(
+          `Logout failed: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
         )
+        return null
+      } finally {
+        auth.setBusy(false)
       }
-      return logoutGeneration
-    } catch (error) {
-      if (logoutGeneration !== null) {
-        reflectSignedOutState()
-        fullSetStatus(
-          `Signed out, but could not refresh the desktop session: ${error instanceof Error ? error.message : String(error)}`,
-          'warn'
-        )
-        return logoutGeneration
-      }
-      fullSetStatus(
-        `Logout failed: ${error instanceof Error ? error.message : String(error)}`,
-        'error'
-      )
-      return null
-    } finally {
-      auth.setBusy(false)
-    }
-  }, [
-    agentsData.reset,
-    auth.setBusy,
-    auth.setIsAuthenticated,
-    auth.setMe,
-    auth.setPassword,
-    chat.resetChat,
-    chat.stopAllActivityStreams,
-    connectorsData.reset,
-    contextsData.reset,
-    fullSetStatus,
-    loadSession,
-    mcpServersData.reset,
-    nav.resetSessionNavigation,
-    notif.resetNotifications,
-    queryClient,
-    resetWorkflowsData,
-    teamsData.reset,
-  ])
+    }, [
+      agentsData.reset,
+      auth.setBusy,
+      auth.setIsAuthenticated,
+      auth.setMe,
+      auth.setPassword,
+      chat.resetChat,
+      chat.stopAllActivityStreams,
+      connectorsData.reset,
+      contextsData.reset,
+      fullSetStatus,
+      mcpServersData.reset,
+      nav.resetSessionNavigation,
+      notif.resetNotifications,
+      queryClient,
+      resetWorkflowsData,
+      setPostPaintDataReady,
+      teamsData.reset,
+      auth.setDesktopReleaseStatus,
+    ])
+  logoutForEnvironmentMismatchRef.current = async () => {
+    const outcome = await logoutAndGetSessionGeneration()
+    return outcome?.kind === 'committed' ? outcome.sessionGeneration : null
+  }
   const handleLogout = useCallback(async (): Promise<void> => {
     await logoutAndGetSessionGeneration()
   }, [logoutAndGetSessionGeneration])
-  logoutForEnvironmentMismatchRef.current = logoutAndGetSessionGeneration
-
   // ─── Cross-domain: handleOpenAgentWorkspace ───
   const openAgentWorkspace = useCallback(
     (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
@@ -1653,6 +1734,7 @@ export function useAppController() {
     statusTone,
     isAuthenticated: auth.isAuthenticated,
     me: auth.me,
+    temporarySessionExpiresAt: auth.temporarySessionExpiresAt,
     currentTeamId,
     availableTeamIds,
     teamDirectoryHydrated: teamsData.teamDirectoryHydrated,
@@ -1672,7 +1754,6 @@ export function useAppController() {
     desktopReleaseStatus: auth.desktopReleaseStatus,
     desktopEnvironmentSetupComplete: auth.desktopEnvironmentSetupComplete,
     pendingDesktopEnvironmentSetup: auth.pendingDesktopEnvironmentSetup,
-    pendingDesktopEnvironmentSwitchConfirmation: auth.pendingDesktopEnvironmentSwitchConfirmation,
     backendSwitchHint: auth.backendSwitchHint,
     showRuntimeConfigSelector: auth.showRuntimeConfigSelector,
     dependencyHealth: auth.dependencyHealth,
@@ -1697,10 +1778,6 @@ export function useAppController() {
     handleClearRuntimeConfigSelection: auth.handleClearRuntimeConfigSelection,
     handleCancelDesktopEnvironmentSetup: auth.handleCancelDesktopEnvironmentSetup,
     handleConfirmDesktopEnvironmentSetup: auth.handleConfirmDesktopEnvironmentSetup,
-    handleCancelDesktopEnvironmentSwitchConfirmation:
-      auth.handleCancelDesktopEnvironmentSwitchConfirmation,
-    handleConfirmDesktopEnvironmentSwitchConfirmation:
-      auth.handleConfirmDesktopEnvironmentSwitchConfirmation,
     handleOpenDesktopRelease: auth.handleOpenDesktopRelease,
     setDesktopEnvironmentSetupComplete: auth.setDesktopEnvironmentSetupComplete,
     handleLogout,

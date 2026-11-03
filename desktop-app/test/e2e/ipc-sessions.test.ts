@@ -320,7 +320,7 @@ describe('Session isolation e2e', () => {
 
       // Helper: get an RPC token for a user via direct HTTP
       async function getRpcToken(email: string): Promise<string> {
-        const loginResp = await fetch(`${EXT_API}/api/v1/auth/password-login`, {
+        const loginResp = await fetch(`${EXT_API}/api/v1/auth/v2/password-login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password: E2E_PASSWORD }),
