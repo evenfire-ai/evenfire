@@ -99,7 +99,11 @@ if [ -n "$OVERLAY" ]; then
         (item && item["value"] || "").split(",").map(&:strip).reject(&:empty?)
       end
       runtime = env_value.call("CONTEXT_MAPPER_RUNTIME_NAMESPACES")
-      minimal = env_value.call("CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES")
+      # HCC defaults this to sandbox-ui when the variable is absent
+      # (host-context-controller/src/config.ts). An explicit value, including
+      # "", overrides that, so the two cases are not the same.
+      minimal_declared = env.any? { |entry| entry["name"] == "CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES" }
+      minimal = minimal_declared ? env_value.call("CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES") : ["sandbox-ui"]
       k8s_api = (static_k8s + (runtime - minimal)).uniq.sort
       puts "ALL_NAMESPACES=#{quote.call(namespaces.join(" "))}"
       puts "K8S_API_NAMESPACES=#{quote.call(k8s_api.join(" "))}"
