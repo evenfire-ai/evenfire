@@ -1401,9 +1401,9 @@ export const config: Config = {
   wfcServiceUrlTemplate:
     process.env.CONTROL_API_WFC_SERVICE_URL_TEMPLATE ||
     'http://wfc-{hash}.mcp-host.svc.cluster.local:8086',
-  // Plugin image-host allowlist (Phase 2.3). Permissive default = current
-  // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit
-  // mode). NOT parseCsvList — that lowercases, which would corrupt prefixes.
+  // Plugin image-host allowlist (Phase 2.3). Default from @clerum/image-policy:
+  // the deploy/base list plus registry.evenfire.ai/; enforce defaults to false
+  // (audit mode). NOT parseCsvList — that lowercases, which would corrupt prefixes.
   allowedPluginImagePrefixes: (
     process.env.CONTROL_API_ALLOWED_IMAGE_PREFIXES ??
     [...DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES].join(',')

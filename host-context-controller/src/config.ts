@@ -875,8 +875,9 @@ export const config: Config = {
   ),
   externalEgressMaxEntries: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_MAX_ENTRIES', 128),
 
-  // Plugin image-host allowlist (Phase 2.3). Permissive default = current
-  // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit mode).
+  // Plugin image-host allowlist (Phase 2.3). Default from @clerum/image-policy:
+  // the deploy/base list plus registry.evenfire.ai/; enforce defaults to false
+  // (audit mode).
   allowedPluginImagePrefixes: getEnv(
     'CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES',
     [...DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES].join(',')
