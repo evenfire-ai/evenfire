@@ -244,6 +244,62 @@ describe('workspace tab overflow production geometry', () => {
     })
   })
 
+  it('restores a pre-existing list style attribute after full-width measurement', async () => {
+    await open(280)
+    const expected = 'color: rgb(12, 34, 56); --r4-measurement-style: preserved;'
+    await page.evaluate(value => {
+      const list = document.querySelector('.chat-view-tabs__list')!
+      list.setAttribute('style', value)
+      window.dispatchEvent(new Event('resize'))
+    }, expected)
+    await settle()
+    expect(await page.locator('.chat-view-tabs__list').getAttribute('style')).toBe(expected)
+  })
+
+  it('keeps an absent list style attribute absent after full-width measurement', async () => {
+    await open(280)
+    await page.evaluate(() => {
+      const list = document.querySelector('.chat-view-tabs__list')!
+      list.removeAttribute('style')
+      window.dispatchEvent(new Event('resize'))
+    })
+    await settle()
+    expect(await page.locator('.chat-view-tabs__list').getAttribute('style')).toBeNull()
+  })
+
+  it('restores the original list style when the full-width read throws', async () => {
+    await open(280)
+    const pageError = page.waitForEvent('pageerror')
+    const result = await page.evaluate(() => {
+      const list = document.querySelector<HTMLElement>('.chat-view-tabs__list')!
+      const before = list.getAttribute('style')
+      let prototype: object | null = Object.getPrototypeOf(list)
+      let nativeGetter: (() => number) | undefined
+      while (prototype && !nativeGetter) {
+        nativeGetter = Object.getOwnPropertyDescriptor(prototype, 'scrollWidth')?.get
+        prototype = Object.getPrototypeOf(prototype)
+      }
+      if (!nativeGetter) throw new Error('native scrollWidth getter unavailable')
+      let throwNext = true
+      Object.defineProperty(list, 'scrollWidth', {
+        configurable: true,
+        get() {
+          if (throwNext) {
+            throwNext = false
+            throw new Error('forced full-width read failure')
+          }
+          return nativeGetter!.call(this)
+        },
+      })
+      window.dispatchEvent(new Event('resize'))
+      const after = list.getAttribute('style')
+      delete (list as HTMLElement & { scrollWidth: number }).scrollWidth
+      return { before, after }
+    })
+    expect(result.after).toBe(result.before)
+    expect((await pageError).message).toBe('forced full-width read failure')
+  })
+
   it('uses the dominant wheel axis and preserves ties, delta modes, modifiers, and edge chaining', async () => {
     await open(280)
     const scroller = page.locator('.chat-view-tabs__scroller')
