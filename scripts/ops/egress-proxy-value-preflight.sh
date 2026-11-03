@@ -16,13 +16,17 @@
 #   - get the Secrets named by the secretKeyRef entries of referenced names only
 # The script never writes to the cluster.
 #
-# Never-print-value contract: no Secret value, literal value, or URL query/path
-# text is printed on any stream, put in argv (visible in `ps`), or written to
-# disk. Values travel from the API response into the environment of a clean
-# `env -i` child through a pipe, and that child runs the repository's real
-# nginx-egress-proxy/egress-proxy-template-check on the live rendered template.
-# Diagnostics name only the namespace, server, env-var name, source category,
-# and NGINX context.
+# Value-handling contract: no Secret value and no resolved env value is printed
+# on any stream, put in argv (visible in `ps`), or written to disk. No URL
+# query/path text is printed or put in argv either, but the rendered template
+# does reach disk: it is CRD text, so a baseUrl query or path (or a literal
+# valueTemplate) can appear in it. The script writes it as a 0600 file inside a
+# 0700 mktemp directory that the EXIT trap removes; a SIGKILL can leave the
+# directory behind. Resolved values travel from the API response into the
+# environment of a clean `env -i` child through a pipe, and that child runs the
+# repository's real nginx-egress-proxy/egress-proxy-template-check on the live
+# rendered template. Diagnostics name only the namespace, server, env-var name,
+# source category, and NGINX context.
 #
 # Exit codes:
 #   0  VERDICT=CLEAN              at least one server checked, all OK
@@ -161,10 +165,13 @@ epvp_valid_name() {
 
 # --- server selection -------------------------------------------------------
 #
-# The API responses stay in shell variables until the last step: a baseUrl query
-# or an authHeader valueTemplate may hold a literal credential, so a JSON file
-# under $epvp_work would put a value on disk. Only names, rule names and the
-# rendered template (which holds placeholders, never values) reach a file.
+# The API responses stay in shell variables: a baseUrl query or an authHeader
+# valueTemplate may hold a literal credential, so a JSON file under $epvp_work
+# would put that text on disk. Only names, rule names, the static findings and
+# the rendered template reach a file. The template is the CRD text the live HCC
+# rendered, so it can hold a literal URL query or path; it never holds a
+# resolved Secret or env value, which exist only in memory and in the pipe to
+# the check child.
 
 epvp_servers=$(epvp_kc get mcpservers -n "$NAMESPACE" -o json 2>/dev/null) ||
   epvp_die 'kubectl-get-mcpservers'
@@ -290,11 +297,15 @@ while IFS= read -r epvp_name; do
   [ -n "$epvp_name" ] || continue
   epvp_checked=$((epvp_checked + 1))
 
+  # The last matching list entry wins, as for a duplicated env name: list names
+  # are unique in Kubernetes, so this keeps one rule for every name resolution.
   epvp_url=$(printf '%s' "$epvp_servers" | jq -jr --arg n "$epvp_name" \
-    '(.items // [])[] | select(.metadata.name == $n) | .spec.remote.baseUrl // ""' \
+    '[(.items // [])[] | select(.metadata.name == $n)] | last
+      | .spec.remote.baseUrl // ""' \
     2>/dev/null) || epvp_die "invalid-mcpservers-json $NAMESPACE/$epvp_name"
   epvp_headers=$(printf '%s' "$epvp_servers" | jq -c --arg n "$epvp_name" \
-    '[(.items // [])[] | select(.metadata.name == $n)][0].spec.remote.authHeaders // []' \
+    '[(.items // [])[] | select(.metadata.name == $n)] | last
+      | .spec.remote.authHeaders // []' \
     2>/dev/null) || epvp_die "invalid-mcpservers-json $NAMESPACE/$epvp_name"
 
   # A static finding makes the server REJECT whatever the other steps say, so
@@ -316,7 +327,9 @@ while IFS= read -r epvp_name; do
     epvp_server_inconclusive no-configmap
     continue
   fi
-  # The template holds placeholders, never values, so a mktemp file is safe.
+  # The template holds CRD text with placeholders and no resolved value; it is
+  # the only file that may hold a baseUrl query or path, so it goes to the 0600
+  # file inside the 0700 directory and the EXIT trap removes it.
   printf '%s' "$epvp_configmap" | jq -jr '.data["default.conf.template"]' \
     >"$epvp_work/template" 2>/dev/null ||
     epvp_die "invalid-configmap-json $NAMESPACE/$epvp_name"
@@ -362,10 +375,14 @@ while IFS= read -r epvp_name; do
       epvp_name_inconclusive "$epvp_ref" unsafe-env-name
       continue
     fi
+    # Kubernetes keeps the last entry of a duplicated env name; HCC's
+    # checkEgressProxyValues builds the same last-wins Map (reconciler.ts:1407).
+    # Resolving the first entry would judge a value the pod never runs and could
+    # call a server CLEAN that the new HCC blocks.
     epvp_entry=$(printf '%s' "$epvp_deployment" | jq -c --arg n "$epvp_ref" '
       [.spec.template.spec.containers[]
       | select(.name == "egress-proxy") | (.env // [])[]
-      | select(.name == $n)] | .[0] // empty' 2>/dev/null) ||
+      | select(.name == $n)] | .[-1] // empty' 2>/dev/null) ||
       epvp_die "invalid-deployment-json $NAMESPACE/$epvp_name"
     # Not in the container env: left undefined, as the pod's envsubst would
     # leave it; the check reports an undefined braced reference.

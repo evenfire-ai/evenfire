@@ -8,11 +8,12 @@
 # same run: the verdict line, the check's message line, the recorded invocation,
 # or the direct run of the same check.
 #
-# Values that depend on the sibling change to nginx-egress-proxy/egress-proxy-
-# template-check and on the new shared corpus (spec §3 and §5.5) are listed as
-# PENDING here. EGRESS_PREFLIGHT_INTEGRATION=1 runs them for real and fails
-# loudly when their inputs are absent; the default run prints the pending count
-# and exits 0 only when every execution assertion passed.
+# The assertions that depend on the sibling change to nginx-egress-proxy/
+# egress-proxy-template-check and on the new shared corpus (spec §3 and §5.5)
+# always run: this checkout carries the check, the corpus and the HCC/image name
+# lists, so a missing input is a hard failure, never a skip.
+# EGRESS_PREFLIGHT_INTEGRATION stays accepted for callers that set it and
+# selects the same run.
 #
 # shellcheck disable=SC2016 # templates, URLs and values are literal fixtures.
 set -u
@@ -25,7 +26,18 @@ CORPUS="$ROOT/nginx-egress-proxy/egress-proxy-value-corpus.tsv"
 HCC="$ROOT/host-context-controller/src/reconciler.ts"
 ENTRYPOINT="$ROOT/nginx-egress-proxy/egress-proxy-entrypoint"
 REAL_AWK=$(command -v awk)
-INTEGRATION=${EGRESS_PREFLIGHT_INTEGRATION:-0}
+
+# No assertion is ever PENDING: the old gate let the default run exit 0 with
+# three assertions skipped. 0 and 1 are both accepted so an existing invocation
+# cannot reintroduce the skip; any other value is a caller typo.
+case "${EGRESS_PREFLIGHT_INTEGRATION:-1}" in
+  0 | 1) ;;
+  *)
+    printf 'FAIL EGRESS_PREFLIGHT_INTEGRATION must be 0 or 1 (got %s)\n' \
+      "$EGRESS_PREFLIGHT_INTEGRATION"
+    exit 2
+    ;;
+esac
 
 TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/egress-value-preflight-test.XXXXXXXX") || exit 2
 trap 'rm -rf -- "$TEST_DIR"' EXIT
@@ -87,7 +99,6 @@ all_output="$TEST_DIR/all-output"
 
 pass() { printf 'PASS %s\n' "$*"; passed=$((passed + 1)); }
 fail() { printf 'FAIL %s\n' "$*"; failed=$((failed + 1)); }
-pending_note() { printf 'PENDING %s\n' "$*"; pending=$((pending + 1)); }
 
 reset_fixture() {
   rm -f -- "$FIXTURE_ROOT"/* "$TEST_DIR/awk-names" "$TEST_DIR/no-verdict"
@@ -157,6 +168,23 @@ expect_absent() { # LABEL TEXT
 
 count_lines() { # FILE TEXT
   grep -Fc -- "$2" "$1" 2>/dev/null || true
+}
+
+# The awk wrapper records one line per invocation, holding the names (never the
+# values) of its environment. Only the `env -i` child that runs the check lacks
+# CONTEXT, so this reports whether exactly that child saw NAME.
+check_ran_with() { # NAME -> yes|no
+  LC_ALL=C "$REAL_AWK" -v n="$1" '
+    {
+      seen = 0; context = 0
+      for (i = 1; i <= NF; i++) {
+        if ($i == n) seen = 1
+        if ($i == "CONTEXT") context = 1
+      }
+      if (seen) { total++; if (!context) clean++ }
+    }
+    END { print (total == 1 && clean == 1) ? "yes" : "no" }' \
+    "$TEST_DIR/awk-names" 2>/dev/null || printf 'no\n'
 }
 
 # What the live check itself decides for a template and one literal value. Used
@@ -273,6 +301,42 @@ if grep -F ' API_KEY ' "$TEST_DIR/awk-names" | grep -Fq ' LC_ALL ' &&
   pass only-referenced-environment
 else
   fail 'only-referenced-environment (LC_ALL/API_KEY missing or LD_PRELOAD exported)'
+fi
+
+# --- duplicate env entries: the last one wins ----------------------------
+# Kubernetes keeps the last entry of a duplicated env name, and HCC builds the
+# same last-wins Map (reconciler.ts:1407). A first-wins lookup calls this server
+# CLEAN while the pod and the new HCC run the rejected value.
+reset_fixture
+envs=$(jq -cn '[{name:"API_KEY",value:"TESTKEY-CLEAN-9482"},
+  {name:"API_KEY",value:"TESTKEY-TRAIL\u0001x"}]')
+add_server dup-last-invalid 'https://example.com/mcp' \
+  'proxy_set_header X-Key "${API_KEY}";' "$envs"
+run_case duplicate-env-last-invalid 1 \
+  'server=fixture-namespace/dup-last-invalid verdict=REJECT'
+expect_output duplicate-env-last-invalid-witness \
+  'the value of API_KEY is not allowed in a quoted string'
+if [ "$(check_ran_with API_KEY)" = yes ]; then
+  pass duplicate-env-last-invalid-resolution
+else
+  fail 'duplicate-env-last-invalid-resolution (no single check run saw API_KEY)'
+fi
+
+# Reverse order: the rejected value is the first entry and the valid one is
+# last, so only a last-wins lookup reports OK.
+reset_fixture
+envs=$(jq -cn '[{name:"API_KEY",value:"TESTKEY-TRAIL\u0001x"},
+  {name:"API_KEY",value:"TESTKEY-CLEAN-9482"}]')
+add_server dup-last-valid 'https://example.com/mcp' \
+  'proxy_set_header X-Key "${API_KEY}";' "$envs"
+run_case duplicate-env-last-valid 0 \
+  'server=fixture-namespace/dup-last-valid verdict=OK'
+expect_output duplicate-env-last-valid-summary \
+  'VERDICT=CLEAN checked=1 ok=1 rejected=0 inconclusive=0'
+if [ "$(check_ran_with API_KEY)" = yes ]; then
+  pass duplicate-env-last-valid-resolution
+else
+  fail 'duplicate-env-last-valid-resolution (no single check run saw API_KEY)'
 fi
 
 # --- unsafe-env-name ------------------------------------------------------
@@ -424,80 +488,74 @@ else
   fi
 fi
 
-# --- assertions that need the sibling check/corpus change ------------------
-# Spec §3.1 row 2: the new query class accepts / = : @ and complete %XX. The
-# old check rejects them as a generic unquoted value, so the verdict is
-# integration-pending, not weakened.
-if [ "$INTEGRATION" = 1 ]; then
-  reset_fixture
-  add_server encoded 'https://example.com/mcp?q=${API_KEY}' \
-    'proxy_pass https://example.com/mcp?q=${API_KEY};' "$(secret_ref API_KEY)"
-  secret_bytes 'TESTKEY-B64/def%2Bgh=='
-  run_case query-encoded-accept 0 'server=fixture-namespace/encoded verdict=OK'
-  expect_output query-encoded-summary 'VERDICT=CLEAN'
+# --- query value class (spec §3.1 row 2, §3.4) ---------------------------
+# The new query class accepts / = : @ and complete %XX; the rejection names the
+# query context.
+reset_fixture
+add_server encoded 'https://example.com/mcp?q=${API_KEY}' \
+  'proxy_pass https://example.com/mcp?q=${API_KEY};' "$(secret_ref API_KEY)"
+secret_bytes 'TESTKEY-B64/def%2Bgh=='
+run_case query-encoded-accept 0 'server=fixture-namespace/encoded verdict=OK'
+expect_output query-encoded-summary 'VERDICT=CLEAN'
 
-  # Spec §3.4: the rejection names the query context.
-  reset_fixture
-  add_server queryctx 'https://example.com/mcp?q=${API_KEY}' \
-    'proxy_pass https://example.com/mcp?q=${API_KEY};' "$(secret_ref API_KEY)"
-  secret_bytes 'TESTKEY-B64/def+gh=='
-  run_case query-context 1 'server=fixture-namespace/queryctx verdict=REJECT'
-  expect_output query-context-witness 'the value of API_KEY is not allowed in an unquoted query value'
-else
-  pending_note 'query-encoded-accept (spec §3.1 row 2: the new query class)'
-  pending_note 'query-context-wording (spec §3.4: "an unquoted query value")'
-fi
+reset_fixture
+add_server queryctx 'https://example.com/mcp?q=${API_KEY}' \
+  'proxy_pass https://example.com/mcp?q=${API_KEY};' "$(secret_ref API_KEY)"
+secret_bytes 'TESTKEY-B64/def+gh=='
+run_case query-context 1 'server=fixture-namespace/queryctx verdict=REJECT'
+expect_output query-context-witness 'the value of API_KEY is not allowed in an unquoted query value'
 
 # --- corpus (spec §3.5 / §5.5): 90 query+quoted rows ----------------------
-if [ "$INTEGRATION" = 1 ]; then
-  if [ ! -r "$CORPUS" ]; then
-    fail "corpus-missing (integration mode needs $CORPUS)"
-  else
-    tab=$(printf '\t')
-    rows=0
-    query_rows=0
-    quoted_rows=0
-    while IFS= read -r row || [ -n "$row" ]; do
-      case $row in
-        '' | '#'*) continue ;;
-      esac
-      ctx=${row%%"$tab"*}
-      [ "$ctx" = context ] && continue
-      rest=${row#*"$tab"}
-      label=${rest%%"$tab"*}
-      rest=${rest#*"$tab"}
-      bytes=${rest%%"$tab"*}
-      expected=${rest#*"$tab"}
-      { [ "$ctx" = query ] || [ "$ctx" = quoted ]; } || continue
-      rows=$((rows + 1))
-      if [ "$ctx" = query ]; then
-        query_rows=$((query_rows + 1))
-        corpus_template='proxy_pass https://example.com/mcp?q=${VALUE};'
-      else
-        quoted_rows=$((quoted_rows + 1))
-        corpus_template='proxy_set_header X-Key "${VALUE}";'
-      fi
-      reset_fixture
-      add_server corpus 'https://example.com/mcp' "$corpus_template" "$(secret_ref VALUE)"
-      # The corpus value field is a POSIX printf format (spec §3.5).
-      # shellcheck disable=SC2059
-      encoded=$(printf -- "$bytes" | base64 | tr -d '\n')
-      jq -n --arg v "$encoded" '{data:{credential:$v}}' \
-        >"$FIXTURE_ROOT/secret-fixture-secret.json"
-      case $expected in
-        ACCEPT) run_case "corpus-$ctx-$label" 0 'server=fixture-namespace/corpus verdict=OK' ;;
-        REJECT) run_case "corpus-$ctx-$label" 1 'the value of VALUE is not allowed in' ;;
-        *) fail "corpus-$ctx-$label (invalid expected verdict: $expected)" ;;
-      esac
-    done <"$CORPUS"
-    if [ "$rows" -eq 90 ] && [ "$query_rows" -eq 45 ] && [ "$quoted_rows" -eq 45 ]; then
-      pass corpus-row-count
-    else
-      fail "corpus-row-count total=$rows query=$query_rows quoted=$quoted_rows"
-    fi
-  fi
+if [ ! -r "$CORPUS" ]; then
+  fail "corpus-missing (the suite needs $CORPUS)"
 else
-  pending_note 'corpus-90 (spec §3.5/§5.5: 45 query + 45 quoted rows, needs the corpus file)'
+  tab=$(printf '\t')
+  rows=0
+  query_rows=0
+  quoted_rows=0
+  while IFS= read -r row || [ -n "$row" ]; do
+    case $row in
+      '' | '#'*) continue ;;
+    esac
+    ctx=${row%%"$tab"*}
+    [ "$ctx" = context ] && continue
+    rest=${row#*"$tab"}
+    label=${rest%%"$tab"*}
+    rest=${rest#*"$tab"}
+    bytes=${rest%%"$tab"*}
+    expected=${rest#*"$tab"}
+    { [ "$ctx" = query ] || [ "$ctx" = quoted ]; } || continue
+    rows=$((rows + 1))
+    if [ "$ctx" = query ]; then
+      query_rows=$((query_rows + 1))
+      corpus_template='proxy_pass https://example.com/mcp?q=${VALUE};'
+    else
+      quoted_rows=$((quoted_rows + 1))
+      corpus_template='proxy_set_header X-Key "${VALUE}";'
+    fi
+    reset_fixture
+    add_server corpus 'https://example.com/mcp' "$corpus_template" "$(secret_ref VALUE)"
+    # The corpus value field is a POSIX printf format (spec §3.5).
+    # shellcheck disable=SC2059
+    encoded=$(printf -- "$bytes" | base64 | tr -d '\n')
+    jq -n --arg v "$encoded" '{data:{credential:$v}}' \
+      >"$FIXTURE_ROOT/secret-fixture-secret.json"
+    case $expected in
+      ACCEPT) run_case "corpus-$ctx-$label" 0 'server=fixture-namespace/corpus verdict=OK' ;;
+      REJECT) run_case "corpus-$ctx-$label" 1 'the value of VALUE is not allowed in' ;;
+      *) fail "corpus-$ctx-$label (invalid expected verdict: $expected)" ;;
+    esac
+  done <"$CORPUS"
+  # A readable corpus that yields no row asserted nothing, so it fails loudly
+  # instead of reporting a green run.
+  if [ "$rows" -eq 0 ]; then
+    fail 'corpus-total-zero (no query or quoted row was executed)'
+  fi
+  if [ "$rows" -eq 90 ] && [ "$query_rows" -eq 45 ] && [ "$quoted_rows" -eq 45 ]; then
+    pass corpus-row-count
+  else
+    fail "corpus-row-count total=$rows query=$query_rows quoted=$quoted_rows"
+  fi
 fi
 
 # --- SC-1 (spec §8.5): name lists parsed from the real sources ------------
@@ -578,10 +636,10 @@ if grep -Eq 'const[[:space:]]+ENVSUBST_PINNED_PROXY_ENV' "$HCC" &&
   else
     fail 'sc1-sets-exported (RESERVED_PROXY_ENV and FORBIDDEN_CRD_ENV_NAMES must be exported)'
   fi
-elif [ "$INTEGRATION" = 1 ]; then
-  fail 'sc1-source-list-drift (integration mode needs the HCC sets and the image assignments)'
+elif [ ! -r "$HCC" ] || [ ! -r "$ENTRYPOINT" ]; then
+  fail "sc1-source-list-drift (the suite needs $HCC and $ENTRYPOINT)"
 else
-  pending_note 'sc1-source-list-drift (HCC RESERVED_PROXY_ENV/ENVSUBST_PINNED_PROXY_ENV/RESOLVER_RESERVED_PROXY_ENV and the image NGINX_ENVSUBST_* assignments are not in this checkout)'
+  fail 'sc1-source-list-drift (the HCC sets or the image NGINX_ENVSUBST_* assignments are missing)'
 fi
 
 # --- every case's output, with a life witness ----------------------------
@@ -592,11 +650,14 @@ else
   fail 'no-values-on-output (a fixture value reached stdout/stderr, or no verdict line was produced)'
 fi
 
+# Anti-vacuity: with no pending mode left, a run that asserted nothing must not
+# look successful.
+if [ $((passed + failed)) -eq 0 ]; then
+  fail 'no-assertions-executed (the suite produced no PASS/FAIL line)'
+fi
+
 printf 'RESULT passed=%s failed=%s pending=%s\n' "$passed" "$failed" "$pending"
 if [ "$failed" -ne 0 ]; then
   exit 1
-fi
-if [ "$INTEGRATION" != 1 ] && [ "$pending" -gt 0 ]; then
-  printf 'PENDING_COUNT=%s (integration-only assertions; set EGRESS_PREFLIGHT_INTEGRATION=1 to run them)\n' "$pending"
 fi
 exit 0
