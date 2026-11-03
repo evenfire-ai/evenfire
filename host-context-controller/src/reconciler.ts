@@ -2808,6 +2808,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    *   - `DeploymentReady` with the same `status` but a new `reason` or
    *     `message` → bump `lastTransitionTime` so recovery after
    *     `RuntimeNotDesired` is visible to #223 consumers.
+   *   - `EgressProxyValuesValid=False` (the egress-proxy block) → always bump
+   *     `lastTransitionTime`, even when `reason` and `message` are identical to
+   *     the prior refusal, and therefore always patch. The value is a
+   *     per-rotation verdict and the Control UI only accepts a refusal written
+   *     after its own rotation cutoff, so two out-of-class rotations that
+   *     violate the same placeholder and key must not share one stamp.
    *   - Condition with same `type` but different `status` → bump
    *     `lastTransitionTime` to now.
    *   - New type → append with fresh `lastTransitionTime`.
@@ -2826,7 +2832,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    *
    * Returns `'wrote'` after a successful patch, `'unchanged'` when the
    * requested condition already matches and no retired type remains, or
-   * `'declined'` when the fence or a write error stops the update.
+   * `'declined'` when the fence or a write error stops the update. The
+   * `EgressProxyValuesValid=False` exception above never returns `'unchanged'`.
    *
    * Failure modes:
    *   - 404 (CRD deleted mid-reconcile) → log + `decline()`.
@@ -2911,7 +2918,25 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
 
       const prior = existingConditions.find(c => c.type === condition.type)
       const observedGeneration = condition.observedGeneration ?? server.generation
+      // A refusal (`EgressProxyValuesValid=False`) is a per-rotation verdict,
+      // not a property of the CRD: the Control UI reports the rotation as
+      // failed only when that condition's lastTransitionTime is after the
+      // rotation's own cutoff (control-ui, useRolloutWait.ts). Two consecutive
+      // out-of-class rotations that violate the same placeholder and key
+      // produce a byte-identical reason+message, so reusing the prior stamp
+      // would make a genuinely fresh refusal look stale and the UI would wait
+      // out its whole 180s budget instead of failing (issue #1240, PR #1243
+      // residuals). Restamping on every block write is self-terminating: the
+      // patch changes status only, and HCC already declines to reconcile a
+      // status-only MODIFIED event (mcpServerSafety.isMcpServerStatusOnlyUpdate),
+      // so it cannot re-enter this path. Scoped to this type+status: no other
+      // condition type changes behavior.
+      const refreshEgressProxyRefusalTime =
+        condition.type === 'EgressProxyValuesValid' &&
+        condition.status === 'False' &&
+        prior !== undefined
       const unchanged =
+        !refreshEgressProxyRefusalTime &&
         prior !== undefined &&
         prior.status === condition.status &&
         prior.reason === condition.reason &&
@@ -2936,7 +2961,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         prior !== undefined &&
         (prior.reason !== condition.reason || prior.message !== condition.message)
       const lastTransitionTime =
-        prior && prior.status === condition.status && !refreshDeploymentReadyTime
+        prior &&
+        prior.status === condition.status &&
+        !refreshDeploymentReadyTime &&
+        !refreshEgressProxyRefusalTime
           ? prior.lastTransitionTime
           : now
 

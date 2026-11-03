@@ -368,7 +368,7 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
     expect(valid.message.match(/query placeholder/g)).toHaveLength(10)
   })
 
-  it('PF-7: the same inputs produce an identical message and the second write is unchanged', async () => {
+  it('PF-7: an identical repeated block keeps the message and restamps the refusal', async () => {
     coreApi.readNamespacedSecret.mockResolvedValue(
       encodedSecret({ [API_KEY_SECRET_KEY]: 'abc/def+gh==' })
     )
@@ -383,19 +383,39 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
       return {}
     })
 
+    vi.setSystemTime(new Date('2026-11-03T09:00:00.000Z'))
     await reconciler.reconcile(API_KEY_SERVER)
-    const firstMessage = persisted.find(
-      condition => condition.type === 'EgressProxyValuesValid'
-    ).message
+    const firstRefusal = persisted.find(condition => condition.type === 'EgressProxyValuesValid')
+    const firstMessage = firstRefusal.message
     const patchesAfterFirst = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
     expect(patchesAfterFirst).toBeGreaterThan(0)
 
+    // A second rotation lands outside the class too, violating the same
+    // placeholder, source and key: reason+message are byte-identical and only
+    // the instant of the refusal differs.
+    vi.setSystemTime(new Date('2026-11-03T09:05:00.000Z'))
     await reconciler.reconcile(API_KEY_SERVER)
 
-    // Witness: the message is a pure function of CRD + Secret data, so every
-    // write is `unchanged` and no patch fires on the second reconcile.
-    expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.length).toBe(patchesAfterFirst)
+    const secondRefusal = persisted.find(condition => condition.type === 'EgressProxyValuesValid')
+    // Life witness: the second reconcile re-read the Secret, reached the block
+    // and republished the refusal.
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(2)
     expect(reconciler.getStatus(API_KEY_SERVER).message).toContain(firstMessage)
+    // The message stays a pure function of CRD + Secret data...
+    expect(secondRefusal.message).toBe(firstMessage)
+    // ...and the refusal is restamped in THIS reconcile. Without that, a second
+    // consecutive out-of-class rotation would carry the first block's
+    // timestamp, Control UI's freshness rule would discard it and the operator
+    // would sit through the full 180s budget instead of seeing the refusal.
+    expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.length).toBe(
+      patchesAfterFirst + 1
+    )
+    expect(secondRefusal.lastTransitionTime).toBe('2026-11-03T09:05:00.000Z')
+    // Scope witness: only the refusal restamps. Ready=False is byte-identical
+    // and keeps the stamp it already had.
+    expect(persisted.find(condition => condition.type === 'Ready').lastTransitionTime).toBe(
+      '2026-11-03T09:00:00.000Z'
+    )
   })
 
   it('PF-8: a fixed Secret clears the block and the Deployment is written', async () => {
