@@ -935,14 +935,18 @@ export class TaskExecutor {
         this.deps.onFail(this.task, taskError)
       }
     } finally {
-      if (this.state !== 'waiting_approval') {
-        await this.stopContinuationLease()
-        await this.abandonOriginCheckpoint()
+      try {
+        await this.settleGfsAfterCleanup(async () => {
+          if (this.state !== 'waiting_approval') {
+            await this.stopContinuationLease()
+            await this.abandonOriginCheckpoint()
+          }
+        })
+      } finally {
+        this.executionBudget.pause()
+        if (this.state !== 'waiting_approval' || this.abortController.signal.aborted)
+          this.resolveCompletion?.()
       }
-      await this.settleGfsRetentionOwner()
-      this.executionBudget.pause()
-      if (this.state !== 'waiting_approval' || this.abortController.signal.aborted)
-        this.resolveCompletion?.()
     }
   }
 
@@ -2068,14 +2072,18 @@ export class TaskExecutor {
         this.deps.onFail(this.task, taskError)
       }
     } finally {
-      if (this.state !== 'waiting_approval') {
-        await this.stopContinuationLease()
-        await this.abandonOriginCheckpoint()
+      try {
+        await this.settleGfsAfterCleanup(async () => {
+          if (this.state !== 'waiting_approval') {
+            await this.stopContinuationLease()
+            await this.abandonOriginCheckpoint()
+          }
+        })
+      } finally {
+        this.executionBudget.pause()
+        if (this.state !== 'waiting_approval' || this.abortController.signal.aborted)
+          this.resolveCompletion?.()
       }
-      await this.settleGfsRetentionOwner()
-      this.executionBudget.pause()
-      if (this.state !== 'waiting_approval' || this.abortController.signal.aborted)
-        this.resolveCompletion?.()
     }
   }
 
@@ -2227,16 +2235,22 @@ export class TaskExecutor {
       // A suspended run has already returned, so its finally block will not
       // re-enter. Join claim settlement and owner release before completion.
       this.suspendedCancellation = (async () => {
-        await this.stopContinuationLease()
-        if (this.task.modelStepContinuation) await this.abandonModelStepContinuation()
-        await this.abandonOriginCheckpoint()
-        await this.settleGfsRetentionOwner()
+        await this.settleGfsAfterCleanup(async () => {
+          await this.stopContinuationLease()
+          if (this.task.modelStepContinuation) await this.abandonModelStepContinuation()
+          await this.abandonOriginCheckpoint()
+        })
       })()
         .then(() => this.resolveCompletion?.())
         .catch(err => {
           logger.error({ taskId: this.taskId, err }, 'Suspended task cancellation cleanup failed')
-          this.deps.onFail(this.task, this.toTaskError(err))
-          this.resolveCompletion?.()
+          try {
+            if (!this.deps.taskLifecycle.isTerminal(this.taskId)) {
+              this.deps.onFail(this.task, this.toTaskError(err))
+            }
+          } finally {
+            this.resolveCompletion?.()
+          }
         })
     }
   }
@@ -2251,6 +2265,28 @@ export class TaskExecutor {
   private captureTaskTokenBaseline(): void {
     if (!this.hasTaskBudgetCap() || !this.conversation) return
     this.taskTokenBaseline = snapshotTaskTokenBaseline(this.conversation)
+  }
+
+  /** Always release terminal GFS retention after earlier cleanup settles. */
+  private async settleGfsAfterCleanup(cleanup: () => Promise<void>): Promise<void> {
+    let cleanupFailed = false
+    let cleanupError: unknown
+    try {
+      await cleanup()
+    } catch (error) {
+      cleanupFailed = true
+      cleanupError = error
+    }
+    try {
+      await this.settleGfsRetentionOwner()
+    } catch (error) {
+      if (!cleanupFailed) throw error
+      logger.error(
+        { taskId: this.taskId, errorName: error instanceof Error ? error.name : typeof error },
+        'GFS retention settlement failed after task cleanup failed'
+      )
+    }
+    if (cleanupFailed) throw cleanupError
   }
 
   /**

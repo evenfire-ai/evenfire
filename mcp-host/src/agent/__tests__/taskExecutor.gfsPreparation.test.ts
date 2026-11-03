@@ -17,6 +17,7 @@ import {
 } from '../../internalTools/gfsSpaceGuidance'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
+import { logger } from '../../logger'
 import type { Task } from '../../queue/types'
 import { deriveUserKey } from '../../workspace/userKey'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
@@ -67,6 +68,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true })
   Object.assign(appConfig, saved)
   vi.clearAllMocks()
+  vi.restoreAllMocks()
 })
 
 function preparedFiles(messages: ChatMessage[]): PreparedGfsFile[] {
@@ -578,6 +580,97 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.contentRequests).toBe(1)
     expect(test.lifecycle.getStatus(test.task.id)).toBe('cancelled')
   })
+
+  it('releases a suspended owner before completion when lease cleanup rejects', async () => {
+    const test = await scenario({ mode: 'script' })
+    await test.executor.run()
+    expect(test.executor.executorState).toBe('waiting_approval')
+    expect(test.releaseReceiptOwner).not.toHaveBeenCalled()
+    const cleanupError = new Error('lease cleanup failed')
+    const stop = vi
+      .spyOn(
+        test.executor as unknown as { stopContinuationLease(): Promise<void> },
+        'stopContinuationLease'
+      )
+      .mockRejectedValueOnce(cleanupError)
+    const logged = vi.spyOn(logger, 'error')
+    let entered!: () => void
+    const releaseEntered = new Promise<void>(resolve => {
+      entered = resolve
+    })
+    let allowRelease!: () => void
+    const releaseAllowed = new Promise<void>(resolve => {
+      allowRelease = resolve
+    })
+    test.releaseReceiptOwner.mockImplementation(async (...args) => {
+      entered()
+      await releaseAllowed
+      await GfsDownloadStore.prototype.releaseReceiptOwner.call(test.store, ...args)
+    })
+    let completions = 0
+    const completion = test.executor.waitForCompletion().then(() => {
+      completions++
+    })
+    test.executor.abort()
+    await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce())
+    // A missing release must fail quickly rather than hang the mutation run.
+    let timeout!: ReturnType<typeof setTimeout>
+    const reached = await Promise.race([
+      releaseEntered.then(() => true),
+      new Promise<boolean>(resolve => {
+        timeout = setTimeout(() => resolve(false), 1_000)
+      }),
+    ])
+    clearTimeout(timeout)
+    const completedBeforeRelease = completions
+    allowRelease()
+    await completion
+    expect(reached).toBe(true)
+    expect(completedBeforeRelease).toBe(0)
+    expect(test.releaseReceiptOwner).toHaveBeenCalledExactlyOnceWith(
+      test.task.id,
+      UNIT_CALLER_STORE_KEY
+    )
+    expect(completions).toBe(1)
+    expect(
+      test.lifecycle
+        .get(test.task.id)
+        ?.history.filter(entry => ['cancelled', 'completed', 'failed'].includes(entry.to))
+    ).toMatchObject([{ to: 'cancelled' }])
+    expect(test.onFail).not.toHaveBeenCalled()
+    expect(test.task.responseCallback).not.toHaveBeenCalled()
+    expect(logged).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: test.task.id, err: cleanupError }),
+      'Suspended task cancellation cleanup failed'
+    )
+  })
+
+  it.each(['run', 'resume'] as const)(
+    'releases the owner and resolves completion when %s terminal cleanup rejects',
+    async path => {
+      const test = await scenario({ mode: path === 'resume' ? 'script' : 'inspect' })
+      if (path === 'resume') {
+        await test.executor.run()
+        expect(test.executor.executorState).toBe('waiting_approval')
+        expect(test.releaseReceiptOwner).not.toHaveBeenCalled()
+      }
+      const cleanupError = new Error(`${path} lease cleanup failed`)
+      const stop = vi
+        .spyOn(
+          test.executor as unknown as { stopContinuationLease(): Promise<void> },
+          'stopContinuationLease'
+        )
+        .mockRejectedValueOnce(cleanupError)
+      const run = path === 'run' ? test.executor.run() : test.executor.resumeAfterApproval(false)
+      await expect(run).rejects.toBe(cleanupError)
+      expect(stop).toHaveBeenCalledOnce()
+      expect(test.releaseReceiptOwner).toHaveBeenCalledExactlyOnceWith(
+        test.task.id,
+        UNIT_CALLER_STORE_KEY
+      )
+      await expect(test.executor.waitForCompletion()).resolves.toBeUndefined()
+    }
+  )
 
   it('cancels metadata preparation through the task signal before any content or provider request', async () => {
     const test = await scenario({ stallMetadata: true })

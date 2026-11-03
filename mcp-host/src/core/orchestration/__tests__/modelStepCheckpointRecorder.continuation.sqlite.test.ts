@@ -704,6 +704,9 @@ describe('E2 poisoned continuation settlement with SQLite', () => {
       enableApproval: false,
       dynamicToolsEnabled: true,
       promptCacheEnabled: false,
+      // The origin 503 only prepares a resumable checkpoint; automatic retry
+      // timing is covered separately and is not needed for this dispatch test.
+      modelStepAutoRetries: 0,
     })
     vi.spyOn(Date, 'now').mockReturnValue(NOW)
     const handle = makeSqliteStore()
@@ -740,6 +743,7 @@ describe('E2 poisoned continuation settlement with SQLite', () => {
       await handle.persistQueue.drain()
       expect(header(handle).status).toBe('resumable')
       expect(execution).toHaveBeenCalledTimes(1)
+      expect(llm.calls()).toBe(2)
 
       const store = originalDeps.modelStepCheckpoints!.store
       const append = store.append.bind(store)
