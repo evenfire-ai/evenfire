@@ -25,7 +25,7 @@ if [ -z "$port" ]; then
   exit 2
 fi
 
-wget -q -T 2 -O /dev/null "http://127.0.0.1:${port}/health" || exit 1
+wget -Y off -q -T 2 -O /dev/null "http://127.0.0.1:${port}/health" || exit 1
 
 # The bracket keeps the pattern from matching a pgrep command line of its own
 # if this script ever grows a wrapper shell.

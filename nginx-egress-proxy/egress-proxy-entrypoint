@@ -6,18 +6,29 @@
 # NGINX's. So this wrapper does its three jobs and then execs the official
 # entrypoint, which execs `nginx -g 'daemon off;'`:
 #
-#   0. It checks, synchronously and before anything else starts, that no value
-#      envsubst is about to insert into a template would change the NGINX
-#      syntax around it, or that a query value is outside the class the
-#      upstream reads unchanged (egress-proxy-template-check), and exits 1
-#      otherwise.
+#   0. It copies each mounted template into a private directory and checks
+#      that copy, synchronously and before anything else starts. mktemp -d
+#      creates the directory mode 0700 with a new name on every start. Each
+#      non-dot top-level *.template is cat'd into a new regular file there,
+#      one open per file, so the check and envsubst both read one kubelet
+#      AtomicWriter generation. egress-proxy-template-check then refuses to
+#      start (exit 1) when a value envsubst is about to insert would change
+#      the NGINX syntax around it, or when a query value is outside the class
+#      the upstream reads unchanged. Before that check it assigns the six
+#      NGINX_ENVSUBST_* knobs with plain assignments and exports them, so the
+#      check and 20-envsubst-on-templates.sh see the same directory, suffixes,
+#      output paths and an empty filter. A pod environment cannot retarget
+#      them. umask 077 covers only the copy and is restored afterwards.
 #   1. It keeps the official /docker-entrypoint.sh, so the template envsubst
 #      (20-envsubst-on-templates.sh) and the image's other
 #      /docker-entrypoint.d scripts still run. A script that exports a
 #      variable for envsubst (15-local-resolvers.envsh, when
 #      NGINX_ENTRYPOINT_LOCAL_RESOLVERS is set) runs after job 0, so the
 #      check never sees that value; the export reaches only the entrypoint's
-#      script loop, where envsubst reads it.
+#      script loop, where envsubst reads it. 15-local-resolvers.envsh does not
+#      overwrite the six knobs assigned in job 0. No HCC template references
+#      NGINX_LOCAL_RESOLVERS, and HCC rejects both resolver names as
+#      placeholders.
 #   2. It routes only NGINX's stderr through the log filter (#1240). The remote
 #      baseUrl query may carry a credential and NGINX prints the full upstream
 #      URL in every upstream error line; NGINX also quotes the upstream's
@@ -46,27 +57,63 @@ fi
 FIFO=/tmp/egress-proxy-error.fifo
 FILTER=/usr/local/bin/egress-proxy-log-filter
 TEMPLATE_CHECK=/usr/local/bin/egress-proxy-template-check
-TEMPLATE_DIR=/etc/nginx/templates
 
-# The official entrypoint substitutes every defined environment variable into
-# the templates. Refuse to start when a value would change the NGINX syntax
-# around it (a Secret value with `;` would otherwise end proxy_pass and add
-# directives). This runs before the filter exists, so its messages go straight
-# to the container stderr; they name the variable, never the value. Files are
-# listed the way 20-envsubst-on-templates.sh lists them.
-if [ -d "$TEMPLATE_DIR" ]; then
-  templates="$(find "$TEMPLATE_DIR" -follow -type f -name '*.template')"
-  if [ -n "$templates" ]; then
-    if ! (
-      set -f
-      IFS='
-'
-      # shellcheck disable=SC2086 # split on newlines only, with globbing off
-      exec awk -f "$TEMPLATE_CHECK" $templates
-    ) >&2; then
-      echo "egress-proxy-entrypoint: refusing to start: a template value would change the NGINX configuration" >&2
+MOUNTED_TEMPLATES=/etc/nginx/templates
+
+# The copy envsubst renders from. mktemp -d creates it with mode 0700 and a new
+# name at every start, so a restart that keeps the writable layer never reuses
+# a previous copy. There is no exists-check and no fallback to the live mount:
+# a failed create, cat or short write refuses to start. umask 077 applies to
+# the copy only and is restored right after it, before the check and before
+# the official entrypoint. 15-local-resolvers.envsh runs later, inside
+# /docker-entrypoint.sh, and does not overwrite the six pins below.
+saved_umask="$(umask)"
+umask 077
+TEMPLATES="$(mktemp -d /tmp/egress-proxy-templates.XXXXXX)" || {
+  echo "egress-proxy-entrypoint: cannot create the template snapshot" >&2
+  exit 1
+}
+
+# Unconditional pins, before the check. Plain assignments, never ${VAR:-default},
+# so a pod value cannot replace them. Exported so the check's ENVIRON and
+# envsubst see the same values.
+NGINX_ENVSUBST_TEMPLATE_DIR="$TEMPLATES"
+NGINX_ENVSUBST_TEMPLATE_SUFFIX=.template
+NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx/conf.d
+NGINX_ENVSUBST_STREAM_TEMPLATE_SUFFIX=.stream-template
+NGINX_ENVSUBST_STREAM_OUTPUT_DIR=/etc/nginx/stream-conf.d
+NGINX_ENVSUBST_FILTER=
+export NGINX_ENVSUBST_TEMPLATE_DIR \
+  NGINX_ENVSUBST_TEMPLATE_SUFFIX \
+  NGINX_ENVSUBST_OUTPUT_DIR \
+  NGINX_ENVSUBST_STREAM_TEMPLATE_SUFFIX \
+  NGINX_ENVSUBST_STREAM_OUTPUT_DIR \
+  NGINX_ENVSUBST_FILTER
+
+count=0
+if [ -d "$MOUNTED_TEMPLATES" ]; then
+  for src in "$MOUNTED_TEMPLATES"/*.template; do
+    # The unmatched glob: the mount is absent of top-level *.template files.
+    [ -e "$src" ] || [ -L "$src" ] || continue
+    if [ ! -f "$src" ]; then
+      echo "egress-proxy-entrypoint: ${src##*/} is not a regular file" >&2
       exit 1
     fi
+    # One open of the mounted path, written to a new regular file. No cp -a,
+    # no symlink, and no walk into ..data. cat exits non-zero on a short write.
+    if ! cat -- "$src" >"$TEMPLATES/${src##*/}"; then
+      echo "egress-proxy-entrypoint: ${src##*/}: snapshot copy failed" >&2
+      exit 1
+    fi
+    count=$((count + 1))
+  done
+fi
+umask "$saved_umask"
+if [ "$count" -gt 0 ]; then
+  # shellcheck disable=SC2086 # one pathname prefix plus the suffix glob; names have no whitespace
+  if ! awk -f "$TEMPLATE_CHECK" "$TEMPLATES"/*.template >&2; then
+    echo "egress-proxy-entrypoint: refusing to start: a template value would change the NGINX configuration" >&2
+    exit 1
   fi
 fi
 
