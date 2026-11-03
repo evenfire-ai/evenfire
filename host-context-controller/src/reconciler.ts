@@ -1613,6 +1613,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       },
       isCurrent
     )
+    if (!isCurrent()) return false
     this.setStatus(server.name, {
       deployed: false,
       ready: false,

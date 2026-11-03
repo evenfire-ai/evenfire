@@ -788,6 +788,14 @@ jobs:
           done < <(find deploy/scripts scripts -type f -name '*.sh' 2>/dev/null)
           exit $fail
 
+      - name: Test egress-proxy value preflight in integration mode
+        env:
+          EGRESS_PREFLIGHT_INTEGRATION: "1"
+        run: bash scripts/ops/test-egress-proxy-value-preflight.sh
+
+      - name: Test replace-one-literal
+        run: bash scripts/tests/test-replace-one-literal.sh
+
       - name: Verify Node security version policy
         run: node --test scripts/tests/node-runtime-version.test.mjs
 
