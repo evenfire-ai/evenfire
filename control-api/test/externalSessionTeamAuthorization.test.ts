@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import express, { type NextFunction, type Request, type Response } from 'express'
+import express from 'express'
 import { DatabaseError } from 'pg'
 import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
@@ -8,7 +8,6 @@ import {
   requireExternalTeamParamMatch,
   requireValidExternalSessionToken,
 } from '../src/middleware/externalSessionAuth.js'
-import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 
 const session = vi.hoisted(() => ({ authenticateExternalUserSession: vi.fn() }))
 const db = vi.hoisted(() => ({ query: vi.fn() }))
@@ -23,15 +22,8 @@ function databaseError(sqlstate: string): DatabaseError {
   return error
 }
 
-function app(budget?: AccessExecutionBudget) {
+function app() {
   const value = express()
-  if (budget) {
-    value.use((req: Request, _res: Response, next: NextFunction) => {
-      ;(req as Request & { accessExecutionBudget?: AccessExecutionBudget }).accessExecutionBudget =
-        budget
-      next()
-    })
-  }
   value.get(
     '/teams/:teamId',
     requireValidExternalSessionToken,
@@ -131,21 +123,5 @@ describe('external team authorization', () => {
       'user-1',
       'team-1',
     ])
-  })
-
-  it('keeps an exhausted access budget on the sanitized 500 path', async () => {
-    const budget = AccessExecutionBudget.create('action', { limits: { producerCalls: 1 } })
-    budget.charge({ kind: 'producerCalls' })
-
-    const response = await request(app(budget))
-      .get('/teams/team-1')
-      .set('x-user-session-token', 'stale-admin-token')
-    budget.close()
-
-    expect(response.status).toBe(500)
-    expect(response.body.error).toBe('Internal Server Error')
-    expect(response.headers['retry-after']).toBeUndefined()
-    // A budget refusal is not a database outage: the query never ran.
-    expect(db.query).not.toHaveBeenCalled()
   })
 })

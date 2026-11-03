@@ -67,7 +67,7 @@ function expectLiveMembership(userId: string, teamId: string) {
   expect(authority.getLiveTeamMembership).toHaveBeenCalledWith(
     userId,
     teamId,
-    expect.objectContaining({ budget: expect.anything() })
+    expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
   )
 }
 

@@ -3,7 +3,6 @@ import express from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { DatabaseError } from 'pg'
 import request from 'supertest'
-import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 
 const poolQuery = vi.hoisted(() => vi.fn())
 const poolConnect = vi.hoisted(() => vi.fn())
@@ -43,23 +42,22 @@ function databaseError(sqlstate: string): DatabaseError {
   return error
 }
 
-function app(budget?: AccessExecutionBudget) {
+function app() {
   const server = express()
   server.get(
     '/protected',
     rateLimit({ windowMs: 60_000, limit: 100, standardHeaders: 'draft-7', legacyHeaders: false }),
     async (req, res, next) => {
-      if (budget) {
-        const budgetedRequest = req as express.Request & {
-          accessExecutionBudget?: AccessExecutionBudget
-        }
-        budgetedRequest.accessExecutionBudget = budget
-      }
       const { requireValidExternalSessionToken } =
         await import('../src/middleware/externalSessionAuth.js')
       await requireValidExternalSessionToken(req as never, res, next)
     },
-    (_req, res) => res.status(200).json({ ok: true })
+    (req, res) =>
+      res.status(200).json({
+        ok: true,
+        userId: (req as express.Request & { externalAuth?: { userId: string } }).externalAuth
+          ?.userId,
+      })
   )
   server.use(
     (_err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -136,22 +134,38 @@ describe('external session lifecycle gate', () => {
   it('answers 503 for a no-SQLSTATE database connection-acquire failure', async () => {
     verifyToken.mockReturnValueOnce(claims)
     const acquireFailure = new Error('private pg-pool acquire timeout sentinel')
-    poolConnect.mockRejectedValueOnce(acquireFailure)
-    const budget = AccessExecutionBudget.create('action')
+    poolQuery.mockRejectedValueOnce(acquireFailure)
 
-    const response = await request(app(budget))
+    const response = await request(app())
       .get('/protected')
-      .set('x-user-session-token', 'session-with-budget')
-    budget.close()
+      .set('x-user-session-token', 'session-without-budget')
 
     expect(response.status).toBe(503)
     expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
     expect(JSON.stringify(response.body)).not.toContain(acquireFailure.message)
     expect(JSON.stringify(response.headers)).not.toContain(acquireFailure.message)
-    expect(poolConnect).toHaveBeenCalledTimes(1)
-    expect(verifyToken).toHaveBeenCalledWith('session-with-budget')
+    expect(poolConnect).not.toHaveBeenCalled()
+    expect(poolQuery).toHaveBeenCalledOnce()
+    expect(verifyToken).toHaveBeenCalledWith('session-without-budget')
     expect(loggerWarn).toHaveBeenCalledTimes(1)
+  })
+
+  it('validates a V1 session without opening a transaction when no budget is attached', async () => {
+    verifyToken.mockReturnValueOnce(claims)
+
+    const response = await request(app())
+      .get('/protected')
+      .set('x-user-session-token', 'session-without-budget')
+
+    expect(response.status).toBe(200)
+    // Witness: next() ran and the middleware fixed req.externalAuth.
+    expect(response.body.userId).toBe(claims.userId)
+    expect(poolConnect).not.toHaveBeenCalled()
+    expect(poolQuery).toHaveBeenCalledTimes(2)
+    const statements = poolQuery.mock.calls.map(call => String(call[0])).join('\n')
+    expect(statements).not.toContain('statement_timeout')
+    expect(statements).not.toContain('READ ONLY')
   })
 
   it('keeps a successful-query session clock invariant failure on the ordinary 500 path', async () => {

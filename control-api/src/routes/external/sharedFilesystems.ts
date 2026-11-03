@@ -2,7 +2,6 @@ import { Router } from 'express'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
-import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
@@ -72,8 +71,7 @@ class ContextAuthorizationUnavailableError extends Error {
 async function loadAccessibleContextIds(
   gateway: K8sGateway,
   userId: string,
-  teamId: string | null,
-  budget: NonNullable<ExternalAuthedRequest['accessExecutionBudget']>
+  teamId: string | null
 ): Promise<Set<string>> {
   const accessible = new Set<string>()
   let activeContextIds: string[]
@@ -92,7 +90,7 @@ async function loadAccessibleContextIds(
     const compatibilityTeamId = teamId.trim()
     let membership
     try {
-      membership = await getLiveTeamMembership(userId, compatibilityTeamId, { budget })
+      membership = await getLiveTeamMembership(userId, compatibilityTeamId)
     } catch (err) {
       throw new ContextAuthorizationUnavailableError(err)
     }
@@ -121,12 +119,7 @@ function loadAccessibleContextIdsForRequest(
 ): Promise<Set<string>> {
   const cache = requestCache(res)
   const claims = req.externalAuth!
-  cache.accessibleContextIds ??= loadAccessibleContextIds(
-    gateway,
-    claims.userId,
-    claims.teamId,
-    req.accessExecutionBudget!
-  )
+  cache.accessibleContextIds ??= loadAccessibleContextIds(gateway, claims.userId, claims.teamId)
   return cache.accessibleContextIds
 }
 
@@ -223,8 +216,7 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
   router.use(
     '/external/contexts/:contextId/shared-filesystems',
     ...externalSharedFilesystemsRateLimits,
-    requireValidExternalSessionToken,
-    attachAccessExecutionBudget
+    requireValidExternalSessionToken
   )
 
   // Reject anything but GET/HEAD up-front so the proxy below can never be

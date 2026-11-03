@@ -510,7 +510,7 @@ describe('routes/profile', () => {
     expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledWith(
       'u1',
       't1',
-      expect.objectContaining({ budget: expect.anything() })
+      expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
     )
   })
 

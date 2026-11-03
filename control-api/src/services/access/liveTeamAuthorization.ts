@@ -1,7 +1,5 @@
 import { type DbClient, pool } from '../../db.js'
 import type { TeamRole } from '../../profileTypes.js'
-import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
-import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 
 export type LiveTeamMembership = {
   teamId: string
@@ -13,7 +11,6 @@ export async function getLiveTeamMembership(
   teamId: string,
   options: {
     db?: Pick<DbClient, 'query'>
-    budget?: AccessExecutionBudget
     onDatabaseFailure?: (error: unknown) => unknown
   } = {}
 ): Promise<LiveTeamMembership | null> {
@@ -26,11 +23,7 @@ export async function getLiveTeamMembership(
       LIMIT 1`
   const values = [userId, teamId]
   let result
-  if (options.budget) {
-    result = await runAccessDatabaseQuery(db, options.budget, text, values, {
-      onDatabaseFailure: options.onDatabaseFailure,
-    })
-  } else if (options.onDatabaseFailure) {
+  if (options.onDatabaseFailure) {
     try {
       result = await db.query(text, values)
     } catch (error) {

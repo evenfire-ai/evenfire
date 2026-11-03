@@ -190,11 +190,7 @@ describe('GET /external/contexts/:contextId/shared-filesystems', () => {
       .set('x-user-session-token', 'dummy')
     expect(res.status).toBe(200)
     expect(res.body.items).toEqual([])
-    expect(mockGetLiveTeamMembership).toHaveBeenCalledWith(
-      'user-1',
-      'team-1',
-      expect.objectContaining({ budget: expect.anything() })
-    )
+    expect(mockGetLiveTeamMembership).toHaveBeenCalledWith('user-1', 'team-1')
   })
 
   it('does not trust a stale v1 team claim after membership revocation', async () => {

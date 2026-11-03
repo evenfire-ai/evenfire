@@ -56,11 +56,13 @@ export type ExternalAuthedRequest = Request & {
     ExternalSessionIdentityAuthentication,
     { status: 'authenticated' }
   >
-  accessExecutionBudget?: AccessExecutionBudget
   externalTeamAuth?: {
     teamId: string
     role: TeamRole
   }
+  // Retained until K9/K11 delete the /external/access routes and the budget
+  // module, which are its only remaining readers and writer.
+  accessExecutionBudget?: AccessExecutionBudget
 }
 
 function extractUserSessionToken(req: Request): string {
@@ -156,7 +158,6 @@ async function validateExternalSessionToken(
     const authentication = await authenticateExternalUserSession(token, {
       purpose: 'protected',
       client: { version: req.header('x-evenfire-client-version') || undefined },
-      budget: req.accessExecutionBudget,
     })
     if (authentication.status === 'upgrade_required') {
       if (publicErrors) {
@@ -199,9 +200,7 @@ export async function requireExternalSessionLimiterIdentityWithPublicErrors(
     return
   }
   try {
-    const identity = await authenticateExternalUserSessionIdentity(token, {
-      budget: req.accessExecutionBudget,
-    })
+    const identity = await authenticateExternalUserSessionIdentity(token, {})
     if (identity.status !== 'authenticated') {
       sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
       return
@@ -231,7 +230,6 @@ export async function requireCompletedExternalSessionAuthenticationWithPublicErr
     const authentication = await authenticateExternalUserSession(token, {
       purpose: 'protected',
       client: { version: req.header('x-evenfire-client-version') || undefined },
-      budget: req.accessExecutionBudget,
       identity,
     })
     if (authentication.status === 'upgrade_required') {
@@ -289,7 +287,6 @@ function externalTeamParamMatcher(paramName: string) {
     }
     try {
       const membership = await getLiveTeamMembership(claims.userId, requestedTeamId, {
-        budget: req.accessExecutionBudget,
         onDatabaseFailure: externalSessionDatabaseFailure,
       })
       if (!membership) {
@@ -299,9 +296,9 @@ function externalTeamParamMatcher(paramName: string) {
       req.externalTeamAuth = membership
       next()
     } catch (error) {
-      // Only the database-outage provenance is an outage. Anything else (an
-      // exhausted access budget, a programmer or policy failure) keeps the
-      // global handler's sanitized 500 path, as the auth routes do.
+      // Only the database-outage provenance is an outage. Anything else (a
+      // programmer or policy failure) keeps the global handler's sanitized 500
+      // path, as the auth routes do.
       if (!isExternalSessionBackendUnavailableError(error)) {
         next(error)
         return

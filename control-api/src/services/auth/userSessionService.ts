@@ -8,11 +8,6 @@ import {
   USER_SESSION_V2_VERSION,
   signUserSessionV2Token,
 } from '../../utils/auth/userSessionV2Token.js'
-import {
-  runAccessDatabaseQuery,
-  withAccessDatabaseTransaction,
-} from '../access/accessDatabaseQuery.js'
-import type { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
 import type { ExternalSessionAuthorityContext } from './externalSessionAuthentication.js'
 import { legacySecurityCutoffRejects } from './legacySecurityCutoff.js'
 import { legacyExternalSessionAuthGeneration } from './legacyV1Generation.js'
@@ -62,16 +57,6 @@ export type IssuedUserSession = {
   token: string
   expiresInSeconds: number
   identity: UserSessionIdentity
-}
-
-function budgetedSessionDatabase(
-  db: SessionDatabase,
-  budget: AccessExecutionBudget,
-  onDatabaseFailure?: (error: unknown) => unknown
-): SessionDatabase {
-  const query = (text: string, values?: unknown[]) =>
-    runAccessDatabaseQuery(db, budget, text, values ?? [], { onDatabaseFailure })
-  return Object.assign(Object.create(db), { query }) as SessionDatabase
 }
 
 function sessionDatabaseWithFailureProvenance(
@@ -304,7 +289,6 @@ export async function validateUserSessionClaims(
   claims: UserSessionV2Claims,
   options: {
     db?: SessionDatabase
-    budget?: AccessExecutionBudget
     touch?: boolean
     onDatabaseFailure?: (error: unknown) => unknown
   } = {}
@@ -315,25 +299,15 @@ export async function validateUserSessionClaims(
     return validateLoadedSession(db, row, claims, now, options.touch !== false)
   }
   if (options.db) {
-    return work(
-      options.budget
-        ? budgetedSessionDatabase(options.db, options.budget, options.onDatabaseFailure)
-        : sessionDatabaseWithFailureProvenance(options.db, options.onDatabaseFailure)
-    )
+    return work(sessionDatabaseWithFailureProvenance(options.db, options.onDatabaseFailure))
   }
-  return options.budget
-    ? withAccessDatabaseTransaction(options.budget, work, {
-        mode: 'read_write',
-        onDatabaseFailure: options.onDatabaseFailure,
-      })
-    : withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
+  return withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
 }
 
 export async function renewUserSession(
   claims: UserSessionV2Claims,
   options: {
     db?: SessionDatabase
-    budget?: AccessExecutionBudget
     onDatabaseFailure?: (error: unknown) => unknown
   } = {}
 ): Promise<IssuedUserSession | UserSessionValidation> {
@@ -411,18 +385,9 @@ export async function renewUserSession(
     }
   }
   if (options.db) {
-    return work(
-      options.budget
-        ? budgetedSessionDatabase(options.db, options.budget, options.onDatabaseFailure)
-        : sessionDatabaseWithFailureProvenance(options.db, options.onDatabaseFailure)
-    )
+    return work(sessionDatabaseWithFailureProvenance(options.db, options.onDatabaseFailure))
   }
-  return options.budget
-    ? withAccessDatabaseTransaction(options.budget, work, {
-        mode: 'read_write',
-        onDatabaseFailure: options.onDatabaseFailure,
-      })
-    : withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
+  return withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
 }
 
 export async function revokeUserSession(
@@ -671,7 +636,6 @@ export async function validateLegacyUserSession(
   claims: AuthClaims,
   options: {
     db?: SessionDatabase
-    budget?: AccessExecutionBudget
     lockUser?: boolean
     onDatabaseFailure?: (error: unknown) => unknown
   } = {}
@@ -738,15 +702,7 @@ export async function validateLegacyUserSession(
     }
   }
   const db = options.db ?? pool
-  if (!options.budget)
-    return work(sessionDatabaseWithFailureProvenance(db, options.onDatabaseFailure))
-  if (options.db) {
-    return work(budgetedSessionDatabase(db, options.budget, options.onDatabaseFailure))
-  }
-  return withAccessDatabaseTransaction(options.budget, work, {
-    mode: 'read_only',
-    onDatabaseFailure: options.onDatabaseFailure,
-  })
+  return work(sessionDatabaseWithFailureProvenance(db, options.onDatabaseFailure))
 }
 
 export async function revokeLegacyUserSession(

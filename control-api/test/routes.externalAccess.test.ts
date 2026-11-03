@@ -146,7 +146,7 @@ describe('external user-access contracts', () => {
     expect(mocks.validateV1).toHaveBeenCalledWith(
       'v1-session',
       expect.any(Object),
-      expect.objectContaining({ budget: expect.any(Object) })
+      expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
     )
   })
 
@@ -230,11 +230,7 @@ describe('external user-access contracts', () => {
       auth_time: 1_900_000_000,
       amr: ['pwd'],
     })
-    mocks.validateV2.mockImplementation(async (_claims, options) => {
-      options.budget.charge({
-        kind: 'producerCalls',
-        amount: options.touch === false ? 2 : 3,
-      })
+    mocks.validateV2.mockImplementation(async () => {
       return {
         status: 'valid',
         identity: {
@@ -279,7 +275,7 @@ describe('external user-access contracts', () => {
     expect(mocks.validateV2).toHaveBeenCalledTimes(2)
     const catalogBudget = mocks.buildCatalog.mock.calls[0]?.[1].budget
     expect(catalogBudget?.limits.producerCalls).toBe(42)
-    expect(catalogBudget?.remaining('producerCalls')).toBe(8)
+    expect(catalogBudget?.remaining('producerCalls')).toBe(13)
   })
 
   it('preserves the eleven-family catalog control and rejects revoked authority before catalog work', async () => {
@@ -297,11 +293,7 @@ describe('external user-access contracts', () => {
       auth_time: 1_900_000_000,
       amr: ['pwd'],
     })
-    mocks.validateV2.mockImplementation(async (_claims, options) => {
-      options.budget.charge({
-        kind: 'producerCalls',
-        amount: options.touch === false ? 2 : 3,
-      })
+    mocks.validateV2.mockImplementation(async () => {
       return {
         status: 'valid',
         identity: {

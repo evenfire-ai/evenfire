@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto'
 import { pool } from '../../db.js'
 import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
-import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import {
   type ExternalAuthedRequest,
   handleExternalSessionBackendFailure,
@@ -587,7 +586,6 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/rpc/token',
-    attachAccessExecutionBudget,
     requireLegacyRpcSessionRateLimitContext,
     requireAuthenticatedExternalUserRateLimitContext,
     async (req: ExternalAuthedRequest, res, next) => {
@@ -598,7 +596,6 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         try {
           liveTeam = claims.teamId
             ? await getLiveTeamMembership(claims.userId, claims.teamId, {
-                budget: req.accessExecutionBudget,
                 onDatabaseFailure: externalSessionDatabaseFailure,
               })
             : null

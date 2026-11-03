@@ -75,7 +75,7 @@ describe('external directory authorization', () => {
     expect(mocks.membership).toHaveBeenCalledWith(
       'user-1',
       'team-1',
-      expect.objectContaining({ budget: expect.anything() })
+      expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
     )
     expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person', undefined)
   })
@@ -92,7 +92,7 @@ describe('external directory authorization', () => {
     expect(mocks.membership).toHaveBeenCalledWith(
       'user-1',
       'team-1',
-      expect.objectContaining({ budget: expect.anything() })
+      expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
     )
     expect(mocks.searchDirectory).not.toHaveBeenCalled()
   })
@@ -143,7 +143,7 @@ describe('external directory authorization', () => {
     expect(mocks.membership).toHaveBeenCalledWith(
       'user-1',
       'team-1',
-      expect.objectContaining({ budget: expect.anything() })
+      expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
     )
     expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person', undefined)
     // dev has no per-user directory-search bucket on this route.
