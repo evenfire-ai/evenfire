@@ -4129,6 +4129,16 @@ export class HostReconciler {
           revalidate?.()
           if (existing.spec?.volumeName) return
           pvc.metadata!.resourceVersion = existing.metadata?.resourceVersion
+          // With no class configured the claim defers to the cluster: the
+          // DefaultStorageClass admission plugin sets the class on create, or the
+          // PV controller sets it later. The apiserver allows only nil -> class on
+          // update, so the replace keeps the class the cluster chose.
+          if (
+            config.hostWorkspaceStorageClassName === undefined &&
+            existing.spec?.storageClassName !== undefined
+          ) {
+            pvc.spec!.storageClassName = existing.spec.storageClassName
+          }
           await this.coreApi.replaceNamespacedPersistentVolumeClaim({
             namespace: host.namespace,
             name,

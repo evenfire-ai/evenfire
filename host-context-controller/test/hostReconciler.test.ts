@@ -2806,4 +2806,68 @@ describe('Host workspace PVC StorageClass from config', () => {
     config.hostWorkspaceStorageClassName = 'standard-rwo'
     expect(buildPvc(makeHost()).spec!.storageClassName).toBe('standard-rwo')
   })
+
+  it('keeps an explicit empty storageClassName on the workspace PVC', () => {
+    const original = config.hostWorkspaceStorageClassName
+    onTestFinished(() => {
+      config.hostWorkspaceStorageClassName = original
+    })
+    const { reconciler } = createReconciler()
+
+    config.hostWorkspaceStorageClassName = ''
+    const spec = (
+      reconciler as unknown as { buildPvc(h: HostCRD): k8s.V1PersistentVolumeClaim }
+    ).buildPvc(makeHost()).spec!
+    // "" disables dynamic provisioning; it must not be dropped like an unset class.
+    expect(spec).toHaveProperty('storageClassName', '')
+  })
+
+  it('keeps the class the cluster assigned when it replaces an unbound PVC and no class is configured', async () => {
+    const original = config.hostWorkspaceStorageClassName
+    onTestFinished(() => {
+      config.hostWorkspaceStorageClassName = original
+    })
+    config.hostWorkspaceStorageClassName = undefined
+    const { reconciler, coreApi } = createReconciler()
+    // A claim created without a class, as the apiserver returns it: the
+    // DefaultStorageClass admission plugin set the class, and it is still
+    // Pending (WaitForFirstConsumer, or a suspended Host), so it has no volumeName.
+    const live: k8s.V1PersistentVolumeClaim = {
+      metadata: {
+        name: 'alpha-host-workspace',
+        namespace: 'mcp-host',
+        uid: 'pvc-uid',
+        labels: {
+          'clerum.io/host': 'alpha-host',
+          'clerum.io/managed-by': 'host-context-controller',
+        },
+        resourceVersion: '7',
+      },
+      spec: {
+        storageClassName: 'standard-rwo',
+        volumeMode: 'Filesystem',
+        accessModes: ['ReadWriteOnce'],
+        resources: { requests: { storage: '10Gi' } },
+      },
+      status: { phase: 'Pending' },
+    }
+    coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
+    // Like the apiserver: once set, spec.storageClassName cannot change on update.
+    coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(
+      async ({ body }: { body: k8s.V1PersistentVolumeClaim }) => {
+        if (body.spec?.storageClassName !== live.spec!.storageClassName) {
+          throw Object.assign(new Error('spec is immutable after creation'), { code: 422 })
+        }
+        return body
+      }
+    )
+
+    await expect(
+      (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
+    ).resolves.toBe(true)
+    expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+    const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
+    expect(body.spec.storageClassName).toBe('standard-rwo')
+    expect(body.metadata.resourceVersion).toBe('7')
+  })
 })
