@@ -355,10 +355,15 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
         parentResourceId: 'folder-active',
       }),
     ])
+    let releaseChildren!: () => void
+    const childrenReady = new Promise<void>(resolve => {
+      releaseChildren = resolve
+    })
     const destinations = await listAccessiblePage([
       accessibleResource('archive-folder', 'Archive', 'directory'),
     ])
     let sourceCalls = 0
+    let destinationCalls = 0
     let finishSourceRefresh!: (value: ReturnType<typeof delegationAffordances>) => void
     const moveResource = vi.fn(async () => undefined)
     const affordances = vi.fn(async (resourceId: string) => {
@@ -370,6 +375,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
           })
         }
       }
+      if (resourceId === 'archive-folder') destinationCalls += 1
       return delegationAffordances(new Set(['read', 'write', 'delete']), false)
     })
     Object.defineProperty(window, 'clerum', {
@@ -378,9 +384,11 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
         gfs: {
           listAccessible: vi.fn(async () => destinations),
           resolve: vi.fn(async () => folder),
-          listChildren: vi.fn(async (resourceId: string) =>
-            resourceId === 'folder-active' ? children : listChildrenPage([])
-          ),
+          listChildren: vi.fn(async (resourceId: string) => {
+            if (resourceId !== 'folder-active') return listChildrenPage([])
+            await childrenReady
+            return children
+          }),
           affordances,
           moveResource,
         },
@@ -388,33 +396,42 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     })
 
     renderHarness()
-    await waitFor(() => expect(sourceCalls).toBe(1))
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
-    })
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    await act(async () => {
-      fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
-    })
-    await act(async () => {
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
-    })
+    try {
+      await waitFor(() => expect(sourceCalls).toBe(1))
+      expect(screen.getByRole('status', { name: 'Loading files' })).toBeTruthy()
+      await act(async () => releaseChildren())
+      await act(async () => {
+        fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
+      })
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+      await act(async () => {
+        fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      })
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+      })
 
-    expect(within(dialog).getByText('Checking permissions…')).toBeTruthy()
-    await waitFor(() => expect(sourceCalls).toBe(2))
-    expect(moveResource).not.toHaveBeenCalled()
+      expect(within(dialog).getByText('Checking permissions…')).toBeTruthy()
+      await waitFor(() => {
+        expect(sourceCalls).toBe(2)
+        expect(destinationCalls).toBe(1)
+      })
+      expect(moveResource).not.toHaveBeenCalled()
 
-    await act(async () => {
-      finishSourceRefresh(delegationAffordances(new Set(['read', 'delete']), false))
-    })
-    expect(
-      await within(dialog).findByText(
-        'You do not have write and delete access to the source folder.'
-      )
-    ).toBeTruthy()
-    expect(within(dialog).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
-    expect(moveResource).not.toHaveBeenCalled()
+      await act(async () => {
+        finishSourceRefresh(delegationAffordances(new Set(['read', 'delete']), false))
+      })
+      expect(
+        await within(dialog).findByText(
+          'You do not have write and delete access to the source folder.'
+        )
+      ).toBeTruthy()
+      expect(within(dialog).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+      expect(moveResource).not.toHaveBeenCalled()
+    } finally {
+      releaseChildren()
+    }
   })
 
   it.each([
