@@ -202,19 +202,33 @@ function readVisualSelectionSnapshot(task: Task): VisualSelectionSnapshot | unde
  * continuation task itself is rebuilt from that same projection when it is
  * admitted, so the header is the continuation's durable source.
  *
+ * The header's `messageId` is the origin turn's. Admission gives the
+ * continuation its own id (modelStepContinuation.ts), and the approval row
+ * stores that id. It seeds the RPC workflow caller's `sourceMessageId` and so
+ * the `workflow_trigger` idempotency key. The id therefore comes from the
+ * approval row: with the origin id, a post-restart trigger would collide with
+ * the origin turn or re-run a trigger the continuation already made.
+ *
  * A NULL source cannot belong to a claimed, suspended continuation: admission
  * throws after the claim and abandons it. Classifying the impossible row as
  * corrupt routes its approval through the boot retirement instead of silently
- * falling back to the files-only approval row.
+ * falling back to the files-only approval row. An approval row without a
+ * message id is corrupt for the same reason.
  */
 function continuationSourceMessageForBoot(
-  header: ValidatedModelStepCheckpointRow
+  header: ValidatedModelStepCheckpointRow,
+  approvalSource: Task['sourceMessage']
 ): Task['sourceMessage'] {
   if (header.source_message === null) {
     throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
   }
+  const messageId = approvalSource?.messageId
+  if (typeof messageId !== 'string' || messageId.length === 0) {
+    throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
+  }
   // `validateHeader` already parsed this object at the worker boundary.
-  return JSON.parse(header.source_message) as Task['sourceMessage']
+  const headerSource = JSON.parse(header.source_message) as NonNullable<Task['sourceMessage']>
+  return { ...headerSource, messageId }
 }
 
 /**
@@ -911,7 +925,7 @@ export class AgentStateMachine extends EventEmitter {
             // checkpoint header, not the files-only approval row. Only this
             // branch rewrites it: an ordinary #666 approval has no checkpoint
             // row for its task and keeps the row projection.
-            task.sourceMessage = continuationSourceMessageForBoot(header)
+            task.sourceMessage = continuationSourceMessageForBoot(header, sourceMessage)
             task.modelStepContinuation = {
               checkpointId: header.checkpoint_id,
               originTaskId: header.origin_task_id,

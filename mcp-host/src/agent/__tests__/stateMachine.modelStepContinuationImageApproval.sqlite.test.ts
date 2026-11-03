@@ -450,11 +450,15 @@ describe('AgentStateMachine cold continuation approval image identity (#1043 WP-
     expect(stateMachine.getPendingApprovals().map(approval => approval.requestId)).toEqual([
       REQUEST_ID,
     ])
-    // The bootstrap-built task carries the header's source identity, with
-    // bytes restored from the checkpoint table (the expiry/digest check ran).
+    // The bootstrap-built task carries the header's image identity, with
+    // bytes restored from the checkpoint table (the expiry/digest check ran),
+    // and keeps the continuation's own message id from the approval row: that
+    // id seeds the RPC workflow caller's sourceMessageId and the
+    // workflow_trigger idempotency key (nativeToolRegistry.ts), so it must
+    // match the id the continuation used before the restart.
     const task = rehydrated[0]!.sourceTask
     expect(task.modelStepContinuation?.checkpointId).toBe(CHECKPOINT_ID)
-    expect(task.sourceMessage?.messageId).toBe(ORIGIN_MESSAGE_ID)
+    expect(task.sourceMessage?.messageId).toBe(CONTINUATION_MESSAGE_ID)
     expect(task.sourceMessage?.attachments).toEqual([
       expect.objectContaining({
         id: 'img-1',
