@@ -86,13 +86,10 @@ export function createAuthRouter(): Router {
         return
       }
 
-      const result = await loginWithGoogle(
-        {
-          idToken,
-          ...(requestedSessionContract(req) ? { sessionContract: 'v2' as const } : {}),
-        },
-        req.ip
-      )
+      const result = await loginWithGoogle({
+        idToken,
+        ...(requestedSessionContract(req) ? { sessionContract: 'v2' as const } : {}),
+      })
       sendLoginResponse(req, res, result)
     } catch (error) {
       if (isControlApiStatus(error, 404)) {
@@ -123,7 +120,7 @@ export function createAuthRouter(): Router {
         res.status(400).json({ error: 'invalid_request' })
         return
       }
-      const result = await loginWithPassword(email, password, requestedSessionContract(req), req.ip)
+      const result = await loginWithPassword(email, password, requestedSessionContract(req))
       sendLoginResponse(req, res, result)
     } catch (error) {
       if (error instanceof ControlApiError && [401, 403, 409].includes(error.status)) {
@@ -157,7 +154,7 @@ export function createAuthRouter(): Router {
         res.status(401).json({ error: 'Unauthorized' })
         return
       }
-      const renewed = await renewUserSession(token, req.ip)
+      const renewed = await renewUserSession(token)
       setProfileSessionCookie(req, res, renewed.token)
       const body = shouldExposeBearerToken(req)
         ? { token: renewed.token, expiresInSeconds: renewed.expiresInSeconds }
@@ -179,7 +176,7 @@ export function createAuthRouter(): Router {
         .replace(/^bearer\s+/i, '')
         .trim()
       const token = bearer || readCookie(req, PROFILE_SESSION_COOKIE)
-      if (token) await logoutUserSession(token, req.ip)
+      if (token) await logoutUserSession(token)
       clearProfileSessionCookie(req, res)
       res.status(200).json({ ok: true })
     } catch (error) {

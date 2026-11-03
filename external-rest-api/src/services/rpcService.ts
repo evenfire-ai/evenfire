@@ -16,8 +16,7 @@ export type RpcAccessTokenResult = IssuedRpcToken | { error: string }
 export async function issueRpcAccessToken(
   sessionToken: string,
   requestedScopesInput: unknown,
-  requestedHostRefsInput: unknown,
-  clientIp?: string
+  requestedHostRefsInput: unknown
 ): Promise<RpcAccessTokenResult> {
   try {
     return await controlApiRequest<IssuedRpcToken>('POST', '/external/rpc/token', {
@@ -26,7 +25,6 @@ export async function issueRpcAccessToken(
         scopes: requestedScopesInput,
         hostRefs: requestedHostRefsInput,
       },
-      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
     })
   } catch (error) {
     // Relay control-api's specific denial reason (e.g. `desktop_requires_team`)

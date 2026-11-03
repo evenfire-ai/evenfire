@@ -73,8 +73,7 @@ export async function switchTeam(
   userId: string,
   email: string,
   nextTeamId: string,
-  sessionToken: string,
-  clientIp?: string
+  sessionToken: string
 ) {
   let membership: { team_id: string; role: TeamRole; team_name: string }
   try {
@@ -100,7 +99,6 @@ export async function switchTeam(
         role,
       },
       userSessionToken: sessionToken,
-      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
     }
   )
   return {

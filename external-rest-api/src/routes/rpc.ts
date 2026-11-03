@@ -12,12 +12,7 @@ export function createRpcRouter(): Router {
         res.status(401).json({ error: 'Unauthorized' })
         return
       }
-      const result = await issueRpcAccessToken(
-        sessionToken,
-        req.body?.scopes,
-        req.body?.hostRefs,
-        req.ip
-      )
+      const result = await issueRpcAccessToken(sessionToken, req.body?.scopes, req.body?.hostRefs)
       if ('error' in result) {
         // Relay control-api's specific reason (e.g. desktop_requires_team) so the
         // desktop app can act on it instead of surfacing an opaque "no access".

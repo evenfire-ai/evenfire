@@ -199,7 +199,7 @@ describe('routes/auth password-login', () => {
     )
   })
 
-  it('delegates Google verification with the trusted client IP', async () => {
+  it('delegates Google verification without an edge-supplied client IP', async () => {
     authServiceMock.loginWithGoogle.mockResolvedValueOnce({
       token: 'google-session-test-token',
       me: { id: 'user-1', email: 'user@example.test' },
@@ -211,10 +211,7 @@ describe('routes/auth password-login', () => {
       .send({ idToken: 'opaque-test-token' })
 
     expect(response.status).toBe(200)
-    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith(
-      { idToken: 'opaque-test-token' },
-      '198.51.100.52'
-    )
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith({ idToken: 'opaque-test-token' })
   })
 
   it('forwards more than ten session renewals without a local rate limit', async () => {
@@ -235,7 +232,7 @@ describe('routes/auth password-login', () => {
       expect(response.headers['x-ratelimit-limit']).toBeUndefined()
     }
     expect(authServiceMock.renewUserSession).toHaveBeenCalledTimes(12)
-    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(session, '198.51.100.89')
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(session)
   })
 
   it('documents the password-reset limiter headers and client-IP contract', async () => {

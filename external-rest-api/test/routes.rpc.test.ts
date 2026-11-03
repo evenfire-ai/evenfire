@@ -75,8 +75,7 @@ describe('routes/rpc /rpc/token', () => {
     expect(rpcServiceMock.issueRpcAccessToken).toHaveBeenCalledWith(
       'session-xyz',
       ['host:message:invoke'],
-      ['pro-agent'],
-      '127.0.0.1'
+      ['pro-agent']
     )
   })
 })
