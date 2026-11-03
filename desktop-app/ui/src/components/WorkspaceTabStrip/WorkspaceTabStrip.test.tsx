@@ -329,17 +329,27 @@ describe('WorkspaceTabStrip', () => {
 
     state = openAppTab(state, { id: 'tab-three', appRef: 'example/app', title: 'Three' })
     layout.setWidths([120, 120, 120])
-    const restoreFutureRects = layout.trackFutureTabRects()
-    view.rerender(
-      <WorkspaceTabStrip
-        activeTabId={state.activeTabId}
-        onClose={onClose}
-        onReorder={vi.fn()}
-        onSelect={vi.fn()}
-        tabs={state.tabs}
-      />
+    const originalRectDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      'getBoundingClientRect'
     )
-    restoreFutureRects()
+    const restoreFutureRects = layout.trackFutureTabRects()
+    try {
+      view.rerender(
+        <WorkspaceTabStrip
+          activeTabId={state.activeTabId}
+          onClose={onClose}
+          onReorder={vi.fn()}
+          onSelect={vi.fn()}
+          tabs={state.tabs}
+        />
+      )
+    } finally {
+      restoreFutureRects()
+    }
+    expect(Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'getBoundingClientRect')).toEqual(
+      originalRectDescriptor
+    )
     layout.syncTabRects()
     expect(
       screen.getByRole('button', { name: 'Scroll tabs left' }).matches('[aria-disabled="true"]')
@@ -368,6 +378,58 @@ describe('WorkspaceTabStrip', () => {
     layout.syncTabRects()
     expect(screen.queryByRole('button', { name: 'Scroll tabs left' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
+  })
+
+  it('restores the future-tab rect spy when an insertion rerender throws', () => {
+    let state = openAppTab(createEmptyWorkspaceTabsState(), {
+      id: 'throw-tab-one',
+      appRef: 'example/app',
+      title: 'One',
+    })
+    state = openAppTab(state, { id: 'throw-tab-two', appRef: 'example/app', title: 'Two' })
+    const props = { onClose: vi.fn(), onReorder: vi.fn(), onSelect: vi.fn() }
+    const view = render(
+      <WorkspaceTabStrip {...props} activeTabId={state.activeTabId} tabs={state.tabs} />
+    )
+    const layout = installTabStripLayout(view.container, [120, 120], 300)
+    const originalDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      'getBoundingClientRect'
+    )
+    const rerenderFailure = new Error('intentional tab render failure')
+
+    state = openAppTab(state, { id: 'throw-tab-three', appRef: 'example/app', title: 'Three' })
+    layout.setWidths([120, 120, 120])
+    const restoreFutureRects = layout.trackFutureTabRects()
+    const throwingTabs = new Proxy(state.tabs, {
+      get(target, property, receiver) {
+        if (property === 'map') throw rerenderFailure
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    let descriptorAfterFailedRerender: PropertyDescriptor | undefined
+
+    try {
+      expect(() => {
+        try {
+          view.rerender(
+            <WorkspaceTabStrip {...props} activeTabId={state.activeTabId} tabs={throwingTabs} />
+          )
+        } finally {
+          restoreFutureRects()
+        }
+      }).toThrow('intentional tab render failure')
+      descriptorAfterFailedRerender = Object.getOwnPropertyDescriptor(
+        HTMLElement.prototype,
+        'getBoundingClientRect'
+      )
+    } finally {
+      if (vi.isMockFunction(HTMLElement.prototype.getBoundingClientRect)) {
+        restoreFutureRects()
+      }
+    }
+
+    expect(descriptorAfterFailedRerender).toEqual(originalDescriptor)
   })
 
   it('does not reveal the unchanged active tab when resizing back into overflow', () => {
