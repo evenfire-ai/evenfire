@@ -861,14 +861,15 @@ export const config: Config = {
   runtimeTokenRotateBeforeSec: getEnvInt('CONTEXT_MAPPER_RUNTIME_TOKEN_ROTATE_BEFORE_S', 86_400),
 
   // Periodic external-egress DNS resync. Lowered from the legacy 5 min to 60s so
-  // it sits below the 300s overlap window: accumulated IPs are refreshed before
-  // they expire, closing the #299 rotation gap. 0 disables (reintroduces the
-  // stale-snapshot risk; only for operators who explicitly opt out).
+  // it sits at or below half the overlap window (default 3600s): accumulated IPs
+  // are refreshed before they expire, closing the #299 rotation gap. 0 disables
+  // (reintroduces the stale-snapshot risk; only for operators who explicitly
+  // opt out).
   externalEgressResyncIntervalSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 60),
   externalEgressDnsResolveTimeoutMs: parseExternalEgressDnsTimeoutMs(
     getEnv('HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS')
   ),
-  externalEgressOverlapSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 300),
+  externalEgressOverlapSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 3600),
   externalEgressRefreshFloorSec: getExternalEgressEnvInt(
     'HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC',
     5

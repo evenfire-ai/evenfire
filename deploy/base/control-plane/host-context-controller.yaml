@@ -108,9 +108,9 @@ spec:
         - name: CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES
           value: sandbox-ui
         # issue #299: the external-egress resync interval MUST stay <= half the
-        # overlap window (HCC_EXTERNAL_EGRESS_OVERLAP_SEC, default 300s) so the
+        # overlap window (HCC_EXTERNAL_EGRESS_OVERLAP_SEC, default 3600s) so the
         # persisted sliding window of resolved /32s never lapses between
-        # refreshes. The legacy 300 (== the overlap) let the accumulated set
+        # refreshes. The legacy 300 (== the old 300s overlap) let the accumulated set
         # expire before the next refresh, which is the #299 drift itself; HCC
         # now fails closed at startup on any interval > overlap/2.
         - name: HCC_EXTERNAL_EGRESS_RESYNC_SEC
