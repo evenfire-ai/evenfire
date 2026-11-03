@@ -6,10 +6,15 @@ import {
   acceptInvitation,
   acceptInvitationById,
   acceptInvitationForEmail,
+  resendManagedInvitationForUser,
+  revokeManagedInvitationForUser,
 } from '../src/services/directory/membership.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const holder = vi.hoisted(() => ({ pool: null as unknown as Pool }))
+const mailer = vi.hoisted(() => ({ registerAndSendInvitation: vi.fn() }))
+
+vi.mock('../src/services/invitationFlowRegistrationService.js', () => mailer)
 
 vi.mock('../src/db.js', async importOriginal => {
   const real = await importOriginal<typeof import('../src/db.js')>()
@@ -495,6 +500,54 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     expect(accepted).toMatchObject({ data: { accepted: true } })
     if (!('data' in accepted)) throw new Error('witness acceptance did not return a result')
     await expect(memberships(String(accepted.data.userId))).resolves.toHaveLength(1)
+  })
+
+  it('refuses resend and revoke unless the invitation is a pending member invitation', async () => {
+    const managerId = randomUUID()
+    await holder.pool.query(
+      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'Invitation Manager')`,
+      [managerId, `manager-${managerId}@example.test`]
+    )
+    await holder.pool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'admin', 'active')`,
+      [teamId, managerId]
+    )
+    const accepted = await createInvitation({ label: 'resend-accepted', status: 'accepted' })
+    const revoked = await createInvitation({ label: 'resend-revoked', status: 'revoked' })
+    const expired = await createInvitation({
+      label: 'resend-expired',
+      expiresAt: new Date(Date.now() - 60_000),
+    })
+    const pending = await createInvitation({ label: 'resend-pending' })
+    mailer.registerAndSendInvitation.mockClear()
+
+    for (const [invitation, expectedStatus] of [
+      [accepted, 'accepted'],
+      [revoked, 'revoked'],
+      [expired, 'pending'],
+    ] as const) {
+      await expect(resendManagedInvitationForUser(managerId, invitation.id)).resolves.toEqual({
+        error: 'not_found',
+      })
+      await expect(revokeManagedInvitationForUser(managerId, invitation.id)).resolves.toEqual({
+        error: 'not_found',
+      })
+      expect(await invitationState(invitation.id)).toMatchObject({ status: expectedStatus })
+    }
+    expect(mailer.registerAndSendInvitation).not.toHaveBeenCalled()
+
+    // Witness: the same calls succeed on a pending member invitation.
+    await expect(resendManagedInvitationForUser(managerId, pending.id)).resolves.toMatchObject({
+      resent: true,
+      id: pending.id,
+    })
+    expect(mailer.registerAndSendInvitation).toHaveBeenCalledOnce()
+    await expect(revokeManagedInvitationForUser(managerId, pending.id)).resolves.toMatchObject({
+      revoked: true,
+      id: pending.id,
+    })
+    expect(await invitationState(pending.id)).toMatchObject({ status: 'revoked' })
   })
 
   it('writes one membership when two acceptances overlap on the invitation row lock', async () => {

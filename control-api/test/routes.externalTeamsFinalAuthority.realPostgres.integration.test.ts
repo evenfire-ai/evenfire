@@ -302,29 +302,18 @@ describeRealPostgres('external team mutations final source authority on real Pos
       },
       {
         name: 'managed invitation resend',
-        prepare: prepareInvitation,
+        prepare: async () => {
+          await prepareInvitation()
+          // Preparation already delivers one email; count only the resend.
+          invitationDelivery.registerAndSendInvitation.mockClear()
+        },
         invoke: server =>
           request(server).post(`/external/members/invitations/${invitationId}/resend`),
         assertMutation: async () => {
-          const result = await databasePool.query(
-            `SELECT 1
-               FROM invitation_delivery_commands
-              WHERE invitation_id = $1
-                AND delivery_kind = 'resend'
-                AND status = 'delivered'`,
-            [invitationId]
-          )
-          expect(result.rowCount).toBe(1)
+          expect(invitationDelivery.registerAndSendInvitation).toHaveBeenCalledOnce()
         },
         assertNoMutation: async () => {
-          const result = await databasePool.query(
-            `SELECT 1
-               FROM invitation_delivery_commands
-              WHERE invitation_id = $1
-                AND delivery_kind = 'resend'`,
-            [invitationId]
-          )
-          expect(result.rowCount).toBe(0)
+          expect(invitationDelivery.registerAndSendInvitation).not.toHaveBeenCalled()
         },
       },
       {

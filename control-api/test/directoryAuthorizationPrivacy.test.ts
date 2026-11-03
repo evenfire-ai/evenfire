@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import bcrypt from 'bcryptjs'
+import { readFileSync } from 'node:fs'
 import {
   DirectorySearchCursorError,
   acceptInvitationForEmail,
@@ -314,13 +315,6 @@ describe('directory privacy and atomic authorization', () => {
       if (sql.includes('INSERT INTO profiles')) return { rows: [], rowCount: 1 }
       if (sql.includes('WITH inserted AS')) return { rows: [invitation], rowCount: 1 }
       if (sql.includes('INSERT INTO invitation_teams')) return { rows: [], rowCount: 1 }
-      if (sql.includes('INSERT INTO invitation_delivery_commands')) {
-        return { rows: [{ id: '00000000-0000-4000-8000-000000000300' }], rowCount: 1 }
-      }
-      if (sql.includes('FROM invitation_delivery_commands c')) {
-        return { rows: [invitation], rowCount: 1 }
-      }
-      if (sql.includes('UPDATE invitation_delivery_commands')) return { rows: [], rowCount: 1 }
       if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
         return {
           rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
@@ -383,76 +377,6 @@ describe('directory privacy and atomic authorization', () => {
     })
     expect(result).toMatchObject({ id: invitation.id, status: 'pending' })
     expect(mocks.registerInvitation).toHaveBeenCalledOnce()
-  })
-
-  it('leaves a delivered draft unusable when manager authority changes before activation', async () => {
-    const invitation = {
-      id: '00000000-0000-4000-8000-000000000200',
-      team_id: TEAM_A,
-      invitee_name: 'Invitee',
-      email: 'invitee@example.com',
-      role: 'member',
-      token: 'synthetic-inert-until-activation',
-      status: 'draft',
-      purpose: 'member_invitation',
-      ...activeInvitationWindow(),
-      accepted_at: null,
-      accepted_user_id: null,
-      team_name: 'Team A',
-    }
-    let transactionDepth = 0
-    let managerChecks = 0
-    mocks.withTransaction.mockImplementation(async work => {
-      transactionDepth += 1
-      try {
-        return await work({ query: queryWithDatabaseClock })
-      } finally {
-        transactionDepth -= 1
-      }
-    })
-    mocks.registerInvitation.mockImplementation(async () => {
-      expect(transactionDepth).toBe(0)
-    })
-    mocks.query.mockImplementation(async (sql: string) => {
-      if (sql.includes("WHERE status = 'draft'")) return { rows: [], rowCount: 0 }
-      if (sql.includes('FROM team_members') && sql.includes('FOR UPDATE')) {
-        managerChecks += 1
-        return managerChecks === 1
-          ? { rows: [{ team_id: TEAM_A, role: 'admin' }], rowCount: 1 }
-          : { rows: [], rowCount: 0 }
-      }
-      if (sql.includes('WITH inserted AS')) return { rows: [invitation], rowCount: 1 }
-      if (sql.includes('INSERT INTO invitation_teams')) return { rows: [], rowCount: 1 }
-      if (sql.includes('INSERT INTO invitation_delivery_commands')) {
-        return { rows: [{ id: '00000000-0000-4000-8000-000000000300' }], rowCount: 1 }
-      }
-      if (sql.includes('FROM invitation_delivery_commands c')) {
-        return { rows: [invitation], rowCount: 1 }
-      }
-      if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
-        return {
-          rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
-          rowCount: 1,
-        }
-      }
-      if (sql.includes('UPDATE invitation_delivery_commands')) return { rows: [], rowCount: 1 }
-      if (sql.includes("SET status = 'revoked'")) return { rows: [], rowCount: 1 }
-      throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
-    })
-
-    await expect(
-      createManagedInvitationForUser(
-        MANAGER,
-        invitation.email,
-        [{ teamId: TEAM_A, role: 'member' }],
-        ''
-      )
-    ).resolves.toEqual({ error: 'forbidden' })
-
-    const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
-    expect(managerChecks).toBe(2)
-    expect(sql).toContain("SET status = 'revoked'")
-    expect(sql).not.toContain("SET status = 'pending'")
   })
 
   it('does not apply inviter-controlled names to an existing user during acceptance', async () => {
@@ -924,7 +848,7 @@ describe('directory privacy and atomic authorization', () => {
     expect(sql).not.toContain('external_user_session_security_epochs')
   })
 
-  it('sends a managed resend from a durable command without holding authority locks', async () => {
+  it('sends a managed resend from one locked transaction', async () => {
     const invitation = {
       id: '00000000-0000-4000-8000-000000000200',
       team_id: TEAM_A,
@@ -958,21 +882,15 @@ describe('directory privacy and atomic authorization', () => {
         rowCount: 1,
       })
       .mockResolvedValueOnce({ rows: [{ team_id: TEAM_A, role: 'admin' }], rowCount: 1 })
-      .mockResolvedValueOnce({
-        rows: [{ id: '00000000-0000-4000-8000-000000000300' }],
-        rowCount: 1,
-      })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
 
     await expect(resendManagedInvitationForUser(MANAGER, invitation.id)).resolves.toEqual({
       resent: true,
       id: invitation.id,
       email: invitation.email,
     })
-    expect(String(mocks.query.mock.calls[3]?.[0])).toContain(
-      'INSERT INTO invitation_delivery_commands'
-    )
-    expect(String(mocks.query.mock.calls[4]?.[0])).toContain('UPDATE invitation_delivery_commands')
+    expect(mocks.query).toHaveBeenCalledTimes(3)
+    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE OF i')
+    expect(mocks.registerInvitation).toHaveBeenCalledOnce()
   })
 
   it.each(['resend', 'revoke'] as const)(
@@ -1127,5 +1045,33 @@ describe('directory privacy and atomic authorization', () => {
     await expect(
       searchDirectory(TEAM_A, '%_', `${result.nextCursor}tampered`)
     ).rejects.toBeInstanceOf(DirectorySearchCursorError)
+  })
+
+  function functionBody(source: string, name: string): string | null {
+    const start = source.indexOf(`function ${name}(`)
+    if (start === -1) return null
+    const end = source.indexOf('\n}\n', start)
+    return end === -1 ? null : source.slice(start, end)
+  }
+
+  // Text fix, not behaviour: the locked read already serializes writers, so no
+  // behaviour test can reach this predicate. The witness proves the extractor
+  // finds the same predicate in the acceptance path.
+  it('pins the conditional revoke predicate in the service body', () => {
+    const source = readFileSync(
+      new URL('../src/services/directory/membership.ts', import.meta.url),
+      'utf8'
+    )
+    const revokeBody = functionBody(source, 'revokeManagedInvitationForUser')
+    expect(revokeBody).toContain(
+      "UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'pending'"
+    )
+    expect(functionBody(source, 'acceptPendingMembershipInvitation')).toContain(
+      "AND status = 'pending'"
+    )
+    // Negative control: a copy without the predicate no longer satisfies it.
+    expect(revokeBody!.replace("AND status = 'pending'", '')).not.toContain(
+      "AND status = 'pending'"
+    )
   })
 })
