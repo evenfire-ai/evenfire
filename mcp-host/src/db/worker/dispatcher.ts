@@ -770,7 +770,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           // #1043 — a new turn retires every live model-step checkpoint, and a
           // continuation's final message completes its fenced checkpoint; both
           // in the SAME transaction as the boundary message.
-          const now = Date.now()
+          const now = op.now
           if (op.retireModelStepCheckpointsOf !== undefined) {
             retireLiveModelStepCheckpoints(db, op.retireModelStepCheckpointsOf, now)
           }

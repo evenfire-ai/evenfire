@@ -757,6 +757,7 @@ export class SqliteConversationStore implements ConversationStore {
     const ordinal = state.nextOrdinal++
     const turnNumber = state.nextTurnNumber
     const marker = this.claimReopenedTurnMarker(state)
+    const now = Date.now()
     try {
       await this.persistQueue.enqueueSync(
         {
@@ -770,7 +771,7 @@ export class SqliteConversationStore implements ConversationStore {
             tool_call_id: null,
             tool_calls: null,
             tool_name: null,
-            timestamp: Date.now() / 1000,
+            timestamp: now / 1000,
             token_count: null,
             finish_reason: null,
             spillover_ref: null,
@@ -789,6 +790,7 @@ export class SqliteConversationStore implements ConversationStore {
           // #1043 — admitting a new turn retires any live model-step checkpoint
           // of this session in the same transaction (Resend and new messages).
           retireModelStepCheckpointsOf: sessionKey,
+          now,
         },
         sessionKey
       )
@@ -838,6 +840,7 @@ export class SqliteConversationStore implements ConversationStore {
     // accumulated it in RAM via recordSessionUsage). reconstruct sums these back
     // onto the Turn on cold-load.
     const turn = conv.turns[conv.turns.length - 1]
+    const now = Date.now()
     try {
       await this.persistQueue.enqueueSync(
         {
@@ -851,7 +854,7 @@ export class SqliteConversationStore implements ConversationStore {
             tool_call_id: null,
             tool_calls: null,
             tool_name: null,
-            timestamp: Date.now() / 1000,
+            timestamp: now / 1000,
             token_count: null,
             finish_reason: 'stop',
             spillover_ref: null,
@@ -870,6 +873,7 @@ export class SqliteConversationStore implements ConversationStore {
             ? { completeModelStepCheckpoint: opts.completeModelStepCheckpoint }
             : {}),
           ...(opts?.modelStepTurnFence ? { modelStepTurnFence: opts.modelStepTurnFence } : {}),
+          now,
         },
         sessionKey
       )
@@ -953,6 +957,7 @@ export class SqliteConversationStore implements ConversationStore {
     // leave active_task_id dirty on an 'idle' session that NO boot reaper
     // matches — the D8 gate would then report activeWork forever and the Host
     // would never suspend. One op = no torn state.
+    const now = Date.now()
     try {
       await this.persistQueue.enqueueSync(
         {
@@ -966,7 +971,7 @@ export class SqliteConversationStore implements ConversationStore {
             tool_call_id: null,
             tool_calls: null,
             tool_name: null,
-            timestamp: Date.now() / 1000,
+            timestamp: now / 1000,
             token_count: null,
             finish_reason: 'stop',
             spillover_ref: null,
@@ -982,6 +987,7 @@ export class SqliteConversationStore implements ConversationStore {
           activeTaskId: null, // D.1 — cancel clears the in-flight task
           activeTraceContext: null,
           ...(fence ? { modelStepTurnFence: fence } : {}),
+          now,
         },
         sessionKey
       )

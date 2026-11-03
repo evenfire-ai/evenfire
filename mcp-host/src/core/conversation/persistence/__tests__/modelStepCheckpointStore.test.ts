@@ -781,6 +781,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
         handle.persistQueue.enqueueSync(
           {
             kind: 'persist_turn_boundary',
+            now: Date.now(),
             message: finalMessage(conv.id, 900),
             sessionId: conv.id,
             state: 'idle',
@@ -806,6 +807,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       await handle.persistQueue.enqueueSync(
         {
           kind: 'persist_turn_boundary',
+          now: Date.now(),
           message: finalMessage(conv.id, 901),
           sessionId: conv.id,
           state: 'idle',
@@ -841,6 +843,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
         ON messages BEGIN SELECT RAISE(IGNORE); END`)
       const boundary = {
         kind: 'persist_turn_boundary' as const,
+        now: Date.now(),
         message: finalMessage(conv.id, 901),
         sessionId: conv.id,
         state: 'idle' as const,

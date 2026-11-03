@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import { reconstructPendingApproval } from '../../../core/conversation/persistence/reconstruct'
 import { runMigrations } from '../../migrate'
@@ -495,18 +495,16 @@ describe('dbWorker dispatcher', () => {
 
     // A live claim owned by the continuation that is about to write the final
     // answer: `persist_turn_boundary` completes the checkpoint and stamps that
-    // message in the same transaction (#1043).
-    db.prepare(
-      `INSERT INTO model_step_checkpoints (
-         checkpoint_id, session_key, origin_turn_number, origin_task_id,
-         version, status, provider, model, host_id, principal,
-         claim_owner, claim_generation, created_at, updated_at
-       ) VALUES (
-         'cp-stamp', @session_key, 1, 'task-origin',
-         2, 'claimed', 'codex-subscription', 'gpt-6.1-sol', 'host-a', 'u-stamp',
-         'owner-1', 1, @now, @now
-       )`
-    ).run({ session_key: session.session_key, now: Date.now() })
+    // message in the same transaction (#1043). The claim is created through the
+    // real open/transition/claim ops, so the row is exactly what production
+    // writes (R1-M6).
+    const fence = await seedClaimedCheckpoint(
+      deps,
+      session,
+      'cp-stamp',
+      'task-origin',
+      'task-answer'
+    )
 
     const question: MessageRow = {
       session_id: session.id,
@@ -544,11 +542,12 @@ describe('dbWorker dispatcher', () => {
     await dispatch(
       {
         kind: 'persist_turn_boundary',
+        now: Date.now(),
         sessionId: session.id,
         state: 'idle',
         activeTaskId: null,
         message: finalAnswer,
-        completeModelStepCheckpoint: { checkpointId: 'cp-stamp', owner: 'owner-1', generation: 1 },
+        completeModelStepCheckpoint: fence,
       },
       deps
     )
@@ -617,6 +616,73 @@ describe('dbWorker dispatcher', () => {
     ).toBe('summary of the continuation')
     expect(stampAt(6)).toBeNull()
     expect(stampAt(5)).toBeNull()
+  })
+
+  it('drives the boundary checkpoint clock from the operation, not the wall clock', async () => {
+    const deps = createDispatcher(db)
+    const session = makeSession('conv-op-clock', 'u-clock:rpc:agent:default')
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    const fence = await seedClaimedCheckpoint(
+      deps,
+      session,
+      'cp-op-clock',
+      'task-origin',
+      'task-continuation'
+    )
+    const answer: MessageRow = {
+      session_id: session.id,
+      ordinal: 0,
+      role: 'assistant',
+      content: 'continued answer',
+      content_parts: null,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      timestamp: 20,
+      token_count: null,
+      finish_reason: 'stop',
+      spillover_ref: null,
+      is_error: 0,
+      turn_number: 1,
+    }
+
+    // The wall clock is far ahead of the operation clock, so a boundary that
+    // read `Date.now()` itself cannot produce the asserted timestamps.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(9_000_000)
+    try {
+      await dispatch(
+        {
+          kind: 'persist_turn_boundary',
+          now: 4_242,
+          sessionId: session.id,
+          state: 'idle',
+          activeTaskId: null,
+          message: answer,
+          completeModelStepCheckpoint: fence,
+        },
+        deps
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // Witness: the fenced completion applied (status flipped), and it used the
+    // operation clock for both the transition and the message stamp.
+    expect(
+      db
+        .prepare('SELECT status, updated_at FROM model_step_checkpoints WHERE checkpoint_id = ?')
+        .get('cp-op-clock')
+    ).toEqual({ status: 'completed', updated_at: 4_242 })
+    expect(
+      (
+        db
+          .prepare(
+            'SELECT model_step_checkpoint_id FROM messages WHERE session_id = ? AND ordinal = 0'
+          )
+          .get(session.id) as { model_step_checkpoint_id: string }
+      ).model_step_checkpoint_id
+    ).toBe('cp-op-clock')
   })
 
   it('separates tool-call storage rows from visible messages and token counters', async () => {
@@ -1431,6 +1497,7 @@ describe('dbWorker dispatcher', () => {
       dispatch(
         {
           kind: 'persist_turn_boundary',
+          now: Date.now(),
           message: boundary,
           sessionId: session.id,
           state: 'idle',
@@ -1456,6 +1523,7 @@ describe('dbWorker dispatcher', () => {
     await dispatch(
       {
         kind: 'persist_turn_boundary',
+        now: Date.now(),
         message: { ...boundary, content: 'owner answer' },
         sessionId: session.id,
         state: 'idle',
@@ -1544,6 +1612,7 @@ describe('dbWorker dispatcher', () => {
     await dispatch(
       {
         kind: 'persist_turn_boundary',
+        now: Date.now(),
         message: boundary,
         sessionId: session.id,
         state: 'idle',

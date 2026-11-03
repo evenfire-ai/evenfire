@@ -365,6 +365,13 @@ export type WorkerOp =
       sessionId: string
       state: string
       /**
+       * Clock for the checkpoint side effects of this same transaction (retire
+       * the session's live checkpoints, complete the continuation's checkpoint).
+       * Supplied by the caller like every `model_step_checkpoint_*` op's `now`,
+       * so the boundary and the checkpoint rows share one clock read.
+       */
+      now: number
+      /**
        * Same semantics as `update_session_state.activeTaskId`:
        * undefined = keep current, a string = set it, null = clear it.
        */
