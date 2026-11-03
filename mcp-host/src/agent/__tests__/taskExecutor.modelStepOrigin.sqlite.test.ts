@@ -305,6 +305,9 @@ describe('TaskExecutor origin model-step checkpoint (#1043)', () => {
           status: 'resumable',
           retryAvailable: true,
           originTaskId: 'model-step-origin',
+          // The session's only turn is the origin turn: the continuation's
+          // reply is the assistant row of turn 1.
+          originTurnNumber: 1,
           provider: 'openai',
           model: 'test-model',
           tools: { confirmed: 1, unknown: 0, notDispatched: 0 },
