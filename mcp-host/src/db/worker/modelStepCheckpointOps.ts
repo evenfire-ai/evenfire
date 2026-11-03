@@ -40,6 +40,7 @@ export interface ModelStepCheckpointRow {
   model: string
   host_id: string
   principal: string
+  /** Raw column value; a snapshot never carries NULL because `validateHeader` rejects it. */
   loop_state: string | null
   task_budget: string | null
   source_message: string | null
@@ -103,8 +104,14 @@ export interface ModelStepCheckpointToolLedger {
   notDispatched: number
 }
 
+/**
+ * A header that passed `validateHeader`: `loop_state` is present and its
+ * frozen origin-user index is parseable.
+ */
+export type ValidatedModelStepCheckpointRow = ModelStepCheckpointRow & { loop_state: string }
+
 export interface ModelStepCheckpointSnapshot {
-  header: ModelStepCheckpointRow
+  header: ValidatedModelStepCheckpointRow
   tools: ModelStepCheckpointToolLedger
   /** Deadline in epoch ms of an approval bound to the same active continuation. */
   approvalExpiresAt: number | null
@@ -133,7 +140,11 @@ export interface ModelStepCheckpointOpenHeader {
   model: string
   hostId: string
   principal: string
-  loopState: string | null
+  /**
+   * Serialized `ModelStepCheckpointLoopState`. The recorder always writes one;
+   * a row without it is corrupt (`validateHeader`), never a valid checkpoint.
+   */
+  loopState: string
   taskBudget: string | null
   /**
    * JSON of the turn's `ResumeSourceMessage` (metadata, no inline bytes); the
@@ -567,7 +578,9 @@ function parseStoredObject(
   return value as Record<string, unknown>
 }
 
-function validateHeader(header: ModelStepCheckpointRow): void {
+function validateHeader(
+  header: ModelStepCheckpointRow
+): asserts header is ValidatedModelStepCheckpointRow {
   if (
     !['open', 'resumable', 'claimed', 'blocked', 'completed', 'abandoned'].includes(header.status)
   ) {
@@ -576,12 +589,16 @@ function validateHeader(header: ModelStepCheckpointRow): void {
   for (const raw of [header.task_budget, header.source_message]) {
     if (raw !== null) parseStoredObject(raw, header.checkpoint_id, null)
   }
-  if (header.loop_state !== null) {
-    try {
-      parseModelStepCheckpointLoopState(header.loop_state)
-    } catch {
-      throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
-    }
+  // A NULL loop state is as unusable as a malformed one: one invalid row must
+  // never deny the Host its boot. Classifying it here, at the snapshot
+  // boundary, keeps the reader's plain parser error out of the bootstrap path.
+  if (header.loop_state === null) {
+    throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
+  }
+  try {
+    parseModelStepCheckpointLoopState(header.loop_state)
+  } catch {
+    throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
   }
 }
 

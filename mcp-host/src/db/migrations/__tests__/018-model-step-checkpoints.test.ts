@@ -116,7 +116,7 @@ describe('migration 018 model-step checkpoints (#1043)', () => {
               model: 'turn-start-model',
               hostId: 'host',
               principal: 'user',
-              loopState: null,
+              loopState: JSON.stringify({ nextIteration: 0 }),
               taskBudget: null,
               sourceMessage,
             },

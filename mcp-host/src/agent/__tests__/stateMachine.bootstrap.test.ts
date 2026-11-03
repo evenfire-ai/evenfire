@@ -43,49 +43,74 @@ afterEach(async () => {
   for (const handle of handles.splice(0)) await handle.shutdown()
 })
 
-async function bootFixture() {
-  const handle = makeSqliteStore()
-  handles.push(handle)
-  const manager = new ConversationManager(handle.store)
-  const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
-    now: () => Date.now(),
-    blockedTtlMs: TTL_MS,
-  })
-  const message: IncomingMessage = {
-    sender: 'boot-user',
+const USER = 'boot-user'
+const MODEL = 'boot-model'
+const HOST_ID = 'boot-host'
+
+function bootMessage(threadId: string, messageId: string): IncomingMessage {
+  return {
+    sender: USER,
     content: 'Run the approved tool',
     channelType: 'rpc',
     channelId: 'chatllm',
-    threadId: 'bad-chat',
-    messageId: 'boot-message',
+    threadId,
+    messageId,
     timestamp: new Date(NOW).toISOString(),
-    hostRef: 'boot-host',
+    hostRef: HOST_ID,
   }
-  const budget = {
+}
+
+function bootBudget() {
+  return {
     elapsedActiveMs: 0,
     iterationsUsed: 1,
     durationMs: 300_000,
     maxIterations: 20,
     attachmentReadLedger: { reads: 0, spentTokens: 0, bytesRead: 0 },
   }
-  const badConversation = await manager.getOrCreate(BAD_SESSION, {
+}
+
+interface ClaimedApprovalSpec {
+  threadId: string
+  messageId: string
+  checkpointId: string
+  originTaskId: string
+  continuationTaskId: string
+  requestId: string
+}
+
+/**
+ * A session whose origin turn is reopened by a claimed continuation waiting on
+ * its approval — the durable state boot must recover. The checkpoint is written
+ * by the real open/transition/claim ops, so `loop_state` is producer-shaped.
+ */
+async function claimedApprovalSession(
+  handle: StoreHandle,
+  manager: ConversationManager,
+  checkpoints: ModelStepCheckpointStore,
+  spec: ClaimedApprovalSpec
+) {
+  const sessionKey = `${USER}:rpc:chatllm:${spec.threadId}`
+  const message = bootMessage(spec.threadId, spec.messageId)
+  const budget = bootBudget()
+  const conversation = await manager.getOrCreate(sessionKey, {
     userId: message.sender,
     channelType: message.channelType,
     channelId: message.channelId,
     threadId: message.threadId,
     source: 'rpc',
   })
-  await manager.startTurn(badConversation, message.content, 'origin-boot-task')
-  await manager.failTurn(badConversation)
+  await manager.startTurn(conversation, message.content, spec.originTaskId)
+  await manager.failTurn(conversation)
   const fence = await checkpoints.open(
     {
-      checkpointId: CHECKPOINT_ID,
-      sessionKey: BAD_SESSION,
+      checkpointId: spec.checkpointId,
+      sessionKey,
       originTurnNumber: 1,
-      originTaskId: 'origin-boot-task',
+      originTaskId: spec.originTaskId,
       provider: 'zai',
-      model: 'boot-model',
-      hostId: message.hostRef!,
+      model: MODEL,
+      hostId: HOST_ID,
       principal: message.sender,
       loopState: JSON.stringify({ nextIteration: 1, originUserMessageIndex: 0 }),
       taskBudget: JSON.stringify(budget),
@@ -99,7 +124,7 @@ async function bootFixture() {
       },
     ]
   )
-  const version = await checkpoints.transition(BAD_SESSION, fence, {
+  const version = await checkpoints.transition(sessionKey, fence, {
     from: ['open'],
     to: 'resumable',
     failedAt: NOW,
@@ -107,43 +132,48 @@ async function bootFixture() {
   })
   if (version === null) throw new Error('Boot fixture transition lost its fence')
   const claim = await checkpoints.claim({
-    sessionKey: BAD_SESSION,
-    checkpointId: CHECKPOINT_ID,
+    sessionKey,
+    checkpointId: spec.checkpointId,
     version,
     hostInstanceId: HOST_INSTANCE,
-    newTaskId: 'bad-boot-task',
+    newTaskId: spec.continuationTaskId,
     leaseMs: LEASE_MS,
   })
   if (claim.outcome !== 'claimed') throw new Error('Boot fixture claim was not acquired')
-  await manager.resumeTurnForContinuation(badConversation, 'bad-boot-task', 1, null, undefined, {
-    fence: claim.fence,
-    activeTaskId: 'bad-boot-task',
-    originTurnNumber: 1,
+  await manager.resumeTurnForContinuation(
+    conversation,
+    spec.continuationTaskId,
+    1,
+    null,
+    undefined,
+    {
+      fence: claim.fence,
+      activeTaskId: spec.continuationTaskId,
+      originTurnNumber: 1,
+    }
+  )
+  await manager.suspendForApproval(conversation, {
+    request_id: spec.requestId,
+    tool_name: 'shell_exec',
+    tool_call_id: `tool-${spec.requestId}`,
+    parameters: {},
+    description: 'Boot recovery approval',
+    context_snapshot: [{ role: 'user', content: message.content }],
+    task_budget: budget,
+    sourceMessage: sourceMessageForResume(message),
   })
-  const healthyMessage = { ...message, threadId: 'healthy-chat', messageId: 'healthy-message' }
-  const healthyConversation = await manager.getOrCreate(HEALTHY_SESSION, {
-    userId: healthyMessage.sender,
-    channelType: healthyMessage.channelType,
-    channelId: healthyMessage.channelId,
-    threadId: healthyMessage.threadId,
-    source: 'rpc',
-  })
-  await manager.startTurn(healthyConversation, healthyMessage.content, 'healthy-boot-task')
-  for (const [conversation, source, requestId] of [
-    [badConversation, message, 'approval-bad'],
-    [healthyConversation, healthyMessage, 'approval-healthy'],
-  ] as const) {
-    await manager.suspendForApproval(conversation, {
-      request_id: requestId,
-      tool_name: 'shell_exec',
-      tool_call_id: `tool-${requestId}`,
-      parameters: {},
-      description: 'Boot recovery approval',
-      context_snapshot: [{ role: 'user', content: source.content }],
-      task_budget: budget,
-      sourceMessage: sourceMessageForResume(source),
-    })
+  return {
+    conversation,
+    sessionKey,
+    requestId: spec.requestId,
+    continuationTaskId: spec.continuationTaskId,
   }
+}
+
+function bootStateMachine(
+  handle: StoreHandle,
+  checkpoints: ModelStepCheckpointStore
+): AgentStateMachine {
   const provider: SingleTurnProvider = {
     getProviderType: () => 'zai',
     classifyError: () => ({
@@ -167,22 +197,62 @@ async function bootFixture() {
   })
   stateMachine.setConversationStore(handle.store)
   stateMachine.setMcpManager(new McpManager())
-  stateMachine.setLLMProvider(provider as never, 'boot-model')
+  stateMachine.setLLMProvider(provider as never, MODEL)
   stateMachine.setTaskModelResolver(() => ({
     provider,
-    model: 'boot-model',
+    model: MODEL,
     contextWindowTokens: 100_000,
   }))
   stateMachine.setModelStepCheckpoints({
     store: checkpoints,
     hostInstanceId: HOST_INSTANCE,
-    hostId: message.hostRef!,
+    hostId: HOST_ID,
     resumableTtlMs: TTL_MS,
     claimLeaseMs: LEASE_MS,
     pendingApprovalTtlMs: TTL_MS,
     attachmentTtlMs: 3_600_000,
   })
   stateMachine.setColdStartLoader(new SqliteColdStartLoader(handle.store))
+  return stateMachine
+}
+
+async function bootFixture() {
+  const handle = makeSqliteStore()
+  handles.push(handle)
+  const manager = new ConversationManager(handle.store)
+  const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+    now: () => Date.now(),
+    blockedTtlMs: TTL_MS,
+  })
+  const bad = await claimedApprovalSession(handle, manager, checkpoints, {
+    threadId: 'bad-chat',
+    messageId: 'boot-message',
+    checkpointId: CHECKPOINT_ID,
+    originTaskId: 'origin-boot-task',
+    continuationTaskId: 'bad-boot-task',
+    requestId: 'approval-bad',
+  })
+  const badConversation = bad.conversation
+  const healthyMessage = bootMessage('healthy-chat', 'healthy-message')
+  const healthyConversation = await manager.getOrCreate(HEALTHY_SESSION, {
+    userId: healthyMessage.sender,
+    channelType: healthyMessage.channelType,
+    channelId: healthyMessage.channelId,
+    threadId: healthyMessage.threadId,
+    source: 'rpc',
+  })
+  await manager.startTurn(healthyConversation, healthyMessage.content, 'healthy-boot-task')
+  await manager.suspendForApproval(healthyConversation, {
+    request_id: 'approval-healthy',
+    tool_name: 'shell_exec',
+    tool_call_id: 'tool-approval-healthy',
+    parameters: {},
+    description: 'Boot recovery approval',
+    context_snapshot: [{ role: 'user', content: healthyMessage.content }],
+    task_budget: bootBudget(),
+    sourceMessage: sourceMessageForResume(healthyMessage),
+  })
+  const stateMachine = bootStateMachine(handle, checkpoints)
   const corrupt = () =>
     handle.worker.db
       .prepare('UPDATE model_step_checkpoint_entries SET payload = ? WHERE checkpoint_id = ?')
@@ -284,4 +354,86 @@ describe('AgentStateMachine corrupt checkpoint boot recovery (#1043 C-2)', () =>
       expect(f.badConversation.pending_approval?.request_id).toBe('approval-bad')
     }
   )
+
+  it('retires NULL and non-object loop states at boot and resolves the valid neighbour once', async () => {
+    const handle = makeSqliteStore()
+    handles.push(handle)
+    const manager = new ConversationManager(handle.store)
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+      now: () => Date.now(),
+      blockedTtlMs: TTL_MS,
+    })
+    const nullLoop = await claimedApprovalSession(handle, manager, checkpoints, {
+      threadId: 'null-loop-chat',
+      messageId: 'null-loop-message',
+      checkpointId: 'checkpoint-null-loop',
+      originTaskId: 'null-loop-origin',
+      continuationTaskId: 'null-loop-task',
+      requestId: 'approval-null-loop',
+    })
+    const malformedLoop = await claimedApprovalSession(handle, manager, checkpoints, {
+      threadId: 'malformed-loop-chat',
+      messageId: 'malformed-loop-message',
+      checkpointId: 'checkpoint-malformed-loop',
+      originTaskId: 'malformed-loop-origin',
+      continuationTaskId: 'malformed-loop-task',
+      requestId: 'approval-malformed-loop',
+    })
+    const validLoop = await claimedApprovalSession(handle, manager, checkpoints, {
+      threadId: 'valid-loop-chat',
+      messageId: 'valid-loop-message',
+      checkpointId: 'checkpoint-valid-loop',
+      originTaskId: 'valid-loop-origin',
+      continuationTaskId: 'valid-loop-task',
+      requestId: 'approval-valid-loop',
+    })
+    const setLoopState = handle.worker.db.prepare(
+      'UPDATE model_step_checkpoints SET loop_state = ? WHERE checkpoint_id = ?'
+    )
+    expect(setLoopState.run(null, 'checkpoint-null-loop').changes).toBe(1)
+    expect(setLoopState.run('{}', 'checkpoint-malformed-loop').changes).toBe(1)
+    const stateMachine = bootStateMachine(handle, checkpoints)
+    const approvals = () =>
+      handle.worker.db.prepare('SELECT request_id FROM pending_approvals ORDER BY request_id').all()
+    // Liveness: all three approvals are durable and projected before boot, so
+    // their later retirement is boot's work and not an empty fixture.
+    expect(approvals()).toEqual([
+      { request_id: 'approval-malformed-loop' },
+      { request_id: 'approval-null-loop' },
+      { request_id: 'approval-valid-loop' },
+    ])
+    for (const pending of [nullLoop, malformedLoop, validLoop]) {
+      expect(pending.conversation.pending_approval?.request_id).toBe(pending.requestId)
+    }
+    const warn = vi.spyOn(logger, 'warn')
+
+    await expect(stateMachine.bootstrap()).resolves.toBeUndefined()
+
+    expect(approvals()).toEqual([{ request_id: 'approval-valid-loop' }])
+    expect(stateMachine.getPendingApprovals().map(approval => approval.requestId)).toEqual([
+      'approval-valid-loop',
+    ])
+    for (const retired of [nullLoop, malformedLoop]) {
+      expect(retired.conversation.state).toBe(ConversationState.Idle)
+      expect(retired.conversation.pending_approval).toBeUndefined()
+      expect(warn).toHaveBeenCalledWith(
+        {
+          sessionKey: retired.sessionKey,
+          taskId: retired.continuationTaskId,
+          code: 'MODEL_STEP_CHECKPOINT_CORRUPT',
+        },
+        'Pending approval checkpoint is corrupt; retiring approval'
+      )
+    }
+    expect(validLoop.conversation.pending_approval?.request_id).toBe('approval-valid-loop')
+    // The valid neighbour is registered exactly once, so one decision settles it.
+    expect(await stateMachine.handleDenial(USER, 'approval-valid-loop', 'rpc', 'chatllm')).toEqual({
+      success: true,
+    })
+    expect(approvals()).toEqual([])
+    expect(await stateMachine.handleDenial(USER, 'approval-valid-loop', 'rpc', 'chatllm')).toEqual({
+      success: false,
+      error: 'No pending approval for request approval-valid-loop',
+    })
+  })
 })

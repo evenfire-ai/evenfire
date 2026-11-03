@@ -106,9 +106,10 @@ export type ModelStepCheckpointRecorderMode =
       confirmedResults: number
       /**
        * Durable `loop_state` of the checkpoint being continued. Its frozen
-       * origin-user index is retained by every state update (C7).
+       * origin-user index is retained by every state update (C7). A continuation
+       * is only built from a validated snapshot, whose loop state is present.
        */
-      loopState: string | null
+      loopState: string
     }
 
 export interface ModelStepCheckpointRecorderOptions {

@@ -1762,6 +1762,25 @@ describe('dbWorker dispatcher', () => {
       name: 'ModelStepCheckpointCorruptError',
       code: 'MODEL_STEP_CHECKPOINT_CORRUPT',
     })
+    // A NULL loop state is the same corruption, not a readable checkpoint.
+    expect(
+      db
+        .prepare('UPDATE model_step_checkpoints SET loop_state = NULL WHERE checkpoint_id = ?')
+        .run(badFence.checkpointId).changes
+    ).toBe(1)
+    await expect(
+      dispatch(
+        {
+          kind: 'model_step_checkpoint_load_for_task',
+          sessionKey: bad.session_key,
+          taskId: bad.active_task_id!,
+        },
+        deps
+      )
+    ).rejects.toMatchObject({
+      name: 'ModelStepCheckpointCorruptError',
+      code: 'MODEL_STEP_CHECKPOINT_CORRUPT',
+    })
     const neighbour = (await dispatch(
       {
         kind: 'model_step_checkpoint_load_for_task',

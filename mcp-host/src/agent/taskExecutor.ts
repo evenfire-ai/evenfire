@@ -989,7 +989,7 @@ export class TaskExecutor {
   private createContinuationRecorder(
     sessionKey: string,
     continuation: ModelStepContinuationRef,
-    loopState: string | null,
+    loopState: string,
     confirmedResults: number,
     attachments: ModelStepCheckpointAttachmentRow[]
   ): ModelStepCheckpointRecorder {

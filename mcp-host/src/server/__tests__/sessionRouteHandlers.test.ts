@@ -263,7 +263,7 @@ describe('session read model-step recording cost', () => {
             model: 'test-model',
             hostId: 'host-a',
             principal: 'user-A',
-            loopState: null,
+            loopState: serializeModelStepCheckpointLoopState({ nextIteration: 0 }),
             taskBudget: null,
             sourceMessage: null,
           },

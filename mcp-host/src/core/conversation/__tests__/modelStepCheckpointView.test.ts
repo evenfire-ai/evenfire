@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import type {
-  ModelStepCheckpointRow,
   ModelStepCheckpointSnapshot,
+  ValidatedModelStepCheckpointRow,
 } from '../../../db/worker/modelStepCheckpointOps'
 import { toModelStepCheckpointView } from '../modelStepCheckpointView'
 
@@ -16,7 +16,9 @@ const readVector = (name: string): unknown =>
 const FAILED_AT = Date.parse('2026-10-07T23:58:23.000Z')
 const EXPIRES_AT = Date.parse('2026-10-14T23:58:23.000Z')
 
-function snapshot(overrides: Partial<ModelStepCheckpointRow>): ModelStepCheckpointSnapshot {
+function snapshot(
+  overrides: Partial<ValidatedModelStepCheckpointRow>
+): ModelStepCheckpointSnapshot {
   return {
     header: {
       checkpoint_id: 'msc_01J9Z7Q4R2M3N5P6Q7R8S9T0V1',
