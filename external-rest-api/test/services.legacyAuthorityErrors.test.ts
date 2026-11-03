@@ -34,71 +34,80 @@ describe('legacy authority adapters', () => {
     clientMock.controlApiRequest.mockReset()
   })
 
-  it('maps only an explicit missing user or membership to absence', async () => {
-    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(404))
-    await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).resolves.toBeNull()
+  it('maps every non-outage /me and switch-team failure to absence', async () => {
+    for (const status of [404, 401, 500]) {
+      clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
+      await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).resolves.toBeNull()
+
+      clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
+      await expect(
+        switchTeam(auth.userId, auth.email, 'team-2', auth.sessionToken)
+      ).resolves.toBeNull()
+    }
 
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
     await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).rejects.toMatchObject({
       status: 503,
     })
 
-    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(404))
-    await expect(
-      switchTeam(auth.userId, auth.email, 'team-2', auth.sessionToken)
-    ).resolves.toBeNull()
-
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
     await expect(
       switchTeam(auth.userId, auth.email, 'team-2', auth.sessionToken)
     ).rejects.toMatchObject({ status: 503 })
+
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(8)
   })
 
   it('does not convert current-team authority outages into an empty team', async () => {
-    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(404))
-    await expect(getCurrentTeam(auth)).resolves.toBeNull()
+    for (const status of [404, 401, 500]) {
+      clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
+      await expect(getCurrentTeam(auth)).resolves.toBeNull()
+    }
 
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
     await expect(getCurrentTeam(auth)).rejects.toMatchObject({ status: 503 })
+
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(4)
   })
 
-  it('keeps rename denial, absence, and authority unavailability distinct', async () => {
-    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(403))
-    await expect(renameTeam(auth, 'Renamed')).resolves.toEqual({ error: 'forbidden' })
-
-    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(404))
-    await expect(renameTeam(auth, 'Renamed')).resolves.toEqual({ error: 'not_found' })
+  it('maps every rename failure except an outage to not_found', async () => {
+    for (const status of [403, 404, 401, 500]) {
+      clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
+      await expect(renameTeam(auth, 'Renamed')).resolves.toEqual({ error: 'not_found' })
+    }
 
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
     await expect(renameTeam(auth, 'Renamed')).rejects.toMatchObject({ status: 503 })
+
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(5)
   })
 
-  it('keeps member-read denial distinct from missing targets and outages', async () => {
-    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(403))
-    await expect(updateMemberRole(auth, 'user-2', 'member')).resolves.toEqual({
-      error: 'forbidden',
-    })
-
-    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(404))
-    await expect(updateMemberRole(auth, 'user-2', 'member')).resolves.toEqual({
-      error: 'not_found',
-    })
+  it('maps every member-read failure except an outage to not_found', async () => {
+    for (const status of [403, 404, 401, 500]) {
+      clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
+      await expect(updateMemberRole(auth, 'user-2', 'member')).resolves.toEqual({
+        error: 'not_found',
+      })
+    }
 
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
     await expect(updateMemberRole(auth, 'user-2', 'member')).rejects.toMatchObject({
       status: 503,
     })
+
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(5)
   })
 
-  it('keeps member-delete denial distinct from missing targets and outages', async () => {
-    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(403))
-    await expect(deleteMember(auth, 'user-2')).resolves.toEqual({ error: 'forbidden' })
-
-    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(404))
-    await expect(deleteMember(auth, 'user-2')).resolves.toEqual({ error: 'not_found' })
+  it('maps every member-delete failure except an outage to not_found', async () => {
+    for (const status of [403, 404, 401, 500]) {
+      clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
+      await expect(deleteMember(auth, 'user-2')).resolves.toEqual({ error: 'not_found' })
+    }
 
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
     await expect(deleteMember(auth, 'user-2')).rejects.toMatchObject({ status: 503 })
+
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(5)
   })
 
   it('does not convert desktop-authorization authority outages into bad passwords', async () => {

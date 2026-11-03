@@ -29,8 +29,8 @@ export async function getCurrentTeam(auth: AuthContext) {
       { userSessionToken: auth.sessionToken }
     )
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 404) return null
-    throw error
+    if (error instanceof ControlApiError && error.status === 503) throw error
+    return null
   }
 }
 
@@ -91,13 +91,8 @@ export async function renameTeam(
       }
     )
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 403) {
-      return { error: 'forbidden' as const }
-    }
-    if (error instanceof ControlApiError && error.status === 404) {
-      return { error: 'not_found' as const }
-    }
-    throw error
+    if (error instanceof ControlApiError && error.status === 503) throw error
+    return { error: 'not_found' as const }
   }
 
   return {
@@ -154,13 +149,8 @@ export async function updateMemberRole(
       { userSessionToken: auth.sessionToken }
     )
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 403) {
-      return { error: 'forbidden' }
-    }
-    if (error instanceof ControlApiError && error.status === 404) {
-      return { error: 'not_found' }
-    }
-    throw error
+    if (error instanceof ControlApiError && error.status === 503) throw error
+    return { error: 'not_found' }
   }
   const updated = await controlApiRequest<unknown>(
     'PATCH',
@@ -212,13 +202,8 @@ export async function deleteMember(auth: AuthContext, userId: string) {
       }
     )
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 403) {
-      return { error: 'forbidden' as const }
-    }
-    if (error instanceof ControlApiError && error.status === 404) {
-      return { error: 'not_found' as const }
-    }
-    throw error
+    if (error instanceof ControlApiError && error.status === 503) throw error
+    return { error: 'not_found' as const }
   }
   return { deleted }
 }

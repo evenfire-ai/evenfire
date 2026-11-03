@@ -1,9 +1,6 @@
 import { Router } from 'express'
-import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import { issueRpcAccessToken } from '../services/rpcService.js'
-
-const RPC_PUBLIC_STATUSES = new Set([403])
 
 export function createRpcRouter(): Router {
   const router = Router()
@@ -21,17 +18,14 @@ export function createRpcRouter(): Router {
         req.body?.hostRefs,
         req.ip
       )
-      res.status(200).json(result)
-    } catch (error) {
-      const sanitized = sanitizeControlApiPublicError(
-        error,
-        RPC_PUBLIC_STATUSES,
-        publicCorrelationId(req)
-      )
-      if (sanitized) {
-        res.status(sanitized.status).json(sanitized.body)
+      if ('error' in result) {
+        // Relay control-api's specific reason (e.g. desktop_requires_team) so the
+        // desktop app can act on it instead of surfacing an opaque "no access".
+        res.status(403).json({ error: result.error })
         return
       }
+      res.status(200).json(result)
+    } catch (error) {
       next(error)
     }
   })

@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { ControlApiError } from '../src/controlApiClient.js'
 import { createRpcRouter } from '../src/routes/rpc.js'
 
 const rpcServiceMock = vi.hoisted(() => ({ issueRpcAccessToken: vi.fn() }))
@@ -17,6 +16,17 @@ function buildApp() {
   return app
 }
 
+const rpcDenialReasons = [
+  'invalid_host_refs',
+  'sandbox_ui_host_ref_required',
+  'sandbox_ui_scope_required',
+  'sandbox_ui_host_ref_exclusive',
+  'host_access_denied',
+  'direct_host_access_required',
+  'desktop_requires_team',
+  'no_permitted_scopes',
+] as const
+
 describe('routes/rpc /rpc/token', () => {
   beforeEach(() => {
     rpcServiceMock.issueRpcAccessToken.mockReset()
@@ -30,39 +40,10 @@ describe('routes/rpc /rpc/token', () => {
     })
   })
 
-  it('returns a bounded public envelope without reflecting the control-api denial body', async () => {
-    rpcServiceMock.issueRpcAccessToken.mockRejectedValue(
-      new ControlApiError('secret internal topology', 403, {
-        error: 'secret-internal-reason',
-        path: '/internal/control-api',
-      })
-    )
-
-    const res = await request(buildApp())
-      .post('/rpc/token')
-      .set('authorization', 'Bearer session-xyz')
-      .set('x-correlation-id', 'rpc_ID-42')
-      .send({ scopes: ['desktop:view'], hostRefs: ['pro-agent'] })
-
-    expect(res.status).toBe(403)
-    expect(res.body).toEqual({
-      error: {
-        code: 'forbidden',
-        message: 'The requested operation is not allowed.',
-        correlationId: 'rpc_ID-42',
-        retryable: false,
-      },
-    })
-    expect(JSON.stringify(res.body)).not.toContain('secret-internal-reason')
-    expect(JSON.stringify(res.body)).not.toContain('/internal/control-api')
-  })
-
-  it.each(['desktop_requires_team', 'no_permitted_scopes'])(
-    'preserves approved safe RPC denial reason %s',
+  it.each(rpcDenialReasons)(
+    'relays the control-api denial reason %s instead of a generic 403',
     async reason => {
-      rpcServiceMock.issueRpcAccessToken.mockRejectedValue(
-        new ControlApiError('private upstream denial', 403, { error: reason })
-      )
+      rpcServiceMock.issueRpcAccessToken.mockResolvedValue({ error: reason })
 
       const res = await request(buildApp())
         .post('/rpc/token')
@@ -70,16 +51,7 @@ describe('routes/rpc /rpc/token', () => {
         .send({ scopes: ['desktop:view'], hostRefs: ['pro-agent'] })
 
       expect(res.status).toBe(403)
-      expect(res.body).toEqual({
-        error: {
-          code: 'forbidden',
-          message: 'The requested operation is not allowed.',
-          correlationId: expect.any(String),
-          retryable: false,
-          details: { reason },
-        },
-      })
-      expect(JSON.stringify(res.body)).not.toContain('private upstream denial')
+      expect(res.body).toEqual({ error: reason })
     }
   )
 

@@ -96,7 +96,7 @@ describe('routes/auth password-login', () => {
     expect(res.body).toEqual({ error: 'Unauthorized' })
   })
 
-  it('keeps any other Google login 401 on the sanitized public envelope', async () => {
+  it('forwards any other Google login 401 body verbatim', async () => {
     authServiceMock.loginWithGoogle.mockReset()
     authServiceMock.loginWithGoogle.mockRejectedValueOnce(
       new ControlApiError('private upstream detail', 401, { error: 'session_revoked' })
@@ -108,8 +108,8 @@ describe('routes/auth password-login', () => {
 
     expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
     expect(res.status).toBe(401)
-    expect(res.body).not.toEqual({ error: 'Unauthorized' })
-    expect(res.body.error).toEqual(expect.objectContaining({ code: expect.any(String) }))
+    expect(res.body).toEqual({ error: 'session_revoked' })
+    expect(JSON.stringify(res.body)).not.toContain('private upstream detail')
   })
 
   it('keeps password setup state opaque on password-login', async () => {

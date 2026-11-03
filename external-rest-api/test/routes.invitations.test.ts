@@ -622,6 +622,43 @@ describe('routes/invitations', () => {
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
   })
 
+  it('answers a not-pending acceptance as 400 instead of signing the caller out', async () => {
+    // X-16: a retired invitee's upstream 401 is mapped to not_pending by the
+    // service, and the accept route must answer 400 so Profile UI's apiSend does
+    // not treat the response as an expired session.
+    invitationsServiceMock.acceptInvitation.mockResolvedValueOnce({ error: 'not_pending' })
+
+    const rejected = await request(makeApp())
+      .post('/invitations/accept')
+      .set('x-forwarded-for', '198.51.100.231')
+      .send({ token: 'synthetic-invitation-link-token', email: 'invitee@example.com' })
+      .expect(400)
+
+    expect(rejected.body).toEqual({ error: 'Invitation is not pending' })
+    expect(rejected.headers['set-cookie']).toBeUndefined()
+
+    // Witness: the same route still accepts a pending invitation.
+    invitationsServiceMock.acceptInvitation.mockResolvedValueOnce({
+      data: {
+        accepted: true,
+        userId: 'user-1',
+        email: 'invitee@example.com',
+        teamId: 'team-1',
+        teamName: 'Team 1',
+        role: 'member',
+        token: 'accepted-session-token',
+      },
+    })
+
+    await request(makeApp())
+      .post('/invitations/accept')
+      .set('x-forwarded-for', '198.51.100.232')
+      .send({ token: 'synthetic-invitation-link-token', email: 'invitee@example.com' })
+      .expect(200)
+
+    expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledTimes(2)
+  })
+
   it('accepts a replay without publishing a profile session', async () => {
     invitationsServiceMock.acceptInvitation
       .mockResolvedValueOnce({

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { externalRestPublicErrorHandler } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createWorkflowApprovalMediumsRouter } from '../src/routes/workflowApprovalMediums.js'
 
@@ -25,11 +26,7 @@ function makeApp() {
   const app = express()
   app.use(express.json())
   app.use(createWorkflowApprovalMediumsRouter())
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
-    }
-  )
+  app.use(externalRestPublicErrorHandler)
   return app
 }
 
@@ -284,7 +281,7 @@ describe('routes/workflowApprovalMediums', () => {
     expect(serviceMock.listApprovalChannelTargets).toHaveBeenCalledWith('session-token')
   })
 
-  it('uses the request correlation when a sanitized upstream error has none', async () => {
+  it('forwards an upstream error body verbatim', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce({ userId: 'user-1', exp: 9999999999 })
     serviceMock.listWorkflowApprovalMediums.mockRejectedValueOnce(
       new ControlApiError('private upstream detail', 403, { error: { code: 'forbidden' } })
@@ -296,6 +293,7 @@ describe('routes/workflowApprovalMediums', () => {
       .set('x-correlation-id', 'approval_mediums_ID-42')
       .expect(403)
 
-    expect(response.body.error.correlationId).toBe('approval_mediums_ID-42')
+    expect(response.body).toEqual({ error: { code: 'forbidden' } })
+    expect(serviceMock.listWorkflowApprovalMediums).toHaveBeenCalledTimes(1)
   })
 })

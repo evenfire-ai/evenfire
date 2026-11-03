@@ -1,13 +1,10 @@
 import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
+import { STATUS_CODES } from 'node:http'
 import { config } from './config.js'
+import { ControlApiError, ControlApiPathError } from './controlApiClient.js'
 import { invitationPasswordErrorHandler } from './http/passwordAdmissionError.js'
-import {
-  publicCorrelationId,
-  sanitizeSupportedControlApiPublicError,
-  sendPublicApiError,
-  sendSanitizedControlApiPublicError,
-} from './http/publicApiError.js'
+import { sendPublicApiError } from './http/publicApiError.js'
 import { requireTrustedBrowserMutation } from './middleware/browserMutationGuard.js'
 import { withExternalRequestContext } from './requestContext.js'
 import { createAccessRouter } from './routes/access.js'
@@ -109,53 +106,44 @@ export function externalRestPublicErrorHandler(
   res: Response,
   _next: NextFunction
 ): void {
-  const propagatedError = sanitizeSupportedControlApiPublicError(err, publicCorrelationId(req))
-  if (propagatedError) {
-    sendSanitizedControlApiPublicError(res, propagatedError)
+  // 1. A caller-influenced control-api path is this edge's own client error. It
+  // must be answered before the ControlApiError rule because
+  // ControlApiPathError extends ControlApiError.
+  if (err instanceof ControlApiPathError) {
+    sendPublicApiError(req, res, 400, 'invalid_request', 'The request is not valid.')
     return
   }
 
+  // 2. Forward control-api's own status and body. Never `String(err.message)`:
+  // for a ControlApiError that is the internal request wrapper, which exposes
+  // control-api paths and ids (#190).
+  if (err instanceof ControlApiError) {
+    if (err.status === 503) {
+      const retryAfter = err.headers?.['retry-after']
+      if (retryAfter) res.setHeader('retry-after', retryAfter)
+      if (err.headers?.['cache-control']?.trim().toLowerCase() === 'no-store') {
+        res.setHeader('cache-control', 'no-store')
+      }
+    }
+    if (err.body !== null && typeof err.body === 'object') {
+      res.status(err.status).json(err.body)
+      return
+    }
+    res.status(err.status).json({ error: STATUS_CODES[err.status] })
+    return
+  }
+
+  // 3. Any other client error keeps dev's message (body-parser SyntaxError 400,
+  // `entity.too.large` 413).
   const status =
     err instanceof Error && typeof (err as Error & { status?: unknown }).status === 'number'
       ? (err as Error & { status: number }).status
       : undefined
   if (status !== undefined && status >= 400 && status < 500) {
-    const code =
-      status === 401
-        ? 'invalid_session'
-        : status === 403
-          ? 'forbidden'
-          : status === 404
-            ? 'not_found'
-            : status === 429
-              ? 'rate_limited'
-              : 'invalid_request'
-    sendPublicApiError(
-      req,
-      res,
-      status,
-      code,
-      status === 404
-        ? 'The resource was not found.'
-        : status === 429
-          ? 'Too many requests; retry later.'
-          : 'The request could not be completed.',
-      status === 429
-    )
+    res.status(status).json({ error: err instanceof Error ? err.message : 'Bad Request' })
     return
   }
 
-  if (status === 503) {
-    sendPublicApiError(
-      req,
-      res,
-      503,
-      'authority_unavailable',
-      'Authorization is temporarily unavailable.',
-      true
-    )
-    return
-  }
-
+  // 4. Everything else keeps the sanitized 500 envelope.
   sendPublicApiError(req, res, 500, 'internal_error', 'The request could not be completed.')
 }

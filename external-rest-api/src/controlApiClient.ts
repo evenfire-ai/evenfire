@@ -126,36 +126,25 @@ export function assertControlApiRawQueryAllowed(rawQueryString: string): void {
   if (RAW_QUERY_CONTROL_CHARACTER.test(rawQueryString)) throw new ControlApiPathError()
 }
 
-const SAFE_RATE_LIMIT_RESPONSE_HEADERS = [
+const FORWARDABLE_RESPONSE_HEADERS = [
   'retry-after',
+  'ratelimit',
+  'ratelimit-policy',
   'x-ratelimit-limit',
   'x-ratelimit-remaining',
   'x-ratelimit-reset',
+  'x-request-id',
 ] as const
 
-function safeForwardableResponseHeaders(headers: Headers, status: number): Record<string, string> {
+function forwardableResponseHeaders(headers: Headers, status: number): Record<string, string> {
   const result: Record<string, string> = {}
-  for (const name of SAFE_RATE_LIMIT_RESPONSE_HEADERS) {
-    const raw = headers.get(name)
-    if (!raw || !/^\d{1,10}$/.test(raw)) continue
-    const value = Number(raw)
-    if (!Number.isSafeInteger(value) || value < 0) continue
-    if (name === 'retry-after' && (value < 1 || value > 86_400)) continue
-    result[name] = String(value)
+  for (const name of FORWARDABLE_RESPONSE_HEADERS) {
+    const value = headers.get(name)
+    if (value) result[name] = value
   }
-  const requestId = headers.get('x-request-id')
-  if (requestId && /^[A-Za-z0-9_-]{1,128}$/.test(requestId)) {
-    result['x-request-id'] = requestId
-  }
-  if (status === 413) {
-    const rawUploadLength = headers.get('upload-length')
-    if (rawUploadLength && /^\d{1,16}$/.test(rawUploadLength)) {
-      const uploadLength = Number(rawUploadLength)
-      if (Number.isSafeInteger(uploadLength) && uploadLength >= 0) {
-        result['upload-length'] = String(uploadLength)
-      }
-    }
-  }
+  // Caching guidance is an outage contract, not free-form metadata: control-api
+  // sends `no-store` on a session-backend 503 so no intermediary caches a
+  // transient authority failure. Only that literal value is relayed.
   if (status === 503 && headers.get('cache-control')?.trim().toLowerCase() === 'no-store') {
     result['cache-control'] = 'no-store'
   }
@@ -263,7 +252,7 @@ export async function controlApiRequestWithStatus<T>(
       `Control API ${method} ${path} returned non-JSON body (status=${response.status})`,
       502,
       { error: 'Upstream returned non-JSON body', status: response.status },
-      safeForwardableResponseHeaders(response.headers, 502)
+      forwardableResponseHeaders(response.headers, 502)
     )
   }
 
@@ -276,7 +265,7 @@ export async function controlApiRequestWithStatus<T>(
       `Control API ${method} ${path} failed (${response.status}): ${errorMessage}`,
       response.status,
       parsed,
-      safeForwardableResponseHeaders(response.headers, response.status)
+      forwardableResponseHeaders(response.headers, response.status)
     )
   }
 
@@ -333,7 +322,7 @@ export async function controlApiBinaryRequestWithStatus(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
       parsed,
-      safeForwardableResponseHeaders(response.headers, response.status)
+      forwardableResponseHeaders(response.headers, response.status)
     )
   }
 
@@ -401,7 +390,7 @@ export async function controlApiStreamRequest(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
       parsed,
-      safeForwardableResponseHeaders(response.headers, response.status)
+      forwardableResponseHeaders(response.headers, response.status)
     )
   }
   return response

@@ -84,8 +84,8 @@ export async function switchTeam(
       { userSessionToken: sessionToken }
     )
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 404) return null
-    throw error
+    if (error instanceof ControlApiError && error.status === 503) throw error
+    return null
   }
 
   const role = membership.role as TeamRole
@@ -133,8 +133,8 @@ export async function getMe(userId: string, teamId: string, sessionToken: string
       },
     }
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 404) return null
-    throw error
+    if (error instanceof ControlApiError && error.status === 503) throw error
+    return null
   }
 }
 

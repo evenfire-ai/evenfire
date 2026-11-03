@@ -30,7 +30,7 @@ describe('External REST /me unavailable producer contract', () => {
 
   afterEach(() => vi.restoreAllMocks())
 
-  it('preserves a Control API outage through the sanitized public error handler', async () => {
+  it('forwards a Control API outage body verbatim through the public error handler', async () => {
     mocks.controlApiRequest.mockRejectedValue(
       new ControlApiError(
         'private Control API failure',
@@ -50,11 +50,33 @@ describe('External REST /me unavailable producer contract', () => {
       .set('authorization', 'Bearer synthetic-session-token')
 
     expect(response.status).toBe(503)
-    expect(response.body.error).toMatchObject({ code: 'authority_unavailable', retryable: true })
+    expect(response.body).toEqual({ error: 'authority_failure' })
     expect(response.headers['retry-after']).toBe('60')
     expect(JSON.stringify(response.body)).not.toMatch(
-      /private Control API failure|authority_failure|synthetic-member-id|synthetic-session-token/
+      /private Control API failure|synthetic-member-id|synthetic-session-token/
     )
+    expect(mocks.controlApiRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/users/synthetic-member-id/me',
+      expect.objectContaining({ userSessionToken: 'synthetic-session-token' })
+    )
+  })
+
+  it('answers a revoked upstream session with the dev not-found response', async () => {
+    mocks.controlApiRequest.mockRejectedValue(
+      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+    )
+    const app = express()
+    app.use(createMeRouter())
+    app.use(externalRestPublicErrorHandler)
+
+    const response = await request(app)
+      .get('/me')
+      .set('authorization', 'Bearer synthetic-session-token')
+
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({ error: 'User not found' })
+    expect(JSON.stringify(response.body)).not.toMatch(/private upstream detail|Unauthorized/)
     expect(mocks.controlApiRequest).toHaveBeenCalledWith(
       'GET',
       '/external/users/synthetic-member-id/me',

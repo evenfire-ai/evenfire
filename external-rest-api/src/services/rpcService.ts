@@ -1,4 +1,4 @@
-import { controlApiRequest } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
 import { RpcAccessScope, RpcScope } from '../types.js'
 
 type IssuedRpcToken = {
@@ -11,7 +11,7 @@ type IssuedRpcToken = {
   droppedScopes?: RpcScope[]
 }
 
-export type RpcAccessTokenResult = IssuedRpcToken
+export type RpcAccessTokenResult = IssuedRpcToken | { error: string }
 
 export async function issueRpcAccessToken(
   sessionToken: string,
@@ -19,12 +19,23 @@ export async function issueRpcAccessToken(
   requestedHostRefsInput: unknown,
   clientIp?: string
 ): Promise<RpcAccessTokenResult> {
-  return controlApiRequest<IssuedRpcToken>('POST', '/external/rpc/token', {
-    body: {
-      sessionToken,
-      scopes: requestedScopesInput,
-      hostRefs: requestedHostRefsInput,
-    },
-    ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
-  })
+  try {
+    return await controlApiRequest<IssuedRpcToken>('POST', '/external/rpc/token', {
+      body: {
+        sessionToken,
+        scopes: requestedScopesInput,
+        hostRefs: requestedHostRefsInput,
+      },
+      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
+    })
+  } catch (error) {
+    // Relay control-api's specific denial reason (e.g. `desktop_requires_team`)
+    // instead of collapsing every 403 to a generic message. The desktop app and
+    // logs can then distinguish "needs a team" from a genuine auth failure.
+    if (error instanceof ControlApiError && error.status === 403) {
+      const reason = error.code ?? 'forbidden'
+      return { error: reason }
+    }
+    throw error
+  }
 }

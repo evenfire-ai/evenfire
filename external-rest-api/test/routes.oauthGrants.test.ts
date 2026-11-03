@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { externalRestPublicErrorHandler } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createOauthGrantsRouter } from '../src/routes/oauthGrants.js'
 
@@ -17,6 +18,7 @@ function makeApp() {
   const app = express()
   app.use(express.json())
   app.use(createOauthGrantsRouter())
+  app.use(externalRestPublicErrorHandler)
   return app
 }
 
@@ -32,7 +34,7 @@ describe('routes/oauthGrants', () => {
     })
   })
 
-  it('uses the request correlation when a sanitized upstream error has none', async () => {
+  it('forwards an upstream error body verbatim', async () => {
     serviceMock.listOauthGrants.mockRejectedValueOnce(
       new ControlApiError('private upstream detail', 403, { error: { code: 'forbidden' } })
     )
@@ -43,6 +45,7 @@ describe('routes/oauthGrants', () => {
       .set('x-correlation-id', 'oauth_grants_ID-42')
       .expect(403)
 
-    expect(response.body.error.correlationId).toBe('oauth_grants_ID-42')
+    expect(response.body).toEqual({ error: { code: 'forbidden' } })
+    expect(serviceMock.listOauthGrants).toHaveBeenCalledTimes(1)
   })
 })
