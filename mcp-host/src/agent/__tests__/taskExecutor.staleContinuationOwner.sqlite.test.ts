@@ -6,6 +6,7 @@ import {
   makeSqliteStore,
 } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
+import { SqliteColdStartLoader } from '../../core/conversation/persistence/sqliteColdStartLoader'
 import { SqliteConversationStore } from '../../core/conversation/persistence/sqliteConversationStore'
 import { LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
@@ -15,9 +16,13 @@ import { ModelStepBoundaryNotCommittedError } from '../../db/worker/protocol'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import { McpManager } from '../../mcp/manager'
+import { MessageQueue } from '../../queue/messageQueue'
 import type { Task } from '../../queue/types'
+import { makeHandlers } from '../../server/__tests__/testHelpers'
+import { handleApprovalRoute } from '../../server/routes'
 import type { IncomingMessage } from '../../server/types'
 import { sourceMessageForResume } from '../sourceMessageForResume'
+import { AgentStateMachine } from '../stateMachine'
 import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
 
 const LEASE_MS = 300_000
@@ -241,6 +246,49 @@ function checkpoint(handle: StoreHandle, id: string) {
       'SELECT status, continuation_task_id FROM model_step_checkpoints WHERE checkpoint_id = ?'
     )
     .get(id)
+}
+
+function activeExecutors(machine: AgentStateMachine) {
+  return (machine as unknown as { activeExecutors: Map<string, TaskExecutor> }).activeExecutors
+}
+
+async function postDenial(machine: AgentStateMachine, requestId: string) {
+  const response = { writeHead: vi.fn(), end: vi.fn() }
+  await handleApprovalRoute(
+    {
+      runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: 'owner-user' },
+      body: { userId: 'owner-user', requestId },
+    } as never,
+    response as never,
+    false,
+    makeHandlers({
+      approvalHandler: decision =>
+        machine.handleDenial(
+          decision.userId,
+          decision.requestId,
+          decision.channelType,
+          decision.channelId
+        ),
+    })
+  )
+  return {
+    status: response.writeHead.mock.calls[0]?.[0] as number,
+    body: JSON.parse(response.end.mock.calls[0]?.[0] as string) as {
+      success: boolean
+      code?: string
+      error?: string
+    },
+  }
+}
+
+function insertApprovalRow(handle: StoreHandle, row: Record<string, unknown>) {
+  const columns = Object.keys(row)
+  handle.worker.db
+    .prepare(
+      `INSERT INTO pending_approvals (${columns.join(', ')})
+       VALUES (${columns.map(() => '?').join(', ')})`
+    )
+    .run(...columns.map(column => row[column]))
 }
 
 describe('stale continuation ownership across separate SQLite caches', () => {
@@ -613,6 +661,221 @@ describe('stale continuation ownership across separate SQLite caches', () => {
       rejectSameOwner?.(new Error('fixture cleanup'))
       await promiseSameOwner?.catch(() => {})
       if (runB?.executor.executorState === 'waiting_approval') await runB.executor.deny()
+      await handle.shutdown()
+    }
+  }, 20_000)
+
+  it('scopes executor denial to the continuation owner and preserves the replacement approval', async () => {
+    Object.assign(appConfig, {
+      enableApproval: true,
+      dynamicToolsEnabled: false,
+      promptCacheEnabled: false,
+      modelStepAutoRetries: 0,
+    })
+    let clock = Date.now()
+    const handle = makeSqliteStore()
+    const lifecycle = new TaskLifecycle()
+    const queue = new MessageQueue()
+    queue.setLifecycle(lifecycle)
+    const machineA = new AgentStateMachine(queue, lifecycle, {
+      maxTaskDuration: 300_000,
+      maxToolCallsPerTask: 20,
+      autoStart: false,
+      taskDelay: 0,
+      approvalTimeout: 300_000,
+    })
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+      now: () => clock,
+      blockedTtlMs: TTL_MS,
+    })
+    const coldProvider = provider(async () => ({ content: 'not reached before assertions' }))
+    machineA.setConversationStore(handle.store)
+    machineA.setMcpManager(new McpManager())
+    machineA.setLLMProvider(coldProvider.llm, 'checkpoint-model')
+    machineA.setTaskModelResolver(selections =>
+      selections?.openai === 'checkpoint-model'
+        ? {
+            provider: coldProvider.llm,
+            model: 'checkpoint-model',
+            contextWindowTokens: 100_000,
+          }
+        : null
+    )
+    machineA.setModelStepCheckpoints({
+      store: checkpoints,
+      hostInstanceId: 'host-deny-owner-a',
+      hostId: 'host-a',
+      resumableTtlMs: TTL_MS,
+      claimLeaseMs: LEASE_MS,
+      pendingApprovalTtlMs: TTL_MS,
+      attachmentTtlMs: 3_600_000,
+    })
+    machineA.setColdStartLoader(new SqliteColdStartLoader(handle.store))
+    const managerA = machineA.getConversationManager()
+
+    try {
+      const fixture = await seed(handle, managerA, checkpoints, clock, 'deny-owner')
+      const taskA = 'continuation-deny-owner-a'
+      const requestA = 'request-deny-owner-a'
+      const conversationA = await managerA.getOrCreate(fixture.sessionKey, {
+        userId: 'owner-user',
+        channelType: 'rpc',
+        channelId: 'chatllm',
+        threadId: 'deny-owner',
+        source: 'rpc',
+      })
+      await managerA.resumeTurnForContinuation(conversationA, taskA, 1, null, undefined, {
+        fence: fixture.fence,
+        activeTaskId: taskA,
+        originTurnNumber: 1,
+      })
+      await managerA.suspendForApproval(conversationA, {
+        request_id: requestA,
+        tool_name: 'shell_exec',
+        tool_call_id: 'tool-deny-owner-a',
+        parameters: { command: 'printf a' },
+        description: 'Approve the first continuation tool',
+        context_snapshot: [{ role: 'user', content: fixture.message.content }],
+        task_budget: {
+          elapsedActiveMs: 0,
+          iterationsUsed: 1,
+          durationMs: 300_000,
+          maxIterations: 20,
+        },
+        sourceMessage: sourceMessageForResume(fixture.message),
+      })
+      await machineA.bootstrap()
+      const executorA = activeExecutors(machineA).get(taskA)!
+      expect(executorA.executorState).toBe('waiting_approval')
+      lifecycle.register(executorA.sourceTask)
+      expect(lifecycle.transition(taskA, 'processing', 'dispatched').kind).toBe('applied')
+      const terminal: string[] = []
+      machineA.on('task:failed', event => {
+        if (event.data.task.id === taskA) terminal.push('task:failed')
+      })
+      machineA.on('task:completed', event => {
+        if (event.data.task.id === taskA) terminal.push('task:completed')
+      })
+      const responseCallback = vi.fn(async (_delivery: { error?: unknown }) => {})
+      executorA.sourceTask.responseCallback = responseCallback
+      const staleApprovalRow = handle.worker.db
+        .prepare('SELECT * FROM pending_approvals WHERE task_id = ?')
+        .get(taskA) as Record<string, unknown>
+      expect(staleApprovalRow.request_id).toBe(requestA)
+
+      const managerB = new ConversationManager(
+        new SqliteConversationStore(handle.persistQueue, { cacheSize: 8 })
+      )
+      const conversationB = await managerB.getSessionByKeyAsync(fixture.sessionKey)
+      if (!conversationB) throw new Error('Replacement cache did not load the suspended session')
+      await managerB.deny(conversationB, taskA)
+      const taskB = 'replacement-deny-owner-b'
+      await managerB.startTurn(conversationB, 'replacement request', taskB)
+      await managerB.suspendForApproval(conversationB, {
+        request_id: 'request-deny-owner-b',
+        tool_name: 'shell_exec',
+        tool_call_id: 'tool-deny-owner-b',
+        parameters: { command: 'printf b' },
+        description: 'Approve the replacement tool',
+        context_snapshot: [{ role: 'user', content: 'replacement request' }],
+        task_budget: {
+          elapsedActiveMs: 0,
+          iterationsUsed: 1,
+          durationMs: 300_000,
+          maxIterations: 20,
+        },
+      })
+      // The stale cleanup interleaving leaves A's already-written approval row
+      // behind after another cache has moved the session to B. Restore that
+      // exact residue without rewriting B's durable session.
+      insertApprovalRow(handle, staleApprovalRow)
+      const beforeSession = session(handle, fixture.sessionKey)
+      const beforeApprovalB = approval(handle, taskB)
+      const beforeApprovalA = approval(handle, taskA)
+      const beforeCheckpoint = checkpoint(handle, fixture.checkpointId)
+      expect(beforeSession).toEqual({
+        state: 'awaiting_approval',
+        active_task_id: taskB,
+      })
+      expect(beforeApprovalB).toMatchObject({ task_id: taskB })
+      expect(beforeApprovalA).toMatchObject({ request_id: requestA, task_id: taskA })
+      expect(beforeCheckpoint).toEqual({
+        status: 'abandoned',
+        continuation_task_id: taskA,
+      })
+
+      const response = await postDenial(machineA, requestA)
+      await handle.persistQueue.drain()
+      expect(response.status).toBe(500)
+      expect(response.body).toEqual({
+        success: false,
+        error: 'The tool call denial could not be completed.',
+      })
+      expect(terminal).toEqual(['task:failed'])
+      expect(responseCallback).toHaveBeenCalledTimes(1)
+      const failureDelivery = responseCallback.mock.calls[0]?.[0]
+      expect(failureDelivery).toHaveProperty('error')
+      expect(
+        lifecycle
+          .get(taskA)
+          ?.history.filter(entry => ['cancelled', 'failed', 'completed'].includes(entry.to))
+      ).toHaveLength(1)
+      expect(conversationA).toMatchObject({
+        state: 'awaiting_approval',
+        activeTaskId: taskA,
+      })
+      expect(conversationA.pending_approval?.request_id).toBe(requestA)
+      expect(session(handle, fixture.sessionKey)).toEqual(beforeSession)
+      expect(approval(handle, taskA)).toEqual(beforeApprovalA)
+      expect(approval(handle, taskB)).toEqual(beforeApprovalB)
+      expect(checkpoint(handle, fixture.checkpointId)).toEqual(beforeCheckpoint)
+
+      const coldStore = new SqliteConversationStore(handle.persistQueue, { cacheSize: 8 })
+      const coldLifecycle = new TaskLifecycle()
+      const coldQueue = new MessageQueue()
+      coldQueue.setLifecycle(coldLifecycle)
+      const coldMachine = new AgentStateMachine(coldQueue, coldLifecycle, {
+        maxTaskDuration: 300_000,
+        maxToolCallsPerTask: 20,
+        autoStart: false,
+        taskDelay: 0,
+        approvalTimeout: 300_000,
+      })
+      coldMachine.setConversationStore(coldStore)
+      coldMachine.setMcpManager(new McpManager())
+      coldMachine.setLLMProvider(coldProvider.llm, 'checkpoint-model')
+      coldMachine.setTaskModelResolver(selections =>
+        selections?.openai === 'checkpoint-model'
+          ? {
+              provider: coldProvider.llm,
+              model: 'checkpoint-model',
+              contextWindowTokens: 100_000,
+            }
+          : null
+      )
+      coldMachine.setModelStepCheckpoints({
+        store: checkpoints,
+        hostInstanceId: 'host-deny-owner-a',
+        hostId: 'host-a',
+        resumableTtlMs: TTL_MS,
+        claimLeaseMs: LEASE_MS,
+        pendingApprovalTtlMs: TTL_MS,
+        attachmentTtlMs: 3_600_000,
+      })
+      coldMachine.setColdStartLoader(new SqliteColdStartLoader(coldStore))
+      await coldMachine.bootstrap()
+      const rehydrated = activeExecutors(coldMachine).get(taskB)!
+      expect(rehydrated.executorState).toBe('waiting_approval')
+      expect(approval(handle, taskA)).toBeUndefined()
+      expect(approval(handle, taskB)).toEqual(beforeApprovalB)
+      expect(session(handle, fixture.sessionKey)).toEqual(beforeSession)
+      expect(
+        coldMachine.getConversationManager().getSessionByKey(fixture.sessionKey)
+      ).toMatchObject({
+        state: 'awaiting_approval',
+        activeTaskId: taskB,
+      })
+    } finally {
       await handle.shutdown()
     }
   }, 20_000)

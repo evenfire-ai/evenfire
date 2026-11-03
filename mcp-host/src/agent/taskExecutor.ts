@@ -2148,7 +2148,10 @@ export class TaskExecutor {
     let failure: unknown
     try {
       try {
-        await this.deps.conversationManager.deny(this.conversation)
+        await this.deps.conversationManager.deny(
+          this.conversation,
+          this.task.modelStepContinuation ? this.taskId : undefined
+        )
       } catch (error) {
         // The suspended ordinary call is cancelled even if its denial write
         // fails. A continuation has an independent claim whose outcome is not
