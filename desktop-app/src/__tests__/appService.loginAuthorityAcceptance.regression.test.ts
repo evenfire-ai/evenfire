@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fsSync from 'node:fs'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
@@ -67,6 +67,36 @@ function validSessionToken(subject: string): string {
 let configPath = ''
 let priorConfigPath: string | undefined
 let chat: typeof import('../chatStoreBinding.js') | undefined
+
+async function readHandleAtOffsetZero(
+  handle: Awaited<ReturnType<typeof fs.open>>
+): Promise<Buffer> {
+  const stat = await handle.stat()
+  const bytes = Buffer.alloc(stat.size)
+  const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0)
+  return bytes.subarray(0, bytesRead)
+}
+
+async function replaceJournalPathForObservation(
+  journalPath: string,
+  label: string
+): Promise<() => Promise<void>> {
+  const originalPath = `${journalPath}.held-${label}-${randomUUID()}`
+  await fs.rename(journalPath, originalPath)
+  try {
+    await fs.writeFile(journalPath, Buffer.from(`readable replacement journal: ${label}`), {
+      flag: 'wx',
+      mode: 0o600,
+    })
+  } catch (error) {
+    await fs.rename(originalPath, journalPath)
+    throw error
+  }
+  return async () => {
+    await fs.rm(journalPath, { force: true })
+    await fs.rename(originalPath, journalPath)
+  }
+}
 
 beforeEach(async () => {
   vi.resetModules()
@@ -1028,62 +1058,113 @@ describe('Stage 4 public login candidate acceptance', () => {
     expect(corruptedJournal.toString('utf8')).toContain(
       createHash('sha256').update(homeToken).digest('hex')
     )
-    await fs.truncate(journalPath, corruptedJournal.length)
-    expect((await fs.stat(journalPath).then(stat => stat.mode)) & 0o077).toBe(0)
+    const journalHandle = await fs.open(journalPath, 'r+')
+    try {
+      await journalHandle.truncate(corruptedJournal.length)
+      const originalIdentity = await journalHandle.stat()
+      const journalModel = {
+        originalBytes: corruptedJournal,
+        originalIdentity: `${originalIdentity.dev}:${originalIdentity.ino}`,
+        pathnameNamesOriginal: true,
+        runtimeAccepted: false,
+      }
+      expect(originalIdentity.mode & 0o077).toBe(0)
+      expect(await readHandleAtOffsetZero(journalHandle)).toEqual(corruptedJournal)
 
-    await expect(h.service.initialize()).resolves.toEqual({ authenticated: false, me: null })
-    expect(h.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
-    expect(h.state.sessionToken).toBeNull()
-    expect(() => h.chatBinding.requireChatStore()).toThrow('Not authenticated')
-    expect(await fs.readFile(journalPath)).toEqual(corruptedJournal)
-    const rejectedLogin = vi
-      .spyOn(h.state.authClient, 'passwordLogin')
-      .mockRejectedValueOnce(new Error('fixture credentials rejected'))
-    await expect(h.service.passwordLogin('owner-b@example.test', 'wrong-password')).rejects.toThrow(
-      'fixture credentials rejected'
-    )
-    expect(rejectedLogin).toHaveBeenCalledOnce()
-    expect(await fs.readFile(journalPath)).toEqual(corruptedJournal)
-    expect(
-      (await fs.readdir(boundary.directory)).filter(name =>
+      const initialization = await h.service.initialize()
+      journalModel.runtimeAccepted = initialization.authenticated
+      expect(initialization).toEqual({ authenticated: false, me: null })
+      expect(h.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
+      expect(h.state.sessionToken).toBeNull()
+      expect(() => h.chatBinding.requireChatStore()).toThrow('Not authenticated')
+      expect(journalModel.runtimeAccepted).toBe(false)
+      const restoreAfterInitialize = await replaceJournalPathForObservation(
+        journalPath,
+        'after-initialize'
+      )
+      try {
+        journalModel.pathnameNamesOriginal = false
+        expect(await readHandleAtOffsetZero(journalHandle)).toEqual(journalModel.originalBytes)
+        const rebound = await fs.lstat(journalPath)
+        expect(`${rebound.dev}:${rebound.ino}` === journalModel.originalIdentity).toBe(
+          journalModel.pathnameNamesOriginal
+        )
+      } finally {
+        await restoreAfterInitialize()
+      }
+      journalModel.pathnameNamesOriginal = true
+      const rejectedLogin = vi
+        .spyOn(h.state.authClient, 'passwordLogin')
+        .mockRejectedValueOnce(new Error('fixture credentials rejected'))
+      await expect(
+        h.service.passwordLogin('owner-b@example.test', 'wrong-password')
+      ).rejects.toThrow('fixture credentials rejected')
+      journalModel.runtimeAccepted = false
+      expect(rejectedLogin).toHaveBeenCalledOnce()
+      const restoreAfterRejectedLogin = await replaceJournalPathForObservation(
+        journalPath,
+        'after-rejected-login'
+      )
+      try {
+        journalModel.pathnameNamesOriginal = false
+        expect(await readHandleAtOffsetZero(journalHandle)).toEqual(journalModel.originalBytes)
+        const rebound = await fs.lstat(journalPath)
+        expect(`${rebound.dev}:${rebound.ino}` === journalModel.originalIdentity).toBe(
+          journalModel.pathnameNamesOriginal
+        )
+      } finally {
+        await restoreAfterRejectedLogin()
+      }
+      journalModel.pathnameNamesOriginal = true
+      expect(h.state.sessionToken).toBeNull()
+      expect(() => h.chatBinding.requireChatStore()).toThrow('Not authenticated')
+      expect(
+        (await fs.readdir(boundary.directory)).filter(name =>
+          name.startsWith('session-persistence-journal-corrupt-')
+        )
+      ).toEqual([])
+
+      rejectedLogin.mockResolvedValueOnce({
+        token: replacementToken,
+        me: replacementUser,
+      })
+      const acceptedLogin = await h.service.passwordLogin(
+        'owner-b@example.test',
+        'fixture-password'
+      )
+      journalModel.runtimeAccepted = acceptedLogin.authenticated
+      expect(journalModel.runtimeAccepted).toBe(true)
+      expect(acceptedLogin).toMatchObject({ authenticated: true, me: replacementUser })
+      expect(h.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
+
+      const quarantines = (await fs.readdir(boundary.directory)).filter(name =>
         name.startsWith('session-persistence-journal-corrupt-')
       )
-    ).toEqual([])
+      expect(quarantines).toHaveLength(1)
+      expect(await fs.readFile(path.join(boundary.directory, quarantines[0]!))).toEqual(
+        corruptedJournal
+      )
 
-    rejectedLogin.mockResolvedValueOnce({
-      token: replacementToken,
-      me: replacementUser,
-    })
-    await expect(
-      h.service.passwordLogin('owner-b@example.test', 'fixture-password')
-    ).resolves.toMatchObject({ authenticated: true, me: replacementUser })
-    expect(h.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
-
-    const quarantines = (await fs.readdir(boundary.directory)).filter(name =>
-      name.startsWith('session-persistence-journal-corrupt-')
-    )
-    expect(quarantines).toHaveLength(1)
-    expect(await fs.readFile(path.join(boundary.directory, quarantines[0]!))).toEqual(
-      corruptedJournal
-    )
-
-    const restarted = await restartHarness()
-    await expect(restarted.service.initialize()).resolves.toMatchObject({
-      authenticated: true,
-      me: replacementUser,
-    })
-    const { SessionAuthorityRecordConflictError } = await import('../sessionAuthorityRecord.js')
-    vi.spyOn(restarted.state.authClient, 'passwordLogin').mockResolvedValueOnce({
-      token: homeToken,
-      me: homeUser,
-    })
-    await expect(
-      restarted.service.passwordLogin('owner-a@example.test', 'fixture-password')
-    ).rejects.toBeInstanceOf(SessionAuthorityRecordConflictError)
-    await expect(restarted.service.getSessionState()).resolves.toMatchObject({
-      authenticated: true,
-      me: replacementUser,
-    })
+      const restarted = await restartHarness()
+      await expect(restarted.service.initialize()).resolves.toMatchObject({
+        authenticated: true,
+        me: replacementUser,
+      })
+      const { SessionAuthorityRecordConflictError } = await import('../sessionAuthorityRecord.js')
+      vi.spyOn(restarted.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+        token: homeToken,
+        me: homeUser,
+      })
+      await expect(
+        restarted.service.passwordLogin('owner-a@example.test', 'fixture-password')
+      ).rejects.toBeInstanceOf(SessionAuthorityRecordConflictError)
+      await expect(restarted.service.getSessionState()).resolves.toMatchObject({
+        authenticated: true,
+        me: replacementUser,
+      })
+    } finally {
+      await journalHandle.close()
+    }
   })
 
   it('resumes corrupt-journal recovery after interruption immediately following quarantine rename', async () => {
@@ -1241,7 +1322,7 @@ describe('Stage 4 public login candidate acceptance', () => {
 
     const freshToken = 'fixture-recovery-owner-token'
     const freshUser = { ...replacementUser, id: 'login-owner-c' }
-    const publicLogin = vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
       token: freshToken,
       me: freshUser,
     })
@@ -1252,6 +1333,14 @@ describe('Stage 4 public login candidate acceptance', () => {
     await expect(
       h.service.passwordLogin('owner-c@example.test', 'fixture-password')
     ).resolves.toMatchObject({ authenticated: true, me: freshUser })
+    const acceptedAfterRecovery = await h.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(acceptedAfterRecovery.status).toBe('accepted')
+    if (acceptedAfterRecovery.status !== 'accepted')
+      throw new Error('Expected the fresh login to be the accepted session source')
+    expect(acceptedAfterRecovery.session.token).toBe(freshToken)
 
     const afterRecovery = repository.observe()
     expect(afterRecovery.status).toBe('observed')
@@ -2203,13 +2292,8 @@ describe('Stage 4 public login candidate acceptance', () => {
           'sessions',
           `session-v1-${source.sourceRef}.enc`
         )
-        const sourceFileExists = await fs.access(sourceFile).then(
-          () => true,
-          () => false
-        )
-        expect(sourceFileExists).toBe(true)
-        const sourceBytes = await fs.readFile(sourceFile)
         const { safeStorage } = await import('electron')
+        const sourceBytes = await fs.readFile(sourceFile)
         const envelope = JSON.parse(safeStorage.decryptString(sourceBytes)) as {
           transactionId: string
           sourceRef: string
