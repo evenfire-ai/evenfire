@@ -1,12 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fork } from 'node:child_process'
 import fs from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import type { SnippetExecuteResponse } from '../../../src/workflow/snippetTypes'
+import type {
+  SnippetExecuteRequest,
+  SnippetExecuteResponse,
+} from '../../../src/workflow/snippetTypes'
 
 const WORKFLOW_RECIPES_ROOT = path.resolve(__dirname, '..', '..', '..')
+const DIST_ROOT = path.join(WORKFLOW_RECIPES_ROOT, 'dist')
+const NODE_MODULES = path.join(WORKFLOW_RECIPES_ROOT, 'node_modules')
 const PERMISSION_PROBE = path.resolve(
   __dirname,
   '..',
@@ -15,16 +21,71 @@ const PERMISSION_PROBE = path.resolve(
   'workflow',
   'snippetPermissionProbe.cjs'
 )
-// Exists on Linux and macOS runners and is outside every grant.
-const OUTSIDE_EVERY_GRANT = '/etc/hosts'
 const CHECK_SCRIPT = 'process.exit(process.permission ? 0 : 3)'
+// The dist/workflow modules that the compiled runtime and its worker fork load.
+const COMPILED_SNIPPET_MODULES = ['snippetRuntime', 'snippetWorker', 'snippetTypes']
+const nodeRequire = createRequire(__filename)
+
+type SnippetRuntimeModule = typeof import('../../../src/workflow/snippetRuntime')
+
+interface PermissionProbeConfig {
+  outputDir: string
+  distRoot: string
+  nodeModules: string
+  outsideFile: string
+  plantedLink: string
+  escapeName: string
+  networkPort: number
+}
 
 interface PermissionProbeReport {
   permission: string
-  modules: Record<string, string>
   artifact: { sizeBytes?: number; error?: string }
+  readGranted: string
   network: string
-  outsideRead: string
+  readOutside: string
+  readOutput: string
+  readPlantedLink: string
+  writeDist: string
+  writeNodeModules: string
+  writeParent: string
+  createSymlink: string
+  createHardLink: string
+  childProcess: string
+}
+
+// `npm test` builds dist/ first (the pretest script); a direct `vitest run` does not. A
+// missing dist/ module, or one older than its source, fails the test here instead of
+// testing a worker that no longer matches src/.
+async function loadCompiledSnippetRuntime(): Promise<SnippetRuntimeModule> {
+  for (const name of COMPILED_SNIPPET_MODULES) {
+    const source = path.join(WORKFLOW_RECIPES_ROOT, 'src', 'workflow', `${name}.ts`)
+    const compiled = path.join(DIST_ROOT, 'workflow', `${name}.js`)
+    let compiledMtimeMs: number
+    try {
+      compiledMtimeMs = (await fs.stat(compiled)).mtimeMs
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      throw new Error(`${compiled} is missing: run \`npm run build\` in workflow-recipes`)
+    }
+    if (compiledMtimeMs < (await fs.stat(source)).mtimeMs) {
+      throw new Error(
+        `${compiled} is older than ${source}: run \`npm run build\` in workflow-recipes`
+      )
+    }
+  }
+  return nodeRequire(path.join(DIST_ROOT, 'workflow', 'snippetRuntime.js')) as SnippetRuntimeModule
+}
+
+function snippetRequest(code: string): SnippetExecuteRequest {
+  return {
+    workflowName: 'nightly-report',
+    stepId: 'render-report',
+    run: { type: 'snippet', language: 'typescript', code },
+    previousOutputs: {},
+    resolvedWorkloads: [],
+    resolvedMcpServers: [],
+  }
 }
 
 async function startLoopbackServer(): Promise<net.Server> {
@@ -38,13 +99,12 @@ async function startLoopbackServer(): Promise<net.Server> {
 
 function runPermissionProbe(
   execArgv: string[],
-  outputDir: string,
-  networkPort: number
+  config: PermissionProbeConfig
 ): Promise<PermissionProbeReport> {
   return new Promise((resolve, reject) => {
     // executeSnippetInWorker (src/workflow/snippetRuntime.ts) forks the worker with an
     // explicit env that has no NODE_OPTIONS.
-    const child = fork(PERMISSION_PROBE, [outputDir, OUTSIDE_EVERY_GRANT, String(networkPort)], {
+    const child = fork(PERMISSION_PROBE, [JSON.stringify(config)], {
       execArgv,
       env: {},
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
@@ -161,7 +221,7 @@ describe('snippet runtime Node permission model', () => {
     expect(buildPermissionArgs('/out')).toEqual([
       '--permission',
       `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'src')}`,
-      `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'node_modules')}`,
+      `--allow-fs-read=${NODE_MODULES}`,
       '--allow-fs-write=/out',
     ])
   })
@@ -179,14 +239,7 @@ describe('snippet runtime Node permission model', () => {
       await import('../../../src/workflow/snippetRuntime')
     expect(resolveSnippetOutputDir()).toBe(outputDir)
 
-    const result = await executeSnippetInWorker({
-      workflowName: 'nightly-report',
-      stepId: 'render-report',
-      run: { type: 'snippet', language: 'typescript', code: 'return 1' },
-      previousOutputs: {},
-      resolvedWorkloads: [],
-      resolvedMcpServers: [],
-    })
+    const result = await executeSnippetInWorker(snippetRequest('return 1'))
 
     // Liveness witnesses: the single fork started the snippet worker with no argv of its
     // own, the grants follow the configured output directory, and the reply reached the caller.
@@ -204,40 +257,122 @@ describe('snippet runtime Node permission model', () => {
     expect(options.execArgv).toEqual([
       '--permission',
       `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'src')}`,
-      `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'node_modules')}`,
+      `--allow-fs-read=${NODE_MODULES}`,
       `--allow-fs-write=${outputDir}`,
     ])
   })
 
-  it('forks a child under the permission model that loads the worker modules, writes an artifact, reaches the network and cannot read outside its grants', async () => {
-    const { buildPermissionArgs } = await import('../../../src/workflow/snippetRuntime')
+  it('runs a snippet that writes an artifact in the compiled worker, forked by the compiled runtime with its grants', async () => {
+    const runtime = await loadCompiledSnippetRuntime()
     const outputDir = await makeOutputDir()
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_DIR', outputDir)
+
+    const response = await runtime.executeSnippetInWorker(
+      snippetRequest("await sdk.artifacts.writeMarkdown('report.md', '# ok')\nreturn 'done'"),
+      10_000
+    )
+
+    expect(response).toEqual({
+      stepId: 'render-report',
+      status: 'completed',
+      output: 'done',
+      artifacts: [
+        {
+          name: 'report.md',
+          format: 'md',
+          sizeBytes: 4,
+          path: '/output/report.md',
+          createdAt: expect.any(String),
+        },
+      ],
+    })
+    await expect(fs.readFile(path.join(outputDir, 'report.md'), 'utf8')).resolves.toBe('# ok')
+    // The fork above used these grants: the compiled runtime grants dist/, where the
+    // worker that ships lives, not src/.
+    expect(runtime.buildPermissionArgs(outputDir)).toEqual([
+      '--permission',
+      `--allow-fs-read=${DIST_ROOT}`,
+      `--allow-fs-read=${NODE_MODULES}`,
+      `--allow-fs-write=${outputDir}`,
+    ])
+  })
+
+  it('runs the compiled worker under the permission model: an artifact write into an output directory that was absent at fork time is denied', async () => {
+    const runtime = await loadCompiledSnippetRuntime()
+    const absentOutputDir = path.join(await makeOutputDir(), 'absent')
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_DIR', absentOutputDir)
+
+    const response = await runtime.executeSnippetInWorker(
+      snippetRequest("await sdk.artifacts.writeMarkdown('report.md', '# ok')\nreturn 'done'"),
+      10_000
+    )
+
+    // Without the permission model the worker creates the directory and the write
+    // succeeds. The worker's own failure reply (not an exit code) and the directory its
+    // mkdir created are the liveness witnesses; the file it could not open is absent.
+    expect(response).toEqual({
+      stepId: 'render-report',
+      status: 'failed',
+      error: expect.stringMatching(/^Access to this API has been restricted/),
+    })
+    expect((await fs.stat(absentOutputDir)).isDirectory()).toBe(true)
+    await expect(fs.stat(path.join(absentOutputDir, 'report.md'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+  })
+
+  it('lets a child forked with the compiled runtime grants write an artifact and open a TCP connection, and denies reads of the output directory, writes outside it, links and child processes', async () => {
+    const runtime = await loadCompiledSnippetRuntime()
+    const base = await makeOutputDir()
+    const outputDir = path.join(base, 'output')
+    await fs.mkdir(outputDir)
+    const outsideFile = path.join(await makeOutputDir(), 'outside.txt')
+    await fs.writeFile(outsideFile, 'outside', 'utf8')
+    // The kind of link another workload sharing the output volume can place there.
+    const plantedLink = path.join(outputDir, 'planted-link')
+    await fs.symlink(outsideFile, plantedLink)
+    const escapeName = `snippet-permission-escape-${process.pid}.txt`
+    const escapeTargets = [DIST_ROOT, NODE_MODULES, base].map(dir => path.join(dir, escapeName))
     const server = await startLoopbackServer()
 
     let report: PermissionProbeReport
     try {
       const { port } = server.address() as net.AddressInfo
-      report = await runPermissionProbe(buildPermissionArgs(outputDir), outputDir, port)
+      report = await runPermissionProbe(runtime.buildPermissionArgs(outputDir), {
+        outputDir,
+        distRoot: DIST_ROOT,
+        nodeModules: NODE_MODULES,
+        outsideFile,
+        plantedLink,
+        escapeName,
+        networkPort: port,
+      })
     } finally {
       await new Promise(resolve => server.close(resolve))
+      // Only a broken grant set creates these; remove them so no file stays in dist/
+      // or node_modules/.
+      await Promise.all(escapeTargets.map(file => fs.rm(file, { force: true })))
     }
 
-    // One assertion, so a failure diff shows every field. permission, modules,
-    // artifact and network are the liveness witnesses (the model is on and the
-    // worker's own work succeeds under it); outsideRead is the negative assertion.
+    // One assertion, so a failure diff shows every field. permission, artifact,
+    // readGranted and network are the liveness witnesses (the model is on and the
+    // granted work succeeds under it); every other field is a negative assertion.
+    // On a Node major that gates network access under --permission, network turns red
+    // until the grants add --allow-net.
     expect(report).toEqual({
       permission: 'object',
-      modules: {
-        '@modelcontextprotocol/sdk/client/index.js': 'ok',
-        '@modelcontextprotocol/sdk/client/sse.js': 'ok',
-        '@modelcontextprotocol/sdk/client/streamableHttp.js': 'ok',
-        mongodb: 'ok',
-        pg: 'ok',
-        typescript: 'ok',
-      },
       artifact: { sizeBytes: 2 },
+      readGranted: 'ok',
       network: 'ok',
-      outsideRead: 'ERR_ACCESS_DENIED',
+      readOutside: 'ERR_ACCESS_DENIED',
+      readOutput: 'ERR_ACCESS_DENIED',
+      readPlantedLink: 'ERR_ACCESS_DENIED',
+      writeDist: 'ERR_ACCESS_DENIED',
+      writeNodeModules: 'ERR_ACCESS_DENIED',
+      writeParent: 'ERR_ACCESS_DENIED',
+      createSymlink: 'ERR_ACCESS_DENIED',
+      createHardLink: 'ERR_ACCESS_DENIED',
+      childProcess: 'ERR_ACCESS_DENIED',
     })
   })
 
