@@ -2154,7 +2154,20 @@ export class TaskExecutor {
     } catch (error) {
       failure ??= error
     } finally {
-      if (this.abortController.signal.aborted) {
+      if (this.deps.taskLifecycle.isTerminal(this.taskId)) {
+        if (failure) {
+          logger.error(
+            {
+              taskId: this.taskId,
+              errorName: failure instanceof Error ? failure.name : typeof failure,
+            },
+            'Denial settlement failed after task became terminal'
+          )
+        }
+        this.state =
+          this.deps.taskLifecycle.getStatus(this.taskId) === 'completed' ? 'completed' : 'failed'
+        this.resolveCompletion?.()
+      } else if (this.abortController.signal.aborted) {
         // The abort path already owns the terminal cancellation signal.
         this.resolveCompletion?.()
       } else if (failure && !(failure instanceof DenialNotSavedError)) {

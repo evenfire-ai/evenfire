@@ -664,7 +664,8 @@ export class ConversationManager {
       const rollbackFence =
         (fence !== undefined || expectedTaskId !== undefined) &&
         (isModelStepFenceMismatch(err) ||
-          (isModelStepBoundaryNotCommitted(err) && !isModelStepTaskOwnerMismatch(err)))
+          isModelStepTaskOwnerMismatch(err) ||
+          isModelStepBoundaryNotCommitted(err))
       if (rollbackFence && currentTurn?.completed_at === writtenCompletedAt) {
         currentTurn.completed_at = previousCompletedAt
       }
@@ -906,13 +907,41 @@ export class ConversationManager {
     if (expectedTaskId !== undefined && !requestId) {
       throw new Error('Cannot resolve a continuation approval without a request id')
     }
+    const previous = {
+      state: conversation.state,
+      pendingApproval: conversation.pending_approval,
+      activeTaskId: conversation.activeTaskId,
+      traceContext: conversation.traceContext,
+      updatedAt: conversation.updated_at,
+    }
+    const denyOwner = expectedTaskId !== undefined ? {} : undefined
+    if (denyOwner) this.turnCompletionOwners.set(conversation, denyOwner)
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — deny is terminal (→ Idle), no task in flight
     conversation.traceContext = null
     conversation.updated_at = new Date()
-    if (requestId) {
-      await this.store.persistApprovalResolved(conversation, requestId, 'deny', expectedTaskId)
+    try {
+      if (requestId) {
+        await this.store.persistApprovalResolved(conversation, requestId, 'deny', expectedTaskId)
+      }
+    } catch (err) {
+      if (
+        denyOwner &&
+        isModelStepTaskOwnerMismatch(err) &&
+        this.turnCompletionOwners.get(conversation) === denyOwner
+      ) {
+        conversation.state = previous.state
+        conversation.pending_approval = previous.pendingApproval
+        conversation.activeTaskId = previous.activeTaskId
+        conversation.traceContext = previous.traceContext
+        conversation.updated_at = previous.updatedAt
+      }
+      throw err
+    } finally {
+      if (denyOwner && this.turnCompletionOwners.get(conversation) === denyOwner) {
+        this.turnCompletionOwners.delete(conversation)
+      }
     }
   }
 

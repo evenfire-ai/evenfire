@@ -12,6 +12,7 @@ import { LlmErrorCode } from '../../core/errors'
 import { FinishReason } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
+import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
 import { MessageQueue } from '../../queue/messageQueue'
 import { makeHandlers } from '../../server/__tests__/testHelpers'
@@ -299,6 +300,135 @@ afterEach(async () => {
 })
 
 describe('denial settlement with SQLite', () => {
+  it.each([true, false])(
+    'approval timeout emits no second terminal when denial fails (continuation=%s)',
+    async continuation => {
+      Object.assign(appConfig, { enableApproval: true, dynamicToolsEnabled: false })
+      const f = await makeFixture()
+      const target = await seedApproval(f, 'timeout', continuation)
+      await seedApproval(f, 'neighbor', true)
+      const active = await bootstrap(f)
+      const executor = active.get(target.taskId)!
+      expect(executor.executorState).toBe('waiting_approval')
+      expect(
+        f.handle.worker.db
+          .prepare('SELECT request_id FROM pending_approvals WHERE request_id = ?')
+          .get(target.requestId)
+      ).toEqual({ request_id: target.requestId })
+
+      // Model a live task whose lifecycle is registered; cold-bootstrap
+      // lifecycle restoration is a separately scoped follow-up.
+      f.lifecycle.register(executor.sourceTask)
+      expect(f.lifecycle.transition(target.taskId, 'processing', 'dispatched').kind).toBe('applied')
+      const response = vi.fn(async () => {})
+      executor.sourceTask.responseCallback = response
+      const logged = vi.spyOn(logger, 'error')
+      const terminal = collectTerminalEvents(f.machine, target.taskId)
+      const trace = vi.spyOn(
+        f.machine as unknown as { enqueueTaskTrace: (...args: unknown[]) => void },
+        'enqueueTaskTrace'
+      )
+      const completion = vi.spyOn(
+        executor as unknown as { resolveCompletion: () => void },
+        'resolveCompletion'
+      )
+      const deny = vi.spyOn(executor, 'deny')
+      if (continuation) {
+        const transition = f.checkpoints.transition.bind(f.checkpoints)
+        vi.spyOn(f.checkpoints, 'transition').mockImplementation(async (key, fence, change) => {
+          if (fence.checkpointId === 'checkpoint-timeout' && change.to === 'abandoned')
+            throw new Error('timeout abandon unavailable')
+          return transition(key, fence, change)
+        })
+      } else {
+        const persist = f.handle.store.persistApprovalResolved.bind(f.handle.store)
+        vi.spyOn(f.handle.store, 'persistApprovalResolved').mockImplementation(
+          async (conversation, requestId, decision, expectedTaskId) => {
+            if (requestId === target.requestId) throw new Error('timeout denial unavailable')
+            await persist(conversation, requestId, decision, expectedTaskId)
+          }
+        )
+      }
+
+      ;(
+        f.machine as unknown as { handleApprovalTimeout: (requestId: string) => void }
+      ).handleApprovalTimeout(target.requestId)
+      await executor.waitForCompletion()
+      await expect(deny.mock.results[0]!.value).rejects.toThrow()
+      await neighborCompletes(f)
+
+      expect(
+        f.lifecycle
+          .get(target.taskId)
+          ?.history.filter(entry => ['completed', 'failed', 'cancelled'].includes(entry.to))
+      ).toMatchObject([{ to: 'completed', reason: 'approval_timeout' }])
+      expect.soft(terminal).toEqual([])
+      expect.soft(response).not.toHaveBeenCalled()
+      expect.soft(completion).toHaveBeenCalledTimes(1)
+      expect(executor.executorState).toBe('completed')
+      expect(logged).toHaveBeenCalledWith(
+        expect.objectContaining({ taskId: target.taskId }),
+        'Denial settlement failed after task became terminal'
+      )
+      const runEnds = trace.mock.calls.filter(args => args[1] === 'run_end')
+      expect(runEnds.some(args => (args[0] as { id: string }).id !== target.taskId)).toBe(true)
+      expect
+        .soft(runEnds.filter(args => (args[0] as { id: string }).id === target.taskId))
+        .toEqual([])
+      if (continuation) {
+        expect(
+          f.handle.worker.db
+            .prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?')
+            .get('checkpoint-timeout')
+        ).toEqual({ status: 'claimed' })
+        expect(
+          f.handle.worker.db
+            .prepare('SELECT request_id FROM pending_approvals WHERE request_id = ?')
+            .get(target.requestId)
+        ).toBeUndefined()
+      } else {
+        expect(
+          f.handle.worker.db
+            .prepare('SELECT request_id FROM pending_approvals WHERE request_id = ?')
+            .get(target.requestId)
+        ).toEqual({ request_id: target.requestId })
+      }
+    }
+  )
+
+  it('approval timeout emits no second terminal when continuation denial succeeds', async () => {
+    Object.assign(appConfig, { enableApproval: true, dynamicToolsEnabled: false })
+    const f = await makeFixture()
+    const target = await seedApproval(f, 'timeout-success', true)
+    await seedApproval(f, 'neighbor', true)
+    const executor = (await bootstrap(f)).get(target.taskId)!
+    expect(executor.executorState).toBe('waiting_approval')
+    f.lifecycle.register(executor.sourceTask)
+    expect(f.lifecycle.transition(target.taskId, 'processing', 'dispatched').kind).toBe('applied')
+    const terminal = collectTerminalEvents(f.machine, target.taskId)
+    const response = vi.fn(async () => {})
+    executor.sourceTask.responseCallback = response
+    const deny = vi.spyOn(executor, 'deny')
+    ;(
+      f.machine as unknown as { handleApprovalTimeout: (requestId: string) => void }
+    ).handleApprovalTimeout(target.requestId)
+    await executor.waitForCompletion()
+    await expect(deny.mock.results[0]!.value).resolves.toBeUndefined()
+    await neighborCompletes(f)
+    expect(
+      f.lifecycle
+        .get(target.taskId)
+        ?.history.filter(entry => ['completed', 'failed', 'cancelled'].includes(entry.to))
+    ).toMatchObject([{ to: 'completed', reason: 'approval_timeout' }])
+    expect(terminal).toEqual([])
+    expect(response).not.toHaveBeenCalled()
+    expect(
+      f.handle.worker.db
+        .prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?')
+        .get('checkpoint-timeout-success')
+    ).toEqual({ status: 'abandoned' })
+  })
+
   it('an admitted live approval settles the task and lifecycle once when denial persistence fails', async () => {
     Object.assign(appConfig, { enableApproval: true, dynamicToolsEnabled: false })
     const f = await makeFixture()

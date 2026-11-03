@@ -1272,20 +1272,12 @@ export class AgentStateMachine extends EventEmitter {
 
     // Now fire the lifecycle transition. Subscribers see clean coordinator state.
     // Distinguishes timeout-triggered denial from user-triggered denial in the
-    // audit trail (PR-186 review M6). Subsequent transitions from executor.deny()'s
-    // downstream queue.completeTask become AlreadyTerminal no-ops.
+    // audit trail (PR-186 review M6). Denial settlement observes this terminal.
     this.lifecycle.transition(entry.taskId, 'completed', 'approval_timeout')
 
-    // deny() propagates denialMessage via responseCallback. Downstream
-    // queue.completeTask → lifecycle.transition('completed', 'natural') is
-    // AlreadyTerminal no-op. onComplete's activeExecutors.delete is a no-op
-    // (already deleted above).
-    //
-    // T2.1: deny() is now async (sync write-through to delete pending_approval
-    // before the channel notification fires). Fire-and-forget here so the
-    // timeout handler returns promptly; errors are logged. Wrap in
-    // Promise.resolve so legacy synchronous test doubles (which return void)
-    // still flow through the same path.
+    // Settle the durable denial without emitting another terminal result.
+    // Fire-and-forget so the timeout handler returns promptly; errors are
+    // logged. Promise.resolve also supports synchronous legacy test doubles.
     Promise.resolve(executor.deny()).catch(err => {
       logger.error({ err, requestId, taskId: entry.taskId }, 'executor.deny() raised after timeout')
     })

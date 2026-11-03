@@ -11,6 +11,7 @@ import { LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
 import type { ModelStepCheckpointFence } from '../../db/worker/modelStepCheckpointOps'
+import { ModelStepBoundaryNotCommittedError } from '../../db/worker/protocol'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import { McpManager } from '../../mcp/manager'
@@ -248,6 +249,55 @@ describe('stale continuation ownership across separate SQLite caches', () => {
     vi.restoreAllMocks()
   })
 
+  it('restores a losing cache after a late owner-mismatch rejection', async () => {
+    const handle = makeSqliteStore()
+    const manager = new ConversationManager(handle.store)
+    try {
+      const key = 'owner-user:rpc:chatllm:late-owner'
+      const conversation = await manager.getOrCreate(key)
+      await manager.startTurn(conversation, 'first request', 'late-owner-a', {
+        version: 1,
+        runId: 'late-owner-trace',
+        origin: 'direct_chat',
+        correlationRefs: [],
+      })
+      const before = {
+        state: conversation.state,
+        pending_approval: conversation.pending_approval,
+        activeTaskId: conversation.activeTaskId,
+        traceContext: conversation.traceContext,
+        updated_at: conversation.updated_at,
+        completedAt: conversation.turns.at(-1)?.completed_at,
+      }
+      const beforeSession = session(handle, key)
+      expect(beforeSession).toEqual({ state: 'processing', active_task_id: 'late-owner-a' })
+      const failure = new ModelStepBoundaryNotCommittedError(
+        new Error('model-step continuation task owner mismatch')
+      )
+      const persist = vi.spyOn(handle.store, 'persistTurnFail').mockRejectedValueOnce(failure)
+      await expect(manager.failTurn(conversation, undefined, 'late-owner-a')).rejects.toBe(failure)
+      expect(persist).toHaveBeenCalledTimes(1)
+      expect.soft(conversation).toMatchObject({
+        state: before.state,
+        pending_approval: before.pending_approval,
+        activeTaskId: before.activeTaskId,
+        traceContext: before.traceContext,
+        updated_at: before.updated_at,
+      })
+      expect.soft(conversation.turns.at(-1)?.completed_at).toBe(before.completedAt)
+      const startError = await manager
+        .startTurn(conversation, 'unexpected follow-up', 'late-follow-up')
+        .then(
+          () => null,
+          error => error
+        )
+      expect.soft(startError).toMatchObject({ code: 'CONV_INVALID_TRANSITION' })
+      expect.soft(session(handle, key)).toEqual(beforeSession)
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
   it('preserves the replacement owner and approval when the stale owner loses its fence', async () => {
     Object.assign(appConfig, {
       enableApproval: true,
@@ -339,9 +389,36 @@ describe('stale continuation ownership across separate SQLite caches', () => {
         continuation_task_id: 'continuation-stale-b',
       })
 
+      const losing = managerA.getSessionByKey(fixture.sessionKey)!
+      losing.traceContext = {
+        version: 1,
+        runId: 'stale-owner-trace',
+        origin: 'direct_chat',
+        correlationRefs: [],
+      }
+      const losingBefore = {
+        state: losing.state,
+        pending_approval: losing.pending_approval,
+        activeTaskId: losing.activeTaskId,
+        traceContext: losing.traceContext,
+        updated_at: losing.updated_at,
+      }
       rejectA(new Error('held provider failed after replacement'))
       await promiseA
       await handle.persistQueue.drain()
+      expect.soft(losing).toMatchObject(losingBefore)
+      const staleStartError = await managerA
+        .startTurn(losing, 'unexpected follow-up', 'stale-follow-up')
+        .then(
+          () => null,
+          error => error
+        )
+      expect.soft(staleStartError).toMatchObject({ code: 'CONV_INVALID_TRANSITION' })
+      expect.soft(session(handle, fixture.sessionKey)).toEqual({
+        state: 'awaiting_approval',
+        active_task_id: 'continuation-stale-b',
+      })
+      expect.soft(approval(handle, 'continuation-stale-b')).toEqual(beforeApproval)
       const afterSession = session(handle, fixture.sessionKey)
       const afterApproval = approval(handle, 'continuation-stale-b')
       const afterCheckpoint = checkpoint(handle, fixture.checkpointId)
@@ -435,12 +512,12 @@ describe('stale continuation ownership across separate SQLite caches', () => {
         continuation_task_id: 'continuation-same-owner-b',
       })
 
-      expect(afterCheckpoint).toEqual({
+      expect.soft(afterCheckpoint).toEqual({
         status: 'claimed',
         continuation_task_id: 'continuation-stale-b',
       })
-      expect(afterApproval).toEqual(beforeApproval)
-      expect(afterSession).toEqual({
+      expect.soft(afterApproval).toEqual(beforeApproval)
+      expect.soft(afterSession).toEqual({
         state: 'awaiting_approval',
         active_task_id: 'continuation-stale-b',
       })
@@ -449,7 +526,12 @@ describe('stale continuation ownership across separate SQLite caches', () => {
       // its session when the lost-fence cleanup follows the deny path.
       const approvalKey = 'owner-user:rpc:chatllm:approval-owner'
       const staleApproval = await managerA.getOrCreate(approvalKey)
-      await managerA.startTurn(staleApproval, 'first request', 'approval-owner-a')
+      await managerA.startTurn(staleApproval, 'first request', 'approval-owner-a', {
+        version: 1,
+        runId: 'stale-approval-trace',
+        origin: 'direct_chat',
+        correlationRefs: [],
+      })
       await managerA.suspendForApproval(staleApproval, {
         request_id: 'approval-owner-request-a',
         tool_name: 'shell_exec',
@@ -489,15 +571,30 @@ describe('stale continuation ownership across separate SQLite caches', () => {
         state: 'awaiting_approval',
         activeTaskId: 'approval-owner-a',
       })
-      expect(session(handle, approvalKey)).toEqual({
+      expect.soft(session(handle, approvalKey)).toEqual({
         state: 'awaiting_approval',
         active_task_id: 'approval-owner-b',
       })
       const approvalBeforeStaleDeny = approval(handle, 'approval-owner-b')
       expect(approvalBeforeStaleDeny).toMatchObject({ request_id: 'approval-owner-request-b' })
+      const staleApprovalBefore = {
+        state: staleApproval.state,
+        pending_approval: staleApproval.pending_approval,
+        activeTaskId: staleApproval.activeTaskId,
+        traceContext: staleApproval.traceContext,
+        updated_at: staleApproval.updated_at,
+      }
       await expect(managerA.deny(staleApproval, 'approval-owner-a')).rejects.toThrow(
         'model-step continuation task owner mismatch'
       )
+      expect.soft(staleApproval).toMatchObject(staleApprovalBefore)
+      const staleApprovalStartError = await managerA
+        .startTurn(staleApproval, 'unexpected follow-up', 'approval-stale-follow-up')
+        .then(
+          () => null,
+          error => error
+        )
+      expect.soft(staleApprovalStartError).toMatchObject({ code: 'CONV_INVALID_TRANSITION' })
       expect(session(handle, approvalKey)).toEqual({
         state: 'awaiting_approval',
         active_task_id: 'approval-owner-b',
