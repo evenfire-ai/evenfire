@@ -430,6 +430,15 @@ function codexRateLimited(): LlmError {
   )
 }
 
+/** A revoked grant: non-retryable, not checkpoint-eligible. */
+function codexNoGrant(): LlmError {
+  return loopErrorFromClassifier(
+    'codex-subscription',
+    new CodexAuthorizeError('no_grant', 'revoked'),
+    error => codexClassifier.classifyError(error)
+  )
+}
+
 const user: ChatMessage = { role: 'user', content: 'Inspect the repository files.' }
 const SOURCE_MESSAGE = JSON.stringify({
   content: 'Inspect the repository files.',
@@ -2956,5 +2965,89 @@ describe('G2 R4-M2: the in-place retry runs where no Retry would be offered', ()
     if (result.type !== 'response') throw new Error(`expected a response, got ${result.type}`)
     expect(result.content).toContain('artifact-output-1043')
     expect(header(worker)).toBeUndefined()
+  })
+})
+
+/**
+ * WP-H8 (Addendum A4, F6): the retried-step memory keeps a checkpoint
+ * resumable only when the step's final error is itself retryable. A step that
+ * starts on an eligible 503 and whose automatic retry ends on a terminal error
+ * must not offer "Retry model step" after access was lost; the retryable end
+ * states keep it.
+ */
+describe('H8 (F6): only a retryable final error keeps a retried step resumable', () => {
+  const transitionsTo =
+    (to: string) =>
+    (transition: { mock: { calls: unknown[][] } }): unknown[][] =>
+      transition.mock.calls.filter(call => (call[2] as { to?: string } | undefined)?.to === to)
+  const resumableTransitions = transitionsTo('resumable')
+  const abandonedTransitions = transitionsTo('abandoned')
+
+  it.each([
+    { label: 'no_grant', makeFinalError: codexNoGrant },
+    { label: 'upstream_rejected', makeFinalError: upstreamRejected },
+  ])(
+    'H8: a 503 whose retry ends on $label leaves no resumable checkpoint and no Retry',
+    async ({ makeFinalError }) => {
+      const { worker, store, recorder } = harness()
+      const settle = vi.spyOn(recorder, 'settle')
+      const transition = vi.spyOn(store, 'transition')
+      const tool = createMockTool('read_file')
+      const terminal = makeFinalError()
+      const reasoning = createMockReasoning([
+        { type: 'tool_calls', calls: [{ id: 'tc_h8', name: 'read_file', arguments: {} }] },
+        { type: 'error', error: codexUnavailable() },
+        { type: 'error', error: terminal },
+      ])
+
+      const result = await runToolUseLoop(
+        withRecorder(reasoning, [tool], recorder, 4, { modelStepAutoRetries: 1 }),
+        [user]
+      )
+
+      // The user gets the terminal error and no checkpoint to retry from.
+      expect(result.type).toBe('error')
+      if (result.type !== 'error') throw new Error(`expected an error, got ${result.type}`)
+      expect(result.error).toBe(terminal)
+      expect(result).not.toHaveProperty('checkpointId')
+      // Liveness: the automatic retry really ran the second provider call.
+      expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
+      expect(tool.execute).toHaveBeenCalledTimes(1)
+      // Witness: the checkpoint was there and was abandoned, not made resumable.
+      expect(resumableTransitions(transition)).toHaveLength(0)
+      expect(abandonedTransitions(transition)).toHaveLength(1)
+      await expect(settle.mock.results[0]!.value).resolves.toBeUndefined()
+      expect(header(worker)).toBeUndefined()
+    }
+  )
+
+  it.each([
+    { label: '503', makeFinalError: codexUnavailable },
+    { label: '429', makeFinalError: codexRateLimited },
+  ])('H8: a 503 whose retry ends on a $label stays resumable', async ({ makeFinalError }) => {
+    const { worker, store, recorder } = harness()
+    const transition = vi.spyOn(store, 'transition')
+    const tool = createMockTool('read_file')
+    const retryableEnd = makeFinalError()
+    const reasoning = createMockReasoning([
+      { type: 'tool_calls', calls: [{ id: 'tc_h8r', name: 'read_file', arguments: {} }] },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'error', error: retryableEnd },
+    ])
+
+    const result = await runToolUseLoop(
+      withRecorder(reasoning, [tool], recorder, 4, { modelStepAutoRetries: 1 }),
+      [user]
+    )
+
+    expect(result.type).toBe('error')
+    if (result.type !== 'error') throw new Error(`expected an error, got ${result.type}`)
+    expect(result.error).toBe(retryableEnd)
+    expect(result).toMatchObject({ checkpointId: 'cp-loop' })
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
+    // Witness: the resumable transition, and no abandonment.
+    expect(resumableTransitions(transition)).toHaveLength(1)
+    expect(abandonedTransitions(transition)).toHaveLength(0)
+    expect(header(worker)).toMatchObject({ status: 'resumable' })
   })
 })

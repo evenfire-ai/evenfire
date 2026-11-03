@@ -29,6 +29,7 @@ import {
   textContentFromParts,
 } from '../types'
 import { isModelStepCheckpointEligibleError } from './modelStepCheckpointEligibility'
+import { isRetryableLlmError } from './toolUseLoopIntentRecovery'
 
 /**
  * Records a turn only once it dispatches a tool into a durable checkpoint (#1043).
@@ -83,10 +84,12 @@ export interface ModelStepCheckpointRecorder {
   /**
    * F6: this step's automatic retries started on `cause` and the step ended on
    * `finalError`. `settle` keeps the checkpoint resumable when the retries end
-   * on the very same `finalError` object, so an eligible first failure is not
-   * discarded by a later non-eligible one. The memory is per step: it is
-   * overwritten by the next retried step and never matches another error
-   * object, so a failure the retries did not produce cannot use it.
+   * on the very same `finalError` object and that final error is itself
+   * retryable, so an eligible first failure still survives a retry that ends on
+   * another transient error, while a step whose retry ended without access is
+   * not offered a Retry. The memory is per step: it is overwritten by the next
+   * retried step and never matches another error object, so a failure the
+   * retries did not produce cannot use it.
    */
   noteModelStepRetry(cause: Error, finalError: Error): void
   /**
@@ -400,14 +403,17 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
 
     // F6: an eligible failure keeps the checkpoint resumable either when it is
     // the error the loop ended on, or when it is the failure this step's
-    // automatic retries started from and those retries ended on exactly this
-    // error object (R2-2: a later step's failure never latches onto it).
+    // automatic retries started from, those retries ended on exactly this error
+    // object and that final error is itself retryable (R2-2: a later step's
+    // failure never latches onto it).
     const retried = this.retriedStep
     const stepError = result?.type === 'error' ? result.error : undefined
     const leavesResumable =
       stepError !== undefined &&
       (this.canResume(stepError) ||
-        (retried?.finalError === stepError && this.canResume(retried.cause)))
+        (retried?.finalError === stepError &&
+          isRetryableLlmError(stepError) &&
+          this.canResume(retried.cause)))
 
     if (leavesResumable) {
       const now = this.opts.now()
