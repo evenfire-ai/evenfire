@@ -58,7 +58,7 @@ function assertView(value: unknown): asserts value is ModelStepCheckpointView {
 describe('model-step checkpoint wire vectors', () => {
   const files = fs.readdirSync(VECTOR_DIR).filter(name => name.endsWith('.json'))
 
-  it('ships one session view per visible status and one continue response per POST row', () => {
+  it('ships one session view per visible status, one continue response per POST row, and the rpc-proxy envelope', () => {
     expect(files.sort()).toEqual([
       'continue-response.blocked.json',
       'continue-response.claimed.json',
@@ -67,6 +67,7 @@ describe('model-step checkpoint wire vectors', () => {
       'continue-response.reclaimed.json',
       'continue-response.replayed.json',
       'continue-response.version-mismatch.json',
+      'host-message-request.json',
       'session-view.blocked.json',
       'session-view.claimed.json',
       'session-view.resumable.json',
