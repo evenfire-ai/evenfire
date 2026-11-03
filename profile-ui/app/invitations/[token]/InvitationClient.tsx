@@ -14,6 +14,7 @@ import {
   ProfileApiError,
   acceptInvitation,
   clearUnconfirmedLogout,
+  getEvenfireDownloadUrl,
   setupAcceptedInvitationPasswordWithToken,
   setupInvitationPasswordWithToken,
 } from '@lib/api'
@@ -137,6 +138,7 @@ export function InvitationClient({
         ? [invitation.teamName]
         : []
   const hasMultipleTeams = teamNames.length > 1
+  const downloadUrl = getEvenfireDownloadUrl()
   const profileLoginHref = PROFILE_ROUTES.login({
     email: invitation?.email.trim().toLowerCase(),
   })
@@ -412,7 +414,12 @@ export function InvitationClient({
         {!invitation ? (
           <InvitationActionPanel mode="link-error" loginHref={profileLoginHref} />
         ) : passwordUpdated ? (
-          <InvitationActionPanel mode="password-updated" loginHref={profileLoginHref} />
+          <InvitationActionPanel
+            mode="password-updated"
+            loginHref={profileLoginHref}
+            downloadUrl={downloadUrl}
+            isPasswordReset={isPasswordReset}
+          />
         ) : recoveryOutcomeUnknown ? (
           <InvitationActionPanel
             mode="outcome-unknown"
@@ -429,6 +436,7 @@ export function InvitationClient({
           <InvitationActionPanel
             mode="used"
             loginHref={profileLoginHref}
+            downloadUrl={downloadUrl}
             isPasswordReset={isPasswordReset}
             forgotPasswordHref={forgotPasswordHref}
           />
