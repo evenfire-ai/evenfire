@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import fc from 'fast-check'
 import { promises as fs, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -28,10 +29,46 @@ afterEach(() => {
   spawnSyncMock.mockReset()
 })
 
-function prepareWindowsInspection(): void {
+interface WindowsFixtureRoots {
+  hostRoot: string
+  simulatedTempRoot: string
+  sentinelPath: string
+  sentinelBytes: Buffer
+  allocationPlatform: NodeJS.Platform
+}
+
+async function createWindowsFixtureRoots(prefix: string): Promise<WindowsFixtureRoots> {
+  const allocationPlatform = process.platform
+  const hostRoot = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-host-`))
+  let simulatedTempRoot: string | undefined
+  try {
+    simulatedTempRoot = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-simulated-`))
+    const sentinelPath = path.join(simulatedTempRoot, 'independent-owner-sentinel')
+    const sentinelBytes = Buffer.from('owned by the simulated TEMP fixture')
+    await fs.writeFile(sentinelPath, sentinelBytes, { flag: 'wx' })
+    return { hostRoot, simulatedTempRoot, sentinelPath, sentinelBytes, allocationPlatform }
+  } catch (error) {
+    await fs.rm(hostRoot, { recursive: true, force: true })
+    if (simulatedTempRoot) await fs.rm(simulatedTempRoot, { recursive: true, force: true })
+    throw error
+  }
+}
+
+async function cleanupWindowsFixtureRoots(roots: WindowsFixtureRoots): Promise<void> {
+  try {
+    await fs.rm(roots.hostRoot, { recursive: true, force: true })
+    const sentinelAfterCleanup = await fs.readFile(roots.sentinelPath).catch(() => null)
+    expect(sentinelAfterCleanup).toEqual(roots.sentinelBytes)
+  } finally {
+    await fs.rm(roots.hostRoot, { recursive: true, force: true })
+    await fs.rm(roots.simulatedTempRoot, { recursive: true, force: true })
+  }
+}
+
+function prepareWindowsInspection(tempRoot = 'C:\\fixture'): void {
   Object.defineProperty(process, 'platform', { ...platformDescriptor, value: 'win32' })
   vi.stubEnv('SystemRoot', 'C:\\Windows')
-  vi.stubEnv('TEMP', 'C:\\fixture')
+  vi.stubEnv('TEMP', tempRoot)
 }
 
 function mockFreshNativeInspection(): void {
@@ -93,6 +130,46 @@ function consentGrant() {
   }
 }
 
+type ConsentRevisionModel = { revision: number }
+type ConsentStoreHarness = {
+  store: LocalConsentStore
+  scheduler: fc.Scheduler
+  pendingWrites: Promise<void>[]
+  scheduledReads: Promise<ReturnType<typeof consentGrant> | null>[]
+  nextOperation: number
+}
+
+class PutAndReadConsentCommand implements fc.AsyncCommand<
+  ConsentRevisionModel,
+  ConsentStoreHarness
+> {
+  check(): boolean {
+    return true
+  }
+
+  run(model: ConsentRevisionModel, harness: ConsentStoreHarness): void {
+    const operation = harness.nextOperation++
+    const expectedRevision = model.revision + 1
+    harness.pendingWrites.push(
+      harness.scheduler.schedule(
+        harness.store.put(consentGrant()),
+        `consent put ${expectedRevision}`
+      )
+    )
+    harness.scheduledReads.push(
+      harness.scheduler.schedule(
+        harness.store.get(consentGrant()),
+        `consent read during operation ${operation}`
+      )
+    )
+    model.revision = expectedRevision
+  }
+
+  toString(): string {
+    return 'PutAndReadConsentCommand'
+  }
+}
+
 function auditEntry() {
   return {
     ts: '2026-10-30T00:00:00.000Z',
@@ -113,10 +190,98 @@ function isUnauthorizedPrincipalRejection(error: unknown): boolean {
 }
 
 describe('Windows plugin storage native evidence contract', () => {
-  it('reinspects a consent file when its identity is unchanged', async () => {
-    prepareWindowsInspection()
+  it('keeps real producer files under the host-owned root, not simulated TEMP', async () => {
+    const roots = await createWindowsFixtureRoots('plugin-acl-root-ownership')
+    prepareWindowsInspection(roots.simulatedTempRoot)
     mockFreshNativeInspection()
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'plugin-acl-freshness-'))
+    const directory = path.join(roots.hostRoot, 'consent')
+    const store = new LocalConsentStore(directory)
+    try {
+      await store.put(consentGrant())
+      await expect(store.get(consentGrant())).resolves.toMatchObject({
+        ...consentGrant(),
+        revision: 1,
+      })
+
+      expect(inspectedPaths.length).toBeGreaterThan(0)
+      expect(roots.allocationPlatform).toBe(platformDescriptor.value)
+      expect(
+        inspectedPaths.every(
+          item => item === roots.hostRoot || item.startsWith(`${roots.hostRoot}${path.sep}`)
+        )
+      ).toBe(true)
+      expect(
+        inspectedPaths.some(item => item.startsWith(`${roots.simulatedTempRoot}${path.sep}`))
+      ).toBe(false)
+      expect(await fs.readFile(roots.sentinelPath)).toEqual(roots.sentinelBytes)
+    } finally {
+      await cleanupWindowsFixtureRoots(roots)
+    }
+  })
+
+  it('matches a small independent model across scheduled real consent operations', async () => {
+    const roots = await createWindowsFixtureRoots('plugin-acl-a6-model')
+    prepareWindowsInspection(roots.simulatedTempRoot)
+    mockFreshNativeInspection()
+    const directory = path.join(roots.hostRoot, 'consent')
+    try {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.scheduler(),
+          fc.commands([fc.constant(new PutAndReadConsentCommand())], {
+            maxCommands: 10,
+            size: '+1',
+          }),
+          async (scheduler, generatedCommands) => {
+            await fs.rm(directory, { recursive: true, force: true })
+            inspectedPaths.length = 0
+            spawnSyncMock.mockClear()
+            const model = { revision: 0 }
+            const store = new LocalConsentStore(directory)
+            const harness: ConsentStoreHarness = {
+              store,
+              scheduler,
+              pendingWrites: [],
+              scheduledReads: [],
+              nextOperation: 0,
+            }
+            const commands = [new PutAndReadConsentCommand(), ...generatedCommands]
+            await fc.asyncModelRun(() => ({ model, real: harness }), commands)
+            await scheduler.waitAll()
+            await Promise.all(harness.pendingWrites)
+
+            expect(harness.scheduledReads).toHaveLength(model.revision)
+            for (const read of harness.scheduledReads) {
+              const observed = await read
+              const observedRevision = observed?.revision ?? 0
+              expect(observedRevision).toBeGreaterThanOrEqual(0)
+              expect(observedRevision).toBeLessThanOrEqual(model.revision)
+            }
+            await expect(store.get(consentGrant())).resolves.toMatchObject({
+              ...consentGrant(),
+              revision: model.revision,
+            })
+            expect(inspectedPaths.length).toBeGreaterThan(0)
+            expect(
+              inspectedPaths.every(
+                item => item === roots.hostRoot || item.startsWith(`${roots.hostRoot}${path.sep}`)
+              )
+            ).toBe(true)
+            expect(await fs.readFile(roots.sentinelPath)).toEqual(roots.sentinelBytes)
+          }
+        ),
+        { numRuns: 10 }
+      )
+    } finally {
+      await cleanupWindowsFixtureRoots(roots)
+    }
+  })
+
+  it('reinspects a consent file when its identity is unchanged', async () => {
+    const roots = await createWindowsFixtureRoots('plugin-acl-freshness')
+    prepareWindowsInspection(roots.simulatedTempRoot)
+    mockFreshNativeInspection()
+    const root = roots.hostRoot
     const directory = path.join(root, 'consent')
     const file = path.join(directory, 'testenv-0123456789ab.json')
     const store = new LocalConsentStore(directory)
@@ -136,7 +301,7 @@ describe('Windows plugin storage native evidence contract', () => {
       expect(after.dev).toBe(before.dev)
       expect(after.ino).toBe(before.ino)
     } finally {
-      await fs.rm(root, { recursive: true, force: true })
+      await cleanupWindowsFixtureRoots(roots)
     }
   })
 
@@ -164,9 +329,10 @@ describe('Windows plugin storage native evidence contract', () => {
       },
     ],
   ])('%s native evidence cannot authorize a cached consent read', async (_kind, failure) => {
-    prepareWindowsInspection()
+    const roots = await createWindowsFixtureRoots('plugin-acl-consent-failure')
+    prepareWindowsInspection(roots.simulatedTempRoot)
     mockFreshNativeInspection()
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'plugin-acl-consent-failure-'))
+    const root = roots.hostRoot
     const directory = path.join(root, 'consent')
     const file = path.join(directory, 'testenv-0123456789ab.json')
     const store = new LocalConsentStore(directory)
@@ -178,14 +344,15 @@ describe('Windows plugin storage native evidence contract', () => {
       await expect(store.get(consentGrant())).rejects.toThrow('privacy could not be verified')
       expect(await fs.readFile(file)).toEqual(originalBytes)
     } finally {
-      await fs.rm(root, { recursive: true, force: true })
+      await cleanupWindowsFixtureRoots(roots)
     }
   })
 
   it('verifies the produced consent destination after atomic replacement', async () => {
-    prepareWindowsInspection()
+    const roots = await createWindowsFixtureRoots('plugin-acl-consent-rename')
+    prepareWindowsInspection(roots.simulatedTempRoot)
     mockFreshNativeInspection()
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'plugin-acl-consent-rename-'))
+    const root = roots.hostRoot
     const directory = path.join(root, 'consent')
     const file = path.join(directory, 'testenv-0123456789ab.json')
     const originalRename = fs.rename.bind(fs)
@@ -218,12 +385,13 @@ describe('Windows plugin storage native evidence contract', () => {
       expect(spawnSyncMock).toHaveBeenCalledTimes(4)
     } finally {
       renameSpy.mockRestore()
-      await fs.rm(root, { recursive: true, force: true })
+      await cleanupWindowsFixtureRoots(roots)
     }
   })
 
   it('distinguishes a pre-rename helper timeout from a produced destination DACL denial', async () => {
-    prepareWindowsInspection()
+    const roots = await createWindowsFixtureRoots('plugin-acl-pre-rename-timeout')
+    prepareWindowsInspection(roots.simulatedTempRoot)
     const timeout = Object.assign(new Error('spawnSync timed out'), { code: 'ETIMEDOUT' })
     spawnSyncMock.mockReturnValue({
       error: timeout,
@@ -232,7 +400,7 @@ describe('Windows plugin storage native evidence contract', () => {
       stdout: '',
       stderr: 'EVENFIRE_PLUGIN_ACL_PHASE=helper-load-start;ordinal=0;elapsedMs=14990\r\n',
     })
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'plugin-acl-pre-rename-timeout-'))
+    const root = roots.hostRoot
     const directory = path.join(root, 'consent')
     const renameSpy = vi.spyOn(fs, 'rename')
     try {
@@ -256,14 +424,15 @@ describe('Windows plugin storage native evidence contract', () => {
       expect(renameSpy).not.toHaveBeenCalled()
     } finally {
       renameSpy.mockRestore()
-      await fs.rm(root, { recursive: true, force: true })
+      await cleanupWindowsFixtureRoots(roots)
     }
   })
 
   it('verifies the produced consent corruption quarantine before accepting recovery', async () => {
-    prepareWindowsInspection()
+    const roots = await createWindowsFixtureRoots('plugin-acl-consent-quarantine')
+    prepareWindowsInspection(roots.simulatedTempRoot)
     mockFreshNativeInspection()
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'plugin-acl-consent-quarantine-'))
+    const root = roots.hostRoot
     const directory = path.join(root, 'consent')
     const file = path.join(directory, 'testenv-0123456789ab.json')
     const store = new LocalConsentStore(directory)
@@ -288,14 +457,15 @@ describe('Windows plugin storage native evidence contract', () => {
       expect(await fs.readFile(path.join(directory, names[0]!), 'utf8')).toBe('{')
     } finally {
       renameSpy.mockRestore()
-      await fs.rm(root, { recursive: true, force: true })
+      await cleanupWindowsFixtureRoots(roots)
     }
   })
 
   it('verifies the rotated audit destination before appending again', async () => {
-    prepareWindowsInspection()
+    const roots = await createWindowsFixtureRoots('plugin-acl-audit-rename')
+    prepareWindowsInspection(roots.simulatedTempRoot)
     mockFreshNativeInspection()
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'plugin-acl-audit-rename-'))
+    const root = roots.hostRoot
     const directory = path.join(root, 'audit')
     const file = path.join(directory, 'testenv-0123456789ab.jsonl')
     const rotated = `${file}.1`
@@ -318,7 +488,7 @@ describe('Windows plugin storage native evidence contract', () => {
     } finally {
       renameSpy.mockRestore()
       warningSpy.mockRestore()
-      await fs.rm(root, { recursive: true, force: true })
+      await cleanupWindowsFixtureRoots(roots)
     }
   })
 
