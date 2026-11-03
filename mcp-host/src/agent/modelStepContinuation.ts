@@ -14,6 +14,12 @@ import type { IncomingMessage } from '../server/types'
 import { serializeSessionKey } from '../session/types.js'
 import type { ModelStepCheckpointSupport } from './types'
 
+/**
+ * The caller's admission budget for one continuation, counted from receipt in
+ * `continue()`. The verdict wait below is bounded by what is left of it after
+ * the claim, the revalidation and the enqueue: the answer lands at most this
+ * after receipt unless those steps alone take longer.
+ */
 export const MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS = 10_000
 
 /** Fixed log code for every admission failure that is not a corrupt source message. */
@@ -82,6 +88,11 @@ export class ModelStepContinuationService {
 
   async continue(request: ModelStepContinuationRequest): Promise<ModelStepContinuationResult> {
     const { checkpoints } = this.deps
+    // The caller's hold budget (rpc-proxy's admission floor) covers this whole
+    // admission, so the verdict deadline is measured from receipt: the claim,
+    // the Host revalidation and the enqueue consume it before a verdict can
+    // exist. Only what is left of it is waited for below.
+    const verdictDeadlineMs = Date.now() + MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS
     // The same normalisation the session store uses: a blank/omitted chat id
     // (the blank rpc threadId) and its literal `default` spelling are one
     // session, so a continuation addressed as `default` reaches the checkpoint
@@ -263,14 +274,22 @@ export class ModelStepContinuationService {
 
     let timer: ReturnType<typeof setTimeout> | undefined
     let decision: AdmissionDecision | undefined
+    // Only the part of the receipt-anchored deadline that is still left is
+    // waited for. When the claim, the validation and the enqueue already spent
+    // it, the answer is the immediate 202 with the claimed task ("no verdict
+    // yet"), never a wait past the caller's hold. A caller that gave up on
+    // that 202 re-POSTs and replays this claim.
+    const remainingVerdictWaitMs = verdictDeadlineMs - Date.now()
     try {
-      decision = await Promise.race([
-        verdictPromise,
-        new Promise<undefined>(resolve => {
-          timer = setTimeout(() => resolve(undefined), MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS)
-          timer.unref?.()
-        }),
-      ])
+      if (remainingVerdictWaitMs > 0) {
+        decision = await Promise.race([
+          verdictPromise,
+          new Promise<undefined>(resolve => {
+            timer = setTimeout(() => resolve(undefined), remainingVerdictWaitMs)
+            timer.unref?.()
+          }),
+        ])
+      }
     } finally {
       clearTimeout(timer)
     }

@@ -219,6 +219,12 @@ function createHarness(
     verdict?: ModelStepContinuationVerdict
     now?: () => number
     liveTaskIds?: string[]
+    /**
+     * Delays only the store's `claim`, the receipt-to-admission work the
+     * caller's hold budget must also cover (the durable write is bounded by
+     * CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS and starts after the queue chain).
+     */
+    claimDelayMs?: number
   } = {}
 ): Harness {
   const handle = makeSqliteStore()
@@ -228,6 +234,13 @@ function createHarness(
     now,
     blockedTtlMs: RESUMABLE_TTL_MS,
   })
+  if (options.claimDelayMs) {
+    const claim = checkpoints.claim.bind(checkpoints)
+    vi.spyOn(checkpoints, 'claim').mockImplementation(async request => {
+      await new Promise(resolve => setTimeout(resolve, options.claimDelayMs))
+      return claim(request)
+    })
+  }
   const support: ModelStepCheckpointSupport = {
     store: checkpoints,
     hostInstanceId: HOST_INSTANCE_ID,
@@ -834,6 +847,43 @@ describe('ModelStepContinuationService — verdicts and admission (#1043)', () =
     expect(settled).toBe(true)
     expect(result.status).toBe(202)
     expect(result.body).toMatchObject({ status: 'claimed', replayed: false })
+  })
+
+  it('anchors the verdict wait at receipt when the claim consumes the budget', async () => {
+    vi.useFakeTimers()
+    const claimDelayMs = 3_000
+    const { checkpoints, service, enqueue, captured } = createHarness({ claimDelayMs })
+    const { version } = await openResumable(checkpoints)
+    const receivedAt = Date.now()
+
+    const pending = service.continue(continuationRequest(version))
+    let settledAt: number | undefined
+    void pending.then(() => {
+      settledAt = Date.now()
+    })
+
+    // The claim alone consumes 3 s of the caller's hold before the
+    // continuation can be admitted; no verdict exists yet.
+    await vi.advanceTimersByTimeAsync(claimDelayMs)
+    const call = await captured
+    // Liveness: the claim settled, so the wait below is the one asserted, not
+    // an admission failure.
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(settledAt).toBeUndefined()
+
+    // Only the remaining 7 s of the receipt-anchored deadline are waited for:
+    // the answer lands at receipt + the verdict bound, not 10 s after enqueue.
+    await vi.advanceTimersByTimeAsync(MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS - claimDelayMs)
+    expect(settledAt).toBe(receivedAt + MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS)
+
+    const result = await pending
+    expect(result.status).toBe(202)
+    expect(result.body).toEqual({
+      taskId: call.taskId,
+      checkpointId: CHECKPOINT_ID,
+      status: 'claimed',
+      replayed: false,
+    })
   })
 })
 
