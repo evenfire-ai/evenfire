@@ -147,6 +147,21 @@ describe('external notification stream currentness', () => {
     expect(streamState.backendFailure).toHaveBeenCalledOnce()
   })
 
+  it("answers dev's flat 401 when the original authority is denied", async () => {
+    streamState.observer.mockResolvedValueOnce({
+      status: 'denied',
+      reason: 'v2_session_revoked_or_changed',
+    })
+
+    const response = await request(makeApp()).get('/external/notifications/stream')
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    // Witness: authority was observed, but no listener was ever opened.
+    expect(streamState.observer).toHaveBeenCalledOnce()
+    expect(streamState.openListener).not.toHaveBeenCalled()
+  })
+
   it('drops an awaited notification batch when original authority is revoked', async () => {
     const batch = deferred<unknown[]>()
     streamState.observer

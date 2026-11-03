@@ -279,16 +279,12 @@ export function requireExternalUserParamMatch(paramName = 'userId') {
   }
 }
 
-function externalTeamParamMatcher(paramName: string, publicErrors: boolean) {
+function externalTeamParamMatcher(paramName: string) {
   return async (req: ExternalAuthedRequest, res: Response, next: NextFunction): Promise<void> => {
     const claims = req.externalAuth
     const requestedTeamId = String(req.params?.[paramName] || req.query?.[paramName] || '').trim()
     if (!claims || !requestedTeamId) {
-      if (publicErrors) {
-        sendPublicApiError(req, res, 403, 'forbidden', 'The requested operation is not allowed.')
-      } else {
-        res.status(403).json({ error: 'Forbidden' })
-      }
+      res.status(403).json({ error: 'Forbidden' })
       return
     }
     try {
@@ -297,11 +293,7 @@ function externalTeamParamMatcher(paramName: string, publicErrors: boolean) {
         onDatabaseFailure: externalSessionDatabaseFailure,
       })
       if (!membership) {
-        if (publicErrors) {
-          sendPublicApiError(req, res, 403, 'forbidden', 'The requested operation is not allowed.')
-        } else {
-          res.status(403).json({ error: 'Forbidden' })
-        }
+        res.status(403).json({ error: 'Forbidden' })
         return
       }
       req.externalTeamAuth = membership
@@ -314,28 +306,13 @@ function externalTeamParamMatcher(paramName: string, publicErrors: boolean) {
         next(error)
         return
       }
-      if (publicErrors) {
-        sendPublicApiError(
-          req,
-          res,
-          503,
-          'authority_unavailable',
-          'Authorization is temporarily unavailable.',
-          true
-        )
-      } else {
-        res.status(503).json({ error: 'authority_unavailable' })
-      }
+      res.status(503).json({ error: 'authority_unavailable' })
     }
   }
 }
 
 export function requireExternalTeamParamMatch(paramName = 'teamId') {
-  return externalTeamParamMatcher(paramName, false)
-}
-
-export function requireExternalTeamParamMatchWithPublicErrors(paramName = 'teamId') {
-  return externalTeamParamMatcher(paramName, true)
+  return externalTeamParamMatcher(paramName)
 }
 
 export function rejectBodyUserTeamMismatch(

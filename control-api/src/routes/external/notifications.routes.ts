@@ -1,7 +1,6 @@
 import { Request, Response, Router } from 'express'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
-import { sendPublicApiError } from '../../http/publicApiError.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
@@ -129,7 +128,7 @@ export function createExternalNotificationsRouter(): Router {
 
         const initialAuthority = await observeExternalSessionCurrentness(authentication)
         if (initialAuthority.status === 'denied') {
-          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          res.status(401).json({ error: 'Unauthorized' })
           return
         }
         if (initialAuthority.status === 'unavailable') {

@@ -263,7 +263,8 @@ describe('routes/external/workflows', () => {
 
     it('returns 401 when no credentials are supplied', async () => {
       const app = makeApp(gateway)
-      await request(app).get('/external/workflows').expect(401)
+      const response = await request(app).get('/external/workflows').expect(401)
+      expect(response.body).toEqual({ error: 'Unauthorized' })
     })
   })
 
@@ -326,6 +327,7 @@ describe('routes/external/workflows', () => {
         .send({})
 
       expect(response.status).toBe(401)
+      expect(response.body).toEqual({ error: 'Unauthorized' })
       // Witness: the session was evaluated and rejected after the limiter ran.
       expect(mockAuthenticateExternalUserSession).toHaveBeenCalledWith(
         'rejected-session-token',

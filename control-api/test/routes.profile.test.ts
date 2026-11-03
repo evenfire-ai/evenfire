@@ -474,7 +474,7 @@ describe('routes/profile', () => {
     ).expect(403)
   })
 
-  it('does not allow an ordinary team member to rename a team', async () => {
+  it('lets a live team member rename a team, as in dev', async () => {
     svc.renameTeam.mockResolvedValue({ id: 't1', name: 'Renamed' })
     const app = express()
     app.use(express.json())
@@ -482,8 +482,17 @@ describe('routes/profile', () => {
 
     await withInternalServiceAuthAndUserSession(
       request(app).put('/external/teams/t1/name').send({ name: 'Renamed' })
-    ).expect(403)
+    ).expect(200, { id: 't1', name: 'Renamed' })
 
+    expect(svc.renameTeam).toHaveBeenCalledWith('t1', 'Renamed')
+
+    // Witness: a removed member is still refused by the live team matcher and
+    // the writer is never reached.
+    svc.renameTeam.mockClear()
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue(null)
+    await withInternalServiceAuthAndUserSession(
+      request(app).put('/external/teams/t1/name').send({ name: 'Renamed' })
+    ).expect(403)
     expect(svc.renameTeam).not.toHaveBeenCalled()
   })
 
@@ -1203,7 +1212,7 @@ describe('routes/profile', () => {
 
     await withInternalServiceAuth(request(app).post('/external/auth/google-login'))
       .send({ idToken: 'retired-google-token' })
-      .expect(403, { error: 'membership_not_found' })
+      .expect(401, { error: 'Unauthorized' })
 
     await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
       .send({ email: 'retired@example.com', password: 'synthetic-correct-password' })

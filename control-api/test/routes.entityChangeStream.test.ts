@@ -61,7 +61,9 @@ class FakeResponse extends EventEmitter {
     this.writableEnded = true
     this.emit('close')
   }
-  json(): this {
+  jsonBody: unknown
+  json(body: unknown): this {
+    this.jsonBody = body
     return this
   }
 }
@@ -99,6 +101,22 @@ describe('routes/entityChangeStream', () => {
     await vi.waitFor(() => expect(res.statusCode).toBe(401))
     expect(res.headersSent).toBe(false)
     expect(res.frames).toEqual([])
+  })
+
+  it("answers dev's fixed 500 when the initial authority read is unavailable", async () => {
+    const req = new FakeRequest()
+    const res = new FakeResponse()
+    streamEntityChanges(
+      req as unknown as Request,
+      res as unknown as Response,
+      null,
+      async () => ({ status: 'unavailable', error: new Error('database unavailable') }),
+      'user'
+    )
+    await vi.waitFor(() => expect(res.statusCode).toBe(500))
+    expect(res.jsonBody).toEqual({ error: 'Entity change stream unavailable' })
+    expect(res.headersSent).toBe(false)
+    expect(serviceMock.subscribeEntityChangeFeedWake).not.toHaveBeenCalled()
   })
 
   it('does not acquire a feed connection when the client disconnects during authorization', async () => {

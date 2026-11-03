@@ -1,12 +1,11 @@
 import { Router } from 'express'
 import { config } from '../../config.js'
-import { sendPublicApiError } from '../../http/publicApiError.js'
 import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
-  requireExternalTeamParamMatchWithPublicErrors,
-  requireValidExternalSessionTokenWithPublicErrors,
+  requireExternalTeamParamMatch,
+  requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import {
   DIRECTORY_SEARCH_MAX_QUERY_LENGTH,
@@ -24,26 +23,26 @@ export function createExternalDirectoryRouter(): Router {
   router.use(
     '/external/directory',
     ...externalDirectoryRateLimits,
-    requireValidExternalSessionTokenWithPublicErrors,
+    requireValidExternalSessionToken,
     attachAccessExecutionBudget
   )
 
   router.get(
     '/external/directory/search',
-    requireExternalTeamParamMatchWithPublicErrors(),
+    requireExternalTeamParamMatch(),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const teamId = String(req.query.teamId || '').trim()
         const q = String(req.query.q || '').trim()
         const cursor = typeof req.query.cursor === 'string' ? req.query.cursor.trim() : undefined
         if (!teamId || !q || q.length > DIRECTORY_SEARCH_MAX_QUERY_LENGTH) {
-          sendPublicApiError(req, res, 400, 'invalid_request', 'Invalid directory search request.')
+          res.status(400).json({ error: 'Invalid directory search request.' })
           return
         }
         return res.status(200).json(await searchDirectory(teamId, q, cursor))
       } catch (error) {
         if (error instanceof DirectorySearchCursorError) {
-          sendPublicApiError(req, res, 400, 'invalid_request', 'Invalid directory search cursor.')
+          res.status(400).json({ error: 'Invalid directory search cursor.' })
           return
         }
         return next(error)

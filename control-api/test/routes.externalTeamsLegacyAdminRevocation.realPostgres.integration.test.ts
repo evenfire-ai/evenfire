@@ -46,7 +46,7 @@ const directory = vi.hoisted(() => ({
   getTeamAgents: vi.fn(),
   getTeamContexts: vi.fn(),
   listMembers: vi.fn(),
-  renameTeamForUser: vi.fn(),
+  renameTeam: vi.fn(),
   updateManagedMemberRoleForUser: vi.fn(),
 }))
 
@@ -73,17 +73,11 @@ type AdminMutation = Readonly<{
   invoke: (server: express.Express) => request.Test
   handler: keyof Pick<
     typeof directory,
-    'renameTeamForUser' | 'updateManagedMemberRoleForUser' | 'deleteManagedMemberForUser'
+    'updateManagedMemberRoleForUser' | 'deleteManagedMemberForUser'
   >
 }>
 
 const mutations: readonly AdminMutation[] = [
-  {
-    name: 'rename team',
-    invoke: server =>
-      request(server).put(`/external/teams/${teamId}/name`).send({ name: 'Renamed' }),
-    handler: 'renameTeamForUser',
-  },
   {
     name: 'change member role',
     invoke: server =>
@@ -211,7 +205,7 @@ describeRealPostgres('legacy V1 live-admin revocation on real external team rout
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
     })
-    directory.renameTeamForUser.mockResolvedValue({ team: { id: teamId, name: 'Renamed' } })
+    directory.renameTeam.mockResolvedValue({ id: teamId, name: 'Renamed' })
     directory.updateManagedMemberRoleForUser.mockResolvedValue({
       membership: { userId: targetUserId, teamId, role: 'member' },
     })
@@ -250,4 +244,36 @@ describeRealPostgres('legacy V1 live-admin revocation on real external team rout
       expect(directory[mutation.handler]).toHaveBeenCalledOnce()
     })
   }
+
+  it('allows a demoted member to rename the team, as in dev', async () => {
+    await databasePool.query(
+      `UPDATE team_members SET role = 'member', updated_at = NOW()
+        WHERE team_id = $1 AND user_id = $2`,
+      [teamId, userId]
+    )
+
+    const response = await request(app())
+      .put(`/external/teams/${teamId}/name`)
+      .send({ name: 'Renamed' })
+      .set('x-user-session-token', staleAdminToken)
+
+    expect(response.status).toBe(200)
+    expect(directory.renameTeam).toHaveBeenCalledWith(teamId, 'Renamed')
+  })
+
+  it("refuses a removed member's rename without reaching the writer", async () => {
+    await databasePool.query(
+      `UPDATE team_members SET status = 'deleted', updated_at = NOW()
+        WHERE team_id = $1 AND user_id = $2`,
+      [teamId, userId]
+    )
+
+    const response = await request(app())
+      .put(`/external/teams/${teamId}/name`)
+      .send({ name: 'Renamed' })
+      .set('x-user-session-token', staleAdminToken)
+
+    expect(response.status).toBe(403)
+    expect(directory.renameTeam).not.toHaveBeenCalled()
+  })
 })

@@ -1,5 +1,5 @@
 import { attachAccessExecutionBudget } from '../../../middleware/accessExecutionBudget.js'
-import { requireValidExternalSessionTokenWithPublicErrors } from '../../../middleware/externalSessionAuth.js'
+import { requireValidExternalSessionToken } from '../../../middleware/externalSessionAuth.js'
 import { bindCompletedExternalWorkflowCaller } from '../../workflows/shared/auth.js'
 import { workflowTriggerRateLimit } from '../../workflows/shared/rateLimit.js'
 
@@ -7,7 +7,7 @@ import { workflowTriggerRateLimit } from '../../workflows/shared/rateLimit.js'
 // route: no limiter sits between identity and policy here.
 export const externalWorkflowReadAdmission = Object.freeze([
   attachAccessExecutionBudget,
-  requireValidExternalSessionTokenWithPublicErrors,
+  requireValidExternalSessionToken,
   bindCompletedExternalWorkflowCaller,
 ])
 
@@ -16,6 +16,6 @@ export const externalWorkflowReadAdmission = Object.freeze([
 export const externalWorkflowTriggerAdmission = Object.freeze([
   attachAccessExecutionBudget,
   workflowTriggerRateLimit(),
-  requireValidExternalSessionTokenWithPublicErrors,
+  requireValidExternalSessionToken,
   bindCompletedExternalWorkflowCaller,
 ])

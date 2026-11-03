@@ -27,7 +27,7 @@ import {
   getTeamAgents,
   getTeamContexts,
   listMembers,
-  renameTeamForUser,
+  renameTeam,
   updateManagedMemberRoleForUser,
 } from '../../services/directory/index.js'
 import { normalizeTeamRoleInput } from '../../services/directory/types.js'
@@ -88,23 +88,14 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.put(
     '/external/teams/:teamId/name',
     requireExternalTeamParamMatch(),
-    requireExternalRole(['admin']),
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
       try {
         const name = String(req.body?.name || '').trim()
         if (!name) return res.status(400).json({ error: 'name is required' })
-        const result = await renameTeamForUser(
-          (req as ExternalAuthedRequest).externalAuth!.userId,
-          req.params.teamId,
-          name,
-          (req as ExternalAuthedRequest).externalSessionAuthority
-        )
-        if ('error' in result) {
-          if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
-          return res.status(404).json({ error: 'not_found' })
-        }
-        return res.status(200).json(result.team)
+        const updated = await renameTeam(req.params.teamId, name)
+        if (!updated) return res.status(404).json({ error: 'not_found' })
+        return res.status(200).json(updated)
       } catch (error) {
         return next(error)
       }

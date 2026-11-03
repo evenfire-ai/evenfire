@@ -240,31 +240,6 @@ export function clerumErrorHandler(
       },
       'forwarded client error from upstream'
     )
-    if (req.originalUrl.startsWith('/api/v1/external')) {
-      const publicCode =
-        errStatus === 401
-          ? 'invalid_session'
-          : errStatus === 403
-            ? 'forbidden'
-            : errStatus === 404
-              ? 'not_found'
-              : errStatus === 429
-                ? 'rate_limited'
-                : 'invalid_request'
-      sendPublicApiError(
-        req,
-        res,
-        errStatus as number,
-        publicCode,
-        errStatus === 404
-          ? 'The resource was not found.'
-          : errStatus === 429
-            ? 'Too many requests; retry later.'
-            : 'The request could not be completed.',
-        errStatus === 429
-      )
-      return
-    }
     res.status(errStatus as number).json({
       error: clientErrorMessage(err, errStatus as number),
       ...(forwardedCode ? { code: forwardedCode } : {}),

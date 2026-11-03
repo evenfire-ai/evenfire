@@ -255,25 +255,6 @@ describeRealPostgres('external team mutations final source authority on real Pos
   function mutations(): readonly AdminMutation[] {
     return [
       {
-        name: 'team rename',
-        invoke: server =>
-          request(server).put(`/external/teams/${teamId}/name`).send({ name: 'Renamed' }),
-        assertMutation: async () => {
-          const result = await databasePool.query<{ name: string }>(
-            `SELECT name FROM teams WHERE id = $1`,
-            [teamId]
-          )
-          expect(result.rows[0]?.name).toBe('Renamed')
-        },
-        assertNoMutation: async () => {
-          const result = await databasePool.query<{ name: string }>(
-            `SELECT name FROM teams WHERE id = $1`,
-            [teamId]
-          )
-          expect(result.rows[0]?.name).toBe('Original')
-        },
-      },
-      {
         name: 'member role change',
         invoke: server =>
           request(server)

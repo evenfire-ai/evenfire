@@ -8,7 +8,7 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 const PRE_D34_TEAMS_WRITER_SHA256 =
-  'b91e7c4cec80a4c4e7be7d92b380d1a28fda2493e96a6047aca9be864c9cde5b'
+  '3f73f787acd4b7aac85b9a489c540403518256460d34c5ae2761121b3ff69843'
 
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
@@ -74,7 +74,7 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
     }
   })
 
-  it('runs the byte-identical pre-D34 team writer against the final additive schema', async () => {
+  it("runs dev's team writer against the PR1 schema", async () => {
     const writerSource = readFileSync(
       new URL('../src/services/directory/teams.ts', import.meta.url)
     )

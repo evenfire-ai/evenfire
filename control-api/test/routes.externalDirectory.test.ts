@@ -88,12 +88,35 @@ describe('external directory authorization', () => {
       .set('x-user-session-token', 'session')
 
     expect(response.status).toBe(403)
-    expect(response.body.error.code).toBe('forbidden')
+    expect(response.body).toEqual({ error: 'Forbidden' })
     expect(mocks.membership).toHaveBeenCalledWith(
       'user-1',
       'team-1',
       expect.objectContaining({ budget: expect.anything() })
     )
+    expect(mocks.searchDirectory).not.toHaveBeenCalled()
+  })
+
+  it("answers dev's flat 401 when no session token is supplied", async () => {
+    const response = await request(app()).get('/external/directory/search?teamId=team-1&q=person')
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(mocks.membership).not.toHaveBeenCalled()
+    expect(mocks.searchDirectory).not.toHaveBeenCalled()
+  })
+
+  it('answers a flat 400 for an oversize query, keeping the head bound', async () => {
+    mocks.membership.mockResolvedValue({ teamId: 'team-1', role: 'member' })
+
+    const response = await request(app())
+      .get(`/external/directory/search?teamId=team-1&q=${'x'.repeat(101)}`)
+      .set('x-user-session-token', 'session')
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'Invalid directory search request.' })
+    // Witness: the request reached live membership before the bound rejected it.
+    expect(mocks.membership).toHaveBeenCalledOnce()
     expect(mocks.searchDirectory).not.toHaveBeenCalled()
   })
 

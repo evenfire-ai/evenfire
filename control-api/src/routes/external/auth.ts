@@ -194,7 +194,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         name: google.name,
         picture: google.picture,
       })
-      if ('error' in login) return sendExternalLoginError(res, login.error)
+      if ('error' in login) return res.status(401).json({ error: 'Unauthorized' })
       const role = login.membership.role
       const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
       if (selection.status !== 'selected') {
