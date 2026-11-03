@@ -25,6 +25,7 @@ import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { RightRailShell } from '@components/RightRailShell'
 import { SidebarNav } from '@components/SidebarNav'
+import { IconClose } from '@components/SidebarNav/icons'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
@@ -135,7 +136,11 @@ import {
   isDesktopCommandEligible,
   platformFromNavigator,
 } from '../../src/desktopCommands'
-import type { DeepLinkAcknowledgmentAuthority } from '../../src/types'
+import type {
+  DeepLinkAcknowledgmentAuthority,
+  DesktopReleaseStatus,
+  DesktopUpdateProgress,
+} from '../../src/types'
 
 type SandboxUiSessionInvalidation = {
   sessionGeneration: number
@@ -261,60 +266,282 @@ function getInitialSidebarCollapsed(): boolean {
   }
 }
 
-function DesktopUpdateRequiredDialog({
-  currentVersion,
-  latestVersion,
+type DesktopUpdateFlow = {
+  mode: 'startup' | 'manual'
+  phase:
+    | 'checking'
+    | 'available'
+    | 'downloading'
+    | 'extracting'
+    | 'preparing'
+    | 'ready'
+    | 'downloaded'
+    | 'installing'
+    | 'opening'
+    | 'error'
+  status: DesktopReleaseStatus | null
+  progress: DesktopUpdateProgress
+  updaterCapable?: boolean
+  manualInstall?: boolean
+  error?: string
+}
+
+function getSelectedBackendOrigin(
+  runtimeConfigState: ReturnType<typeof useAppController>['runtimeConfigState']
+): string | undefined {
+  const selected = runtimeConfigState?.options.find(
+    option => option.id === runtimeConfigState.activeOptionId
+  )
+  if (!selected) return undefined
+  try {
+    const endpoint = new URL(selected.externalRestApiBaseUrl)
+    if (endpoint.protocol !== 'http:' && endpoint.protocol !== 'https:') return undefined
+    return endpoint.origin
+  } catch {
+    return undefined
+  }
+}
+
+function getSafeDesktopUpdateFailure(error: string | undefined, backendOrigin?: string) {
+  const details: Array<{ label: string; value: string }> = []
+  let message = 'The Desktop update could not be completed.'
+  let category: string | undefined
+  let status: string | undefined
+
+  const releaseStatus =
+    /^The selected API (rejected|could not complete) the Desktop release check \(HTTP ([1-5]\d\d)\)\.$/.exec(
+      error ?? ''
+    )
+  if (releaseStatus) {
+    status = releaseStatus[2]
+    category =
+      releaseStatus[1] === 'rejected'
+        ? 'Selected API rejected the release check'
+        : 'Selected API could not complete the release check'
+    message = releaseStatus[0]
+  } else if (error === 'The Desktop release check failed before a usable response was received.') {
+    category = 'No usable release response was received'
+    message = error
+  } else if (error === 'The downloaded macOS target failed signature verification.') {
+    category = 'Downloaded target signature verification failed'
+    message = error
+  } else if (error === 'The downloaded macOS target failed macOS trust assessment.') {
+    category = 'macOS rejected the downloaded target'
+    message = error
+  } else if (
+    error ===
+      'macOS could not open the installer. The verified installer remains in Evenfire’s update cache; open it manually to continue.' ||
+    error ===
+      'The saved macOS installer is missing or has changed. Download it again before opening.'
+  ) {
+    category = 'Manual installer handoff failed'
+    message = error
+  }
+
+  if (category) details.push({ label: 'Failure category', value: category })
+  if (status) details.push({ label: 'HTTP status', value: status })
+  if (backendOrigin) details.push({ label: 'Selected backend origin', value: backendOrigin })
+  return { message, details }
+}
+
+async function getDesktopUpdatePresentation(): Promise<{ manualInstall: boolean }> {
+  const getPresentation = window.clerum?.auth?.getDesktopUpdatePresentation
+  return typeof getPresentation === 'function' ? getPresentation() : { manualInstall: false }
+}
+
+function DesktopUpdatePanel({
+  flow,
+  backendOrigin,
+  onClose,
   onDownload,
+  onRestart,
 }: {
-  currentVersion: string
-  latestVersion: string
+  flow: DesktopUpdateFlow
+  backendOrigin?: string
+  onClose: () => void
   onDownload: () => void
+  onRestart: () => void
 }) {
   const titleId = React.useId()
   const descriptionId = React.useId()
   const detailsId = React.useId()
   const [detailsOpen, setDetailsOpen] = React.useState(false)
+  const status = flow.status
+  const failure =
+    flow.phase === 'error' ? getSafeDesktopUpdateFailure(flow.error, backendOrigin) : null
+  const hasDetails = Boolean(status || failure?.details.length)
+  const title =
+    flow.phase === 'checking'
+      ? 'Checking for updates'
+      : flow.phase === 'downloading'
+        ? 'Downloading Desktop update'
+        : flow.phase === 'extracting'
+          ? 'Extracting installer'
+          : flow.phase === 'preparing'
+            ? 'Preparing installer'
+            : flow.phase === 'ready'
+              ? 'Ready to install'
+              : flow.phase === 'downloaded'
+                ? 'Desktop update ready'
+                : flow.phase === 'installing'
+                  ? 'Restarting to install Desktop update'
+                  : flow.phase === 'opening'
+                    ? 'Opening installer'
+                    : flow.phase === 'error'
+                      ? 'Desktop update check failed'
+                      : 'Desktop update available'
 
   return (
     <div className="desktop-update-dialog-backdrop" role="presentation">
       <section
         aria-describedby={descriptionId}
         aria-labelledby={titleId}
-        aria-modal="true"
         className="desktop-update-dialog"
-        role="dialog"
+        role="region"
+        aria-label="Desktop update notice"
       >
-        <h3 id={titleId}>Desktop update required</h3>
+        <div className="desktop-update-dialog__heading">
+          <h3 id={titleId}>{title}</h3>
+          <button
+            aria-label="Dismiss update notice"
+            className="desktop-update-dialog__dismiss"
+            onClick={onClose}
+            type="button"
+          >
+            <IconClose width={16} height={16} />
+          </button>
+        </div>
         <div className="desktop-update-dialog__body" id={descriptionId}>
-          <p>
-            This workspace requires the latest version of Evenfire Desktop before you can continue.
-          </p>
+          {flow.phase === 'checking' ? (
+            <p>Checking the selected backend for a compatible build.</p>
+          ) : null}
+          {flow.phase === 'available' && status ? (
+            <p>
+              Build {status.currentVersion} is not listed as compatible with this backend. The
+              recommended build is {status.latestVersion}. You can keep working and update when
+              ready.
+            </p>
+          ) : null}
+          {flow.phase === 'downloading' && status ? (
+            <>
+              <p>
+                Downloading Evenfire Desktop {status.latestVersion}. You can keep using the app.
+              </p>
+              <progress
+                aria-label="Desktop update download progress"
+                max={100}
+                value={flow.progress.percent}
+              />
+              <span aria-live="polite">{Math.floor(flow.progress.percent)}%</span>
+            </>
+          ) : null}
+          {flow.phase === 'extracting' && status ? (
+            <p>Verifying and extracting the original Evenfire Desktop installer.</p>
+          ) : null}
+          {flow.phase === 'preparing' && status ? (
+            <p>Preparing the verified installer in Evenfire’s private update cache.</p>
+          ) : null}
+          {flow.phase === 'ready' && status ? (
+            <p>
+              Evenfire {status.latestVersion} is ready. Open the installer, drag Evenfire into
+              Applications, choose Replace if prompted, then reopen Evenfire.
+            </p>
+          ) : null}
+          {flow.phase === 'downloaded' && status ? (
+            <p>
+              Evenfire Desktop {status.latestVersion} is ready. Restart now to install it, or keep
+              working and restart later.
+            </p>
+          ) : null}
+          {flow.phase === 'installing' && status ? (
+            <p>
+              Evenfire Desktop {status.latestVersion} is downloaded. The app is restarting to
+              install it.
+            </p>
+          ) : null}
+          {flow.phase === 'error' ? (
+            <p role="alert">
+              {failure?.message || 'The update could not be completed.'} You can keep using the app.
+            </p>
+          ) : null}
         </div>
-        <div className="desktop-update-dialog__actions">
-          <Button block onClick={onDownload}>
-            Download update
-          </Button>
-        </div>
-        <button
-          type="button"
-          className="desktop-update-dialog__more-info"
-          aria-controls={detailsId}
-          aria-expanded={detailsOpen}
-          onClick={() => setDetailsOpen(open => !open)}
-        >
-          {detailsOpen ? 'Hide info' : 'More info'}
-        </button>
-        {detailsOpen ? (
-          <dl className="desktop-update-dialog__versions" id={detailsId}>
-            <div>
-              <dt>Installed</dt>
-              <dd>{currentVersion}</dd>
-            </div>
-            <div>
-              <dt>Latest</dt>
-              <dd>{latestVersion}</dd>
-            </div>
-          </dl>
+        {flow.phase === 'available' ? (
+          <div className="desktop-update-dialog__actions">
+            <Button block onClick={onDownload}>
+              {flow.manualInstall ? 'Download installer' : 'Update and restart'}
+            </Button>
+            <Button block color="neutral" onClick={onClose}>
+              Later
+            </Button>
+          </div>
+        ) : null}
+        {flow.phase === 'ready' ? (
+          <div className="desktop-update-dialog__actions">
+            <Button block onClick={onRestart}>
+              Open installer &amp; Quit Evenfire
+            </Button>
+            <Button block color="neutral" onClick={onClose}>
+              Later
+            </Button>
+          </div>
+        ) : null}
+        {flow.phase === 'downloaded' ? (
+          <div className="desktop-update-dialog__actions">
+            <Button block onClick={onRestart}>
+              Restart now
+            </Button>
+            <Button block color="neutral" onClick={onClose}>
+              Restart later
+            </Button>
+          </div>
+        ) : null}
+        {flow.phase === 'error' ? (
+          <div className="desktop-update-dialog__actions">
+            {status?.updateAvailable ? (
+              <Button block onClick={onDownload}>
+                Try again
+              </Button>
+            ) : null}
+            <Button block color="neutral" onClick={onClose}>
+              Dismiss
+            </Button>
+          </div>
+        ) : null}
+        {hasDetails ? (
+          <>
+            <button
+              type="button"
+              className="desktop-update-dialog__more-info"
+              aria-controls={detailsId}
+              aria-expanded={detailsOpen}
+              onClick={() => setDetailsOpen(open => !open)}
+            >
+              {detailsOpen ? 'Hide info' : 'More info'}
+            </button>
+            {detailsOpen ? (
+              <dl className="desktop-update-dialog__versions" id={detailsId}>
+                {status ? (
+                  <>
+                    <div>
+                      <dt>Current version</dt>
+                      <dd>{status.currentVersion}</dd>
+                    </div>
+                    <div>
+                      <dt>Version to install</dt>
+                      <dd>{status.latestVersion}</dd>
+                    </div>
+                  </>
+                ) : (
+                  failure?.details.map(detail => (
+                    <div key={detail.label}>
+                      <dt>{detail.label}</dt>
+                      <dd>{detail.value}</dd>
+                    </div>
+                  ))
+                )}
+              </dl>
+            ) : null}
+          </>
         ) : null}
       </section>
     </div>
@@ -328,6 +555,228 @@ export function App() {
   // Electron never fires `visibilitychange` on OS-window switching; bridge
   // DOM focus/blur so focus-aware query revalidation actually runs.
   useWindowFocusBridge()
+  const [desktopUpdateFlow, setDesktopUpdateFlow] = React.useState<DesktopUpdateFlow | null>(null)
+  const desktopUpdateRequestRef = React.useRef(0)
+  const dismissDesktopUpdateFlow = React.useCallback(() => {
+    if (
+      desktopUpdateFlow?.phase === 'downloading' ||
+      desktopUpdateFlow?.phase === 'extracting' ||
+      desktopUpdateFlow?.phase === 'preparing'
+    ) {
+      void window.clerum.auth.cancelDesktopUpdate().catch(() => undefined)
+    }
+    desktopUpdateRequestRef.current += 1
+    setDesktopUpdateFlow(null)
+  }, [desktopUpdateFlow?.phase])
+  const checkForDesktopUpdates = React.useCallback(async () => {
+    const requestId = ++desktopUpdateRequestRef.current
+    let manualInstall = false
+    try {
+      manualInstall = (await getDesktopUpdatePresentation()).manualInstall
+    } catch {
+      // An unavailable presentation query leaves the established automatic path usable.
+    }
+    if (requestId !== desktopUpdateRequestRef.current) return
+    setDesktopUpdateFlow({
+      mode: 'manual',
+      phase: 'checking',
+      status: null,
+      progress: { percent: 0, transferred: 0, total: 0 },
+      manualInstall,
+    })
+    try {
+      const status = await window.clerum.auth.getDesktopReleaseStatus()
+      if (requestId !== desktopUpdateRequestRef.current) return
+      if (!status.updateAvailable) {
+        setDesktopUpdateFlow(null)
+        vm.pushToast('Evenfire Desktop is up to date for the selected backend.', 'success')
+        return
+      }
+      setDesktopUpdateFlow({
+        mode: 'manual',
+        phase: 'downloading',
+        status,
+        progress: { percent: 0, transferred: 0, total: 0 },
+        manualInstall,
+      })
+      await window.clerum.auth.downloadDesktopUpdate(status.latestVersion)
+    } catch (error) {
+      if (requestId !== desktopUpdateRequestRef.current) return
+      setDesktopUpdateFlow(current =>
+        current
+          ? { ...current, phase: 'error', error: errorMessage(error) }
+          : {
+              mode: 'manual',
+              phase: 'error',
+              status: null,
+              progress: { percent: 0, transferred: 0, total: 0 },
+              error: errorMessage(error),
+            }
+      )
+    }
+  }, [vm.pushToast])
+
+  React.useEffect(() => {
+    const subscribe = window.clerum?.auth?.onDesktopUpdateCheckRequested
+    return typeof subscribe === 'function'
+      ? subscribe(() => void checkForDesktopUpdates())
+      : undefined
+  }, [checkForDesktopUpdates])
+
+  React.useEffect(() => {
+    const authBridge = window.clerum?.auth
+    const removeProgress =
+      typeof authBridge?.onDesktopUpdateProgress === 'function'
+        ? authBridge.onDesktopUpdateProgress(progress => {
+            setDesktopUpdateFlow(current =>
+              current ? { ...current, phase: 'downloading', progress } : current
+            )
+          })
+        : () => {}
+    const removeExtracting =
+      typeof authBridge?.onDesktopUpdateExtracting === 'function'
+        ? authBridge.onDesktopUpdateExtracting(version => {
+            setDesktopUpdateFlow(current =>
+              current?.status?.latestVersion === version
+                ? { ...current, phase: 'extracting' }
+                : current
+            )
+          })
+        : () => {}
+    const removePreparing =
+      typeof authBridge?.onDesktopUpdatePreparing === 'function'
+        ? authBridge.onDesktopUpdatePreparing(version => {
+            setDesktopUpdateFlow(current =>
+              current?.status?.latestVersion === version
+                ? { ...current, phase: 'preparing' }
+                : current
+            )
+          })
+        : () => {}
+    const removeOpening =
+      typeof authBridge?.onDesktopUpdateOpening === 'function'
+        ? authBridge.onDesktopUpdateOpening(version => {
+            setDesktopUpdateFlow(current =>
+              current?.status?.latestVersion === version
+                ? { ...current, phase: 'opening' }
+                : current
+            )
+          })
+        : () => {}
+    const removeDownloaded =
+      typeof authBridge?.onDesktopUpdateDownloaded === 'function'
+        ? authBridge.onDesktopUpdateDownloaded(({ version, updaterCapable, manualInstall }) => {
+            setDesktopUpdateFlow(current => {
+              if (!current || current.status?.latestVersion !== version) return current
+              return {
+                ...current,
+                phase: manualInstall
+                  ? 'ready'
+                  : current.mode === 'startup'
+                    ? 'installing'
+                    : 'downloaded',
+                updaterCapable,
+                manualInstall,
+                progress: {
+                  percent: 100,
+                  transferred: current.progress.total,
+                  total: current.progress.total,
+                },
+              }
+            })
+          })
+        : () => {}
+    const removeError =
+      typeof authBridge?.onDesktopUpdateError === 'function'
+        ? authBridge.onDesktopUpdateError(message => {
+            setDesktopUpdateFlow(current =>
+              current ? { ...current, phase: 'error', error: message } : current
+            )
+          })
+        : () => {}
+    return () => {
+      removeProgress()
+      removeExtracting()
+      removePreparing()
+      removeOpening()
+      removeDownloaded()
+      removeError()
+    }
+  }, [])
+
+  React.useEffect(() => {
+    const status = vm.desktopReleaseStatus
+    if (!status) {
+      desktopUpdateRequestRef.current += 1
+      setDesktopUpdateFlow(null)
+      return
+    }
+    const requestId = ++desktopUpdateRequestRef.current
+    void window.clerum.auth
+      .getPendingDesktopUpdate()
+      .catch(() => null)
+      .then(async pending => {
+        if (requestId !== desktopUpdateRequestRef.current) return
+        if (pending && pending.version === status.latestVersion) {
+          setDesktopUpdateFlow({
+            mode: 'manual',
+            phase: pending.manualInstall ? 'ready' : 'downloaded',
+            status,
+            updaterCapable: pending.updaterCapable,
+            manualInstall: pending.manualInstall,
+            progress: { percent: 100, transferred: 0, total: 0 },
+          })
+          return
+        }
+        if (status.updateRequired) {
+          const presentation = await getDesktopUpdatePresentation()
+          if (requestId !== desktopUpdateRequestRef.current) return
+          setDesktopUpdateFlow({
+            mode: 'startup',
+            phase: 'available',
+            status,
+            progress: { percent: 0, transferred: 0, total: 0 },
+            manualInstall: presentation.manualInstall,
+          })
+          return
+        }
+        if (!status.compatible) return
+      })
+      .catch(() => undefined)
+  }, [vm.desktopReleaseStatus])
+
+  const beginDesktopUpdate = React.useCallback(() => {
+    const flow = desktopUpdateFlow
+    if (!flow?.status) return
+    setDesktopUpdateFlow({ ...flow, phase: 'downloading', error: undefined })
+    void window.clerum.auth
+      .downloadDesktopUpdate(flow.status.latestVersion, flow.mode === 'startup')
+      .catch(error => {
+        setDesktopUpdateFlow(current =>
+          current ? { ...current, phase: 'error', error: errorMessage(error) } : current
+        )
+      })
+  }, [desktopUpdateFlow])
+
+  const restartDesktopUpdate = React.useCallback(() => {
+    const flow = desktopUpdateFlow
+    if (!flow?.status) return
+    if (flow.manualInstall) {
+      setDesktopUpdateFlow({ ...flow, phase: 'opening', error: undefined })
+      void window.clerum.auth.openDesktopUpdateInstaller(flow.status.latestVersion).catch(error => {
+        setDesktopUpdateFlow(current =>
+          current ? { ...current, phase: 'error', error: errorMessage(error) } : current
+        )
+      })
+      return
+    }
+    setDesktopUpdateFlow({ ...flow, phase: 'installing', error: undefined })
+    void window.clerum.auth.installDesktopUpdate(flow.status.latestVersion).catch(error => {
+      setDesktopUpdateFlow(current =>
+        current ? { ...current, phase: 'error', error: errorMessage(error) } : current
+      )
+    })
+  }, [desktopUpdateFlow])
   const [themeMode, setThemeMode] = React.useState<ThemeMode>(getInitialThemeMode)
   const [remoteGfsChangeEpoch, setRemoteGfsChangeEpoch] = React.useState(0)
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
@@ -4179,14 +4628,15 @@ export function App() {
         (tab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
     )?.id ?? null
 
-  const desktopUpdateRequiredDialog =
-    vm.isAuthenticated && vm.desktopReleaseStatus?.updateRequired ? (
-      <DesktopUpdateRequiredDialog
-        currentVersion={vm.desktopReleaseStatus.currentVersion}
-        latestVersion={vm.desktopReleaseStatus.latestVersion}
-        onDownload={vm.handleOpenDesktopRelease}
-      />
-    ) : null
+  const desktopUpdateNotice = desktopUpdateFlow ? (
+    <DesktopUpdatePanel
+      flow={desktopUpdateFlow}
+      backendOrigin={getSelectedBackendOrigin(vm.runtimeConfigState)}
+      onClose={dismissDesktopUpdateFlow}
+      onDownload={beginDesktopUpdate}
+      onRestart={restartDesktopUpdate}
+    />
+  ) : null
 
   return (
     <AuthContext.Provider value={authValue}>
@@ -4444,6 +4894,7 @@ export function App() {
                                   {vm.navItem === DESKTOP_ROUTES.settings && (
                                     <SettingsPage
                                       shortcutsFocusRequestId={settingsShortcutsRequestId}
+                                      onCheckForUpdates={() => void checkForDesktopUpdates()}
                                       notificationSettings={vm.notificationSettings}
                                       desktopNotificationPermission={
                                         vm.desktopNotificationPermission
@@ -4525,7 +4976,7 @@ export function App() {
                                 restorePreviousFocus={!commandPaletteReturnToSandbox}
                               />
                             ) : null}
-                            {desktopUpdateRequiredDialog}
+                            {desktopUpdateNotice}
                             {environmentSetupConfirmationDialog}
                             {environmentSwitchConfirmationDialog}
                             {environmentSetupSuccessDialog}

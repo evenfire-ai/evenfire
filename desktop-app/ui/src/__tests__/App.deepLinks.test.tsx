@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import fc, { type AsyncCommand } from 'fast-check'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
@@ -61,6 +62,8 @@ import {
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { buildDesktopReleasePolicy } from '../../../../external-rest-api/src/desktopReleasePolicy.js'
+import { releaseManifest } from '../../../../external-rest-api/src/releaseManifest.js'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
 import { GfsClient, type GfsTransport } from '../../../src/gfs/uriHandler'
 import {
@@ -373,7 +376,26 @@ vi.mock('@pages/SandboxUiPage', () => ({
   },
 }))
 const settingsPageHarness = vi.hoisted(() => ({
-  props: null as null | { shortcutsFocusRequestId?: number },
+  props: null as null | {
+    shortcutsFocusRequestId?: number
+    onCheckForUpdates?: () => void
+  },
+}))
+const desktopUpdateCheckHarness = vi.hoisted(() => ({
+  onRequested: null as null | (() => void),
+  getStatus: vi.fn<() => Promise<unknown>>(),
+  getPresentation: vi.fn<() => Promise<{ manualInstall: boolean }>>(),
+  getPending: vi.fn<() => Promise<unknown>>(),
+  onDownloaded: null as
+    | null
+    | ((update: { version: string; updaterCapable: boolean; manualInstall?: boolean }) => void),
+  onExtracting: null as null | ((version: string) => void),
+  onSaving: null as null | ((version: string) => void),
+  onOpening: null as null | ((version: string) => void),
+  renderButtons: false,
+  download: vi.fn(),
+  install: vi.fn(),
+  openInstaller: vi.fn(),
 }))
 vi.mock('@pages/SettingsPage', () => ({
   SettingsPage: (props: NonNullable<typeof settingsPageHarness.props>) => {
@@ -704,6 +726,66 @@ function renderApp(ui: ReactElement) {
   })
 }
 
+async function createOutdatedDesktopReleaseStatus(installedVersion = '0.10.0') {
+  const electron = await import('../../../src/__tests__/__fixtures__/sandboxUiElectronFakes')
+  const fakeApp = electron.electronModule.app as unknown as Record<string, unknown>
+  const previousIsPackaged = fakeApp.isPackaged
+  const previousGetVersion = fakeApp.getVersion
+  fakeApp.isPackaged = true
+  fakeApp.getVersion = () => installedVersion
+
+  try {
+    const { AppService } = await import('../../../src/appService')
+    const policy = buildDesktopReleasePolicy(
+      {
+        ...releaseManifest,
+        desktopVersion: '0.12.0',
+        compatibleDesktopVersions: ['0.12.0'],
+      },
+      'https://github.com/evenfire-ai/evenfire/releases'
+    )
+    const service = new AppService() as unknown as {
+      authClient: { getDesktopReleasePolicy: ReturnType<typeof vi.fn> }
+      getDesktopReleaseStatus: () => Promise<NonNullable<AppController['desktopReleaseStatus']>>
+    }
+    service.authClient = { getDesktopReleasePolicy: vi.fn().mockResolvedValue(policy) }
+    return await service.getDesktopReleaseStatus()
+  } finally {
+    if (previousIsPackaged === undefined) delete fakeApp.isPackaged
+    else fakeApp.isPackaged = previousIsPackaged
+    if (previousGetVersion === undefined) delete fakeApp.getVersion
+    else fakeApp.getVersion = previousGetVersion
+  }
+}
+
+async function createPreUpdaterDownload(version: string) {
+  const { createPackage } = await import('@electron/asar')
+  const { mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const path = await import('node:path')
+  const { readPackagedAppManifest, getUpdaterCapability } =
+    await import('../../../src/desktopUpdateArtifacts')
+  const parent = process.env.EVENFIRE_TEST_TMPDIR ?? tmpdir()
+  await mkdir(parent, { recursive: true })
+  const root = await mkdtemp(path.join(parent, 'asar-producer-'))
+  try {
+    const source = path.join(root, 'source')
+    await mkdir(source)
+    await writeFile(
+      path.join(source, 'package.json'),
+      JSON.stringify({ name: 'evenfire', productName: 'Evenfire', version })
+    )
+    const archive = path.join(root, 'app.asar')
+    await createPackage(source, archive)
+    return {
+      version: readPackagedAppManifest(archive).version,
+      updaterCapable: getUpdaterCapability(archive),
+    }
+  } finally {
+    await rm(root, { recursive: true, force: false })
+  }
+}
+
 describe('App deep-link orchestration', () => {
   let currentController: AppController
   let realController: AppController | null = null
@@ -808,6 +890,334 @@ describe('App deep-link orchestration', () => {
     expect(confirmSwitch).toHaveBeenCalledOnce()
   })
 
+  it('clears a stale update notice when the selected backend status is reset', async () => {
+    const desktopReleaseStatus = await createOutdatedDesktopReleaseStatus()
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus,
+    })
+    const view = renderApp(<App />)
+
+    await waitFor(() =>
+      expect(
+        view.container.querySelector('[role="region"][aria-label="Desktop update notice"]')
+      ).not.toBeNull()
+    )
+
+    act(() => {
+      currentController.desktopReleaseStatus = null
+      view.rerender(<App />)
+    })
+
+    expect(
+      view.container.querySelector('[role="region"][aria-label="Desktop update notice"]')
+    ).toBeNull()
+    view.unmount()
+  })
+
+  it('restores a backend-bound pending DMG for an incompatible startup', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    desktopUpdateCheckHarness.renderButtons = true
+    desktopUpdateCheckHarness.getPending.mockResolvedValue({
+      version: status.latestVersion,
+      updaterCapable: false,
+      manualInstall: true,
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    const view = renderApp(<App />)
+
+    await waitFor(() =>
+      expect(view.getByRole('button', { name: 'Open installer & Quit Evenfire' })).not.toBeNull()
+    )
+    expect(view.getByText('Ready to install')).not.toBeNull()
+    expect(desktopUpdateCheckHarness.download).not.toHaveBeenCalled()
+  })
+
+  it('keeps the incompatible-startup update alert available if pending lookup fails', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    desktopUpdateCheckHarness.renderButtons = true
+    desktopUpdateCheckHarness.getPresentation.mockResolvedValue({ manualInstall: true })
+    desktopUpdateCheckHarness.getPending.mockRejectedValue(new Error('pending state unavailable'))
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    const view = renderApp(<App />)
+
+    await waitFor(() =>
+      expect(view.getByRole('button', { name: 'Download installer' })).not.toBeNull()
+    )
+    expect(desktopUpdateCheckHarness.download).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it('continues startup consent through a pre-updater download without another confirmation', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    const downloaded = await createPreUpdaterDownload(status.latestVersion)
+    desktopUpdateCheckHarness.renderButtons = true
+    desktopUpdateCheckHarness.download.mockImplementation(async () => {
+      desktopUpdateCheckHarness.onDownloaded?.(downloaded)
+      return { downloaded: true, ...downloaded }
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    const view = renderApp(<App />)
+
+    await waitFor(() =>
+      expect(view.getByRole('button', { name: 'Update and restart' })).not.toBeNull()
+    )
+    await userEvent.click(view.getByRole('button', { name: 'Update and restart' }))
+
+    await waitFor(() =>
+      expect(view.getByText('Restarting to install Desktop update')).not.toBeNull()
+    )
+    expect(desktopUpdateCheckHarness.download).toHaveBeenCalledWith('0.12.0', true)
+    expect(view.container.textContent).not.toContain('predates')
+    expect(view.queryByRole('button', { name: 'Install and restart' })).toBeNull()
+    expect(view.queryByRole('button', { name: 'Restart now' })).toBeNull()
+  })
+
+  it('shows the manual DMG extraction and open handoff states on macOS', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    desktopUpdateCheckHarness.renderButtons = true
+    desktopUpdateCheckHarness.getPresentation.mockResolvedValue({ manualInstall: true })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    let finishDownload!: () => void
+    let finishExtraction!: () => void
+    desktopUpdateCheckHarness.download.mockImplementation(
+      (version: string, restartAfterDownload: boolean) =>
+        new Promise(resolve => {
+          expect(restartAfterDownload).toBe(true)
+          desktopUpdateCheckHarness.onExtracting?.(version)
+          finishExtraction = () => desktopUpdateCheckHarness.onSaving?.(version)
+          finishDownload = () => {
+            desktopUpdateCheckHarness.onDownloaded?.({
+              version,
+              updaterCapable: false,
+              manualInstall: true,
+            })
+            resolve({ downloaded: true, version, updaterCapable: false, manualInstall: true })
+          }
+        })
+    )
+    desktopUpdateCheckHarness.openInstaller.mockRejectedValue(
+      new Error(
+        'macOS could not open the installer. The verified installer remains in Evenfire’s update cache; open it manually to continue.'
+      )
+    )
+    const view = renderApp(<App />)
+
+    await waitFor(() =>
+      expect(view.getByRole('button', { name: 'Download installer' })).not.toBeNull()
+    )
+    expect(view.queryByRole('button', { name: 'Update and restart' })).toBeNull()
+    await userEvent.click(view.getByRole('button', { name: 'Download installer' }))
+    await waitFor(() => expect(view.getByText('Extracting installer')).not.toBeNull())
+    expect(view.getByText(/extracting the original Evenfire Desktop installer/)).not.toBeNull()
+
+    finishExtraction()
+    await waitFor(() => expect(view.getByText('Preparing installer')).not.toBeNull())
+    expect(
+      view.getByText('Preparing the verified installer in Evenfire’s private update cache.')
+    ).not.toBeNull()
+    finishDownload()
+    await waitFor(() => expect(view.getByText('Ready to install')).not.toBeNull())
+    expect(
+      view.getAllByText(/drag Evenfire into Applications, choose Replace if prompted, then reopen/)
+    ).not.toHaveLength(0)
+    const updateDialog = view.container.querySelector('.desktop-update-dialog')!
+    await userEvent.click(
+      within(updateDialog).getByRole('button', { name: 'Open installer & Quit Evenfire' })
+    )
+    await waitFor(() =>
+      expect(
+        within(updateDialog).getByText(
+          'macOS could not open the installer. The verified installer remains in Evenfire’s update cache; open it manually to continue. You can keep using the app.'
+        )
+      ).not.toBeNull()
+    )
+    expect(desktopUpdateCheckHarness.openInstaller).toHaveBeenCalledWith('0.12.0')
+    expect(view.container.querySelector('.app-frame')).not.toBeNull()
+  })
+
+  it('keeps manual restart choices and installs a pre-updater target on the first restart action', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    const downloaded = await createPreUpdaterDownload(status.latestVersion)
+    desktopUpdateCheckHarness.renderButtons = true
+    desktopUpdateCheckHarness.getStatus.mockResolvedValue(status)
+    desktopUpdateCheckHarness.download.mockImplementation(async () => {
+      desktopUpdateCheckHarness.onDownloaded?.(downloaded)
+      return { downloaded: true, ...downloaded }
+    })
+    currentController = makeController({ initialExperienceLoading: false })
+    const view = renderApp(<App />)
+
+    await act(async () => {
+      desktopUpdateCheckHarness.onRequested?.()
+    })
+    await waitFor(() => expect(view.getByRole('button', { name: 'Restart now' })).not.toBeNull())
+    expect(view.getByRole('button', { name: 'Restart later' })).not.toBeNull()
+    expect(desktopUpdateCheckHarness.install).not.toHaveBeenCalled()
+    await userEvent.click(view.getByRole('button', { name: 'Restart now' }))
+    await waitFor(() => expect(desktopUpdateCheckHarness.install).toHaveBeenCalledWith('0.12.0'))
+    expect(view.container.textContent).not.toContain('predates')
+    expect(view.queryByRole('button', { name: 'Install and restart' })).toBeNull()
+  })
+
+  it('shows exactly two version fields in the update notice', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    const view = renderApp(<App />)
+    try {
+      await waitFor(() =>
+        expect(within(view.container).getByRole('button', { name: 'More info' })).not.toBeNull()
+      )
+      const moreInfo = within(view.container).getByRole('button', { name: 'More info' })
+      await userEvent.click(moreInfo)
+      expect(moreInfo.getAttribute('aria-expanded')).toBe('true')
+      const details = view.container.querySelector('.desktop-update-dialog__versions')!
+      expect(Array.from(details.querySelectorAll('dt'), node => node.textContent)).toEqual([
+        'Current version',
+        'Version to install',
+      ])
+      expect(Array.from(details.querySelectorAll('dd'), node => node.textContent)).toEqual([
+        '0.11.9',
+        '0.12.0',
+      ])
+      expect(details.textContent).not.toContain('Compatible versions')
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('dismisses Later for this session and shows an incompatible notice on a fresh launch', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    desktopUpdateCheckHarness.renderButtons = true
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    const view = renderApp(<App />)
+
+    const notice = within(view.container)
+    await waitFor(() =>
+      expect(notice.getByRole('region', { name: 'Desktop update available' })).not.toBeNull()
+    )
+    expect(notice.getByRole('region', { name: 'Desktop update available' })).not.toBeNull()
+    await userEvent.click(notice.getByRole('button', { name: 'Later' }))
+
+    expect(notice.queryByRole('region', { name: 'Desktop update available' })).toBeNull()
+    expect(view.container.querySelector('.app-frame')).not.toBeNull()
+    view.unmount()
+
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: await createOutdatedDesktopReleaseStatus('0.11.9'),
+    })
+    const nextLaunch = renderApp(<App />)
+    try {
+      const launched = within(nextLaunch.container)
+      await waitFor(() =>
+        expect(launched.getByRole('region', { name: 'Desktop update available' })).not.toBeNull()
+      )
+      expect(launched.getByRole('region', { name: 'Desktop update available' })).not.toBeNull()
+      expect(launched.getByRole('button', { name: 'Later' })).not.toBeNull()
+    } finally {
+      nextLaunch.unmount()
+    }
+  })
+
+  it('shows safe populated failure details and keeps the update notice dismissible', async () => {
+    const user = userEvent.setup()
+    currentController = makeController({
+      initialExperienceLoading: false,
+      runtimeConfigState: {
+        configured: true,
+        isLocalhost: false,
+        selectorVisible: false,
+        activeOptionId: 'selected-api',
+        envKey: 'https://api.example.test',
+        storagePath: '/tmp/evenfire-runtime-config',
+        options: [
+          {
+            id: 'selected-api',
+            label: 'Selected API',
+            source: 'file',
+            configPath: null,
+            externalRestApiBaseUrl:
+              'https://user:password@api.example.test/api/v1?access_token=secret',
+            rpcProxyBaseUrl: 'https://rpc.example.test/api/v1',
+            appName: 'Evenfire',
+          },
+        ],
+      },
+    } as Partial<AppController>)
+    desktopUpdateCheckHarness.getStatus.mockRejectedValue(
+      new Error('The selected API rejected the Desktop release check (HTTP 401).')
+    )
+
+    const view = renderApp(<App />)
+    await act(async () => {
+      desktopUpdateCheckHarness.onRequested?.()
+      await Promise.resolve()
+    })
+    await waitFor(() => {
+      expect(view.container.querySelector('[role="alert"]')?.textContent).toContain('HTTP 401')
+    })
+
+    const moreInfo = view.container.querySelector<HTMLButtonElement>(
+      '.desktop-update-dialog__more-info'
+    )
+    expect(moreInfo?.textContent).toBe('More info')
+    await user.click(moreInfo!)
+    expect(moreInfo?.getAttribute('aria-expanded')).toBe('true')
+    const details = view.container.querySelector('.desktop-update-dialog__versions')
+    expect(details?.textContent).toContain('Selected API rejected the release check')
+    expect(details?.textContent).toContain('401')
+    expect(details?.textContent).toContain('https://api.example.test')
+    expect(details?.textContent).not.toContain('password')
+    expect(details?.textContent).not.toContain('secret')
+
+    moreInfo?.focus()
+    await user.keyboard('{Enter}')
+    expect(moreInfo?.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(view.container.querySelector('[aria-label="Dismiss update notice"]')!)
+    expect(view.container.querySelector('[aria-label="Desktop update notice"]')).toBeNull()
+    expect(view.container.querySelector('.app-frame')).not.toBeNull()
+  })
+
+  it('hides More info when a failure has no useful safe diagnostic detail', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    desktopUpdateCheckHarness.getStatus.mockRejectedValue(
+      new Error('token=secret raw server response body')
+    )
+
+    const view = renderApp(<App />)
+    await act(async () => {
+      desktopUpdateCheckHarness.onRequested?.()
+      await Promise.resolve()
+    })
+    await waitFor(() => {
+      expect(view.container.querySelector('[role="alert"]')).not.toBeNull()
+    })
+
+    expect(view.container.querySelector('.desktop-update-dialog__more-info')).toBeNull()
+    expect(view.container.querySelector('.desktop-update-dialog__versions')).toBeNull()
+    expect(view.container.textContent).not.toContain('secret')
+    expect(view.container.querySelector('.app-frame')).not.toBeNull()
+  })
+
   function resetAppDeepLinkHarness(): void {
     vi.clearAllMocks()
     confirmDialogHarness.props = null
@@ -816,6 +1226,18 @@ describe('App deep-link orchestration', () => {
     chatLocalSearchHarness.rendered.mockReset()
     commandPaletteHarness.props = null
     settingsPageHarness.props = null
+    desktopUpdateCheckHarness.onRequested = null
+    desktopUpdateCheckHarness.getStatus = vi.fn().mockResolvedValue(null)
+    desktopUpdateCheckHarness.getPresentation = vi.fn().mockResolvedValue({ manualInstall: false })
+    desktopUpdateCheckHarness.getPending = vi.fn().mockResolvedValue(null)
+    desktopUpdateCheckHarness.onDownloaded = null
+    desktopUpdateCheckHarness.onExtracting = null
+    desktopUpdateCheckHarness.onSaving = null
+    desktopUpdateCheckHarness.onOpening = null
+    desktopUpdateCheckHarness.renderButtons = false
+    desktopUpdateCheckHarness.download = vi.fn().mockResolvedValue(undefined)
+    desktopUpdateCheckHarness.install = vi.fn().mockResolvedValue({ installed: true })
+    desktopUpdateCheckHarness.openInstaller = vi.fn().mockResolvedValue({ opened: true })
     sandboxUiPageHarness.props = null
     filesPageHarness.props = null
     filesPageHarness.renderActual = false
@@ -853,6 +1275,43 @@ describe('App deep-link orchestration', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: {
+          getDesktopReleaseStatus: () => desktopUpdateCheckHarness.getStatus(),
+          getDesktopUpdatePresentation: () => desktopUpdateCheckHarness.getPresentation(),
+          getPendingDesktopUpdate: () => desktopUpdateCheckHarness.getPending(),
+          downloadDesktopUpdate: (...args: unknown[]) =>
+            desktopUpdateCheckHarness.download(...args),
+          installDesktopUpdate: (...args: unknown[]) => desktopUpdateCheckHarness.install(...args),
+          openDesktopUpdateInstaller: (...args: unknown[]) =>
+            desktopUpdateCheckHarness.openInstaller(...args),
+          onDesktopUpdateProgress: () => vi.fn(),
+          onDesktopUpdateExtracting: (callback: (version: string) => void) => {
+            desktopUpdateCheckHarness.onExtracting = callback
+            return vi.fn()
+          },
+          onDesktopUpdatePreparing: (callback: (version: string) => void) => {
+            desktopUpdateCheckHarness.onSaving = callback
+            return vi.fn()
+          },
+          onDesktopUpdateOpening: (callback: (version: string) => void) => {
+            desktopUpdateCheckHarness.onOpening = callback
+            return vi.fn()
+          },
+          onDesktopUpdateDownloaded: (
+            callback: (update: {
+              version: string
+              updaterCapable: boolean
+              manualInstall?: boolean
+            }) => void
+          ) => {
+            desktopUpdateCheckHarness.onDownloaded = callback
+            return vi.fn()
+          },
+          onDesktopUpdateCheckRequested: (callback: () => void) => {
+            desktopUpdateCheckHarness.onRequested = callback
+            return vi.fn()
+          },
+        },
         shortcuts: {
           onCommand: vi.fn(
             (callback: (commandId: DesktopCommandId, source: 'host' | 'sandbox') => void) => {
@@ -922,6 +1381,7 @@ describe('App deep-link orchestration', () => {
     )
     const controllerBridge = window.clerum
     Object.assign(window.clerum, {
+      auth: { ...(rendererBridge.auth ?? {}), ...(controllerBridge.auth ?? {}) },
       shortcuts: rendererBridge.shortcuts,
       entityChanges: rendererBridge.entityChanges,
       app: rendererBridge.app,
@@ -1371,6 +1831,7 @@ describe('App deep-link orchestration', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -1770,6 +2231,7 @@ describe('App deep-link orchestration', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -2139,6 +2601,7 @@ describe('App deep-link orchestration', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -2370,6 +2833,7 @@ describe('App deep-link orchestration', () => {
       )
     }
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -2673,6 +3137,7 @@ describe('App deep-link orchestration', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -2782,6 +3247,7 @@ describe('App deep-link orchestration', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -4583,6 +5049,7 @@ describe('App deep-link orchestration', () => {
     const appBridge = window.clerum
     const { handle } = installAppControllerClerum({ agentNames: ['agent-x'] })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -4719,6 +5186,7 @@ describe('App deep-link orchestration', () => {
     const appBridge = window.clerum
     const { handle } = installAppControllerClerum({ agentNames: ['agent-x'] })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,
@@ -6589,6 +7057,7 @@ describe('App deep-link orchestration', () => {
       return { authenticated: true, me: userB }
     })
     Object.assign(window.clerum, {
+      auth: { ...(appBridge.auth ?? {}), ...(window.clerum.auth ?? {}) },
       shortcuts: appBridge.shortcuts,
       app: appBridge.app,
       sandboxUi: appBridge.sandboxUi,

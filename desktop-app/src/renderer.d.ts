@@ -21,6 +21,9 @@ import {
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
+  DesktopUpdateDownloadResult,
+  DesktopUpdateDownloadedEvent,
+  DesktopUpdateProgress,
   EntityChangeStreamEvent,
   ExternalChannelsSummary,
   HostActivitySnapshot,
@@ -33,6 +36,7 @@ import {
   LoginBackendHint,
   MessageToolStep,
   PasswordLoginResult,
+  PendingDesktopUpdate,
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
@@ -111,6 +115,24 @@ declare global {
           callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
         ) => () => void
         getDesktopReleaseStatus: () => Promise<DesktopReleaseStatus>
+        getDesktopUpdatePresentation: () => Promise<{ manualInstall: boolean }>
+        getPendingDesktopUpdate: () => Promise<PendingDesktopUpdate | null>
+        downloadDesktopUpdate: (
+          expectedVersion: string,
+          restartAfterDownload?: boolean
+        ) => Promise<DesktopUpdateDownloadResult>
+        cancelDesktopUpdate: () => Promise<void>
+        installDesktopUpdate: (expectedVersion: string) => Promise<{ installed: true }>
+        openDesktopUpdateInstaller: (expectedVersion: string) => Promise<{ opened: true }>
+        onDesktopUpdateCheckRequested: (callback: () => void) => () => void
+        onDesktopUpdateProgress: (callback: (progress: DesktopUpdateProgress) => void) => () => void
+        onDesktopUpdateExtracting: (callback: (version: string) => void) => () => void
+        onDesktopUpdatePreparing: (callback: (version: string) => void) => () => void
+        onDesktopUpdateOpening: (callback: (version: string) => void) => () => void
+        onDesktopUpdateDownloaded: (
+          callback: (payload: DesktopUpdateDownloadedEvent) => void
+        ) => () => void
+        onDesktopUpdateError: (callback: (message: string) => void) => () => void
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
         onExternalLogout: (callback: () => void) => () => void

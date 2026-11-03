@@ -627,7 +627,12 @@ describe('FilePreviewPage', () => {
         return digestResult.then(() => actualDigest)
       })
     const renameResource = vi.fn(async () => undefined)
-    const affordances = vi.fn(async () => activeAffordances)
+    let authorityGeneration = 1
+    const authorityReads: Array<{ generation: number; resourceId: string }> = []
+    const affordances = vi.fn(async (resourceId: string) => {
+      authorityReads.push({ generation: authorityGeneration, resourceId })
+      return activeAffordances
+    })
     const producerResource = () =>
       resolveResource({
         resourceId: '0123456789abcdef0123456789abcdef',
@@ -671,10 +676,19 @@ describe('FilePreviewPage', () => {
       })
       fireEvent.submit(dialog)
       await digestFinished
-      const permissionReadsBeforeReplacement = affordances.mock.calls.length
 
+      authorityGeneration = 2
       controllerState.sessionGeneration = 2
       view.rerender(<FilePreviewPage {...props} />)
+      await waitFor(() => {
+        expect(
+          authorityReads.filter(read => read.generation === 2).map(read => read.resourceId)
+        ).toEqual(expect.arrayContaining(['0123456789abcdef0123456789abcdef', 'preview-parent']))
+      })
+      const replacementGenerationReads = authorityReads
+        .filter(read => read.generation === 2)
+        .map(read => read.resourceId)
+
       await act(async () => releaseDigest(new ArrayBuffer(0)))
       await act(async () => {
         await Promise.resolve()
@@ -682,7 +696,9 @@ describe('FilePreviewPage', () => {
       })
 
       expect(renameResource).not.toHaveBeenCalled()
-      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeReplacement)
+      expect(
+        authorityReads.filter(read => read.generation === 2).map(read => read.resourceId)
+      ).toEqual(replacementGenerationReads)
     } finally {
       releaseDigest(new ArrayBuffer(0))
       digestSpy.mockRestore()

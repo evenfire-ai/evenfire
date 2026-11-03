@@ -22,9 +22,13 @@ const OUTDATED_DESKTOP_RELEASE = {
   checked: true,
   currentVersion: '0.1.249',
   latestVersion: '0.1.250',
+  compatibleVersions: ['0.1.250'],
+  compatible: false,
+  updateAvailable: true,
   minimumVersion: '0.1.250',
   updateRequired: true,
-  releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/desktop-app-0.1.250',
+  releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/v0.1.250',
+  releaseTag: 'v0.1.250',
 }
 
 /**
@@ -173,13 +177,14 @@ describe('useWorkspaceController', () => {
     renderControllerHarness()
 
     await waitFor(() => expect(screen.getByTestId('booting').textContent).toBe('false'))
+    await waitFor(() => expect(clerum.getDesktopReleaseStatus).toHaveBeenCalledTimes(1))
 
     fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
     fireEvent.click(screen.getByRole('button', { name: 'Login' }))
 
     await waitFor(() => expect(clerum.passwordLogin).toHaveBeenCalledWith('test@clerum.io', 'test'))
     await waitFor(() => expect(clerum.getSessionState).toHaveBeenCalledTimes(2))
-    await waitFor(() => expect(clerum.getDesktopReleaseStatus).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(clerum.getDesktopReleaseStatus).toHaveBeenCalledTimes(2))
 
     expect(screen.getByTestId('busy').textContent).toBe('true')
 

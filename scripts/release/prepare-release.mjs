@@ -4,7 +4,7 @@
 // duplicating its renderer.
 //
 //   node scripts/release/prepare-release.mjs --version 0.6.0 --release-id <id> \
-//        [--minimum-desktop-version 0.6.0]
+//        [--compatible-desktop-version 0.5.9 --compatible-desktop-version 0.6.0]
 import { execFileSync, execFileSync as run } from 'node:child_process'
 import process from 'node:process'
 import {
@@ -42,7 +42,16 @@ function die(message) {
 
 const version = argValue('--version')
 const releaseId = argValue('--release-id')
-const minimumDesktopVersion = argValue('--minimum-desktop-version')
+const compatibleDesktopVersions = []
+for (let index = 0; index < process.argv.length; index += 1) {
+  if (process.argv[index] === '--compatible-desktop-version') {
+    const requested = process.argv[index + 1]
+    if (!requested || requested.startsWith('--')) {
+      die('--compatible-desktop-version requires a MAJOR.MINOR.PATCH value')
+    }
+    compatibleDesktopVersions.push(requested)
+  }
+}
 
 if (!SEMVER_RE.test(version)) {
   die(`--version must be MAJOR.MINOR.PATCH, got: ${version || '(missing)'}`)
@@ -55,18 +64,25 @@ if (!releaseId) {
   die('--release-id is required (it reaches a customer-facing manifest)')
 }
 
-if (minimumDesktopVersion && !SEMVER_RE.test(minimumDesktopVersion)) {
-  die(`--minimum-desktop-version must be MAJOR.MINOR.PATCH, got: ${minimumDesktopVersion}`)
+if (process.argv.includes('--minimum-desktop-version')) {
+  die(
+    'minimumDesktopVersion is frozen for already-shipped clients; do not raise the legacy update floor'
+  )
 }
 
-// Range-check the floor BEFORE writing anything. The delegated updater rejects
-// a floor above desktopVersion, and discovering that after the coordinate loop
-// has already written package.json leaves the tree half-cut.
-if (minimumDesktopVersion && compareVersions(minimumDesktopVersion, version) > 0) {
-  die(
-    `--minimum-desktop-version ${minimumDesktopVersion} is greater than --version ${version}. ` +
-      `The floor is a compatibility minimum; it can never exceed the release itself.`
-  )
+if (compatibleDesktopVersions.length > 0) {
+  if (compatibleDesktopVersions.some(value => !SEMVER_RE.test(value))) {
+    die('--compatible-desktop-version values must be MAJOR.MINOR.PATCH')
+  }
+  if (new Set(compatibleDesktopVersions).size !== compatibleDesktopVersions.length) {
+    die('--compatible-desktop-version values must be unique')
+  }
+  if (!compatibleDesktopVersions.includes(version)) {
+    die('the compatible Desktop version set must include the requested --version')
+  }
+  if (compatibleDesktopVersions.some(value => compareVersions(value, version) > 0)) {
+    die('compatible Desktop versions cannot be greater than the requested --version')
+  }
 }
 
 const onDisk = COORDINATES.find(c => c.name === 'desktop-app/package.json').read(ROOT)
@@ -95,8 +111,8 @@ const manifestArgs = [
   '--release-id',
   releaseId,
 ]
-if (minimumDesktopVersion) {
-  manifestArgs.push('--minimum-desktop-version', minimumDesktopVersion)
+for (const compatibleDesktopVersion of compatibleDesktopVersions) {
+  manifestArgs.push('--compatible-desktop-version', compatibleDesktopVersion)
 }
 try {
   execFileSync('node', manifestArgs, { cwd: ROOT, stdio: 'inherit' })

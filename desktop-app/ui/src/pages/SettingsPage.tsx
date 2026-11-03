@@ -296,6 +296,7 @@ export function SettingsPage({
   desktopNotificationPermission,
   themeMode,
   onNotify,
+  onCheckForUpdates,
   onThemeModeChange,
   onNotificationSoundVolumeChange,
   onPlayNotificationSoundPreview,
@@ -931,7 +932,12 @@ export function SettingsPage({
           >
             <section className="page-card settings-card" aria-label="Connection endpoints">
               <div className="settings-form">
-                <dl className="settings-runtime-details settings-runtime-details--diagnostics">
+                <div className="settings-control-width">
+                  <Button block type="button" color="secondary" onClick={onCheckForUpdates}>
+                    Check for updates
+                  </Button>
+                </div>
+                <dl className="settings-control-width settings-runtime-details settings-runtime-details--diagnostics">
                   <div>
                     <dt>Desktop app version</dt>
                     <dd>
@@ -983,18 +989,18 @@ export function SettingsPage({
                     </dd>
                   </div>
                   <div>
-                    <dt>Minimum desktop version</dt>
+                    <dt>Certified compatible Desktop versions</dt>
                     <dd>
                       {endpointDiagnostics.releaseStatus
-                        ? endpointDiagnostics.releaseStatus.minimumVersion
+                        ? endpointDiagnostics.releaseStatus.compatibleVersions.join(', ')
                         : getVersionValue(null, { loading: endpointDiagnostics.loading })}
                     </dd>
                   </div>
                   <div>
-                    <dt>Update required</dt>
+                    <dt>Compatible with selected backend</dt>
                     <dd>
                       {endpointDiagnostics.releaseStatus
-                        ? endpointDiagnostics.releaseStatus.updateRequired
+                        ? endpointDiagnostics.releaseStatus.compatible
                           ? 'Yes'
                           : 'No'
                         : endpointDiagnostics.loading
@@ -1005,6 +1011,10 @@ export function SettingsPage({
                   <div>
                     <dt>Release URL</dt>
                     <dd>{endpointDiagnostics.releaseStatus?.releaseUrl || 'Not reported'}</dd>
+                  </div>
+                  <div>
+                    <dt>Legacy minimum (not used by this client)</dt>
+                    <dd>{endpointDiagnostics.releaseStatus?.minimumVersion || 'Not reported'}</dd>
                   </div>
                   <div>
                     <dt>External REST API health</dt>

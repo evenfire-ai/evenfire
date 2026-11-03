@@ -19,6 +19,7 @@ import {
   requireChatStore,
   requireChatStoreForBindingGeneration,
 } from './chatStoreBinding.js'
+import { DesktopUpdateManager } from './desktopUpdateManager.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
 import {
@@ -440,7 +441,11 @@ function sanitizeDesktopNotificationActions(
     .slice(0, 3)
 }
 
-export function registerIpcHandlers(service: AppService, logout: () => Promise<number>): void {
+export function registerIpcHandlers(
+  service: AppService,
+  logout: () => Promise<number> = () => service.logout(),
+  desktopUpdates?: DesktopUpdateManager
+): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
@@ -609,6 +614,46 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     return service.getDesktopReleaseStatus()
   })
+  ipcMain.handle('auth:getPendingDesktopUpdate', async event => {
+    assertTrustedSender(event)
+    return (await desktopUpdates?.getPendingDesktopUpdate()) ?? null
+  })
+  ipcMain.handle('auth:getDesktopUpdatePresentation', async event => {
+    assertTrustedSender(event)
+    return { manualInstall: process.platform === 'darwin' }
+  })
+  ipcMain.handle(
+    'auth:downloadDesktopUpdate',
+    async (event, payload: { expectedVersion?: unknown; restartAfterDownload?: unknown }) => {
+      assertTrustedSender(event)
+      if (!desktopUpdates) throw new Error('Desktop updates are unavailable.')
+      return desktopUpdates.downloadDesktopUpdate(
+        sanitizeString(payload?.expectedVersion),
+        payload?.restartAfterDownload === true
+      )
+    }
+  )
+  ipcMain.handle('auth:cancelDesktopUpdate', async event => {
+    assertTrustedSender(event)
+    if (!desktopUpdates) throw new Error('Desktop updates are unavailable.')
+    await desktopUpdates.cancelDesktopUpdate()
+  })
+  ipcMain.handle(
+    'auth:installDesktopUpdate',
+    async (event, payload: { expectedVersion?: unknown }) => {
+      assertTrustedSender(event)
+      if (!desktopUpdates) throw new Error('Desktop updates are unavailable.')
+      return desktopUpdates.installDownloadedUpdate(sanitizeString(payload?.expectedVersion))
+    }
+  )
+  ipcMain.handle(
+    'auth:openDesktopUpdateInstaller',
+    async (event, payload: { expectedVersion?: unknown }) => {
+      assertTrustedSender(event)
+      if (!desktopUpdates) throw new Error('Desktop updates are unavailable.')
+      return desktopUpdates.openDownloadedMacInstaller(sanitizeString(payload?.expectedVersion))
+    }
+  )
   ipcMain.handle('auth:getDesktopAppInfo', async event => {
     assertTrustedSender(event)
     return service.getDesktopAppInfo()

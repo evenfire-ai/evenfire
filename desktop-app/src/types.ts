@@ -108,6 +108,7 @@ export type DesktopReleasePolicy = {
   externalRestApiVersion?: string
   rpcProxyVersion?: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
   releaseTag: string
   releaseUrl: string
@@ -123,6 +124,9 @@ export type DesktopReleaseStatus = {
   checked: boolean
   currentVersion: string
   latestVersion: string
+  compatibleVersions: string[]
+  compatible: boolean
+  updateAvailable: boolean
   minimumVersion: string
   updateRequired: boolean
   releaseUrl: string
@@ -131,6 +135,31 @@ export type DesktopReleaseStatus = {
   externalRestApiVersion?: string
   rpcProxyVersion?: string
   reason?: string
+}
+
+export type DesktopUpdateProgress = {
+  percent: number
+  transferred: number
+  total: number
+}
+
+export type DesktopUpdateDownloadResult = {
+  downloaded: true
+  version: string
+  updaterCapable: boolean
+  manualInstall: boolean
+}
+
+export type DesktopUpdateDownloadedEvent = {
+  version: string
+  updaterCapable: boolean
+  manualInstall: boolean
+}
+
+export type PendingDesktopUpdate = {
+  version: string
+  updaterCapable: boolean
+  manualInstall: boolean
 }
 
 export type PendingWorkflowApproval = {

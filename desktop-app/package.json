@@ -50,6 +50,7 @@
   "dependencies": {
     "@clerum/desktop-app-links": "file:../packages/desktop-app-links",
     "@clerum/gfs-interaction-policy": "file:../packages/gfs-interaction-policy",
+    "@electron/asar": "3.4.1",
     "@tanstack/react-query": "5.100.10",
     "hast-util-to-jsx-runtime": "^2.3.6",
     "js-yaml": "^4.3.2",
@@ -60,7 +61,8 @@
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
     "remark-rehype": "^11.1.2",
-    "unified": "^11.0.5"
+    "unified": "^11.0.5",
+    "yauzl": "3.4.0"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",
@@ -80,6 +82,7 @@
     "@types/node": "^24.3.0",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
+    "@types/yauzl": "3.4.0",
     "@vitejs/plugin-react": "^5.0.2",
     "concurrently": "^9.2.1",
     "cross-env": "^10.0.0",
@@ -97,6 +100,6 @@
   "overrides": {
     "@tootallnate/once": "^3.0.1",
     "tmp": "^0.2.4",
-    "tar": "7.5.19"
+    "tar": "7.5.22"
   }
 }

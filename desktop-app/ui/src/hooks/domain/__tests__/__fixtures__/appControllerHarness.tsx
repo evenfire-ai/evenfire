@@ -89,6 +89,9 @@ const DEFAULT_DESKTOP_RELEASE_STATUS = {
   checked: true,
   currentVersion: '0.1.250',
   latestVersion: '0.1.250',
+  compatibleVersions: ['0.1.250'],
+  compatible: true,
+  updateAvailable: false,
   minimumVersion: '0.1.250',
   updateRequired: false,
   releaseUrl: '',
@@ -152,6 +155,7 @@ export interface AppControllerClerumHandle {
     appName?: string
   }) => Promise<void>
   getDesktopReleaseStatus: Fn
+  getPendingDesktopUpdate: Fn
   teamDirectory: Fn
   switchTeam: Fn
   refreshCatalog: Fn
@@ -263,6 +267,7 @@ export function extendMockClerumForAppController(
   const getDesktopReleaseStatus = vi.fn(
     async () => options.desktopReleaseStatus ?? DEFAULT_DESKTOP_RELEASE_STATUS
   )
+  const getPendingDesktopUpdate = vi.fn(async () => null)
   const teamDirectory = vi.fn(async () =>
     held() ? teamDirectoryDeferred.promise : teamDirectoryPayload
   )
@@ -328,6 +333,7 @@ export function extendMockClerumForAppController(
       getSessionGeneration,
       selectRuntimeConfigForHandoff,
       getDesktopReleaseStatus,
+      getPendingDesktopUpdate,
       openDesktopRelease: vi.fn(async () => undefined),
       passwordLogin,
       logout,
@@ -413,6 +419,7 @@ export function extendMockClerumForAppController(
       await desktopEnvironmentSetupListener?.(payload)
     },
     getDesktopReleaseStatus,
+    getPendingDesktopUpdate,
     teamDirectory,
     switchTeam,
     refreshCatalog,

@@ -774,6 +774,13 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
   if (existing) {
     existing.updatedAt = new Date().toISOString()
     existing.appName = validated.appName?.trim() || DEFAULT_APP_NAME
+    const previousRpcOrigin = existing.config.rpcProxyBaseUrl
+      ? resolveOriginKeyPart(existing.config.rpcProxyBaseUrl)
+      : ''
+    const nextRpcOrigin = validated.rpcProxyBaseUrl
+      ? resolveOriginKeyPart(validated.rpcProxyBaseUrl)
+      : ''
+    if (previousRpcOrigin !== nextRpcOrigin) existing.id = randomUUID()
     existing.config = {
       externalRestApiBaseUrl: validated.externalRestApiBaseUrl,
       rpcProxyBaseUrl: validated.rpcProxyBaseUrl || '',
@@ -790,7 +797,7 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
   const filePath = nextProfileFilePath(directoryPath, validated.appName || DEFAULT_APP_NAME)
   const timestamp = new Date().toISOString()
   const profile: StoredRuntimeProfile = {
-    id: `${toAppSlug(validated.appName || DEFAULT_APP_NAME)}-${randomUUID()}`,
+    id: randomUUID(),
     appName: validated.appName?.trim() || DEFAULT_APP_NAME,
     filePath,
     createdAt: timestamp,

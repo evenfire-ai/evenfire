@@ -143,7 +143,7 @@ export const COORDINATES = [
     name: 'releaseManifest.minimumDesktopVersion',
     assert: 'floor',
     read: root => manifestField(root, 'minimumDesktopVersion'),
-    writtenBy: 'update-desktop-release-manifest.mjs --minimum-desktop-version',
+    writtenBy: 'legacy compatibility metadata (frozen; do not raise)',
   },
   {
     name: 'releaseManifest.releaseId',
