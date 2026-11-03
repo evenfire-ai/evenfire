@@ -2192,6 +2192,22 @@ export class TaskExecutor {
             'Denial settlement failed after task became terminal'
           )
         }
+        // A timeout still owes the caller one result. The denial text names the
+        // user as the decider, so a timed-out approval delivers the timeout
+        // outcome instead. The terminal transition above owns the progress
+        // stream and the queue cleanup; this is only the result delivery.
+        if (
+          this.deps.taskLifecycle.get(this.taskId)?.reason === 'approval_timeout' &&
+          this.task.responseCallback
+        ) {
+          this.task
+            .responseCallback({
+              response: `The approval for \`${toolName}\` timed out. The operation was not performed.`,
+            })
+            .catch(err => {
+              logger.error({ taskId: this.taskId, err }, 'Failed to send approval timeout')
+            })
+        }
         this.state =
           this.deps.taskLifecycle.getStatus(this.taskId) === 'completed' ? 'completed' : 'failed'
         this.resolveCompletion?.()
