@@ -1116,7 +1116,8 @@ describe('R2-L2 post-wake continuation attempt floor', () => {
 
   /**
    * The two services share no package, so each side's value is read from its
-   * own production source: the Host's verdict bound and the proxy's copy, its
+   * own production source: the Host's verdict bound and its default durable
+   * store sync timeout, then the proxy's copy of the verdict wait, its
    * pre-verdict allowance and the floor composed from both.
    */
   function readHostVerdictBudgetMs(): number {
@@ -1127,6 +1128,28 @@ describe('R2-L2 post-wake continuation attempt floor', () => {
     const bound = source.match(/MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS = ([\d_]+)/)
     expect(bound, 'MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS is declared').toBeTruthy()
     return Number(bound![1]!.replaceAll('_', ''))
+  }
+
+  /**
+   * The proxy's stated basis for the allowance is the Host's DEFAULT durable
+   * store sync timeout, which is what a deployment gets unless it sets the
+   * variable: no chart, compose file or manifest in this repository sets
+   * `CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS`. The checkpoint claim is one such
+   * bounded sync write, so raising this default widens the window the
+   * allowance exists to cover. The field name is part of the match because the
+   * stall-timeout default below it reads the same variable and must not answer
+   * here instead.
+   */
+  function readHostDbPersistSyncTimeoutDefaultMs(): number {
+    const source = readFileSync(new URL('../../../mcp-host/src/config.ts', import.meta.url), 'utf8')
+    const declared = source.match(
+      /dbPersistSyncTimeoutMs:\s*parseInt\(\s*getEnv\('CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS',\s*'(\d+)'\)/
+    )
+    expect(
+      declared,
+      'dbPersistSyncTimeoutMs declares the CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS default'
+    ).toBeTruthy()
+    return Number(declared![1])
   }
 
   function readProxyContinuationBudgets(): {
@@ -1156,11 +1179,16 @@ describe('R2-L2 post-wake continuation attempt floor', () => {
     // that wait at receipt, so the answer still has to travel back, and the
     // claim can outlive the deadline by one bounded sync write.
     const hostVerdictTimeoutMs = readHostVerdictBudgetMs()
+    const hostSyncTimeoutDefaultMs = readHostDbPersistSyncTimeoutDefaultMs()
     const { verdict, allowance, floor } = readProxyContinuationBudgets()
 
     expect(verdict).toBe(hostVerdictTimeoutMs)
     expect(allowance).toBeGreaterThan(0)
     expect(floor).toBeGreaterThan(hostVerdictTimeoutMs)
+    // The allowance's stated basis is that bounded sync write, so it must still
+    // cover the Host default after the default changes: pinning the allowance
+    // to a literal alone would absorb a raise silently.
+    expect(allowance).toBeGreaterThanOrEqual(hostSyncTimeoutDefaultMs)
   })
 
   it('starts no POST with 2 s of hold left and answers 503 host_waking', async () => {
