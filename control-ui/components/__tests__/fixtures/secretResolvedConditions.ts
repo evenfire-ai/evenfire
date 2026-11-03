@@ -38,7 +38,7 @@ import {
  *
  * | builder              | producer branch                        |
  * |----------------------|----------------------------------------|
- * | `secretFound`        | the success write (both sites)          |
+ * | `secretFound`        | every literal success site              |
  * | `secretNotFound`     | `absent` — the k8s 404 read             |
  * | `secretMissingKey`   | `missingKey` — the declared-key check    |
  * | `secretAccessDenied` | `accessDenied` — the k8s 401/403 read   |
@@ -70,8 +70,8 @@ const DEFAULT_ENV_VAR = 'LINEAR_WORKSPACE'
 type Stamped = { at: string }
 
 /** The producer's success write — the Secret exists and every declared key is
- *  present. Both success sites, managed and WRC-owned, write one triple; the
- *  extraction fails if they ever stop agreeing. */
+ *  present. Every literal success site (managed, WRC-owned and the egress-proxy
+ *  block) writes one triple; the extraction fails if they ever stop agreeing. */
 export function secretFound({ at }: Stamped): McpServerCondition {
   return {
     type: SECRET_RESOLVED,

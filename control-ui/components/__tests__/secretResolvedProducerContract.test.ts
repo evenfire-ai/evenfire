@@ -74,11 +74,38 @@ const lines = source.split('\n')
 type ConditionWrite = {
   /** 1-based line of the `type:` property, for failure messages. */
   line: number
+  /** The class method that owns this write site, e.g. `performReconcile`. */
+  owner: string
   status: string
   /** RAW source expression, e.g. `'SecretFound'` or `secretResult.reason`. */
   reason: string
   /** RAW source expression, e.g. `'Secret resolved and validated'`. */
   message: string
+}
+
+/**
+ * The class method enclosing a condition-write anchor, so a producer site is
+ * identified by WHO writes it, not only by the triple it writes (the egress
+ * proxy block writes the same success triple as the two reconcile paths).
+ *
+ * Class members are the only declarations at two-space indentation in
+ * `reconciler.ts`; method bodies are deeper. An anchor with no enclosing member
+ * throws rather than guessing, because a guessed owner would let a moved site
+ * keep matching this allowlist.
+ */
+function enclosingMethod(anchor: number): string {
+  /** A member declaration: two-space indented, optional modifiers, then the name. */
+  const memberDeclaration =
+    /^ {2}(?:(?:private|public|protected|static|async|readonly)\s+)*([A-Za-z_$][\w$]*)\s*\(/
+  for (let index = anchor; index >= 0; index--) {
+    const matched = memberDeclaration.exec(lines[index])
+    if (matched) return matched[1]
+  }
+  throw new Error(
+    `SecretResolved producer contract: the condition write anchored at ` +
+      `${path.basename(RECONCILER_PATH)}:${anchor + 1} has no enclosing class method. The ` +
+      `producer file's shape changed; re-derive this extractor.`
+  )
 }
 
 function matchProperty(line: string | undefined, re: RegExp, at: number, what: string): string {
@@ -107,6 +134,7 @@ function extractConditionWrites(): ConditionWrite[] {
   }
   return anchors.map(index => ({
     line: index + 1,
+    owner: enclosingMethod(index),
     status: matchProperty(lines[index + 1], /^\s*status: '([A-Za-z]+)',$/, index + 2, 'status'),
     reason: matchProperty(lines[index + 2], /^\s*reason: (.+),$/, index + 3, 'reason'),
     message: matchProperty(lines[index + 3], /^\s*message: (.+),$/, index + 4, 'message'),
@@ -116,15 +144,45 @@ function extractConditionWrites(): ConditionWrite[] {
 const conditionWrites = extractConditionWrites()
 
 /**
- * The producer sites known when this contract was written: two `True` writes
- * (managed at ~:1981, WRC-owned at ~:2063) and two `False` writes that forward
- * `validateSecret`'s result (~:1872 and ~:2041).
+ * Every `SecretResolved` producer write site this contract knows, keyed by the
+ * method that owns it and the SHAPE it writes.
  *
- * A change to this count is not automatically wrong, but it means a NEW way for
- * the UI to observe `SecretResolved` appeared, and the fixture contract below
- * has to be re-derived rather than assumed to still cover it.
+ * This is an ALLOWLIST OF SITES, not a count. A new way for the UI to observe
+ * `SecretResolved` has to be named here — with the producer method that writes
+ * it — and the fixture contract below then has to account for it. A site that
+ * disappears fails just as loudly, which is the property the fixture builders
+ * depend on: `secretFound()` stands for EVERY literal success site.
+ *
+ * The shape is derived from the write (`forward-validateSecret` when it forwards
+ * `validateSecret`'s result, `literal-success` for a non-forwarding literal
+ * write at the success status) rather than the triple being restated here, so a
+ * producer RENAME still propagates into the fixtures instead of merely breaking
+ * this allowlist. A literal write that is not the success status is `unknown`
+ * and cannot match any site, which is how a novel condition lands red.
+ *
+ * `blockEgressProxyValues` (issue #1240) is the site that forced this shape: a
+ * rotation whose credential is readable but outside the egress-proxy value class
+ * still clears a stale `SecretResolved=False` from an earlier state, writing the
+ * same success triple as the two reconcile paths. It is a real producer site,
+ * so it is listed here rather than absorbed into a bumped count.
  */
-const KNOWN_PRODUCER_WRITE_SITES = 4
+type ProducerSiteShape = 'forward-validateSecret' | 'literal-success'
+type ProducerWriteSite = { owner: string; shape: ProducerSiteShape | 'unknown' }
+
+const KNOWN_PRODUCER_WRITE_SITES: readonly ProducerWriteSite[] = [
+  // Failed Secret validation in the managed reconcile: forwards validateSecret.
+  { owner: 'performReconcile', shape: 'forward-validateSecret' },
+  // The managed reconcile's success write.
+  { owner: 'performReconcile', shape: 'literal-success' },
+  // The WRC-owned paths write the same two shapes for their own branch.
+  { owner: 'reconcileWrcOwnedServer', shape: 'literal-success' },
+  { owner: 'reconcileWrcOwnedServer', shape: 'forward-validateSecret' },
+  // The egress-proxy value preflight's block path (issue #1240).
+  { owner: 'blockEgressProxyValues', shape: 'literal-success' },
+]
+
+/** Stable, order-independent identity for a site in a failure message. */
+const describeWriteSite = (site: ProducerWriteSite): string => `${site.owner} | ${site.shape}`
 
 const isStringLiteral = (expression: string) => /^'[^']*'$/.test(expression)
 const unquote = (expression: string) => expression.slice(1, -1)
@@ -135,6 +193,22 @@ const literalWrites = conditionWrites.filter(
 const derivedWrites = conditionWrites.filter(
   write => write.reason === 'secretResult.reason' && write.message === 'secretResult.message'
 )
+
+/** Classifies a write by its derived shape; `unknown` never matches a site. */
+function producerSiteShape(write: ConditionWrite): ProducerWriteSite['shape'] {
+  if (write.reason === 'secretResult.reason' && write.message === 'secretResult.message') {
+    return 'forward-validateSecret'
+  }
+  if (isStringLiteral(write.reason) && isStringLiteral(write.message) && write.status === 'True') {
+    return 'literal-success'
+  }
+  return 'unknown'
+}
+
+const extractedWriteSites: ProducerWriteSite[] = conditionWrites.map(write => ({
+  owner: write.owner,
+  shape: producerSiteShape(write),
+}))
 
 // ─── Extraction 2: `validateSecret`'s failure results ──────────────────────
 
@@ -303,8 +377,12 @@ function renderProducerTemplate(reason: string): string {
 const AT = '2026-08-06T04:00:00.000Z'
 
 describe('SecretResolved producer contract — extraction guards', () => {
-  it('finds the producer condition writes it expects to find', () => {
-    expect(conditionWrites.length).toBe(KNOWN_PRODUCER_WRITE_SITES)
+  it('finds exactly the producer condition write sites the contract knows', () => {
+    // Site-for-site, not a count: a new SecretResolved producer must be named
+    // here with its owning method, and a site that disappears fails too.
+    expect(extractedWriteSites.map(describeWriteSite).sort()).toEqual(
+      KNOWN_PRODUCER_WRITE_SITES.map(describeWriteSite).sort()
+    )
     // Every write must be one of the two known shapes. A third shape means the
     // UI can observe a condition this contract says nothing about.
     expect(literalWrites.length + derivedWrites.length).toBe(conditionWrites.length)
@@ -337,11 +415,12 @@ describe('SecretResolved producer contract — fixture builders match the produc
     }
   })
 
-  it('secretFound() reproduces the producer’s success triple, and both sites agree', () => {
+  it('secretFound() reproduces the producer’s success triple, and every site agrees', () => {
     const successWrites = literalWrites.filter(write => write.status === 'True')
     expect(successWrites.length).toBeGreaterThan(0)
-    // All True sites must write the same triple; otherwise one fixture cannot
-    // stand for both and the builder has to grow a discriminator.
+    // All True sites must write the same triple — including the egress-proxy
+    // block path; otherwise one fixture cannot stand for all of them and the
+    // builder has to grow a discriminator.
     const distinct = new Set(successWrites.map(write => `${write.reason}|${write.message}`))
     expect(distinct.size).toBe(1)
 
