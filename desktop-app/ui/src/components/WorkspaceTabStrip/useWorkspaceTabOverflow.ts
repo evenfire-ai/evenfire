@@ -23,10 +23,34 @@ export function useWorkspaceTabOverflow({
   })
   const updateScrollState = useCallback(() => {
     const scroller = scrollerRef.current
-    if (!scroller) return
+    const strip = stripRef.current
+    const list = scroller?.firstElementChild as HTMLElement | null
+    if (!scroller || !strip || !list) return
+
+    const stripWidth = strip.clientWidth
+    if (stripWidth <= 0) return
+
+    const originalStyle = list.getAttribute('style')
+    const styleSeparator = originalStyle && !originalStyle.trimEnd().endsWith(';') ? ';' : ''
+    let fullWidthContent: number
+    try {
+      list.setAttribute(
+        'style',
+        `${originalStyle ?? ''}${styleSeparator}width: ${stripWidth}px !important;`
+      )
+      fullWidthContent = list.scrollWidth
+    } finally {
+      if (originalStyle === null) list.removeAttribute('style')
+      else list.setAttribute('style', originalStyle)
+      // Restore the live list layout before reading viewport navigation geometry.
+      scroller.getBoundingClientRect()
+    }
+
+    const hasOverflow = fullWidthContent - stripWidth > SCROLL_EPSILON
+    if (!hasOverflow && scroller.scrollLeft !== 0) scroller.scrollLeft = 0
     const maximum = Math.max(0, scroller.scrollWidth - scroller.clientWidth)
     const next: WorkspaceTabScrollState = {
-      hasOverflow: maximum > SCROLL_EPSILON,
+      hasOverflow,
       canScrollLeft: scroller.scrollLeft > SCROLL_EPSILON,
       canScrollRight: scroller.scrollLeft < maximum - SCROLL_EPSILON,
     }
@@ -43,7 +67,7 @@ export function useWorkspaceTabOverflow({
         ? current
         : next
     )
-  }, [])
+  }, [stripRef])
 
   const getTabNodes = useCallback(() => {
     const list = scrollerRef.current?.firstElementChild
@@ -162,7 +186,7 @@ export function useWorkspaceTabOverflow({
       window.removeEventListener('resize', measure)
       scroller.removeEventListener('scroll', measure)
     }
-  }, [tabs, updateScrollState, revealPendingTab])
+  }, [tabs, activeTabId, updateScrollState, revealPendingTab])
 
   useEffect(() => {
     const scroller = scrollerRef.current

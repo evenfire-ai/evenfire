@@ -20,6 +20,8 @@ export const installTabStripLayout = (
   initialStripWidth: number
 ) => {
   const scroller = container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement
+  const strip = container.querySelector('.chat-view-tabs') as HTMLDivElement
+  const list = scroller.firstElementChild as HTMLDivElement
   let widths = initialWidths
   let stripWidth = initialStripWidth
   let scrollLeft = 0
@@ -31,6 +33,22 @@ export const installTabStripLayout = (
   const getViewportWidth = () => stripWidth - scrollButtonWidth * getScrollButtonCount()
   const getContentWidth = () =>
     widths.reduce((sum, width) => sum + width, 0) + gap * Math.max(0, widths.length - 1)
+  Object.defineProperty(strip, 'clientWidth', {
+    configurable: true,
+    get: () => stripWidth,
+  })
+  Object.defineProperty(list, 'scrollWidth', {
+    configurable: true,
+    get: () => {
+      const temporaryWidth = list
+        .getAttribute('style')
+        ?.match(/(?:^|;)\s*width:\s*([\d.]+)px\s*!important\s*;?/i)?.[1]
+      return Math.max(
+        temporaryWidth ? Number(temporaryWidth) : getViewportWidth(),
+        getContentWidth()
+      )
+    },
+  })
   const getMaximumScrollLeft = () => Math.max(0, getContentWidth() - getViewportWidth())
   Object.defineProperties(scroller, {
     clientLeft: { configurable: true, value: 0 },

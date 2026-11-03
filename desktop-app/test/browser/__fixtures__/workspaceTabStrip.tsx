@@ -5,12 +5,14 @@ import {
   closeWorkspaceTab,
   createEmptyWorkspaceTabsState,
   openAppTab,
+  openFilesTab,
   reorderWorkspaceTab,
   selectWorkspaceTab,
 } from '../../../ui/src/lib/workspaceTabs'
 
 let state = createEmptyWorkspaceTabsState()
 let selectionCount = 0
+let fileSequence = 0
 const root = createRoot(document.getElementById('workspace-fixture')!)
 
 function render() {
@@ -53,7 +55,38 @@ function setTabCount(count: number) {
   render()
 }
 
+function setFilesTabCount(count: number) {
+  while (state.tabs.length > 0) {
+    state = closeWorkspaceTab(state, state.tabs.at(-1)!.id)
+  }
+  for (let index = 0; index < count; index += 1) {
+    const sequence = fileSequence++
+    state = openFilesTab(state, {
+      id: `files-${sequence}`,
+      path: `gfs://main/${sequence.toString(16).padStart(32, '0')}`,
+    })
+  }
+  if (state.tabs.length > 0) state = selectWorkspaceTab(state, state.tabs[0]!.id)
+  render()
+}
+
+function selectTab(index: number) {
+  const tab = state.tabs[index]
+  if (!tab) throw new Error(`No workspace tab at index ${index}`)
+  state = selectWorkspaceTab(state, tab.id)
+  render()
+}
+
 Object.assign(window, {
-  workspaceTabsFixture: { setTabCount, selectionCount: () => selectionCount },
+  workspaceTabsFixture: {
+    setTabCount,
+    setFilesTabCount,
+    selectTab,
+    selectionCount: () => selectionCount,
+  },
 })
-setTabCount(4)
+if (document.documentElement.dataset.filesCount !== undefined) {
+  setFilesTabCount(Number(document.documentElement.dataset.filesCount))
+} else {
+  setTabCount(4)
+}
