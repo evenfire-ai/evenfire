@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import type { SnippetExecuteResponse } from '../../../src/workflow/snippetTypes'
 
 const WORKFLOW_RECIPES_ROOT = path.resolve(__dirname, '..', '..', '..')
 const PERMISSION_PROBE = path.resolve(
@@ -78,6 +79,48 @@ async function mockSpawnSync(result: Record<string, unknown>) {
   return spawnSync
 }
 
+interface FakeWorkerChild {
+  stdout: null
+  stderr: null
+  killed: boolean
+  once: (event: string, handler: (...args: unknown[]) => void) => FakeWorkerChild
+  kill: () => boolean
+  send: () => boolean
+}
+
+// Captures the fork options instead of starting a real worker: the caller controls the
+// single reply the fake child delivers when the request is sent.
+function mockForkOnce(response: SnippetExecuteResponse): {
+  fork: ReturnType<typeof vi.fn>
+  child: FakeWorkerChild
+} {
+  const handlers = new Map<string, (...args: unknown[]) => void>()
+  const child: FakeWorkerChild = {
+    stdout: null,
+    stderr: null,
+    killed: false,
+    once: (event, handler) => {
+      handlers.set(event, handler)
+      return child
+    },
+    kill: () => {
+      child.killed = true
+      return true
+    },
+    send: () => {
+      // Deferred so executeSnippetInWorker has armed its timeout before the reply lands.
+      queueMicrotask(() => handlers.get('message')?.(response))
+      return true
+    },
+  }
+  const fork = vi.fn(() => child)
+  vi.doMock('node:child_process', async () => {
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    return { ...actual, fork }
+  })
+  return { fork, child }
+}
+
 // Spies through to the real spawnSync, so the check runs on the Node that runs the tests.
 async function spyOnRealSpawnSync() {
   const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
@@ -101,6 +144,7 @@ describe('snippet runtime Node permission model', () => {
   afterEach(async () => {
     vi.resetModules()
     vi.doUnmock('node:child_process')
+    vi.unstubAllEnvs()
     vi.restoreAllMocks()
     await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })))
   })
@@ -120,6 +164,50 @@ describe('snippet runtime Node permission model', () => {
       `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'node_modules')}`,
       '--allow-fs-read=/out',
       '--allow-fs-write=/out',
+    ])
+  })
+
+  it('forks the snippet worker under the permission model with grants for the configured output directory', async () => {
+    const outputDir = await makeOutputDir()
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_DIR', outputDir)
+    const response: SnippetExecuteResponse = {
+      stepId: 'render-report',
+      status: 'completed',
+      output: 'ok',
+    }
+    const { fork } = mockForkOnce(response)
+    const { buildPermissionArgs, executeSnippetInWorker, resolveSnippetOutputDir } =
+      await import('../../../src/workflow/snippetRuntime')
+    expect(resolveSnippetOutputDir()).toBe(outputDir)
+
+    const result = await executeSnippetInWorker({
+      workflowName: 'nightly-report',
+      stepId: 'render-report',
+      run: { type: 'snippet', language: 'typescript', code: 'return 1' },
+      previousOutputs: {},
+      resolvedWorkloads: [],
+      resolvedMcpServers: [],
+    })
+
+    // Liveness witnesses: the single fork started the snippet worker with no argv of its
+    // own, the grants follow the configured output directory, and the reply reached the caller.
+    expect(result).toEqual(response)
+    expect(fork).toHaveBeenCalledOnce()
+    const [workerPath, args, options] = fork.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { execArgv: string[] },
+    ]
+    expect(workerPath).toBe(path.join(WORKFLOW_RECIPES_ROOT, 'src', 'workflow', 'snippetWorker.js'))
+    expect(args).toEqual([])
+    expect(options.execArgv).toEqual(buildPermissionArgs(outputDir))
+    // Spelled out so a hardcoded '/output' grant cannot pass the comparison above.
+    expect(options.execArgv).toEqual([
+      '--permission',
+      `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'src')}`,
+      `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'node_modules')}`,
+      `--allow-fs-read=${outputDir}`,
+      `--allow-fs-write=${outputDir}`,
     ])
   })
 
