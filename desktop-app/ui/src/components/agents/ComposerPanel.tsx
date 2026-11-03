@@ -37,7 +37,10 @@ import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
 import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { formatFileSize } from '@lib/composerFileAdmission'
-import { prefillEmptyConversationWithGfsResource } from '@lib/gfsConversationPrefill'
+import {
+  getLatestGfsConversationContext,
+  prefillEmptyConversationWithGfsResource,
+} from '@lib/gfsConversationPrefill'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
 import type {
@@ -163,6 +166,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     failedAgentSend,
     activeChatId,
     workspaceChatTabId,
+    persistedConversationPrefillReceipt,
+    authorityScope,
+    onPersistedConversationPrefillAttempt,
     activeMessageCount,
     composerFocusRequestId,
   } = useChatComposerStateContext()
@@ -405,9 +411,34 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   }, [composerFocusRequestId])
 
   useEffect(() => {
-    if (!activeChatId || !selectedAgent) return
-    prefillEmptyConversationWithGfsResource(activeChatId, selectedAgent)
-  }, [activeChatId, composerFocusRequestId, selectedAgent])
+    const receipt = persistedConversationPrefillReceipt
+    if (
+      !receipt ||
+      receipt.status !== 'bound-eligible' ||
+      receipt.authorityScope !== authorityScope ||
+      receipt.agentRef !== selectedAgent ||
+      receipt.chatId !== activeChatId ||
+      receipt.destinationWorkspaceTabId !== workspaceChatTabId
+    ) {
+      return
+    }
+    const currentResource = getLatestGfsConversationContext()
+    if (
+      currentResource?.uri !== receipt.resource.uri ||
+      currentResource.sourceTabId !== receipt.resource.sourceTabId
+    ) {
+      return
+    }
+    prefillEmptyConversationWithGfsResource(receipt.chatId, receipt.agentRef, receipt.resource)
+    onPersistedConversationPrefillAttempt?.(receipt.id)
+  }, [
+    activeChatId,
+    authorityScope,
+    onPersistedConversationPrefillAttempt,
+    persistedConversationPrefillReceipt,
+    selectedAgent,
+    workspaceChatTabId,
+  ])
 
   const handleDraftChange = useCallback(
     (value: string) => {

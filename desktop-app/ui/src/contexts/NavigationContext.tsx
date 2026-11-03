@@ -1,4 +1,5 @@
 import { createContext, useContext } from 'react'
+import type { PersistedConversationActivationOrigin } from '../lib/gfsConversationPrefill'
 import type { AgentWorkspaceRoute, NavItem } from '../uiTypes'
 
 export interface NavigationContextValue {
@@ -9,7 +10,13 @@ export interface NavigationContextValue {
   handleOpenAgentWorkspace: (agentName: string, route?: AgentWorkspaceRoute) => void
   handleSelectChatAgent: (
     agentName: string,
-    options?: { selectLatest?: boolean; chatId?: string; isRemote?: boolean; title?: string }
+    options?: {
+      selectLatest?: boolean
+      chatId?: string
+      isRemote?: boolean
+      title?: string
+      activationOrigin?: PersistedConversationActivationOrigin
+    }
   ) => void
   handleBackToAgents: () => void
 }

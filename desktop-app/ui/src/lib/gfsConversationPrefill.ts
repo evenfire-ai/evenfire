@@ -9,6 +9,39 @@ import type { WorkspaceTab } from './workspaceTabs.types'
 
 export type GfsConversationContext = { uri: string; sourceTabId: string }
 
+export type PersistedConversationActivationOrigin =
+  | 'sidebar-session'
+  | 'chat-thread-session'
+  | 'workspace-chat-tab'
+  | 'drawer-chat-switcher'
+  | 'header-conversation'
+
+export type PersistedConversationPrefillStatus =
+  | 'awaiting-authorization'
+  | 'pending-ready'
+  | 'bound-eligible'
+  | 'suspended-resource'
+  | 'consumed'
+  | 'superseded'
+  | 'terminally-cancelled'
+  | 'owner-destroyed'
+
+/**
+ * App/selection-owned activation state. ComposerPanel observes this snapshot;
+ * it never owns or recreates the activation.
+ */
+export interface PersistedConversationPrefillReceipt {
+  id: number
+  intentSequence: number
+  authorityScope: string
+  origin: PersistedConversationActivationOrigin
+  agentRef: string
+  chatId: string
+  resource: GfsConversationContext
+  status: PersistedConversationPrefillStatus
+  destinationWorkspaceTabId: string | null
+}
+
 let latestGfsConversationContext: GfsConversationContext | null = null
 
 function resourceUriForTab(tab: WorkspaceTab | null | undefined): string | null {

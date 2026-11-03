@@ -11,6 +11,12 @@ import type {
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
 import { toPrettyJson } from '../lib/format'
+import { getLatestGfsConversationContext } from '../lib/gfsConversationPrefill'
+import type {
+  PersistedConversationActivationOrigin,
+  PersistedConversationPrefillReceipt,
+  PersistedConversationPrefillStatus,
+} from '../lib/gfsConversationPrefill'
 import {
   type HostAuthorityHoldKind,
   type HostAuthorityStore,
@@ -336,10 +342,79 @@ export function useAppController() {
     (agentName: string) => agentsData.agentDisplayByName[agentName] ?? agentName,
     [agentsData.agentDisplayByName]
   )
-  const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${currentTeamId}`
+  const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${currentTeamId}:${publishedSessionGeneration ?? ''}`
   const authorityScopeRef = useRef(authorityScope)
   authorityScopeRef.current = authorityScope
   const navigationIntentEpochRef = useRef(0)
+  const qualifyingActivationSequenceRef = useRef(0)
+  const prefillReceiptIdRef = useRef(0)
+  const prefillReceiptRef = useRef<PersistedConversationPrefillReceipt | null>(null)
+  const [persistedConversationPrefillReceipt, setPersistedConversationPrefillReceipt] =
+    useState<PersistedConversationPrefillReceipt | null>(null)
+  const publishPrefillReceipt = useCallback(
+    (receipt: PersistedConversationPrefillReceipt | null) => {
+      prefillReceiptRef.current = receipt
+      setPersistedConversationPrefillReceipt(receipt)
+    },
+    []
+  )
+  const updatePrefillReceipt = useCallback(
+    (
+      receiptId: number,
+      status: PersistedConversationPrefillStatus,
+      updates: Partial<PersistedConversationPrefillReceipt> = {}
+    ) => {
+      const current = prefillReceiptRef.current
+      if (!current || current.id !== receiptId) return false
+      if (
+        ['consumed', 'superseded', 'terminally-cancelled', 'owner-destroyed'].includes(
+          current.status
+        ) &&
+        status !== current.status
+      ) {
+        return false
+      }
+      if (
+        current.status === status &&
+        Object.entries(updates).every(
+          ([key, value]) => current[key as keyof PersistedConversationPrefillReceipt] === value
+        )
+      ) {
+        return false
+      }
+      publishPrefillReceipt({ ...current, ...updates, status })
+      return true
+    },
+    [publishPrefillReceipt]
+  )
+  const beginPersistedConversationActivation = useCallback(
+    (agentRef: string, chatId: string | null, origin: PersistedConversationActivationOrigin) => {
+      const intentSequence = ++qualifyingActivationSequenceRef.current
+      const resource = getLatestGfsConversationContext()
+      const current = prefillReceiptRef.current
+      if (current && current.status !== 'consumed') {
+        publishPrefillReceipt({ ...current, status: 'superseded' })
+      }
+      if (!chatId || !resource) {
+        publishPrefillReceipt(null)
+        return null
+      }
+      const receipt: PersistedConversationPrefillReceipt = {
+        id: ++prefillReceiptIdRef.current,
+        intentSequence,
+        authorityScope: authorityScopeRef.current,
+        origin,
+        agentRef,
+        chatId,
+        resource,
+        status: 'awaiting-authorization',
+        destinationWorkspaceTabId: null,
+      }
+      publishPrefillReceipt(receipt)
+      return receipt
+    },
+    [publishPrefillReceipt]
+  )
   // Lazy-init: the factory must run once per mount, like the FSM store.
   const hostAuthorityRef = useRef<HostAuthorityStore | null>(null)
   if (!hostAuthorityRef.current) hostAuthorityRef.current = createHostAuthorityStore()
@@ -390,8 +465,12 @@ export function useAppController() {
       } catch {
         return false
       }
-      if (authorityScopeRef.current !== scope || !hostAuthority.release(agentRef, heldAtEpoch))
-        return false
+      if (authorityScopeRef.current !== scope) return false
+      const released = hostAuthority.release(agentRef, heldAtEpoch)
+      // Another successful same-scope verifier may already have released this
+      // exact host hold. This caller can proceed only after its own RPC above
+      // succeeded and the current per-host authority is now unblocked.
+      if (!released && hostAuthority.isBlocked(agentRef)) return false
       setHostAuthorityRevision(revision => revision + 1)
       return true
     },
@@ -1174,6 +1253,7 @@ export function useAppController() {
         // <ChatPage>'s conversation in place, so it must not navigate away.
         keepNavItem?: boolean
         navigationIntentAlreadyStarted?: boolean
+        activationOrigin?: PersistedConversationActivationOrigin
       } = {}
     ) => {
       if (!agentName) return
@@ -1296,23 +1376,213 @@ export function useAppController() {
   const handleSelectChatAgent = useCallback(
     (agentName: string, options: Parameters<typeof selectChatAgent>[1] = {}) => {
       if (!agentName) return
-      const navigationIntentEpoch = ++navigationIntentEpochRef.current
-      if (!isHostAccessBlocked(agentName)) {
+      const targetChatId = String(options.chatId || '').trim() || null
+      const currentReceipt = prefillReceiptRef.current
+      const isSameCurrentReceiptTarget = Boolean(
+        currentReceipt &&
+        currentReceipt.authorityScope === authorityScopeRef.current &&
+        !['superseded', 'terminally-cancelled', 'owner-destroyed'].includes(
+          currentReceipt.status
+        ) &&
+        currentReceipt.agentRef === agentName &&
+        currentReceipt.chatId === targetChatId
+      )
+      const activationReceipt = options.activationOrigin
+        ? beginPersistedConversationActivation(agentName, targetChatId, options.activationOrigin)
+        : null
+      if (!options.activationOrigin && currentReceipt && !isSameCurrentReceiptTarget) {
+        updatePrefillReceipt(currentReceipt.id, 'terminally-cancelled')
+      }
+      const navigationIntentEpoch =
+        options.activationOrigin || !isSameCurrentReceiptTarget
+          ? ++navigationIntentEpochRef.current
+          : navigationIntentEpochRef.current
+      const activationIsCurrent = () =>
+        !activationReceipt ||
+        (prefillReceiptRef.current?.id === activationReceipt.id &&
+          !['consumed', 'superseded', 'terminally-cancelled', 'owner-destroyed'].includes(
+            prefillReceiptRef.current.status
+          ) &&
+          authorityScopeRef.current === activationReceipt.authorityScope &&
+          qualifyingActivationSequenceRef.current === activationReceipt.intentSequence)
+      const acceptSelection = () => {
         selectChatAgent(agentName, options)
+        if (activationReceipt && activationIsCurrent()) {
+          updatePrefillReceipt(activationReceipt.id, 'pending-ready')
+        }
+      }
+      if (!isHostAccessBlocked(agentName)) {
+        acceptSelection()
         return
       }
-      const scope = authorityScopeRef.current
       void verifyHostAccess(agentName).then(verified => {
+        if (!verified) {
+          if (activationReceipt) {
+            updatePrefillReceipt(activationReceipt.id, 'terminally-cancelled')
+          }
+          return
+        }
         if (
-          verified &&
-          authorityScopeRef.current === scope &&
-          navigationIntentEpochRef.current === navigationIntentEpoch
+          navigationIntentEpochRef.current === navigationIntentEpoch &&
+          activationIsCurrent() &&
+          !isHostAccessBlocked(agentName)
         ) {
-          selectChatAgent(agentName, options)
+          acceptSelection()
+        } else if (activationReceipt) {
+          updatePrefillReceipt(activationReceipt.id, 'terminally-cancelled')
         }
       })
     },
-    [isHostAccessBlocked, selectChatAgent, verifyHostAccess]
+    [
+      beginPersistedConversationActivation,
+      isHostAccessBlocked,
+      selectChatAgent,
+      updatePrefillReceipt,
+      verifyHostAccess,
+    ]
+  )
+
+  useEffect(() => {
+    const receipt = prefillReceiptRef.current
+    if (!receipt) return
+    if (receipt.authorityScope !== authorityScope) {
+      updatePrefillReceipt(receipt.id, 'terminally-cancelled')
+      return
+    }
+    if (
+      receipt.status === 'consumed' ||
+      receipt.status === 'superseded' ||
+      receipt.status === 'terminally-cancelled' ||
+      receipt.status === 'owner-destroyed'
+    ) {
+      return
+    }
+    const sourceOwnerExists = nav.workspaceTabs.tabs.some(
+      tab => tab.id === receipt.resource.sourceTabId
+    )
+    if (!sourceOwnerExists) {
+      updatePrefillReceipt(receipt.id, 'terminally-cancelled')
+      return
+    }
+    if (receipt.destinationWorkspaceTabId) {
+      const destination = nav.workspaceTabs.tabs.find(
+        tab => tab.id === receipt.destinationWorkspaceTabId
+      )
+      if (
+        !destination ||
+        destination.kind !== 'chat' ||
+        destination.chat?.agentRef !== receipt.agentRef ||
+        destination.chat?.chatId !== receipt.chatId
+      ) {
+        updatePrefillReceipt(receipt.id, 'terminally-cancelled')
+        return
+      }
+    }
+    if (receipt.status === 'awaiting-authorization') return
+    if (hostAuthority.isBlocked(receipt.agentRef)) {
+      updatePrefillReceipt(receipt.id, 'terminally-cancelled')
+      return
+    }
+    const currentResource = getLatestGfsConversationContext()
+    const resourceMatches =
+      currentResource?.uri === receipt.resource.uri &&
+      currentResource.sourceTabId === receipt.resource.sourceTabId
+    updatePrefillReceipt(
+      receipt.id,
+      !resourceMatches
+        ? 'suspended-resource'
+        : receipt.destinationWorkspaceTabId
+          ? 'bound-eligible'
+          : 'pending-ready'
+    )
+  }, [
+    authorityScope,
+    hostAuthority,
+    hostAuthorityRevision,
+    nav.workspaceTabs,
+    updatePrefillReceipt,
+  ])
+
+  const bindPersistedConversationPrefillDestination = useCallback(
+    (receiptId: number, destinationWorkspaceTabId: string) => {
+      const receipt = prefillReceiptRef.current
+      if (
+        !receipt ||
+        receipt.id !== receiptId ||
+        receipt.authorityScope !== authorityScopeRef.current ||
+        receipt.status === 'consumed' ||
+        receipt.status === 'superseded' ||
+        receipt.status === 'terminally-cancelled' ||
+        receipt.status === 'owner-destroyed'
+      ) {
+        return false
+      }
+      if (
+        receipt.destinationWorkspaceTabId &&
+        receipt.destinationWorkspaceTabId !== destinationWorkspaceTabId
+      ) {
+        updatePrefillReceipt(receipt.id, 'terminally-cancelled')
+        return false
+      }
+      const destination = nav.workspaceTabs.tabs.find(tab => tab.id === destinationWorkspaceTabId)
+      if (
+        !destination ||
+        destination.kind !== 'chat' ||
+        destination.chat?.agentRef !== receipt.agentRef ||
+        destination.chat?.chatId !== receipt.chatId
+      ) {
+        return false
+      }
+      const currentResource = getLatestGfsConversationContext()
+      const resourceMatches =
+        currentResource?.uri === receipt.resource.uri &&
+        currentResource.sourceTabId === receipt.resource.sourceTabId
+      updatePrefillReceipt(
+        receipt.id,
+        receipt.status === 'awaiting-authorization'
+          ? 'awaiting-authorization'
+          : resourceMatches
+            ? 'bound-eligible'
+            : 'suspended-resource',
+        { destinationWorkspaceTabId }
+      )
+      return true
+    },
+    [nav.workspaceTabs, updatePrefillReceipt]
+  )
+
+  const consumePersistedConversationPrefillReceipt = useCallback(
+    (receiptId: number) => {
+      const receipt = prefillReceiptRef.current
+      if (
+        !receipt ||
+        receipt.id !== receiptId ||
+        receipt.status !== 'bound-eligible' ||
+        receipt.authorityScope !== authorityScopeRef.current
+      ) {
+        return false
+      }
+      return updatePrefillReceipt(receiptId, 'consumed')
+    },
+    [updatePrefillReceipt]
+  )
+
+  const handleSelectChat = useCallback(
+    async (
+      chatId: string,
+      options: { activationOrigin?: PersistedConversationActivationOrigin } = {}
+    ) => {
+      if (options.activationOrigin && nav.selectedAgent) {
+        handleSelectChatAgent(nav.selectedAgent, {
+          chatId,
+          selectLatest: false,
+          activationOrigin: options.activationOrigin,
+        })
+        return
+      }
+      await chat.handleSelectChat(chatId)
+    },
+    [chat.handleSelectChat, handleSelectChatAgent, nav.selectedAgent]
   )
 
   // ─── Cross-domain: handleNavSelect (extended) ───
@@ -1352,7 +1622,10 @@ export function useAppController() {
   const openAgentConversationTarget = useCallback(
     async (
       target: AgentConversationNotificationTarget,
-      options: { keepNavItem?: boolean } = {}
+      options: {
+        keepNavItem?: boolean
+        activationOrigin?: PersistedConversationActivationOrigin
+      } = {}
     ) => {
       const targetAgent = String(target.agentName || '').trim()
       if (!targetAgent) return
@@ -1360,6 +1633,36 @@ export function useAppController() {
       const targetTeamId = String(target.teamId || '').trim()
       const activeTeamId = currentTeamIdRef.current
       const requiresTeamSwitch = Boolean(targetTeamId && targetTeamId !== activeTeamId)
+      const activationReceipt =
+        targetChatId && options.activationOrigin
+          ? beginPersistedConversationActivation(
+              targetAgent,
+              targetChatId,
+              options.activationOrigin
+            )
+          : null
+      const activationIntentEpoch = activationReceipt
+        ? ++navigationIntentEpochRef.current
+        : navigationIntentEpochRef.current
+      const activationIsCurrent = () =>
+        !activationReceipt ||
+        (prefillReceiptRef.current?.id === activationReceipt.id &&
+          !['consumed', 'superseded', 'terminally-cancelled', 'owner-destroyed'].includes(
+            prefillReceiptRef.current.status
+          ) &&
+          authorityScopeRef.current === activationReceipt.authorityScope &&
+          qualifyingActivationSequenceRef.current === activationReceipt.intentSequence &&
+          navigationIntentEpochRef.current === activationIntentEpoch)
+      const acceptActivation = () => {
+        if (activationReceipt && activationIsCurrent()) {
+          updatePrefillReceipt(activationReceipt.id, 'pending-ready')
+        }
+      }
+      const cancelActivation = () => {
+        if (activationReceipt) {
+          updatePrefillReceipt(activationReceipt.id, 'terminally-cancelled')
+        }
+      }
       const navigationIntentSequence = nav.beginUserNavigationIntent()
       // minispec 04 approach C: when the app embed is live (App requests
       // `keepNavItem`) and no team switch is needed, surface the conversation IN
@@ -1370,23 +1673,36 @@ export function useAppController() {
       try {
         if (requiresTeamSwitch) {
           await ensureTeamContext({ teamId: targetTeamId, navigationIntentSequence })
-          if (!nav.isNavigationIntentCurrent(navigationIntentSequence)) return
+          if (!nav.isNavigationIntentCurrent(navigationIntentSequence)) {
+            cancelActivation()
+            return
+          }
+          // A cross-team target intentionally changes the captured authority.
+          // Navigation may continue, but this gesture cannot carry a receipt
+          // into the newly established team scope.
+          if (activationReceipt && authorityScopeRef.current !== activationReceipt.authorityScope) {
+            cancelActivation()
+          }
         }
         if (isHostAccessBlocked(targetAgent)) {
           const verified = await verifyHostAccess(targetAgent)
-          if (!verified || !nav.isNavigationIntentCurrent(navigationIntentSequence)) return
+          if (!verified || !nav.isNavigationIntentCurrent(navigationIntentSequence)) {
+            cancelActivation()
+            return
+          }
         }
 
         if (stayInDrawer) {
           // handleSelectChatAgent(keepNavItem) sets the active chat without
           // flipping `navItem` (and imperatively switches for the same-agent
           // case); the drawer reconciler (approach A) syncs the switcher tab.
-          handleSelectChatAgent(targetAgent, {
+          selectChatAgent(targetAgent, {
             selectLatest: false,
             keepNavItem: true,
             navigationIntentAlreadyStarted: true,
             ...(targetChatId ? { chatId: targetChatId } : {}),
           })
+          acceptActivation()
           return
         }
 
@@ -1415,19 +1731,33 @@ export function useAppController() {
               },
             })
           } catch {
+            cancelActivation()
             // The request owns current feedback and still rejects to awaiters.
             // This UI event observes that rejection without reporting it again.
             return
           }
-          if (!nav.isNavigationIntentCurrent(navigationIntentSequence)) return
+          if (
+            !nav.isNavigationIntentCurrent(navigationIntentSequence) &&
+            !(
+              activationIsCurrent() &&
+              nav.selectedAgent === targetAgent &&
+              chat.activeChatId === targetChatId
+            )
+          ) {
+            cancelActivation()
+            return
+          }
           nav.activateChatTab(targetAgent, targetChatId, undefined, true)
+          acceptActivation()
           return
         }
 
         chat.setPendingChatSelection(targetAgent, targetChatId || null)
         nav.setSelectedAgent(targetAgent)
         nav.activateChatTab(targetAgent, targetChatId || null, undefined, true)
+        acceptActivation()
       } catch (error) {
+        cancelActivation()
         fullSetStatus(
           `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
           'error'
@@ -1439,6 +1769,7 @@ export function useAppController() {
       chat.switchToChat,
       ensureTeamContext,
       fullSetStatus,
+      beginPersistedConversationActivation,
       handleSelectChatAgent,
       isHostAccessBlocked,
       nav.beginUserNavigationIntent,
@@ -1448,6 +1779,9 @@ export function useAppController() {
       nav.navItem,
       nav.selectedAgent,
       nav.setSelectedAgent,
+      chat.activeChatId,
+      selectChatAgent,
+      updatePrefillReceipt,
     ]
   )
 
@@ -1610,7 +1944,12 @@ export function useAppController() {
       }
       // `keepNavItem` (App passes it when the app embed is live) only reaches the
       // agent-conversation surface — workflow/SDK targets navigate elsewhere.
-      await openAgentConversationTarget(notification, options)
+      const agentRef = String(notification.agentName || '').trim()
+      const chatId = String(notification.chatId || '').trim()
+      await openAgentConversationTarget(notification, {
+        ...options,
+        ...(agentRef && chatId ? { activationOrigin: 'header-conversation' } : {}),
+      })
     },
     [
       notif.markNotificationRead,
@@ -1708,8 +2047,12 @@ export function useAppController() {
     // Navigation
     navItem: nav.navItem,
     selectedAgent: nav.selectedAgent,
+    authorityScope,
     isHostAccessBlocked,
     hostAuthorityRevision,
+    persistedConversationPrefillReceipt,
+    bindPersistedConversationPrefillDestination,
+    consumePersistedConversationPrefillReceipt,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,
     handleNavSelect,
@@ -1809,7 +2152,7 @@ export function useAppController() {
     captureChatDeleteFence: chat.captureChatDeleteFence,
     handleDeleteChat: chat.handleDeleteChat,
     handleDeleteChatForAgent: chat.handleDeleteChatForAgent,
-    handleSelectChat: chat.handleSelectChat,
+    handleSelectChat,
     handleLoadOlderMessages: chat.handleLoadOlderMessages,
     loadMoreChatSessions: chat.loadMoreChatSessions,
     handleSendAgentMessage: chat.handleSendAgentMessage,
