@@ -104,7 +104,8 @@ export interface Config {
   hostPort: number
   hostConfigMapName: string
   hostServiceAccountName: string
-  hostWorkspaceStorageClassName: string
+  // Unset: the PVC omits storageClassName and the cluster default class applies.
+  hostWorkspaceStorageClassName: string | undefined
   hostWorkspaceStorageSize: string
   hostWorkspacePath: string
   hostResources: {
@@ -715,10 +716,7 @@ export const config: Config = {
   hostPort: getEnvInt('CONTEXT_MAPPER_HOST_PORT', 8080),
   hostConfigMapName: getEnv('CONTEXT_MAPPER_HOST_CONFIGMAP_NAME', 'mcp-host-config')!,
   hostServiceAccountName: getEnv('CONTEXT_MAPPER_HOST_SERVICE_ACCOUNT', 'mcp-host')!,
-  hostWorkspaceStorageClassName: getEnv(
-    'CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS',
-    'do-block-storage-retain'
-  )!,
+  hostWorkspaceStorageClassName: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS'),
   hostWorkspaceStorageSize: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_SIZE', '10Gi')!,
   hostWorkspacePath: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_PATH', '/workspace')!,
   hostResources: {

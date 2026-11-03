@@ -2783,3 +2783,27 @@ describe('Host Deployment pull Secret from config', () => {
     expect(named.imagePullSecrets).toEqual([{ name: 'regcred' }])
   })
 })
+
+describe('Host workspace PVC StorageClass from config', () => {
+  it('omits storageClassName from the workspace PVC when no class is configured', () => {
+    const original = config.hostWorkspaceStorageClassName
+    onTestFinished(() => {
+      config.hostWorkspaceStorageClassName = original
+    })
+    const { reconciler } = createReconciler()
+    const buildPvc = (host: HostCRD): k8s.V1PersistentVolumeClaim =>
+      (reconciler as unknown as { buildPvc(h: HostCRD): k8s.V1PersistentVolumeClaim }).buildPvc(
+        host
+      )
+
+    config.hostWorkspaceStorageClassName = undefined
+    const unset = buildPvc(makeHost()).spec!
+    expect(unset).not.toHaveProperty('storageClassName')
+    // Witness: the claim was built and inspected.
+    expect(unset.accessModes).toEqual(['ReadWriteOnce'])
+    expect(unset.resources?.requests?.storage).toBe('10Gi')
+
+    config.hostWorkspaceStorageClassName = 'standard-rwo'
+    expect(buildPvc(makeHost()).spec!.storageClassName).toBe('standard-rwo')
+  })
+})

@@ -3069,7 +3069,11 @@ export class HostReconciler {
         },
       },
       spec: {
-        storageClassName: config.hostWorkspaceStorageClassName,
+        // Unset: omit the field so the cluster's default StorageClass applies.
+        // An explicit "" is kept; in Kubernetes it disables dynamic provisioning.
+        ...(config.hostWorkspaceStorageClassName !== undefined
+          ? { storageClassName: config.hostWorkspaceStorageClassName }
+          : {}),
         accessModes: ['ReadWriteOnce'],
         resources: {
           requests: {
