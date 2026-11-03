@@ -69,6 +69,31 @@ export function useWorkspaceTabOverflow({
     )
   }, [stripRef])
 
+  const updateScrollAvailability = useCallback(() => {
+    const scroller = scrollerRef.current
+    const strip = stripRef.current
+    if (!scroller || !strip) return
+    const stripWidth = strip.clientWidth
+    const viewportWidth = scroller.clientWidth
+    const maximum = Math.max(0, scroller.scrollWidth - viewportWidth)
+    if (
+      stripWidth > 0 &&
+      !strip.querySelector('.chat-view-tabs__scroll-button') &&
+      viewportWidth === stripWidth &&
+      maximum <= SCROLL_EPSILON &&
+      scroller.scrollLeft !== 0
+    ) {
+      scroller.scrollLeft = 0
+    }
+    const canScrollLeft = scroller.scrollLeft > SCROLL_EPSILON
+    const canScrollRight = scroller.scrollLeft < maximum - SCROLL_EPSILON
+    setScrollState(current =>
+      current.canScrollLeft === canScrollLeft && current.canScrollRight === canScrollRight
+        ? current
+        : { ...current, canScrollLeft, canScrollRight }
+    )
+  }, [stripRef])
+
   const getTabNodes = useCallback(() => {
     const list = scrollerRef.current?.firstElementChild
     return list
@@ -97,10 +122,10 @@ export function useWorkspaceTabOverflow({
         0,
         Math.min(scroller.scrollWidth - scroller.clientWidth, nextScrollLeft)
       )
-      updateScrollState()
+      updateScrollAvailability()
       return true
     },
-    [updateScrollState]
+    [updateScrollAvailability]
   )
 
   const scrollToNearestHiddenTab = (direction: 'left' | 'right') => {
@@ -144,9 +169,9 @@ export function useWorkspaceTabOverflow({
       if (Math.abs(nextScrollLeft - scroller.scrollLeft) <= SCROLL_EPSILON) return
       event.preventDefault()
       scroller.scrollLeft = nextScrollLeft
-      updateScrollState()
+      updateScrollAvailability()
     },
-    [updateScrollState]
+    [updateScrollAvailability]
   )
 
   const revealPendingTab = useCallback(() => {
@@ -177,18 +202,22 @@ export function useWorkspaceTabOverflow({
       updateScrollState()
       revealPendingTab()
     }
+    const handleScroll = () => {
+      updateScrollAvailability()
+      revealPendingTab()
+    }
     measure()
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
     observer?.observe(scroller)
     if (scroller.firstElementChild) observer?.observe(scroller.firstElementChild)
     window.addEventListener('resize', measure)
-    scroller.addEventListener('scroll', measure, { passive: true })
+    scroller.addEventListener('scroll', handleScroll, { passive: true })
     return () => {
       observer?.disconnect()
       window.removeEventListener('resize', measure)
-      scroller.removeEventListener('scroll', measure)
+      scroller.removeEventListener('scroll', handleScroll)
     }
-  }, [tabs, activeTabId, updateScrollState, revealPendingTab])
+  }, [tabs, activeTabId, updateScrollState, updateScrollAvailability, revealPendingTab])
 
   useEffect(() => {
     const scroller = scrollerRef.current
