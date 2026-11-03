@@ -395,6 +395,13 @@ export class DualConversationStore implements ConversationStore {
     ])
   }
 
+  async deletePendingApproval(requestId: string, sessionKey?: string): Promise<void> {
+    await Promise.all([
+      Promise.resolve(this.memory.deletePendingApproval?.(requestId, sessionKey)),
+      Promise.resolve(this.sqlite.deletePendingApproval?.(requestId, sessionKey)),
+    ])
+  }
+
   async shutdown(): Promise<void> {
     await Promise.allSettled([this.memory.shutdown?.(), this.sqlite.shutdown?.()])
   }

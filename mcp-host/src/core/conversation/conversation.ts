@@ -956,6 +956,9 @@ export class ConversationManager {
    * without throwing "Cannot start turn: conversation is awaiting_approval". (BUG-8)
    *
    * Returns false without changing state if a different approval is current.
+   * The refused request's own durable row is deleted in that case: the session
+   * belongs to the current approval, but the obsolete row must not outlive the
+   * cleanup that owns it.
    * Safe on unknown sessionKey (no-op).
    *
    * **IronClaw write-through**: durable mutation lands before returning.
@@ -973,6 +976,11 @@ export class ConversationManager {
         { sessionKey, requestId, currentRequestId },
         'Refusing to clear a different pending approval'
       )
+      // The durable session row belongs to the current approval's owner, so it
+      // must not move. This refused cleanup is the obsolete row's last owner:
+      // delete that row alone, or it would surface as the session's pending
+      // approval on every cold read until the next boot prune.
+      await this.store.deletePendingApproval?.(requestId, sessionKey)
       return false
     }
     requestId ??= conv.pending_approval?.request_id

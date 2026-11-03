@@ -1376,6 +1376,12 @@ export class SqliteConversationStore implements ConversationStore {
     )
   }
 
+  async deletePendingApproval(requestId: string, sessionKey?: string): Promise<void> {
+    // Targeted by request_id only: no session write, so a session owned by a
+    // newer task keeps its state, active_task_id and trace context.
+    await this.persistQueue.enqueueSync({ kind: 'delete_pending_approval', requestId }, sessionKey)
+  }
+
   async shutdown(): Promise<void> {
     await this.persistQueue.close()
   }

@@ -415,6 +415,15 @@ export interface ConversationStore {
     decision: 'approve' | 'deny' | 'cancel',
     expectedTaskId?: string
   ): Promise<void>
+  /**
+   * Sync write-through: deletes ONE pending-approval row by its own request id
+   * and writes nothing else. Used when a cleanup targets an approval that is no
+   * longer the session's current one: the obsolete row must not survive its
+   * retry queue entry, while the session row belongs to the current owner and
+   * must not move. In-memory stores hold no approval rows, so implementations
+   * are optional.
+   */
+  deletePendingApproval?(requestId: string, sessionKey?: string): Promise<void>
 
   /** Optional shutdown drain. Implementations without a worker may no-op. */
   shutdown?(): Promise<void>
