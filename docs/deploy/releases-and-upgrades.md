@@ -250,17 +250,20 @@ value wins and nothing changes. The common case is a ConfigMap without the
 variable, which was added in v0.11.0: rpc-proxy then used the old 60 s default
 and now uses 300 s. The timer bounds the in-cluster transfer of an artifact body
 from the Host after the Host's response headers arrive. It does not bound the
-client's download from rpc-proxy. The Host serves
-artifact files of at most 50 MiB; with the old 60 s default a 50 MiB artifact
-was aborted if that transfer ran below about 0.83 MiB/s, while the new 300 s
-lowers the floor to about 0.17 MiB/s.
+client's download from rpc-proxy. The Host serves artifact files of at most
+50 MiB; with the old 60 s default a 50 MiB artifact was aborted if that transfer
+ran below about 0.83 MiB/s, while the new 300 s lowers the floor to about
+0.17 MiB/s. When the Host has to be woken first, the transfer is also bounded by
+the remaining request hold, which is at most 48 s (`MAX_REQUEST_HOLD_MS`).
 
 The six stream caps below keep their defaults, but an invalid value is now a
-startup error: anything that is not a positive integer (`abc`, `0`, `-1`, `1.5`)
-stops rpc-proxy with an error naming the variable. Each cap counts the open
-streams of one rpc-proxy pod, and a new stream gets HTTP 429 once its count
-reaches the cap. Before this release `abc` parsed as `NaN` and turned that cap
-off, and `0` rejected every stream the cap covers.
+startup error: anything that is not a positive integer (`abc`, `0`, `-1`, `1.5`,
+`Infinity`, or a value that is only whitespace) stops rpc-proxy with an error
+naming the variable. Each cap counts the open streams of one rpc-proxy pod, and
+a new stream gets HTTP 429 once its count reaches the cap. Before this release
+`abc` parsed as `NaN` and `Infinity` stayed unbounded, which turned the cap off
+in both cases, while `0` rejected every stream and a whitespace-only value parsed
+as `0` with the same effect.
 
 | Variable                                      | Limits                                  | Default |
 | --------------------------------------------- | --------------------------------------- | ------- |
