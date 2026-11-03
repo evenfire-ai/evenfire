@@ -368,6 +368,10 @@ if run_fixture active-env-order-mismatch >/dev/null; then
 fi
 mv "$fixture_root/reordered-matched.json" "$capture"
 
+normalize_def_count="$(grep -c 'def normalize_job_spec' "$DEPLOY_FILE" || true)"
+[ "$normalize_def_count" = "1" ] || \
+  fail "expected one normalize_job_spec definition, found ${normalize_def_count}"
+
 # The API server stores a defaulted Job, not the submitted manifest. These are the
 # fields a Kubernetes v1.35.1 apiserver added or dropped for this Job under
 # `create --dry-run=server` (T2 run1 on 92f6dc886 died on them): defaults are added
