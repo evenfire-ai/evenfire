@@ -160,9 +160,9 @@ export async function callReasoningForIteration(
 
     // #1043 — a failure that would leave a resumable checkpoint retries this
     // model step, inside the same heartbeat window, before the loop can settle
-    // the checkpoint. The gate is the recorder's own settle predicate, plus a
-    // failed attempt that is known to be pre-dispatch and an error that error
-    // recovery would answer, so a retry can only happen where a manual Retry
+    // the checkpoint. The gate is the recorder's own settle predicate, the
+    // failed attempt was not known to be pre-dispatch, and error recovery would
+    // not answer the failure, so a retry can only happen where a manual Retry
     // model step would have been offered and where stopping now would not lose
     // a workflow answer. Each retry uses its jittered schedule wait. The
     // counter and the 60 s window are per model step and consume no loop
