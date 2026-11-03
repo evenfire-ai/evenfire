@@ -147,12 +147,19 @@ export function parseArtifactDownloadMaxBytes(rawMb: string): number {
 /** Largest delay setTimeout/AbortSignal.timeout accept; above it they fire immediately. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
-export function parsePositiveIntMs(name: string, raw: string): number {
+/** Positive integer count (not a duration): no timer bound applies to it. */
+export function parsePositiveInt(name: string, raw: string): number {
   const trimmed = raw.trim()
   const n = Number(trimmed)
   if (!Number.isInteger(n) || n < 1) {
     throw new Error(`${name} contains invalid value "${trimmed}" (must be a positive integer)`)
   }
+  return n
+}
+
+export function parsePositiveIntMs(name: string, raw: string): number {
+  const trimmed = raw.trim()
+  const n = parsePositiveInt(name, raw)
   if (n > MAX_TIMER_DELAY_MS) {
     throw new Error(
       `${name} contains invalid value "${trimmed}" (must be at most ${MAX_TIMER_DELAY_MS} ms)`
@@ -218,7 +225,7 @@ export const config: Config = {
   jwtAudience: requiredOrDevDefault('RPC_PROXY_JWT_AUDIENCE', 'rpc-proxy'),
   upstreamTimeoutMs: parsePositiveIntMs(
     'RPC_PROXY_UPSTREAM_TIMEOUT_MS',
-    process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS || '60000'
+    process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS || '8000'
   ),
   maxTokenLength: Number(process.env.RPC_PROXY_MAX_TOKEN_LENGTH || 4096),
   allowedMethodPattern: new RegExp(
@@ -235,9 +242,11 @@ export const config: Config = {
   })(),
   controlApiServiceName: process.env.RPC_PROXY_CONTROL_API_SERVICE_NAME || 'rpc-proxy',
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
-  // The effective cap for artifact files is min(this value, the Host's 50 MiB artifact cap,
-  // MAX_ARTIFACT_BYTES in mcp-host/src/workflow/artifactPaths.ts): the Host answers 413
-  // above 50 MiB, so a larger value here admits no larger artifact.
+  // The Host refuses artifact files above 50 MiB (MAX_ARTIFACT_BYTES in
+  // mcp-host/src/workflow/artifactPaths.ts) before it redacts them, and redaction
+  // can make the response slightly longer than the file
+  // (mcp-host/src/artifacts/artifactRedaction.ts), so a value below 50 rejects
+  // files the Host serves. The default matches the Host's cap.
   artifactDownloadMaxBytes: parseArtifactDownloadMaxBytes(
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB || '50'
   ),
@@ -261,8 +270,9 @@ export const config: Config = {
   ),
   activityStreamMaxConcurrent: Number(process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT || 1000),
   activityStreamMaxPerUser: Number(process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER || 3),
-  activityStreamMaxPerUserHost: Number(
-    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST || 3
+  activityStreamMaxPerUserHost: parsePositiveInt(
+    'RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST',
+    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST || '1'
   ),
   wakeMaxHoldMs: parseWakeMaxHoldMs(process.env.RPC_PROXY_WAKE_MAX_HOLD_MS || '48000'),
   wakePollMs: parsePositiveIntMs(

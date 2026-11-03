@@ -121,7 +121,7 @@ describe('parseWakeMaxHoldMs', () => {
   })
 })
 
-describe('config timeouts loaded from the environment', () => {
+describe('config values loaded from the environment', () => {
   const ENV_KEYS = [
     'RPC_PROXY_UPSTREAM_TIMEOUT_MS',
     'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
@@ -165,25 +165,40 @@ describe('config timeouts loaded from the environment', () => {
     await expect(loadConfig()).rejects.toThrow(/RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS/)
   })
 
-  it('defaults both timeouts and the per-user-host activity stream cap to the minikube overlay values', async () => {
+  it('defaults the upstream timeout, the artifact download timeout and the per-user-host cap', async () => {
     delete process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS
     delete process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS
     delete process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST
     const loaded = await loadConfig()
-    expect(loaded.upstreamTimeoutMs).toBe(60_000)
+    expect(loaded.upstreamTimeoutMs).toBe(8_000)
     expect(loaded.artifactDownloadTimeoutMs).toBe(300_000)
-    expect(loaded.activityStreamMaxPerUserHost).toBe(3)
+    expect(loaded.activityStreamMaxPerUserHost).toBe(1)
   })
 
   it('an explicit value still overrides each of those defaults', async () => {
-    process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS = '8000'
-    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS = '60000'
-    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST = '1'
+    process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS = '45000'
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS = '120000'
+    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST = '2'
     const loaded = await loadConfig()
-    expect(loaded.upstreamTimeoutMs).toBe(8_000)
-    expect(loaded.artifactDownloadTimeoutMs).toBe(60_000)
-    expect(loaded.activityStreamMaxPerUserHost).toBe(1)
+    expect(loaded.upstreamTimeoutMs).toBe(45_000)
+    expect(loaded.artifactDownloadTimeoutMs).toBe(120_000)
+    expect(loaded.activityStreamMaxPerUserHost).toBe(2)
   })
+
+  it('trims and accepts a padded per-user-host cap', async () => {
+    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST = ' 2 '
+    expect((await loadConfig()).activityStreamMaxPerUserHost).toBe(2)
+  })
+
+  it.each(['abc', '0', '-1', '1.5'])(
+    'fails loud on RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST=%s',
+    async value => {
+      process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST = value
+      await expect(loadConfig()).rejects.toThrow(
+        /RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST.*must be a positive integer/
+      )
+    }
+  )
 
   it('clamps RPC_PROXY_WAKE_MAX_HOLD_MS above the cap in the loaded config', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
