@@ -7,6 +7,8 @@ const UI_ROOT = path.resolve(__dirname, '../../ui/src')
 let browser: Browser
 let page: Page
 let bundle: string
+let pageErrors: string[]
+let expectedPageErrors: string[]
 
 const frame = () =>
   page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
@@ -59,13 +61,14 @@ describe('workspace tab overflow browser focus', () => {
 
   beforeEach(async () => {
     page = await browser.newPage({ viewport: { width: 1000, height: 600 } })
+    pageErrors = []
+    expectedPageErrors = []
     await page.setContent(
       '<button id="outside">Outside</button><div id="workspace-fixture" style="width:280px"></div>'
     )
     await page.addStyleTag({ path: path.join(UI_ROOT, 'styles/tokens.css') })
     await page.addStyleTag({ path: path.join(UI_ROOT, 'styles.css') })
-    const pageErrors: Error[] = []
-    page.on('pageerror', error => pageErrors.push(error))
+    page.on('pageerror', error => pageErrors.push(error.message))
     await page.addScriptTag({
       content: `
         const NativeResizeObserver = window.ResizeObserver
@@ -90,6 +93,7 @@ describe('workspace tab overflow browser focus', () => {
 
   afterEach(async () => {
     await page?.close()
+    expect(pageErrors).toEqual(expectedPageErrors)
   })
   afterAll(async () => {
     await browser?.close()
@@ -175,5 +179,17 @@ describe('workspace tab overflow browser focus', () => {
     })
     await resize(900)
     expect(await page.evaluate(() => document.activeElement?.id)).toBe('outside')
+  })
+
+  it('captures asynchronous page errors from setup through browser teardown', async () => {
+    const expectedMessage = 'delayed fixture page error'
+    expectedPageErrors.push(expectedMessage)
+    const observed = page.waitForEvent('pageerror')
+    await page.evaluate(message => {
+      setTimeout(() => {
+        throw new Error(message)
+      }, 0)
+    }, expectedMessage)
+    expect((await observed).message).toBe(expectedMessage)
   })
 })
