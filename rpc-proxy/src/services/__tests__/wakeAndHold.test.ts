@@ -773,6 +773,9 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     await pending
 
     expect(attemptUpstream).not.toHaveBeenCalled()
+    // Witness: the hold itself resolved `proceed` (the wake was requested), so
+    // the withheld attempt is the budget decision, not a hold that never ended.
+    expect(requestWake).toHaveBeenCalledTimes(1)
     expect(res.statusCode).toBe(503)
     expect(res.body).toMatchObject({ code: 'host_waking', hostRef: 'chatllm' })
   })
