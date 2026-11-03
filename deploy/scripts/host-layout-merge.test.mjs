@@ -445,16 +445,18 @@ test('an orphan split PVC is reported without blocking the verdict (T9)', () => 
 })
 
 test('an orphan check Pod takes the HCC pull Secret: empty means none, a name is used', () => {
-  for (const [value, expected] of [
-    ['', []],
-    ['regcred', [{ name: 'regcred' }]],
+  for (const [entry, expected] of [
+    [{ name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', value: '' }, []],
+    [{ name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', value: 'regcred' }, [{ name: 'regcred' }]],
+    // A real apiserver read omits `value` for an empty variable.
+    [{ name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET' }, []],
   ]) {
     const f = fleet()
-    f.hcc = hcc([{ name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', value }])
+    f.hcc = hcc([entry])
     f.pvcs.push(pvc('delta'))
     f.checks['delta-workspace'] = { output: 'WILL_MERGE\n' }
     const r = verify(f)
-    assert.equal(r.status, 0, `${JSON.stringify(value)}: ${r.stdout}${r.stderr}`)
+    assert.equal(r.status, 0, `${JSON.stringify(entry)}: ${r.stdout}${r.stderr}`)
     assert.match(row(r.stdout, 'delta-workspace'), /host=delta kind=ORPHAN state=NO_HOST result=SPLIT$/)
     const orphanPod = creates(r.calls).find(m => m.spec.volumes[0].persistentVolumeClaim.claimName === 'delta-workspace')
     assert.deepEqual(orphanPod.spec.imagePullSecrets, expected)
