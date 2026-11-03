@@ -243,18 +243,25 @@ applies when the variable is unset or empty in `rpc-proxy-config`.
 
 | Variable                                 | Old default       | New default         |
 | ---------------------------------------- | ----------------- | ------------------- |
-| `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` | `60000` ms (60 s) | `300000` ms (300 s) |
+| `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` | `60000` ms (60 s) | `100000` ms (100 s) |
 
 If your `rpc-proxy-config` sets `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, that
 value wins and nothing changes. The common case is a ConfigMap without the
 variable, which was added in v0.11.0: rpc-proxy then used the old 60 s default
-and now uses 300 s. The timer bounds the in-cluster transfer of an artifact body
+and now uses 100 s. The timer bounds the in-cluster transfer of an artifact body
 from the Host after the Host's response headers arrive. It does not bound the
 client's download from rpc-proxy. The Host serves artifact files of at most
 50 MiB; with the old 60 s default a 50 MiB artifact was aborted if that transfer
-ran below about 0.83 MiB/s, while the new 300 s lowers the floor to about
-0.17 MiB/s. When the Host has to be woken first, the transfer is also bounded by
-the remaining request hold, which is at most 48 s (`MAX_REQUEST_HOLD_MS`).
+ran below about 0.83 MiB/s, while the new 100 s lowers the floor to 0.5 MiB/s.
+When the Host has to be woken first, the transfer is also bounded by the
+remaining request hold, which is at most 48 s (`MAX_REQUEST_HOLD_MS`).
+
+rpc-proxy sends nothing to the client until it has the whole body, so a larger
+value only helps when the client reaches rpc-proxy without a proxy that times
+out the origin. Behind Cloudflare, the origin read timeout (125 s by default)
+ends a longer transfer with an HTTP 524 while rpc-proxy keeps reading. Keep the
+value below your edge's timeout. Confirming the timeout of the operated zones is
+tracked in #1309.
 
 The six stream caps below keep their defaults, but an invalid value is now a
 startup error: anything that is not a positive integer (`abc`, `0`, `-1`, `1.5`,

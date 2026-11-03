@@ -250,9 +250,12 @@ export const config: Config = {
   artifactDownloadMaxBytes: parseArtifactDownloadMaxBytes(
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB || '50'
   ),
+  // rpc-proxy sends nothing to the client until the whole artifact body is buffered,
+  // so this default stays below the public edge's origin read timeout (Cloudflare's
+  // default is 125 s): a slow transfer then ends as rpc-proxy's own 504, not an edge 524.
   artifactDownloadTimeoutMs: parsePositiveIntMs(
     'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
-    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS || '300000'
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS || '100000'
   ),
   streamMaxLifetimeMs: Number(process.env.RPC_PROXY_STREAM_MAX_LIFETIME_MS || 600000),
   streamIntervalMs: Number(process.env.RPC_PROXY_STREAM_INTERVAL_MS || 3000),

@@ -209,7 +209,7 @@ describe('config values loaded from the environment', () => {
     delete process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST
     const loaded = await loadConfig()
     expect(loaded.upstreamTimeoutMs).toBe(8_000)
-    expect(loaded.artifactDownloadTimeoutMs).toBe(300_000)
+    expect(loaded.artifactDownloadTimeoutMs).toBe(100_000)
     expect(loaded.activityStreamMaxPerUserHost).toBe(1)
   })
 
