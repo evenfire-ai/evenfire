@@ -64,6 +64,18 @@ function attachmentCount(handle: StoreHandle, checkpointId: string): number {
   ).n
 }
 
+function sessionRow(
+  handle: StoreHandle,
+  sessionId: string
+): {
+  state: string
+  active_task_id: string | null
+} {
+  return handle.worker.db
+    .prepare('SELECT state, active_task_id FROM sessions WHERE id = ?')
+    .get(sessionId) as { state: string; active_task_id: string | null }
+}
+
 async function claimedCheckpoint(
   handle: StoreHandle,
   sessionKey = SESSION_KEY,
@@ -445,6 +457,137 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     handles.splice(handles.indexOf(handle), 1)
     await expect(handle.shutdown()).rejects.toThrow(/db worker exited \(code=1\)/)
   })
+
+  it.each(['resumable', 'abandoned'] as const)(
+    'refuses to reopen a turn through a same-generation %s checkpoint (R3-L10)',
+    async status => {
+      const handle = freshStore()
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'origin input', 'task-origin')
+      await manager.failTurn(conv)
+      const fence = await claimedCheckpoint(handle)
+      const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+        now: () => CLOCK,
+        blockedTtlMs: 7 * 24 * 3_600_000,
+      })
+      const released = await checkpoints.transition(SESSION_KEY, fence, {
+        from: ['claimed'],
+        to: status,
+        ...(status === 'resumable'
+          ? { failedAt: CLOCK, expiresAt: CLOCK + 7 * 24 * 3_600_000 }
+          : {}),
+      })
+      expect(released).not.toBeNull()
+
+      conv.state = ConversationState.Processing
+      conv.activeTaskId = 'task-continuation'
+      await expect(
+        handle.store.persistContinuationStart(conv, 1, turnFence(fence))
+      ).rejects.toThrow(/model-step continuation fence mismatch/)
+      // Liveness witness: the refused start left the durable session released.
+      expect(sessionRow(handle, conv.id)).toMatchObject({
+        state: 'idle',
+        active_task_id: null,
+      })
+      expect(handle.store.activeTurnNumber(conv)).toBe(2)
+    }
+  )
+
+  it('still closes a released continuation turn through the unchanged close fence', async () => {
+    const handle = freshStore()
+    const manager = new ConversationManager(handle.store)
+    const conv = await manager.getOrCreate(SESSION_KEY)
+    await manager.startTurn(conv, 'origin input', 'task-origin')
+    await manager.failTurn(conv)
+    const fence = await claimedCheckpoint(handle)
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+      now: () => CLOCK,
+      blockedTtlMs: 7 * 24 * 3_600_000,
+    })
+    conv.state = ConversationState.Processing
+    conv.activeTaskId = 'task-continuation'
+    await handle.store.persistContinuationStart(conv, 1, turnFence(fence))
+    const released = await checkpoints.transition(SESSION_KEY, fence, {
+      from: ['claimed'],
+      to: 'resumable',
+      failedAt: CLOCK,
+      expiresAt: CLOCK + 7 * 24 * 3_600_000,
+    })
+    expect(released).not.toBeNull()
+
+    conv.state = ConversationState.Idle
+    await handle.store.persistTurnComplete(conv, 'post-release answer', {
+      modelStepTurnFence: turnFence(fence),
+    })
+    expect(turnRows(handle, conv.id, 1).map(row => [row.role, row.content])).toContainEqual([
+      'assistant',
+      'post-release answer',
+    ])
+    expect(sessionRow(handle, conv.id)).toMatchObject({ state: 'idle', active_task_id: null })
+    expect(handle.store.activeTurnNumber(conv)).toBe(2)
+  })
+
+  it.each(['fail', 'cancel'] as const)(
+    'restores the reopened-turn marker when a true fence mismatch rejects the %s boundary (R3-M4)',
+    async boundary => {
+      const handle = freshStore()
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'origin input', 'task-origin')
+      await manager.failTurn(conv)
+      const fence = await claimedCheckpoint(handle)
+      const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+        now: () => CLOCK,
+        blockedTtlMs: 7 * 24 * 3_600_000,
+      })
+      conv.state = ConversationState.Processing
+      conv.activeTaskId = 'task-continuation'
+      await handle.store.persistContinuationStart(conv, 1, turnFence(fence))
+      expect(handle.store.activeTurnNumber(conv)).toBe(1)
+
+      // A real replacement claim bumps the durable generation; no injection
+      // stands in for the fence the worker actually enforces.
+      const released = await checkpoints.transition(SESSION_KEY, fence, {
+        from: ['claimed'],
+        to: 'resumable',
+        failedAt: CLOCK,
+        expiresAt: CLOCK + LEASE_MS,
+      })
+      expect(released).not.toBeNull()
+      const reclaimed = await checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: fence.checkpointId,
+        version: released!,
+        hostInstanceId: 'host-instance-replacement',
+        newTaskId: 'task-replacement',
+        leaseMs: LEASE_MS,
+      })
+      expect(reclaimed.outcome).toBe('claimed')
+
+      const staleFence = turnFence(fence)
+      if (boundary === 'fail') {
+        await expect(handle.store.persistTurnFail(conv, staleFence)).rejects.toThrow(
+          /model-step continuation fence mismatch/
+        )
+      } else {
+        await expect(handle.store.persistTurnCancel(conv, staleFence)).rejects.toThrow(
+          /model-step continuation fence mismatch/
+        )
+      }
+      // The marker is restored: turn 1 is still the open turn, so the
+      // replacement's close keeps the transcript numbering gapless.
+      expect(handle.store.activeTurnNumber(conv)).toBe(1)
+      // Liveness witness: the rejected boundary did not clear the durable turn.
+      expect(sessionRow(handle, conv.id)).toMatchObject({
+        state: 'processing',
+        active_task_id: 'task-continuation',
+      })
+      expect(turnRows(handle, conv.id, 1).map(row => row.content)).not.toContain(
+        '[Task cancelled by user before completion]'
+      )
+    }
+  )
 
   it('ends a cancelled reopened turn in the origin turn without advancing the next number', async () => {
     const handle = freshStore()

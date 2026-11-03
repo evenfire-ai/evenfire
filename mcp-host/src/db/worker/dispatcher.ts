@@ -95,7 +95,7 @@ function prepareDispatcherStatements(db: Database): DispatcherStatements {
           AND c.claim_owner = ?
           AND c.claim_generation = ?
           AND c.origin_turn_number = ?
-          AND c.status IN ('claimed', 'resumable', 'abandoned')`
+          AND c.status = 'claimed'`
     ),
     selectStampedMessages: db.prepare(
       `SELECT role, content, timestamp, model_step_checkpoint_id

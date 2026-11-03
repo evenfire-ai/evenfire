@@ -360,6 +360,13 @@ export class ConversationManager {
    * BEFORE ACKing the client (`responseCallback`) so an acknowledged turn is
    * always durable. A rejected write propagates — never swallowed — and the
    * caller fails the turn (see TaskExecutor.handleLoopResult).
+   *
+   * R3-M3: a sync-timeout rejection from the SQLite store reaches this method
+   * only after the store awaited the queue's per-id late settlement. A
+   * committed late answer resolves the store call (RAM keeps the answer and
+   * the caller delivers it); a rejection proves the boundary did not commit or
+   * the worker died, and the fenced rollback below restores Processing so the
+   * session cannot start a conflicting write.
    */
   async completeTurn(
     conversation: Conversation,

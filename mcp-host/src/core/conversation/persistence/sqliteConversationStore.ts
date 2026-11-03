@@ -55,7 +55,7 @@ import {
   userIdFromRpcPrefix,
   userIdFromStructuredSessionKey,
 } from '../sessionKeyParts'
-import type { PersistQueue } from './persistQueue'
+import { type PersistQueue, syncTimeoutLateSettlement } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
 import {
   groupMessagesIntoTurns,
@@ -734,6 +734,31 @@ export class SqliteConversationStore implements ConversationStore {
     return { owner, previousOwner, previousReopenedTurnNumber }
   }
 
+  /**
+   * R3-M3 — a fenced boundary whose sync write timed out has an unknown
+   * durable outcome while the worker keeps running the op. Await the queue's
+   * per-id late settlement: it resolves only with the worker's authoritative
+   * answer for this exact op, so a resolved settlement means the boundary
+   * committed and a rejection means it did not (or can never be known after a
+   * worker exit/stall). The reopened-turn marker must not move until that
+   * answer arrives; restoring it at timeout time would split RAM from a
+   * boundary that still commits, and releasing it blindly would invent a
+   * commit that never happened.
+   */
+  private async settleUncertainBoundary(err: unknown): Promise<{
+    committed: boolean
+    error: Error
+  }> {
+    const lateSettlement = syncTimeoutLateSettlement(err)
+    if (!lateSettlement) return { committed: false, error: err as Error }
+    try {
+      await lateSettlement
+      return { committed: true, error: err as Error }
+    } catch (lateError) {
+      return { committed: false, error: lateError as Error }
+    }
+  }
+
   private releaseReopenedTurnMarker(state: SessionOrdinalState, marker: { owner: object }): void {
     if (this.reopenedTurnCompletionOwners.get(state) === marker.owner) {
       this.reopenedTurnCompletionOwners.delete(state)
@@ -881,11 +906,21 @@ export class SqliteConversationStore implements ConversationStore {
         this.reopenedTurnCompletionOwners.delete(state)
       }
     } catch (err) {
+      const settled = await this.settleUncertainBoundary(err)
+      if (settled.committed) {
+        // The worker answered after the caller's sync timeout: the boundary
+        // transaction committed, so keep the reopened marker cleared and let
+        // the completion proceed instead of inventing a rollback (R3-M3).
+        if (this.reopenedTurnCompletionOwners.get(state) === completionOwner) {
+          this.reopenedTurnCompletionOwners.delete(state)
+        }
+        return
+      }
       if (this.reopenedTurnCompletionOwners.get(state) === completionOwner) {
         state.reopenedTurnNumber = previousReopenedTurnNumber
         this.reopenedTurnCompletionOwners.delete(state)
       }
-      throw err
+      throw settled.error
     }
   }
 
@@ -992,12 +1027,19 @@ export class SqliteConversationStore implements ConversationStore {
         sessionKey
       )
     } catch (err) {
-      // SF (R2-M2): the mirror follows the manager's fence-only rule for
-      // fail/cancel. Only a fence mismatch means the turn is still open;
-      // any other rejection leaves it closed in RAM, so close it here too.
+      // R3-M3: await the late settlement first. Committed means the durable
+      // close happened after the caller's timeout; a rejected settlement
+      // proved the boundary did not commit, so — like a fence mismatch — the
+      // reopened turn is still open and the marker must be restored.
+      const uncertain = syncTimeoutLateSettlement(err) !== undefined
+      const settled = await this.settleUncertainBoundary(err)
+      if (settled.committed) {
+        this.releaseReopenedTurnMarker(state, marker)
+        return
+      }
       if (
         fence !== undefined &&
-        isModelStepFenceMismatch(err) &&
+        (isModelStepFenceMismatch(settled.error) || uncertain) &&
         this.reopenedTurnCompletionOwners.get(state) === marker.owner
       ) {
         state.reopenedTurnNumber = marker.previousReopenedTurnNumber
@@ -1005,7 +1047,7 @@ export class SqliteConversationStore implements ConversationStore {
       } else {
         this.releaseReopenedTurnMarker(state, marker)
       }
-      throw err
+      throw settled.error
     }
     this.releaseReopenedTurnMarker(state, marker)
   }
@@ -1043,10 +1085,16 @@ export class SqliteConversationStore implements ConversationStore {
         sessionKey
       )
     } catch (err) {
-      // SF (R2-M2): same rule as persistTurnCancel above.
+      // R3-M3: same rule as persistTurnCancel above.
+      const uncertain = syncTimeoutLateSettlement(err) !== undefined
+      const settled = await this.settleUncertainBoundary(err)
+      if (settled.committed) {
+        this.releaseReopenedTurnMarker(state, marker)
+        return
+      }
       if (
         fence !== undefined &&
-        isModelStepFenceMismatch(err) &&
+        (isModelStepFenceMismatch(settled.error) || uncertain) &&
         this.reopenedTurnCompletionOwners.get(state) === marker.owner
       ) {
         if (marker.previousReopenedTurnNumber !== undefined) {
@@ -1057,7 +1105,7 @@ export class SqliteConversationStore implements ConversationStore {
       } else {
         this.releaseReopenedTurnMarker(state, marker)
       }
-      throw err
+      throw settled.error
     }
     this.releaseReopenedTurnMarker(state, marker)
   }

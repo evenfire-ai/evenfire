@@ -88,6 +88,73 @@ describe('PersistQueue', () => {
     await expect(q.enqueueSync({ kind: 'ping' })).rejects.toThrow(/timeout/)
   })
 
+  it('keeps a per-id late settlement after a sync timeout and resolves it with the worker answer', async () => {
+    const worker = new FakeWorker()
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 30,
+      asyncTimeoutMs: 30,
+      stallTimeoutMs: 30_000,
+    })
+    const timedOut = q.enqueueSync({ kind: 'ping' }).catch((err: unknown) => err)
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(1))
+    const error = (await timedOut) as Error & { lateSettlement?: Promise<unknown> }
+    expect(error.message).toMatch(/db worker timeout \(30ms\) for op=ping/)
+    // Liveness witness: the timed-out op is still owned by the worker, so its
+    // durable outcome is unknown until the late settlement answers.
+    expect(error.lateSettlement).toBeInstanceOf(Promise)
+
+    worker.emit('message', {
+      id: worker.sent[0].id,
+      ok: true,
+      result: 'late pong',
+    } satisfies WorkerReply)
+    await expect(error.lateSettlement).resolves.toBe('late pong')
+    // The resolved settlement did not poison later admission.
+    const next = q.enqueueSync({ kind: 'ping' })
+    worker.emit('message', {
+      id: worker.sent[1].id,
+      ok: true,
+      result: 'next',
+    } satisfies WorkerReply)
+    await expect(next).resolves.toBe('next')
+  })
+
+  it('rejects the late settlement when the timed-out op eventually fails', async () => {
+    const worker = new FakeWorker()
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 30,
+      asyncTimeoutMs: 30,
+      stallTimeoutMs: 30_000,
+    })
+    const timedOut = q.enqueueSync({ kind: 'ping' }).catch((err: unknown) => err)
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(1))
+    const error = (await timedOut) as Error & { lateSettlement?: Promise<unknown> }
+
+    worker.emit('message', {
+      id: worker.sent[0].id,
+      ok: false,
+      error: { code: 'SQLITE_FULL', message: 'late worker error' },
+    } satisfies WorkerReply)
+    await expect(error.lateSettlement).rejects.toThrow(/late worker error/)
+  })
+
+  it('rejects the late settlement when the worker exits before answering', async () => {
+    const worker = new FakeWorker()
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 30,
+      asyncTimeoutMs: 30,
+      stallTimeoutMs: 30_000,
+    })
+    const timedOut = q.enqueueSync({ kind: 'ping' }).catch((err: unknown) => err)
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(1))
+    const error = (await timedOut) as Error & { lateSettlement?: Promise<unknown> }
+
+    worker.emit('exit', 1)
+    await expect(error.lateSettlement).rejects.toThrow(
+      /db worker exited \(code=1\) while op=ping was pending/
+    )
+  })
+
   it('awaitOpen outlasts the sync timeout and resolves on the worker reply', async () => {
     const worker = new FakeWorker()
     const q = new PersistQueue(worker, {

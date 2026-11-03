@@ -14,7 +14,7 @@ import { EventEmitter } from 'node:events'
 import { runMigrations } from '../../../../db/migrate'
 import { applyPragmas } from '../../../../db/pragmas'
 import { createDispatcher, dispatch } from '../../../../db/worker/dispatcher'
-import type { WorkerMessage, WorkerReply } from '../../../../db/worker/protocol'
+import type { WorkerMessage, WorkerOp, WorkerReply } from '../../../../db/worker/protocol'
 import { PersistQueue, type WorkerLike } from '../persistQueue'
 import { SqliteConversationStore } from '../sqliteConversationStore'
 
@@ -28,7 +28,7 @@ export interface InProcessWorkerHandle {
 
 export function createInProcessWorker(
   dbPath: string = ':memory:',
-  opts: { barrierMode?: boolean } = {}
+  opts: { barrierMode?: boolean; holdOps?: (op: WorkerOp) => Promise<void> } = {}
 ): InProcessWorkerHandle {
   const ee = new EventEmitter()
   ee.setMaxListeners(50)
@@ -59,6 +59,7 @@ export function createInProcessWorker(
       }
       queueMicrotask(async () => {
         try {
+          if (opts.holdOps) await opts.holdOps(msg.op)
           const result = await dispatch(msg.op, deps)
           if (msg.op.kind === 'shutdown') {
             alive = false
@@ -113,15 +114,25 @@ export interface StoreHandle {
 }
 
 export function makeSqliteStore(
-  opts: { dbPath?: string; cacheSize?: number; barrierMode?: boolean } = {}
+  opts: {
+    dbPath?: string
+    cacheSize?: number
+    barrierMode?: boolean
+    /** Overrides the PersistQueue budgets; defaults mirror production shape. */
+    persistQueue?: { syncTimeoutMs?: number; asyncTimeoutMs?: number; stallTimeoutMs?: number }
+    /** Test gate awaited inside the worker before an op dispatches. */
+    holdOps?: (op: WorkerOp) => Promise<void>
+  } = {}
 ): StoreHandle {
   const worker = createInProcessWorker(opts.dbPath ?? ':memory:', {
     barrierMode: opts.barrierMode,
+    holdOps: opts.holdOps,
   })
   const persistQueue = new PersistQueue(worker.worker, {
     syncTimeoutMs: 2000,
     asyncTimeoutMs: 5000,
     stallTimeoutMs: 30_000,
+    ...opts.persistQueue,
   })
   const store = new SqliteConversationStore(persistQueue, {
     cacheSize: opts.cacheSize ?? 8,

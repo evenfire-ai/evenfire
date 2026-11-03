@@ -36,6 +36,7 @@ import {
   type ToolCall,
 } from '../../core/types'
 import type { ModelStepCheckpointFence } from '../../db/worker/modelStepCheckpointOps'
+import type { WorkerOp } from '../../db/worker/protocol'
 import { GfscHttpError } from '../../internalTools/gfsClient'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { CodexProxyError } from '../../llm/codexLlmProxyClient'
@@ -247,6 +248,7 @@ async function claimedCheckpoint(options: {
   /** Source-image byte rows (digest-bound), as a resumable transition writes them. */
   imageAttachmentBytes?: Buffer[]
   checkpointId?: string
+  storeOptions?: Parameters<typeof makeSqliteStore>[0]
   /** The user message as the origin sent it (production records it with its turn-context block). */
   recordedUserContent?: string
   recordedUserParts?: MessageContentPart[]
@@ -256,7 +258,7 @@ async function claimedCheckpoint(options: {
    */
   storeRawSourceMessage?: boolean
 }): Promise<CheckpointFixture> {
-  const handle = makeSqliteStore()
+  const handle = makeSqliteStore(options.storeOptions)
   handles.push(handle)
   const manager = new ConversationManager(handle.store)
   const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
@@ -3046,7 +3048,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     await nextTurnIsTwo(fixture)
   })
 
-  async function limitContinuationRun(fixture: CheckpointFixture) {
+  async function limitContinuationRun(fixture: CheckpointFixture, gate?: BoundaryGate) {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
     let enteredProvider!: () => void
     const providerEntered = new Promise<void>(resolve => {
@@ -3060,6 +3062,17 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     const execution = run.executor.run()
     await providerEntered
     await vi.advanceTimersByTimeAsync(101)
+    if (gate) {
+      await gate.entered
+      try {
+        // Liveness witness: the boundary op is held past the sync timeout.
+        await vi.advanceTimersByTimeAsync(26)
+        expect(run.onComplete).not.toHaveBeenCalled()
+        expect(run.onFail).not.toHaveBeenCalled()
+      } finally {
+        gate.release()
+      }
+    }
     await execution
     await fixture.handle.persistQueue.drain()
     vi.useRealTimers()
@@ -3098,34 +3111,46 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     await nextTurnIsTwo(fixture)
   })
 
-  // The persist queue rejects with its sync-timeout error. 'late-commit' lets
-  // the boundary commit first (the worker finished after the timeout);
-  // 'no-commit' never sends it (the worker failed later).
-  function injectBoundaryTimeout(
-    fixture: CheckpointFixture,
-    content: RegExp,
-    mode: 'late-commit' | 'no-commit'
-  ) {
-    const queue = fixture.handle.persistQueue
-    const real = queue.enqueueSync.bind(queue)
-    const injected = { count: 0 }
-    queue.enqueueSync = ((op: any, sessionKey?: string) => {
-      if (
-        injected.count === 0 &&
-        op.kind === 'persist_turn_boundary' &&
-        op.message?.role === 'assistant' &&
-        content.test(String(op.message?.content))
-      ) {
-        injected.count += 1
-        const timeout = new Error('db worker timeout (2000ms) for op=persist_turn_boundary')
-        if (mode === 'no-commit') return Promise.reject(timeout)
-        return real(op, sessionKey).then(() => {
-          throw timeout
-        })
-      }
-      return real(op, sessionKey)
-    }) as typeof queue.enqueueSync
-    return injected
+  // Holds the worker's dispatch of one fenced assistant boundary so the real
+  // PersistQueue times out first (R3-M3). Releasing the gate lets the same
+  // in-flight op commit late or fail late, exactly as a busy worker would.
+  interface BoundaryGate {
+    entered: Promise<void>
+    release: () => void
+    holdOps: (op: WorkerOp) => Promise<void>
+  }
+
+  function boundaryGate(content: RegExp): BoundaryGate {
+    let releaseGate!: () => void
+    const held = new Promise<void>(resolve => {
+      releaseGate = resolve
+    })
+    let signalEntered!: () => void
+    const entered = new Promise<void>(resolve => {
+      signalEntered = resolve
+    })
+    return {
+      entered,
+      release: () => releaseGate(),
+      holdOps: op => {
+        if (
+          op.kind === 'persist_turn_boundary' &&
+          op.message.role === 'assistant' &&
+          content.test(String(op.message.content))
+        ) {
+          signalEntered()
+          return held
+        }
+        return Promise.resolve()
+      },
+    }
+  }
+
+  function gatedStore(gate: BoundaryGate) {
+    return {
+      persistQueue: { syncTimeoutMs: 25 },
+      holdOps: gate.holdOps,
+    }
   }
 
   // The persist queue rejects the assistant boundary once with the real
@@ -3164,29 +3189,56 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     await nextTurnIsTwo(fixture)
   }
 
-  it('R2-M2 X4. a fenced response completion that times out after a late commit releases the turn', async () => {
-    const fixture = await claimedCheckpoint({})
-    const injected = injectBoundaryTimeout(fixture, /^late answer$/, 'late-commit')
+  it('R3-M3. a fenced response completion that times out but commits late delivers the durable answer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const gate = boundaryGate(/^late answer$/)
+    const fixture = await claimedCheckpoint({ storeOptions: gatedStore(gate) })
     const llm = provider(undefined, () => ({ content: 'late answer' }))
     const run = await runContinuation(fixture, llm)
-    await run.executor.run()
+    const execution = run.executor.run()
+    await gate.entered
+    try {
+      await vi.advanceTimersByTimeAsync(26)
+      // Liveness witness: the caller already saw the sync timeout, the worker
+      // still owns the boundary, and no verdict or row exists yet.
+      expect(header(fixture.handle).status).toBe('claimed')
+      expect(turnRows(fixture.handle).some(row => row.content === 'late answer')).toBe(false)
+      expect(run.onComplete).not.toHaveBeenCalled()
+      expect(run.onFail).not.toHaveBeenCalled()
+    } finally {
+      gate.release()
+    }
+    await execution
     await fixture.handle.persistQueue.drain()
-    expect(injected.count).toBe(1)
+    vi.useRealTimers()
+
     expect(llm.calls()).toBe(1)
-    expect(run.onFail).toHaveBeenCalledTimes(1)
-    expect(run.onComplete).not.toHaveBeenCalled()
+    expect(run.onComplete).toHaveBeenCalledTimes(1)
+    expect(run.onFail).not.toHaveBeenCalled()
+    expect(header(fixture.handle)).toMatchObject({ status: 'completed' })
     expect(turnRows(fixture.handle)).toEqual([
       expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
-      expect.objectContaining({ role: 'assistant', content: 'late answer', turn_number: 1 }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'late answer',
+        turn_number: 1,
+        model_step_checkpoint_id: 'checkpoint-b2',
+      }),
     ])
+    const { conversation } = fencedSession(fixture)
+    expect(
+      fixture.manager.buildMessageHistory(conversation).map(message => String(message.content))
+    ).toContain('late answer')
     await releasedAndNextTurnIsTwo(fixture)
   })
 
-  it('R2-M2 X5. a fenced limit completion that times out after a late commit releases the turn', async () => {
-    const fixture = await claimedCheckpoint({ taskBudget: budget({ durationMs: 100 }) })
-    const injected = injectBoundaryTimeout(fixture, /active execution reached/, 'late-commit')
-    const { run, llm } = await limitContinuationRun(fixture)
-    expect(injected.count).toBe(1)
+  it('R3-M3 limit. a fenced limit completion that times out but commits late keeps its durable close', async () => {
+    const gate = boundaryGate(/active execution reached/)
+    const fixture = await claimedCheckpoint({
+      taskBudget: budget({ durationMs: 100 }),
+      storeOptions: gatedStore(gate),
+    })
+    const { run, llm } = await limitContinuationRun(fixture, gate)
     expect(llm.calls()).toBe(1)
     expect(run.onFail).toHaveBeenCalledTimes(1)
     expect(run.onFail.mock.calls[0]![1].code).toBe('TASK_DURATION_LIMIT')
@@ -3201,34 +3253,62 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     await releasedAndNextTurnIsTwo(fixture)
   })
 
-  it('R2-M2 X6. a fenced response completion that times out without a commit releases the turn', async () => {
-    const fixture = await claimedCheckpoint({})
-    const injected = injectBoundaryTimeout(fixture, /^lost answer$/, 'no-commit')
+  it('R3-M3 no-commit. a fenced response completion that times out and fails late rolls the turn back', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const gate = boundaryGate(/^lost answer$/)
+    const fixture = await claimedCheckpoint({ storeOptions: gatedStore(gate) })
     const llm = provider(undefined, () => ({ content: 'lost answer' }))
     const run = await runContinuation(fixture, llm)
-    await run.executor.run()
+    const execution = run.executor.run()
+    await gate.entered
+    try {
+      await vi.advanceTimersByTimeAsync(26)
+      // Liveness witness: the timeout fired while the boundary was still held.
+      expect(run.onComplete).not.toHaveBeenCalled()
+      expect(run.onFail).not.toHaveBeenCalled()
+      fixture.handle.worker.db.exec(`
+        CREATE TRIGGER reject_lost_late BEFORE INSERT ON messages
+        WHEN NEW.role = 'assistant' AND NEW.content = 'lost answer'
+        BEGIN SELECT RAISE(ABORT, 'probe late completion rejected'); END;
+      `)
+    } finally {
+      gate.release()
+    }
+    await execution
     await fixture.handle.persistQueue.drain()
-    expect(injected.count).toBe(1)
+    vi.useRealTimers()
+    fixture.handle.worker.db.exec('DROP TRIGGER reject_lost_late')
+
     expect(llm.calls()).toBe(1)
     expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onFail.mock.calls[0]![1].message).toContain('probe late completion rejected')
     expect(run.onComplete).not.toHaveBeenCalled()
+    expect(header(fixture.handle).status).toBe('abandoned')
     expect(turnRows(fixture.handle)).toEqual([
       expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
     ])
     await releasedAndNextTurnIsTwo(fixture, /^lost answer$/)
   })
 
-  it('R2-M2 X7. a fenced limit completion that times out without a commit releases the turn', async () => {
-    const fixture = await claimedCheckpoint({ taskBudget: budget({ durationMs: 100 }) })
-    const injected = injectBoundaryTimeout(fixture, /active execution reached/, 'no-commit')
-    const { run, llm } = await limitContinuationRun(fixture)
-    expect(injected.count).toBe(1)
+  it('R3-M3 no-commit limit. a fenced limit completion that times out and fails late rolls back', async () => {
+    const gate = boundaryGate(/active execution reached/)
+    const fixture = await claimedCheckpoint({
+      taskBudget: budget({ durationMs: 100 }),
+      storeOptions: gatedStore(gate),
+    })
+    fixture.handle.worker.db.exec(`
+      CREATE TRIGGER reject_limit_late BEFORE INSERT ON messages
+      WHEN NEW.role = 'assistant' AND NEW.content LIKE '%active execution reached%'
+      BEGIN SELECT RAISE(ABORT, 'probe late limit rejected'); END;
+    `)
+    const { run, llm } = await limitContinuationRun(fixture, gate)
     expect(llm.calls()).toBe(1)
     expect(run.onFail).toHaveBeenCalledTimes(1)
     expect(run.onFail.mock.calls[0]![1].code).toBe('TASK_DURATION_LIMIT')
     expect(turnRows(fixture.handle)).toEqual([
       expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
     ])
+    fixture.handle.worker.db.exec('DROP TRIGGER reject_limit_late')
     await releasedAndNextTurnIsTwo(fixture, /active execution reached/)
   })
 
