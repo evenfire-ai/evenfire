@@ -4,7 +4,7 @@ import type { RolloutWaitOptions } from '@components/UpdateConnectorCredentials/
 import { useRolloutWait } from '@components/UpdateConnectorCredentials/useRolloutWait'
 import { POLL_INTERVAL_MS, POLL_TIMEOUT_MS } from '@constants/connectorCredentials'
 import { getMcpServer } from '@lib/api'
-import type { McpServerResource } from '@lib/api'
+import type { McpServerCondition, McpServerResource } from '@lib/api'
 
 vi.mock('@lib/api', () => ({ getMcpServer: vi.fn() }))
 const cutoff = '2026-10-23T12:00:00.000Z'
@@ -14,6 +14,38 @@ const target: RolloutWaitOptions = {
   expectedUid: 'uid',
   expectedGeneration: 3,
 }
+// The HCC-authored refusal message (host-context-controller/src/reconciler.ts,
+// spec §4.7): placeholder / source / context names only, never value bytes.
+const EGRESS_REFUSAL_MESSAGE =
+  '1 value would be refused by the egress-proxy image; the existing ConfigMap and ' +
+  'Deployment are unchanged: query placeholder ${API_KEY} (Secret "remote-creds" key ' +
+  '"api-key"). See docs/crds/mcpserver.md "Value classes".'
+function egressCondition(
+  status: 'True' | 'False',
+  options: {
+    timestamp?: string
+    observedGeneration?: number
+    message?: string
+  } = {}
+): McpServerCondition {
+  return {
+    type: 'EgressProxyValuesValid',
+    status,
+    reason: status === 'False' ? 'ValueOutsideClass' : 'ValuesWithinClass',
+    message:
+      options.message ??
+      (status === 'False'
+        ? EGRESS_REFUSAL_MESSAGE
+        : 'Every value the egress-proxy template substitutes is within its class'),
+    lastTransitionTime: options.timestamp ?? '2026-10-23T12:00:04.000Z',
+    observedGeneration: options.observedGeneration ?? 3,
+  }
+}
+function withoutObservedGeneration(condition: McpServerCondition): McpServerCondition {
+  const copy = { ...condition }
+  delete copy.observedGeneration
+  return copy
+}
 function response(
   status: 'True' | 'False' = 'True',
   options: {
@@ -22,6 +54,7 @@ function response(
     timestamp?: string
     reason?: string
     uid?: string
+    extraConditions?: McpServerCondition[]
   } = {}
 ): McpServerResource {
   return {
@@ -36,6 +69,7 @@ function response(
           lastTransitionTime: options.timestamp ?? '2026-10-23T12:00:01.000Z',
           observedGeneration: options.observedGeneration ?? 3,
         },
+        ...(options.extraConditions ?? []),
       ],
     },
   }
@@ -125,6 +159,78 @@ describe('shared rollout observation', () => {
     expect(hook.result.current.phase).toBe('rotating')
     await tick()
     expect(hook.result.current.phase).toBe('success')
+  })
+  it('fails as soon as a fresh egress-proxy refusal arrives, without waiting for DeploymentReady', async () => {
+    // The PR #1243 shape: the PREVIOUS rollout's DeploymentReady=True is still
+    // on the CRD, and the blocking reconcile deliberately writes no
+    // DeploymentReady. Without the refusal branch this poll spins to
+    // POLL_TIMEOUT_MS and reports the stale True as the current state; the
+    // operator only learns why 180s later — or never.
+    vi.mocked(getMcpServer)
+      .mockResolvedValueOnce(response('True', { timestamp: cutoff }))
+      .mockResolvedValue(
+        response('True', {
+          timestamp: cutoff,
+          extraConditions: [egressCondition('False')],
+        })
+      )
+    const hook = start()
+    await tick()
+    expect(hook.result.current.phase).toBe('rotating')
+    await tick()
+    expect(hook.result.current.phase).toBe('failed')
+    // The HCC message verbatim: placeholder/source/context, no value bytes.
+    expect(hook.result.current.phaseMessage).toBe(EGRESS_REFUSAL_MESSAGE)
+    // Terminal: the poll stopped, so no later tick resurrects a timeout.
+    await tick(POLL_TIMEOUT_MS)
+    expect(hook.result.current.phase).toBe('failed')
+    expect(hook.result.current.phaseMessage).toBe(EGRESS_REFUSAL_MESSAGE)
+  })
+  it.each([
+    {
+      label: 'a block timestamped at or before the write',
+      condition: egressCondition('False', { timestamp: cutoff }),
+    },
+    {
+      label: 'a block observed for another generation',
+      condition: egressCondition('False', { observedGeneration: 2 }),
+    },
+    {
+      label: 'a block without observedGeneration',
+      condition: withoutObservedGeneration(egressCondition('False')),
+    },
+    {
+      label: 'a within-class True',
+      condition: egressCondition('True'),
+    },
+  ])('does not treat $label as this write’s verdict', async ({ condition }) => {
+    vi.mocked(getMcpServer).mockResolvedValue(
+      response('True', { timestamp: cutoff, extraConditions: [condition] })
+    )
+    const hook = start()
+    await tick()
+    expect(hook.result.current.phase).toBe('rotating')
+    expect(hook.result.current.phaseMessage).not.toBe(EGRESS_REFUSAL_MESSAGE)
+    // Still the pre-existing bounded behavior: no fresh DeploymentReady, no
+    // verdict, so the poll ends as an inconclusive timeout — never a failure
+    // blamed on a condition this write did not produce.
+    await tick(POLL_TIMEOUT_MS - POLL_INTERVAL_MS)
+    expect(hook.result.current.phase).toBe('timeout')
+  })
+  it('reports a fresh refusal for timestamp-only rotation callers', async () => {
+    // UpdateConnectorCredentials (/mcp-servers/[name]/edit) passes no identity:
+    // the refusal is correlated by the same timestamp-only window this caller
+    // already uses for DeploymentReady success.
+    const blocked = response('True', {
+      timestamp: cutoff,
+      extraConditions: [withoutObservedGeneration(egressCondition('False'))],
+    })
+    delete blocked.metadata
+    vi.mocked(getMcpServer).mockResolvedValue(blocked)
+    const hook = start({ serverName: 'connector', cutoff })
+    await tick()
+    expect(hook.result.current.phase).toBe('failed')
+    expect(hook.result.current.phaseMessage).toBe(EGRESS_REFUSAL_MESSAGE)
   })
   it('keeps the HCC diagnostic until its own timeout, including read failures', async () => {
     vi.mocked(getMcpServer)

@@ -35,6 +35,19 @@ export const POLL_TIMEOUT_MS = 180_000
 // diagnostic value. Must match host-context-controller/src/reconciler.ts.
 export const ROLLOUT_INCOMPLETE_REASON = 'RolloutIncomplete'
 
+// The two McpServer condition types the credential-rotation rollout wait reads.
+// Both must stay in sync with host-context-controller/src/reconciler.ts.
+export const DEPLOYMENT_READY_CONDITION = 'DeploymentReady'
+
+// The egress-proxy value preflight. Only a managed, enabled, remote connector
+// gets it, and it is False only when the egress-proxy image WOULD REFUSE one of
+// the values the connector substitutes: the HCC then preserves the existing
+// ConfigMap and Deployment and deliberately writes NO DeploymentReady
+// (reconciler.ts, blockEgressProxyValues; docs/crds/mcpserver.md, "Value
+// classes"). The condition's message names the placeholder, the source and the
+// context only — never value bytes — so it is safe to show the operator as-is.
+export const EGRESS_PROXY_VALUES_VALID_CONDITION = 'EgressProxyValuesValid'
+
 // Slack subtracted from the client-side cutoff to absorb clock skew between the
 // browser and the Kubernetes API server (which stamps lastTransitionTime). Must
 // stay well under a real rollout's duration so a stale condition is still

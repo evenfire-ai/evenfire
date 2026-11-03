@@ -62,7 +62,9 @@ export type UpdateConnectorCredentialsProps = {
  *             DeploymentReady condition (the connector restarting after a
  *             rotation, or starting for the first time after a create).
  * - success:  a fresh DeploymentReady=True was observed after the write.
- * - failed:   the write failed, or the UI budget expired after an unresolved
+ * - failed:   the write failed, a fresh EgressProxyValuesValid=False refusal
+ *             arrived (terminal: the HCC blocks the update and writes no
+ *             DeploymentReady), or the UI budget expired after an unresolved
  *             RolloutIncomplete diagnostic (a fresh False alone is not final).
  * - timeout:  the bounded poll window elapsed without a fresh terminal
  *             condition. Never reported as success.
