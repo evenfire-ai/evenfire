@@ -884,7 +884,7 @@ export const config: Config = {
   // desktopGfsOperatorLinkingEnabled. Missing/'false' → OFF; only 'true' enables.
   mcpOauthBrokerEnabled: failClosedBooleanFromEnv('MCP_OAUTH_BROKER_ENABLED'),
   userApprovalRequestDefaultTtlSec: Number(process.env.WORKFLOW_APPROVAL_DEFAULT_TTL_SEC || 86400),
-  userApprovalRequestMaxTtlSec: Number(process.env.WORKFLOW_APPROVAL_MAX_TTL_SEC || 604800),
+  userApprovalRequestMaxTtlSec: Number(process.env.WORKFLOW_APPROVAL_MAX_TTL_SEC || 172800),
   userApprovalRequestExpiryIntervalMs: Number(
     process.env.WORKFLOW_APPROVAL_EXPIRY_INTERVAL_MS || 60000
   ),
