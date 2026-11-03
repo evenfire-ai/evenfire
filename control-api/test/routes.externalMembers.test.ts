@@ -99,8 +99,7 @@ describe('external members routes', () => {
       'manager-1',
       'invitee@example.com',
       [{ teamId: 'team-1', role: 'admin' }],
-      'Full Name',
-      expect.objectContaining({ contract: 'v1', userId: 'manager-1' })
+      'Full Name'
     )
   })
 
@@ -154,8 +153,7 @@ describe('external members routes', () => {
         'manager-1',
         email,
         [{ teamId: 'team-1', role: 'member' }],
-        '',
-        expect.objectContaining({ contract: 'v1', userId: 'manager-1' })
+        ''
       )
     }
   )
@@ -242,16 +240,11 @@ describe('external members routes', () => {
       .send({ reason: 'manager retirement' })
       .expect(200, { ok: true, id: 'target-1' })
 
-    expect(directoryMock.deleteManagedUserForUser).toHaveBeenCalledWith(
-      'manager-1',
-      'target-1',
-      {
-        reason: 'manager retirement',
-        idempotencyKey: 'external-delete-1',
-        requestId: 'request-external-members',
-      },
-      expect.objectContaining({ contract: 'v1', userId: 'manager-1' })
-    )
+    expect(directoryMock.deleteManagedUserForUser).toHaveBeenCalledWith('manager-1', 'target-1', {
+      reason: 'manager retirement',
+      idempotencyKey: 'external-delete-1',
+      requestId: 'request-external-members',
+    })
   })
 
   it.each([

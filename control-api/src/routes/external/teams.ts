@@ -207,8 +207,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           (req as ExternalAuthedRequest).externalAuth!.userId,
           req.params.userId,
           req.params.teamId,
-          role,
-          (req as ExternalAuthedRequest).externalSessionAuthority
+          role
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
@@ -242,8 +241,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           (req as ExternalAuthedRequest).externalAuth!.userId,
           email,
           [{ teamId: req.params.teamId, role }],
-          name || fallbackName,
-          (req as ExternalAuthedRequest).externalSessionAuthority
+          name || fallbackName
         )
         if ('error' in result) {
           return res.status(result.error === 'forbidden' ? 403 : 400).json({ error: result.error })
@@ -272,8 +270,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
         const result = await deleteManagedMemberForUser(
           (req as ExternalAuthedRequest).externalAuth!.userId,
           req.params.userId,
-          req.params.teamId,
-          (req as ExternalAuthedRequest).externalSessionAuthority
+          req.params.teamId
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })

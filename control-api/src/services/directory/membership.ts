@@ -1,8 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
-import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
-import { validateExternalSessionAuthorityContext } from '../auth/userSessionService.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
 import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 import {
@@ -508,8 +506,7 @@ async function deliverAndActivateInvitation(
 async function deliverAndActivateManagedInvitation(
   inserted: InvitationWithTeams,
   commandId: string,
-  managerUserId: string,
-  authority?: ExternalSessionAuthorityContext
+  managerUserId: string
 ) {
   try {
     await registerAndSendInvitation(
@@ -537,11 +534,6 @@ async function deliverAndActivateManagedInvitation(
   }
 
   return withTransaction(async db => {
-    const sourceAuthorityValid = await hasValidManagedMutationAuthority(
-      db,
-      managerUserId,
-      authority
-    )
     const locked = await db.query(
       `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose,
               i.created_at, i.expires_at, i.accepted_at, i.accepted_user_id,
@@ -561,14 +553,6 @@ async function deliverAndActivateManagedInvitation(
     )
     const invitation = (locked.rows[0] as InvitationRow | undefined) || null
     if (!invitation) return { error: 'not_found' as const }
-    if (!sourceAuthorityValid) {
-      await finishInvitationDeliveryCommand(db, commandId, 'cancelled', 'authority_changed')
-      await db.query(
-        `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'draft'`,
-        [invitation.id]
-      )
-      return { error: 'forbidden' as const }
-    }
     const teams = await loadInvitationTeams(db, invitation.id, invitation)
     if (!(await managerCanControlAllInvitationTeams(db, managerUserId, teams, true))) {
       await finishInvitationDeliveryCommand(db, commandId, 'cancelled', 'authority_changed')
@@ -1378,16 +1362,6 @@ async function getManagerRolesForTeams(
   )
 }
 
-async function hasValidManagedMutationAuthority(
-  db: DbClient,
-  managerUserId: string,
-  authority?: ExternalSessionAuthorityContext
-): Promise<boolean> {
-  if (!authority) return true
-  const session = await validateExternalSessionAuthorityContext(authority, { db })
-  return session.status === 'valid' && session.identity.userId === managerUserId.trim()
-}
-
 function canManagerInviteAssignment(
   managerRole: TeamRole | undefined,
   assignmentRole: InviteRole
@@ -1477,8 +1451,7 @@ export async function createManagedInvitationForUser(
   managerUserId: string,
   email: string,
   teamAssignments: readonly InvitationTeamAssignment[],
-  inviteeName = '',
-  authority?: ExternalSessionAuthorityContext
+  inviteeName = ''
 ) {
   const normalizedEmail = email.trim().toLowerCase()
   const normalizedInviteeName = inviteeName.trim()
@@ -1489,9 +1462,6 @@ export async function createManagedInvitationForUser(
 
   const fallbackName = normalizedEmail.split('@')[0] || normalizedEmail
   const authorized = await withTransaction(async db => {
-    if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
-      return { error: 'forbidden' as const }
-    }
     const managerRoles = await getManagerRolesForTeams(
       db,
       managerUserId.trim(),
@@ -1524,8 +1494,7 @@ export async function createManagedInvitationForUser(
   const delivered = await deliverAndActivateManagedInvitation(
     authorized.inserted,
     authorized.commandId,
-    managerUserId,
-    authority
+    managerUserId
   )
   if ('error' in delivered) return { error: delivered.error }
   return {
@@ -1537,17 +1506,13 @@ export async function updateManagedMemberRoleForUser(
   managerUserId: string,
   targetUserId: string,
   teamId: string,
-  role: TeamRole,
-  authority?: ExternalSessionAuthorityContext
+  role: TeamRole
 ) {
   const normalizedRole = normalizeTeamRoleInput(role)
   if (!normalizedRole) {
     return { error: 'invalid_role' as const }
   }
   return withTransaction(async db => {
-    if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
-      return { error: 'forbidden' as const }
-    }
     const locked = await db.query(
       `SELECT user_id::text AS user_id, role
          FROM team_members
@@ -1612,13 +1577,9 @@ export async function updateManagedMemberRoleForUser(
 export async function deleteManagedMemberForUser(
   managerUserId: string,
   targetUserId: string,
-  teamId: string,
-  authority?: ExternalSessionAuthorityContext
+  teamId: string
 ) {
   return withTransaction(async db => {
-    if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
-      return { error: 'forbidden' as const }
-    }
     const locked = await db.query(
       `SELECT user_id::text AS user_id, role
          FROM team_members
@@ -1673,8 +1634,7 @@ export async function deleteManagedMemberForUser(
 export async function deleteManagedUserForUser(
   managerUserId: string,
   targetUserId: string,
-  retirement: { reason: string; idempotencyKey: string; requestId: string | null },
-  authority?: ExternalSessionAuthorityContext
+  retirement: { reason: string; idempotencyKey: string; requestId: string | null }
 ) {
   const normalizedManagerUserId = managerUserId.trim()
   const normalizedTargetUserId = targetUserId.trim()
@@ -1695,7 +1655,7 @@ export async function deleteManagedUserForUser(
     return await withTransaction(async db => {
       // Reciprocal retirements must not each lock their own actor before the
       // other request's target. Lock the existing principal pair in the same
-      // database UUID order before revalidating authority or locking teams.
+      // database UUID order before locking teams.
       // Filter malformed ids before the UUID cast so the indexed lookup does
       // not change their existing later validation/error path.
       const principalIds = [...new Set([normalizedManagerUserId, normalizedTargetUserId])]
@@ -1712,9 +1672,6 @@ export async function deleteManagedUserForUser(
           FOR UPDATE`,
         [principalIds]
       )
-      if (!(await hasValidManagedMutationAuthority(db, normalizedManagerUserId, authority))) {
-        return { error: 'forbidden' as const }
-      }
       const outcome = await retireDesktopUser(
         { kind: 'platform_user', desktopUserId: normalizedManagerUserId },
         normalizedTargetUserId,
@@ -1765,15 +1722,8 @@ export async function deleteManagedUserForUser(
   }
 }
 
-export async function resendManagedInvitationForUser(
-  managerUserId: string,
-  invitationId: string,
-  authority?: ExternalSessionAuthorityContext
-) {
+export async function resendManagedInvitationForUser(managerUserId: string, invitationId: string) {
   const authorized = await withTransaction(async db => {
-    if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
-      return { error: 'forbidden' as const }
-    }
     const result = await db.query(
       `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
@@ -1828,15 +1778,8 @@ export async function resendManagedInvitationForUser(
   return { resent: true as const, id: invitation.id, email: invitation.email }
 }
 
-export async function revokeManagedInvitationForUser(
-  managerUserId: string,
-  invitationId: string,
-  authority?: ExternalSessionAuthorityContext
-) {
+export async function revokeManagedInvitationForUser(managerUserId: string, invitationId: string) {
   return withTransaction(async db => {
-    if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
-      return { error: 'forbidden' as const }
-    }
     const result = await db.query(
       `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,

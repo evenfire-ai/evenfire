@@ -1,13 +1,19 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ExternalGfsAuthorityError,
   resolveExternalGfsAuthority,
+  signCurrentExternalGfsUserToken,
 } from '../src/gfs/externalAuthority.js'
 import { GfsDesktopOperatorLinkError } from '../src/services/gfsDesktopOperatorLinkService.js'
+
+const dbMock = vi.hoisted(() => ({ withTransaction: vi.fn() }))
+const gfsTokenMock = vi.hoisted(() => ({ signGfsToken: vi.fn() }))
 
 vi.mock('../src/config.js', () => ({
   config: { desktopGfsOperatorLinkingEnabled: false },
 }))
+vi.mock('../src/db.js', () => ({ withTransaction: dbMock.withTransaction }))
+vi.mock('../src/auth/gfsToken.js', () => ({ signGfsToken: gfsTokenMock.signGfsToken }))
 vi.mock('../src/services/gfsDesktopOperatorLinkService.js', () => {
   class GfsDesktopOperatorLinkError extends Error {
     constructor(
@@ -143,5 +149,97 @@ describe('resolveExternalGfsAuthority', () => {
         }),
       })
     ).rejects.toMatchObject({ status: 403, code: 'gfs_operator_link_invalid' })
+  })
+})
+
+describe('signCurrentExternalGfsUserToken', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const policy = {
+    policyVersion: '1' as const,
+    policyRevision: 'gfs-external-authority-test',
+    acceptV1: true,
+    issueV1: true,
+    acceptV2: false,
+    issueV2: false,
+    renewV2: false,
+    switchCompatibility: true,
+    computeCatalogShadow: false,
+    serveCatalog: false,
+    actionContextV2: false,
+    rpcDelegationV2: false,
+    desktopAllTeamMode: false,
+    profileV2Mode: false,
+    minimumClientVersion: null,
+    enforceMinimumClient: false,
+    advertisedCatalogFamilies: [],
+  }
+  const tokenClaims = {
+    userId: DESKTOP_USER_ID,
+    email: 'user@example.test',
+    teamId: null,
+    role: 'member' as const,
+    authGeneration: 1,
+    exp: Math.floor(Date.now() / 1000) + 600,
+  }
+  const authentication = {
+    status: 'authenticated' as const,
+    contract: 'v1' as const,
+    claims: tokenClaims,
+    authorityContext: {
+      contract: 'v1' as const,
+      userId: DESKTOP_USER_ID,
+      tokenHash: 'token-hash',
+      issuedAt: 1,
+      authGeneration: 1,
+    },
+    tokenClaims,
+    policy,
+  }
+  const input = { subject: DESKTOP_USER_ID, drive: 'user', scopes: ['read' as const] }
+
+  it('signs with a single unlocked users read and no session revalidation', async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{ lifecycle_state: 'active', lifecycle_version: 3, db_now: new Date() }],
+      rowCount: 1,
+    })
+    dbMock.withTransaction.mockImplementation(async work => work({ query }))
+    gfsTokenMock.signGfsToken.mockReturnValue({ token: 'signed-gfs-token', expiresInSeconds: 600 })
+
+    await expect(signCurrentExternalGfsUserToken(authentication, input)).resolves.toEqual({
+      token: 'signed-gfs-token',
+      expiresInSeconds: 600,
+    })
+
+    expect(query).toHaveBeenCalledOnce()
+    expect(String(query.mock.calls[0]?.[0])).toContain('FROM users')
+    expect(String(query.mock.calls[0]?.[0])).not.toContain('FOR UPDATE')
+    expect(
+      query.mock.calls.some(call =>
+        String(call[0]).includes('external_user_session_security_epochs')
+      )
+    ).toBe(false)
+    // Witness: the canonical generation reaches the signed claims.
+    expect(gfsTokenMock.signGfsToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subject: DESKTOP_USER_ID,
+        authGeneration: 3,
+        principalType: 'user',
+      })
+    )
+  })
+
+  it('returns null for a retired user instead of signing', async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{ lifecycle_state: 'retired', lifecycle_version: 4, db_now: new Date() }],
+      rowCount: 1,
+    })
+    dbMock.withTransaction.mockImplementation(async work => work({ query }))
+
+    await expect(signCurrentExternalGfsUserToken(authentication, input)).resolves.toBeNull()
+    expect(query).toHaveBeenCalledOnce()
+    expect(gfsTokenMock.signGfsToken).not.toHaveBeenCalled()
   })
 })

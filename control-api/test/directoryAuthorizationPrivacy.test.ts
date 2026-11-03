@@ -218,20 +218,8 @@ describe('directory privacy and atomic authorization', () => {
     expect(mocks.withTransaction).toHaveBeenCalledOnce()
   })
 
-  it('revalidates source authority before final role-mutation membership locks', async () => {
+  it('does not re-lock the caller before the membership locks', async () => {
     mocks.query
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            id: MANAGER,
-            email: 'manager@example.test',
-            lifecycle_state: 'active',
-            lifecycle_version: 1,
-          },
-        ],
-        rowCount: 1,
-      })
-      .mockResolvedValueOnce({ rows: [{ valid_after: null, token_revoked: false }], rowCount: 1 })
       .mockResolvedValueOnce({
         rows: [
           { user_id: MANAGER, role: 'admin' },
@@ -255,9 +243,16 @@ describe('directory privacy and atomic authorization', () => {
     expect(result).toEqual({
       membership: { team_id: TEAM_A, user_id: TARGET, role: 'inviter', status: 'active' },
     })
-    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FROM users')
+    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FROM team_members')
     expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
-    expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FROM team_members')
+    expect(
+      mocks.query.mock.calls.some(call =>
+        String(call[0]).includes('external_user_session_security_epochs')
+      )
+    ).toBe(false)
+    // Witness: the mutation completed and emitted its UPDATE.
+    expect(String(mocks.query.mock.calls[1]?.[0])).toContain('UPDATE team_members')
+    expect(mocks.appendEvents).toHaveBeenCalledTimes(1)
   })
 
   it('locks invitation authority and denies inviter-to-admin assignment before mutation', async () => {
@@ -1031,20 +1026,8 @@ describe('directory privacy and atomic authorization', () => {
     expect(mocks.appendEvents).not.toHaveBeenCalled()
   })
 
-  it('revalidates source authority before final member-removal membership locks', async () => {
+  it('does not re-lock the caller before the member-removal membership locks', async () => {
     mocks.query
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            id: MANAGER,
-            email: 'manager@example.test',
-            lifecycle_state: 'active',
-            lifecycle_version: 1,
-          },
-        ],
-        rowCount: 1,
-      })
-      .mockResolvedValueOnce({ rows: [{ valid_after: null, token_revoked: false }], rowCount: 1 })
       .mockResolvedValueOnce({
         rows: [
           { user_id: MANAGER, role: 'admin' },
@@ -1068,9 +1051,16 @@ describe('directory privacy and atomic authorization', () => {
     expect(result).toEqual({
       deleted: { team_id: TEAM_A, user_id: TARGET, role: 'member', status: 'deleted' },
     })
-    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FROM users')
+    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FROM team_members')
     expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
-    expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FROM team_members')
+    expect(
+      mocks.query.mock.calls.some(call =>
+        String(call[0]).includes('external_user_session_security_epochs')
+      )
+    ).toBe(false)
+    // Witness: the removal completed and emitted its UPDATE.
+    expect(String(mocks.query.mock.calls[1]?.[0])).toContain('UPDATE team_members')
+    expect(mocks.appendEvents).toHaveBeenCalledTimes(1)
   })
 
   it('changes a password and revokes every session in one conditional transaction', async () => {

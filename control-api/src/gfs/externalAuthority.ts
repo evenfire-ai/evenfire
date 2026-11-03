@@ -7,7 +7,6 @@ import {
   externalSessionDatabaseFailure,
   isExternalSessionBackendUnavailableError,
 } from '../services/auth/sessionDatabaseFailure.js'
-import { validateExternalSessionAuthorityContext } from '../services/auth/userSessionService.js'
 import {
   type GfsDesktopOperatorLink,
   GfsDesktopOperatorLinkError,
@@ -49,10 +48,9 @@ export type ExternalGfsUserTokenInput = Readonly<{
 }>
 
 /**
- * Sign a user-plane GFS token while the authenticated session and canonical
- * user generation are current under the same principal lock. GFSC consumes
- * users.lifecycle_version as authGeneration; V2's sessionVersion is a
- * different fence and must never be projected into that claim.
+ * Sign a user-plane GFS token with the current canonical user generation.
+ * GFSC re-reads users.lifecycle_version on every request, so a generation that
+ * changes after signing fails closed there.
  *
  * The signed bytes remain private to this function until COMMIT succeeds, so a
  * lost/uncertain commit cannot be reported as a usable GFS credential.
@@ -82,11 +80,6 @@ export async function signCurrentExternalGfsUserToken(
   try {
     return await withTransaction(
       async transaction => {
-        const current = await validateExternalSessionAuthorityContext(context, {
-          db: transaction,
-        })
-        if (current.status !== 'valid' || current.identity.userId !== context.userId) return null
-
         const result = await transaction.query(
           `SELECT lifecycle_state, lifecycle_version, clock_timestamp() AS db_now
              FROM users
