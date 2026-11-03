@@ -80,6 +80,31 @@ function makeRemoteServer(): McpServerCRD {
   }
 }
 
+/**
+ * Remote server whose Deployment carries the two `env[].value: ""` entries the
+ * apiserver drops: a query placeholder declared by envSecret, and a backfilled
+ * authHeader placeholder with no Secret entry behind it.
+ */
+function makeRemotePlaceholderServer(): McpServerCRD {
+  return {
+    name: 'test-remote-placeholder',
+    namespace: 'mcp-server',
+    uid: 'uid-remote-placeholder-1234',
+    spec: {
+      image: 'my-mcp-server:v1',
+      transport: { type: 'streamableHttp', port: 3000 },
+      remote: {
+        baseUrl: 'https://mcp.example.com/mcp?k=' + '$' + '{Q}',
+        authHeaders: [{ header: 'X-Api-Key', valueTemplate: '$' + '{OPTIONAL_TOKEN}' }],
+      },
+      envSecret: {
+        name: 'test-remote-placeholder-credentials',
+        keys: [{ secretKey: 'q', envVar: 'Q' }],
+      },
+    },
+  }
+}
+
 function makeStdioServer(): McpServerCRD {
   return {
     name: 'test-mcp',
@@ -211,6 +236,103 @@ describe('McpServer ensureDeployment no-op gate', () => {
 
     await (reconciler as any).ensureDeployment(remoteServer, 'rev-1')
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
+  })
+
+  it('NOOP-MCPDEP-REMOTE-2: placeholder and backfill entries are a no-op across reconciles', async () => {
+    const remoteServer = makeRemotePlaceholderServer()
+    const desired = (reconciler as any).buildDeployment(
+      remoteServer,
+      'rev-1',
+      remoteConfigRevision(remoteServer)
+    ) as k8s.V1Deployment
+    const live = asApiserverDeployment(desired)
+    const liveContainer = live.spec?.template?.spec?.containers?.find(
+      container => container.name === 'egress-proxy'
+    )
+
+    // Desired shape: both empty-valued entries exist with `value: ''`.
+    const desiredContainer = desired.spec?.template?.spec?.containers?.find(
+      container => container.name === 'egress-proxy'
+    )
+    expect(desiredContainer?.env).toContainEqual({
+      name: 'Q',
+      valueFrom: {
+        secretKeyRef: {
+          name: 'test-remote-placeholder-credentials',
+          key: 'q',
+        },
+      },
+    })
+    expect(desiredContainer?.env).toContainEqual({ name: 'OPTIONAL_TOKEN', value: '' })
+    expect(desiredContainer?.env).toContainEqual({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
+
+    // Live shape: the apiserver omitted `value` on the two empty entries.
+    expect(liveContainer).toBeDefined()
+    const backfill = liveContainer?.env?.find(entry => entry.name === 'OPTIONAL_TOKEN')
+    const filter = liveContainer?.env?.find(entry => entry.name === 'NGINX_ENVSUBST_FILTER')
+    expect(backfill).toBeDefined()
+    expect(backfill).not.toHaveProperty('value')
+    expect(filter).toBeDefined()
+    expect(filter).not.toHaveProperty('value')
+
+    appsApi.readNamespacedDeployment.mockResolvedValue(live)
+    await (reconciler as any).ensureDeployment(remoteServer, 'rev-1')
+    await (reconciler as any).ensureDeployment(remoteServer, 'rev-1')
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    // Witness: both calls read the live object; the no-op is a decision, not a
+    // skipped read.
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
+  })
+
+  it('UPGRADE-ONCE-MCPDEP-REMOTE-1: a dev-shape proxy is replaced once, then not again', async () => {
+    const remoteServer = makeRemotePlaceholderServer()
+    const revision = remoteConfigRevision(remoteServer)
+    const desired = (reconciler as any).buildDeployment(
+      remoteServer,
+      'rev-1',
+      revision
+    ) as k8s.V1Deployment
+
+    // The `dev` shape, derived from the new desired object so every other field
+    // matches and the single replace is attributable to the upgrade: httpGet
+    // liveness, no template digest annotation, the previous image, no FILTER.
+    const legacy = structuredClone(desired)
+    const legacyAnnotations = legacy.spec?.template?.metadata?.annotations ?? {}
+    delete legacyAnnotations[NGINX_CONFIG_REVISION_ANNOTATION]
+    const legacyContainer = legacy.spec?.template?.spec?.containers?.find(
+      container => container.name === 'egress-proxy'
+    )
+    if (!legacyContainer) throw new Error('fixture did not build an egress-proxy container')
+    legacyContainer.image = 'ghcr.io/evenfire-ai/nginx-egress-proxy:0.0.9'
+    legacyContainer.livenessProbe = { httpGet: { path: '/health', port: 'http' } }
+    legacyContainer.env = (legacyContainer.env ?? []).filter(
+      entry => entry.name !== 'NGINX_ENVSUBST_FILTER'
+    )
+
+    appsApi.readNamespacedDeployment.mockResolvedValue(asApiserverDeployment(legacy))
+    await (reconciler as any).ensureDeployment(remoteServer, 'rev-1')
+
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+    const body = (
+      appsApi.replaceNamespacedDeployment.mock.calls[0][0] as { body: k8s.V1Deployment }
+    ).body
+    const replacedContainer = body.spec?.template?.spec?.containers?.find(
+      container => container.name === 'egress-proxy'
+    )
+    expect(replacedContainer?.livenessProbe?.exec?.command).toEqual([
+      '/usr/local/bin/egress-proxy-liveness',
+      '3000',
+    ])
+    expect(body.spec?.template?.metadata?.annotations?.[NGINX_CONFIG_REVISION_ANNOTATION]).toBe(
+      revision
+    )
+    expect(replacedContainer?.env).toContainEqual({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
+
+    // The replaced object as the apiserver would return it is a no-op.
+    appsApi.readNamespacedDeployment.mockResolvedValue(asApiserverDeployment(body))
+    await (reconciler as any).ensureDeployment(remoteServer, 'rev-1')
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
     expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
   })
 

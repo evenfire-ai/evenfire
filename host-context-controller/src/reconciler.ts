@@ -21,6 +21,7 @@ import {
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from './constants'
+import { isQueryValueAllowed, isQuotedValueAllowed } from './egressProxyValueClass'
 import { hccLogger } from './logger'
 import {
   confirmAuthoritativeMcpServerAbsence,
@@ -62,6 +63,15 @@ export type SecretValidationResult =
        * can never describe a different revision than the one that was checked.
        */
       revision: string
+      /**
+       * The base64 `data` object of the very Secret this validation read and
+       * hashed, so the egress-proxy preflight (reconciler.ts,
+       * EgressProxyValuesValid) judges the exact version whose digest goes on
+       * the PodTemplate. It stays base64: only the preflight decodes it, key by
+       * key, into the bytes the kubelet places in the container env. Empty when
+       * the McpServer has no envSecret.
+       */
+      secretData: Record<string, string>
     }
   | {
       ok: false
@@ -114,6 +124,26 @@ export type McpServerMutationOptions = {
   isCurrent?: () => boolean
 }
 
+/**
+ * One reason the egress-proxy value preflight refuses a value (issue #1240).
+ * Only names, sources and contexts travel here: never a value byte, a value
+ * length or an offending character.
+ */
+type EgressProxyValueViolation = {
+  context: 'query' | 'quoted' | 'collision'
+  placeholder: string
+  source: string
+  header?: string
+  kind: 'class' | 'dependent-env'
+}
+
+type EgressProxyValueVerdict =
+  | { ok: true }
+  | { ok: false; violations: EgressProxyValueViolation[]; message: string }
+
+/** At most this many violations are spelled out in the status message. */
+const MAX_EGRESS_PROXY_VALUE_ENTRIES = 10
+
 // G2: Pre-deploy handshake constants — imported from @clerum/network-policy-core
 // (single source of truth shared with WRC; a divergence is a compile error rather
 // than a silent 30s fail-open timeout). clerum.io/network-ready-observed-generation
@@ -152,7 +182,9 @@ const QUERY_PLACEHOLDER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
 const REMOTE_HOSTNAME_RE = /^[a-z0-9._-]+$/
 // CRD-supplied env names that could hijack the runtime (loader, interpreter or
 // cluster-access knobs). sanitizeCrdSpec strips them from spec.env.
-const FORBIDDEN_CRD_ENV_NAMES = new Set([
+// Exported so that the SC-1 drift test can compare this set with the operator
+// script's FORBIDDEN_NAMES line; the export changes no behavior.
+export const FORBIDDEN_CRD_ENV_NAMES = new Set([
   'LD_PRELOAD',
   'LD_LIBRARY_PATH',
   'PATH',
@@ -163,15 +195,33 @@ const FORBIDDEN_CRD_ENV_NAMES = new Set([
   'KUBERNETES_SERVICE_HOST',
   'KUBERNETES_SERVICE_PORT',
 ])
-// Egress-proxy env whose value the platform owns: buildContainerEnv appends the
-// empty NGINX_ENVSUBST_FILTER after every CRD env source, and the image
-// entrypoint exports the resolver variables itself. A CRD declaration never
-// controls their value, so a placeholder naming one of them would resolve to a
-// platform value and be sent upstream.
-const PLATFORM_OWNED_PROXY_ENV = new Set([
-  'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
+// Read by the image's 20-envsubst-on-templates.sh. egress-proxy-entrypoint
+// assigns all six before it checks and renders the templates, and HCC strips
+// them from every CRD env source of a remote server, so a CRD value never
+// reaches envsubst.
+export const ENVSUBST_PINNED_PROXY_ENV = new Set([
+  'NGINX_ENVSUBST_TEMPLATE_DIR',
+  'NGINX_ENVSUBST_TEMPLATE_SUFFIX',
+  'NGINX_ENVSUBST_OUTPUT_DIR',
+  'NGINX_ENVSUBST_STREAM_TEMPLATE_SUFFIX',
+  'NGINX_ENVSUBST_STREAM_OUTPUT_DIR',
   'NGINX_ENVSUBST_FILTER',
+])
+// The image's 15-local-resolvers.envsh exports NGINX_LOCAL_RESOLVERS when
+// NGINX_ENTRYPOINT_LOCAL_RESOLVERS is set. It runs after the template check, so
+// a placeholder naming either variable would be filled with an unchecked value.
+// A CRD may still set them; no template HCC renders references them.
+export const RESOLVER_RESERVED_PROXY_ENV = new Set([
+  'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
   'NGINX_LOCAL_RESOLVERS',
+])
+// Every egress-proxy env name a CRD may not own: a value the image sets after
+// the check (the resolver pair) or a value the image pins (the six envsubst
+// knobs). A placeholder naming one of them would resolve to that value and be
+// sent upstream. Exported for the SC-1 drift test, like FORBIDDEN_CRD_ENV_NAMES.
+export const RESERVED_PROXY_ENV = new Set([
+  ...ENVSUBST_PINNED_PROXY_ENV,
+  ...RESOLVER_RESERVED_PROXY_ENV,
 ])
 
 function withoutForbiddenCrdEnv<T extends { name: string }>(
@@ -899,7 +949,7 @@ export class McpServerReconciler {
    */
   async validateSecret(server: McpServerCRD): Promise<SecretValidationResult> {
     // No envSecret: nothing to hash, and no credentials annotation is written.
-    if (!server.spec.envSecret) return { ok: true, revision: '' }
+    if (!server.spec.envSecret) return { ok: true, revision: '', secretData: {} }
 
     const secretName = server.spec.envSecret.name
 
@@ -927,7 +977,7 @@ export class McpServerReconciler {
       hccLogger.info(`Secret "${secretName}" validated for McpServer ${server.name}`, {
         scope: '[Reconciler]',
       })
-      return { ok: true, revision }
+      return { ok: true, revision, secretData: data as Record<string, string> }
     } catch (error: unknown) {
       const code = getErrorCode(error)
       if (code === 404) {
@@ -1093,15 +1143,15 @@ export class McpServerReconciler {
     }
     // The rendered `proxy_set_header` is envsubst-filled at pod start from the
     // container env, so a reference to a forbidden name (stripped from
-    // spec.env) or to a platform-owned egress-proxy env would inject a platform
-    // value (the image PATH, the resolver variables) into the outbound request.
-    // Names are compared exact-case: a distinct lowercase name is another env.
-    // The warning names the header, never the value.
+    // spec.env) or to a reserved egress-proxy env var — a value the image sets
+    // after the check or a value the image pins — would inject that value into
+    // the outbound request. Names are compared exact-case: a distinct lowercase
+    // name is another env. The warning names the header, never the value.
     for (const match of h.valueTemplate.matchAll(AUTH_HEADER_ENV_REF_RE)) {
       const referenced = match[1] ?? match[2] ?? ''
-      if (FORBIDDEN_CRD_ENV_NAMES.has(referenced) || PLATFORM_OWNED_PROXY_ENV.has(referenced)) {
+      if (FORBIDDEN_CRD_ENV_NAMES.has(referenced) || RESERVED_PROXY_ENV.has(referenced)) {
         hccLogger.warn(
-          `Rejecting authHeader referencing a forbidden or platform-owned env var for header: ${h.header}`,
+          `Rejecting authHeader referencing a forbidden or reserved egress-proxy env var for header: ${h.header}`,
           { scope: '[HCC]' }
         )
         return null
@@ -1113,7 +1163,21 @@ export class McpServerReconciler {
     return { header: h.header, valueTemplate: escaped }
   }
 
-  private buildNginxConfigMap(server: McpServerCRD): k8s.V1ConfigMap {
+  /**
+   * Render the nginx template of a remote server once per reconcile.
+   *
+   * Returns the ConfigMap that goes to the API server plus the two reference
+   * positions of the contract: the parsed query (`parsed.search`, where every
+   * `${NAME}` is a query-position placeholder) and the authHeaders that
+   * `sanitizeAuthHeader` kept (every `$NAME`/`${NAME}` there is a quoted
+   * position). The egress-proxy preflight derives its reference positions from
+   * this render, never from a second parser.
+   */
+  private renderNginxTemplate(server: McpServerCRD): {
+    configMap: k8s.V1ConfigMap
+    parsedSearch: string
+    authHeaders: Array<{ header: string; valueTemplate: string }>
+  } {
     const {
       safeUrl,
       host: upstreamHost,
@@ -1127,15 +1191,14 @@ export class McpServerReconciler {
     // query. The comparison is exact and case-sensitive, like envsubst's.
     // Declared means present in the env this reconcile gives the egress-proxy
     // container: envMapping, spec.env after the forbidden names are stripped,
-    // spec.envSecret and the authHeaders backfill. Platform-owned egress-proxy
-    // env is never CRD-controlled, so a placeholder naming one of those is
-    // rejected before the declared check.
+    // spec.envSecret and the authHeaders backfill. Reserved egress-proxy env
+    // names are rejected before the declared check.
     const declaredEnvNames = this.egressProxyEnvNames(server)
     for (const match of upstreamSearch.matchAll(QUERY_PLACEHOLDER_RE)) {
-      if (PLATFORM_OWNED_PROXY_ENV.has(match[1])) {
+      if (RESERVED_PROXY_ENV.has(match[1])) {
         throw new Error(
-          `remote.baseUrl query placeholder \${${match[1]}} names an env var the ` +
-            'egress-proxy platform sets, not the CRD'
+          `remote.baseUrl query placeholder \${${match[1]}} names a reserved egress-proxy env var; ` +
+            'use another name'
         )
       }
       if (!declaredEnvNames.has(match[1])) {
@@ -1236,7 +1299,7 @@ server {
 ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolved) ──\n' + authHeaderLines + '\n' : ''}${authorizationBlock}
         # An upstream must not drive internal redirects or charset overrides:
         # NGINX logs the X-Accel-Redirect target and the X-Accel-Charset value
-        # it received, outside the messages egress-proxy-log-filter redacts (#1240).
+        # it received, outside the messages egress-proxy-log-filter redacts.
         proxy_ignore_headers X-Accel-Redirect X-Accel-Charset;
 
         # SSE/streaming support
@@ -1278,31 +1341,292 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     return {
-      apiVersion: 'v1',
-      kind: 'ConfigMap',
-      metadata: {
-        name: `${server.name}-nginx-conf`,
-        namespace: server.namespace,
-        labels,
-        ...(server.uid && {
-          ownerReferences: [
-            {
-              apiVersion: 'clerum.io/v1alpha1',
-              kind: 'McpServer',
-              name: server.name,
-              uid: server.uid,
-              controller: true,
-              blockOwnerDeletion: true,
-            },
-          ],
-        }),
+      configMap: {
+        apiVersion: 'v1',
+        kind: 'ConfigMap',
+        metadata: {
+          name: `${server.name}-nginx-conf`,
+          namespace: server.namespace,
+          labels,
+          ...(server.uid && {
+            ownerReferences: [
+              {
+                apiVersion: 'clerum.io/v1alpha1',
+                kind: 'McpServer',
+                name: server.name,
+                uid: server.uid,
+                controller: true,
+                blockOwnerDeletion: true,
+              },
+            ],
+          }),
+        },
+        data: {
+          // Stored as .conf.template so Clerum's nginx egress proxy runs envsubst at
+          // startup, resolving ${VAR} placeholders from env (sourced from envSecret).
+          'default.conf.template': nginxConf,
+        },
       },
-      data: {
-        // Stored as .conf.template so Clerum's nginx egress proxy runs envsubst at
-        // startup, resolving ${VAR} placeholders from env (sourced from envSecret).
-        'default.conf.template': nginxConf,
-      },
+      parsedSearch: upstreamSearch,
+      authHeaders: sanitizedAuthHeaders,
     }
+  }
+
+  /** ConfigMap of a remote server; thin wrapper over renderNginxTemplate. */
+  private buildNginxConfigMap(server: McpServerCRD): k8s.V1ConfigMap {
+    return this.renderNginxTemplate(server).configMap
+  }
+
+  /**
+   * Egress-proxy value preflight (issue #1240): every value the rendered
+   * template substitutes must be within the class of the NGINX context it lands
+   * in. It blocks instead of warning because a write would replace the
+   * Deployment, the new pod would refuse to start on the same value, mcp-host
+   * would disconnect the server and the rollout would never converge.
+   *
+   * The positions come from the same render that goes to the ConfigMap: a
+   * `${NAME}` in `parsed.search` is query position, a `$NAME`/`${NAME}` in an
+   * authHeader that sanitizeAuthHeader kept is quoted position, and a reference
+   * that appears more often in the template than in those two positions also
+   * sits in the fixed template text (an argument start, where the image refuses
+   * any value). Values are bytes: a Secret key is base64 in the snapshot and a
+   * CRD literal is UTF-8, the bytes the kubelet puts in the container env.
+   *
+   * Never logs or returns a value byte.
+   */
+  private checkEgressProxyValues(
+    server: McpServerCRD,
+    rendered: {
+      configMap: k8s.V1ConfigMap
+      parsedSearch: string
+      authHeaders: Array<{ header: string; valueTemplate: string }>
+    },
+    secretData: Record<string, string>
+  ): EgressProxyValueVerdict {
+    const template = rendered.configMap.data?.['default.conf.template'] ?? ''
+    // Kubernetes keeps the last entry of a duplicated env name.
+    const effective = new Map<string, k8s.V1EnvVar>()
+    for (const entry of this.buildContainerEnv(server)) effective.set(entry.name, entry)
+
+    const countOccurrences = (text: string, pattern: RegExp): Map<string, number> => {
+      const counts = new Map<string, number>()
+      for (const match of text.matchAll(pattern)) {
+        const name = match[1] ?? match[2] ?? ''
+        if (name === '') continue
+        counts.set(name, (counts.get(name) ?? 0) + 1)
+      }
+      return counts
+    }
+
+    const queryOccurrences = countOccurrences(rendered.parsedSearch, QUERY_PLACEHOLDER_RE)
+    const templateOccurrences = countOccurrences(template, AUTH_HEADER_ENV_REF_RE)
+    const headerOccurrences = countOccurrences(
+      rendered.authHeaders.map(header => header.valueTemplate).join('\n'),
+      AUTH_HEADER_ENV_REF_RE
+    )
+
+    // Every (header, name) pair the kept headers reference, so a rejection
+    // names the header that would lose its value.
+    const headerPairs: Array<{ header: string; name: string }> = []
+    const seenHeaderPairs = new Set<string>()
+    for (const header of rendered.authHeaders) {
+      for (const match of header.valueTemplate.matchAll(AUTH_HEADER_ENV_REF_RE)) {
+        const name = match[1] ?? match[2] ?? ''
+        if (name === '') continue
+        const pair = `${header.header}\u0000${name}`
+        if (seenHeaderPairs.has(pair)) continue
+        seenHeaderPairs.add(pair)
+        headerPairs.push({ header: header.header, name })
+      }
+    }
+
+    const violations: EgressProxyValueViolation[] = []
+    for (const [name, entry] of effective) {
+      const source = this.describeEnvSource(entry)
+      const fixedOccurrences =
+        (templateOccurrences.get(name) ?? 0) -
+        (queryOccurrences.get(name) ?? 0) -
+        (headerOccurrences.get(name) ?? 0)
+      if (fixedOccurrences > 0) {
+        violations.push({ context: 'collision', kind: 'class', placeholder: name, source })
+        continue
+      }
+      if (
+        queryOccurrences.has(name) &&
+        !isQueryValueAllowed(this.effectiveEnvBytes(entry, secretData))
+      ) {
+        violations.push({
+          context: 'query',
+          kind: this.isDependentEnvLiteral(entry) ? 'dependent-env' : 'class',
+          placeholder: name,
+          source,
+        })
+      }
+      for (const pair of headerPairs) {
+        if (pair.name !== name) continue
+        if (isQuotedValueAllowed(this.effectiveEnvBytes(entry, secretData))) continue
+        violations.push({
+          context: 'quoted',
+          kind: this.isDependentEnvLiteral(entry) ? 'dependent-env' : 'class',
+          placeholder: name,
+          source,
+          header: pair.header,
+        })
+      }
+    }
+
+    if (violations.length === 0) return { ok: true }
+    return { ok: false, violations, message: this.formatEgressProxyValueMessage(violations) }
+  }
+
+  /** Human-readable source of an env entry: names only, never the value. */
+  private describeEnvSource(entry: k8s.V1EnvVar): string {
+    const secretKeyRef = entry.valueFrom?.secretKeyRef
+    if (secretKeyRef) return `Secret "${secretKeyRef.name}" key "${secretKeyRef.key}"`
+    return 'literal value from spec.env or spec.envMapping'
+  }
+
+  /** The bytes the kubelet places in the container env for this entry. */
+  private effectiveEnvBytes(entry: k8s.V1EnvVar, secretData: Record<string, string>): Uint8Array {
+    const secretKeyRef = entry.valueFrom?.secretKeyRef
+    if (!secretKeyRef) return Buffer.from(entry.value ?? '', 'utf8')
+    const encoded = secretData[secretKeyRef.key]
+    if (encoded === undefined) {
+      // validateSecret already proved that every envSecret key exists; a missing
+      // key here means the snapshot and the env list disagree. Fail loud instead
+      // of classifying an empty value as valid.
+      throw new Error(
+        `egress-proxy preflight: Secret "${secretKeyRef.name}" snapshot has no key ` +
+          `"${secretKeyRef.key}"`
+      )
+    }
+    return Buffer.from(encoded, 'base64')
+  }
+
+  /**
+   * A referenced literal that holds `$(NAME)`: Kubernetes expands dependent
+   * environment references at container start, and HCC judges the literal as
+   * written, so the value is refused for its `$` (blocked by design, m1).
+   */
+  private isDependentEnvLiteral(entry: k8s.V1EnvVar): boolean {
+    return entry.valueFrom === undefined && (entry.value ?? '').includes('$(')
+  }
+
+  private formatEgressProxyValueMessage(violations: EgressProxyValueViolation[]): string {
+    const compare = (left: string, right: string): number =>
+      left < right ? -1 : left > right ? 1 : 0
+    const unique = new Map<string, EgressProxyValueViolation>()
+    for (const violation of violations) {
+      const identity =
+        `${violation.context}\u0000${violation.placeholder}\u0000` +
+        `${violation.header ?? ''}\u0000${violation.kind}`
+      if (!unique.has(identity)) unique.set(identity, violation)
+    }
+    const sorted = [...unique.values()].sort(
+      (left, right) =>
+        compare(left.context, right.context) ||
+        compare(left.placeholder, right.placeholder) ||
+        compare(left.header ?? '', right.header ?? '')
+    )
+    const entries = sorted.map(violation => this.formatEgressProxyValueEntry(violation))
+    const shown = entries.slice(0, MAX_EGRESS_PROXY_VALUE_ENTRIES)
+    const hidden = entries.length - shown.length
+    const more = hidden > 0 ? `; and ${hidden} more` : ''
+    return (
+      `${entries.length} value(s) would be refused by the egress-proxy image; ` +
+      'the existing ConfigMap and Deployment are unchanged: ' +
+      `${shown.join('; ')}${more}. See docs/crds/mcpserver.md "Value classes".`
+    )
+  }
+
+  private formatEgressProxyValueEntry(violation: EgressProxyValueViolation): string {
+    const dependent =
+      violation.kind === 'dependent-env'
+        ? '; a $(NAME) dependent env reference is not expanded by HCC, store the final value'
+        : ''
+    switch (violation.context) {
+      case 'collision':
+        return `env var \${${violation.placeholder}} collides with an NGINX variable the template uses`
+      case 'quoted':
+        return (
+          `authHeader ${violation.header} placeholder \${${violation.placeholder}} ` +
+          `(quoted value; ${violation.source}${dependent})`
+        )
+      case 'query':
+        return `query placeholder \${${violation.placeholder}} (${violation.source}${dependent})`
+      default: {
+        const exhaustive: never = violation.context
+        return exhaustive
+      }
+    }
+  }
+
+  /**
+   * Block path of the egress-proxy value preflight. Modelled on the
+   * ImageNotAllowed block: keep the existing ConfigMap, Service and Deployment
+   * (and therefore the running pod), report not ready with a named reason, and
+   * write no DeploymentReady.
+   */
+  private async blockEgressProxyValues(
+    server: McpServerCRD,
+    verdict: Extract<EgressProxyValueVerdict, { ok: false }>,
+    isCurrent: () => boolean
+  ): Promise<boolean> {
+    // First, before any status write of the block: bump the retirement epoch so
+    // a readiness tick that is already in flight cannot publish Ready=True over
+    // this block. The clearTimeout + delete that beginStatusTracking uses does
+    // not bump it; only the bump makes the resumed tick's retiredNow() true.
+    this.retireReadinessWindow(server.name)
+    if (server.spec.envSecret) {
+      // The Secret exists and has its keys. Without this write a stale
+      // SecretResolved=False/SecretNotFound from an earlier state would survive:
+      // policies would stay revoked and the operator would see a missing Secret
+      // instead of a value outside the class.
+      await this.writeStatusCondition(
+        server,
+        {
+          type: 'SecretResolved',
+          status: 'True',
+          reason: 'SecretFound',
+          message: 'Secret resolved and validated',
+        },
+        isCurrent
+      )
+    }
+    await this.writeStatusCondition(
+      server,
+      {
+        type: 'EgressProxyValuesValid',
+        status: 'False',
+        reason: 'ValueOutsideClass',
+        message: verdict.message,
+      },
+      isCurrent
+    )
+    await this.writeStatusCondition(
+      server,
+      {
+        type: 'Ready',
+        status: 'False',
+        reason: 'EgressProxyValuesInvalid',
+        message: verdict.message,
+      },
+      isCurrent
+    )
+    this.setStatus(server.name, {
+      deployed: false,
+      ready: false,
+      message: `EgressProxyValuesValid=False: ${verdict.message}`,
+    })
+    // Field names avoid key/secret/token, which hccLogger redacts by name, and
+    // each violation holds names only. No value byte reaches a log.
+    hccLogger.warn('Blocking egress-proxy update: values outside the egress-proxy value class', {
+      scope: '[Reconciler]',
+      mcpServer: server.name,
+      namespace: server.namespace,
+      violations: verdict.violations,
+    })
+    return isCurrent()
   }
 
   private nginxConfigRevision(configMap: k8s.V1ConfigMap): string {
@@ -1312,13 +1636,16 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   }
 
   /**
-   * Ensure ConfigMap exists and is up to date (create or replace).
+   * Ensure ConfigMap exists and is up to date (create or replace). When the
+   * caller already rendered the template for the preflight, it passes the
+   * prebuilt ConfigMap so one reconcile renders the template once.
    */
   private async ensureConfigMap(
     server: McpServerCRD,
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    prebuilt?: k8s.V1ConfigMap
   ): Promise<string> {
-    const cm = this.buildNginxConfigMap(server)
+    const cm = prebuilt ?? this.buildNginxConfigMap(server)
     const name = `${server.name}-nginx-conf`
     const namespace = server.namespace
     await ensureResource({
@@ -1440,8 +1767,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * Names of the env vars the egress-proxy container of a remote server
    * receives. Derived from buildContainerEnv, the same function buildDeployment
    * uses, so no second copy of those rules exists here. buildContainerEnv strips
-   * forbidden names silently; buildDeployment reports each one once per
-   * reconcile, and this lookup must not report it again.
+   * forbidden and reserved names silently; buildDeployment reports each
+   * reserved (name, source) pair once per reconcile, and this lookup must not
+   * report it again.
    */
   private egressProxyEnvNames(server: McpServerCRD): Set<string> {
     return new Set(this.buildContainerEnv(server).map(entry => entry.name))
@@ -1449,47 +1777,81 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
 
   /**
    * Env for the server's main container (the egress proxy of a remote server):
-   * envMapping, spec.env, spec.envSecret, then the remote authHeaders backfill
-   * and the platform-owned NGINX_ENVSUBST_FILTER. Forbidden spec.env names are
-   * stripped here, silently, so no caller can deploy one; buildDeployment
-   * sanitizes first and reports each stripped name once per reconcile.
+   * envMapping, spec.env, spec.envSecret, then the reserved-name strip, the
+   * remote authHeaders backfill and the empty NGINX_ENVSUBST_FILTER. Forbidden
+   * spec.env names are stripped here, silently, so no caller can deploy one;
+   * buildDeployment sanitizes first and reports each stripped name once per
+   * reconcile. For remote servers the six envsubst knobs the image pins are
+   * stripped too, and `onStripped` receives each removed (name, source) pair.
    */
-  private buildContainerEnv(server: McpServerCRD): k8s.V1EnvVar[] {
+  private buildContainerEnv(
+    server: McpServerCRD,
+    onStripped: (
+      name: string,
+      source: 'spec.env' | 'spec.envSecret' | 'envMapping'
+    ) => void = () => {}
+  ): k8s.V1EnvVar[] {
     const transportPort = server.spec.transport.port || 3000
     const isRemote = this.isRemote(server)
     const healthCheckPort = server.spec.healthCheck?.port
 
     // --- Env vars ---
-    const env: k8s.V1EnvVar[] = []
+    // The CRD source of every entry is kept until the reserved-name strip, so a
+    // stripped name is reported with the channel it came from.
+    const assembled: Array<{
+      source: 'spec.env' | 'spec.envSecret' | 'envMapping'
+      entry: k8s.V1EnvVar
+    }> = []
 
     // Env vars derived from CRD fields via envMapping
     const mapping = server.spec.envMapping
     if (mapping) {
       if (mapping.transport) {
-        env.push({ name: mapping.transport, value: 'http' })
+        assembled.push({ source: 'envMapping', entry: { name: mapping.transport, value: 'http' } })
       }
       if (mapping.httpHost) {
-        env.push({ name: mapping.httpHost, value: '0.0.0.0' })
+        assembled.push({
+          source: 'envMapping',
+          entry: { name: mapping.httpHost, value: '0.0.0.0' },
+        })
       }
       if (mapping.httpPort) {
-        env.push({ name: mapping.httpPort, value: String(transportPort) })
+        assembled.push({
+          source: 'envMapping',
+          entry: { name: mapping.httpPort, value: String(transportPort) },
+        })
       }
       if (mapping.healthCheckHost) {
-        env.push({ name: mapping.healthCheckHost, value: '0.0.0.0' })
+        assembled.push({
+          source: 'envMapping',
+          entry: { name: mapping.healthCheckHost, value: '0.0.0.0' },
+        })
       }
       if (mapping.healthCheckPort && healthCheckPort) {
-        env.push({ name: mapping.healthCheckPort, value: String(healthCheckPort) })
+        assembled.push({
+          source: 'envMapping',
+          entry: { name: mapping.healthCheckPort, value: String(healthCheckPort) },
+        })
       }
 
       const sc = server.spec.serverConfig
       if (mapping.readOnly && sc?.readOnly !== undefined) {
-        env.push({ name: mapping.readOnly, value: String(sc.readOnly) })
+        assembled.push({
+          source: 'envMapping',
+          entry: { name: mapping.readOnly, value: String(sc.readOnly) },
+        })
       }
       if (mapping.loggers && sc?.loggers) {
-        env.push({ name: mapping.loggers, value: sc.loggers })
+        assembled.push({
+          source: 'envMapping',
+          entry: { name: mapping.loggers, value: sc.loggers },
+        })
       }
       if (mapping.telemetry && sc?.telemetry) {
-        env.push({ name: mapping.telemetry, value: sc.telemetry })
+        assembled.push({
+          source: 'envMapping',
+          entry: { name: mapping.telemetry, value: sc.telemetry },
+        })
       }
     }
 
@@ -1498,31 +1860,48 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // cannot deploy a forbidden name. Order and duplicates are preserved.
     if (server.spec.env) {
       for (const e of withoutForbiddenCrdEnv(server.spec.env)) {
-        env.push({ name: e.name, value: e.value })
+        assembled.push({ source: 'spec.env', entry: { name: e.name, value: e.value } })
       }
     }
 
     // Secret-backed env vars
     if (server.spec.envSecret) {
       for (const keyMapping of server.spec.envSecret.keys) {
-        env.push({
-          name: keyMapping.envVar,
-          valueFrom: {
-            secretKeyRef: {
-              name: server.spec.envSecret.name,
-              key: keyMapping.secretKey,
+        assembled.push({
+          source: 'spec.envSecret',
+          entry: {
+            name: keyMapping.envVar,
+            valueFrom: {
+              secretKeyRef: {
+                name: server.spec.envSecret.name,
+                key: keyMapping.secretKey,
+              },
             },
           },
         })
       }
     }
 
+    const env: k8s.V1EnvVar[] = []
+    for (const item of assembled) {
+      // The egress-proxy entrypoint assigns these six before it checks and
+      // renders, so a CRD value would never reach envsubst and would only make
+      // the Deployment state a value the pod ignores. Exact and case-sensitive,
+      // like envsubst. Non-remote servers keep them: a local image may use them.
+      if (isRemote && ENVSUBST_PINNED_PROXY_ENV.has(item.entry.name)) {
+        onStripped(item.entry.name, item.source)
+        continue
+      }
+      env.push(item.entry)
+    }
+
     // Remote servers: ensure authHeaders ${VAR} placeholders have env vars
     // defined, even when credentials are optional and envSecret is absent.
     // Without this, nginx envsubst fails with "unknown variable" on startup.
-    // A name the authHeader guard rejects (forbidden or platform-owned) is never
-    // backfilled: the header is already dropped, and a `value: ''` entry would
-    // only override the container's own value (PATH, the resolver variables).
+    // A name the authHeader guard rejects (forbidden or a reserved egress-proxy
+    // name) is never backfilled: the header is already dropped, and a `value: ''`
+    // entry would only override the container's own value (PATH, a reserved
+    // egress-proxy name).
     if (isRemote && server.spec.remote?.authHeaders) {
       const definedVars = new Set(env.map(e => e.name))
       for (const ah of server.spec.remote.authHeaders) {
@@ -1530,7 +1909,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (!matches) continue
         for (const m of matches) {
           const varName = m.slice(2, -1)
-          if (FORBIDDEN_CRD_ENV_NAMES.has(varName) || PLATFORM_OWNED_PROXY_ENV.has(varName)) {
+          if (FORBIDDEN_CRD_ENV_NAMES.has(varName) || RESERVED_PROXY_ENV.has(varName)) {
             continue
           }
           if (!definedVars.has(varName)) {
@@ -1573,7 +1952,19 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const healthCheckPort = server.spec.healthCheck?.port
 
     // --- Env vars ---
-    const env = this.buildContainerEnv(server)
+    // One warning per stripped (name, source) pair per reconcile (m5): the
+    // ConfigMap render derives the same names silently through
+    // egressProxyEnvNames, so the report belongs to the Deployment build.
+    const reportedStrips = new Set<string>()
+    const env = this.buildContainerEnv(server, (name, source) => {
+      const pair = `${source}\u0000${name}`
+      if (reportedStrips.has(pair)) return
+      reportedStrips.add(pair)
+      hccLogger.warn(
+        `McpServer "${server.name}": env "${name}" from ${source} stripped (reserved for the egress-proxy image)`,
+        { scope: '[Security]' }
+      )
+    })
 
     // --- Ports ---
     const ports: k8s.V1ContainerPort[] = [
@@ -2419,9 +2810,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    *   - Condition with same `type` but different `status` → bump
    *     `lastTransitionTime` to now.
    *   - New type → append with fresh `lastTransitionTime`.
-   *   - Any write also strips retired types (NetworkReady). If a retired
-   *     type is still present, the patch is forced even when the requested
-   *     condition is otherwise unchanged.
+   *   - Any write also strips retired types (NetworkReady) and every type the
+   *     caller lists in `retireTypes` (for example `EgressProxyValuesValid`
+   *     once the server stops being remote or is disabled). A retired type in
+   *     the merged array also defeats the `unchanged` short-circuit, so the
+   *     removal reaches the CRD even when the requested condition is identical.
    *
    * Side-effect: updates the `clerum_hcc_mcpserver_missing_secret` gauge for
    * `SecretResolved` conditions (1 when False, 0 when True).
@@ -2443,7 +2836,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     server: McpServerCRD,
     condition: Omit<McpServerCondition, 'lastTransitionTime'>,
     isCurrent: () => boolean = () => true,
-    onDecline: StatusWriteDeclineArg = () => 'record-obligation'
+    onDecline: StatusWriteDeclineArg = () => 'record-obligation',
+    /**
+     * Condition types this write must remove from the merged array, treated
+     * exactly like a globally retired type for this write only. The global
+     * `RETIRED_STATUS_CONDITION_TYPES` list does not change.
+     */
+    retireTypes: readonly string[] = []
   ): Promise<StatusWriteOutcome> {
     const decline = (): StatusWriteOutcome =>
       onDecline() === 'silent' ? 'declined' : this.recordIncompletePublication(server)
@@ -2517,7 +2916,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         prior.reason === condition.reason &&
         prior.message === condition.message &&
         prior.observedGeneration === observedGeneration &&
-        !existingConditions.some(existing => isRetiredStatusConditionType(existing.type))
+        !existingConditions.some(
+          existing =>
+            isRetiredStatusConditionType(existing.type) || retireTypes.includes(existing.type)
+        )
 
       // Skip the patch when the condition is identical to what's already on
       // the CRD. Without this, every reconcile bumps the McpServer's
@@ -2549,7 +2951,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       const nextConditions = [
         ...existingConditions.filter(
           existing =>
-            existing.type !== condition.type && !isRetiredStatusConditionType(existing.type)
+            existing.type !== condition.type &&
+            !isRetiredStatusConditionType(existing.type) &&
+            !retireTypes.includes(existing.type)
         ),
         merged,
       ]
@@ -2733,7 +3137,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           reason: 'Disabled',
           message: 'McpServer is disabled',
         },
-        isCurrent
+        isCurrent,
+        undefined,
+        // A disabled server has no egress-proxy values to validate; retire the
+        // condition instead of leaving a stale verdict on the CRD.
+        ['EgressProxyValuesValid']
       )
       if (retract && !retract.retracted && !retract.foreignRuntime) return false
       return cleanupComplete && isCurrent()
@@ -2802,7 +3210,19 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         // workloads use the platform-owned proxy image selected in
         // buildDeployment(); rewriting spec.image here would bump generation
         // and retire this reconcile before it can create the runtime resources.
-        nginxConfigRevision = await this.ensureConfigMap(server, isCurrent)
+        //
+        // Render once: the same ConfigMap goes to the API server, and the value
+        // preflight derives its reference positions from it. The block runs
+        // before ensureConfigMap, so an invalid value leaves the running pod's
+        // template and env a matching pair (a ConfigMap-only write would project
+        // a new template into a pod whose env predates it).
+        const rendered = this.renderNginxTemplate(server)
+        const verdict = this.checkEgressProxyValues(server, rendered, secretResult.secretData)
+        if (!verdict.ok) {
+          const blocked = await this.blockEgressProxyValues(server, verdict, isCurrent)
+          return blocked
+        }
+        nginxConfigRevision = await this.ensureConfigMap(server, isCurrent, rendered.configMap)
       } else {
         // Phase 2.3: plugin image-host allowlist. Audit mode (default) logs a
         // would-be denial and still builds; enforce mode blocks the workload.
@@ -2919,6 +3339,21 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         isCurrent
       )
     }
+    // Only managed, enabled, remote servers get this condition: their values
+    // passed the preflight just above. A local or WRC-owned server never has it
+    // (and gets it retired by its Ready write below when it stops being remote).
+    if (this.isRemote(server)) {
+      await this.writeStatusCondition(
+        server,
+        {
+          type: 'EgressProxyValuesValid',
+          status: 'True',
+          reason: 'ValuesWithinClass',
+          message: 'Every value the egress-proxy template substitutes is within its class',
+        },
+        isCurrent
+      )
+    }
     await this.writeStatusCondition(
       server,
       {
@@ -2929,7 +3364,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           ? 'Deployment created'
           : 'Deployment created, waiting for pods to become ready',
       },
-      isCurrent
+      isCurrent,
+      undefined,
+      // A server that stops being remote must not keep a stale
+      // EgressProxyValuesValid from its egress-proxy lifetime.
+      this.isRemote(server) ? [] : ['EgressProxyValuesValid']
     )
 
     // If not ready yet, poll until it becomes ready. With generation-aware
