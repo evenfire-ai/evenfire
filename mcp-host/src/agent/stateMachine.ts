@@ -37,7 +37,11 @@ import type {
   AgentEventType as CoreAgentEventType,
   PendingApproval,
 } from '../core/types'
-import { MODEL_STEP_CHECKPOINT_CORRUPT } from '../db/worker/modelStepCheckpointOps'
+import {
+  MODEL_STEP_CHECKPOINT_CORRUPT,
+  ModelStepCheckpointCorruptError,
+  type ValidatedModelStepCheckpointRow,
+} from '../db/worker/modelStepCheckpointOps'
 import type { ReapedSession } from '../db/worker/protocol'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
@@ -185,6 +189,32 @@ function readVisualSelectionSnapshot(task: Task): VisualSelectionSnapshot | unde
   if (typeof provider !== 'string' || !provider) return undefined
   if (typeof model !== 'string' || !model) return undefined
   return { provider, model }
+}
+
+/**
+ * #1043 WP-H12 — the durable source identity of a model-step continuation.
+ *
+ * The approval row keeps the #666 files-only projection, so it cannot name the
+ * turn's images. The checkpoint header was written by the origin turn with
+ * `sourceMessageForResume`: it keeps every image's metadata and the sha256
+ * digest that binds the image to `model_step_checkpoint_attachments`, which is
+ * what `restoreSourceImageAttachments` consumes on a cold rehydration. The
+ * continuation task itself is rebuilt from that same projection when it is
+ * admitted, so the header is the continuation's durable source.
+ *
+ * A NULL source cannot belong to a claimed, suspended continuation: admission
+ * throws after the claim and abandons it. Classifying the impossible row as
+ * corrupt routes its approval through the boot retirement instead of silently
+ * falling back to the files-only approval row.
+ */
+function continuationSourceMessageForBoot(
+  header: ValidatedModelStepCheckpointRow
+): Task['sourceMessage'] {
+  if (header.source_message === null) {
+    throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
+  }
+  // `validateHeader` already parsed this object at the worker boundary.
+  return JSON.parse(header.source_message) as Task['sourceMessage']
 }
 
 /**
@@ -877,6 +907,11 @@ export class AgentStateMachine extends EventEmitter {
               }
               continue
             }
+            // WP-H12 — the claimed continuation's durable source is the
+            // checkpoint header, not the files-only approval row. Only this
+            // branch rewrites it: an ordinary #666 approval has no checkpoint
+            // row for its task and keeps the row projection.
+            task.sourceMessage = continuationSourceMessageForBoot(header)
             task.modelStepContinuation = {
               checkpointId: header.checkpoint_id,
               originTaskId: header.origin_task_id,
@@ -937,7 +972,10 @@ export class AgentStateMachine extends EventEmitter {
           registeredAt: new Date(now),
           expiresAt: entry.expiresAt,
           timerId: this.makeApprovalTimeout(entry.request_id, entry.expiresAt, now),
-          binding: this.buildApprovalBinding(sourceMessage, entry.session_key),
+          // The effective task source: the checkpoint header for a continuation,
+          // the approval row otherwise. The binding reads only the sender and
+          // channel fields, which both projections carry identically.
+          binding: this.buildApprovalBinding(task.sourceMessage, entry.session_key),
         })
       } catch (error) {
         const code = (error as { code?: string } | null)?.code
