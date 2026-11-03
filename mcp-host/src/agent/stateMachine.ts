@@ -192,27 +192,33 @@ function readVisualSelectionSnapshot(task: Task): VisualSelectionSnapshot | unde
 }
 
 /**
- * #1043 WP-H12 — the durable source identity of a model-step continuation.
+ * The durable source identity of a model-step continuation that was claimed
+ * and suspended for approval, rebuilt at cold boot.
  *
- * The approval row keeps the #666 files-only projection, so it cannot name the
- * turn's images. The checkpoint header was written by the origin turn with
- * `sourceMessageForResume`: it keeps every image's metadata and the sha256
- * digest that binds the image to `model_step_checkpoint_attachments`, which is
- * what `restoreSourceImageAttachments` consumes on a cold rehydration. The
- * continuation task itself is rebuilt from that same projection when it is
- * admitted, so the header is the continuation's durable source.
+ * The approval row is the continuation's durable source. It was written at
+ * suspend from the continuation's own live message, so it keeps the per-run
+ * `messageId` admission stamped on that turn and the file-reference
+ * resolutions preparation re-resolved onto it. The id seeds the RPC workflow
+ * caller's `sourceMessageId` and so the `workflow_trigger` idempotency key:
+ * with the origin turn's id, a post-restart trigger would collide with the
+ * origin turn or re-run a trigger the continuation already made. The
+ * resolutions are what the model was told to expect in the frozen turn
+ * context, and what the rebuilt GFS read tool pins.
  *
- * The header's `messageId` is the origin turn's. Admission gives the
- * continuation its own id (modelStepContinuation.ts), and the approval row
- * stores that id. It seeds the RPC workflow caller's `sourceMessageId` and so
- * the `workflow_trigger` idempotency key. The id therefore comes from the
- * approval row: with the origin id, a post-restart trigger would collide with
- * the origin turn or re-run a trigger the continuation already made.
+ * Only the attachment list comes from the checkpoint header. The approval row
+ * keeps the #666 files-only projection, so it cannot name the turn's images;
+ * the header was written by the origin turn with `sourceMessageForResume` and
+ * keeps every image's metadata and the sha256 digest that binds the image to
+ * `model_step_checkpoint_attachments`, which is what
+ * `restoreSourceImageAttachments` consumes on a cold rehydration. File
+ * attachments are identical in both projections: admission copies them from
+ * the header, preparation only sets `dataBase64` on them, and both
+ * projections strip it.
  *
  * A NULL source cannot belong to a claimed, suspended continuation: admission
  * throws after the claim and abandons it. Classifying the impossible row as
  * corrupt routes its approval through the boot retirement instead of silently
- * falling back to the files-only approval row. An approval row without a
+ * rebuilding a turn with no attachment identity. An approval row without a
  * message id is corrupt for the same reason.
  */
 function continuationSourceMessageForBoot(
@@ -222,13 +228,17 @@ function continuationSourceMessageForBoot(
   if (header.source_message === null) {
     throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
   }
-  const messageId = approvalSource?.messageId
-  if (typeof messageId !== 'string' || messageId.length === 0) {
+  if (
+    !approvalSource ||
+    typeof approvalSource.messageId !== 'string' ||
+    approvalSource.messageId.length === 0
+  ) {
     throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
   }
   // `validateHeader` already parsed this object at the worker boundary.
   const headerSource = JSON.parse(header.source_message) as NonNullable<Task['sourceMessage']>
-  return { ...headerSource, messageId }
+  const { attachments } = headerSource
+  return { ...approvalSource, ...(attachments ? { attachments } : {}) }
 }
 
 /**
@@ -921,10 +931,11 @@ export class AgentStateMachine extends EventEmitter {
               }
               continue
             }
-            // WP-H12 — the claimed continuation's durable source is the
-            // checkpoint header, not the files-only approval row. Only this
-            // branch rewrites it: an ordinary #666 approval has no checkpoint
-            // row for its task and keeps the row projection.
+            // The claimed continuation's source is its approval row, which the
+            // continuation wrote at suspend from its own message; only the
+            // attachment list comes from the checkpoint header. This is the
+            // only branch that rewrites it: an ordinary #666 approval has no
+            // checkpoint row for its task and keeps the row projection.
             task.sourceMessage = continuationSourceMessageForBoot(header, sourceMessage)
             task.modelStepContinuation = {
               checkpointId: header.checkpoint_id,

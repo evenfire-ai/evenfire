@@ -1,13 +1,16 @@
 /**
- * #1043 WP-H12 — a model-step continuation that suspends for approval keeps
- * its source identity in the checkpoint header, not in the files-only #666
- * approval row. A cold boot must rebuild the same attachment-capable turn
- * (image line plus the save tool), and must retire the approval instead of
- * silently continuing without the image when its checkpoint byte row expired
- * or the header has no source at all.
+ * A model-step continuation that suspends for approval keeps its own source
+ * identity — the per-run message id and the file references its preparation
+ * re-resolved — in the files-only #666 approval row, and only its image
+ * identity in the checkpoint header's source message. A cold boot must
+ * rebuild the same attachment-capable turn (image line plus the save tool),
+ * and must retire the approval instead of silently continuing without the
+ * image when its checkpoint byte row expired or the header has no source at
+ * all.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import {
@@ -23,7 +26,7 @@ import {
   buildTurnContextBlock,
 } from '../../core/orchestration/turnContext'
 import type { Attachment, ChatMessage, ToolCall } from '../../core/types'
-import { GFS_SAVE_ATTACHMENT_TOOL } from '../../internalTools/gfs'
+import { GFS_SAVE_ATTACHMENT_TOOL, referencedFilePins } from '../../internalTools/gfs'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import { logger } from '../../logger'
@@ -31,6 +34,7 @@ import { McpManager } from '../../mcp/manager'
 import { MessageQueue } from '../../queue/messageQueue'
 import type { Task } from '../../queue/types'
 import type { IncomingMessage } from '../../server/types'
+import type { FileReferenceResolution } from '../fileReferenceResolver'
 import { approvalSourceMessageForResume, sourceMessageForResume } from '../sourceMessageForResume'
 import { AgentStateMachine } from '../stateMachine'
 import { type ModelStepCheckpointExecutionSupport, TaskExecutor } from '../taskExecutor'
@@ -49,6 +53,8 @@ const ORIGIN_MESSAGE_ID = 'message-origin-h12'
 const CONTINUATION_MESSAGE_ID = 'message-continuation-h12'
 const ORDINARY_REQUEST_ID = 'approval-ordinary-h12'
 const PIN = { provider: 'openai', model: 'image-checkpoint-model' }
+const GFS_RID = '0123456789abcdef0123456789abcdef'
+const GFS_KEY = `main/${GFS_RID}`
 const NOW = 1_700_000_000_000
 const TTL_MS = 7 * 24 * 3_600_000
 const LEASE_MS = 300_000
@@ -147,6 +153,27 @@ function encodedGfsClaims(scopes: string[]): string {
   return `${header}.${payload}.sig`
 }
 
+/** The GFS file both the origin turn and the continuation referenced. */
+function gfsReference() {
+  const built = buildGfsFileReference({
+    drive: 'main',
+    resourceId: GFS_RID,
+    gfsUri: `gfs://main/${GFS_RID}`,
+    version: 2,
+    name: 'notes.txt',
+    declaredMediaType: null,
+    byteLength: 4,
+    classification: classifyBytes({
+      bytes: new Uint8Array(0),
+      totalByteLength: 4,
+      declaredMediaType: null,
+      filename: 'notes.txt',
+    }),
+  })
+  if (!built.ok) throw new Error(`fixture reference must build: ${built.message}`)
+  return built.value
+}
+
 const suspendedCall: ToolCall = {
   id: 'tc-image-gate',
   name: 'shell_exec',
@@ -187,7 +214,8 @@ interface ImageFixture {
 async function openImageCheckpoint(
   manager: ConversationManager,
   checkpoints: ModelStepCheckpointStore,
-  originTaskId: string
+  originTaskId: string,
+  headerResolutions?: FileReferenceResolution[]
 ): Promise<void> {
   const message = imageMessage()
   const conversation = await manager.getOrCreate(SESSION_KEY, {
@@ -210,7 +238,14 @@ async function openImageCheckpoint(
       principal: USER,
       loopState: JSON.stringify({ nextIteration: 1, originUserMessageIndex: 0 }),
       taskBudget: JSON.stringify(bootBudget()),
-      sourceMessage: JSON.stringify(sourceMessageForResume(message)),
+      // The header keeps the origin turn's projection, including the file
+      // references that turn resolved.
+      sourceMessage: JSON.stringify(
+        sourceMessageForResume({
+          ...message,
+          ...(headerResolutions ? { fileReferenceResolutions: headerResolutions } : {}),
+        })
+      ),
     },
     [
       {
@@ -222,8 +257,14 @@ async function openImageCheckpoint(
   )
 }
 
+/** The origin and continuation projections of the same referenced GFS file. */
+interface ContinuationReferences {
+  header: FileReferenceResolution[]
+  approval: FileReferenceResolution[]
+}
+
 /** A claimed continuation whose approval row keeps the #666 files-only projection. */
-async function claimedImageApproval(): Promise<ImageFixture> {
+async function claimedImageApproval(references?: ContinuationReferences): Promise<ImageFixture> {
   const handle = makeSqliteStore()
   handles.push(handle)
   const manager = new ConversationManager(handle.store)
@@ -232,7 +273,7 @@ async function claimedImageApproval(): Promise<ImageFixture> {
     blockedTtlMs: TTL_MS,
   })
   const message = imageMessage()
-  await openImageCheckpoint(manager, checkpoints, ORIGIN_TASK)
+  await openImageCheckpoint(manager, checkpoints, ORIGIN_TASK, references?.header)
   await manager.failTurn(manager.getSessionByKey(SESSION_KEY)!)
   const resumable = await checkpoints.transition(
     SESSION_KEY,
@@ -276,11 +317,13 @@ async function claimedImageApproval(): Promise<ImageFixture> {
     description: 'Approve the continuation tool call',
     context_snapshot: frozenSnapshot(message),
     task_budget: bootBudget(),
-    // The continuation admission stamped its own per-run message id; the
+    // The continuation admission stamped its own per-run message id and its
+    // preparation re-resolved the file references onto its message; the
     // approval row keeps that identity with the #666 files-only projection.
     sourceMessage: approvalSourceMessageForResume({
       ...message,
       messageId: CONTINUATION_MESSAGE_ID,
+      ...(references ? { fileReferenceResolutions: references.approval } : {}),
     }),
   })
   return { handle, manager, checkpoints }
@@ -484,6 +527,76 @@ describe('AgentStateMachine cold continuation approval image identity (#1043 WP-
     expect(toolNames(pinned.tools[0])).toContain(GFS_SAVE_ATTACHMENT_TOOL)
     expect(checkpointRow(f.handle, 'status')).toEqual({ status: 'completed' })
     expect(approvalRow(f.handle, REQUEST_ID)).toBeUndefined()
+  })
+
+  it("restores the continuation's re-resolved file references after a cold restart", async () => {
+    const reference = gfsReference()
+    const f = await claimedImageApproval({
+      header: [{ availability: 'stale', reference, resolvedVersion: 3 }],
+      approval: [{ availability: 'stale', reference, resolvedVersion: 5 }],
+    })
+    // Liveness: the two durable records existed before boot and disagree. The
+    // header keeps the origin turn's resolution; only the approval row keeps
+    // the continuation's re-resolved one.
+    const header = JSON.parse(String(checkpointValue(f.handle, 'source_message')))
+    expect(header.fileReferenceResolutions).toEqual([
+      { availability: 'stale', reference, resolvedVersion: 3 },
+    ])
+    const approval = JSON.parse(approvalRow(f.handle, REQUEST_ID)!)
+    expect(approval.fileReferenceResolutions).toEqual([
+      { availability: 'stale', reference, resolvedVersion: 5 },
+    ])
+
+    const rehydrated: TaskExecutor[] = []
+    const original = TaskExecutor.prototype.rehydrateWaitingApproval
+    vi.spyOn(TaskExecutor.prototype, 'rehydrateWaitingApproval').mockImplementation(function (
+      this: TaskExecutor,
+      sessionKey: string,
+      pending
+    ) {
+      rehydrated.push(this)
+      return original.call(this, sessionKey, pending)
+    })
+    const stateMachine = bootStateMachine(f.handle, f.checkpoints, provider())
+    await stateMachine.bootstrap()
+    await f.handle.persistQueue.drain()
+
+    expect(stateMachine.getPendingApprovals().map(pending => pending.requestId)).toEqual([
+      REQUEST_ID,
+    ])
+    const task = rehydrated[0]!.sourceTask
+    // The booted source is the continuation's own row: its per-run message id
+    // and the resolutions its preparation wrote, which the model was told
+    // about in the frozen turn context.
+    expect(task.sourceMessage?.messageId).toBe(CONTINUATION_MESSAGE_ID)
+    expect(task.sourceMessage?.fileReferenceResolutions).toEqual(approval.fileReferenceResolutions)
+    // Liveness for the reference choice: the rebuilt read tool pins version 2
+    // with current_version 5, so the model's expectedVersion 5 is accepted
+    // instead of refused as it would be with the header's version 3.
+    const pins = referencedFilePins(task.sourceMessage?.fileReferenceResolutions)
+    expect([...pins.entries()]).toEqual([
+      [
+        GFS_KEY,
+        {
+          version: 2,
+          currentVersion: 5,
+          byteLength: 4,
+          reader: 'text',
+          modelImageInput: 'unsupported',
+        },
+      ],
+    ])
+    // Only the attachment list comes from the header: the approval row is
+    // files-only, and the header's image identity is what rehydrates the
+    // digest-bound bytes.
+    expect(task.sourceMessage?.attachments).toEqual([
+      expect.objectContaining({
+        id: 'img-1',
+        kind: 'image',
+        dataBase64: PNG_1X1_BASE64,
+        digest: { algorithm: 'sha256', hex: IMAGE_DIGEST },
+      }),
+    ])
   })
 
   it('retires the approval and blocks the checkpoint when the image row expired before boot', async () => {
