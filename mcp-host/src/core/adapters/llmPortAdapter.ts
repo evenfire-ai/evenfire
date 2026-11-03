@@ -783,7 +783,8 @@ export class LlmPortAdapter implements LlmPort {
       classified.retryable,
       err as Error,
       classified.httpStatus,
-      classified.providerCode
+      classified.providerCode,
+      classified.providerDispatched
     )
   }
 

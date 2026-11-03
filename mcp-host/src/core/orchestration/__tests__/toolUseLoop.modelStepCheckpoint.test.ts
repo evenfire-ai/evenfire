@@ -21,10 +21,15 @@ import { CodexProxyError } from '../../../llm/codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../../../llm/codexSubscription'
 import { GrokProxyError } from '../../../llm/grokLlmProxyClient'
 import { GrokSubscriptionProvider } from '../../../llm/grokSubscription'
-import { CodexAuthorizeError } from '../../../llm/providerAttemptAuthorizer'
+import {
+  CodexAuthorizeError,
+  ProviderAttemptAuthorizer,
+  resolveCodexAuthorizeUrl,
+} from '../../../llm/providerAttemptAuthorizer'
 import type { ClassifiedError } from '../../../llm/types'
 import { logger } from '../../../logger'
 import type { LlmInProgressEvent, ProgressReporter } from '../../../progress/types'
+import { LlmPortAdapter } from '../../adapters/llmPortAdapter'
 import {
   type InProcessWorkerHandle,
   createInProcessWorker,
@@ -33,6 +38,7 @@ import { ModelStepCheckpointStore } from '../../conversation/persistence/modelSt
 import { PersistQueue } from '../../conversation/persistence/persistQueue'
 import { LlmError, LlmErrorCode } from '../../errors'
 import type { AgentEventEmitter, ReasoningPort, Tool } from '../../interfaces'
+import { DefaultReasoningPort } from '../../reasoning/port'
 import { BasicSafety } from '../../safety/safety'
 import type {
   AgentEvent,
@@ -366,7 +372,8 @@ function loopErrorFromClassifier(
     classified.retryable,
     cause,
     classified.httpStatus,
-    classified.providerCode
+    classified.providerCode,
+    classified.providerDispatched
   )
 }
 
@@ -2302,7 +2309,10 @@ describe('model-step retry schedule and deadline (#1043)', () => {
 
   // Mirror ReasoningPort: an aborted request resolves with the wrapped,
   // non-retryable ApiCallFailed instead of rejecting or reporting a 503.
-  function timedReasoning(outcomes: Array<{ afterMs: number; result: RespondResult }>) {
+  function timedReasoning(
+    outcomes: Array<{ afterMs: number; result: RespondResult }>,
+    ignoreAbort = false
+  ) {
     const attempts: Attempt[] = []
     const reasoning: ReasoningPort = {
       respondWithTools: vi.fn(async () => toolCall('tc_retry_first')),
@@ -2333,8 +2343,8 @@ describe('model-step retry schedule and deadline (#1043)', () => {
             context.signal?.removeEventListener('abort', onAbort)
             resolve(outcome.result)
           }, outcome.afterMs)
-          if (context.signal?.aborted) onAbort()
-          else context.signal?.addEventListener('abort', onAbort, { once: true })
+          if (!ignoreAbort && context.signal?.aborted) onAbort()
+          else if (!ignoreAbort) context.signal?.addEventListener('abort', onAbort, { once: true })
         })
       }),
     }
@@ -2345,6 +2355,149 @@ describe('model-step retry schedule and deadline (#1043)', () => {
     expect(transitionsTo(transition, 'resumable')).toHaveLength(1)
     expect(transitionsTo(transition, 'abandoned')).toHaveLength(0)
   }
+
+  it.each([
+    ['codex-subscription', 'gpt-5.3-codex', CodexSubscriptionProvider],
+    ['grok-subscription', 'grok-4.6', GrokSubscriptionProvider],
+  ] as const)(
+    'G2-L1: %s real authorize 503 does not stack with the loop retry',
+    (providerName, model, Provider) =>
+      withRetryClock(async () => {
+        const { recorder } = harness()
+        const fetchFn = vi.fn(async () => new Response('unavailable', { status: 503 }))
+        const authorizer = new ProviderAttemptAuthorizer({
+          authorizeUrl: resolveCodexAuthorizeUrl('http://gateway:8092'),
+          readPlatformJwt: () => 'platform-jwt',
+          fetchFn: fetchFn as unknown as typeof fetch,
+        })
+        const stream = vi.fn()
+        const provider = new Provider(model, {
+          authorizer: {
+            authorize: (body: never, options: never) => authorizer.authorize(body, options),
+          },
+          proxy: { stream },
+          attemptContext: () => ({ policyRevision: 1, policyHash: 'b'.repeat(64) }),
+        } as never)
+        const adapter = new LlmPortAdapter(provider, model, providerName)
+        const actual = new DefaultReasoningPort(adapter, {
+          buildSystemPrompt: () => ({ role: 'system', content: 'test' }),
+        })
+        const tool = createMockTool('read_file')
+        const reasoning: ReasoningPort = {
+          respondWithTools: vi.fn(async () => toolCall('authorize-test')),
+          continueWithToolResults: vi.fn(actual.continueWithToolResults.bind(actual)),
+        }
+        const completed: AgentEvent[] = []
+        const events = new SimpleEventEmitter()
+        events.on('llm:completed', event => completed.push(event))
+        const { result } = await driveLoop(
+          runToolUseLoop(
+            withRecorder(reasoning, [tool], recorder, 4, {
+              events,
+              modelStepAutoRetries: 3,
+              modelStepRetryRandom: () => 0.5,
+            }),
+            [user]
+          )
+        )
+        expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+        if (result.type !== 'error') throw new Error('expected provider error')
+        expect(result.error).toMatchObject({
+          providerCode: 'provider_unavailable',
+          providerDispatched: false,
+        })
+        expect(tool.execute).toHaveBeenCalledTimes(1)
+        expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(1)
+        expect(fetchFn).toHaveBeenCalledTimes(3)
+        expect(stream).not.toHaveBeenCalled()
+        expect(completed).toHaveLength(1)
+      })
+  )
+
+  it.each([
+    ['codex-subscription', 'gpt-5.3-codex', CodexSubscriptionProvider, CodexProxyError],
+    ['grok-subscription', 'grok-4.6', GrokSubscriptionProvider, GrokProxyError],
+  ] as const)(
+    'default retries dispatch four %s streams on 503',
+    (providerName, model, Provider, ProxyError) =>
+      withRetryClock(async () => {
+        const { recorder } = harness()
+        const authorize = vi.fn(
+          async (input: { providerAttemptIndex: number; requestHash: string }) => ({
+            providerAttemptId: `attempt-${input.providerAttemptIndex}`,
+            requestHash: input.requestHash,
+            executionTicket: 'test-ticket',
+            expiresAt: '2026-10-20T00:00:00.000Z',
+          })
+        )
+        const stream = vi.fn(async () => {
+          throw new ProxyError('provider_unavailable', 'upstream 503')
+        })
+        const provider = new Provider(model, {
+          authorizer: { authorize },
+          proxy: { stream },
+          attemptContext: () => ({ policyRevision: 1, policyHash: 'b'.repeat(64) }),
+        } as never)
+        const actual = new DefaultReasoningPort(new LlmPortAdapter(provider, model, providerName), {
+          buildSystemPrompt: () => ({ role: 'system', content: 'test' }),
+        })
+        const tool = createMockTool('read_file')
+        const reasoning: ReasoningPort = {
+          respondWithTools: vi.fn(async () => toolCall('stream-test')),
+          continueWithToolResults: vi.fn(actual.continueWithToolResults.bind(actual)),
+        }
+        const events = new SimpleEventEmitter()
+        const completed: AgentEvent[] = []
+        events.on('llm:completed', event => completed.push(event))
+        const { result } = await driveLoop(
+          runToolUseLoop(
+            withRecorder(reasoning, [tool], recorder, 4, {
+              events,
+              modelStepAutoRetries: 3,
+              modelStepRetryRandom: () => 0.5,
+            }),
+            [user]
+          )
+        )
+        expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+        expect(tool.execute).toHaveBeenCalledTimes(1)
+        expect(authorize).toHaveBeenCalledTimes(4)
+        expect(stream).toHaveBeenCalledTimes(4)
+        expect(
+          completed.filter(event => event.data.iteration === 1).map(event => event.data.status)
+        ).toEqual(['failed', 'failed', 'failed', 'failed'])
+      })
+  )
+
+  it('records each dispatched attempt with its own duration and outcome', () =>
+    withRetryClock(async () => {
+      const { recorder } = harness()
+      const { reasoning, attempts } = timedReasoning([
+        { afterMs: 200, result: unavailable() },
+        { afterMs: 300, result: { type: 'text', content: 'recovered' } },
+      ])
+      const events = new SimpleEventEmitter()
+      const completed: AgentEvent[] = []
+      events.on('llm:completed', event => completed.push(event))
+      const { result } = await driveLoop(
+        runToolUseLoop(
+          withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
+            events,
+            modelStepAutoRetries: 3,
+            modelStepRetryRandom: () => 0.5,
+          }),
+          [user]
+        )
+      )
+      expect(result).toMatchObject({ type: 'response', content: 'recovered' })
+      expect(attempts).toHaveLength(2)
+      expect(
+        completed.filter(event => event.data.iteration === 1).map(event => event.data)
+      ).toEqual([
+        expect.objectContaining({ attempt: 1, durationMs: 200, status: 'failed' }),
+        expect.objectContaining({ attempt: 2, durationMs: 300, status: 'succeeded' }),
+      ])
+    }))
 
   it('S2: three retries use the jitter source and wait 450, 1350 and 2700 ms', () =>
     withRetryClock(async warn => {
@@ -2466,7 +2619,6 @@ describe('model-step retry schedule and deadline (#1043)', () => {
       expect(warnings(warn)).toHaveLength(2)
       expect(warnings(warn, DEADLINE_WARNING)).toEqual([
         expect.objectContaining({
-          inFlight: false,
           attempt: 2,
           deadlineMs: 60_000,
           checkpointId: 'cp-loop',
@@ -2484,16 +2636,16 @@ describe('model-step retry schedule and deadline (#1043)', () => {
       { afterMs: 5_000, result: unavailable() },
       { afterMs: 25_000, result: unavailable() },
       { afterMs: 25_000, result: lastFailure },
-      { afterMs: 25_000, result: unavailable() },
+      { afterMs: 10_500, result: { type: 'text', content: 'finished after the retry window' } },
     ])
     return { ...timed, controller, lastFailure }
   }
 
-  it('S6: an in-flight retry is cut 60 s after the eligible failure with heartbeats and the same resumable error', () =>
+  it('S6: an in-flight retry finishes beyond the window while heartbeats continue', () =>
     withRetryClock(async warn => {
       const { recorder, store } = harness()
       const transition = vi.spyOn(store, 'transition')
-      const { reasoning, attempts, controller, lastFailure } = cappedAttempt()
+      const { reasoning, attempts, controller } = cappedAttempt()
       const heartbeat = vi.fn((_event: LlmInProgressEvent) => {})
       const reporter: ProgressReporter = {
         reportToolStart: vi.fn(),
@@ -2515,48 +2667,52 @@ describe('model-step retry schedule and deadline (#1043)', () => {
       )
       expect(attempts).toHaveLength(4)
       expect(attempts[3]!.startedAt).toBe(59_500)
-      expect(attempts[3]!.abortedAt).toBe(65_000)
-      expect(attempts[3]!.signal!.aborted).toBe(true)
-      expect(attempts[3]!.signal!.reason.name).toBe('TimeoutError')
-      expect(controller.signal.aborted).toBe(false)
-      expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
-      if (result.type !== 'error' || lastFailure.type !== 'error')
-        throw new Error('expected provider error')
-      expect(result.error).toBe(lastFailure.error)
-      resumable(transition)
-      expect(warnings(warn)).toEqual(
-        [450, 1350, 2700].map(delayMs => expect.objectContaining({ delayMs }))
-      )
-      expect(warnings(warn, DEADLINE_WARNING)).toEqual([
-        expect.objectContaining({
-          inFlight: true,
-          attempt: 3,
-          deadlineMs: 60_000,
-          checkpointId: 'cp-loop',
-        }),
-      ])
-      expect(settledAt).toBeGreaterThanOrEqual(65_000)
-      expect(settledAt).toBeLessThanOrEqual(65_050)
-      expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(6)
-      expect(
-        heartbeat.mock.calls.some(
-          ([event]) => event.elapsedMs >= 59_500 && event.elapsedMs < 65_000
-        )
-      ).toBe(true)
-      expect(heartbeat.mock.calls.every(([event]) => event.iteration === 1)).toBe(true)
+      expect(attempts[3]!.signal!.aborted).toBe(false)
+      expect(result).toMatchObject({ type: 'response', content: 'finished after the retry window' })
+      expect(settledAt).toBe(70_000)
+      expect(heartbeat.mock.calls.some(([event]) => event.elapsedMs >= 60_000)).toBe(true)
+      expect(transitionsTo(transition, 'abandoned')).toHaveLength(1)
+      expect(warnings(warn, DEADLINE_WARNING)).toHaveLength(0)
       const heartbeatCount = heartbeat.mock.calls.length
       await vi.advanceTimersByTimeAsync(30_000)
       expect(heartbeat).toHaveBeenCalledTimes(heartbeatCount)
       expect(vi.getTimerCount()).toBe(0)
     }))
 
-  it('S7: a user cancel during the capped attempt wins over the deadline', () =>
+  it('S6b: an already-dispatched success is not discarded when its provider ignores abort', () =>
+    withRetryClock(async () => {
+      const { recorder } = harness()
+      const { reasoning, attempts } = timedReasoning(
+        [
+          { afterMs: 5_000, result: unavailable() },
+          { afterMs: 25_000, result: unavailable() },
+          { afterMs: 25_000, result: unavailable() },
+          { afterMs: 10_500, result: { type: 'text', content: 'provider completed' } },
+        ],
+        true
+      )
+      const { result, settledAt } = await driveLoop(
+        runToolUseLoop(
+          withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
+            modelStepAutoRetries: 3,
+            modelStepRetryRandom: () => 0.5,
+          }),
+          [user]
+        )
+      )
+      expect(attempts).toHaveLength(4)
+      expect(attempts[3]!.startedAt).toBe(59_500)
+      expect(settledAt).toBe(70_000)
+      expect(result).toMatchObject({ type: 'response', content: 'provider completed' })
+    }))
+
+  it('S7: a user cancel after the window aborts the in-flight retry', () =>
     withRetryClock(async warn => {
       const { recorder, store } = harness()
       const transition = vi.spyOn(store, 'transition')
       const { reasoning, attempts, controller } = cappedAttempt()
       const reason = new Error('user cancel')
-      setTimeout(() => controller.abort(reason), 62_000)
+      setTimeout(() => controller.abort(reason), 70_000)
       const { result, settledAt } = await driveLoop(
         runToolUseLoop(
           withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
@@ -2569,14 +2725,14 @@ describe('model-step retry schedule and deadline (#1043)', () => {
       )
       expect(result).toEqual({ type: 'cancelled', reason: 'signal_aborted' })
       expect(attempts).toHaveLength(4)
-      expect(attempts[3]!.abortedAt).toBe(62_000)
+      expect(attempts[3]!.startedAt).toBe(59_500)
+      expect(attempts[3]!.abortedAt).toBe(70_000)
       expect(attempts[3]!.signal!.reason).toBe(reason)
       expect(warnings(warn)).toHaveLength(3)
       expect(warnings(warn, DEADLINE_WARNING)).toHaveLength(0)
       expect(transitionsTo(transition, 'resumable')).toHaveLength(0)
       expect(transitionsTo(transition, 'abandoned')).toHaveLength(1)
-      expect(settledAt).toBeGreaterThanOrEqual(62_000)
-      expect(settledAt).toBeLessThanOrEqual(62_050)
+      expect(settledAt).toBe(70_000)
       expect(vi.getTimerCount()).toBe(0)
     }))
 
@@ -2667,4 +2823,138 @@ describe('model-step retry schedule and deadline (#1043)', () => {
       resumable(transition)
       expect(vi.getTimerCount()).toBe(0)
     }))
+})
+
+const upstreamRejected = () =>
+  new LlmError(
+    'upstream rejected the request',
+    'codex-subscription',
+    LlmErrorCode.UpstreamRejected,
+    false,
+    undefined,
+    400,
+    'upstream_rejected'
+  )
+
+function workflowFallbackScenario() {
+  const workflowTool = createMockTool('workflow_result', {
+    sanitize: false,
+    output: JSON.stringify({
+      workflowName: 'treasury-risk-review',
+      result: { artifactProof: 'artifact-output-1043' },
+    }),
+  })
+  return { workflowTool }
+}
+
+describe('G2 R4-M2: the in-place retry runs where no Retry would be offered', () => {
+  it('G2-A: with the production default 3 retries, a workflow fallback turn makes one model call', async () => {
+    const { worker, recorder } = harness()
+    const { workflowTool } = workflowFallbackScenario()
+    const reasoning = createMockReasoning([
+      {
+        type: 'tool_calls',
+        calls: [
+          { id: 'tc_w', name: 'workflow_result', arguments: { name: 'treasury-risk-review' } },
+        ],
+      },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'error', error: codexUnavailable() },
+    ])
+
+    const result = await runToolUseLoop(
+      withRecorder(reasoning, [workflowTool], recorder, 6, { modelStepAutoRetries: 3 }),
+      [{ role: 'user', content: 'Show me the workflow result artifact for treasury-risk-review.' }]
+    )
+
+    // The fallback answers after the first failed model call.
+    expect(result.type).toBe('response')
+    if (result.type !== 'response') throw new Error(`expected a response, got ${result.type}`)
+    expect(result.content).toContain('artifact-output-1043')
+    // The step continues from tool results, so the retried call is
+    // continueWithToolResults: only the first failure.
+    expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(1)
+    // No checkpoint: the workflow fallback answered, so no Retry was ever on offer.
+    expect(header(worker)).toBeUndefined()
+  }, 30_000)
+
+  it('G2-B: retries=0 on the same turn makes exactly one call', async () => {
+    const { worker, recorder } = harness()
+    const { workflowTool } = workflowFallbackScenario()
+    const reasoning = createMockReasoning([
+      {
+        type: 'tool_calls',
+        calls: [
+          { id: 'tc_w', name: 'workflow_result', arguments: { name: 'treasury-risk-review' } },
+        ],
+      },
+      { type: 'error', error: codexUnavailable() },
+    ])
+
+    const result = await runToolUseLoop(
+      withRecorder(reasoning, [workflowTool], recorder, 6, { modelStepAutoRetries: 0 }),
+      [{ role: 'user', content: 'Show me the workflow result artifact for treasury-risk-review.' }]
+    )
+
+    expect(result.type).toBe('response')
+    expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(1)
+    expect(header(worker)).toBeUndefined()
+  })
+
+  it('G2-C: an eligible 503 preserves the answer before upstream_rejected', async () => {
+    const { worker, recorder } = harness()
+    const { workflowTool } = workflowFallbackScenario()
+    const reasoning = createMockReasoning([
+      {
+        type: 'tool_calls',
+        calls: [
+          { id: 'tc_w', name: 'workflow_result', arguments: { name: 'treasury-risk-review' } },
+        ],
+      },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'error', error: upstreamRejected() },
+    ])
+
+    const result = await runToolUseLoop(
+      withRecorder(reasoning, [workflowTool], recorder, 6, { modelStepAutoRetries: 3 }),
+      [{ role: 'user', content: 'Show me the workflow result artifact for treasury-risk-review.' }]
+    )
+
+    expect(result).toMatchObject({
+      type: 'response',
+      content: expect.stringContaining('artifact-output-1043'),
+    })
+    expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(1)
+    expect(header(worker)).toBeUndefined()
+  }, 30_000)
+
+  it('G2-D: retries=0 with the same two failures keeps today’s workflow answer', async () => {
+    const { worker, recorder } = harness()
+    const { workflowTool } = workflowFallbackScenario()
+    const reasoning = createMockReasoning([
+      {
+        type: 'tool_calls',
+        calls: [
+          { id: 'tc_w', name: 'workflow_result', arguments: { name: 'treasury-risk-review' } },
+        ],
+      },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'error', error: upstreamRejected() },
+    ])
+
+    const result = await runToolUseLoop(
+      withRecorder(reasoning, [workflowTool], recorder, 6, { modelStepAutoRetries: 0 }),
+      [{ role: 'user', content: 'Show me the workflow result artifact for treasury-risk-review.' }]
+    )
+
+    expect(result.type).toBe('response')
+    if (result.type !== 'response') throw new Error(`expected a response, got ${result.type}`)
+    expect(result.content).toContain('artifact-output-1043')
+    expect(header(worker)).toBeUndefined()
+  })
 })

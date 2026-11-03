@@ -200,7 +200,15 @@ async function runLoopIterations(
         config,
         context,
         lastToolResults,
-        iteration
+        iteration,
+        {
+          emptyResponseAfterToolResultsRecovered,
+          emptyInitialResponseRecovered,
+          workflowTriggerTextResponseRecovered,
+          lastCompletedToolResultsForFallback,
+          messages,
+          userRequestText,
+        }
       )
       if (continuingFromToolResults) lastToolResults = null
       if (config.abortSignal?.aborted) return { type: 'cancelled', reason: 'signal_aborted' }

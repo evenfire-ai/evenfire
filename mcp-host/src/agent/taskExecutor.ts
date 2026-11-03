@@ -2880,15 +2880,19 @@ export class TaskExecutor {
         }
         if (event.type === 'llm:completed') {
           const iteration = typeof event.data.iteration === 'number' ? event.data.iteration : 0
+          const { attempt, status } = event.data
+          if (typeof attempt !== 'number' || (status !== 'failed' && status !== 'succeeded')) {
+            throw new Error('Invalid llm:completed attempt or status')
+          }
           // Each approval resume starts a fresh loop at iteration zero.
-          const occurrence = `${event.timestamp.getTime()}-${iteration}`
+          const occurrence = `${event.timestamp.getTime()}-${iteration}-${attempt}`
           this.enqueueGovernedRunEvent(
             'llm_call',
             `task:${this.taskId}:llm:${occurrence}`,
             {
-              status: 'succeeded',
+              status,
               model: this.deps.modelName,
-              attempt: iteration + 1,
+              attempt,
             },
             event.timestamp
           )

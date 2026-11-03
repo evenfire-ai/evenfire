@@ -146,7 +146,9 @@ export class LlmError extends AgentError {
      * (positional, all args before these) remain unchanged.
      */
     public readonly httpStatus?: number,
-    public readonly providerCode?: string
+    public readonly providerCode?: string,
+    /** Whether the provider request reached the upstream service, when known. */
+    public readonly providerDispatched?: boolean
   ) {
     super(message, code, cause)
     this.name = 'LlmError'

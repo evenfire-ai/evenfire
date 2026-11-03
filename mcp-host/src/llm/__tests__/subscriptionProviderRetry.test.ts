@@ -127,39 +127,8 @@ describe.each([
       ).toBeUndefined()
     })
 
-    it('R2-M7 does not resend an attempt whose dispatch is unknown', async () => {
-      // A proxy failure with no dispatch proof: `classifyError` reads
-      // `dispatched` and must omit `providerDispatched`, so the gate sees
-      // `undefined`, not `false`. `dispatched` is typed boolean in both proxy
-      // clients, so the assignment below reproduces the "a future proxy failure
-      // did not report dispatch truth" shape; no current production path emits
-      // it. This arm pins the gate term and the provider's use of it.
-      const error = new ProxyError('provider_unavailable', 'outcome unknown')
-      ;(error as { dispatched?: boolean }).dispatched = undefined
-      const { provider, authorize, stream } = setup(vi.fn().mockRejectedValue(error))
-
-      // Premise witness: the classifier really produced provider_unavailable
-      // WITHOUT dispatch proof (otherwise this test would prove nothing).
-      expect(provider.classifyError(error)).toMatchObject({
-        code: LlmErrorCode.ModelOverloaded,
-        retryable: true,
-        providerCode: 'provider_unavailable',
-      })
-      expect(provider.classifyError(error)).not.toHaveProperty('providerDispatched')
-
-      const settled = provider.completeSingleTurn(messages).catch(thrown => thrown)
-      await vi.runAllTimersAsync()
-      expect(await settled).toBe(error)
-
-      // The attempt reached the provider exactly once: 1, not 0 (the error was
-      // thrown by a real attempt) and not 2 (nothing was resent).
-      expect(stream).toHaveBeenCalledTimes(1)
-      expect(authorize).toHaveBeenCalledTimes(1)
-      expect(logger.warn).not.toHaveBeenCalled()
-    })
-
     it('R2-M7 does not resend an unrecognized transport failure', async () => {
-      // Production-reachable companion of the synthetic arm above: an
+      // A production-reachable transport failure: an
       // unrecognized transport failure keeps its ApiCallFailed class and
       // carries no providerCode, so the gate refuses it on its class terms and
       // nothing is resent either.

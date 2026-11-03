@@ -81,6 +81,7 @@ const savedConfig = {
   enableApproval: appConfig.enableApproval,
   dynamicToolsEnabled: appConfig.dynamicToolsEnabled,
   promptCacheEnabled: appConfig.promptCacheEnabled,
+  modelStepAutoRetries: appConfig.modelStepAutoRetries,
 }
 
 type ProviderScript = (
@@ -2049,6 +2050,94 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     expect(retry.onFail).not.toHaveBeenCalled()
     releaseDispatch()
     await unfinished
+  })
+
+  it('records one governed llm_call for each dispatched retry attempt', async () => {
+    Object.assign(appConfig, { modelStepAutoRetries: 3 })
+    const fixture = await claimedCheckpoint({ confirmedResults: 1 })
+    let calls = 0
+    const llm = provider(undefined, () => {
+      calls++
+      return calls === 1 ? { error: new Error('upstream 503') } : { content: 'retry succeeded' }
+    })
+    const enqueue = vi.fn()
+    const events = new SimpleEventEmitter()
+    const completed: AgentEvent[] = []
+    events.on('llm:completed', event => completed.push(event))
+    const run = await runContinuation(fixture, llm, {
+      events,
+      deps: {
+        governedRunReporter: { enqueue } as unknown as TaskExecutorDeps['governedRunReporter'],
+        usageStaticContext: { host_ref: 'host-a', context_ref: null, llm_secret_name: null },
+      },
+    })
+    run.task.traceContext = {
+      version: 1,
+      runId: 'retry-run',
+      sessionId: 'retry-session',
+      origin: 'direct_chat',
+      correlationRefs: [],
+    }
+    await run.executor.run()
+    expect(llm.calls()).toBe(2)
+    expect(run.onComplete).toHaveBeenCalledTimes(1)
+    expect(completed.map(event => event.data.status)).toEqual(['failed', 'succeeded'])
+    const recorded = enqueue.mock.calls
+      .map(([event]) => event)
+      .filter(event => event.eventType === 'llm_call')
+    expect(recorded.map(event => event.payload)).toEqual([
+      { status: 'failed', model: 'checkpoint-model', attempt: 1 },
+      { status: 'succeeded', model: 'checkpoint-model', attempt: 2 },
+    ])
+    expect(new Set(recorded.map(event => event.sourceEventId)).size).toBe(2)
+    expect(recorded.map(event => event.sourceEventId)).toEqual([
+      expect.stringMatching(/-0-1$/),
+      expect.stringMatching(/-0-2$/),
+    ])
+  })
+
+  it('aborts an in-flight retry past 60 seconds when lease renewal fails', async () => {
+    Object.assign(appConfig, { modelStepAutoRetries: 3 })
+    const fixture = await claimedCheckpoint({ confirmedResults: 1 })
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    let entered!: (signal: AbortSignal | undefined) => void
+    const retryEntered = new Promise<AbortSignal | undefined>(resolve => {
+      entered = resolve
+    })
+    const llm = provider()
+    const completion = vi
+      .spyOn(llm, 'completeSingleTurnWithTools')
+      .mockImplementationOnce(async () => {
+        throw new Error('upstream 503')
+      })
+      .mockImplementationOnce(async (_messages, _tools, options) => {
+        entered(options?.signal)
+        return new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal!.reason), {
+            once: true,
+          })
+        })
+      })
+    const renewal = vi.spyOn(fixture.checkpoints, 'renewLease')
+    const lifecycle = new TaskLifecycle()
+    const terminals: string[] = []
+    lifecycle.on('transition', event => {
+      if (['completed', 'failed', 'cancelled'].includes(event.to)) terminals.push(event.to)
+    })
+    const run = await runContinuation(fixture, llm, { deps: { taskLifecycle: lifecycle } })
+    lifecycle.register(run.task)
+    const running = run.executor.run()
+    const signal = await retryEntered
+    expect(completion).toHaveBeenCalledTimes(2)
+    expect(signal).toBeDefined()
+    expect(signal!.aborted).toBe(false)
+    clock += 70_000
+    renewal.mockResolvedValueOnce(false)
+    await vi.advanceTimersByTimeAsync(LEASE_MS / 3)
+    expect(renewal).toHaveBeenCalledTimes(3)
+    expect(signal!.aborted).toBe(true)
+    await running
+    expect(terminals).toEqual(['cancelled'])
   })
 
   it.each(['transient', 'false', 'expired'] as const)(
