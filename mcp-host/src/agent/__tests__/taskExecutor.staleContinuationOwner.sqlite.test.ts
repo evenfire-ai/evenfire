@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as fs from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import {
@@ -12,7 +15,11 @@ import { LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
 import type { ModelStepCheckpointFence } from '../../db/worker/modelStepCheckpointOps'
-import { ModelStepBoundaryNotCommittedError } from '../../db/worker/protocol'
+import {
+  ModelStepBoundaryNotCommittedError,
+  isModelStepTaskOwnerMismatch,
+} from '../../db/worker/protocol'
+import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import { McpManager } from '../../mcp/manager'
@@ -21,6 +28,7 @@ import type { Task } from '../../queue/types'
 import { makeHandlers } from '../../server/__tests__/testHelpers'
 import { handleApprovalRoute } from '../../server/routes'
 import type { IncomingMessage } from '../../server/types'
+import { gfsStoreCallerIdentity } from '../gfsExecutionCapability'
 import { sourceMessageForResume } from '../sourceMessageForResume'
 import { AgentStateMachine } from '../stateMachine'
 import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
@@ -712,6 +720,8 @@ describe('stale continuation ownership across separate SQLite caches', () => {
     })
     machineA.setColdStartLoader(new SqliteColdStartLoader(handle.store))
     const managerA = machineA.getConversationManager()
+    let gfsStore: GfsDownloadStore | undefined
+    let gfsRoot: string | undefined
 
     try {
       const fixture = await seed(handle, managerA, checkpoints, clock, 'deny-owner')
@@ -804,6 +814,32 @@ describe('stale continuation ownership across separate SQLite caches', () => {
         continuation_task_id: taskA,
       })
 
+      // The row is already `abandoned`, so a second abandon attempt settles as
+      // lost and leaves no durable trace. These spies are the witnesses: the
+      // lease stop and the owner-mismatch write prove `deny()` reached its
+      // continuation branch, and any abandon attempt would show up as a
+      // transition on A's fence.
+      const executorFence = (
+        executorA as unknown as {
+          continuationClaim: { fence: ModelStepCheckpointFence | undefined }
+        }
+      ).continuationClaim.fence
+      expect(executorFence).toEqual(fixture.fence)
+      const transition = vi.spyOn(checkpoints, 'transition')
+      const leaseStop = vi.spyOn(
+        executorA as unknown as { stopContinuationLease(): Promise<void> },
+        'stopContinuationLease'
+      )
+      const persist = vi.spyOn(handle.store, 'persistApprovalResolved')
+      gfsRoot = await fs.mkdtemp(join(tmpdir(), 'stale-owner-gfs-'))
+      gfsStore = new GfsDownloadStore(gfsRoot)
+      await gfsStore.initialize()
+      const releaseOwner = vi.spyOn(gfsStore, 'releaseReceiptOwner')
+      ;(
+        executorA as unknown as { deps: { gfsDownloadStore: GfsDownloadStore } }
+      ).deps.gfsDownloadStore = gfsStore
+      expect(releaseOwner).not.toHaveBeenCalled()
+
       const response = await postDenial(machineA, requestA)
       await handle.persistQueue.drain()
       expect(response.status).toBe(500)
@@ -811,6 +847,24 @@ describe('stale continuation ownership across separate SQLite caches', () => {
         success: false,
         error: 'The tool call denial could not be completed.',
       })
+      expect(
+        transition.mock.calls.filter(
+          ([, fence, change]) =>
+            change.to === 'abandoned' &&
+            fence.owner === executorFence!.owner &&
+            fence.generation === executorFence!.generation
+        )
+      ).toEqual([])
+      expect(leaseStop).toHaveBeenCalledOnce()
+      const persistRejection = await persist.mock.results[0]!.value.then(
+        () => null,
+        (error: unknown) => error
+      )
+      expect(isModelStepTaskOwnerMismatch(persistRejection)).toBe(true)
+      expect(releaseOwner).toHaveBeenCalledExactlyOnceWith(
+        taskA,
+        gfsStoreCallerIdentity(executorA.sourceTask.sourceMessage)
+      )
       expect(terminal).toEqual(['task:failed'])
       expect(responseCallback).toHaveBeenCalledTimes(1)
       const failureDelivery = responseCallback.mock.calls[0]?.[0]
@@ -876,6 +930,8 @@ describe('stale continuation ownership across separate SQLite caches', () => {
         activeTaskId: taskB,
       })
     } finally {
+      if (gfsStore) await gfsStore.close()
+      if (gfsRoot) await fs.rm(gfsRoot, { recursive: true, force: true })
       await handle.shutdown()
     }
   }, 20_000)
