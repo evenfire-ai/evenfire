@@ -22,6 +22,7 @@ describe('Profile logout client boundary', () => {
 
   it.each([
     ['503 response', () => Promise.resolve(new Response('', { status: 503 }))],
+    ['404 response', () => Promise.resolve(new Response('{"error":"Not Found"}', { status: 404 }))],
     ['transport failure', () => Promise.reject(new TypeError('network unavailable'))],
   ])('abandons local credentials after a logout %s', async (_caseName, response) => {
     vi.mocked(fetch).mockImplementationOnce(response)
@@ -32,6 +33,7 @@ describe('Profile logout client boundary', () => {
       fencePersisted: true,
     })
 
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
     expect(window.localStorage.getItem('external_session_token')).toBeNull()
     await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
     expect(fetch).toHaveBeenCalledOnce()
