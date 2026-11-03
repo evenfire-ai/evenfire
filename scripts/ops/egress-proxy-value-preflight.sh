@@ -395,12 +395,20 @@ while IFS= read -r epvp_name; do
           epvp_name_inconclusive "$epvp_ref" secret-unreadable
           continue
         fi
+        # Presence first: an empty Secret value is an empty base64 string, which
+        # is indistinguishable from an absent key by content alone. A key that
+        # exists with an empty value is judged like any other value (both value
+        # classes accept the empty string); only a missing key is unreadable.
+        if ! printf '%s' "$epvp_secret_json" |
+          jq -e --arg k "$epvp_key" '(.data // {}) | has($k)' >/dev/null 2>&1; then
+          epvp_name_inconclusive "$epvp_ref" secret-unreadable
+          continue
+        fi
         epvp_encoded=$(printf '%s' "$epvp_secret_json" |
           jq -jr --arg k "$epvp_key" '.data[$k] // empty' 2>/dev/null) ||
           epvp_die "invalid-secret-json $NAMESPACE/$epvp_secret"
         # base64-decoded in a pipe: the value is never stored outside memory.
-        if [ -z "$epvp_encoded" ] ||
-          ! printf '%s' "$epvp_encoded" | base64 -d >/dev/null 2>&1; then
+        if ! printf '%s' "$epvp_encoded" | base64 -d >/dev/null 2>&1; then
           epvp_name_inconclusive "$epvp_ref" secret-unreadable
           continue
         fi
