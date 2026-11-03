@@ -93,12 +93,15 @@ export function isModelStepTaskOwnerMismatch(err: unknown): boolean {
 }
 
 /**
- * A fenced boundary write timed out, the worker later proved the
- * transaction did NOT commit, and the store restored the reopened-turn marker.
- * The message is the worker's real error so callers keep the true cause (and a
- * late fence mismatch still matches `isModelStepFenceMismatch`); the class is
- * the extra signal that RAM must be restored too. It must not be conflated
- * with a fence mismatch: an operational late failure is not a lost fence.
+ * A fenced boundary write did not commit and the store restored the
+ * reopened-turn marker. It covers two shapes: a write that timed out and was
+ * later proved not committed on the turn cancel and fail paths, and any
+ * not-committed rejection on the continuation start
+ * (`persistContinuationStart`), which does not require a timeout. The message
+ * is the worker's real error so callers keep the true cause (and a late fence
+ * mismatch still matches `isModelStepFenceMismatch`); the class is the extra
+ * signal that RAM must be restored too. It must not be conflated with a fence
+ * mismatch: an operational late failure is not a lost fence.
  */
 export class ModelStepBoundaryNotCommittedError extends Error {
   constructor(cause: Error) {
