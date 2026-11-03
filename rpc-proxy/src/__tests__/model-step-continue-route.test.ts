@@ -121,6 +121,61 @@ describe(`POST ${CONTINUE_PATH} — model-step continuation passthrough`, () => 
     expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
   })
 
+  it('reports an unavailable attribution binding for the continuation run', async () => {
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      ...HOST_CONNECTION,
+      attributionBindingStatus: 'unavailable',
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const claimed = readVector('continue-response.claimed.json')
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse(claimed.httpStatus, claimed.body))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .post(CONTINUE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ version: 3 })
+      .expect(202)
+
+    // Witness: the continuation reached the Host once, so the missing warn is
+    // not explained by a short-circuited route.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const signals = warnSpy.mock.calls
+      .map(([line]) => String(line))
+      .filter(line => line.startsWith('{'))
+      .map(line => JSON.parse(line) as Record<string, unknown>)
+    expect(signals).toContainEqual({
+      event: 'governed_trace_operational_error',
+      scope: 'agent_run',
+      reason: 'attribution_binding_unavailable',
+    })
+  })
+
+  it('stays silent when the attribution binding was recorded', async () => {
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      ...HOST_CONNECTION,
+      attributionBindingStatus: 'recorded',
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const claimed = readVector('continue-response.claimed.json')
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse(claimed.httpStatus, claimed.body))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .post(CONTINUE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ version: 3 })
+      .expect(202)
+
+    // Liveness witness: the same request that warns above is served here, so
+    // the empty signal set is the binding status, not a failed forward.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const signals = warnSpy.mock.calls
+      .map(([line]) => String(line))
+      .filter(line => line.startsWith('{'))
+    expect(signals).toEqual([])
+  })
+
   it.each(['c1', 'chat-東京'])(
     'mints and binds a trusted continuation trace for %s while dropping client trace data',
     async chatId => {

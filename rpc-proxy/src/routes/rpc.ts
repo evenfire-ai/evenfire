@@ -47,6 +47,7 @@ import {
   sanitizeHostRefForLog,
 } from '../services/wakeAndHold.js'
 import { mintOrReuseDirectTraceContext } from '../traceContext.js'
+import type { ResolvedServerConnection } from '../types.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
@@ -55,6 +56,19 @@ const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 // own copy (the two services share no package, so each names its own).
 const SESSIONS_LIMIT_CAP = 100
 const MESSAGES_LIMIT_CAP = 200
+
+/**
+ * How long mcp-host may wait for a model-step continuation's admission verdict
+ * before it answers 202 with the claimed task (`mcp-host`'s
+ * MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS). The two services share no
+ * package, so this is the proxy's own copy like the paging caps above.
+ *
+ * The Host claims the checkpoint BEFORE that wait, so a post-wake attempt that
+ * starts with less hold than this can be aborted by the proxy after the write
+ * took effect. Such an attempt is not started at all: the caller gets the
+ * retryable 503 `host_waking` and a re-POST replays the claim.
+ */
+const HOST_CONTINUATION_ADMISSION_BUDGET_MS = 10_000
 
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (
@@ -199,6 +213,27 @@ export function respondControlApiHostAccessRejection(
     return
   }
   res.status(409).json({ error: 'Direct run attribution conflict' })
+}
+
+/**
+ * The direct-run attribution binding is what lets control-api charge a run to
+ * the Desktop's trace. `unavailable` means the Host connection was resolved but
+ * the binding write did not land: the run still proceeds, and the condition is
+ * reported once per request as a structured operational error (never a token,
+ * a DSN or a prompt). Emitted for every route that resolves a direct-run
+ * binding, so the metric does not depend on which write started the turn.
+ */
+function warnIfAttributionBindingUnavailable(
+  host: Pick<ResolvedServerConnection, 'attributionBindingStatus'>
+): void {
+  if (host.attributionBindingStatus !== 'unavailable') return
+  console.warn(
+    JSON.stringify({
+      event: 'governed_trace_operational_error',
+      scope: 'agent_run',
+      reason: 'attribution_binding_unavailable',
+    })
+  )
 }
 
 /**
@@ -495,15 +530,7 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (host.attributionBindingStatus === 'unavailable') {
-          console.warn(
-            JSON.stringify({
-              event: 'governed_trace_operational_error',
-              scope: 'agent_run',
-              reason: 'attribution_binding_unavailable',
-            })
-          )
-        }
+        warnIfAttributionBindingUnavailable(host)
 
         const isAsync = req.query.async === 'true'
         const attachmentCount = Array.isArray(forwardedBody.attachments)
@@ -1067,6 +1094,7 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
+        warnIfAttributionBindingUnavailable(host)
         const baseUrl = host.url.replace(/\/+$/, '')
         // The segments are already control-char free (the guard above rejects
         // the C0 range, CR/LF included); strip line breaks again as defense in
@@ -1131,6 +1159,10 @@ export function createRpcRouter(): Router {
               // A live claim or completed result replays. After the claim lease
               // lapses, a new task may claim it; the old task loses its write fence.
               retryUntilDeadline: true,
+              // The Host claims the checkpoint before its admission verdict, so
+              // an attempt with less hold than that wait would be aborted after
+              // the claim landed. Below it answer 503 host_waking instead.
+              minAttemptBudgetMs: HOST_CONTINUATION_ADMISSION_BUDGET_MS,
               attemptUpstream: async (_timeoutMs, deadlineMs) => {
                 // The Host waits up to 10 s for its admission verdict. The
                 // generic wake attempt is capped by upstreamTimeoutMs (8 s

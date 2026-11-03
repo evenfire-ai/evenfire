@@ -708,6 +708,16 @@ export type RespondWithWakeAndHoldOptions = {
    * POST risks a duplicate side effect. Defaults to false.
    */
   retryUntilDeadline?: boolean
+  /**
+   * Smallest hold remainder an admission attempt may START with, on top of the
+   * generic `MIN_ADMISSION_RETRY_TIMEOUT_MS` floor. A route whose upstream
+   * applies the write before it answers (the model-step continuation claims
+   * its checkpoint before the Host emits the admission verdict) passes the
+   * upstream's own admission budget here: starting below it would let the
+   * proxy abort AFTER the write took effect. Below it the caller gets the
+   * retryable 503 `host_waking` instead. Defaults to 0.
+   */
+  minAttemptBudgetMs?: number
 }
 
 /**
@@ -752,6 +762,9 @@ export async function respondWithWakeAndHold(
       let attempts = 0
       const maxAttempts = options.retryUntilDeadline ? Infinity : 1
       const minAttemptTimeoutMs = Math.min(MIN_ADMISSION_RETRY_TIMEOUT_MS, config.upstreamTimeoutMs)
+      // A route-specific floor can only raise the generic one: the upstream's
+      // own admission latency is not bounded by this proxy's upstream timeout.
+      const minAttemptBudgetMs = Math.max(minAttemptTimeoutMs, options.minAttemptBudgetMs ?? 0)
       while (Date.now() < deadlineMs) {
         if (options.res.headersSent) {
           // Resolution latch: the response was committed while this retry
@@ -764,7 +777,7 @@ export async function respondWithWakeAndHold(
         }
         try {
           const remainingMs = deadlineMs - Date.now()
-          if (remainingMs < minAttemptTimeoutMs) break
+          if (remainingMs < minAttemptBudgetMs) break
           attempts++
           await options.attemptUpstream(Math.min(config.upstreamTimeoutMs, remainingMs), deadlineMs)
           return
