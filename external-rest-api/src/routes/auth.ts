@@ -161,8 +161,9 @@ export function createAuthRouter(): Router {
         : { expiresInSeconds: renewed.expiresInSeconds }
       res.status(200).json(body)
     } catch (error) {
+      // control-api renews V2 sessions only, so a 401 can be a still-valid V1
+      // cookie: answer it without clearing the caller's session.
       if (isControlApiStatus(error, 401)) {
-        clearProfileSessionCookie(req, res)
         res.status(401).json({ error: 'Unauthorized' })
         return
       }

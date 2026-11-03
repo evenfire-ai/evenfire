@@ -235,6 +235,28 @@ describe('routes/auth password-login', () => {
     expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(session)
   })
 
+  it('keeps a V1 profile cookie when renewal is refused with 401', async () => {
+    const v1Session = 'synthetic-v1-profile-session'
+    authServiceMock.renewUserSession.mockRejectedValueOnce(
+      new ControlApiError('Control API POST /external/auth/session/renew failed (401)', 401, {
+        error: 'Unauthorized',
+      })
+    )
+
+    const response = await request(buildApp())
+      .post('/api/v1/auth/session/renew')
+      .set('cookie', `profile_session=${v1Session}`)
+      .expect(401)
+
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    // E-2: control-api renews V2 sessions only, so a 401 on a still-valid V1
+    // cookie must not delete it.
+    expect(String(response.headers['set-cookie'] ?? '')).not.toContain('profile_session')
+    // Witness: the route reached the renewal with the cookie's token.
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledOnce()
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(v1Session)
+  })
+
   it('documents the password-reset limiter headers and client-IP contract', async () => {
     authServiceMock.requestPasswordReset.mockResolvedValue({ requested: true })
     const app = buildApp()
