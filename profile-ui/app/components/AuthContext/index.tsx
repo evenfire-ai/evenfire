@@ -63,7 +63,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [signOutIncomplete, setSignOutIncomplete] = useState(false)
   const [signOutPending, setSignOutPending] = useState(false)
   // The sign-out request whose answer may still change this screen. A newer sign-out or a
-  // login replaces it, so an answer that arrives late for an older request is ignored.
+  // successful login replaces it, so an answer that arrives late for an older request is
+  // ignored. A failed login leaves it in place: the old cookie may still be valid.
   const pendingRevocationRef = useRef<object | null>(null)
 
   const checkAuth = useCallback(async (): Promise<AuthCheckResult> => {
@@ -101,10 +102,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(async (email: string, password: string) => {
     authCheckSequenceRef.current += 1
-    pendingRevocationRef.current = null
-    setSignOutPending(false)
     try {
       const result = await loginWithPassword(email, password)
+      pendingRevocationRef.current = null
+      setSignOutPending(false)
       resetProfileAccessCache()
       const current = await getMe().catch(() => {
         return meFromPasswordLoginResponse(result.me)

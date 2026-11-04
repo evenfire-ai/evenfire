@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { AuthProvider, useAuth } from '@components/AuthContext'
@@ -50,16 +51,27 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-function AuthProbe() {
+function AuthProbe({ expectLoginFailure = false }: { expectLoginFailure?: boolean }) {
   const { authState, login, logout, signOutIncomplete, signOutPending, retrySignOut } = useAuth()
+  const [loginFailure, setLoginFailure] = useState<string | null>(null)
+  const startLogin = () => {
+    const attempt = login('user@example.invalid', 'password')
+    if (expectLoginFailure) {
+      // The login screen catches a rejected login; the probe records it as the witness.
+      void attempt.catch((error: Error) => setLoginFailure(error.message))
+    } else {
+      void attempt
+    }
+  }
   return (
     <div>
       <span>{authState.isLoggedIn ? 'signed-in' : 'signed-out'}</span>
       <span>{signOutPending ? 'sign-out-pending' : 'sign-out-idle'}</span>
+      {loginFailure ? <span>login-failed: {loginFailure}</span> : null}
       <button type="button" onClick={logout}>
         Log out
       </button>
-      <button type="button" onClick={() => void login('user@example.invalid', 'password')}>
+      <button type="button" onClick={startLogin}>
         Log in
       </button>
       {signOutIncomplete ? <p role="alert">Sign-out is not complete</p> : null}
@@ -262,6 +274,56 @@ describe('Profile logout consumer', () => {
     expect(screen.queryByText(/signed out here/i)).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.getByText('sign-out-idle')).toBeInTheDocument()
+  })
+
+  async function failLoginDuringPendingSignOut() {
+    const signOut = deferred<LogoutResult>()
+    mocks.logoutProfileUI.mockReturnValueOnce(signOut.promise)
+    mocks.loginWithPassword.mockRejectedValueOnce(new Error('invalid credentials'))
+    render(
+      <ToastProvider>
+        <AuthProvider>
+          <AuthProbe expectLoginFailure />
+        </AuthProvider>
+      </ToastProvider>
+    )
+
+    await screen.findByText('signed-in')
+    fireEvent.click(screen.getByRole('button', { name: 'Log out' }))
+    expect(screen.getByText('sign-out-pending')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Log in' }))
+    // Liveness: the login ran and its rejection reached the login screen.
+    await screen.findByText('login-failed: invalid credentials')
+    expect(mocks.loginWithPassword).toHaveBeenCalledOnce()
+    expect(screen.getByText('signed-out')).toBeInTheDocument()
+    // The failed login did not supersede the sign-out whose answer is still due.
+    expect(screen.getByText('sign-out-pending')).toBeInTheDocument()
+    return signOut
+  }
+
+  it('keeps a pending sign-out when the login that started during it fails', async () => {
+    const signOut = await failLoginDuringPendingSignOut()
+
+    await act(async () => signOut.resolve(unsavedFailure))
+
+    await screen.findByText('sign-out-idle')
+    expect(screen.getByRole('alert')).toHaveTextContent('Sign-out is not complete')
+    expect(mocks.logoutProfileUI).toHaveBeenCalledOnce()
+  })
+
+  it('reports the unconfirmed revocation when the login that started during the sign-out fails', async () => {
+    const signOut = await failLoginDuringPendingSignOut()
+
+    await act(async () => signOut.resolve(noSessionReached))
+
+    await screen.findByText('sign-out-idle')
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /server could not confirm that your session was revoked/i
+      )
+    )
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('a new login clears the incomplete sign-out', async () => {
