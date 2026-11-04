@@ -362,6 +362,17 @@ PY
   projection="$RUN_EVIDENCE/logs/t1-control-api-isolated.results.json"
   [ -s "$projection" ] || fail 'run_suite did not persist the T1 reporter projection'
   grep -Fq '"fileMessageOmitted": true' "$projection" || fail 'the projection lost the failing file record'
+  # The file name expands $lane by itself, so the recorded fields are checked
+  # directly: run_suite must pass the package and the lane in that order.
+  python3 - "$projection" <<'PY' || fail 'the projection does not record package control-api and lane isolated'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    projection = json.load(handle)
+assert projection["package"] == "control-api", projection.get("package")
+assert projection["lane"] == "isolated", projection.get("lane")
+PY
   grep -Fq "$run_password" "$projection" && fail 'the password reached the T1 evidence projection'
   grep -Fq "$run_bearer" "$projection" && fail 'the bearer token reached the T1 evidence projection'
   grep -Fq 'REAL_PG_SUITE_FAILED' "$run_err" || fail 'run_suite did not fail on the failing reporter'

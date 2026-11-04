@@ -90,7 +90,7 @@ function fixture(t) {
   write(join(root, 'mcp-host/node_modules/@napi-rs/canvas/index.js'), 'module.exports = {}\n')
   write(join(root, 'external-rest-api/dist/app.js'), '// synthetic build\n')
   write(join(root, 'packages/workflow-runtime-core/dist/index.js'), '// synthetic build\n')
-  write(join(root, 'scripts/minikube/pre-gate-sync.sh'), 'run_if_changed mcp-host "npm test"\n')
+  write(join(root, 'scripts/minikube/pre-gate-sync.sh'), 'run_if_changed mcp-host "npm test"\nrun_if_changed gfs-controller "npm test"\n')
   const suites = {
     version: 1,
     publicPostgres: ['control-api/test/public.realPostgres.test.ts'],
@@ -316,4 +316,36 @@ test('Git range arguments cannot be interpreted as command options', t => {
   assert.match(result.stderr, /invalid Git range/)
   assert.equal(existsSync(f.audit), false)
   assert.equal(existsSync(f.mutation), false)
+})
+
+test('T0 scope checks affected packages only, while T2 also checks every pre-gate package', t => {
+  const f = fixture(t); ready(f)
+  write(join(f.root, 'gfs-controller/.missing-dependency'), '')
+  let result = f.invoke('check', '--scope', 't0', '--base', f.base, '--head', f.head)
+  assert.equal(result.status, 0, result.stderr)
+  assert.doesNotMatch(result.stderr, /gfs-controller/)
+  write(join(f.root, 'mcp-host/.missing-dependency'), '')
+  result = f.invoke('check', '--scope', 't0', '--base', f.base, '--head', f.head)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /incomplete: mcp-host/)
+  assert.doesNotMatch(result.stderr, /gfs-controller/)
+  result = check(f)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /incomplete: mcp-host/)
+  assert.match(result.stderr, /incomplete: gfs-controller/)
+  assert.equal(existsSync(f.mutation), false)
+})
+
+test('the T2 runbook documents how to prepare every pinned producer input', () => {
+  const contract = JSON.parse(readFileSync(join(sourceRoot, 'tests/contracts/certification-inputs.json'), 'utf8'))
+  const producers = Object.entries(contract.producers)
+  const names = [...new Set(producers.map(([, producer]) => producer.env))]
+  assert.equal(names.length, 2, 'the contract must declare exactly two distinct producer environment variables')
+  assert.deepEqual(producers.map(([id]) => id).sort(), ['latestDev', 'observedDev'])
+  const runbook = readFileSync(join(sourceRoot, 'docs/testing/minikube-t2-runbook.md'), 'utf8')
+  const section = runbook.split(/^### Pinned producer inputs\s*$/m)[1]?.split(/^#{2,3} /m)[0]
+  assert.ok(section, 'runbook must contain the "Pinned producer inputs" subsection')
+  for (const name of names) assert.ok(section.includes(name), `runbook subsection must name ${name}`)
+  for (const [id] of producers)
+    assert.ok(section.includes(`build-producer --producer ${id}`), `runbook subsection must build ${id}`)
 })

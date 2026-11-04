@@ -38,11 +38,14 @@
 # the run fails when it expires. A timed-out kubectl call can take up to the
 # 2 s kill grace of run-with-deadline.mjs to terminate.
 # ======================================================================
+# The journey handles a password and bearer tokens: `bash -x` must not trace them.
+{ set +x; } 2>/dev/null
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/e2e-lib.sh"
+source "${SCRIPT_DIR}/e2e-rpc-http-lib.sh"
 
 if [ -z "${E2E_KUBECONTEXT:-}" ] || ! is_branch_scoped_e2e_context "$E2E_KUBECONTEXT"; then
   echo "J4 requires an explicit branch-scoped KUBECONTEXT (or E2E_K8S_CONTEXT); the global current-context is never used" >&2
@@ -138,31 +141,16 @@ kctl() {
     --request-timeout="${budget}s" "$@"
 }
 
-http_call() {
-  # http_call <label> <timeout-seconds> <curl args...> → HTTP_STATUS / HTTP_BODY
-  local label=$1 budget resp
-  budget="$(call_budget "$2")"
-  shift 2
-  HTTP_STATUS=000
-  HTTP_BODY=''
-  if [ "$budget" -le 0 ]; then
-    echo "${label}: J4 deadline expired before the request" >&2
-    return 1
-  fi
-  if ! resp=$(curl -sS -m "$budget" -w '\n%{http_code}' "$@"); then
-    echo "${label}: curl error" >&2
-    return 1
-  fi
-  HTTP_STATUS="$(printf '%s\n' "$resp" | tail -n1)"
-  HTTP_BODY="$(printf '%s\n' "$resp" | sed '$d')"
-}
+# Credentials never reach argv, where any local user can read them with ps:
+# http_call (e2e-rpc-http-lib.sh) sends request bodies on stdin and bearer
+# tokens as a header read from a file descriptor, never from a file on disk.
 
 header "Prerequisites"
 for bin in jq curl node; do
   command -v "$bin" >/dev/null 2>&1 || { fail "missing required binary: $bin"; print_results || true; exit 1; }
 done
 for base in "$EXT_BASE" "$RPC_BASE"; do
-  if http_call health 10 -o /dev/null "${base}/health" && [ "$HTTP_STATUS" = "200" ]; then
+  if http_call health 10 '' '' -o /dev/null "${base}/health" && [ "$HTTP_STATUS" = "200" ]; then
     ok "${base}/health → 200"
   else
     fail "${base}/health → ${HTTP_STATUS} (port-forward down or service unhealthy)"
@@ -187,11 +175,14 @@ fi
 
 header "Tokens"
 SESSION_TOKEN=''
-if http_call password-login 30 -X POST "${EXT_BASE}/api/v1/auth/password-login" \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -cn --arg e "$E2E_DEV_LOGIN_EMAIL" --arg p "$DEV_PASSWORD" '{email: $e, password: $p}')"; then
+# jq reads the login from its own environment, so the password is in no argv.
+login_body="$(E2E_DEV_LOGIN_EMAIL="$E2E_DEV_LOGIN_EMAIL" DEV_PASSWORD="$DEV_PASSWORD" \
+  jq -cn '{email: env.E2E_DEV_LOGIN_EMAIL, password: env.DEV_PASSWORD}')"
+if http_call password-login 30 "$login_body" '' -X POST "${EXT_BASE}/api/v1/auth/password-login" \
+  -H 'Content-Type: application/json'; then
   SESSION_TOKEN="$(printf '%s' "$HTTP_BODY" | jq -r '.token // empty' 2>/dev/null || true)"
 fi
+unset login_body
 if [ "$HTTP_STATUS" = "200" ] && [ -n "$SESSION_TOKEN" ]; then
   ok "session token minted for ${E2E_DEV_LOGIN_EMAIL}"
 else
@@ -202,10 +193,11 @@ fi
 
 mint_rpc_token() {
   RPC_TOKEN=''
-  http_call rpc/token 30 -X POST "${EXT_BASE}/api/v1/rpc/token" \
-    -H "Authorization: Bearer ${SESSION_TOKEN}" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg h "$HOST_REF" '{hostRefs: [$h], scopes: ["host:message:invoke", "host:task:read"]}')" ||
+  http_call rpc/token 30 \
+    "$(jq -cn --arg h "$HOST_REF" '{hostRefs: [$h], scopes: ["host:message:invoke", "host:task:read"]}')" \
+    "$SESSION_TOKEN" \
+    -X POST "${EXT_BASE}/api/v1/rpc/token" \
+    -H 'Content-Type: application/json' ||
     return 1
   RPC_TOKEN="$(printf '%s' "$HTTP_BODY" | jq -r '.token // empty' 2>/dev/null || true)"
   [ "$HTTP_STATUS" = "200" ] && [ -n "$RPC_TOKEN" ]
@@ -213,7 +205,8 @@ mint_rpc_token() {
 if mint_rpc_token; then
   ok "RPC token minted for hostRef=${HOST_REF}"
 else
-  fail "rpc/token → HTTP ${HTTP_STATUS}: ${HTTP_BODY}"
+  # An auth response body can carry a token: report the status only.
+  fail "rpc/token → HTTP ${HTTP_STATUS}"
   print_results || true
   exit 1
 fi
@@ -231,10 +224,11 @@ while :; do
     fail "rpc/token re-mint → HTTP ${HTTP_STATUS}"
     break
   fi
-  if ! http_call message "$E2E_TURN_TIMEOUT" -X POST "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/messages" \
-    -H "Authorization: Bearer ${RPC_TOKEN}" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg c "J4 gateway check ${MARKER}. Reply with OK." --arg t "$THREAD_ID" '{content: $c, threadId: $t}')"; then
+  if ! http_call message "$E2E_TURN_TIMEOUT" \
+    "$(jq -cn --arg c "J4 gateway check ${MARKER}. Reply with OK." --arg t "$THREAD_ID" '{content: $c, threadId: $t}')" \
+    "$RPC_TOKEN" \
+    -X POST "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/messages" \
+    -H 'Content-Type: application/json'; then
     fail "POST /rpc/hosts/${HOST_REF}/messages: no HTTP response"
     break
   fi
@@ -263,8 +257,7 @@ header "Journey: artifact list through the parent Host path"
 within_deadline "artifact read"
 if ! mint_rpc_token; then
   fail "rpc/token re-mint → HTTP ${HTTP_STATUS}; artifact list not attempted"
-elif ! http_call artifacts 30 "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/artifacts" \
-  -H "Authorization: Bearer ${RPC_TOKEN}"; then
+elif ! http_call artifacts 30 '' "$RPC_TOKEN" "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/artifacts"; then
   fail "GET /rpc/hosts/${HOST_REF}/artifacts: no HTTP response"
 elif [ "$HTTP_STATUS" = "200" ]; then
   ok "GET /rpc/hosts/${HOST_REF}/artifacts → 200"

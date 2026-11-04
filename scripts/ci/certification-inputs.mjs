@@ -292,7 +292,8 @@ export function inspectCertificationInputs(options) {
       if (scope !== 'ci-t1') for (const pkg of contract.localT1ExtraPackages) packages.add(pkg)
     }
     if (scope === 't2' || scope === 't0') {
-      for (const pkg of listPreGatePackages(root, contract)) packages.add(pkg)
+      // T0 tests only the affected packages; the pre-gate set runs only in T2.
+      if (scope === 't2') for (const pkg of listPreGatePackages(root, contract)) packages.add(pkg)
       for (const pkg of listAffectedPackages(root, base, head)) {
         if (!/^tests\/e2e(?:\/|$)/.test(pkg) && !/\/tests\/e2e(?:\/|$)/.test(pkg)) packages.add(pkg)
       }

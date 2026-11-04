@@ -224,7 +224,7 @@ require_t1_commands() {
     die_t1 "$REAL_PG_PREFLIGHT_ERROR_CODE" "$REAL_PG_PREFLIGHT_ERROR_MESSAGE"
   fi
   if ! node "$SCRIPT_DIR/../ci/certification-inputs.mjs" check --root "$PROJECT_DIR" --scope t1; then
-    T1_NEXT_COMMAND='prepare the reported local inputs explicitly, then re-run the standalone Real PostgreSQL lane'
+    T1_NEXT_COMMAND='prepare the reported local inputs explicitly (pinned producers: docs/testing/minikube-t2-runbook.md "Pinned producer inputs"), then re-run the standalone Real PostgreSQL lane'
     die_t1 LOCAL_DEPENDENCY_MISSING 'certification input preflight failed before T1'
   fi
 }

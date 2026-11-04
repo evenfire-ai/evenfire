@@ -183,6 +183,10 @@ only the internal planner so `full-bootstrap` is reachable).
 `make minikube-pre-gate-sync` alone never constitutes T2 evidence.
 Follow the rule `.cursor/rules/minikube-t0-t1-t2.mdc` and the skill
 `.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification workflow.
+T1 needs the two pinned producer checkouts named by
+`TASK106_R61_B1_DEV_SOURCE_DIR` and `TASK106_R61_B1_LATEST_DEV_SOURCE_DIR`;
+prepare them as in `docs/testing/minikube-t2-runbook.md` ("Pinned producer
+inputs") before launching.
 A T1 `next:` line or `REAL_PG_REQUIRED_BUT_UNAVAILABLE` is not a license to
 operate Docker: do not `docker run` probes, `docker desktop restart`, or
 experiment with published ports. Re-enter `make minikube-t2` or

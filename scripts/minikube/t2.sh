@@ -92,7 +92,7 @@ run_certification_inputs_preflight() {
   fi
   if ! node "$SCRIPT_DIR/../ci/certification-inputs.mjs" check \
     --root "$T2_PROJECT_DIR" --scope "$scope" --base "$T2_ORIGIN_DEV" --head "$T2_HEAD"; then
-    T2_NEXT_COMMAND='prepare the reported local inputs explicitly, then re-run the canonical gate'
+    T2_NEXT_COMMAND='prepare the reported local inputs explicitly (pinned producers: docs/testing/minikube-t2-runbook.md "Pinned producer inputs"), then re-run the canonical gate'
     t2_evidence_write local-preflight FAIL 'certification inputs are incomplete'
     t2_fail LOCAL_DEPENDENCY_MISSING 'certification input preflight failed before T0'
     return 1
@@ -324,7 +324,7 @@ run_t1() {
     fi
     T2_T1_STATUS=PASS
     T2_T1_COUNTS="$(awk -F= '/^T1_TESTS=|^T1_PASSED_TESTS=|^T1_PENDING_TESTS=|^T1_EXPECTED_FILES=|^T1_REPORTED_FILES=/{printf "%s%s", (n++ ? "," : ""), $0}' "$T2_T1_OUTPUT")"
-    t2_evidence_write T1 PASS "Real PostgreSQL suites executed with exact file identity and no skips; $T2_T1_COUNTS; duration=${t1_duration}s; orchestratorDuration=$((SECONDS - phase_started_seconds))s"
+    t2_evidence_write T1 PASS "Real PostgreSQL suites executed with exact file identity and no skips; $T2_T1_COUNTS; duration=${t1_duration}s; orchestratorDuration=$((SECONDS - phase_started_seconds))s; t1Evidence=${t1_evidence}"
   else
     cat "$T2_T1_OUTPUT" >&2 || true
     T2_T1_STATUS=FAIL

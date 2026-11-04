@@ -418,3 +418,24 @@ test('hosted real-PostgreSQL job enforces the same public inventory as Minikube'
   assert.equal(new Set(pins).size, pins.length, 'pinned suites must be unique')
   assert.deepEqual(pins.filter(pin => !publicNames.has(pin)), [], 'every pinned suite must be in the public inventory')
 })
+
+test('hosted contract step runs its node test files through the zero-test-refusing runner', () => {
+  const workflow = readFileSync(join(root, '.github/workflows/ci-public.yml'), 'utf8')
+  const job = workflow.split(/^  control-api-migration:\s*$/m)[1]?.split(/^  [a-zA-Z0-9_-]+:\s*$/m)[0]
+  assert.ok(job, 'control-api-migration job must exist')
+  const step = job
+    .split(/^      - name: Validate recovery suite selection, certification input and T1 evidence contracts\s*$/m)[1]
+    ?.split(/^      - /m)[0]
+  assert.ok(step, 'contract validation step must exist')
+  const files = [
+    'scripts/tests/password-recovery-suite-contract.test.mjs',
+    'scripts/tests/certification-inputs.test.mjs',
+    'scripts/tests/t1-reporter-projection.test.mjs',
+  ]
+  for (const file of files) assert.ok(step.includes(file), `contract step must list ${file}`)
+  const run = step.split(/^\s+run: >-\s*$/m)[1]
+  assert.ok(run, 'contract step must use a folded run command')
+  const command = run.trim().split(/\s+/).join(' ')
+  assert.equal(command, ['node scripts/tests/run-node-test-files.mjs', ...files].join(' '))
+  assert.doesNotMatch(step, /node --test/)
+})
