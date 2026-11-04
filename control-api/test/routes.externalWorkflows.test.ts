@@ -43,8 +43,6 @@ vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
 vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
   authenticateExternalUserSession: (...args: unknown[]) =>
     mockAuthenticateExternalUserSession(...args),
-  authenticateExternalUserSessionIdentity: (...args: unknown[]) =>
-    mockAuthenticateExternalUserSession(...args),
   externalSessionUserIdForRateLimit: (token: string) =>
     token === 'user-session-token'
       ? 'user-123'

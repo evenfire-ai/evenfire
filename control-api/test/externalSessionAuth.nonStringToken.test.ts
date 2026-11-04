@@ -7,7 +7,6 @@ import { createExternalAuthRouter } from '../src/routes/external/auth.js'
 
 const sessions = vi.hoisted(() => ({
   authenticateExternalUserSession: vi.fn(),
-  authenticateExternalUserSessionIdentity: vi.fn(),
   renewExternalUserSession: vi.fn(),
 }))
 const revocations = vi.hoisted(() => ({

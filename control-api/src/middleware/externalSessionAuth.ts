@@ -3,15 +3,10 @@ import { sendPublicApiError } from '../http/publicApiError.js'
 import { rootLogger } from '../observability/logger.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
-import {
-  authenticateExternalUserSession,
-  authenticateExternalUserSessionIdentity,
-} from '../services/auth/externalSessionAuthentication.js'
+import { authenticateExternalUserSession } from '../services/auth/externalSessionAuthentication.js'
 import type {
   ExternalSessionAuthentication,
-  ExternalSessionAuthorityContext,
   ExternalSessionClient,
-  ExternalSessionIdentityAuthentication,
   ExternalSessionPurpose,
 } from '../services/auth/externalSessionAuthentication.js'
 import {
@@ -46,13 +41,8 @@ export function handleExternalSessionBackendFailure(
 
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
-  externalSessionAuthority?: ExternalSessionAuthorityContext
   externalSessionAuthentication?: Extract<
     ExternalSessionAuthentication,
-    { status: 'authenticated' }
-  >
-  externalSessionLimiterIdentity?: Extract<
-    ExternalSessionIdentityAuthentication,
     { status: 'authenticated' }
   >
   externalTeamAuth?: {
@@ -125,7 +115,6 @@ export function requireExternalSessionRateLimitContext(options: {
         return
       }
       req.externalAuth = authentication.claims
-      req.externalSessionAuthority = authentication.authorityContext
       req.externalSessionAuthentication = authentication
       next()
     } catch (error) {
@@ -134,131 +123,36 @@ export function requireExternalSessionRateLimitContext(options: {
   }
 }
 
-async function validateExternalSessionToken(
-  req: ExternalAuthedRequest,
-  res: Response,
-  next: NextFunction,
-  publicErrors: boolean
-): Promise<void> {
-  const token = extractUserSessionToken(req)
-  if (!token || token.length > 4096) {
-    if (publicErrors) {
-      sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-    } else {
-      res.status(401).json({ error: 'Unauthorized' })
-    }
-    return
-  }
-
-  try {
-    const authentication = await authenticateExternalUserSession(token, {
-      purpose: 'protected',
-      client: { version: req.header('x-evenfire-client-version') || undefined },
-    })
-    if (authentication.status === 'upgrade_required') {
-      if (publicErrors) {
-        sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
-      } else {
-        res.status(426).json({ error: 'upgrade_required' })
-      }
-      return
-    }
-    if (authentication.status !== 'authenticated') {
-      if (publicErrors) {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-      } else {
-        res.status(401).json({ error: 'Unauthorized' })
-      }
-      return
-    }
-    req.externalAuth = authentication.claims
-    req.externalSessionAuthority = authentication.authorityContext
-    req.externalSessionAuthentication = authentication
-    next()
-  } catch (error) {
-    handleExternalSessionBackendFailure(error, req, res, next)
-  }
-}
-
-/**
- * Establishes the policy-I/O-free live identity needed only for the dedicated
- * catalog/resolve authenticated limiter. Final policy and contract validation
- * must run separately after that limiter allows the request.
- */
-export async function requireExternalSessionLimiterIdentityWithPublicErrors(
-  req: ExternalAuthedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  const token = extractUserSessionToken(req)
-  if (!token || token.length > 4096) {
-    sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-    return
-  }
-  try {
-    const identity = await authenticateExternalUserSessionIdentity(token, {})
-    if (identity.status !== 'authenticated') {
-      sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-      return
-    }
-    req.externalAuth = identity.claims
-    req.externalSessionAuthority = identity.authorityContext
-    req.externalSessionLimiterIdentity = identity
-    next()
-  } catch (error) {
-    handleExternalSessionBackendFailure(error, req, res, next)
-  }
-}
-
-/** Completes canonical current policy/contract authentication after limiter allowance. */
-export async function requireCompletedExternalSessionAuthenticationWithPublicErrors(
-  req: ExternalAuthedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  const token = extractUserSessionToken(req)
-  const identity = req.externalSessionLimiterIdentity
-  if (!token || token.length > 4096 || !identity) {
-    sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-    return
-  }
-  try {
-    const authentication = await authenticateExternalUserSession(token, {
-      purpose: 'protected',
-      client: { version: req.header('x-evenfire-client-version') || undefined },
-      identity,
-    })
-    if (authentication.status === 'upgrade_required') {
-      sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
-      return
-    }
-    if (authentication.status !== 'authenticated') {
-      sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-      return
-    }
-    req.externalAuth = authentication.claims
-    req.externalSessionAuthority = authentication.authorityContext
-    req.externalSessionAuthentication = authentication
-    next()
-  } catch (error) {
-    handleExternalSessionBackendFailure(error, req, res, next)
-  }
-}
-
 export async function requireValidExternalSessionToken(
   req: ExternalAuthedRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  return validateExternalSessionToken(req, res, next, false)
-}
+  const token = extractUserSessionToken(req)
+  if (!token || token.length > 4096) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
 
-export async function requireValidExternalSessionTokenWithPublicErrors(
-  req: ExternalAuthedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  return validateExternalSessionToken(req, res, next, true)
+  try {
+    const authentication = await authenticateExternalUserSession(token, {
+      purpose: 'protected',
+      client: { version: req.header('x-evenfire-client-version') || undefined },
+    })
+    if (authentication.status === 'upgrade_required') {
+      res.status(426).json({ error: 'upgrade_required' })
+      return
+    }
+    if (authentication.status !== 'authenticated') {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    req.externalAuth = authentication.claims
+    req.externalSessionAuthentication = authentication
+    next()
+  } catch (error) {
+    handleExternalSessionBackendFailure(error, req, res, next)
+  }
 }
 
 export function requireExternalUserParamMatch(paramName = 'userId') {
@@ -273,7 +167,7 @@ export function requireExternalUserParamMatch(paramName = 'userId') {
   }
 }
 
-function externalTeamParamMatcher(paramName: string) {
+export function requireExternalTeamParamMatch(paramName = 'teamId') {
   return async (req: ExternalAuthedRequest, res: Response, next: NextFunction): Promise<void> => {
     const claims = req.externalAuth
     const requestedTeamId = String(req.params?.[paramName] || req.query?.[paramName] || '').trim()
@@ -302,10 +196,6 @@ function externalTeamParamMatcher(paramName: string) {
       res.status(503).json({ error: 'authority_unavailable' })
     }
   }
-}
-
-export function requireExternalTeamParamMatch(paramName = 'teamId') {
-  return externalTeamParamMatcher(paramName)
 }
 
 export function rejectBodyUserTeamMismatch(
@@ -337,17 +227,6 @@ export function requireExternalRole(allowedRoles: TeamRole[]) {
     const role = req.externalTeamAuth?.role
     if (!role || !allowedRoles.includes(role)) {
       res.status(403).json({ error: 'Forbidden' })
-      return
-    }
-    next()
-  }
-}
-
-export function requireExternalRoleWithPublicErrors(allowedRoles: TeamRole[]) {
-  return (req: ExternalAuthedRequest, res: Response, next: NextFunction): void => {
-    const role = req.externalTeamAuth?.role
-    if (!role || !allowedRoles.includes(role)) {
-      sendPublicApiError(req, res, 403, 'forbidden', 'The requested operation is not allowed.')
       return
     }
     next()

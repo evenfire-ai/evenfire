@@ -7,7 +7,6 @@ import { ExternalSessionBackendUnavailableError } from '../src/services/auth/ses
 
 const sessions = vi.hoisted(() => ({
   authenticateExternalUserSession: vi.fn(),
-  authenticateExternalUserSessionIdentity: vi.fn(),
   renewExternalUserSession: vi.fn(),
 }))
 const revocations = vi.hoisted(() => ({

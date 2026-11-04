@@ -7,7 +7,7 @@ import { workflowTriggerRateLimitCredential } from '../src/routes/workflows/shar
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import {
   authenticateExternalUserSession,
-  authenticateExternalUserSessionIdentity,
+  renewExternalUserSession,
 } from '../src/services/auth/externalSessionAuthentication.js'
 import { createUserSession } from '../src/services/auth/userSessionService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
@@ -30,7 +30,7 @@ function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
 
-describeRealPostgres('external-session staged touch ownership on real PostgreSQL', () => {
+describeRealPostgres('external-session touch ownership on real PostgreSQL', () => {
   const database = `control_api_session_touch_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
     adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
@@ -92,28 +92,12 @@ describeRealPostgres('external-session staged touch ownership on real PostgreSQL
     }
   })
 
-  it('touches a V2 session once after authenticated limiter identity is established', async () => {
+  it('touches a V2 session once per authenticated request', async () => {
     const issued = await createUserSession({
       userId,
       email: `${userId}@example.test`,
       authenticationMethods: ['password'],
     })
-
-    const identity = await authenticateExternalUserSessionIdentity(issued.token)
-    expect(identity.status).toBe('authenticated')
-    if (identity.status !== 'authenticated') throw new Error('Stage A rejected the issued session')
-    expect(
-      workflowTriggerRateLimitCredential({
-        externalAuth: identity.claims,
-        ip: '203.0.113.10',
-        header(name: string) {
-          if (name.toLowerCase() === 'authorization') return 'Bearer workflow-service-token'
-          if (name.toLowerCase() === 'x-user-session-token') return issued.token
-          return undefined
-        },
-      } as Request)
-    ).toBe(`user:${userId}`)
-
     const policy: EffectiveUserAccessPolicy = {
       policyVersion: '1',
       policyRevision: 'r24-single-touch',
@@ -126,13 +110,60 @@ describeRealPostgres('external-session staged touch ownership on real PostgreSQL
       minimumClientVersion: null,
       enforceMinimumClient: false,
     }
-    await expect(
-      authenticateExternalUserSession(issued.token, {
-        purpose: 'protected',
-        policy,
-        identity,
-      })
-    ).resolves.toMatchObject({ status: 'authenticated' })
+
+    const authentication = await authenticateExternalUserSession(issued.token, {
+      purpose: 'protected',
+      policy,
+    })
+    expect(authentication).toMatchObject({ status: 'authenticated', contract: 'v2' })
+    if (authentication.status !== 'authenticated')
+      throw new Error('the issued session was rejected')
+    expect(
+      workflowTriggerRateLimitCredential({
+        externalAuth: authentication.claims,
+        ip: '203.0.113.10',
+        header(name: string) {
+          if (name.toLowerCase() === 'authorization') return 'Bearer workflow-service-token'
+          if (name.toLowerCase() === 'x-user-session-token') return issued.token
+          return undefined
+        },
+      } as Request)
+    ).toBe(`user:${userId}`)
+
+    const touches = await databasePool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM session_touch_audit WHERE sid = $1`,
+      [issued.identity.sid]
+    )
+    expect(touches.rows).toEqual([{ count: '1' }])
+  })
+
+  it('touches a V2 session once when the request renews it', async () => {
+    const issued = await createUserSession({
+      userId,
+      email: `${userId}@example.test`,
+      authenticationMethods: ['password'],
+    })
+    const policy: EffectiveUserAccessPolicy = {
+      policyVersion: '1',
+      policyRevision: 'r24-single-touch-renew',
+      acceptV1: true,
+      issueV1: true,
+      acceptV2: true,
+      issueV2: true,
+      renewV2: true,
+      switchCompatibility: true,
+      minimumClientVersion: null,
+      enforceMinimumClient: false,
+    }
+
+    // The renewal route authenticates with purpose 'renew' and then renews.
+    const authentication = await authenticateExternalUserSession(issued.token, {
+      purpose: 'renew',
+      policy,
+    })
+    expect(authentication).toMatchObject({ status: 'authenticated', contract: 'v2' })
+    const renewal = await renewExternalUserSession(issued.token, { policy })
+    expect(renewal.status).toBe('renewed')
 
     const touches = await databasePool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM session_touch_audit WHERE sid = $1`,

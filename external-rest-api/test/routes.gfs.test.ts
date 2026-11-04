@@ -13,10 +13,8 @@ const { ControlApiError, clientMock } = vi.hoisted(() => {
     ) {
       super(message)
       this.headers = headers instanceof Headers ? Object.fromEntries(headers.entries()) : headers
-      this.responseHeaders = this.headers
     }
     public headers: Record<string, string>
-    public responseHeaders: Record<string, string>
   }
   return {
     ControlApiError,

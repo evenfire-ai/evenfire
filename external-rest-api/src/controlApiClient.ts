@@ -14,7 +14,6 @@ function addExternalClientIdentity(headers: Record<string, string>): void {
 export class ControlApiError extends Error {
   status: number
   body: unknown
-  responseHeaders: Record<string, string>
   headers: Record<string, string>
   constructor(
     message: string,
@@ -26,7 +25,6 @@ export class ControlApiError extends Error {
     this.name = 'ControlApiError'
     this.status = status
     this.body = body
-    this.responseHeaders = responseHeaders
     this.headers = responseHeaders
   }
 
@@ -67,9 +65,8 @@ export class ControlApiUnexpectedResponseError extends Error {
 /**
  * A caller-influenced control-api path would have selected a route other than
  * the one the edge intended. It is a client error, not an upstream failure:
- * extend ControlApiError so the existing public invalid-request mapping
- * (sanitizeControlApiPublicError and the app's 4xx handler) handles it without
- * a new status scheme.
+ * extend ControlApiError so the app's existing 4xx handler maps it to a public
+ * invalid-request error without a new status scheme.
  */
 export class ControlApiPathError extends ControlApiError {
   constructor() {

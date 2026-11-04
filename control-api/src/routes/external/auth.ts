@@ -159,7 +159,6 @@ async function requireLegacyRpcSessionRateLimitContext(
       return
     }
     req.externalAuth = authentication.claims
-    req.externalSessionAuthority = authentication.authorityContext
     req.externalSessionAuthentication = authentication
     next()
   } catch (error) {

@@ -27,23 +27,9 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
   ) => {
     const externalReq = req as express.Request & {
       externalAuth?: { userId: string }
-      externalSessionAuthority?: {
-        contract: 'v1'
-        userId: string
-        authGeneration: number
-        issuedAt: number
-        tokenHash: string
-      }
     }
     externalReq.externalAuth = {
       userId: 'manager-1',
-    }
-    externalReq.externalSessionAuthority = {
-      contract: 'v1',
-      userId: 'manager-1',
-      authGeneration: 1,
-      issuedAt: 1_787_931_018,
-      tokenHash: 'external-members-test-token',
     }
     next()
   },
