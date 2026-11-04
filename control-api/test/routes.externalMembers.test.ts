@@ -120,7 +120,7 @@ describe('external members routes', () => {
     expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
   })
 
-  it.each(['invitee@.example.com', 'invitee@example.com.'])(
+  it.each(['invitee@.example.com', 'invitee@example.com.', 'a@b.c'])(
     'preserves bounded legacy domain-dot acceptance for %s',
     async email => {
       directoryMock.createManagedInvitationForUser.mockResolvedValueOnce({
