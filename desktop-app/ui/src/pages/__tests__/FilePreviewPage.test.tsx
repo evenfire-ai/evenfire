@@ -12,6 +12,7 @@ import {
   within,
 } from '@testing-library/react'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
@@ -671,10 +672,24 @@ describe('FilePreviewPage', () => {
       })
       fireEvent.submit(dialog)
       await digestFinished
-      const permissionReadsBeforeReplacement = affordances.mock.calls.length
 
       controllerState.sessionGeneration = 2
       view.rerender(<FilePreviewPage {...props} />)
+      const queryClient = queryClients.at(-1)
+      if (!queryClient) throw new Error('Preview query client is unavailable')
+      // The replacement generation owns fresh file and source-parent reads.
+      // Settle both while the old digest is blocked so only that old operation
+      // can cause additional permission reads after the baseline below.
+      await waitFor(() => {
+        for (const resourceId of ['0123456789abcdef0123456789abcdef', 'preview-parent']) {
+          const state = queryClient.getQueryState(
+            desktopQueryKeys.gfsAffordances(controllerState.sessionScope, resourceId, 'main', 2)
+          )
+          expect(state?.status).toBe('success')
+          expect(state?.fetchStatus).toBe('idle')
+        }
+      })
+      const permissionReadsBeforeDigestRelease = affordances.mock.calls.length
       await act(async () => releaseDigest(new ArrayBuffer(0)))
       await act(async () => {
         await Promise.resolve()
@@ -682,7 +697,7 @@ describe('FilePreviewPage', () => {
       })
 
       expect(renameResource).not.toHaveBeenCalled()
-      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeReplacement)
+      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeDigestRelease)
     } finally {
       releaseDigest(new ArrayBuffer(0))
       digestSpy.mockRestore()
