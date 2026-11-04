@@ -20,6 +20,7 @@ const harness = vi.hoisted(() => {
     logout: vi.fn(async () => 7),
     sessionGeneration: 0,
     invalidateSandboxUiSession: null as null | (() => void),
+    sessionCleared: null as null | (() => void),
     parseSandboxUiDeepLink: vi.fn(() => null),
     registeredLogout: null as null | (() => Promise<unknown>),
     createWindow: null as null | (() => Record<string, any>),
@@ -106,8 +107,12 @@ vi.mock('electron', () => ({
 
 vi.mock('../appService.js', () => ({
   AppService: class {
-    constructor(options?: { onSandboxUiSessionInvalidated?: () => void }) {
+    constructor(options?: {
+      onSandboxUiSessionInvalidated?: () => void
+      onSessionCleared?: () => void
+    }) {
       harness.invalidateSandboxUiSession = options?.onSandboxUiSessionInvalidated ?? null
+      harness.sessionCleared = options?.onSessionCleared ?? null
     }
     initialize = harness.initialize
     logout = harness.logout
@@ -257,6 +262,20 @@ describe('main.ts GFS navigation-generation composition', () => {
     await expect(harness.registeredLogout?.()).resolves.toBe(7)
     expect(harness.logout).toHaveBeenCalledTimes(2)
     expect(listPending(ipcEvent(ownContents)).links).toEqual([])
+  })
+
+  it('tells the main window when main ends the committed session', () => {
+    const ownContents = harness.windows[0]?.webContents
+    if (!ownContents) throw new Error('main.ts did not create the owning BrowserWindow')
+    if (!harness.sessionCleared) throw new Error('main.ts did not pass onSessionCleared')
+    ownContents.send.mockClear()
+
+    harness.sessionCleared()
+
+    const notices = ownContents.send.mock.calls.filter(
+      ([channel]) => channel === 'auth:sessionCleared'
+    )
+    expect(notices).toEqual([['auth:sessionCleared']])
   })
 
   it('keeps post-invalidation App and resource links above the main queue reset floors', () => {

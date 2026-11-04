@@ -227,6 +227,22 @@ export function useAuthController({
     })
   }, [onSessionEnded, setStatus])
 
+  // Main ended the committed session (control-api rejected it). Loading the
+  // session again runs the same signed-out transition as a failed restore.
+  useEffect(() => {
+    return window.clerum.auth.onSessionCleared(() => {
+      setStatus('Your session ended. Sign in again.', 'info')
+      onSessionNeedsLoad().catch(error => {
+        setStatus(
+          `Your session ended, but the desktop could not refresh it: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          'warn'
+        )
+      })
+    })
+  }, [onSessionNeedsLoad, setStatus])
+
   const handlePasswordLogin = async () => {
     try {
       setBusy(true)

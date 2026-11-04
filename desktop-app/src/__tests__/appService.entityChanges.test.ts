@@ -66,6 +66,7 @@ describe('AppService entity-change fan-out', () => {
         token: 'synthetic-new-committed-token',
         me: { id: 'user-1', teamId: 'team-1' },
       }),
+      getMe: vi.fn().mockResolvedValue({ id: 'user-1', teamId: 'team-1' }),
       openEntityChangeStream: vi.fn((token, cursor, onEvent, signal) => {
         opened.push({ token, cursor, onEvent, signal })
         return new Promise<void>(resolve => {
@@ -282,6 +283,7 @@ describe('AppService entity-change reconnect behavior', () => {
       openEntityChangeStream: vi
         .fn()
         .mockRejectedValue(new ApiError('Entity change stream failed (401)', 401, '')),
+      getMe: vi.fn().mockResolvedValue({ id: 'user-1', teamId: 'team-1' }),
     }
     const events: EntityChangeStreamEvent[] = []
 
@@ -346,6 +348,7 @@ describe('AppService entity-change reconnect behavior', () => {
           reason: 'session_expired',
         })
       }),
+      getMe: vi.fn().mockResolvedValue({ id: 'user-1', teamId: 'team-1' }),
     }
     const events: EntityChangeStreamEvent[] = []
 
@@ -404,6 +407,7 @@ describe('AppService entity-change reconnect behavior', () => {
     setSyntheticSessionToken(service, 'committed-session-token')
     let publish!: (event: EntityChangeStreamEvent) => void
     service.authClient = {
+      getMe: vi.fn().mockResolvedValue({ id: 'user-1', teamId: 'team-1' }),
       openEntityChangeStream: vi.fn((_token, _cursor, onEvent, signal) => {
         publish = onEvent
         return new Promise<void>(resolve => {
@@ -435,7 +439,123 @@ describe('AppService entity-change reconnect behavior', () => {
   })
 })
 
+describe('AppService entity-change expiry asks /me about the session', () => {
+  function expiringService(getMe: ReturnType<typeof vi.fn>) {
+    const tokenStore = {
+      clearSessionToken: vi.fn().mockResolvedValue(undefined),
+      setSessionToken: vi.fn().mockResolvedValue(undefined),
+      getSessionToken: vi.fn().mockResolvedValue(null),
+    }
+    const onSessionCleared = vi.fn()
+    const service = new AppService({ tokenStore: tokenStore as never, onSessionCleared }) as any
+    setSyntheticSessionToken(service, 'committed-session-token')
+    service.me = { id: 'user-1', teamId: 'team-1' }
+    service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
+    let publish!: (event: EntityChangeStreamEvent) => void
+    service.authClient = {
+      getMe,
+      openEntityChangeStream: vi.fn((_token, _cursor, onEvent, signal) => {
+        publish = onEvent
+        return new Promise<void>(resolve => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }),
+    }
+    const events: EntityChangeStreamEvent[] = []
+    service.startEntityChangeStream('stream-1', 7, (event: EntityChangeStreamEvent) => {
+      events.push(event)
+    })
+    const expire = () =>
+      publish({
+        type: 'stream.closing',
+        schemaVersion: 1,
+        cursor: '00000000-0000-0000-0000-000000000000',
+        reason: 'session_expired',
+      })
+    return { service, tokenStore, onSessionCleared, events, expire }
+  }
+
+  it('ends the session when /me rejects it after the stream expired', async () => {
+    const getMe = vi.fn().mockRejectedValue(new ApiError('401 Unauthorized', 401, ''))
+    const { service, tokenStore, onSessionCleared, events, expire } = expiringService(getMe)
+    await flushAsyncWork()
+
+    expire()
+    await flushAsyncWork(20)
+
+    expect(events.map(event => event.type)).toEqual(['stream.closing'])
+    expect(events[0]).toMatchObject({ reason: 'session_expired' })
+    expect(getMe).toHaveBeenCalledTimes(1)
+    expect(getMe).toHaveBeenCalledWith('committed-session-token')
+    expect(service.sessionToken).toBeNull()
+    expect(service.me).toBeNull()
+    expect(tokenStore.clearSessionToken).toHaveBeenCalledTimes(1)
+    expect(onSessionCleared).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the session when /me accepts it after the stream expired', async () => {
+    const getMe = vi.fn().mockResolvedValue({ id: 'user-1', teamId: 'team-1' })
+    const { service, tokenStore, onSessionCleared, expire } = expiringService(getMe)
+    await flushAsyncWork()
+
+    expire()
+    await flushAsyncWork(20)
+
+    expect(getMe).toHaveBeenCalledTimes(1)
+    expect(service.sessionToken).toBe('committed-session-token')
+    expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
+    expect(onSessionCleared).not.toHaveBeenCalled()
+    service.stopEntityChangeStream('stream-1', 7)
+  })
+
+  it('does not ask /me when a newer committed session replaces the expired stream', async () => {
+    const getMe = vi.fn()
+    const { service, onSessionCleared, expire } = expiringService(getMe)
+    await flushAsyncWork()
+    setSyntheticEntityChangeSession(service, 'new-committed-session-token', 1)
+
+    expire()
+    await flushAsyncWork(20)
+
+    const openedTokens = service.authClient.openEntityChangeStream.mock.calls.map(
+      (call: unknown[]) => call[0]
+    )
+    expect(openedTokens).toEqual(['committed-session-token', 'new-committed-session-token'])
+    expect(getMe).not.toHaveBeenCalled()
+    expect(onSessionCleared).not.toHaveBeenCalled()
+    service.stopEntityChangeStream('stream-1', 7)
+  })
+})
+
 describe('AppService entity-change stream team-context lifecycle', () => {
+  it('asks /me about the session when a team hop releases a deferred stream expiry', async () => {
+    const tokenStore = {
+      clearSessionToken: vi.fn().mockResolvedValue(undefined),
+      setSessionToken: vi.fn().mockResolvedValue(undefined),
+      getSessionToken: vi.fn().mockResolvedValue(null),
+    }
+    const onSessionCleared = vi.fn()
+    const service = new AppService({ tokenStore: tokenStore as never, onSessionCleared }) as any
+    setSyntheticSessionToken(service, 'committed-session-token')
+    service.me = { id: 'user-1', teamId: 'team-1' }
+    service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
+    service.authClient = {
+      getMe: vi.fn().mockRejectedValue(new ApiError('401 Unauthorized', 401, '')),
+    }
+    const release = service.enterGfsTransientTeamHop()
+
+    service.handleEntityChangeSessionExpiry(service.entityChangeSessionGeneration)
+
+    // The expiry was deferred during the hop, not dropped and not checked yet.
+    expect(service.entityChangeSessionExpiryDeferred).toBe(true)
+    expect(service.authClient.getMe).not.toHaveBeenCalled()
+    release()
+    await vi.waitFor(() => expect(onSessionCleared).toHaveBeenCalledTimes(1))
+    expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
+    expect(service.authClient.getMe).toHaveBeenCalledWith('committed-session-token')
+    expect(service.sessionToken).toBeNull()
+  })
+
   it('never reconnects with a transient team token and rebinds after the hop', async () => {
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(0)

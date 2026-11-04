@@ -879,6 +879,7 @@ export function migrateDesktopGfsUploadState(value: unknown): {
 export interface AppServiceOptions {
   tokenStore?: TokenStore
   onSandboxUiSessionInvalidated?: () => void
+  onSessionCleared?: () => void
 }
 
 export class AppService {
@@ -896,6 +897,7 @@ export class AppService {
   })
   private readonly tokenStore: TokenStore
   private readonly onSandboxUiSessionInvalidated?: () => void
+  private readonly onSessionCleared?: () => void
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -911,6 +913,9 @@ export class AppService {
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
   private interactiveLoginAttempts = 0
+  // A session that /me rejected while a login was in progress. It is ended
+  // when the last login settles, unless that login replaced it.
+  private sessionRejectedDuringLogin: string | null = null
   private nativeAuthEnvironmentCommitQueue: Promise<void> = Promise.resolve()
   private gfsAuthEpoch = 0
   private gfsDispatchBlocked = true
@@ -999,6 +1004,7 @@ export class AppService {
   constructor(options: AppServiceOptions = {}) {
     this.tokenStore = options.tokenStore ?? new TokenStore()
     this.onSandboxUiSessionInvalidated = options.onSandboxUiSessionInvalidated
+    this.onSessionCleared = options.onSessionCleared
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1275,17 +1281,7 @@ export class AppService {
               fenceError
             )
           }
-          this.clearAuthenticatedSessionState()
-          try {
-            await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
-              legacyEnvKeys: getActiveLegacyEnvKeys(),
-            })
-          } catch (clearError) {
-            console.warn(
-              '[AppService] Failed to clear a partially switched team session:',
-              clearError
-            )
-          }
+          await this.endCommittedSession()
         }
         throw error
       }
@@ -1363,7 +1359,17 @@ export class AppService {
 
       let context = session
       if (!context.teamId) {
-        const me = await this.authClient.getMe(session.sessionToken)
+        let me: SessionMe
+        try {
+          me = await this.authClient.getMe(session.sessionToken)
+        } catch (error) {
+          if (AppService.isRejectedStoredSessionError(error)) {
+            await this.withNativeAuthEnvironmentCommit(() =>
+              this.endSessionRejectedByMe(session.sessionToken)
+            )
+          }
+          throw error
+        }
         context = await this.withNativeAuthEnvironmentCommit(async () => {
           this.assertSessionGeneration(session.sessionGeneration)
           if (this.sessionToken !== session.sessionToken) {
@@ -1538,6 +1544,7 @@ export class AppService {
    * first and drops its effects if it moved. `sessionGeneration` cannot serve:
    * every token commit bumps it, including the two of each transient team hop
    * that unrelated concurrent work performs while a mint is in flight.
+   * `listWorkflows` captures it too, so a listing never mixes two sessions.
    */
   private sandboxUiSessionEpoch = 0
 
@@ -1587,6 +1594,79 @@ export class AppService {
     this.rpcTokenManager.clear()
     unbindChatStore()
     this.invalidateSandboxUiSession()
+  }
+
+  /**
+   * Ends the committed session: clears in-memory state, removes the saved token
+   * and tells the window so it returns to sign-in. The window is told even when
+   * the saved token could not be removed, because the in-memory session is gone.
+   */
+  private async endCommittedSession(): Promise<void> {
+    this.clearAuthenticatedSessionState()
+    try {
+      await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
+        legacyEnvKeys: getActiveLegacyEnvKeys(),
+      })
+    } catch (clearError) {
+      console.warn('[AppService] Failed to clear the saved session token:', clearError)
+    } finally {
+      this.onSessionCleared?.()
+    }
+  }
+
+  /**
+   * Ends a session that control-api rejected on `/me`. A token that is no longer
+   * the committed one belongs to a session that was already replaced, so it is
+   * left alone.
+   */
+  private async endSessionRejectedByMe(rejectedToken: string): Promise<void> {
+    if (this.sessionToken !== rejectedToken) return
+    // A login in progress has reserved the next session generation and replaces
+    // this session itself (installAuthenticatedLogin fences its GFS uploads).
+    // Ending it here would advance the generation and cancel that login, so the
+    // rejection is kept until the last login settles.
+    if (this.interactiveLoginAttempts > 0) {
+      this.sessionRejectedDuringLogin = rejectedToken
+      return
+    }
+    const identity =
+      this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
+    try {
+      await this.suspendDesktopGfsUploadsForAuthBoundary(identity)
+    } catch (fenceError) {
+      console.warn('[AppService] Failed to fence GFS uploads for a rejected session:', fenceError)
+    }
+    await this.endCommittedSession()
+  }
+
+  /**
+   * Called inside the commit owner when the last interactive login settles.
+   * Ends a session that `/me` rejected during the login if it is still the
+   * committed one; a login that installed a new session leaves nothing to end.
+   */
+  private async endSessionRejectedDuringLogin(): Promise<void> {
+    const rejectedToken = this.sessionRejectedDuringLogin
+    this.sessionRejectedDuringLogin = null
+    if (rejectedToken) await this.endSessionRejectedByMe(rejectedToken)
+  }
+
+  /**
+   * Asks `/me` whether the committed session is still valid after another call
+   * answered 401. Only a rejection from `/me` ends the session; any other
+   * failure gives no verdict and leaves it in place.
+   */
+  private async confirmCommittedSessionWithMe(): Promise<void> {
+    const token = this.sessionToken
+    if (!token) return
+    try {
+      await this.authClient.getMe(token)
+    } catch (error) {
+      if (!AppService.isRejectedStoredSessionError(error)) {
+        console.warn('[AppService] Session check returned no verdict:', error)
+        return
+      }
+      await this.withNativeAuthEnvironmentCommit(() => this.endSessionRejectedByMe(token))
+    }
   }
 
   /** Retires the sandbox-ui work of a session that is being cleared or replaced. */
@@ -2230,6 +2310,7 @@ export class AppService {
           if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
             await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
           }
+          if (this.interactiveLoginAttempts === 0) await this.endSessionRejectedDuringLogin()
         })
       }
     }
@@ -2424,6 +2505,7 @@ export class AppService {
           if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
             await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
           }
+          if (this.interactiveLoginAttempts === 0) await this.endSessionRejectedDuringLogin()
         })
       }
     }
@@ -3694,6 +3776,16 @@ export class AppService {
     // can rebind the stream without requiring a renderer remount. The expired
     // connection itself is already stopped; logout and renderer teardown remove
     // these owners through stopAllStreams/stopEntityChangeStreamsForOwner.
+    //
+    // The stream ending says the token expired; /me decides whether the session
+    // really ended. Not awaited: when this runs inside the commit owner (a hop
+    // release), the check waits in the queue instead of blocking it.
+    void this.confirmCommittedSessionWithMe().catch(error => {
+      console.warn(
+        '[AppService] Could not check the session after the live-update stream expired:',
+        error
+      )
+    })
   }
 
   private ensureEntityChangeConnection(): void {
@@ -4020,54 +4112,77 @@ export class AppService {
 
   async listWorkflows(): Promise<WorkflowRecipeListResult> {
     const token = this.requireSessionToken()
-    try {
-      const listed = await this.authClient.listTeams(token)
-      const teams = Array.isArray(listed.items) ? listed.items : []
-      if (!teams.length) {
-        this.workflowTeamByKey.clear()
-        return this.authClient.listWorkflows(token)
-      }
-
-      const orderedTeams = [
-        ...teams.filter(team => team.id === listed.currentTeamId),
-        ...teams.filter(team => team.id !== listed.currentTeamId),
-      ]
-      const items: WorkflowRecipeListResult['items'] = []
-      const seen = new Set<string>()
-      const nextWorkflowTeamByKey = new Map<string, string>()
-
-      for (const team of orderedTeams) {
-        const teamId = String(team.id || '').trim()
-        if (!teamId) continue
-        try {
-          const result = await this.runWithTeamContext(teamId, teamToken =>
-            this.authClient.listWorkflows(teamToken)
-          )
-          const teamItems = Array.isArray(result.items) ? result.items : []
-          for (const item of teamItems) {
-            const namespace = String(item.metadata?.namespace || '').trim()
-            const name = String(item.metadata?.name || '').trim()
-            if (!namespace || !name) continue
-            const key = this.workflowKey(namespace, name)
-            if (seen.has(key)) continue
-            seen.add(key)
-            nextWorkflowTeamByKey.set(key, teamId)
-            items.push(item)
-          }
-        } catch (error) {
-          console.warn(`[AppService] Failed loading workflows for team ${teamId}:`, error)
-        }
-      }
-
-      this.workflowTeamByKey.clear()
-      for (const [key, teamId] of nextWorkflowTeamByKey) {
-        this.workflowTeamByKey.set(key, teamId)
-      }
-      return { items, count: items.length }
-    } catch {
-      this.workflowTeamByKey.clear()
-      return this.authClient.listWorkflows(token)
+    // The listing belongs to the signed-in session that started it. If that
+    // session ends (or a login replaces it) while teams are being listed, no
+    // list is returned and no team map is published.
+    const sessionEpoch = this.sandboxUiSessionEpoch
+    const sessionChanged = () => this.sandboxUiSessionEpoch !== sessionEpoch
+    const assertSameSession = () => {
+      if (sessionChanged())
+        throw new Error('stale_auth_epoch: the session changed during the workflow listing')
     }
+    // Without a team list, only the session's current team is listed.
+    const listWithoutTeams = async () => {
+      assertSameSession()
+      this.workflowTeamByKey.clear()
+      const result = await this.authClient.listWorkflows(token)
+      assertSameSession()
+      return result
+    }
+    let listed: { currentTeamId: string; items: TeamSummary[] }
+    try {
+      listed = await this.authClient.listTeams(token)
+    } catch {
+      return listWithoutTeams()
+    }
+    const teams = Array.isArray(listed.items) ? listed.items : []
+    if (!teams.length) return listWithoutTeams()
+
+    const orderedTeams = [
+      ...teams.filter(team => team.id === listed.currentTeamId),
+      ...teams.filter(team => team.id !== listed.currentTeamId),
+    ]
+    const items: WorkflowRecipeListResult['items'] = []
+    const seen = new Set<string>()
+    const nextWorkflowTeamByKey = new Map<string, string>()
+
+    for (const team of orderedTeams) {
+      const teamId = String(team.id || '').trim()
+      if (!teamId) continue
+      try {
+        const result = await this.runWithTeamContext(teamId, teamToken =>
+          this.authClient.listWorkflows(teamToken)
+        )
+        const teamItems = Array.isArray(result.items) ? result.items : []
+        for (const item of teamItems) {
+          const namespace = String(item.metadata?.namespace || '').trim()
+          const name = String(item.metadata?.name || '').trim()
+          if (!namespace || !name) continue
+          const key = this.workflowKey(namespace, name)
+          if (seen.has(key)) continue
+          seen.add(key)
+          nextWorkflowTeamByKey.set(key, teamId)
+          items.push(item)
+        }
+      } catch (error) {
+        // The session ended while this listing ran, so no list is returned.
+        if (sessionChanged()) throw error
+        if (error instanceof ApiError && error.status === 401) {
+          // A rejected team call leaves the list incomplete. Let /me decide
+          // whether the session ended; the list is not returned either way.
+          await this.confirmCommittedSessionWithMe()
+          throw error
+        }
+        console.warn(`[AppService] Failed loading workflows for team ${teamId}:`, error)
+      }
+    }
+    assertSameSession()
+
+    this.workflowTeamByKey.clear()
+    for (const [key, teamId] of nextWorkflowTeamByKey) {
+      this.workflowTeamByKey.set(key, teamId)
+    }
+    return { items, count: items.length }
   }
 
   async readWorkflow(ns: string, name: string): Promise<unknown> {
@@ -4178,14 +4293,8 @@ export class AppService {
           // auth-boundary state write fails, do not leave that token/me paired
           // with a blocked or stale GFS scope. Cleanup remains inside the outer
           // transient-hop gate, and the original persistence error is preserved.
-          this.clearAuthenticatedSessionState()
-          try {
-            await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
-              legacyEnvKeys: getActiveLegacyEnvKeys(),
-            })
-          } catch {
-            // Preserve the original team-transition error when cleanup also fails.
-          }
+          // The window is told the session ended so it does not keep showing it.
+          await this.endCommittedSession()
           throw error
         }
         this.activateGfsAuthScope()
