@@ -1,6 +1,6 @@
 #!/bin/sh
 # egress-proxy-template-check-table: the shared corpus, against the image's own
-# egress-proxy-template-check and real NGINX (#1240).
+# egress-proxy-template-check and real NGINX.
 #
 # Run inside the egress proxy image with --network none, after rendering the two
 # HCC templates on the host:

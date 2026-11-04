@@ -34,27 +34,27 @@
 #
 #   valid, chain2, untrusted, expired, wrongsan, nobundle   TLS contract
 #   query-accept   a ${VAR} query placeholder is resolved by envsubst inside the
-#                  container and reaches the upstream (#1240)
+#                  container and reaches the upstream
 #   redact         an upstream error line never carries the remote query, in the
 #                  IP form, a line truncated at NGINX's 2047-byte error cap,
 #                  and a line where upstream bytes quoted in the message put a
 #                  fake field ahead of the real one while the client request
 #                  itself holds a quote; the message rule removes the whole
-#                  quoted echo there (#1240)
+#                  quoted echo there
 #   echo           an upstream echoes a credential the proxy forwarded (the
 #                  per-user OAuth Bearer, a static authHeaders value and the
 #                  query value) in the response headers NGINX quotes, plus the
 #                  two X-Accel headers the generated template ignores: the
 #                  filtered log never holds a marker and each echo has its own
-#                  upstream access-log witness (#1240)
+#                  upstream access-log witness
 #   filter-lines   the shipped filter program on fixed NGINX 1.30.6 lines no live
 #                  upstream emits (S5, a quoting message with no context field,
 #                  and S6, a non-quoting message), behind the audited-release
-#                  gate (#1240)
+#                  gate
 #   quoted-live    a raw TCP upstream sends an invalid Content-Length, an
 #                  unknown Transfer-Encoding and a header with a NUL byte: each
 #                  becomes a 502 whose filtered message is REDACTED, no marker
-#                  survives, and the raw request line is the witness (#1240)
+#                  survives, and the raw request line is the witness
 #   signals        QUIT and TERM reach the NGINX master, which is PID 1
 #   filter-death   the exec liveness script fails once the stderr filter dies,
 #                  and no unfiltered error line reaches the logs
@@ -70,13 +70,13 @@
 #   swap           the kubelet's AtomicWriter layout is retargeted between the
 #                  check and envsubst; the rendered config is the checked
 #                  generation, /health answers 200 and no X-Evil reaches the
-#                  upstream (#1240)
+#                  upstream
 #   override       six hostile NGINX_ENVSUBST_* values plus http_proxy cannot
 #                  retarget the template dir, suffix, output dirs or filter, and
-#                  the liveness probe still passes (#1240)
+#                  the liveness probe still passes
 #   restart        a docker restart keeps the writable layer; the second start
 #                  creates a new template snapshot instead of reusing the first
-#                  one, and the proxy serves the same query again (#1240)
+#                  one, and the proxy serves the same query again
 #
 # Requires docker, curl, openssl, node and `npm ci` in host-context-controller.
 #
@@ -201,8 +201,8 @@ infra_fail() {
   INFRA=1
 }
 
-# The exact red set of every mutation mode, measured on the final product
-# (spec v2 section 8.3 step 5). A mutation run passes only when the sorted,
+# The exact red set of every mutation mode, measured on the final product.
+# A mutation run passes only when the sorted,
 # unique failed check IDs equal this list and no infrastructure check fired.
 expected_red_ids() {
   case "$1" in
@@ -304,9 +304,9 @@ LIVENESS
     ;;
   template-check-mismatch)
     prepare_image_mutation
-    # C6 of the R1-M2 table: `%` stays in the class, so the check accepts a
-    # value NGINX serves as something else and the driver reports MISMATCH>0.
-    # H15 has to fail on that count, not only on the driver's exit status.
+    # `%` stays in the class, so the check accepts a value NGINX serves as
+    # something else and the driver reports MISMATCH>0. The template-check
+    # case has to fail on that count, not only on the driver's exit status.
     mutate "$build_context/egress-proxy-template-check" \
       'gsub(/%[0-9A-Fa-f][0-9A-Fa-f]/, "", rest)' 'gsub(/%/, "", rest)'
     ;;
@@ -337,8 +337,9 @@ LIVENESS
     ;;
   quoted-cntrl-regex)
     prepare_image_mutation
-    # B1: HEAD's locale-dependent class. musl reports no match for a whole value
-    # holding an invalid UTF-8 sequence, so a control byte after one passes.
+    # The locale-dependent control class this replaces: musl reports no match
+    # for a whole value holding an invalid UTF-8 sequence, so a control byte
+    # after one passes.
     mutate "$build_context/egress-proxy-template-check" \
       'if (has_any(value, CONTROL_BYTES) || has_any(value, "\"$\\")) reject(name, "a quoted string")' \
       'if (value ~ /[[:cntrl:]]/ || has_any(value, "\"$\\")) reject(name, "a quoted string")'
@@ -1937,8 +1938,8 @@ expect_value_reject() {
   expect_rejected_value query-plus query-accept UPSTREAM_QUERY_KEY "$AUTH_SECRET" \
     -e 'UPSTREAM_QUERY_KEY=abc/def+gh=='
 
-  # Docker's JSON environment changes invalid UTF-8. Construct both the B1
-  # payload and its accepted life witness inside the container instead.
+  # Docker's JSON environment changes invalid UTF-8. Construct both the
+  # invalid-UTF-8 payload and its accepted life witness inside the container.
   local b1="$NAME-proxy-b1" b1log b1prefix b1_driver good_driver b1token
   # shellcheck disable=SC2016 # literal shell text for the container's sh -c.
   b1_driver='UPSTREAM_TOKEN="$(printf "tok\377\r\nX-Injected: 1x")"; UPSTREAM_TOKEN="${UPSTREAM_TOKEN%x}"; export UPSTREAM_TOKEN; exec /usr/local/bin/egress-proxy-entrypoint nginx -g "daemon off;"'
@@ -1953,8 +1954,8 @@ expect_value_reject() {
     infra_fail 'B1 log is unreadable'
   else
     # The log holds invalid UTF-8. Plain BSD grep can abort with "illegal byte
-    # sequence" and the negative assertion then reads as "absent" (B1 measured
-    # exactly that on the blocked lane). LC_ALL=C plus -a keeps the match
+    # sequence" and the negative assertion then reads as "absent", a false
+    # pass. LC_ALL=C plus -a keeps the match
     # byte-wise. grep is line-oriented, so the 8-byte value prefix cannot be one
     # pattern (it holds a CR and an LF); its distinctive "tok\xff" part is
     # checked instead, next to the injected header name.
@@ -2038,10 +2039,27 @@ expect_template_check() {
   local driver="$REPO_ROOT/scripts/tests/fixtures/egress-proxy-template-check-table.sh"
   local corpus="$DOCKERFILE_DIR/egress-proxy-value-corpus.tsv"
   local out="$WORK/template-check.out" err="$WORK/template-check.err" rc=0 summary
-  local rows mismatches bad equiv diff expected n ctx expected_ctx flagged
+  local rows mismatches bad equiv diff expected n ctx expected_ctx flagged corpus_bad
   cases=$((cases + 1))
   expected="$(awk -F'\t' '!/^#/ && NF == 4 { n++ } END { print n+0 }' "$corpus")"
   if [ "$expected" -eq 0 ]; then infra_fail 'template-check corpus is empty'; return; fi
+  # The corpus size and its eight one-row contexts are pinned, not derived:
+  # deriving the total from the file itself would let a deleted row shrink
+  # the expectation and still pass. The derived per-context checks below
+  # still compare the driver output with the file that was actually read.
+  corpus_bad=0
+  if [ "$expected" -ne 368 ]; then
+    infra_fail "template-check corpus has $expected data rows, expected 368"
+    corpus_bad=1
+  fi
+  for ctx in query-first-char query-second-arg query-escaped-qmark query-escape-start undef-argstart undef-brace-quoted undef-brace-query first-line-comment; do
+    n="$(awk -F'\t' -v c="$ctx" 'NF==4 && $1==c {n++} END {print n+0}' "$corpus")"
+    if [ "$n" -ne 1 ]; then
+      infra_fail "template-check corpus has $n rows for $ctx, expected 1"
+      corpus_bad=1
+    fi
+  done
+  if [ "$corpus_bad" -ne 0 ]; then return; fi
   docker run --rm --network none -v "$driver:/t/table.sh:ro" -v "$corpus:/t/corpus.tsv:ro" \
     -v "$WORK/templates/hcc-query/default.conf.template:/t/query:ro" \
     -v "$WORK/templates/hcc-quoted/default.conf.template:/t/quoted:ro" \
@@ -2068,6 +2086,9 @@ expect_template_check() {
     [ "$expected_ctx" -eq 0 ] && expected_ctx=$n
     [ "$n" -eq "$expected_ctx" ] || infra_fail "unequal corpus counts for $ctx"
     [ "$(awk -F'\t' -v c="$ctx" 'NF==9 && $1==c {n++} END {print n+0}' "$out")" -eq "$n" ] || infra_fail "missing rows for $ctx"
+  done
+  for ctx in query-first-char query-second-arg query-escaped-qmark query-escape-start undef-argstart undef-brace-quoted undef-brace-query first-line-comment; do
+    [ "$(awk -F'\t' -v c="$ctx" 'NF==9 && $1==c {n++} END {print n+0}' "$out")" -eq 1 ] || infra_fail "missing rows for $ctx"
   done
   for ctx in argstart squote comment escaped; do
     n="$(awk -F'\t' -v c="$ctx" 'NF==9 && $1==c && $4=="OK" && $5=="yes" {n++} END {print n+0}' "$out")"
