@@ -83,6 +83,15 @@ resolver setting or restrict which declared names `envsubst` substitutes. The
 image exports the pod's local nameservers into `NGINX_LOCAL_RESOLVERS`, which
 the generated `resolver` directive uses.
 
+### Readiness and an unresolvable upstream
+
+With `resolve`, an upstream name that does not resolve does not stop NGINX
+from starting. The pod can be Ready and answer `/health` with 200 while the
+MCP path returns 502 (`no live upstreams`). A passing readiness probe therefore
+proves that NGINX is running and serving its local health endpoint; it does not
+prove that the upstream name resolves, that the policy admits the resolved
+addresses, or that the upstream answers.
+
 Residuals:
 
 - Declared values are substituted literally by `envsubst`; HCC validates
@@ -96,6 +105,11 @@ Residuals:
   container-start template value check that would close it is not part of
   #1240's acceptance criteria: it lands with the #1243 egress-proxy image layer.
   Until both changes deploy, this PR alone does not close this residual.
+- Kubernetes expands `$(VAR)` in a literal `spec.env` value at container start
+  when `VAR` is another env var of the same container, so the value `envsubst`
+  sees can differ from the CRD literal. HCC validates env names and `${NAME}`
+  placeholders; it does not model kubelet `$(VAR)` expansion of values. Use the
+  documented `$$(VAR)` escape when a literal `$(VAR)` is intended.
 - A literal credential written into `baseUrl` instead of a placeholder is still
   stored in the ConfigMap. Use placeholders.
 
@@ -115,10 +129,25 @@ desired state owned by the CRD author. Deployment rendering always stamps the
 configured platform image for remote egress proxies, so a remote CRD's
 `spec.image` is never what runs.
 
-HCC and this image must be upgraded together. The HCC template needs
-`server ... resolve` (NGINX ≥ 1.27.3) and the base image's
-`15-local-resolvers.envsh`, both provided by the pinned base. An older image is
-expected to fail visibly rather than silently fall back.
+## Rollout and image requirements
+
+The generated template requires an image that provides:
+
+- NGINX ≥ 1.27.3, for the `resolve` parameter on an upstream `server`;
+- the base image's `15-local-resolvers.envsh`, which exports the pod's local
+  nameservers as `NGINX_LOCAL_RESOLVERS` for the generated `resolver` line.
+
+The pinned `nginx:1.30.6-alpine` base in the [Dockerfile](./Dockerfile)
+provides both, so the image built here satisfies the requirement. The release
+floor in [scripts/nginx-image-policy.sh](../scripts/nginx-image-policy.sh) is
+already above 1.27.3, so a platform-accepted official `nginx` release does not
+lack either piece.
+
+The ConfigMap and the Deployment image do not update atomically. During an
+upgrade, a pod that restarts after the new ConfigMap lands but before the
+rollout completes can still be running a previous image that predates the
+requirement and fail on the resolver until the Deployment finishes. The upgrade
+window is not empty.
 
 ## Ports
 
@@ -131,6 +160,11 @@ comes from `spec.transport.port` (default 3000); `/health` answers on it.
   all capabilities dropped, `allowPrivilegeEscalation: false`, seccomp
   `RuntimeDefault`, `automountServiceAccountToken: false` at the pod level.
 - Proxy is pinned to exactly one sanitized external base URL over verified TLS.
+- The `baseUrl` hostname check is string-only. HCC validates the name before
+  rendering, but it does not pin the addresses the proxy resolves at runtime.
+  Continued resolution depends on TLS verification of the upstream name and on
+  the exact-host NetworkPolicy admitting the addresses the resolver returns;
+  this is not a complete anti-rebinding control.
 - The broader egress-binding CIDR model (private, metadata, link-local,
   documentation, multicast, and reserved IPv4 ranges blocked) is validated in
   [control-ui/lib/egressModel.ts](../control-ui/lib/egressModel.ts).
