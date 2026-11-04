@@ -106,10 +106,14 @@ Residuals:
   #1240's acceptance criteria: it lands with the #1243 egress-proxy image layer.
   Until both changes deploy, this PR alone does not close this residual.
 - Kubernetes expands `$(VAR)` in a literal `spec.env` value at container start
-  when `VAR` is another env var of the same container, so the value `envsubst`
-  sees can differ from the CRD literal. HCC validates env names and `${NAME}`
-  placeholders; it does not model kubelet `$(VAR)` expansion of values. Use the
-  documented `$$(VAR)` escape when a literal `$(VAR)` is intended.
+  only when `VAR` is already defined earlier in the same container's env list
+  (service env vars also count), so the value `envsubst` sees can differ from
+  the CRD literal. HCC emits `spec.env` before `spec.envSecret`, so a literal
+  `spec.env` value cannot reference a name declared only later through
+  `envSecret`: the reference stays literal. HCC validates env names and
+  `${NAME}` placeholders; it does not model kubelet `$(VAR)` expansion of
+  values. Use the documented `$$(VAR)` escape when a literal `$(VAR)` is
+  intended.
 - A literal credential written into `baseUrl` instead of a placeholder is still
   stored in the ConfigMap. Use placeholders.
 
