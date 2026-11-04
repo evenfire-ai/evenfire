@@ -732,6 +732,9 @@ fi
 # and the real template check must accept each golden with a clean value.
 # A missing golden is a hard failure, never a skip.
 golden_dir="$ROOT/host-context-controller/src/__tests__/fixtures/egress-proxy-template"
+# Both dynamic names carry the suite's one clean marker value, supplied
+# through the environment from this single variable.
+golden_clean_value='TESTKEY-CLEAN-9482'
 golden_total_refs=0
 golden_union=''
 golden_plain_fixed=0
@@ -760,7 +763,7 @@ for golden_shape in plain query-header oauth; do
   if [ "$golden_shape" = plain ]; then
     golden_plain_fixed=$(printf '%s\n' "$golden_fixed" | wc -w | tr -d ' ')
   fi
-  LC_ALL=C API_KEY=TESTKEY-CLEAN-9482 UPSTREAM_TOKEN=TESTKEY-CLEAN-9482 \
+  LC_ALL=C env "API_KEY=$golden_clean_value" "UPSTREAM_TOKEN=$golden_clean_value" \
     "$REAL_AWK" -f "$CHECK" "$golden_file" >/dev/null 2>&1
   golden_check_rc=$?
   if [ "$golden_check_rc" -eq 0 ]; then
