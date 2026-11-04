@@ -70,9 +70,14 @@ import {
   platformWorkloadNamespaces,
 } from '../../services/registryPullSecretService.js'
 import {
+  type RegistryUpstreamStep,
+  classifyRegistryUpstreamFailure,
+} from '../../services/registryUpstreamFailure.js'
+import {
   REGISTRY_SECRET_OPERATION_ID_ANNOTATION,
   invalidSecretTypeReason,
 } from '../../services/secretConstraints.js'
+import { readSecretOrNull } from '../../services/secretRead.js'
 import { findSecretReferenceState } from '../../services/secretReferenceService.js'
 import { SecretSnapshot, toSecretSnapshot } from '../../services/secretRepository.js'
 import {
@@ -462,10 +467,23 @@ type SafeRegistryErrorLogFields = {
   name: string
   status?: number
   code?: string
+  cause?: SafeRegistryErrorLogFields
 }
 
-/** Return only bounded error identity fields; never place upstream messages in logs. */
+/**
+ * Return only bounded error identity fields; never place upstream messages in
+ * logs. A @kubernetes/client-node ApiException carries its HTTP status in a
+ * numeric `code`, so that is read as the status. One level of `cause` is
+ * included, so a wrapper such as RegistryInstallRollbackError still logs the
+ * upstream status that made the rollback give up.
+ */
 export function registryErrorLogFields(err: unknown): SafeRegistryErrorLogFields {
+  const fields = registryErrorIdentityFields(err)
+  const cause = err instanceof Error ? err.cause : undefined
+  return cause === undefined ? fields : { ...fields, cause: registryErrorIdentityFields(cause) }
+}
+
+function registryErrorIdentityFields(err: unknown): SafeRegistryErrorLogFields {
   const candidate =
     err && typeof err === 'object'
       ? (err as {
@@ -480,7 +498,10 @@ export function registryErrorLogFields(err: unknown): SafeRegistryErrorLogFields
     typeof rawName === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawName)
       ? rawName
       : 'UnknownError'
-  const rawStatus = candidate?.status ?? candidate?.statusCode
+  const rawStatus =
+    candidate?.status ??
+    candidate?.statusCode ??
+    (typeof candidate?.code === 'number' ? candidate.code : undefined)
   const status =
     typeof rawStatus === 'number' &&
     Number.isInteger(rawStatus) &&
@@ -624,20 +645,17 @@ async function collectMissingMcpEnvSecretPendingCredentials(
   const keys = credentialSchema.keys.map(key => key.name)
   if (keys.length === 0) return []
 
-  try {
-    const existing = await gateway.getSecret(secretName, namespace)
-    const missingKeys = keys.filter(key => !hasMcpCredentialKey(existing, key))
-    if (missingKeys.length === 0) return []
-    return [
-      { kind: 'mcpEnvSecret', secretName, namespace, keys: missingKeys, field: 'spec.envSecret' },
-    ]
-  } catch (err) {
-    const k8sErr = extractK8sError(err)
-    if (k8sErr?.status === 404) {
-      return [{ kind: 'mcpEnvSecret', secretName, namespace, keys, field: 'spec.envSecret' }]
-    }
-    throw err
+  // A read failure other than 404 throws SecretReadError (502/503) through
+  // clerumErrorHandler instead of forwarding the apiserver's text.
+  const existing = await readSecretOrNull(gateway, secretName, namespace)
+  if (existing === null) {
+    return [{ kind: 'mcpEnvSecret', secretName, namespace, keys, field: 'spec.envSecret' }]
   }
+  const missingKeys = keys.filter(key => !hasMcpCredentialKey(existing, key))
+  if (missingKeys.length === 0) return []
+  return [
+    { kind: 'mcpEnvSecret', secretName, namespace, keys: missingKeys, field: 'spec.envSecret' },
+  ]
 }
 
 /** Validate credential schema structure from registry (finding #9). */
@@ -1270,13 +1288,72 @@ class RegistryInstallRollbackError extends Error {
    * and without the subject the 500 says only that something could not be
    * cleaned up. Kind and name only — never credential data.
    */
-  constructor(subject?: string) {
+  constructor(subject?: string, options?: { cause?: unknown }) {
     super(
       'registry install rollback could not be completed without risking another writer' +
-        (subject ? `: ${subject}` : '')
+        (subject ? `: ${subject}` : ''),
+      options
     )
     this.name = 'RegistryInstallRollbackError'
   }
+}
+
+/**
+ * An error whose message control-api composed from kinds, names and fixed
+ * text only, so an uninstall response may carry it verbatim. Upstream errors
+ * never take this type.
+ */
+class RegistryOperatorMessageError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RegistryOperatorMessageError'
+  }
+}
+
+/**
+ * The warning text an uninstall 503 carries for a failed step. A
+ * @kubernetes/client-node ApiException message embeds the apiserver's
+ * response headers, and `extractK8sError` falls back to that message when the
+ * Status body is empty, so an upstream error contributes its HTTP status only.
+ * The raw error goes to the server log through `registryErrorLogFields`.
+ */
+function uninstallWarningDetail(err: unknown): string {
+  if (err instanceof RegistryOperatorMessageError || err instanceof RegistryInstallRollbackError) {
+    return err.message
+  }
+  const status = extractK8sError(err)?.status
+  if (status !== undefined) return `Kubernetes API returned HTTP ${status}`
+  return `unable to verify (${registryErrorLogFields(err).name})`
+}
+
+/**
+ * Answer a failed Kubernetes call of an install/upgrade step with the
+ * classified status and a control-api message (services/registryUpstreamFailure).
+ * The apiserver's Status message, the filtered 422 field paths and the bounded
+ * error identity go to one `registry_upstream_failure` log line with the
+ * request's correlation id; the response never carries apiserver text. Errors
+ * that are not apiserver or transport failures are rethrown unchanged.
+ */
+function sendRegistryUpstreamFailure(
+  req: Request,
+  res: Response,
+  err: unknown,
+  step: RegistryUpstreamStep
+): void {
+  const failure = classifyRegistryUpstreamFailure(err, step)
+  log[failure.severity](
+    {
+      correlationId: req.correlationId,
+      step,
+      status: failure.status,
+      upstreamStatus: failure.upstreamStatus,
+      upstreamReason: failure.upstreamReason,
+      invalidFields: failure.invalidFields,
+      error: registryErrorLogFields(err),
+    },
+    'registry_upstream_failure'
+  )
+  res.status(failure.status).json(failure.body)
 }
 
 async function readSecretForRollback(
@@ -1287,7 +1364,7 @@ async function readSecretForRollback(
     return await gateway.getSecret(snapshot.name, snapshot.namespace)
   } catch (err) {
     if (extractK8sError(err)?.status === 404) return null
-    throw new RegistryInstallRollbackError()
+    throw new RegistryInstallRollbackError(`Secret/${snapshot.name}`, { cause: err })
   }
 }
 
@@ -1628,7 +1705,7 @@ async function waitForDeletion(
     }
     await sleep(pollMs)
   }
-  throw new Error(`Timed out waiting for ${label} deletion`)
+  throw new RegistryOperatorMessageError(`Timed out waiting for ${label} deletion`)
 }
 
 export interface RegistryInstallRequest {
@@ -1720,6 +1797,15 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
     recipeKeys: [...recipeKeys].sort((a, b) => a.localeCompare(b)),
     hookKeys: [...hookKeys].sort((a, b) => a.localeCompare(b)),
   }
+}
+
+/**
+ * The install rollback answers a bare `compensation_failed`, so this log line
+ * is the only record of why: the subject left behind and, through `cause`, the
+ * upstream status that stopped the compensation.
+ */
+function logInstallRollbackFailure(subject: string, err: unknown): void {
+  log.error({ subject, error: registryErrorLogFields(err) }, 'Registry install rollback failed')
 }
 
 type RegistryFenceFailure = 'identity-mismatch' | 'identity-unavailable' | 'rejected' | 'unresolved'
@@ -2573,9 +2659,13 @@ export function createAdminRegistryRouter(
             } catch (err) {
               const k8sErr = extractK8sError(err)
               if (k8sErr && k8sErr.status < 500) {
-                res
-                  .status(k8sErr.status)
-                  .json({ error: `Secret creation failed: ${k8sErr.message}` })
+                sendRegistryUpstreamFailure(req, res, err, {
+                  verb: 'create',
+                  kind: 'Secret',
+                  name: secretName,
+                  namespace: targetNs,
+                  content: { source: 'operator' },
+                })
                 return
               }
               // A create has no pre-write UID/RV to fence. Its response cannot
@@ -2633,7 +2723,8 @@ export function createAdminRegistryRouter(
             if (createdSecretSnapshot) {
               try {
                 await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-              } catch {
+              } catch (rollbackErr) {
+                logInstallRollbackFailure(`Secret/${createdSecretSnapshot.name}`, rollbackErr)
                 rollbackFailed = true
               }
             }
@@ -2646,9 +2737,13 @@ export function createAdminRegistryRouter(
             }
             const k8sErr = extractK8sError(err)
             if (k8sErr && k8sErr.status < 500) {
-              res
-                .status(k8sErr.status)
-                .json({ error: `OAuth client Secret creation failed: ${k8sErr.message}` })
+              sendRegistryUpstreamFailure(req, res, err, {
+                verb: 'create',
+                kind: 'Secret',
+                name: managedOAuthSecret.name,
+                namespace: targetNs,
+                content: { source: 'operator' },
+              })
               return
             }
             // A create has no pre-write UID/RV to fence; its response cannot be
@@ -2701,7 +2796,6 @@ export function createAdminRegistryRouter(
             throw new RegistryInstallRollbackError()
           }
         } catch (err) {
-          const k8sErr = extractK8sError(err)
           if (
             err instanceof RegistryInstallRollbackError ||
             !isDeterministicRegistryNoCommit(err)
@@ -2725,14 +2819,19 @@ export function createAdminRegistryRouter(
           if (createdSecretSnapshot) {
             try {
               await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-            } catch {
+            } catch (rollbackErr) {
+              logInstallRollbackFailure(`Secret/${createdSecretSnapshot.name}`, rollbackErr)
               rollbackFailed = true
             }
           }
           if (createdOAuthClientSecretSnapshot) {
             try {
               await rollbackCreatedSecret(gateway, createdOAuthClientSecretSnapshot)
-            } catch {
+            } catch (rollbackErr) {
+              logInstallRollbackFailure(
+                `Secret/${createdOAuthClientSecretSnapshot.name}`,
+                rollbackErr
+              )
               rollbackFailed = true
             }
           }
@@ -2743,11 +2842,18 @@ export function createAdminRegistryRouter(
             })
             return
           }
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw err
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'create',
+            kind: 'McpServer',
+            name: serverName,
+            namespace: targetNs,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
 
         // ── Step 5: Report install to registry (fire-and-forget) ──────────
@@ -2960,12 +3066,20 @@ export function createAdminRegistryRouter(
             spec: recipeSpec,
           })
         } catch (err) {
-          const k8sErr = extractK8sError(err)
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw err
+          // The gateway creates WorkflowRecipes in config.sandboxNamespace
+          // (K8sGateway defaultNamespaces.workflowrecipes).
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'create',
+            kind: 'WorkflowRecipe',
+            name: recipeName,
+            namespace: config.sandboxNamespace,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
 
         // Step 5: Report install (fire-and-forget)
@@ -3069,8 +3183,16 @@ export function createAdminRegistryRouter(
             return
           }
         } catch (err) {
-          const k8sErr = extractK8sError(err)
-          res.status(k8sErr?.status ?? 404).json({ error: `Host "${body.hostRef}" not found` })
+          if (extractK8sError(err)?.status === 404) {
+            res.status(404).json({ error: `Host "${body.hostRef}" not found` })
+            return
+          }
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'read',
+            kind: 'Host',
+            name: body.hostRef,
+            namespace: config.hostsNamespace,
+          })
           return
         }
         const guardrails = host.spec?.guardrails ?? {}
@@ -3203,7 +3325,13 @@ export function createAdminRegistryRouter(
           } catch (err) {
             const k8sErr = extractK8sError(err)
             if (k8sErr && k8sErr.status < 500) {
-              res.status(k8sErr.status).json({ error: `Secret creation failed: ${k8sErr.message}` })
+              sendRegistryUpstreamFailure(req, res, err, {
+                verb: 'create',
+                kind: 'Secret',
+                name: secretName,
+                namespace: targetNs,
+                content: { source: 'operator' },
+              })
               return
             }
             // A create has no pre-write UID/RV to fence. Its response cannot
@@ -3234,7 +3362,8 @@ export function createAdminRegistryRouter(
             if (secretCreated && createdSecretSnapshot) {
               try {
                 await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-              } catch {
+              } catch (rollbackErr) {
+                logInstallRollbackFailure(`Secret/${createdSecretSnapshot.name}`, rollbackErr)
                 res.status(500).json({
                   error: 'registry_install_rollback_incomplete',
                   outcome: 'compensation_failed',
@@ -3293,7 +3422,6 @@ export function createAdminRegistryRouter(
             throw new RegistryInstallRollbackError()
           }
         } catch (err) {
-          const k8sErr = extractK8sError(err)
           if (
             err instanceof RegistryInstallRollbackError ||
             !isDeterministicRegistryNoCommit(err)
@@ -3312,7 +3440,8 @@ export function createAdminRegistryRouter(
           if (secretCreated && createdSecretSnapshot) {
             try {
               await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-            } catch {
+            } catch (rollbackErr) {
+              logInstallRollbackFailure(`Secret/${createdSecretSnapshot.name}`, rollbackErr)
               rollbackFailed = true
             }
           }
@@ -3323,11 +3452,18 @@ export function createAdminRegistryRouter(
             })
             return
           }
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw err
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'create',
+            kind: 'LlmHook',
+            name: crName,
+            namespace: targetNs,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
 
         // Step 10 — reference the hook from Host.spec.guardrails.hooks[phase] as
@@ -3400,7 +3536,8 @@ export function createAdminRegistryRouter(
                 createdHookSnapshot!,
                 `LlmHook/${crName}`
               )
-            } catch {
+            } catch (rollbackErr) {
+              logInstallRollbackFailure(`LlmHook/${crName}`, rollbackErr)
               resourceRollbackFailed = true
             }
             if (resourceRollbackFailed) {
@@ -3420,13 +3557,17 @@ export function createAdminRegistryRouter(
               })
               return
             }
-            const k8sErr = extractK8sError(err)
-            const message =
-              k8sErr?.message ||
-              (err instanceof Error ? err.message : 'Failed to update Host guardrails')
-            res
-              .status(k8sErr?.status ?? 500)
-              .json({ error: `Host guardrails update failed: ${message}` })
+            sendRegistryUpstreamFailure(req, res, err, {
+              verb: 'update',
+              kind: 'Host',
+              name: body.hostRef,
+              namespace: config.hostsNamespace,
+              content: {
+                source: 'registry',
+                entry: body.registryEntryName,
+                version: body.registryEntryVersion,
+              },
+            })
             return
           }
         }
@@ -3526,8 +3667,15 @@ export function createAdminRegistryRouter(
             }
           }
         } catch (err) {
-          res.status(404).json({
-            error: `LlmHook "${body.hookName}" not found: ${err instanceof Error ? err.message : 'not found'}`,
+          if (extractK8sError(err)?.status === 404) {
+            res.status(404).json({ error: `LlmHook "${body.hookName}" not found` })
+            return
+          }
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'read',
+            kind: 'LlmHook',
+            name: body.hookName,
+            namespace: llmHooksNs,
           })
           return
         }
@@ -3778,12 +3926,18 @@ export function createAdminRegistryRouter(
           operationId
         )
         if (mutation.outcome === 'rejected') {
-          const k8sErr = extractK8sError(mutation.error)
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw mutation.error
+          sendRegistryUpstreamFailure(req, res, mutation.error, {
+            verb: 'update',
+            kind: 'LlmHook',
+            name: body.hookName,
+            namespace: llmHooksNs,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
         if (mutation.outcome === 'not-committed') {
           res.status(503).json({
@@ -3885,6 +4039,12 @@ export function createAdminRegistryRouter(
 
         const deleted: string[] = []
         const warnings: string[] = []
+        const logUninstallStepFailure = (subject: string, err: unknown): void => {
+          log.error(
+            { resourceName, resourceType, namespace, subject, error: registryErrorLogFields(err) },
+            'Registry uninstall step failed'
+          )
+        }
 
         if (resourceType === 'recipe') {
           if (namespace !== config.sandboxNamespace) {
@@ -3915,6 +4075,7 @@ export function createAdminRegistryRouter(
               deleted.push(`WorkflowRecipe/${resourceName}`)
             }
           } catch (err) {
+            logUninstallStepFailure(`WorkflowRecipe/${resourceName}`, err)
             res.status(503).json({
               error: 'registry_uninstall_outcome_ambiguous',
               outcome: 'repair_required',
@@ -3924,7 +4085,7 @@ export function createAdminRegistryRouter(
               deleted,
               warnings: [
                 ...warnings,
-                `WorkflowRecipe/${resourceName}: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
+                `WorkflowRecipe/${resourceName}: ${uninstallWarningDetail(err)}`,
               ],
             })
             return
@@ -4057,8 +4218,17 @@ export function createAdminRegistryRouter(
             body.serverName,
             namespace
           )) as typeof existingServer
-        } catch {
-          res.status(404).json({ error: `McpServer "${body.serverName}" not found` })
+        } catch (err) {
+          if (extractK8sError(err)?.status === 404) {
+            res.status(404).json({ error: `McpServer "${body.serverName}" not found` })
+            return
+          }
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'read',
+            kind: 'McpServer',
+            name: body.serverName,
+            namespace,
+          })
           return
         }
 
@@ -4237,20 +4407,11 @@ export function createAdminRegistryRouter(
         let mutatedSecretSnapshot: SecretSnapshot | null = null
         const hasCredentialUpdates = Object.keys(credentialPayload.secretData).length > 0
         if (hasCredentialUpdates) {
-          try {
-            previousSecretSnapshot = normalizeSecretSnapshot(
-              await gateway.getSecret(secretName, namespace),
-              secretName,
-              namespace
-            )
-          } catch (err) {
-            const k8sErr = extractK8sError(err)
-            if (k8sErr?.status !== 404) {
-              res.status(k8sErr?.status ?? 500).json({
-                error: `Failed to read existing credentials: ${k8sErr?.message || (err instanceof Error ? err.message : 'unknown error')}`,
-              })
-              return
-            }
+          // A read failure other than 404 throws SecretReadError (502/503)
+          // through clerumErrorHandler before any write.
+          const existingSecret = await readSecretOrNull(gateway, secretName, namespace)
+          if (existingSecret !== null) {
+            previousSecretSnapshot = normalizeSecretSnapshot(existingSecret, secretName, namespace)
           }
 
           if (previousSecretSnapshot) {
@@ -4334,7 +4495,13 @@ export function createAdminRegistryRouter(
           } catch (err) {
             const k8sErr = extractK8sError(err)
             if (k8sErr && k8sErr.status < 500) {
-              res.status(k8sErr.status).json({ error: k8sErr.message })
+              sendRegistryUpstreamFailure(req, res, err, {
+                verb: previousSecretSnapshot ? 'update' : 'create',
+                kind: 'Secret',
+                name: secretName,
+                namespace,
+                content: { source: 'operator' },
+              })
               return
             }
 
@@ -4489,12 +4656,18 @@ export function createAdminRegistryRouter(
             return
           }
 
-          const k8sErr = extractK8sError(err)
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw err
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'update',
+            kind: 'McpServer',
+            name: body.serverName,
+            namespace,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
         auditLog('upgrade', {
           serverName: body.serverName,
@@ -4583,8 +4756,17 @@ export function createAdminRegistryRouter(
             }
             namespace = candidate
             break
-          } catch {
-            // try next namespace
+          } catch (err) {
+            // Only "not in this namespace" moves on; any other failure means
+            // the lookup is unknown, not that the recipe is absent.
+            if (extractK8sError(err)?.status === 404) continue
+            sendRegistryUpstreamFailure(req, res, err, {
+              verb: 'read',
+              kind: 'WorkflowRecipe',
+              name: body.recipeName,
+              namespace: candidate,
+            })
+            return
           }
         }
         if (!namespace || !existingRecipe) {
@@ -4762,12 +4944,18 @@ export function createAdminRegistryRouter(
           operationId
         )
         if (mutation.outcome === 'rejected') {
-          const k8sErr = extractK8sError(mutation.error)
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw mutation.error
+          sendRegistryUpstreamFailure(req, res, mutation.error, {
+            verb: 'update',
+            kind: 'WorkflowRecipe',
+            name: body.recipeName,
+            namespace,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
         if (mutation.outcome === 'not-committed') {
           res.status(503).json({
