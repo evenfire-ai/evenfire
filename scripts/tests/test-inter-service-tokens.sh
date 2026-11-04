@@ -128,6 +128,10 @@ case "${args[0]:-}" in
         ;;
       deploy|deployment)
         [[ "${KUBE_DEPLOY_EXISTS:-}" == "1" ]] && exit 0
+        # Like kubectl: a label selector with no match succeeds with no output;
+        # a named Deployment that does not exist fails with NotFound.
+        [[ "${args[2]:-}" == "-l" ]] && exit 0
+        echo "Error from server (NotFound): deployments.apps \"${args[2]:-}\" not found" >&2
         exit 1
         ;;
     esac
@@ -164,6 +168,11 @@ case "${args[0]:-}" in
     ;;
   rollout)
     if [[ "${args[1]:-}" == "restart" ]]; then
+      if [[ "${KUBE_DEPLOY_EXISTS:-}" != "1" ]]; then
+        # No Deployment to restart: kubectl fails for a name or an empty selector.
+        echo "error: no deployments found to restart: ${args[*]}" >&2
+        exit 1
+      fi
       printf '%s %s\n' "$ns" "${args[*]}" >> "${ROLLOUT_LOG:?}"
     fi
     exit 0
@@ -254,7 +263,7 @@ assert_no_secret_material() {
   for log in "$TMP/stdout" "$TMP/stderr"; do
     # Every token in these tests is 64 hex characters (fixtures and the fake
     # openssl), as are real `openssl rand -hex 32` tokens.
-    if grep -E '[0-9a-f]{64}|member-registration-hmac' "$log" >/dev/null; then
+    if grep -E '[0-9a-f]{64}|member-registration-hmac|stale-|replace-with-|retired' "$log" >/dev/null; then
       echo "secret material leaked into $log" >&2
       cat "$log" >&2
       exit 1
@@ -379,24 +388,41 @@ run_tokens gke-dev "$rollout" "" env
 assert_restarted_exactly "$rollout" control-plane/control-api profiles/external-rest-api
 assert_no_secret_material
 
-# A previous run patched control-api-internal-tokens and died before patching
-# the caller: every control-api key already holds the new token and only the
-# caller's key differs, yet both ends restart (control-api's pods were never
-# restarted onto the new map).
-webhook_before="$(store_get webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN)"
-run_tokens gke-dev "$TMP/rollout-setup.log" "" env CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY="$HCC_NEW"
-store_set webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN "$webhook_before"
-rollout="$TMP/rollout-half-applied.log"
-run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY="$HCC_NEW"
-assert_restarted_exactly "$rollout" control-plane/control-api webhook-ingress/webhook-proxy
-assert_no_secret_material
+# Every control-api service-token caller, as
+# map-entry|namespace|secret|key|override-env-var|consumer.
+SERVICE_TOKEN_CALLERS=(
+  "external-rest-api|profiles|external-rest-api-secrets|EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN|CONTROL_API_INTERNAL_TOKEN_EXT_REST|profiles/external-rest-api"
+  "rpc-proxy|rpc-proxy|rpc-proxy-secrets|RPC_PROXY_CONTROL_API_SERVICE_TOKEN|CONTROL_API_INTERNAL_TOKEN_RPC|rpc-proxy/rpc-proxy"
+  "webhook-proxy|webhook-ingress|webhook-proxy-secrets|WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN|CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY|webhook-ingress/webhook-proxy"
+  "codex-llm-proxy|control-plane|codex-llm-proxy-secrets|CODEX_LLM_PROXY_CONTROL_API_TOKEN|CONTROL_API_INTERNAL_TOKEN_CODEX_LLM_PROXY|control-plane/codex-llm-proxy"
+  "grok-llm-proxy|control-plane|grok-llm-proxy-secrets|GROK_LLM_PROXY_CONTROL_API_TOKEN|CONTROL_API_INTERNAL_TOKEN_GROK_LLM_PROXY|control-plane/grok-llm-proxy"
+  "workflow-approval-reader|channels|workflow-approval-request-reader-credentials|control-api-token|CONTROL_API_INTERNAL_TOKEN_WA_READER|channels/clerum-workflow-approval-request-reader"
+)
+caller_index=0
+for caller in "${SERVICE_TOKEN_CALLERS[@]}"; do
+  IFS='|' read -r entry_name caller_ns caller_secret caller_key caller_env caller_consumer <<<"$caller"
+  caller_index=$((caller_index + 1))
+  new_token="$(printf '%064x' $((0xB000 + caller_index)))"
 
-# The map entry for one caller is stale while its Secret is current: both ends.
-store_set_map_entry grok-llm-proxy stale-grok-entry
-rollout="$TMP/rollout-stale-map-entry.log"
-run_tokens gke-dev "$rollout" "" env
-assert_restarted_exactly "$rollout" control-plane/control-api control-plane/grok-llm-proxy
-assert_no_secret_material
+  # A previous run patched control-api-internal-tokens and died before patching
+  # the caller: every control-api key already holds the new token and only the
+  # caller's key differs, yet both ends restart (control-api's pods were never
+  # restarted onto the new map).
+  caller_before="$(store_get "$caller_ns" "$caller_secret" "$caller_key")"
+  run_tokens gke-dev "$TMP/rollout-setup.log" "" env "$caller_env=$new_token"
+  store_set "$caller_ns" "$caller_secret" "$caller_key" "$caller_before"
+  rollout="$TMP/rollout-half-applied-$entry_name.log"
+  run_tokens gke-dev "$rollout" "" env "$caller_env=$new_token"
+  assert_restarted_exactly "$rollout" control-plane/control-api "$caller_consumer"
+  assert_no_secret_material
+
+  # The caller's map entry is stale while its Secret is current: both ends.
+  store_set_map_entry "$entry_name" "stale-$entry_name-entry"
+  rollout="$TMP/rollout-stale-entry-$entry_name.log"
+  run_tokens gke-dev "$rollout" "" env
+  assert_restarted_exactly "$rollout" control-plane/control-api "$caller_consumer"
+  assert_no_secret_material
+done
 
 # One rotation per remaining override: exactly the caller and control-api.
 rotation_case() {
@@ -440,6 +466,17 @@ run_tokens gke-dev "$rollout" "" env FORCE_CONSUMER_RESTART=true
 assert_restarted_exactly "$rollout" "${ALL_TOKEN_CONSUMERS[@]}"
 if grep -q 'tokens unchanged' "$TMP/stderr"; then
   fail "FORCE_CONSUMER_RESTART must not skip any consumer"
+fi
+assert_no_secret_material
+
+# No consumer is deployed yet (first apply before any workload): even with FORCE,
+# no rollout is issued for a missing Deployment and the run completes.
+rollout="$TMP/rollout-no-deployments.log"
+run_tokens gke-dev "$rollout" "" env FORCE_CONSUMER_RESTART=true KUBE_DEPLOY_EXISTS=0
+assert_restarted_exactly "$rollout"
+grep -q '\] Done\.$' "$TMP/stderr" || fail "run without deployments did not reach Done."
+if grep -q 'Rolling deployment' "$TMP/stderr"; then
+  fail "a missing Deployment must not be rolled"
 fi
 assert_no_secret_material
 

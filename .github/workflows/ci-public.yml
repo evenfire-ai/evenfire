@@ -843,6 +843,9 @@ jobs:
       - name: Test JWT key rotation consumer restarts
         run: bash scripts/tests/test-gen-jwt-keys-restarts.sh
 
+      - name: Test minikube key generation
+        run: bash scripts/tests/test-minikube-generate-keys.sh
+
       - name: Test WRC internal dependency NetworkPolicy contracts
         run: bash scripts/tests/test-wrc-internal-dependency-networkpolicy-gate.sh
 

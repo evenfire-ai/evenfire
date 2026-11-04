@@ -258,12 +258,15 @@ if [[ "${1:-}" == "--apply" ]]; then
   log "Applying secrets to cluster..."
   $KC apply -f "$OUTPUT"
   ok "Secrets applied to cluster"
-  # Regenerating over existing keys (FORCE_REGEN=true) rotates them in a live
-  # profile: restart their consumers so signers and verifiers load the same keys.
-  if [ -n "$EXISTING_SECRET" ]; then
-    log "Restarting consumers of the rotated keys..."
-    restart_jwt_key_consumers kubectl --context="${PROFILE}"
-  fi
+  # New keys were just applied (this point is reached only when
+  # control-api-secrets was absent or FORCE_REGEN=true). Restart every deployed
+  # consumer so signers and verifiers load the same keys; on a fresh profile no
+  # consumer is deployed yet and each one is skipped. mcp-host and gfsc read the
+  # RPC public key from ConfigMaps that this script does not write: callers
+  # follow with `make minikube-sync-auth-key` (full-setup.sh runs
+  # sync-auth-key.sh later in the same setup).
+  log "Restarting consumers of the new keys..."
+  restart_jwt_key_consumers kubectl --context="${PROFILE}"
 fi
 
 log "Done. Key pairs generated and written to deploy/minikube/secrets/jwt-signing-keys.yaml"

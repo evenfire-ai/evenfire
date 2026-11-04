@@ -16,8 +16,11 @@
 #   control-plane/host-context-controller  control-api-public-key ConfigMap
 #   control-plane/codex-llm-proxy          control-api-public-key ConfigMap
 #   control-plane/grok-llm-proxy           control-api-public-key ConfigMap
-# mcp-host is restarted by the auth-key sync of each caller. Workflow pods get
-# clerum-wrc-public-key when WRC creates them.
+# Not in this list: mcp-host (and gfsc), which read the RPC public key from
+# ConfigMaps. gen-jwt-keys.sh writes mcp-host-config and restarts mcp-host itself;
+# scripts/minikube/generate-keys.sh does not, and its callers run
+# sync-auth-key.sh afterwards. Workflow pods get clerum-wrc-public-key when WRC
+# creates them.
 #
 # Usage: restart_jwt_key_consumers <kubectl command and its leading args...>
 #   restart_jwt_key_consumers kctl

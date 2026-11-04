@@ -234,8 +234,11 @@ INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TO
 #
 # Half-applied run: if a run patches every Secret and dies before the rollouts
 # below, the next run reads the new values, sees no change and skips the
-# restarts, so the running pods keep the old values. Recover with
-# FORCE_CONSUMER_RESTART=true.
+# restarts, so the running pods keep the old values. The same holds when every
+# Secret holding a key was edited out of band (`kubectl patch` of both ends of a
+# service token, of an HMAC, or of the handoff token): this run preserves the
+# edited value and sees no change. Rotate through the env overrides above, or
+# recover with FORCE_CONSUMER_RESTART=true.
 #
 # Prints "true" or "false". Arguments are repeated
 # (namespace, secret, key, value-this-run-writes) groups.
