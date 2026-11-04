@@ -138,7 +138,12 @@ export async function provisionAdminDesktopWorkspace(
   const name = input.displayName.trim() || null
   const teamLabel = input.displayName.trim() || email
   const provision = async (db: Pick<DbClient, 'query'>): Promise<{ userId: string }> => {
-    const existing = await db.query(`SELECT id FROM users WHERE email = $1 LIMIT 1`, [email])
+    // Lock order: an existing user row before its team_members rows
+    // (ensureDefaultTeamAndGrants) and before the operator link's user lock.
+    const existing = await db.query(
+      `SELECT id FROM users WHERE email = $1 LIMIT 1 FOR NO KEY UPDATE`,
+      [email]
+    )
     let userId = (existing.rows[0] as { id: string } | undefined)?.id
     const existingUser = Boolean(userId)
     if (!userId) {

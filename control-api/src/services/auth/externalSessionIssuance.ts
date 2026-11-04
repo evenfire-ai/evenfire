@@ -28,6 +28,24 @@ export type LegacyExternalSessionExchange =
 
 type SessionTransaction = <T>(work: (db: DbClient) => Promise<T>) => Promise<T>
 
+/**
+ * Lifecycle columns a caller read from the user row while holding that row's
+ * lock (`FOR NO KEY UPDATE` or stronger) in the transaction of `db`.
+ */
+export type LockedUserLifecycle = { lifecycleState: unknown; lifecycleVersion: unknown }
+
+type ExternalSessionIssuanceOptions =
+  | {
+      db?: Pick<DbClient, 'query'>
+      policy: EffectiveUserAccessPolicy
+      lockedUser?: undefined
+    }
+  | {
+      db: Pick<DbClient, 'query'>
+      policy: EffectiveUserAccessPolicy
+      lockedUser: LockedUserLifecycle
+    }
+
 export function selectExternalSessionRepresentation(
   client: ExternalSessionClient,
   policy: EffectiveUserAccessPolicy
@@ -62,14 +80,12 @@ export async function issueExternalUserSession(
     teamId: string | null
     role: TeamRole
     // Legacy callers may still supply the generation they observed. V1 issuance
-    // deliberately re-reads it under the canonical user lock below.
+    // never signs it: it signs the generation read under the user lock, either
+    // the caller's `lockedUser` row or its own locked read below.
     authGeneration?: number
     authenticationMethods: string[]
   },
-  options: {
-    db?: Pick<DbClient, 'query'>
-    policy: EffectiveUserAccessPolicy
-  }
+  options: ExternalSessionIssuanceOptions
 ): Promise<{ token: string; contract: ExternalSessionContract }> {
   const policy = options.policy
   if (input.contract === 'v2') {
@@ -81,9 +97,11 @@ export async function issueExternalUserSession(
       email: input.email,
       authenticationMethods: input.authenticationMethods,
     }
-    const session = options.db
-      ? await createUserSession(sessionInput, { db: options.db })
-      : await createUserSession(sessionInput)
+    const session = options.lockedUser
+      ? await createUserSession(sessionInput, { db: options.db, userLocked: true })
+      : options.db
+        ? await createUserSession(sessionInput, { db: options.db })
+        : await createUserSession(sessionInput)
     return { token: session.token, contract: 'v2' }
   }
 
@@ -91,17 +109,22 @@ export async function issueExternalUserSession(
     throw new Error('legacy user-session issuance is not effective')
   }
 
+  const lockedUser = options.lockedUser
   const issueLegacy = async (db: Pick<DbClient, 'query'>) => {
-    const user = await db.query(
-      `SELECT lifecycle_state, lifecycle_version
-         FROM users
-        WHERE id = $1
-        FOR UPDATE`,
-      [input.userId]
-    )
-    const row = user.rows[0] as
-      | { lifecycle_state?: unknown; lifecycle_version?: unknown }
-      | undefined
+    const row = lockedUser
+      ? {
+          lifecycle_state: lockedUser.lifecycleState,
+          lifecycle_version: lockedUser.lifecycleVersion,
+        }
+      : ((
+          await db.query(
+            `SELECT lifecycle_state, lifecycle_version
+               FROM users
+              WHERE id = $1
+              FOR NO KEY UPDATE`,
+            [input.userId]
+          )
+        ).rows[0] as { lifecycle_state?: unknown; lifecycle_version?: unknown } | undefined)
     const authGeneration = Number(row?.lifecycle_version)
     if (
       row?.lifecycle_state !== 'active' ||
@@ -176,7 +199,7 @@ export async function exchangeLegacyExternalUserSession(
     if (validation.status !== 'valid') return { status: 'invalid_session' }
 
     const membership = await db.query(
-      `SELECT tm.role, u.lifecycle_version
+      `SELECT tm.role, u.lifecycle_state, u.lifecycle_version
          FROM users u
          JOIN team_members tm ON tm.user_id = u.id
         WHERE u.id = $1
@@ -189,10 +212,12 @@ export async function exchangeLegacyExternalUserSession(
       [input.userId, input.email, input.teamId]
     )
     const row = membership.rows[0] as
-      | { role?: TeamRole; lifecycle_version?: number | string }
+      | { role?: TeamRole; lifecycle_state?: unknown; lifecycle_version?: number | string }
       | undefined
     if (!row?.role || row.role !== input.role) return { status: 'membership_not_found' }
 
+    // validateLegacyUserSession({ lockUser: true }) holds the user row lock in
+    // this transaction, so the lifecycle read above is the locked snapshot.
     const issued = await issueExternalUserSession(
       {
         contract: 'v1',
@@ -203,7 +228,14 @@ export async function exchangeLegacyExternalUserSession(
         authGeneration: Number(row.lifecycle_version),
         authenticationMethods: [],
       },
-      { db, policy: options.policy }
+      {
+        db,
+        policy: options.policy,
+        lockedUser: {
+          lifecycleState: row.lifecycle_state,
+          lifecycleVersion: row.lifecycle_version,
+        },
+      }
     )
     return { status: 'issued', token: issued.token, role: row.role }
   })

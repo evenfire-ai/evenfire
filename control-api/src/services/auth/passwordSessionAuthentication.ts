@@ -34,15 +34,18 @@ export async function authenticatePasswordAndIssueSession(input: {
 
   return withTransaction(async (db: Pick<DbClient, 'query'>) => {
     const credential = await db.query(
-      `SELECT id
+      `SELECT id, lifecycle_state, lifecycle_version
          FROM users
         WHERE id = $1
           AND email = $2
           AND password_hash = $3
-        FOR UPDATE`,
+        FOR NO KEY UPDATE`,
       [authenticatedLogin.user.id, authenticatedLogin.user.email, authenticatedLogin.credentialHash]
     )
-    if ((credential.rowCount ?? 0) === 0) return null
+    const lockedUser = credential.rows[0] as
+      | { lifecycle_state: unknown; lifecycle_version: unknown }
+      | undefined
+    if (!lockedUser) return null
 
     const issued = await issueExternalUserSession(
       {
@@ -54,7 +57,14 @@ export async function authenticatePasswordAndIssueSession(input: {
         authGeneration: authenticatedLogin.authGeneration,
         authenticationMethods: ['pwd'],
       },
-      { db, policy: input.policy }
+      {
+        db,
+        policy: input.policy,
+        lockedUser: {
+          lifecycleState: lockedUser.lifecycle_state,
+          lifecycleVersion: lockedUser.lifecycle_version,
+        },
+      }
     )
     return { ...authenticatedLogin, issued }
   })

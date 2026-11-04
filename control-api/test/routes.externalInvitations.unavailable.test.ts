@@ -130,16 +130,16 @@ describe('external invitation routes when the hub is unavailable', () => {
           role: 'member',
           authGeneration: 1,
         },
+        // The acceptance locked the user row before its membership writes; the
+        // generation differs from the pre-lock authGeneration above.
+        lockedUser: { lifecycleState: 'active', lifecycleVersion: 4 },
       })
-      .mockResolvedValueOnce({ data: replayData })
+      .mockResolvedValueOnce({
+        data: replayData,
+        lockedUser: { lifecycleState: 'active', lifecycleVersion: 4 },
+      })
     database.query.mockImplementation(async sql => {
       const text = String(sql)
-      if (text.includes('SELECT id FROM users') && text.includes('FOR UPDATE')) {
-        return { rows: [{ id: '00000000-0000-4000-8000-000000000001' }], rowCount: 1 }
-      }
-      if (text.includes('SELECT lifecycle_state, lifecycle_version')) {
-        return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }], rowCount: 1 }
-      }
       if (text.includes('clock_timestamp()')) {
         return { rows: [{ db_now: new Date('2026-10-07T12:00:00.000Z') }], rowCount: 1 }
       }
@@ -162,12 +162,12 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(replay.body).not.toHaveProperty('token')
     expect(replay.body).not.toHaveProperty('sessionContract')
     expect(tokenSigner.sign).toHaveBeenCalledTimes(1)
-    // Only the first acceptance reaches the user lock and the issuance reads.
-    expect(database.query).toHaveBeenCalledTimes(4)
-    expect(String(database.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
-    expect(String(database.query.mock.calls[1]?.[0])).toContain('lifecycle_version')
-    expect(String(database.query.mock.calls[2]?.[0])).toContain('clock_timestamp()')
-    expect(String(database.query.mock.calls[3]?.[0])).toContain('SELECT valid_after')
+    // Only the first acceptance issues. Issuance signs the generation of the
+    // row the acceptance locked and does not read or lock the user again.
+    expect(tokenSigner.sign).toHaveBeenCalledWith(expect.objectContaining({ authGeneration: 4 }))
+    expect(database.query).toHaveBeenCalledTimes(2)
+    expect(String(database.query.mock.calls[0]?.[0])).toContain('clock_timestamp()')
+    expect(String(database.query.mock.calls[1]?.[0])).toContain('SELECT valid_after')
     expect(flow.validateInvitationFlowToken).toHaveBeenCalledTimes(2)
   })
 

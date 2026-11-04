@@ -44,7 +44,8 @@ describe('revoke-all transaction boundary', () => {
 
     expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
     expect(mocks.query).toHaveBeenCalledTimes(5)
-    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR NO KEY UPDATE')
+    expect(String(mocks.query.mock.calls[0]?.[0])).not.toMatch(/\bFOR UPDATE\b/)
     expect(mocks.committedEpoch).toBe(false)
   })
 
@@ -66,7 +67,8 @@ describe('revoke-all transaction boundary', () => {
     const { revokeAllUserSessions } = await import('../src/services/auth/userSessionService.js')
     await expect(revokeAllUserSessions('user-1', 'security_event')).resolves.toBe(0)
 
-    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR NO KEY UPDATE')
+    expect(String(mocks.query.mock.calls[0]?.[0])).not.toMatch(/\bFOR UPDATE\b/)
     expect(String(mocks.query.mock.calls[1]?.[0])).toContain('clock_timestamp()')
     expect(String(mocks.query.mock.calls[2]?.[0])).toContain(
       'lifecycle_version = lifecycle_version + 1'

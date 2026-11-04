@@ -187,6 +187,10 @@ describe('provisionAdminDesktopWorkspace', () => {
       seedPassword: false,
     })
 
+    // Lock order: the existing user row is locked before its team_members rows.
+    expect(String(dbMocks.txQuery.mock.calls[0]?.[0])).toBe(
+      'SELECT id FROM users WHERE email = $1 LIMIT 1 FOR NO KEY UPDATE'
+    )
     expect(dbMocks.txQuery).not.toHaveBeenCalledWith(
       expect.stringContaining('UPDATE users'),
       expect.anything()

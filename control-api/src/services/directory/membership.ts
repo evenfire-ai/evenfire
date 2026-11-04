@@ -819,6 +819,20 @@ export async function acceptInvitationForEmailInTransaction(
   const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
   if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
 
+  // Lock order: the user row before any team_members row of that user. The
+  // team-session exchange locks the user and then its membership, so the
+  // membership writes below must not precede this lock. A user that
+  // ensureInvitationUser inserted is invisible to other transactions until
+  // commit. Session issuance reuses this locked row.
+  const locked = await db.query(
+    `SELECT id, lifecycle_state, lifecycle_version FROM users WHERE id = $1 FOR NO KEY UPDATE`,
+    [user.id]
+  )
+  const lockedRow = locked.rows[0] as
+    | { lifecycle_state: unknown; lifecycle_version: unknown }
+    | undefined
+  if (!lockedRow) return { error: 'not_found' as const }
+
   const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
   if (acceptance && 'error' in acceptance) return acceptance
   const replay = acceptance?.replay === true
@@ -836,6 +850,10 @@ export async function acceptInvitationForEmailInTransaction(
       ...payload,
       userId: user.id,
       ...(replay ? { replay: true as const } : {}),
+    },
+    lockedUser: {
+      lifecycleState: lockedRow.lifecycle_state,
+      lifecycleVersion: lockedRow.lifecycle_version,
     },
   }
 }
@@ -1109,6 +1127,12 @@ async function getManagerRolesForTeams(
   lock = false
 ): Promise<Map<string, TeamRole>> {
   if (teamIds.length === 0) return new Map()
+  if (lock) {
+    // Lock order: the manager's user row before its team_members rows, as the
+    // team-session exchange does. A single FOR UPDATE over the join would lock
+    // each team_members row before the user row.
+    await db.query(`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, [managerUserId.trim()])
+  }
   const result = await db.query(
     `SELECT tm.team_id, tm.role
        FROM team_members tm
@@ -1118,7 +1142,7 @@ async function getManagerRolesForTeams(
         AND tm.status = 'active'
         AND u.lifecycle_state = 'active'
       ORDER BY tm.team_id
-      ${lock ? 'FOR UPDATE' : ''}`,
+      ${lock ? 'FOR UPDATE OF tm' : ''}`,
     [managerUserId.trim(), teamIds]
   )
   return new Map(

@@ -256,10 +256,12 @@ describe('directory privacy and atomic authorization', () => {
   })
 
   it('locks invitation authority and denies inviter-to-admin assignment before mutation', async () => {
-    mocks.query.mockResolvedValueOnce({
-      rows: [{ team_id: TEAM_A, role: 'inviter' }],
-      rowCount: 1,
-    })
+    mocks.query
+      .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ team_id: TEAM_A, role: 'inviter' }],
+        rowCount: 1,
+      })
 
     await expect(
       createManagedInvitationForUser(
@@ -271,8 +273,14 @@ describe('directory privacy and atomic authorization', () => {
     ).resolves.toEqual({ error: 'forbidden' })
 
     expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
-    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
-    expect(mocks.query).toHaveBeenCalledTimes(1)
+    // Lock order: the manager's user row, then its team_members rows.
+    expect(String(mocks.query.mock.calls[0]?.[0])).toBe(
+      'SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE'
+    )
+    expect(mocks.query.mock.calls[0]?.[1]).toEqual([MANAGER])
+    expect(String(mocks.query.mock.calls[1]?.[0])).toContain('FROM team_members tm')
+    expect(String(mocks.query.mock.calls[1]?.[0])).toContain('FOR UPDATE OF tm')
+    expect(mocks.query).toHaveBeenCalledTimes(2)
     expect(mocks.registerInvitation).not.toHaveBeenCalled()
   })
 
@@ -305,6 +313,9 @@ describe('directory privacy and atomic authorization', () => {
     }
     mocks.query.mockImplementation(async (sql: string) => {
       if (sql.includes("WHERE status = 'draft'")) return { rows: [], rowCount: 0 }
+      if (sql.includes('SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE')) {
+        return { rows: [{ id: MANAGER }], rowCount: 1 }
+      }
       if (sql.includes('FROM team_members') && sql.includes('FOR UPDATE')) {
         return { rows: [{ team_id: TEAM_A, role: 'admin' }], rowCount: 1 }
       }
@@ -397,6 +408,15 @@ describe('directory privacy and atomic authorization', () => {
       if (sql.includes("$2 = '' AND i.token = $1")) {
         return { rows: [invitation], rowCount: 1 }
       }
+      if (
+        sql.includes('SELECT id, lifecycle_state, lifecycle_version FROM users') &&
+        sql.includes('FOR NO KEY UPDATE')
+      ) {
+        return {
+          rows: [{ id: TARGET, lifecycle_state: 'active', lifecycle_version: 1 }],
+          rowCount: 1,
+        }
+      }
       if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
         return {
           rows: [
@@ -448,7 +468,22 @@ describe('directory privacy and atomic authorization', () => {
     const result = await acceptInvitationForEmail(invitation.email, invitation.token)
 
     expect(result).toMatchObject({ data: { accepted: true, userId: TARGET } })
-    const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
+    // Lock order: the user row before the membership write; the caller issues
+    // from that locked row.
+    expect(result).toMatchObject({ lockedUser: { lifecycleState: 'active', lifecycleVersion: 1 } })
+    const statements = mocks.query.mock.calls.map(call => String(call[0]))
+    const userLock = statements.findIndex(
+      statement =>
+        statement.includes('SELECT id, lifecycle_state, lifecycle_version FROM users') &&
+        statement.includes('FOR NO KEY UPDATE')
+    )
+    const membershipWrite = statements.findIndex(statement =>
+      statement.includes('INSERT INTO team_members')
+    )
+    expect(userLock).toBeGreaterThanOrEqual(0)
+    expect(membershipWrite).toBeGreaterThan(userLock)
+    expect(mocks.query.mock.calls[userLock]?.[1]).toEqual([TARGET])
+    const sql = statements.join('\n')
     expect(sql).toContain('FOR UPDATE OF i')
     expect(sql).toContain("AND status = 'pending'")
     expect(sql).not.toContain('UPDATE users')
@@ -483,6 +518,15 @@ describe('directory privacy and atomic authorization', () => {
               accepted_user_id: status === 'accepted' ? TARGET : null,
             },
           ],
+          rowCount: 1,
+        }
+      }
+      if (
+        sql.includes('SELECT id, lifecycle_state, lifecycle_version FROM users') &&
+        sql.includes('FOR NO KEY UPDATE')
+      ) {
+        return {
+          rows: [{ id: TARGET, lifecycle_state: 'active', lifecycle_version: 1 }],
           rowCount: 1,
         }
       }
@@ -602,6 +646,9 @@ describe('directory privacy and atomic authorization', () => {
             rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
             rowCount: 1,
           }
+        }
+        if (sql.includes('SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE')) {
+          return { rows: [{ id: MANAGER }], rowCount: 1 }
         }
         if (sql.includes('FROM team_members') && sql.includes('FOR UPDATE')) {
           managerCheckStarted()
@@ -880,6 +927,7 @@ describe('directory privacy and atomic authorization', () => {
         rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
         rowCount: 1,
       })
+      .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ team_id: TEAM_A, role: 'admin' }], rowCount: 1 })
 
     await expect(resendManagedInvitationForUser(MANAGER, invitation.id)).resolves.toEqual({
@@ -887,8 +935,10 @@ describe('directory privacy and atomic authorization', () => {
       id: invitation.id,
       email: invitation.email,
     })
-    expect(mocks.query).toHaveBeenCalledTimes(3)
+    expect(mocks.query).toHaveBeenCalledTimes(4)
     expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE OF i')
+    expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FOR NO KEY UPDATE')
+    expect(String(mocks.query.mock.calls[3]?.[0])).toContain('FOR UPDATE OF tm')
     expect(mocks.registerInvitation).toHaveBeenCalledOnce()
   })
 
@@ -915,6 +965,7 @@ describe('directory privacy and atomic authorization', () => {
           rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
           rowCount: 1,
         })
+        .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
 
       const result =
@@ -924,8 +975,9 @@ describe('directory privacy and atomic authorization', () => {
 
       expect(result).toEqual({ error: 'forbidden' })
       expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE OF i')
-      expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FOR UPDATE')
-      expect(mocks.query).toHaveBeenCalledTimes(3)
+      expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FOR NO KEY UPDATE')
+      expect(String(mocks.query.mock.calls[3]?.[0])).toContain('FOR UPDATE OF tm')
+      expect(mocks.query).toHaveBeenCalledTimes(4)
       expect(mocks.registerInvitation).not.toHaveBeenCalled()
     }
   )

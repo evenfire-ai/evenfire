@@ -263,14 +263,11 @@ describe('app router wiring', () => {
           rowCount: 1,
         }
       }
-      if (sql.includes('SELECT lifecycle_state, lifecycle_version')) {
+      if (sql.includes('JOIN team_members')) {
         return {
-          rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }],
+          rows: [{ role: payload.role, lifecycle_state: 'active', lifecycle_version: 1 }],
           rowCount: 1,
         }
-      }
-      if (sql.includes('JOIN team_members')) {
-        return { rows: [{ role: payload.role, lifecycle_version: 1 }], rowCount: 1 }
       }
       throw new Error(`unexpected session exchange query: ${sql}`)
     })
@@ -291,12 +288,12 @@ describe('app router wiring', () => {
         expect(response.status, JSON.stringify(response.body)).toBe(200)
       })
     expect(res.body.token).toBeTruthy()
+    // Issuance reuses the row validateLegacyUserSession locked: no second user read.
     expect(transactionQuery.mock.calls.map(([sql]) => String(sql))).toEqual([
       'BEGIN',
-      expect.stringContaining('SELECT id FROM users'),
+      expect.stringMatching(/SELECT id FROM users[\s\S]*FOR NO KEY UPDATE/),
       expect.stringContaining('external_user_session_security_epochs'),
-      expect.stringContaining('JOIN team_members'),
-      expect.stringContaining('SELECT lifecycle_state, lifecycle_version'),
+      expect.stringMatching(/u\.lifecycle_state, u\.lifecycle_version[\s\S]*JOIN team_members/),
       expect.stringContaining('clock_timestamp()'),
       expect.stringContaining('SELECT valid_after'),
       'COMMIT',

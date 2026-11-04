@@ -212,14 +212,23 @@ export async function createUserSession(
     authenticationMethods: string[]
     authenticatedAt?: Date
   },
-  options: { db?: SessionDatabase } = {}
+  // userLocked: the caller already holds this user's row lock (`FOR NO KEY
+  // UPDATE` or stronger) in the transaction of `db`; that lock serializes the
+  // session cap below, so only this function's own lock statement is skipped.
+  options:
+    | { db?: SessionDatabase; userLocked?: false }
+    | { db: SessionDatabase; userLocked: true } = {}
 ): Promise<IssuedUserSession> {
   const sid = randomUUID()
   const jti = randomUUID()
 
   const work = async (db: SessionDatabase) => {
-    const user = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [input.userId])
-    if ((user.rowCount ?? 0) === 0) throw new Error('user session principal does not exist')
+    if (!options.userLocked) {
+      const user = await db.query(`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, [
+        input.userId,
+      ])
+      if ((user.rowCount ?? 0) === 0) throw new Error('user session principal does not exist')
+    }
     const now = await loadSessionDatabaseNow(db)
     const authenticatedAt = atSecond(input.authenticatedAt ?? now)
     const idleExpiresAt = plusSeconds(now, USER_SESSION_IDLE_LIFETIME_SECONDS)
@@ -439,12 +448,11 @@ export async function revokeAllUserSessions(
   options: { onDatabaseFailure?: (error: unknown) => unknown } = {}
 ): Promise<number> {
   const work = async (transaction: SessionDatabase) => {
-    const userLock = expectedLifecycleVersion === undefined ? 'FOR UPDATE' : 'FOR NO KEY UPDATE'
     const user = await transaction.query(
       `SELECT id, lifecycle_version
          FROM users
         WHERE id = $1
-        ${userLock}`,
+        FOR NO KEY UPDATE`,
       [userId]
     )
     if ((user.rowCount ?? 0) === 0) {
@@ -537,7 +545,7 @@ export async function validateExternalSessionAuthorityContext(
            FROM users
           WHERE id = $1
             AND lifecycle_state = 'active'
-          FOR UPDATE`,
+          FOR NO KEY UPDATE`,
         [context.userId]
       )
       if ((principal.rowCount ?? 0) === 0) {
@@ -564,7 +572,7 @@ export async function validateExternalSessionAuthorityContext(
       `SELECT id, email, lifecycle_state, lifecycle_version
          FROM users
         WHERE id = $1
-        FOR UPDATE`,
+        FOR NO KEY UPDATE`,
       [context.userId]
     )
     const user = principal.rows[0] as
@@ -648,7 +656,7 @@ export async function validateLegacyUserSession(
   }
   const work = async (db: SessionDatabase): Promise<UserSessionValidation> => {
     if (options.lockUser) {
-      const locked = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+      const locked = await db.query(`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, [
         claims.userId,
       ])
       if ((locked.rowCount ?? 0) === 0) return { status: 'revoked', reason: 'user_unavailable' }
@@ -714,7 +722,7 @@ export async function revokeLegacyUserSession(
   options: { onDatabaseFailure?: (error: unknown) => unknown } = {}
 ): Promise<boolean> {
   const work = async (transaction: SessionDatabase): Promise<boolean> => {
-    const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+    const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, [
       claims.userId,
     ])
     if ((user.rowCount ?? 0) === 0) return false

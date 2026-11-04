@@ -26,14 +26,14 @@ function exchangeDatabase(lockedRole: TeamRole) {
   const db = {
     query: async (sql: string, values: unknown[] = []) => {
       if (sql.includes('clock_timestamp()')) return { rows: [{ db_now: now }], rowCount: 1 }
-      if (sql.includes('SELECT tm.role, u.lifecycle_version')) {
+      if (sql.includes('SELECT tm.role, u.lifecycle_state, u.lifecycle_version')) {
         membershipQueries.push(values)
-        return { rows: [{ role: lockedRole, lifecycle_version: 1 }], rowCount: 1 }
+        return {
+          rows: [{ role: lockedRole, lifecycle_state: 'active', lifecycle_version: 1 }],
+          rowCount: 1,
+        }
       }
-      if (sql.includes('SELECT lifecycle_state, lifecycle_version')) {
-        return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }], rowCount: 1 }
-      }
-      if (sql.includes('SELECT id FROM users WHERE id = $1 FOR UPDATE')) {
+      if (sql.includes('SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE')) {
         return { rows: [{ id: userId }], rowCount: 1 }
       }
       if (sql.includes('SELECT u.id, u.lifecycle_state, u.lifecycle_version')) {

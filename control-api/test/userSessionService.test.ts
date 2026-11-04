@@ -94,11 +94,45 @@ describe('user session state machine', () => {
       jti: values[2],
       sv: 1,
     })
-    expect(String(query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(String(query.mock.calls[0]?.[0])).toContain('SELECT id FROM users')
+    expect(String(query.mock.calls[0]?.[0])).toContain('FOR NO KEY UPDATE')
+    expect(String(query.mock.calls[0]?.[0])).not.toMatch(/\bFOR UPDATE\b/)
     expect(String(query.mock.calls[1]?.[0])).toContain('clock_timestamp()')
     expect(String(query.mock.calls[2]?.[0])).toContain('DELETE FROM external_user_sessions')
     expect(String(query.mock.calls[3]?.[0])).toContain('OFFSET $3')
     expect(query.mock.calls[3]?.[1]?.[2]).toBe(USER_SESSION_MAX_ACTIVE_PER_USER - 1)
+  })
+
+  it('skips only its own user lock when the caller already holds it', async () => {
+    const inserted = row()
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('FROM users')) return { rows: [{ id: inserted.user_id }], rowCount: 1 }
+      if (sql.includes('clock_timestamp()')) return { rows: [{ db_now: now }], rowCount: 1 }
+      if (sql.includes('INSERT INTO external_user_sessions')) {
+        return {
+          rows: [{ ...inserted, sid: values?.[0], user_id: values?.[1], current_jti: values?.[2] }],
+          rowCount: 1,
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+
+    const issued = await createUserSession(
+      {
+        userId: String(inserted.user_id),
+        email: 'User@Example.com',
+        authenticationMethods: ['pwd'],
+      },
+      { db: { query }, userLocked: true }
+    )
+
+    // Witness: the session was inserted and signed, and the cap still ran.
+    expect(verifyUserSessionV2Token(issued.token)).toMatchObject({ sub: inserted.user_id })
+    const statements = query.mock.calls.map(([sql]) => String(sql))
+    expect(statements[0]).toContain('clock_timestamp()')
+    expect(statements.some(sql => sql.includes('OFFSET $3'))).toBe(true)
+    expect(statements.some(sql => sql.includes('INSERT INTO external_user_sessions'))).toBe(true)
+    expect(statements.filter(sql => /SELECT id FROM users[\s\S]*\bFOR\b/.test(sql))).toEqual([])
   })
 
   it('rotates once and returns the same successor to an overlapping renewal', async () => {
@@ -229,7 +263,8 @@ describe('user session state machine', () => {
         .mockResolvedValueOnce({ rows: [], rowCount: 2 }),
     }
     await expect(revokeAllUserSessions(userId, 'password_changed', db)).resolves.toBe(2)
-    expect(String(db.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(String(db.query.mock.calls[0]?.[0])).toContain('FOR NO KEY UPDATE')
+    expect(String(db.query.mock.calls[0]?.[0])).not.toMatch(/\bFOR UPDATE\b/)
     expect(String(db.query.mock.calls[1]?.[0])).toContain('clock_timestamp()')
     expect(String(db.query.mock.calls[2]?.[0])).toContain(
       'lifecycle_version = lifecycle_version + 1'
