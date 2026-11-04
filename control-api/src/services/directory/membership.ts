@@ -18,7 +18,6 @@ import {
   insertInvitationForTeams,
   invitationForTeamsResponse,
   invitationResponse,
-  invitationUserIsRetired,
   loadInvitationTeams,
   normalizeInvitationPurpose,
   normalizeInvitationTeamAssignments,
@@ -151,7 +150,12 @@ async function applyInvitationMemberships(
   return teams
 }
 
-async function acceptPendingMembershipInvitation(
+/**
+ * The single-use transition of a pending invitation. Its predicates are the
+ * last guard against consuming a revoked, expired or password-reset row, so
+ * they hold even when a caller skipped its own refusals.
+ */
+export async function acceptPendingMembershipInvitation(
   db: Pick<DbClient, 'query'>,
   invitation: InvitationRow,
   userId: string
@@ -791,47 +795,76 @@ export async function getInvitationByToken(token: string) {
   return invitationResponse(invitation, user, teams)
 }
 
-export async function acceptInvitationForEmailInTransaction(
+type InvitationAcceptanceLookup =
+  | { by: 'token_or_id'; token: string; invitationId: string }
+  | { by: 'id'; invitationId: string }
+
+type InvitationAcceptanceRefusal = 'not_found' | 'forbidden' | 'not_pending' | 'expired'
+
+function readInvitationForAcceptance(
+  db: Pick<DbClient, 'query'>,
+  lookup: InvitationAcceptanceLookup,
+  lock: boolean
+): Promise<InvitationRow | null> {
+  return lookup.by === 'id'
+    ? getInvitationRecordById(db, lookup.invitationId, { lock })
+    : getInvitationRecordByTokenOrId(db, lookup.token, lookup.invitationId, { lock })
+}
+
+function invitationAcceptanceRefusal(
+  invitation: InvitationRow,
+  email: string
+): InvitationAcceptanceRefusal | null {
+  if (invitation.email.toLowerCase() !== email.toLowerCase()) return 'forbidden'
+  if (invitation.purpose === 'password_reset') return 'not_pending'
+  if (invitation.status === 'revoked' || invitation.status === 'draft') return 'not_pending'
+  if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
+    return 'expired'
+  }
+  return null
+}
+
+/**
+ * Accepts an invitation for `email` inside the caller's transaction.
+ *
+ * Lock order: the user row, then the invitation, then that user's
+ * team_members. Every transaction that writes an invitation and a user of the
+ * same person takes the user first (user deletion with its ON DELETE SET NULL
+ * on invitations.accepted_user_id, Google login, password reset, first
+ * password setup, managed resend and revoke), so acceptance must not hold the
+ * invitation row while it waits for the user. The unlocked first read only
+ * spares the user insert on an obviously refused call: every refusal is
+ * decided again on the locked invitation row, and the lifecycle decision, the
+ * response and session issuance use the locked user row.
+ */
+async function acceptInvitationInTransaction(
   db: Pick<DbClient, 'query'>,
   email: string,
-  token: string,
-  invitationId = ''
+  lookup: InvitationAcceptanceLookup
 ) {
-  const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId, {
-    lock: true,
-  })
-  if (!invitation) {
-    return { error: 'not_found' as const }
-  }
-  if (invitation.email.toLowerCase() !== email.toLowerCase()) {
-    return { error: 'forbidden' as const }
-  }
-  if (invitation.purpose === 'password_reset') {
-    return { error: 'not_pending' as const }
-  }
-  if (invitation.status === 'revoked' || invitation.status === 'draft') {
-    return { error: 'not_pending' as const }
-  }
-  if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
-    return { error: 'expired' as const }
-  }
+  const candidate = await readInvitationForAcceptance(db, lookup, false)
+  if (!candidate) return { error: 'not_found' as const }
+  const candidateRefusal = invitationAcceptanceRefusal(candidate, email)
+  if (candidateRefusal) return { error: candidateRefusal }
 
-  const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-  if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
-
-  // Lock order: the user row before any team_members row of that user. The
-  // team-session exchange locks the user and then its membership, so the
-  // membership writes below must not precede this lock. A user that
-  // ensureInvitationUser inserted is invisible to other transactions until
-  // commit. Session issuance reuses this locked row.
+  // ensureInvitationUser may insert the user and its profile; a user it
+  // inserted is invisible to other transactions until commit. Only its id is
+  // used here.
+  const ensured = await ensureInvitationUser(db, candidate.email, candidate.invitee_name)
   const locked = await db.query(
-    `SELECT id, lifecycle_state, lifecycle_version FROM users WHERE id = $1 FOR NO KEY UPDATE`,
-    [user.id]
+    `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version FROM users WHERE id = $1 FOR NO KEY UPDATE`,
+    [ensured.id]
   )
-  const lockedRow = locked.rows[0] as
-    | { lifecycle_state: unknown; lifecycle_version: unknown }
-    | undefined
-  if (!lockedRow) return { error: 'not_found' as const }
+  const user = locked.rows[0] as InvitationUserRow | undefined
+  if (!user) return { error: 'not_found' as const }
+  // A retirement that committed while this transaction waited on the lock wins
+  // before any invitation or membership write.
+  if (user.lifecycle_state !== 'active') return { error: 'user_retired' as const }
+
+  const invitation = await readInvitationForAcceptance(db, lookup, true)
+  if (!invitation) return { error: 'not_found' as const }
+  const refusal = invitationAcceptanceRefusal(invitation, email)
+  if (refusal) return { error: refusal }
 
   const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
   if (acceptance && 'error' in acceptance) return acceptance
@@ -851,11 +884,21 @@ export async function acceptInvitationForEmailInTransaction(
       userId: user.id,
       ...(replay ? { replay: true as const } : {}),
     },
+    // Session issuance reuses this locked row instead of locking it again.
     lockedUser: {
-      lifecycleState: lockedRow.lifecycle_state,
-      lifecycleVersion: lockedRow.lifecycle_version,
+      lifecycleState: user.lifecycle_state,
+      lifecycleVersion: user.lifecycle_version,
     },
   }
+}
+
+export async function acceptInvitationForEmailInTransaction(
+  db: Pick<DbClient, 'query'>,
+  email: string,
+  token: string,
+  invitationId = ''
+) {
+  return acceptInvitationInTransaction(db, email, { by: 'token_or_id', token, invitationId })
 }
 
 export async function acceptInvitationForEmail(email: string, token: string, invitationId = '') {
@@ -865,47 +908,7 @@ export async function acceptInvitationForEmail(email: string, token: string, inv
 }
 
 export async function acceptInvitationById(email: string, invitationId: string) {
-  return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, invitationId, { lock: true })
-    if (!invitation) {
-      return { error: 'not_found' as const }
-    }
-    if (invitation.email.toLowerCase() !== email.toLowerCase()) {
-      return { error: 'forbidden' as const }
-    }
-    if (invitation.purpose === 'password_reset') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'revoked' || invitation.status === 'draft') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
-      return { error: 'expired' as const }
-    }
-
-    const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
-
-    const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
-    if (acceptance && 'error' in acceptance) return acceptance
-    const replay = acceptance?.replay === true
-
-    const refreshed = await getInvitationRecordByToken(db, invitation.token)
-    if (!refreshed) {
-      return { error: 'not_found' as const }
-    }
-    const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
-    const payload = invitationResponse(refreshed, user, teams)
-
-    return {
-      data: {
-        accepted: true as const,
-        ...payload,
-        userId: user.id,
-        ...(replay ? { replay: true as const } : {}),
-      },
-    }
-  })
+  return withTransaction(db => acceptInvitationInTransaction(db, email, { by: 'id', invitationId }))
 }
 
 export const DIRECTORY_SEARCH_MAX_QUERY_LENGTH = 100
@@ -1120,6 +1123,10 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
   }))
 }
 
+async function lockManagerUser(db: Pick<DbClient, 'query'>, managerUserId: string): Promise<void> {
+  await db.query(`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, [managerUserId.trim()])
+}
+
 async function getManagerRolesForTeams(
   db: Pick<DbClient, 'query'>,
   managerUserId: string,
@@ -1130,8 +1137,9 @@ async function getManagerRolesForTeams(
   if (lock) {
     // Lock order: the manager's user row before its team_members rows, as the
     // team-session exchange does. A single FOR UPDATE over the join would lock
-    // each team_members row before the user row.
-    await db.query(`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, [managerUserId.trim()])
+    // each team_members row before the user row. A caller that already locked
+    // the manager re-issues a no-op lock here.
+    await lockManagerUser(db, managerUserId)
   }
   const result = await db.query(
     `SELECT tm.team_id, tm.role
@@ -1497,6 +1505,9 @@ export async function deleteManagedUserForUser(
 
 export async function resendManagedInvitationForUser(managerUserId: string, invitationId: string) {
   const authorized = await withTransaction(async db => {
+    // Lock order: users before invitations. The manager may be the invitee,
+    // and an acceptance holds that user while it waits for the invitation.
+    await lockManagerUser(db, managerUserId)
     const result = await db.query(
       `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
@@ -1539,6 +1550,8 @@ export async function resendManagedInvitationForUser(managerUserId: string, invi
 
 export async function revokeManagedInvitationForUser(managerUserId: string, invitationId: string) {
   return withTransaction(async db => {
+    // Lock order: users before invitations, as in resendManagedInvitationForUser.
+    await lockManagerUser(db, managerUserId)
     const result = await db.query(
       `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,

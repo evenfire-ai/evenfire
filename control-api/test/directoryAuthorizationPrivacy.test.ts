@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import bcrypt from 'bcryptjs'
 import { readFileSync } from 'node:fs'
 import {
+  acceptInvitationById,
   acceptInvitationForEmail,
   createInvitationForTeams,
   createManagedInvitationForUser,
@@ -39,6 +40,134 @@ const MANAGER = '00000000-0000-4000-8000-000000000001'
 const TARGET = '00000000-0000-4000-8000-000000000002'
 const TEAM_A = '00000000-0000-4000-8000-000000000010'
 const TEAM_SECRET = '00000000-0000-4000-8000-000000000099'
+
+// The acceptance's user lock. Its text differs from the multi-line password
+// setup lock, so a match cannot hit that statement.
+const ACCEPTANCE_USER_LOCK =
+  'SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version FROM users WHERE id = $1 FOR NO KEY UPDATE'
+const MANAGER_USER_LOCK = 'SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE'
+
+type AcceptanceInvitationFixture = {
+  id: string
+  team_id: string | null
+  invitee_name: string | null
+  email: string
+  role: string
+  token: string
+  status: string
+  purpose: string
+  created_at: Date
+  expires_at: Date
+  accepted_at: Date | null
+  accepted_user_id: string | null
+  team_name: string | null
+}
+
+type AcceptanceUserFixture = {
+  lifecycle_state: string
+  lifecycle_version: number
+  password_hash?: string | null
+}
+
+// A dispatcher for one acceptance: the unlocked user read of
+// ensureInvitationUser and the locked user row can disagree, as when a
+// lifecycle change commits while the acceptance waits on the user lock.
+function acceptanceQueries(options: {
+  invitation: AcceptanceInvitationFixture
+  unlockedUser: AcceptanceUserFixture
+  lockedUser: AcceptanceUserFixture
+}) {
+  const state = {
+    status: options.invitation.status,
+    membershipWrites: 0,
+    acceptanceWrites: 0,
+  }
+  const userRow = (fixture: AcceptanceUserFixture) => ({
+    id: TARGET,
+    email: options.invitation.email,
+    name: 'Target',
+    picture: null,
+    password_hash: fixture.password_hash ?? null,
+    lifecycle_state: fixture.lifecycle_state,
+    lifecycle_version: fixture.lifecycle_version,
+  })
+  const query = async (sql: string) => {
+    if (sql.includes('FROM invitations i')) {
+      return {
+        rows: [
+          {
+            ...options.invitation,
+            status: state.status,
+            accepted_user_id: state.status === 'accepted' ? TARGET : null,
+          },
+        ],
+        rowCount: 1,
+      }
+    }
+    if (sql.includes(ACCEPTANCE_USER_LOCK)) {
+      return { rows: [userRow(options.lockedUser)], rowCount: 1 }
+    }
+    if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
+      return { rows: [userRow(options.unlockedUser)], rowCount: 1 }
+    }
+    if (sql.includes('INSERT INTO profiles')) return { rows: [], rowCount: 0 }
+    if (sql.includes("SET status = 'accepted'")) {
+      if (state.status !== 'pending') return { rows: [], rowCount: 0 }
+      state.status = 'accepted'
+      state.acceptanceWrites += 1
+      return { rows: [{ id: options.invitation.id }], rowCount: 1 }
+    }
+    if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
+      return { rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }], rowCount: 1 }
+    }
+    if (sql.includes('INSERT INTO team_members')) {
+      state.membershipWrites += 1
+      return { rows: [], rowCount: 1 }
+    }
+    throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+  }
+  return { state, query }
+}
+
+// Acceptance lock order: an unlocked invitation read, then the user lock with
+// the target id, then the locked invitation read, then the membership write.
+function expectUsersBeforeInvitations(
+  calls: ReadonlyArray<ReadonlyArray<unknown>>,
+  options: { membershipWrite: boolean }
+) {
+  const statements = calls.map(call => String(call[0]))
+  const unlockedRead = statements.findIndex(
+    statement => statement.includes('FROM invitations i') && !statement.includes('FOR UPDATE')
+  )
+  const userLock = statements.findIndex(statement => statement.includes(ACCEPTANCE_USER_LOCK))
+  const invitationLock = statements.findIndex(statement => statement.includes('FOR UPDATE OF i'))
+  const membershipWrite = statements.findIndex(statement =>
+    statement.includes('INSERT INTO team_members')
+  )
+  expect(unlockedRead).toBe(0)
+  expect(userLock).toBeGreaterThan(unlockedRead)
+  expect(calls[userLock]?.[1]).toEqual([TARGET])
+  expect(invitationLock).toBeGreaterThan(userLock)
+  if (options.membershipWrite) {
+    expect(membershipWrite).toBeGreaterThan(invitationLock)
+  } else {
+    expect(membershipWrite).toBe(-1)
+  }
+}
+
+// Managed resend and revoke: the manager's user row, then the invitation row,
+// then the invitation teams, then the (no-op) manager re-lock and the
+// manager's team_members rows.
+function expectManagerBeforeInvitation(calls: ReadonlyArray<ReadonlyArray<unknown>>) {
+  const statements = calls.map(call => String(call[0]))
+  expect(statements).toHaveLength(5)
+  expect(statements[0]).toContain(MANAGER_USER_LOCK)
+  expect(calls[0]?.[1]).toEqual([MANAGER])
+  expect(statements[1]).toContain('FOR UPDATE OF i')
+  expect(statements[2]).toContain('FROM invitation_teams it')
+  expect(statements[3]).toContain(MANAGER_USER_LOCK)
+  expect(statements[4]).toContain('FOR UPDATE OF tm')
+}
 
 async function queryWithDatabaseClock(sql: string, values?: unknown[]) {
   if (sql.includes('clock_timestamp()')) {
@@ -408,12 +537,19 @@ describe('directory privacy and atomic authorization', () => {
       if (sql.includes("$2 = '' AND i.token = $1")) {
         return { rows: [invitation], rowCount: 1 }
       }
-      if (
-        sql.includes('SELECT id, lifecycle_state, lifecycle_version FROM users') &&
-        sql.includes('FOR NO KEY UPDATE')
-      ) {
+      if (sql.includes(ACCEPTANCE_USER_LOCK)) {
         return {
-          rows: [{ id: TARGET, lifecycle_state: 'active', lifecycle_version: 1 }],
+          rows: [
+            {
+              id: TARGET,
+              email: invitation.email,
+              name: 'Original user name',
+              picture: null,
+              password_hash: null,
+              lifecycle_state: 'active',
+              lifecycle_version: 1,
+            },
+          ],
           rowCount: 1,
         }
       }
@@ -468,22 +604,11 @@ describe('directory privacy and atomic authorization', () => {
     const result = await acceptInvitationForEmail(invitation.email, invitation.token)
 
     expect(result).toMatchObject({ data: { accepted: true, userId: TARGET } })
-    // Lock order: the user row before the membership write; the caller issues
-    // from that locked row.
+    // Lock order: the user row before the invitation row and the membership
+    // write; the caller issues from that locked row.
     expect(result).toMatchObject({ lockedUser: { lifecycleState: 'active', lifecycleVersion: 1 } })
-    const statements = mocks.query.mock.calls.map(call => String(call[0]))
-    const userLock = statements.findIndex(
-      statement =>
-        statement.includes('SELECT id, lifecycle_state, lifecycle_version FROM users') &&
-        statement.includes('FOR NO KEY UPDATE')
-    )
-    const membershipWrite = statements.findIndex(statement =>
-      statement.includes('INSERT INTO team_members')
-    )
-    expect(userLock).toBeGreaterThanOrEqual(0)
-    expect(membershipWrite).toBeGreaterThan(userLock)
-    expect(mocks.query.mock.calls[userLock]?.[1]).toEqual([TARGET])
-    const sql = statements.join('\n')
+    expectUsersBeforeInvitations(mocks.query.mock.calls, { membershipWrite: true })
+    const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
     expect(sql).toContain('FOR UPDATE OF i')
     expect(sql).toContain("AND status = 'pending'")
     expect(sql).not.toContain('UPDATE users')
@@ -521,12 +646,19 @@ describe('directory privacy and atomic authorization', () => {
           rowCount: 1,
         }
       }
-      if (
-        sql.includes('SELECT id, lifecycle_state, lifecycle_version FROM users') &&
-        sql.includes('FOR NO KEY UPDATE')
-      ) {
+      if (sql.includes(ACCEPTANCE_USER_LOCK)) {
         return {
-          rows: [{ id: TARGET, lifecycle_state: 'active', lifecycle_version: 1 }],
+          rows: [
+            {
+              id: TARGET,
+              email: invitation.email,
+              name: 'Target',
+              picture: null,
+              password_hash: null,
+              lifecycle_state: 'active',
+              lifecycle_version: 1,
+            },
+          ],
           rowCount: 1,
         }
       }
@@ -573,10 +705,13 @@ describe('directory privacy and atomic authorization', () => {
 
     const first = await acceptInvitationForEmail(invitation.email, invitation.token)
     expect(first).toMatchObject({ data: { accepted: true, userId: TARGET } })
+    mocks.query.mockClear()
     const replay = await acceptInvitationForEmail(invitation.email, invitation.token)
     expect(replay).toMatchObject({
       data: { accepted: true, userId: TARGET, replay: true },
     })
+    // The replay takes the user lock before the accepted invitation row too.
+    expectUsersBeforeInvitations(mocks.query.mock.calls, { membershipWrite: false })
     // The replay repeats the retained payload and only adds the replay signal.
     if (!('data' in first) || !('data' in replay)) {
       throw new Error('acceptance replay did not return data')
@@ -591,6 +726,122 @@ describe('directory privacy and atomic authorization', () => {
     await expect(acceptInvitationForEmail(invitation.email, invitation.token)).resolves.toEqual({
       error: 'not_pending',
     })
+  })
+
+  it('locks the user before the invitation when accepting by id', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000201',
+      team_id: TEAM_A,
+      invitee_name: 'Target',
+      email: 'target@example.com',
+      role: 'member',
+      token: 'synthetic-desktop-access-token',
+      status: 'pending',
+      purpose: 'admin_desktop_access',
+      ...activeInvitationWindow(),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: 'Team A',
+    }
+    const dispatcher = acceptanceQueries({
+      invitation,
+      unlockedUser: { lifecycle_state: 'active', lifecycle_version: 1 },
+      lockedUser: { lifecycle_state: 'active', lifecycle_version: 1 },
+    })
+    mocks.query.mockImplementation(dispatcher.query)
+
+    await expect(acceptInvitationById(invitation.email, invitation.id)).resolves.toMatchObject({
+      data: { accepted: true, userId: TARGET, status: 'accepted' },
+    })
+    expectUsersBeforeInvitations(mocks.query.mock.calls, { membershipWrite: true })
+    const statements = mocks.query.mock.calls.map(call => String(call[0]))
+    expect(statements[0]).toContain('i.id::text = $1')
+    expect(dispatcher.state.acceptanceWrites).toBe(1)
+    expect(dispatcher.state.membershipWrites).toBe(1)
+  })
+
+  it.each([
+    ['token', () => acceptInvitationForEmail('target@example.com', 'synthetic-retired-token')],
+    [
+      'id',
+      () => acceptInvitationById('target@example.com', '00000000-0000-4000-8000-000000000202'),
+    ],
+  ] as const)(
+    'refuses acceptance by %s when the locked user row is retired',
+    async (_lookup, accept) => {
+      const invitation = {
+        id: '00000000-0000-4000-8000-000000000202',
+        team_id: TEAM_A,
+        invitee_name: 'Target',
+        email: 'target@example.com',
+        role: 'member',
+        token: 'synthetic-retired-token',
+        status: 'pending',
+        purpose: 'member_invitation',
+        ...activeInvitationWindow(),
+        accepted_at: null,
+        accepted_user_id: null,
+        team_name: 'Team A',
+      }
+      // The unlocked read predates a retirement that committed while the
+      // acceptance waited on the user lock.
+      const dispatcher = acceptanceQueries({
+        invitation,
+        unlockedUser: { lifecycle_state: 'active', lifecycle_version: 1 },
+        lockedUser: { lifecycle_state: 'retired', lifecycle_version: 2 },
+      })
+      mocks.query.mockImplementation(dispatcher.query)
+
+      await expect(accept()).resolves.toEqual({ error: 'user_retired' })
+      const statements = mocks.query.mock.calls.map(call => String(call[0]))
+      // Witness: the decision followed the user lock taken for the target.
+      const userLock = statements.findIndex(statement => statement.includes(ACCEPTANCE_USER_LOCK))
+      expect(userLock).toBeGreaterThan(0)
+      expect(mocks.query.mock.calls[userLock]?.[1]).toEqual([TARGET])
+      expect(statements.some(statement => statement.includes('INSERT INTO team_members'))).toBe(
+        false
+      )
+      expect(statements.some(statement => statement.includes("SET status = 'accepted'"))).toBe(
+        false
+      )
+      expect(dispatcher.state.status).toBe('pending')
+    }
+  )
+
+  it('returns the lifecycle generation of the locked user row', async () => {
+    const invitation = {
+      id: '00000000-0000-4000-8000-000000000203',
+      team_id: TEAM_A,
+      invitee_name: 'Target',
+      email: 'target@example.com',
+      role: 'member',
+      token: 'synthetic-generation-token',
+      status: 'pending',
+      purpose: 'member_invitation',
+      ...activeInvitationWindow(),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: 'Team A',
+    }
+    // A password change committed between the unlocked read and the lock.
+    const dispatcher = acceptanceQueries({
+      invitation,
+      unlockedUser: { lifecycle_state: 'active', lifecycle_version: 1, password_hash: null },
+      lockedUser: {
+        lifecycle_state: 'active',
+        lifecycle_version: 2,
+        password_hash: 'synthetic-stored-hash',
+      },
+    })
+    mocks.query.mockImplementation(dispatcher.query)
+
+    const result = await acceptInvitationForEmail(invitation.email, invitation.token)
+
+    expect(result).toMatchObject({
+      data: { accepted: true, authGeneration: 2, lifecycleState: 'active', passwordPending: false },
+      lockedUser: { lifecycleState: 'active', lifecycleVersion: 2 },
+    })
+    expect(dispatcher.state.membershipWrites).toBe(1)
   })
 
   it('serializes invitation acceptance behind a concurrent manager revocation', async () => {
@@ -620,6 +871,7 @@ describe('directory privacy and atomic authorization', () => {
       managerCheckStarted = resolve
     })
     let membershipWrites = 0
+    let acceptanceUserReads = 0
 
     mocks.withTransaction.mockImplementation(async work => {
       const transaction = Symbol('invitation-transaction')
@@ -647,9 +899,29 @@ describe('directory privacy and atomic authorization', () => {
             rowCount: 1,
           }
         }
-        if (sql.includes('SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE')) {
+        if (sql.includes(MANAGER_USER_LOCK)) {
           return { rows: [{ id: MANAGER }], rowCount: 1 }
         }
+        // The acceptance resolves and locks its user before it queues on the
+        // invitation row the revocation holds.
+        if (sql.includes(ACCEPTANCE_USER_LOCK) || sql.includes('WHERE email = $1')) {
+          acceptanceUserReads += 1
+          return {
+            rows: [
+              {
+                id: TARGET,
+                email: invitation.email,
+                name: 'Invitee',
+                picture: null,
+                password_hash: null,
+                lifecycle_state: 'active',
+                lifecycle_version: 1,
+              },
+            ],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('INSERT INTO profiles')) return { rows: [], rowCount: 0 }
         if (sql.includes('FROM team_members') && sql.includes('FOR UPDATE')) {
           managerCheckStarted()
           await managerCheckMayFinish
@@ -687,6 +959,9 @@ describe('directory privacy and atomic authorization', () => {
     await expect(revoke).resolves.toMatchObject({ revoked: true })
     await expect(accept).resolves.toEqual({ error: 'not_pending' })
     expect(status).toBe('revoked')
+    // Witness: the acceptance passed its unlocked read and locked its user, so
+    // the refusal came from the locked invitation row after the revocation.
+    expect(acceptanceUserReads).toBe(2)
     expect(membershipWrites).toBe(0)
   })
 
@@ -789,6 +1064,22 @@ describe('directory privacy and atomic authorization', () => {
           rowCount: 1,
         }
       }
+      if (sql.includes(ACCEPTANCE_USER_LOCK)) {
+        return {
+          rows: [
+            {
+              id: TARGET,
+              email: invitation.email,
+              name: 'New user',
+              picture: null,
+              password_hash: passwordHash,
+              lifecycle_state: 'active',
+              lifecycle_version: lifecycleVersion,
+            },
+          ],
+          rowCount: 1,
+        }
+      }
       if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
         return {
           rows: [
@@ -843,6 +1134,7 @@ describe('directory privacy and atomic authorization', () => {
     await expect(
       acceptInvitationForEmail(invitation.email, invitation.token, invitation.id)
     ).resolves.toMatchObject({ data: { accepted: true, userId: TARGET, status: 'accepted' } })
+    expectUsersBeforeInvitations(mocks.query.mock.calls, { membershipWrite: true })
     await expect(
       setInvitationPasswordForUser(
         TARGET,
@@ -922,6 +1214,7 @@ describe('directory privacy and atomic authorization', () => {
       expect(transactionDepth).toBe(0)
     })
     mocks.query
+      .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [invitation], rowCount: 1 })
       .mockResolvedValueOnce({
         rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
@@ -935,10 +1228,7 @@ describe('directory privacy and atomic authorization', () => {
       id: invitation.id,
       email: invitation.email,
     })
-    expect(mocks.query).toHaveBeenCalledTimes(4)
-    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE OF i')
-    expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FOR NO KEY UPDATE')
-    expect(String(mocks.query.mock.calls[3]?.[0])).toContain('FOR UPDATE OF tm')
+    expectManagerBeforeInvitation(mocks.query.mock.calls)
     expect(mocks.registerInvitation).toHaveBeenCalledOnce()
   })
 
@@ -960,6 +1250,7 @@ describe('directory privacy and atomic authorization', () => {
         team_name: 'Team A',
       }
       mocks.query
+        .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [invitation], rowCount: 1 })
         .mockResolvedValueOnce({
           rows: [{ team_id: TEAM_A, team_name: 'Team A', role: 'member' }],
@@ -974,10 +1265,7 @@ describe('directory privacy and atomic authorization', () => {
           : await revokeManagedInvitationForUser(MANAGER, invitation.id)
 
       expect(result).toEqual({ error: 'forbidden' })
-      expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE OF i')
-      expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FOR NO KEY UPDATE')
-      expect(String(mocks.query.mock.calls[3]?.[0])).toContain('FOR UPDATE OF tm')
-      expect(mocks.query).toHaveBeenCalledTimes(4)
+      expectManagerBeforeInvitation(mocks.query.mock.calls)
       expect(mocks.registerInvitation).not.toHaveBeenCalled()
     }
   )

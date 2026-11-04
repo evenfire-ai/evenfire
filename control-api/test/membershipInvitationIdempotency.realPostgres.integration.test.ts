@@ -2,9 +2,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
+import { getInvitationRecordById } from '../src/services/directory/invitationStore.js'
 import {
   acceptInvitationById,
   acceptInvitationForEmail,
+  acceptPendingMembershipInvitation,
   resendManagedInvitationForUser,
   revokeManagedInvitationForUser,
 } from '../src/services/directory/membership.js'
@@ -132,25 +134,29 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     await holder.pool.query(`UPDATE team_membership_write_probe SET writes = 0`)
   }
 
-  // Both concurrent acceptance statements execute the same locked invitation
-  // SELECT. Counting them in pg_stat_activity proves they are queued on the
-  // barrier's row lock before it is released, so this is a real overlap rather
-  // than two calls that happened to run one after the other.
-  async function waitForLockedAcceptances(expected: number): Promise<void> {
+  // Acceptance takes the user before the invitation. The first acceptance
+  // inserts the invitee and queues on the barrier's invitation row lock; the
+  // second queues on that user (its insert or its lock) behind the first.
+  // Seeing both waiting before the barrier is released proves a real overlap
+  // rather than two calls that happened to run one after the other.
+  async function waitForQueuedAcceptances(): Promise<void> {
     const deadline = Date.now() + 5_000
     while (Date.now() < deadline) {
-      const result = await holder.pool.query<{ count: number }>(
-        `SELECT count(*)::int AS count
+      const result = await holder.pool.query<{ invitation: number; user: number }>(
+        `SELECT count(*) FILTER (WHERE query LIKE '%FOR UPDATE OF i%')::int AS invitation,
+                count(*) FILTER (
+                  WHERE query LIKE '%INSERT INTO users%'
+                     OR query LIKE '%lifecycle_version FROM users WHERE id = $1 FOR NO KEY UPDATE%'
+                )::int AS user
            FROM pg_stat_activity
           WHERE datname = current_database()
-            AND wait_event_type = 'Lock'
-            AND query LIKE '%FOR UPDATE OF i%'`
+            AND wait_event_type = 'Lock'`
       )
-      if (result.rows[0]!.count >= expected) return
+      if (result.rows[0]!.invitation >= 1 && result.rows[0]!.user >= 1) return
       await new Promise(resolve => setTimeout(resolve, 20))
     }
     throw new Error(
-      `expected ${expected} invitation acceptance statements waiting on the invitation row lock`
+      'expected one acceptance waiting on the invitation row and one waiting on the user'
     )
   }
 
@@ -533,13 +539,63 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     expect(await invitationState(pending.id)).toMatchObject({ status: 'revoked' })
   })
 
-  it('writes one membership when two acceptances overlap on the invitation row lock', async () => {
+  // INV-6: the consuming UPDATE's own predicates refuse a revoked or expired
+  // row even when no caller refusal ran first; both callers refuse those
+  // states earlier, so only a direct call observes the predicates.
+  it('consumes only a pending, unexpired invitation in the single-use transition', async () => {
+    const consume = async (label: string, options: Parameters<typeof createInvitation>[0]) => {
+      const invitation = await createInvitation(options)
+      const user = await holder.pool.query<{ id: string }>(
+        `INSERT INTO users(email, name) VALUES ($1, $2) RETURNING id::text AS id`,
+        [invitation.email, label]
+      )
+      const userId = user.rows[0]!.id
+      const row = await getInvitationRecordById(holder.pool, invitation.id)
+      if (!row) throw new Error(`invitation ${label} was not seeded`)
+      const before = await invitationState(invitation.id)
+      const client = await holder.pool.connect()
+      try {
+        await client.query('BEGIN')
+        const consumed = await acceptPendingMembershipInvitation(client, row, userId)
+        await client.query('COMMIT')
+        return { consumed, userId, before, after: await invitationState(invitation.id) }
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    }
+
+    // Witness: the same direct call consumes a pending, unexpired invitation.
+    const pending = await consume('inv6-pending', { label: 'inv6-pending' })
+    expect(pending.consumed).toBe(true)
+    expect(pending.after).toMatchObject({ status: 'accepted', accepted_user_id: pending.userId })
+    await expect(memberships(pending.userId)).resolves.toEqual([
+      { team_id: teamId, role: 'member', status: 'active' },
+    ])
+
+    const revoked = await consume('inv6-revoked', { label: 'inv6-revoked', status: 'revoked' })
+    expect(revoked.consumed).toBe(false)
+    expect(revoked.after).toEqual(revoked.before)
+    expect(revoked.after).toEqual({ status: 'revoked', accepted_user_id: null, accepted_at: null })
+    await expect(memberships(revoked.userId)).resolves.toEqual([])
+
+    const expired = await consume('inv6-expired', {
+      label: 'inv6-expired',
+      expiresAt: new Date(Date.now() - 60 * 1000),
+    })
+    expect(expired.consumed).toBe(false)
+    expect(expired.after).toEqual(expired.before)
+    expect(expired.after).toEqual({ status: 'pending', accepted_user_id: null, accepted_at: null })
+    await expect(memberships(expired.userId)).resolves.toEqual([])
+  })
+
+  it('writes one membership when two acceptances overlap behind a held invitation row', async () => {
     const invitation = await createInvitation({ label: 'concurrent' })
     await resetMembershipWriteProbe()
 
-    // Hold the invitation row so both acceptances queue on the same lock before
-    // either can consume the pending transition. Releasing it then lets exactly
-    // one win and the other observe the accepted row.
+    // Hold the invitation row so both acceptances queue before either can
+    // consume the pending transition. Releasing it then lets exactly one win
+    // and the other observe the accepted row.
     const barrier = await holder.pool.connect()
     let accepting: Array<ReturnType<typeof acceptInvitationForEmail>> = []
     let barrierCommitted = false
@@ -552,7 +608,7 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
         acceptInvitationForEmail(invitation.email, invitation.token, invitation.id),
         acceptInvitationForEmail(invitation.email, invitation.token, invitation.id),
       ]
-      await waitForLockedAcceptances(2)
+      await waitForQueuedAcceptances()
       await barrier.query('COMMIT')
       barrierCommitted = true
 

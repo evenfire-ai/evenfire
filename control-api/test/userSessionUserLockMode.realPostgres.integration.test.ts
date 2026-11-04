@@ -69,7 +69,7 @@ const runtimeRoles = [
   'workflow_recipes_runtime',
 ] as const
 const ISSUANCE_REFUSED = 'legacy user-session issuance requires an active lifecycle generation'
-const PASSWORD = 'Lock-Mode-Password-1!'
+const PASSWORD = 'Synthetic-Lock-Mode-Password-1!'
 // Every connection of the suite, including the production paths that open
 // their own transactions, gives up on a lock after this bound; each case's
 // own timeout leaves room for that bound to fire and for the cleanup.
@@ -78,8 +78,9 @@ const CASE_TIMEOUT_MS = 40_000
 
 // Statements the cases wait on, matched against pg_stat_activity.query.
 const SESSION_USER_LOCK = /SELECT id FROM users WHERE id = \$1 FOR NO KEY UPDATE/
+// Single-line on purpose: the multi-line password-setup lock never matches it.
 const ACCEPTANCE_USER_LOCK =
-  /SELECT id, lifecycle_state, lifecycle_version FROM users WHERE id = \$1 FOR NO KEY UPDATE/
+  /SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version FROM users WHERE id = \$1 FOR NO KEY UPDATE/
 const CREDENTIAL_USER_LOCK = /FROM users[\s\S]*password_hash = \$3[\s\S]*FOR NO KEY UPDATE/
 const LIFECYCLE_UPDATE = /UPDATE users SET lifecycle_version = lifecycle_version \+ 1/
 const USER_DELETE = /DELETE FROM users WHERE id = \$1/
@@ -232,6 +233,28 @@ describeRealPostgres('session user-row lock mode on real PostgreSQL', () => {
     const flowToken = `flow-${randomUUID()}`
     flowTokens.set(flowToken, { capability, email })
     return { invitationId, flowToken }
+  }
+
+  // An invitation already accepted by the user, with the user's profile row,
+  // so a replay's profile insert takes no FK lock on the user.
+  async function seedAcceptedInvitation(
+    user: { userId: string; email: string },
+    label: string
+  ): Promise<{ invitationId: string; flowToken: string }> {
+    const teamId = randomUUID()
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, $2)`, [teamId, label])
+    await databasePool.query(`INSERT INTO profiles(user_id, display_name) VALUES ($1, $2)`, [
+      user.userId,
+      label,
+    ])
+    const seeded = await seedInvitation(user.email, teamId, 'member')
+    await databasePool.query(
+      `UPDATE invitations
+          SET status = 'accepted', accepted_at = NOW(), accepted_user_id = $2
+        WHERE id = $1`,
+      [seeded.invitationId, user.userId]
+    )
+    return seeded
   }
 
   function legacyToken(user: { userId: string; email: string }, teamId: string) {
@@ -618,19 +641,113 @@ describeRealPostgres('session user-row lock mode on real PostgreSQL', () => {
 
         const settled = await acceptance
         if (!('value' in settled)) throw settled.error
-        expect(settled.value.status).toBe(500)
-        expect(settled.value.body).toEqual({
-          error: 'Internal Server Error',
-          message: ISSUANCE_REFUSED,
-        })
+        // The decision is taken on the locked user row, before any invitation
+        // or membership write: the route's user_retired answer.
+        expect(settled.value.status).toBe(401)
+        expect(settled.value.body).toEqual({ error: 'Unauthorized' })
         expect(settled.value.body).not.toHaveProperty('token')
-        // The refused issuance rolled the acceptance back.
         const state = await databasePool.query<{
           status: string
           accepted_user_id: string | null
         }>(`SELECT status, accepted_user_id FROM invitations WHERE id = $1`, [invitationId])
         expect(state.rows).toEqual([{ status: 'pending', accepted_user_id: null }])
+        const membership = await databasePool.query(
+          `SELECT 1 FROM team_members WHERE user_id = $1 AND team_id = $2`,
+          [user.userId, teamId]
+        )
+        expect(membership.rowCount).toBe(0)
         expect(await lifecycle(user.userId)).toEqual({ state: 'retired', version: 2 })
+      } finally {
+        await settle([gate], pending)
+      }
+    },
+    CASE_TIMEOUT_MS
+  )
+
+  // Users before invitations: a replay waits on the user row without holding
+  // the accepted invitation that a user delete (ON DELETE SET NULL) or a
+  // Google login (accepted_user_id backfill) writes after locking the user.
+  it(
+    'a replayed acceptance and a user delete do not deadlock',
+    async () => {
+      const user = await seedUser('replay-delete')
+      const { flowToken, invitationId } = await seedAcceptedInvitation(user, 'replay-delete')
+
+      const gate = await databasePool.connect()
+      const pending: Promise<unknown>[] = []
+      try {
+        await gate.query('BEGIN')
+        await gate.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [user.userId])
+        const gatePid = await backendPid(gate)
+        const acceptance = track(pending, accept(flowToken, user.email))
+        await waitForWaitingStatement(ACCEPTANCE_USER_LOCK, gatePid)
+        const deleted = await gate.query(`DELETE FROM users WHERE id = $1`, [user.userId])
+        expect(deleted.rowCount).toBe(1)
+        await gate.query('COMMIT')
+
+        const settled = await acceptance
+        if (!('value' in settled)) throw settled.error
+        expect(settled.value.status, JSON.stringify(settled.value.body)).toBe(404)
+        expect(settled.value.body).toEqual({ error: 'not_found' })
+        const state = await databasePool.query<{ accepted_user_id: string | null }>(
+          `SELECT accepted_user_id FROM invitations WHERE id = $1`,
+          [invitationId]
+        )
+        expect(state.rows).toEqual([{ accepted_user_id: null }])
+      } finally {
+        await settle([gate], pending)
+      }
+    },
+    CASE_TIMEOUT_MS
+  )
+
+  it(
+    'a replayed acceptance and a Google login do not deadlock',
+    async () => {
+      const user = await seedUser('replay-login')
+      const { flowToken, invitationId } = await seedAcceptedInvitation(user, 'replay-login')
+
+      const gate = await databasePool.connect()
+      const pending: Promise<unknown>[] = []
+      try {
+        await gate.query('BEGIN')
+        // The literal statements of googleLoginData (login.ts) and of
+        // linkAcceptedInvitationsToUser, in their order.
+        await gate.query(
+          `UPDATE users
+              SET name = COALESCE($2, name),
+                  picture = COALESCE($3, picture),
+                  updated_at = NOW()
+            WHERE email = $1
+          RETURNING id, email, name, picture, lifecycle_version`,
+          [user.email, 'replay-login', null]
+        )
+        const gatePid = await backendPid(gate)
+        const acceptance = track(pending, accept(flowToken, user.email))
+        await waitForWaitingStatement(ACCEPTANCE_USER_LOCK, gatePid)
+        await gate.query(
+          `UPDATE invitations
+              SET accepted_user_id = COALESCE(accepted_user_id, $2)
+            WHERE LOWER(email) = LOWER($1)
+              AND status = 'accepted'`,
+          [user.email, user.userId]
+        )
+        await gate.query('COMMIT')
+
+        const settled = await acceptance
+        if (!('value' in settled)) throw settled.error
+        expect(settled.value.status, JSON.stringify(settled.value.body)).toBe(200)
+        expect(settled.value.body).toMatchObject({
+          accepted: true,
+          userId: user.userId,
+          replay: true,
+        })
+        expect(settled.value.body).not.toHaveProperty('token')
+        const state = await databasePool.query<{ accepted_user_id: string | null }>(
+          `SELECT accepted_user_id FROM invitations WHERE id = $1`,
+          [invitationId]
+        )
+        expect(state.rows).toEqual([{ accepted_user_id: user.userId }])
       } finally {
         await settle([gate], pending)
       }
