@@ -6,16 +6,33 @@ import request from 'supertest'
 
 const poolQuery = vi.hoisted(() => vi.fn())
 const poolConnect = vi.hoisted(() => vi.fn())
+// Statements sent on a client checked out with pool.connect(), and its release.
+const clientQuery = vi.hoisted(() => vi.fn())
+const clientRelease = vi.hoisted(() => vi.fn())
+const withTransaction = vi.hoisted(() => vi.fn())
 const verifyToken = vi.hoisted(() => vi.fn())
 let authorityRows: Array<Record<string, unknown>> = []
 const loggerWarn = vi.hoisted(() => vi.fn())
 
-vi.mock('../src/db.js', () => ({
-  pool: {
+type MockTransactionClient = {
+  query: (...args: unknown[]) => Promise<unknown>
+  release: () => void
+}
+type MockPool = { connect: () => Promise<MockTransactionClient> }
+
+vi.mock('../src/db.js', () => {
+  const pool = {
     query: (...args: unknown[]) => poolQuery(...args),
     connect: (...args: unknown[]) => poolConnect(...args),
-  },
-}))
+  }
+  return {
+    pool,
+    // Same signature as the real helper: the transaction runs on a client of
+    // txPool, which defaults to the core pool.
+    withTransaction: (work: unknown, txPool: unknown = pool, options?: unknown) =>
+      withTransaction(work, txPool, options),
+  }
+})
 vi.mock('../src/observability/logger.js', () => ({
   rootLogger: {
     warn: (...args: unknown[]) => loggerWarn(...args),
@@ -71,6 +88,9 @@ describe('external session lifecycle gate', () => {
   beforeEach(() => {
     poolQuery.mockReset()
     poolConnect.mockReset()
+    clientQuery.mockReset()
+    clientRelease.mockReset()
+    withTransaction.mockReset()
     verifyToken.mockReset()
     loggerWarn.mockReset()
     authorityRows = [
@@ -82,10 +102,36 @@ describe('external session lifecycle gate', () => {
         token_revoked: false,
       },
     ]
-    poolQuery.mockImplementation(async () => ({
+    const authorityResult = async () => ({
       rows: authorityRows,
       rowCount: authorityRows.length,
-    }))
+    })
+    poolQuery.mockImplementation(authorityResult)
+    // A checked-out client answers like the pool, so validation moved into a
+    // transaction still succeeds and the test reaches its transaction assertions.
+    clientQuery.mockImplementation(authorityResult)
+    poolConnect.mockImplementation(
+      async (): Promise<MockTransactionClient> => ({
+        query: (...args: unknown[]) => clientQuery(...args),
+        release: () => clientRelease(),
+      })
+    )
+    withTransaction.mockImplementation(
+      async (work: (client: MockTransactionClient) => Promise<unknown>, txPool: MockPool) => {
+        const client = await txPool.connect()
+        try {
+          await client.query('BEGIN')
+          const result = await work(client)
+          await client.query('COMMIT')
+          return result
+        } catch (error) {
+          await client.query('ROLLBACK')
+          throw error
+        } finally {
+          client.release()
+        }
+      }
+    )
   })
 
   it('accepts an active session whose generation matches the user row', async () => {
@@ -161,8 +207,13 @@ describe('external session lifecycle gate', () => {
     // Witness: next() ran and the middleware fixed req.externalAuth.
     expect(response.body.userId).toBe(claims.userId)
     expect(poolConnect).not.toHaveBeenCalled()
+    expect(withTransaction).not.toHaveBeenCalled()
+    // Witness: the lifecycle row was read once, on the pool, with the database clock.
     expect(poolQuery).toHaveBeenCalledTimes(1)
-    const statements = poolQuery.mock.calls.map(call => String(call[0])).join('\n')
+    expect(String(poolQuery.mock.calls[0]?.[0])).toContain("date_trunc('second', now())")
+    const statements = [...poolQuery.mock.calls, ...clientQuery.mock.calls]
+      .map(call => String(call[0]))
+      .join('\n')
     expect(statements).not.toContain('statement_timeout')
     expect(statements).not.toContain('READ ONLY')
   })

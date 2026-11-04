@@ -77,7 +77,7 @@ async function exchange(requestedRole: TeamRole, database: ReturnType<typeof exc
   }
   const result = await exchangeLegacyExternalUserSession(
     {
-      token: 'legacy-session-token',
+      token: 'synthetic-legacy-session-token',
       claims,
       userId: database.userId,
       email,
