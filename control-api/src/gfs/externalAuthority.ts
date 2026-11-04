@@ -48,9 +48,17 @@ export type ExternalGfsUserTokenInput = Readonly<{
 }>
 
 /**
- * Sign a user-plane GFS token with the current canonical user generation.
- * GFSC re-reads users.lifecycle_version on every request, so a generation that
- * changes after signing fails closed there.
+ * Sign a user-plane GFS token for the session this request authenticated. The
+ * signing read compares that session's generation (V1 `authGeneration`, V2
+ * `session_version`) with the current row and refuses on any difference; GFSC
+ * re-reads users.lifecycle_version on every request, so a change after signing
+ * fails closed there.
+ *
+ * The V1 comparison covers the user generation only. A single-token V1 logout
+ * is recorded as a token revocation, not as a lifecycle_version bump, so one
+ * that commits between the session middleware and this read is not detected
+ * here (same as before V2). The V2 read joins the authenticated session row and
+ * does detect a per-session revocation.
  *
  * The signed bytes remain private to this function until COMMIT succeeds, so a
  * lost/uncertain commit cannot be reported as a usable GFS credential.
@@ -80,27 +88,50 @@ export async function signCurrentExternalGfsUserToken(
   try {
     return await withTransaction(
       async transaction => {
-        const result = await transaction.query(
-          `SELECT lifecycle_state, lifecycle_version, clock_timestamp() AS db_now
-             FROM users
-            WHERE id = $1`,
-          [context.userId]
-        )
+        // One unlocked statement per mint (M-30). V2 reads the authenticated
+        // session row in the same snapshot as the user row.
+        const result =
+          context.contract === 'v1'
+            ? await transaction.query(
+                `SELECT lifecycle_state, lifecycle_version, clock_timestamp() AS db_now
+                   FROM users
+                  WHERE id = $1`,
+                [context.userId]
+              )
+            : await transaction.query(
+                `SELECT u.lifecycle_state, u.lifecycle_version, clock_timestamp() AS db_now,
+                        s.revoked_at, s.session_version
+                   FROM users u
+                   JOIN external_user_sessions s ON s.sid = $2 AND s.user_id = u.id
+                  WHERE u.id = $1`,
+                [context.userId, context.sid]
+              )
         const row = result.rows[0] as
           | {
               lifecycle_state?: unknown
               lifecycle_version?: unknown
               db_now?: Date | string
+              revoked_at?: unknown
+              session_version?: unknown
             }
           | undefined
-        const generation = Number(row?.lifecycle_version)
-        const dbNow = row?.db_now instanceof Date ? row.db_now : new Date(String(row?.db_now ?? ''))
+        if (!row) return null
+        const generation = Number(row.lifecycle_version)
+        const dbNow = row.db_now instanceof Date ? row.db_now : new Date(String(row.db_now ?? ''))
         if (
-          row?.lifecycle_state !== 'active' ||
+          row.lifecycle_state !== 'active' ||
           !Number.isSafeInteger(generation) ||
           generation < 1 ||
           !Number.isFinite(dbNow.getTime()) ||
           expiresAt * 1000 <= dbNow.getTime()
+        ) {
+          return null
+        }
+        if (context.contract === 'v1') {
+          if (generation !== context.authGeneration) return null
+        } else if (
+          row.revoked_at !== null ||
+          Number(row.session_version) !== context.sessionVersion
         ) {
           return null
         }

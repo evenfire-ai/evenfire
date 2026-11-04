@@ -193,16 +193,20 @@ describe('signCurrentExternalGfsUserToken', () => {
   }
   const input = { subject: DESKTOP_USER_ID, drive: 'user', scopes: ['read' as const] }
 
-  it('signs with a single unlocked users read and no session revalidation', async () => {
-    const query = vi.fn().mockResolvedValue({
-      rows: [{ lifecycle_state: 'active', lifecycle_version: 3, db_now: new Date() }],
-      rowCount: 1,
-    })
+  function mockSingleRowQuery(rows: Record<string, unknown>[]) {
+    const query = vi.fn().mockResolvedValue({ rows, rowCount: rows.length })
     dbMock.withTransaction.mockImplementation(async work => work({ query }))
     gfsTokenMock.signGfsToken.mockReturnValue({
       token: 'synthetic-signed-gfs-token',
       expiresInSeconds: 600,
     })
+    return query
+  }
+
+  it('signs the authenticated V1 generation with a single unlocked users read', async () => {
+    const query = mockSingleRowQuery([
+      { lifecycle_state: 'active', lifecycle_version: 1, db_now: new Date() },
+    ])
 
     await expect(signCurrentExternalGfsUserToken(authentication, input)).resolves.toEqual({
       token: 'synthetic-signed-gfs-token',
@@ -217,14 +221,124 @@ describe('signCurrentExternalGfsUserToken', () => {
         String(call[0]).includes('external_user_session_security_epochs')
       )
     ).toBe(false)
-    // Witness: the canonical generation reaches the signed claims.
+    // Witness: the authenticated session's generation reaches the signed claims.
     expect(gfsTokenMock.signGfsToken).toHaveBeenCalledWith(
       expect.objectContaining({
         subject: DESKTOP_USER_ID,
-        authGeneration: 3,
+        authGeneration: 1,
         principalType: 'user',
       })
     )
+  })
+
+  it('refuses a V1 session whose generation was bumped after authentication', async () => {
+    const query = mockSingleRowQuery([
+      { lifecycle_state: 'active', lifecycle_version: 3, db_now: new Date() },
+    ])
+
+    await expect(signCurrentExternalGfsUserToken(authentication, input)).resolves.toBeNull()
+
+    // Witness: the signing read ran before the refusal.
+    expect(query).toHaveBeenCalledOnce()
+    expect(String(query.mock.calls[0]?.[0])).toContain('FROM users')
+    expect(gfsTokenMock.signGfsToken).not.toHaveBeenCalled()
+  })
+
+  describe('V2 session', () => {
+    const SID = '44444444-4444-4444-8444-444444444444'
+    const v2TokenClaims = {
+      sub: DESKTOP_USER_ID,
+      sid: SID,
+      jti: '55555555-5555-4555-8555-555555555555',
+      sv: 2,
+      ver: 2 as const,
+      typ: 'user_session' as const,
+      auth_time: 1,
+      amr: ['pwd'],
+      iat: 1,
+      exp: Math.floor(Date.now() / 1000) + 600,
+    }
+    const v2Authentication = {
+      status: 'authenticated' as const,
+      contract: 'v2' as const,
+      claims: {
+        userId: DESKTOP_USER_ID,
+        email: 'user@example.test',
+        teamId: null,
+        role: 'member' as const,
+        exp: v2TokenClaims.exp,
+      },
+      authorityContext: {
+        contract: 'v2' as const,
+        userId: DESKTOP_USER_ID,
+        sid: SID,
+        jti: v2TokenClaims.jti,
+        sessionVersion: 2,
+      },
+      tokenClaims: v2TokenClaims,
+      policy: { ...policy, acceptV2: true, issueV2: true, renewV2: true },
+    }
+    const currentRow = {
+      lifecycle_state: 'active',
+      lifecycle_version: 5,
+      db_now: new Date(),
+      revoked_at: null,
+      session_version: 2,
+    }
+
+    function expectSessionSnapshotRead(query: ReturnType<typeof vi.fn>) {
+      expect(query).toHaveBeenCalledOnce()
+      const sql = String(query.mock.calls[0]?.[0])
+      expect(sql).toContain('FROM users')
+      expect(sql).toContain('external_user_sessions')
+      expect(sql).not.toContain('FOR UPDATE')
+      expect(query.mock.calls[0]?.[1]).toEqual([DESKTOP_USER_ID, SID])
+    }
+
+    it('signs the current user generation for a live session', async () => {
+      const query = mockSingleRowQuery([currentRow])
+
+      await expect(signCurrentExternalGfsUserToken(v2Authentication, input)).resolves.toEqual({
+        token: 'synthetic-signed-gfs-token',
+        expiresInSeconds: 600,
+      })
+
+      expectSessionSnapshotRead(query)
+      expect(gfsTokenMock.signGfsToken).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subject: DESKTOP_USER_ID,
+          authGeneration: 5,
+          principalType: 'user',
+        })
+      )
+    })
+
+    it('refuses a session revoked after authentication', async () => {
+      const query = mockSingleRowQuery([{ ...currentRow, revoked_at: new Date() }])
+
+      await expect(signCurrentExternalGfsUserToken(v2Authentication, input)).resolves.toBeNull()
+
+      expectSessionSnapshotRead(query)
+      expect(gfsTokenMock.signGfsToken).not.toHaveBeenCalled()
+    })
+
+    it('refuses a session whose version moved after authentication', async () => {
+      const query = mockSingleRowQuery([{ ...currentRow, session_version: 3 }])
+
+      await expect(signCurrentExternalGfsUserToken(v2Authentication, input)).resolves.toBeNull()
+
+      expectSessionSnapshotRead(query)
+      expect(gfsTokenMock.signGfsToken).not.toHaveBeenCalled()
+    })
+
+    it('refuses when the session row is gone', async () => {
+      const query = mockSingleRowQuery([])
+
+      await expect(signCurrentExternalGfsUserToken(v2Authentication, input)).resolves.toBeNull()
+
+      expectSessionSnapshotRead(query)
+      expect(gfsTokenMock.signGfsToken).not.toHaveBeenCalled()
+    })
   })
 
   it('returns null for a retired user instead of signing', async () => {
