@@ -39,9 +39,9 @@ vi.mock('../src/config.js', async importOriginal => {
   return { ...actual, config: { ...actual.config, notificationStreamHeartbeatMs: 20 } }
 })
 // Every authority observation made after the stream's first event read has
-// started (that is, by a heartbeat) waits for the test's gate, then runs the
-// real observer against PostgreSQL. Startup observations all finish before that
-// first read and pass straight through.
+// started (the batch observation and any heartbeat) waits for the test's gate,
+// then runs the real observer against PostgreSQL. Startup observations all
+// finish before that first read and pass straight through.
 vi.mock('../src/services/auth/externalSessionCurrentnessObserver.js', async importOriginal => {
   const actual =
     await importOriginal<
@@ -164,7 +164,7 @@ describeRealPostgres('mounted notification stream currentness on real PostgreSQL
     }
   })
 
-  it('writes a real V2 notification batch read before revoke-all and closes on the next heartbeat', async () => {
+  it('withholds a real V2 notification batch when revoke-all commits between its read and its observation', async () => {
     const userId = randomUUID()
     const email = `notification-currentness-${userId}@example.test`
     await databasePool.query(`INSERT INTO users(id, email, name) VALUES ($1, $2, $3)`, [
@@ -215,25 +215,25 @@ describeRealPostgres('mounted notification stream currentness on real PostgreSQL
         status: 'approved',
       },
     ])
-    // The batch is written in the microtasks after the resolve. Release the
-    // held heartbeat observations only once a heartbeat is waiting, so the
-    // first observation after the batch reads the committed revocation.
+    // The batch observation starts after the read resolves and is held at the
+    // gate with any heartbeat observation. Release them once one is waiting:
+    // every one of them reads the committed revocation.
     await vi.waitFor(() => expect(heartbeatAuthority.heldObservations).toBeGreaterThan(0))
     heartbeatGate.resolve()
     const response = await responsePromise
 
     expect(response.status).toBe(200)
     expect(response.text).toContain('notification.snapshot')
-    // The batch read before the revocation is written, and the next heartbeat
-    // observes the revocation on the real database and closes the stream.
-    expect(response.text).toContain('batch-event-id')
+    // The batch read before the revocation committed is observed after it, on
+    // the real database, so it is never written and the stream closes.
+    expect(response.text).not.toContain('batch-event-id')
     const frames = response.text
       .split('\n')
       .filter(line => line.length > 0)
       .map(line => JSON.parse(line) as { type: string; reason?: string })
     expect(frames.at(-1)).toMatchObject({ type: 'stream.closing', reason: 'session_expired' })
-    expect(response.text.indexOf('batch-event-id')).toBeLessThan(
-      response.text.indexOf('stream.closing')
-    )
+    expect(frames.some(frame => frame.type === 'approval.updated')).toBe(false)
+    // Witness: the batch was read exactly once.
+    expect(producerDatabase.listEvents).toHaveBeenCalledOnce()
   })
 })

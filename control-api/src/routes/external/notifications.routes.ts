@@ -144,6 +144,10 @@ export function createExternalNotificationsRouter(): Router {
 
         let closed = false
         let flushInFlight = false
+        // Delivery opens only once the snapshot frame is written. Listener
+        // notifications that arrive during startup read and write nothing; the
+        // first flush after the snapshot catches up from lastCursor.
+        let deliveryOpen = false
         let lastCursor: string | null = rawCursor || null
         let listener: Awaited<ReturnType<typeof openNotificationQueueListener>> | null = null
         let heartbeatTimer: NodeJS.Timeout | null = null
@@ -233,7 +237,7 @@ export function createExternalNotificationsRouter(): Router {
         )
 
         const flushNewEvents = async () => {
-          if (closed || flushInFlight) return
+          if (closed || flushInFlight || !deliveryOpen) return
           flushInFlight = true
           try {
             const events = await listNotificationStreamEventsForUser(claims.userId, {
@@ -244,6 +248,12 @@ export function createExternalNotificationsRouter(): Router {
               notificationStreamEventsFilteredTotal.inc({ reason: 'no_new_active_events' }, 1)
               return
             }
+            // One authority observation per non-empty batch, after the read and
+            // before the write. The writes below are synchronous, so this
+            // observation covers the whole batch. On a refusal the stream ends
+            // (with session_expired when denied) and lastCursor does not
+            // advance, so a reconnect re-reads the withheld events.
+            if (!(await closeForAuthority())) return
             for (const event of events) {
               if (closed) break
               if (event.eventType === 'approval.requested') {
@@ -346,6 +356,7 @@ export function createExternalNotificationsRouter(): Router {
           observedAt: new Date().toISOString(),
         })
         notificationStreamEventsSentTotal.inc({ event_type: 'notification.snapshot' }, 1)
+        deliveryOpen = true
         void flushNewEvents()
 
         heartbeatTimer = setInterval(() => {

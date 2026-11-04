@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { EventEmitter } from 'node:events'
 import request from 'supertest'
+import { notificationStreamEventsSentTotal } from '../src/observability/metrics.js'
 import { createExternalNotificationsRouter } from '../src/routes/external/notifications.routes.js'
 
 const streamState = vi.hoisted(() => ({
@@ -108,7 +109,36 @@ function approvalUpdated(index: number) {
   }
 }
 
-describe('external notification stream authority checks per heartbeat', () => {
+type StreamFrame = { type: string; id?: string; reason?: string }
+
+function parseFrames(text: string): StreamFrame[] {
+  return text
+    .split('\n')
+    .filter(line => line.length > 0)
+    .map(line => JSON.parse(line) as StreamFrame)
+}
+
+// Witness that a batch reached the response: the route counts every written
+// approval.updated frame on the sent-events metric.
+function writtenApprovalUpdates(): number {
+  return vi
+    .mocked(notificationStreamEventsSentTotal.inc)
+    .mock.calls.filter(
+      ([labels]) =>
+        (labels as { event_type?: string } | undefined)?.event_type === 'approval.updated'
+    ).length
+}
+
+function openStream() {
+  const responsePromise = request(makeApp()).get('/external/notifications/stream')
+  const result: { response?: { status: number; text: string } } = {}
+  void responsePromise.then(response => {
+    result.response = { status: response.status, text: response.text }
+  })
+  return { responsePromise, result }
+}
+
+describe('external notification stream authority checks per heartbeat and per batch', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     streamState.listener = null
@@ -127,20 +157,18 @@ describe('external notification stream authority checks per heartbeat', () => {
     })
   })
 
-  it('observes authority only at startup and once per heartbeat, then closes on the next heartbeat after denial', async () => {
-    const responsePromise = request(makeApp()).get('/external/notifications/stream')
-    let responseResult: { status: number; text: string } | undefined
-    void responsePromise.then(response => {
-      responseResult = { status: response.status, text: response.text }
-    })
+  it('observes authority at startup, once per heartbeat and once per non-empty batch, then closes on the next heartbeat after denial', async () => {
+    const { responsePromise, result } = openStream()
     await vi.waitFor(() =>
-      expect(streamState.listActive, JSON.stringify(responseResult)).toHaveBeenCalledOnce()
+      expect(streamState.listActive, JSON.stringify(result.response)).toHaveBeenCalledOnce()
     )
 
     for (const index of [1, 2, 3]) {
       streamState.pendingEvents.push(approvalUpdated(index))
       streamState.listener!.emit('notification')
-      await vi.waitFor(() => expect(streamState.pendingEvents).toHaveLength(0))
+      // Wait for the write, not only for the read: the batch observation runs
+      // between them, and the next event must start a batch of its own.
+      await vi.waitFor(() => expect(writtenApprovalUpdates()).toBe(index))
     }
 
     streamState.observer.mockResolvedValue({
@@ -150,10 +178,7 @@ describe('external notification stream authority checks per heartbeat', () => {
     const response = await responsePromise
 
     expect(response.status).toBe(200)
-    const frames = response.text
-      .split('\n')
-      .filter(line => line.length > 0)
-      .map(line => JSON.parse(line) as { type: string; id?: string; reason?: string })
+    const frames = parseFrames(response.text)
     const eventIds = frames
       .filter(frame => frame.type === 'approval.updated')
       .map(frame => frame.id)
@@ -163,8 +188,66 @@ describe('external notification stream authority checks per heartbeat', () => {
     expect(frames.at(-1)).toMatchObject({ type: 'stream.closing', reason: 'session_expired' })
     const heartbeatFrames = frames.filter(frame => frame.type === 'heartbeat').length
     // Three startup observations (before headers, before and after the
-    // snapshot read), one per heartbeat that wrote a frame, and one for the
-    // heartbeat that closed the stream. Delivering the three events adds none.
+    // snapshot read), one per heartbeat that wrote a frame, one for the
+    // heartbeat that closed the stream, and one per non-empty batch (three
+    // single-event batches).
+    expect(streamState.observer).toHaveBeenCalledTimes(3 + heartbeatFrames + 1 + 3)
+  })
+
+  it('observes authority once for a batch of several events, not once per event', async () => {
+    const { responsePromise, result } = openStream()
+    await vi.waitFor(() =>
+      expect(streamState.listActive, JSON.stringify(result.response)).toHaveBeenCalledOnce()
+    )
+
+    streamState.pendingEvents.push(approvalUpdated(1), approvalUpdated(2), approvalUpdated(3))
+    streamState.listener!.emit('notification')
+    await vi.waitFor(() => expect(writtenApprovalUpdates()).toBe(3))
+
+    streamState.observer.mockResolvedValue({
+      status: 'denied',
+      reason: 'v2_session_revoked_or_changed',
+    })
+    const response = await responsePromise
+
+    const frames = parseFrames(response.text)
+    expect(
+      frames.filter(frame => frame.type === 'approval.updated').map(frame => frame.id)
+    ).toEqual(['event-1', 'event-2', 'event-3'])
+    expect(frames.at(-1)).toMatchObject({ type: 'stream.closing', reason: 'session_expired' })
+    const heartbeatFrames = frames.filter(frame => frame.type === 'heartbeat').length
+    // One observation covers the whole three-event batch.
+    expect(streamState.observer).toHaveBeenCalledTimes(3 + heartbeatFrames + 1 + 1)
+  })
+
+  it('makes no authority observation for a wake-up whose read finds no events', async () => {
+    const { responsePromise, result } = openStream()
+    await vi.waitFor(() =>
+      expect(streamState.listActive, JSON.stringify(result.response)).toHaveBeenCalledOnce()
+    )
+
+    for (let wakeUp = 0; wakeUp < 3; wakeUp += 1) {
+      const readsBefore = streamState.listEvents.mock.calls.length
+      streamState.listener!.emit('notification')
+      await vi.waitFor(() =>
+        expect(streamState.listEvents.mock.calls.length).toBeGreaterThan(readsBefore)
+      )
+    }
+
+    streamState.observer.mockResolvedValue({
+      status: 'denied',
+      reason: 'v2_session_revoked_or_changed',
+    })
+    const response = await responsePromise
+
+    const frames = parseFrames(response.text)
+    expect(frames.at(-1)).toMatchObject({ type: 'stream.closing', reason: 'session_expired' })
+    // Witness: the empty reads did happen (the post-snapshot catch-up plus at
+    // least the three wake-ups).
+    expect(streamState.listEvents.mock.calls.length).toBeGreaterThanOrEqual(4)
+    expect(frames.some(frame => frame.type === 'approval.updated')).toBe(false)
+    const heartbeatFrames = frames.filter(frame => frame.type === 'heartbeat').length
+    // Startup, heartbeats and the closing heartbeat only: empty reads add none.
     expect(streamState.observer).toHaveBeenCalledTimes(3 + heartbeatFrames + 1)
   })
 })
