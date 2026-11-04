@@ -37,7 +37,7 @@
 # format. The quoted class is decided byte by byte with index() for that same
 # reason: a POSIX control-character class is locale-dependent, and musl's
 # regexec reports no match at all for a whole value holding an invalid UTF-8
-# sequence, which let a control byte through when it followed one (B1). On a
+# sequence, which let a control byte through when it followed one. On a
 # rejection it prints the file, the variable name and the context, never the
 # value or the template line, and exits 1.
 

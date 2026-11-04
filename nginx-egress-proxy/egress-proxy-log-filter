@@ -1,4 +1,4 @@
-# Keep credentials the egress proxy forwards out of NGINX's error log (#1240).
+# Keep credentials the egress proxy forwards out of NGINX's error log.
 #
 # Two rules run on every record, message rule first.
 #

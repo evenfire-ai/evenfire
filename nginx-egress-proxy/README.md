@@ -149,6 +149,11 @@ valueTemplate) can appear in it. The script writes that file mode 0600 inside a
 0700 mktemp directory that the EXIT trap removes; a SIGKILL can leave the
 directory behind.
 
+The operator preflight judges values, not hostnames, so it does not cover the
+host rule: an internal hostname with a trailing dot (for example
+`sentry.svc.cluster.local.`) is refused by the new HCC after it removes the
+trailing root-label dots, even when the value preflight reports `CLEAN`.
+
 Every enabled HCC-managed remote proxy rolls once at the paired upgrade. One
 Deployment replace carries the image, the exec liveness probe, the template
 digest annotation, `proxy_ignore_headers`, and the env after the reserved-name
@@ -264,6 +269,8 @@ Before NGINX starts, `egress-proxy-entrypoint` copies each mounted top-level
 that copy. `mktemp -d` creates `/tmp/egress-proxy-templates.XXXXXX` mode 0700
 with a new name on every start, so a restart that keeps the writable layer
 never reads the previous copy. Each file is one `cat` into a regular file.
+Only top-level `*.template` files are copied into the snapshot and rendered;
+this image does not render `*.stream-template` templates.
 `umask 077` covers only that copy and is restored afterwards. Before the check,
 the entrypoint assigns and exports all six envsubst knobs:
 `NGINX_ENVSUBST_TEMPLATE_DIR` (the snapshot),

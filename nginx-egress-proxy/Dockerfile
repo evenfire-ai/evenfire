@@ -4,7 +4,7 @@ FROM nginx:1.30.6-alpine@sha256:c59d1f8b1e0e42da75be973424cd72e23f7f8adfb54e982f
 # The upstream nginx image provides the /etc/nginx/templates envsubst entrypoint
 # behavior HCC relies on; this layer makes it safe to run as the nginx user.
 #
-# This layer also carries the stderr log filter (#1240). The remote baseUrl
+# This layer also carries the stderr log filter. The remote baseUrl
 # query can hold a credential, and NGINX prints the full upstream URL in every
 # upstream error line; it also quotes the upstream's response-header bytes in
 # four upstream messages, where an upstream can echo any credential the proxy

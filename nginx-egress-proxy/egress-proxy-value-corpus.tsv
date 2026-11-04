@@ -1,4 +1,4 @@
-# egress-proxy-value-corpus: reviewed value-class table for #1240.
+# egress-proxy-value-corpus: reviewed value-class table.
 #
 # One data row per case: context<TAB>label<TAB>value<TAB>expected.
 # `value` holds only [A-Za-z0-9] and three-digit octal escapes (\ooo):

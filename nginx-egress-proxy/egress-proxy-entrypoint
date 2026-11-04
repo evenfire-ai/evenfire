@@ -29,7 +29,7 @@
 #      overwrite the six knobs assigned in job 0. No HCC template references
 #      NGINX_LOCAL_RESOLVERS, and HCC rejects both resolver names as
 #      placeholders.
-#   2. It routes only NGINX's stderr through the log filter (#1240). The remote
+#   2. It routes only NGINX's stderr through the log filter. The remote
 #      baseUrl query may carry a credential and NGINX prints the full upstream
 #      URL in every upstream error line; NGINX also quotes the upstream's
 #      response-header bytes in four upstream messages, where an upstream can

@@ -233,6 +233,9 @@ preflight is also stricter for a referenced literal that contains `$(`: HCC
 judges the literal as written and does not emulate Kubernetes' expansion of
 `$(NAME)`, so that literal is refused.
 
+An empty resolved authHeader value is within the quoted class; NGINX omits a
+header set to an empty value (`proxy_set_header X ""`), so that header is not sent.
+
 Query class, character by character. "Encode as" is the operator's
 remediation. The proxy never encodes a value.
 
@@ -378,10 +381,13 @@ both with the same message. The message starts `<n> value(s) would be refused
 by the egress-proxy image; the existing ConfigMap and Deployment are
 unchanged:` and ends with a pointer to this page's "Value classes" section. Each entry has one of these shapes:
 `query placeholder ${API_KEY} (Secret "remote-creds" key "api-key")`,
-`authHeader X-Api-Key placeholder ${TOKEN} (Secret "remote-creds" key
-"token")`, `query placeholder ${K} (literal value from spec.env or
-spec.envMapping)`, or `env var ${scheme} collides with an NGINX variable the
-template uses`. Entries are sorted by context, placeholder, and header, at most
+`authHeader X-Api-Key placeholder ${TOKEN} (quoted value; Secret "remote-creds" key "token")`,
+`query placeholder ${K} (literal value from spec.env or spec.envMapping)`,
+`authHeader X-Api-Key placeholder ${TOKEN} (quoted value; literal value from spec.env or spec.envMapping)`,
+or `env var ${scheme} collides with an NGINX variable the template uses`.
+A query or authHeader entry for a literal holding `$(NAME)` carries the
+suffix `; a $(NAME) dependent env reference is not expanded by HCC, store the final value`
+inside the parentheses, after the source. Entries are sorted by context, placeholder, and header, at most
 10, then `and <m> more`. The message names the placeholder, the source, and
 the context. It never includes value bytes, the value's length, or the
 offending character. When `spec.envSecret` is set and the Secret exists with
