@@ -1233,6 +1233,10 @@ export function createAdminResourcesRouter(
         plural === 'communicationchannels' && ccSecretRefName
           ? await captureSecretForCleanup(gateway, ccSecretRefName, ns, log)
           : null
+      // An unreadable credential Secret stops the delete before anything is
+      // removed (502/503 secret_read_failed). Deleting the CR anyway would
+      // orphan a live credential for as long as an RBAC drift lasts.
+      if (ccSecretCleanup?.status === 'read-failed') throw ccSecretCleanup.error
 
       const deleted = await gateway.deleteResource(plural, name, ns)
       if (plural === 'contexts') {

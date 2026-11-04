@@ -25,6 +25,7 @@
  *     ordering in mcp-host/src/config/configStore.ts:listSecretEntries).
  */
 import { K8sGateway } from '../k8s.js'
+import { readResourceOrNull, readSecretOrNull } from './secretRead.js'
 
 const PER_HOST_ENV_SECRET_PREFIX = 'host-'
 const PER_HOST_ENV_SECRET_SUFFIX = '-env-secret'
@@ -97,28 +98,35 @@ export async function loadHostSecretEntries(
     }
   }
 
+  // Only a 404 means "nothing to redact from this source". Any other read
+  // failure throws (SecretReadError / ResourceReadError, 502/503): skipping it
+  // would serve the artifact with that Secret's values unredacted.
+
   // Per-Host env Secret. May not exist if the operator hasn't set any
   // secret-typed env vars on this Host — that's fine, treat as empty.
-  try {
-    const envSecret = (await gateway.getSecret(
-      `${PER_HOST_ENV_SECRET_PREFIX}${hostRef}${PER_HOST_ENV_SECRET_SUFFIX}`,
-      hostsNamespace
-    )) as K8sSecret | null
-    addEntries(collectEntries(envSecret))
-  } catch {
-    /* 404 / forbidden — skip */
-  }
+  const envSecret = (await readSecretOrNull(
+    gateway,
+    `${PER_HOST_ENV_SECRET_PREFIX}${hostRef}${PER_HOST_ENV_SECRET_SUFFIX}`,
+    hostsNamespace
+  )) as K8sSecret | null
+  addEntries(collectEntries(envSecret))
 
   // LLM provider Secret via Host.spec.secretRef. Resolve the Host CRD first.
-  try {
-    const host = (await gateway.getResource('hosts', hostRef, hostsNamespace)) as HostCRD
-    const llmSecretName = host?.spec?.secretRef
-    if (llmSecretName) {
-      const llmSecret = (await gateway.getSecret(llmSecretName, hostsNamespace)) as K8sSecret | null
-      addEntries(collectEntries(llmSecret))
-    }
-  } catch {
-    /* Host not found / Secret not found — skip */
+  const host = (await readResourceOrNull(
+    gateway,
+    'hosts',
+    'Host',
+    hostRef,
+    hostsNamespace
+  )) as HostCRD | null
+  const llmSecretName = host?.spec?.secretRef
+  if (llmSecretName) {
+    const llmSecret = (await readSecretOrNull(
+      gateway,
+      llmSecretName,
+      hostsNamespace
+    )) as K8sSecret | null
+    addEntries(collectEntries(llmSecret))
   }
 
   // Sort longest-first so a longer secret that contains a shorter one is

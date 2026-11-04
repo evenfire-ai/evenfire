@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
+import { controlApiForbiddenRead, expectRejectedSecretRead } from './helpers/secretReadFailure.js'
 import { MockGateway } from './mockGateway.js'
 
 function writeSummary(body: unknown) {
@@ -405,7 +407,7 @@ describe('routes/secrets', () => {
             data: {},
           }
         }
-        throw new Error('not found')
+        throw Object.assign(new Error('not found'), { statusCode: 404 })
       })
       const app = express()
       app.use(express.json())
@@ -607,7 +609,7 @@ describe('routes/secrets', () => {
             data: {},
           }
         }
-        throw new Error('not found')
+        throw Object.assign(new Error('not found'), { statusCode: 404 })
       })
       const app = express()
       app.use(express.json())
@@ -670,10 +672,12 @@ describe('routes/secrets', () => {
       app.use(express.json())
       app.use(createAdminSecretsRouter(gateway as never))
 
-      await request(app)
+      const res = await request(app)
         .put('/admin/recipe-secrets')
         .send({ name: 'ghost', data: { TOKEN: 'x' } })
         .expect(404)
+      expect(gateway.getSecret).toHaveBeenCalledWith('ghost', 'sandbox-recipes')
+      expect(res.body.error).toBe('Recipe secret not found')
       expect(gateway.updateSecret).not.toHaveBeenCalled()
     })
 
@@ -694,31 +698,34 @@ describe('routes/secrets', () => {
       app.use(express.json())
       app.use(createAdminSecretsRouter(gateway as never))
 
-      await request(app).delete('/admin/recipe-secrets/ghost').expect(404)
+      const res = await request(app).delete('/admin/recipe-secrets/ghost').expect(404)
+      expect(gateway.getSecret).toHaveBeenCalledWith('ghost', 'sandbox-recipes')
+      expect(res.body.error).toBe('Recipe secret not found')
       expect(gateway.deleteSecret).not.toHaveBeenCalled()
     })
 
     // Only a 404 may become "Recipe secret not found". Any other read failure
     // must propagate: the identity fence below cannot compare against a live
     // object it never saw, and a 404 here would tell the caller the Secret is
-    // gone while it still exists on the cluster. The propagated error keeps
-    // its own status: a 4xx from the apiserver is forwarded as that 4xx (the
-    // Express default handler and `clerumErrorHandler` both read
-    // `.statusCode`), while a 5xx or status-less failure surfaces as 500.
+    // gone while it still exists on the cluster. readSecretOrNull maps an
+    // apiserver 401/403 to a SecretReadError 502 and any other HTTP status to
+    // 503 (both read from `.status` by the Express default handler and by
+    // `clerumErrorHandler`); a status-less, non-transport error is rethrown
+    // unchanged and surfaces as 500.
     it.each([
       {
         label: 'forbidden',
         error: Object.assign(new Error('forbidden'), { statusCode: 403 }),
-        expectedStatus: 403,
+        expectedStatus: 502,
       },
       {
         label: 'apiserver outage',
         error: Object.assign(new Error('boom'), { code: 500 }),
-        expectedStatus: 500,
+        expectedStatus: 503,
       },
       {
-        label: 'status-less transport error',
-        error: new Error('socket hang up'),
+        label: 'status-less non-transport error',
+        error: new Error('unexpected gateway failure'),
         expectedStatus: 500,
       },
     ])('DELETE fails loud when the live read fails with a $label', async testCase => {
@@ -743,11 +750,16 @@ describe('routes/secrets', () => {
       {
         label: 'forbidden',
         error: Object.assign(new Error('forbidden'), { statusCode: 403 }),
-        expectedStatus: 403,
+        expectedStatus: 502,
       },
       {
         label: 'apiserver outage',
         error: Object.assign(new Error('boom'), { code: 500 }),
+        expectedStatus: 503,
+      },
+      {
+        label: 'status-less non-transport error',
+        error: new Error('unexpected gateway failure'),
         expectedStatus: 500,
       },
     ])('PUT fails loud when the live read fails with a $label', async testCase => {
@@ -765,6 +777,92 @@ describe('routes/secrets', () => {
       expect(res.body).not.toMatchObject({ error: 'Recipe secret not found' })
       expect(gateway.getSecret).toHaveBeenCalledOnce()
       expect(gateway.updateSecret).not.toHaveBeenCalled()
+    })
+
+    // Only a 404 means "no such Secret". A 403 on control-api's own read must
+    // reach the operator as a 502 naming control-api's access — never as a
+    // false "Recipe secret not found", and never as a forwarded 403.
+    function createRecipeAppWithReadError(gateway: ReturnType<typeof createRecipeGateway>) {
+      gateway.getSecret.mockRejectedValue(controlApiForbiddenRead('r1', 'sandbox-recipes'))
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminSecretsRouter(gateway as never))
+      app.use(clerumErrorHandler)
+      return app
+    }
+
+    it('DELETE with a 403 on the Secret read returns 502, not a false not-found', async () => {
+      const gateway = createRecipeGateway()
+      const app = createRecipeAppWithReadError(gateway)
+      vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+      vi.spyOn(rootLogger, 'error').mockImplementation(() => {})
+
+      try {
+        const res = await request(app).delete('/admin/recipe-secrets/r1')
+        expect(gateway.getSecret).toHaveBeenCalledWith('r1', 'sandbox-recipes')
+        expectRejectedSecretRead(res, 'r1', 'sandbox-recipes')
+        expect(gateway.deleteSecret).not.toHaveBeenCalled()
+      } finally {
+        vi.restoreAllMocks()
+      }
+    })
+
+    it('PUT with a 403 on the Secret read returns 502, not a false not-found', async () => {
+      const gateway = createRecipeGateway()
+      const app = createRecipeAppWithReadError(gateway)
+      vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+      vi.spyOn(rootLogger, 'error').mockImplementation(() => {})
+
+      try {
+        const res = await request(app)
+          .put('/admin/recipe-secrets')
+          .send({ name: 'r1', data: { API_KEY: 'new-api' } })
+        expect(gateway.getSecret).toHaveBeenCalledWith('r1', 'sandbox-recipes')
+        expectRejectedSecretRead(res, 'r1', 'sandbox-recipes')
+        expect(gateway.updateSecret).not.toHaveBeenCalled()
+      } finally {
+        vi.restoreAllMocks()
+      }
+    })
+
+    // A refused connection has no HTTP status. The route must answer 503
+    // "could not be reached" through the production handler, and the
+    // node-fetch message (which carries the apiserver URL) stays out of it.
+    it('DELETE with a refused connection on the Secret read returns 503', async () => {
+      const gateway = createRecipeGateway()
+      gateway.getSecret.mockRejectedValueOnce(
+        Object.assign(new Error('request to https://10.96.0.1/api failed, reason: connect'), {
+          name: 'FetchError',
+          type: 'system',
+          code: 'ECONNREFUSED',
+          errno: 'ECONNREFUSED',
+        })
+      )
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminSecretsRouter(gateway as never))
+      app.use(clerumErrorHandler)
+      vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+
+      try {
+        const res = await request(app)
+          .delete('/admin/recipe-secrets/r1')
+          .send({ uid: 'uid-r1', resourceVersion: '1' })
+
+        expect(gateway.getSecret).toHaveBeenCalledWith('r1', 'sandbox-recipes')
+        expect(res.status).toBe(503)
+        expect(Object.keys(res.body).sort()).toEqual(['correlationId', 'error', 'message'])
+        expect(res.body).toMatchObject({
+          error: 'secret_read_failed',
+          message:
+            'control-api could not read Secret "r1" in namespace "sandbox-recipes": ' +
+            'the Kubernetes API server could not be reached.',
+        })
+        expect(JSON.stringify(res.body)).not.toContain('10.96.0.1')
+        expect(gateway.deleteSecret).not.toHaveBeenCalled()
+      } finally {
+        vi.restoreAllMocks()
+      }
     })
   })
 
@@ -966,7 +1064,7 @@ describe('routes/secrets — PUT merge semantics', () => {
   ) {
     const gateway = createGateway()
     gateway.getSecret.mockImplementation(async () => {
-      if (existing === null) throw new Error('not found')
+      if (existing === null) throw Object.assign(new Error('not found'), { statusCode: 404 })
       return {
         metadata: {
           name: 'chatllm-api-keys',
@@ -1062,11 +1160,63 @@ describe('routes/secrets — PUT merge semantics', () => {
 
   it('merge:true on a missing secret returns 404', async () => {
     const { app, gateway } = makeMergeApp(null)
-    await request(app)
+    const res = await request(app)
       .put('/admin/secrets')
       .send({ name: 'chatllm-api-keys', merge: true, stringData: { 'openai-api-key': 'sk' } })
       .expect(404)
+    expect(gateway.getSecret).toHaveBeenCalledWith('chatllm-api-keys', 'mcp-host')
+    expect(res.body.error).toBe('Secret not found')
     expect(gateway.updateSecret).not.toHaveBeenCalled()
+  })
+
+  it('full-replace on a missing secret (404 read) still writes', async () => {
+    const { app, gateway } = makeMergeApp(null)
+    await request(app)
+      .put('/admin/secrets')
+      .send({ name: 'chatllm-api-keys', stringData: { 'openai-api-key': 'sk' } })
+      .expect(200)
+    expect(gateway.getSecret).toHaveBeenCalledWith('chatllm-api-keys', 'mcp-host')
+    expect(gateway.updateSecret).toHaveBeenCalledOnce()
+  })
+
+  it('merge:true with a 403 on the Secret read returns 502, not a false 404', async () => {
+    const { app, gateway } = makeMergeApp(null)
+    gateway.getSecret.mockRejectedValue(controlApiForbiddenRead('chatllm-api-keys', 'mcp-host'))
+    app.use(clerumErrorHandler)
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    vi.spyOn(rootLogger, 'error').mockImplementation(() => {})
+
+    try {
+      const res = await request(app)
+        .put('/admin/secrets')
+        .send({ name: 'chatllm-api-keys', merge: true, stringData: { 'openai-api-key': 'sk' } })
+      expect(gateway.getSecret).toHaveBeenCalledWith('chatllm-api-keys', 'mcp-host')
+      expectRejectedSecretRead(res, 'chatllm-api-keys', 'mcp-host')
+      expect(gateway.updateSecret).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  // The full-replace path reads the existing Secret to apply the LLM slot gate.
+  // A rejected read must stop the write, not skip the gate.
+  it('full-replace with a 403 on the Secret read returns 502 and writes nothing', async () => {
+    const { app, gateway } = makeMergeApp(null)
+    gateway.getSecret.mockRejectedValue(controlApiForbiddenRead('chatllm-api-keys', 'mcp-host'))
+    app.use(clerumErrorHandler)
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    vi.spyOn(rootLogger, 'error').mockImplementation(() => {})
+
+    try {
+      const res = await request(app)
+        .put('/admin/secrets')
+        .send({ name: 'chatllm-api-keys', stringData: { 'openai-api-key': 'sk' } })
+      expect(gateway.getSecret).toHaveBeenCalledWith('chatllm-api-keys', 'mcp-host')
+      expectRejectedSecretRead(res, 'chatllm-api-keys', 'mcp-host')
+      expect(gateway.updateSecret).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 
   it('without the flag the update stays full-replace (data passed through, not merged)', async () => {

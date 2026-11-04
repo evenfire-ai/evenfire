@@ -6,6 +6,7 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { RFC1123_RE } from '../../http/rfc1123.js'
 import { K8sGateway } from '../../k8s.js'
 import { loadHostSecretEntries, redactArtifactBuffer } from '../../services/artifactRedactor.js'
+import { ResourceReadError, SecretReadError } from '../../services/secretRead.js'
 
 const BASE = '/admin/hosts'
 const BINARY_ARTIFACT_FORMATS = new Set(['doc', 'docx', 'pdf', 'ppt', 'pptx', 'xls', 'xlsx', 'zip'])
@@ -291,6 +292,9 @@ export function createAdminHostArtifactsRouter(gateway: K8sGateway): Router {
         res.setHeader('Content-Length', String(redactedBuffer.length))
         res.send(redactedBuffer)
       } catch (err) {
+        // The redaction source could not be read: the global handler answers
+        // 502/503 with a fixed message, and the artifact is never sent.
+        if (err instanceof SecretReadError || err instanceof ResourceReadError) throw err
         if (isPodNotFoundError(err)) {
           sendPodNotFound(res, hostRef, podNameFromError(err, hostRef))
           return
