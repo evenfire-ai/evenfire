@@ -580,6 +580,12 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     })
     expect(realRepeatedLogout.status).toBe(401)
     expect(realRepeatedLogout.body).toMatchObject({ error: { code: 'invalid_session' } })
+    const fixtureRepeatedLogout = await requestFixture('POST', '/external/auth/session/logout', {
+      sessionToken: fixtureToken,
+    })
+    expect(fixtureRepeatedLogout.status).toBe(realRepeatedLogout.status)
+    expect(bodyShape(fixtureRepeatedLogout.body)).toEqual(bodyShape(realRepeatedLogout.body))
+    expect(fixtureRepeatedLogout.body).toMatchObject({ error: { code: 'invalid_session' } })
 
     await expectParity(
       'GET',

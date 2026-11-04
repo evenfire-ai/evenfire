@@ -509,7 +509,19 @@ export async function createRecoveryControlApi({
       metrics.logoutRequests.push({ hasToken: Boolean(token) })
       const session = sessions.get(token)
       if (!session || session.revoked) {
-        return { status: 401, body: { error: 'Unauthorized' } }
+        // Same public envelope as the real producer (sendPublicApiError): External REST
+        // treats only invalid_session as an already-revoked logout.
+        return {
+          status: 401,
+          body: {
+            error: {
+              code: 'invalid_session',
+              message: 'The session is not valid.',
+              correlationId: `fixture-logout-${metrics.logoutRequests.length}`,
+              retryable: false,
+            },
+          },
+        }
       }
       session.revoked = true
       return { status: 200, body: { revoked: true } }
