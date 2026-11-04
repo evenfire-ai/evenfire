@@ -474,16 +474,32 @@ describe('routes/profile', () => {
     ).expect(403)
   })
 
-  it('lets a live team member rename a team, as in dev', async () => {
+  it('refuses a live member and lets a live admin rename a team', async () => {
     svc.renameTeam.mockResolvedValue({ id: 't1', name: 'Renamed' })
     const app = express()
     app.use(express.json())
     mountInternalRoutes(app, accessCatalogGateway())
 
+    // The live team row says `member` (default fixture), so the live role
+    // check refuses before the writer.
+    await withInternalServiceAuthAndUserSession(
+      request(app).put('/external/teams/t1/name').send({ name: 'Renamed' })
+    ).expect(403)
+    // Witness: the refusal came after the live membership lookup.
+    expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledWith(
+      'u1',
+      't1',
+      expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
+    )
+    expect(svc.renameTeam).not.toHaveBeenCalled()
+
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue({
+      teamId: 't1',
+      role: 'admin',
+    })
     await withInternalServiceAuthAndUserSession(
       request(app).put('/external/teams/t1/name').send({ name: 'Renamed' })
     ).expect(200, { id: 't1', name: 'Renamed' })
-
     expect(svc.renameTeam).toHaveBeenCalledWith('t1', 'Renamed')
 
     // Witness: a removed member is still refused by the live team matcher and

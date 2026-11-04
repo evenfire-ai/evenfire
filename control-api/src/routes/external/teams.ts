@@ -82,6 +82,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.put(
     '/external/teams/:teamId/name',
     requireExternalTeamParamMatch(),
+    requireExternalRole(['admin']),
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
       try {
