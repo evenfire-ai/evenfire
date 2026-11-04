@@ -281,14 +281,22 @@ describe('minikube rpc-proxy ConfigMap', () => {
     return Number(match[1])
   }
 
-  it('sets an artifact download timeout sized for the 250 MB cap', () => {
+  it("sets an artifact download timeout sized for the Host's 50 MiB artifact cap", () => {
     const timeoutMs = value('RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS')
-    const maxMb = value('RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB')
-    expect(maxMb).toBe(250)
-    // 60 s would need 4.2 MB/s to move 250 MB; the overlay must not.
-    const requiredMbPerSecond = maxMb / (timeoutMs / 1000)
-    expect(requiredMbPerSecond).toBeLessThanOrEqual(1)
-    expect(timeoutMs).toBeGreaterThan(60_000)
+    // The Host refuses larger files, so its cap, not RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB,
+    // is the largest body this timer has to move.
+    const artifactPaths = readFileSync(
+      resolve(__dirname, '../../../mcp-host/src/workflow/artifactPaths.ts'),
+      'utf8'
+    )
+    const cap = artifactPaths.match(/^export const MAX_ARTIFACT_BYTES = (\d+) \* 1024 \* 1024$/m)
+    if (!cap) throw new Error('MAX_ARTIFACT_BYTES (in MiB) is missing from artifactPaths.ts')
+    const hostCapMiB = Number(cap[1])
+    expect(hostCapMiB).toBe(50)
+    // The built-in 100 s default moves 50 MiB at 0.5 MiB/s; the overlay must not ask
+    // for a faster transfer than that.
+    const requiredMiBPerSecond = hostCapMiB / (timeoutMs / 1000)
+    expect(requiredMiBPerSecond).toBeLessThanOrEqual(0.5)
     // ...and it must load through the same parser as production.
     expect(parsePositiveIntMs('RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS', String(timeoutMs))).toBe(
       timeoutMs
