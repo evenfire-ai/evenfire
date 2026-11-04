@@ -406,7 +406,7 @@ describe('McpServerReconciler remote egress proxy', () => {
         const names = (egressProxy.env ?? []).map((entry: any) => entry.name)
         expect(names).not.toContain('KUBECONFIG')
         expect(() => remoteConfig(reconciler, forbidden)).toThrow(
-          'query placeholder ${KUBECONFIG} is not declared'
+          'query placeholder ${KUBECONFIG} names a forbidden env var; use another name'
         )
       } finally {
         warn.mockRestore()
@@ -2008,9 +2008,10 @@ describe('McpServerReconciler remote egress proxy', () => {
       // Witness: the reconcile reached the resource sync (it read the Secret).
       expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
       expect(status.message).toContain('Resource sync failed')
-      expect(status.message).toContain('query placeholder ${KUBECONFIG} is not declared')
-      // The status the operator reads names the strip, not just the absence.
-      expect(status.message).toContain('stripped as forbidden')
+      // The status the operator reads names the forbidden class, not just an
+      // absence: spec.env strips the name, and the render rejects the
+      // placeholder for naming it.
+      expect(status.message).toContain('query placeholder ${KUBECONFIG} names a forbidden env var')
       expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
       expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
       expect(status.message).not.toContain(marker)

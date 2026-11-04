@@ -1,6 +1,6 @@
 /**
- * Byte-wise value classes of the egress-proxy template contract (issue #1240,
- * docs/crds/mcpserver.md "Value classes").
+ * Byte-wise value classes of the egress-proxy template contract
+ * (docs/crds/mcpserver.md "Value classes").
  *
  * The image check (nginx-egress-proxy/egress-proxy-template-check), the HCC
  * preflight (reconciler.ts, EgressProxyValuesValid) and the operator script

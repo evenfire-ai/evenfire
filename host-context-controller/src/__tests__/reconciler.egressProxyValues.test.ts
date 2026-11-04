@@ -16,7 +16,7 @@ import { McpServerReconciler } from '../reconciler'
 import type { McpServerCRD } from '../types'
 
 /**
- * Egress-proxy value preflight (spec §4/§8.5, issue #1240): PF-1..PF-16 and
+ * Egress-proxy value preflight (spec §4/§8.5, issue #1240): PF-1..PF-20 and
  * PF-11b. Every negative assertion carries a witness that the path ran: the
  * Secret read, the condition write, the `False` condition or the block's
  * `Ready=False` patch.
@@ -600,7 +600,7 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
     ).toEqual([])
   })
 
-  it('PF-13: a static CRD error keeps the Resource sync failed path and writes no condition', async () => {
+  it('PF-13: a static CRD error keeps the Resource sync failed path and writes no EgressProxyValuesValid condition', async () => {
     const server = cloneServer(API_KEY_SERVER, {
       remote: {
         baseUrl: 'https://api.example.com/mcp?apikey=' + '$' + '{UNDECLARED_KEY}',
@@ -623,6 +623,17 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
         condition => condition.type === 'EgressProxyValuesValid'
       )
     ).toEqual([])
+    // Witness: the failure still reaches the CRD as Ready=False, the write a
+    // stale verdict would be retired on (PF-19 covers the retirement itself).
+    expect(allPatchedConditions(customApi)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'Ready',
+          status: 'False',
+          reason: 'ResourceSyncFailed',
+        }),
+      ])
+    )
   })
 
   it('PF-14: a referenced literal holding $(NAME) is blocked by design', async () => {
@@ -794,5 +805,152 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
       message: 'Not reconciled yet',
       authoritative: false,
     })
+  })
+
+  it('PF-18: a query placeholder naming a forbidden env var is rejected even when declared only via envSecret', () => {
+    const forbiddenNames = [
+      'LD_PRELOAD',
+      'LD_LIBRARY_PATH',
+      'PATH',
+      'NODE_OPTIONS',
+      'PYTHONPATH',
+      'JAVA_TOOL_OPTIONS',
+      'KUBECONFIG',
+      'KUBERNETES_SERVICE_HOST',
+      'KUBERNETES_SERVICE_PORT',
+    ]
+    expect(forbiddenNames).toHaveLength(9)
+    for (const name of forbiddenNames) {
+      const server = cloneServer(API_KEY_SERVER, {
+        remote: { baseUrl: 'https://api.example.com/mcp?q=' + '$' + `{${name}}` },
+        envSecret: {
+          name: SECRET_NAME,
+          keys: [{ secretKey: 'k', envVar: name }],
+        },
+      })
+      expect(
+        () => (reconciler as any).buildNginxConfigMap(server),
+        `${name} declared via envSecret must still be rejected`
+      ).toThrow(`query placeholder \${${name}} names a forbidden env var; use another name`)
+    }
+    // Life witness: the same shape with an allowed name declared only via
+    // envSecret renders, so the rejections above come from the name class and
+    // not from the envSecret declaration channel.
+    expect(
+      (reconciler as any).buildNginxConfigMap(API_KEY_SERVER).data['default.conf.template']
+    ).toContain('proxy_pass https://api.example.com/mcp?apikey=${API_KEY};')
+  })
+
+  it('PF-19: a render failure retires a stale True through the Ready write', async () => {
+    let persisted: any[] = [
+      {
+        type: 'Ready',
+        status: 'True',
+        reason: 'ReconcileSuccess',
+        message: 'Deployment created',
+        lastTransitionTime: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        type: 'EgressProxyValuesValid',
+        status: 'True',
+        reason: 'ValuesWithinClass',
+        message: 'Every value the egress-proxy template substitutes is within its class',
+        lastTransitionTime: '2026-01-01T00:00:00.000Z',
+      },
+    ]
+    customApi.getNamespacedCustomObjectStatus.mockImplementation(async () => ({
+      metadata: { resourceVersion: '13' },
+      status: { conditions: persisted },
+    }))
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }: any) => {
+      persisted = conditionsFromStatusPatch(body)
+      return {}
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'alpha%2Fbeta' })
+    )
+    // Editing baseUrl to an undeclared placeholder makes the render throw
+    // before any verdict exists for this spec.
+    const server = cloneServer(API_KEY_SERVER, {
+      remote: {
+        baseUrl: 'https://api.example.com/mcp?apikey=' + '$' + '{UNDECLARED_KEY}',
+      },
+    })
+
+    await reconciler.reconcile(server)
+
+    // Life witness: the reconcile reached the resource sync and the render
+    // failed there (it read the Secret and recorded the sync failure).
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledOnce()
+    expect(reconciler.getStatus(server).message).toContain('Resource sync failed')
+    expect(reconciler.getStatus(server).message).toContain(
+      'query placeholder ${UNDECLARED_KEY} is not declared'
+    )
+    expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    // The retirement rides the Ready write: the resulting conditions hold the
+    // new Ready=False and no EgressProxyValuesValid at all, instead of the
+    // stale True the earlier spec persisted.
+    expect(persisted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'Ready',
+          status: 'False',
+          reason: 'ResourceSyncFailed',
+        }),
+      ])
+    )
+    expect(persisted.map(condition => condition.type)).not.toContain('EgressProxyValuesValid')
+  })
+
+  it('PF-20: a WRC-owned server retires a stale False through its Ready write', async () => {
+    let persisted: any[] = [
+      {
+        type: 'Ready',
+        status: 'False',
+        reason: 'EgressProxyValuesInvalid',
+        message: 'stale refusal from before WRC ownership',
+        lastTransitionTime: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        type: 'EgressProxyValuesValid',
+        status: 'False',
+        reason: 'ValueOutsideClass',
+        message: 'stale refusal from before WRC ownership',
+        lastTransitionTime: '2026-01-01T00:00:00.000Z',
+      },
+    ]
+    customApi.getNamespacedCustomObjectStatus.mockImplementation(async () => ({
+      metadata: { resourceVersion: '14' },
+      status: { conditions: persisted },
+    }))
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }: any) => {
+      persisted = conditionsFromStatusPatch(body)
+      return {}
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'alpha%2Fbeta' })
+    )
+    const server = cloneServer(API_KEY_SERVER, { managed: false })
+
+    await reconciler.reconcile(server)
+
+    // Life witness: the WRC-owned path ran (Secret validated, discovery
+    // status registered, no HCC runtime written).
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledOnce()
+    expect(reconciler.getStatus(server).message).toContain('WRC-owned runtime registered')
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    // Ready=True no longer sits next to the stale False: the WRC Ready write
+    // retired it.
+    expect(persisted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'Ready',
+          status: 'True',
+          reason: 'WrcOwnedRuntimeRegistered',
+        }),
+      ])
+    )
+    expect(persisted.map(condition => condition.type)).not.toContain('EgressProxyValuesValid')
   })
 })

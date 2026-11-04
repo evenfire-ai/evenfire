@@ -125,7 +125,7 @@ export type McpServerMutationOptions = {
 }
 
 /**
- * One reason the egress-proxy value preflight refuses a value (issue #1240).
+ * One reason the egress-proxy value preflight refuses a value.
  * Only names, sources and contexts travel here: never a value byte, a value
  * length or an offending character.
  */
@@ -1191,10 +1191,21 @@ export class McpServerReconciler {
     // query. The comparison is exact and case-sensitive, like envsubst's.
     // Declared means present in the env this reconcile gives the egress-proxy
     // container: envMapping, spec.env after the forbidden names are stripped,
-    // spec.envSecret and the authHeaders backfill. Reserved egress-proxy env
-    // names are rejected before the declared check.
+    // spec.envSecret and the authHeaders backfill. Forbidden and reserved
+    // egress-proxy env names are rejected before the declared check: only
+    // spec.env is stripped of forbidden names, so a forbidden name declared
+    // through spec.envSecret would otherwise pass as declared and envsubst
+    // would send a runtime value the CRD must never own (a loader, interpreter
+    // or cluster-access knob) upstream as a query value. Exact-case, like the
+    // authHeader guard.
     const declaredEnvNames = this.egressProxyEnvNames(server)
     for (const match of upstreamSearch.matchAll(QUERY_PLACEHOLDER_RE)) {
+      if (FORBIDDEN_CRD_ENV_NAMES.has(match[1])) {
+        throw new Error(
+          `remote.baseUrl query placeholder \${${match[1]}} names a forbidden env var; ` +
+            'use another name'
+        )
+      }
       if (RESERVED_PROXY_ENV.has(match[1])) {
         throw new Error(
           `remote.baseUrl query placeholder \${${match[1]}} names a reserved egress-proxy env var; ` +
@@ -1378,7 +1389,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   }
 
   /**
-   * Egress-proxy value preflight (issue #1240): every value the rendered
+   * Egress-proxy value preflight: every value the rendered
    * template substitutes must be within the class of the NGINX context it lands
    * in. It blocks instead of warning because a write would replace the
    * Deployment, the new pod would refuse to start on the same value, mcp-host
@@ -1440,6 +1451,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       }
     }
 
+    // Invariant the fixed-occurrence subtraction below depends on: each query
+    // placeholder and each kept authHeader reference appears exactly once in
+    // the rendered template today (the query rides the single proxy_pass line
+    // and each header its single proxy_set_header line). Only then does
+    // template - query - header count exactly the references that sit in the
+    // fixed template text. Rendering a placeholder twice would break the
+    // subtraction and this counting would have to become positional.
     const violations: EgressProxyValueViolation[] = []
     for (const [name, entry] of effective) {
       const source = this.describeEnvSource(entry)
@@ -1506,7 +1524,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   /**
    * A referenced literal that holds `$(NAME)`: Kubernetes expands dependent
    * environment references at container start, and HCC judges the literal as
-   * written, so the value is refused for its `$` (blocked by design, m1).
+   * written, so the value is refused for its `$`. That refusal is by design:
+   * HCC never expands the reference itself, so the operator must store the
+   * final value instead.
    */
   private isDependentEnvLiteral(entry: k8s.V1EnvVar): boolean {
     return entry.valueFrom === undefined && (entry.value ?? '').includes('$(')
@@ -1953,7 +1973,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const healthCheckPort = server.spec.healthCheck?.port
 
     // --- Env vars ---
-    // One warning per stripped (name, source) pair per reconcile (m5): the
+    // One warning per stripped (name, source) pair per reconcile: the
     // ConfigMap render derives the same names silently through
     // egressProxyEnvNames, so the report belongs to the Deployment build.
     const reportedStrips = new Set<string>()
@@ -2051,7 +2071,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         template: {
           metadata: {
             labels,
-            // Issue #223: rotating a credential changes its digest, while a
+            // Rotating a credential changes its digest, while a
             // remote template change changes the NGINX digest. Either change
             // alters the PodTemplate and rolls the container. Empty revisions
             // are omitted so they cannot become drift fields.
@@ -2925,10 +2945,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       // out-of-class rotations that violate the same placeholder and key
       // produce a byte-identical reason+message, so reusing the prior stamp
       // would make a genuinely fresh refusal look stale and the UI would wait
-      // out its whole 180s budget instead of failing (issue #1240, PR #1243
-      // residuals). Restamping on every block write is self-terminating: the
-      // patch changes status only, and HCC already declines to reconcile a
-      // status-only MODIFIED event (mcpServerSafety.isMcpServerStatusOnlyUpdate),
+      // out its whole 180s budget instead of failing. Restamping on every
+      // block write is self-terminating: the patch changes status only, and
+      // HCC already declines to reconcile a status-only MODIFIED event
+      // (mcpServerSafety.isMcpServerStatusOnlyUpdate),
       // so it cannot re-enter this path. Scoped to this type+status: no other
       // condition type changes behavior.
       const refreshEgressProxyRefusalTime =
@@ -3291,11 +3311,33 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       await this.ensureDeployment(server, secretResult.revision, isCurrent, nginxConfigRevision)
     } catch (err) {
       if (!isCurrent()) return false
+      const message = `Resource sync failed: ${err instanceof Error ? err.message : String(err)}`
       this.setStatus(server.name, {
         deployed: false,
         ready: false,
-        message: `Resource sync failed: ${err instanceof Error ? err.message : String(err)}`,
+        message,
       })
+      if (this.isRemote(server)) {
+        // This spec produced no egress-proxy verdict (its render or preflight
+        // is what failed, or the sync stopped before either could vouch for
+        // the current values), so an EgressProxyValuesValid=True persisted by
+        // an earlier spec no longer describes this server. Retire it on the
+        // Ready write, the same pattern the disabled and non-remote success
+        // writes use: a condition this reconcile no longer owns is removed,
+        // never parked at Unknown.
+        await this.writeStatusCondition(
+          server,
+          {
+            type: 'Ready',
+            status: 'False',
+            reason: 'ResourceSyncFailed',
+            message,
+          },
+          isCurrent,
+          undefined,
+          ['EgressProxyValuesValid']
+        )
+      }
       return false
     }
 
@@ -3491,7 +3533,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         reason: WRC_OWNED_RUNTIME_READY_REASON,
         message: 'WRC-owned runtime registered for HCC discovery',
       },
-      isCurrent
+      isCurrent,
+      undefined,
+      // WRC owns the runtime, so HCC never runs the egress-proxy preflight
+      // for this server: retire any verdict persisted from before WRC
+      // ownership instead of leaving it next to Ready=True. Same retire list
+      // the managed non-remote success write passes.
+      ['EgressProxyValuesValid']
     )
     return isCurrent()
   }
