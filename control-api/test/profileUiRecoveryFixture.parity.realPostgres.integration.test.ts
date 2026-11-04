@@ -573,6 +573,14 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     expect(bodyShape(fixtureRevoked.body)).toEqual(bodyShape(realRevoked.body))
     expect(realRevoked.status).toBe(401)
 
+    // External REST treats only this envelope as an already-revoked logout; a bare 401 is
+    // its own service credential being rejected.
+    const realRepeatedLogout = await requestReal('POST', '/external/auth/session/logout', {
+      sessionToken: realToken,
+    })
+    expect(realRepeatedLogout.status).toBe(401)
+    expect(realRepeatedLogout.body).toMatchObject({ error: { code: 'invalid_session' } })
+
     await expectParity(
       'GET',
       `/external/users/${fixtureModule.RECOVERY_USERS.logout.id}/me?teamId=`

@@ -47,6 +47,23 @@ function isRejectedGoogleIdentity(error: unknown): error is ControlApiError {
   return 'error' in error.body && error.body.error === 'Unauthorized'
 }
 
+// control-api answers an invalid, expired or revoked session on logout with its public
+// `invalid_session` envelope. A bare 401 on that route comes from the edge's own service
+// credential, so it does not prove that the session is already gone.
+function isInvalidSessionLogoutDenial(error: unknown): error is ControlApiError {
+  if (!isControlApiStatus(error, 401) || !error.body || typeof error.body !== 'object') {
+    return false
+  }
+  if (!('error' in error.body)) return false
+  const envelope = error.body.error
+  return (
+    typeof envelope === 'object' &&
+    envelope !== null &&
+    'code' in envelope &&
+    envelope.code === 'invalid_session'
+  )
+}
+
 type LoginResponse = {
   token: string
   me: unknown
@@ -181,7 +198,7 @@ export function createAuthRouter(): Router {
       clearProfileSessionCookie(req, res)
       res.status(200).json({ ok: true })
     } catch (error) {
-      if (isControlApiStatus(error, 401)) {
+      if (isInvalidSessionLogoutDenial(error)) {
         clearProfileSessionCookie(req, res)
         res.status(200).json({ ok: true })
         return

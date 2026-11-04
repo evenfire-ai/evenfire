@@ -331,7 +331,14 @@ describe('routes/auth password-login', () => {
 
   it('keeps already-invalid logout idempotent and expires its cookie', async () => {
     authServiceMock.logoutUserSession.mockRejectedValueOnce(
-      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+      new ControlApiError('private upstream detail', 401, {
+        error: {
+          code: 'invalid_session',
+          message: 'The session is not valid.',
+          correlationId: 'synthetic-correlation',
+          retryable: false,
+        },
+      })
     )
 
     const response = await request(buildApp())
@@ -344,6 +351,25 @@ describe('routes/auth password-login', () => {
     expect(String(response.headers['set-cookie'])).toContain(
       'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
     )
+    expect(authServiceMock.logoutUserSession).toHaveBeenCalledWith('opaque-session')
+  })
+
+  it('does not confirm logout when control-api rejects the edge service credential', async () => {
+    authServiceMock.logoutUserSession.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+    )
+
+    const response = await request(buildApp())
+      .post('/api/v1/auth/logout')
+      .set('Cookie', 'profile_session=opaque-session')
+      .set('x-forwarded-proto', 'https')
+      .expect(401)
+
+    expect(response.body.ok).toBeUndefined()
+    expect(String(response.headers['set-cookie'])).toContain(
+      'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+    )
+    expect(authServiceMock.logoutUserSession).toHaveBeenCalledWith('opaque-session')
   })
 
   it('does not call remote revocation or set a cookie when no session is present', async () => {
