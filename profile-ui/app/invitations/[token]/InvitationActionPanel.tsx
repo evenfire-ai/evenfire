@@ -26,10 +26,16 @@ type InvitationActionPanelProps =
         event: MouseEvent<HTMLButtonElement> | PointerEvent<HTMLButtonElement>
       ) => void
     }
-  | { mode: 'password-updated'; loginHref: string }
+  | {
+      mode: 'password-updated'
+      loginHref: string
+      downloadUrl: string
+      isPasswordReset: boolean
+    }
   | {
       mode: 'used'
       loginHref: string
+      downloadUrl: string
       isPasswordReset: boolean
       forgotPasswordHref: string
     }
@@ -126,6 +132,11 @@ export function InvitationActionPanel(props: InvitationActionPanelProps) {
           <a className="cu-btn cu-btn--primary" href={props.loginHref}>
             Sign in
           </a>
+          {!props.isPasswordReset ? (
+            <a className="cu-btn" href={props.downloadUrl} target="_blank" rel="noreferrer">
+              Download Evenfire
+            </a>
+          ) : null}
         </div>
       )
     case 'used':
@@ -136,6 +147,9 @@ export function InvitationActionPanel(props: InvitationActionPanelProps) {
           </p>
           <a className="cu-btn cu-btn--primary" href={props.loginHref}>
             Sign in
+          </a>
+          <a className="cu-btn" href={props.downloadUrl} target="_blank" rel="noreferrer">
+            Download Evenfire
           </a>
           {props.isPasswordReset ? (
             <a className="cu-btn" href={props.forgotPasswordHref}>

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
+import { EVENFIRE_RELEASES_URL } from '@constants/api'
 import { PROFILE_ROUTES } from '@constants/routes'
 import type { InvitationPreview } from '@/app/types/api'
 import { InvitationClient } from '../../invitations/[token]/InvitationClient'
@@ -72,6 +73,9 @@ describe('InvitationClient entry states', () => {
     expect(screen.getByRole('link', { name: 'Sign in' }).getAttribute('href')).toBe(
       PROFILE_ROUTES.login({ email: baseInvitation.email })
     )
+    const downloadLink = screen.getByRole('link', { name: 'Download Evenfire' })
+    expect(downloadLink.getAttribute('href')).toBe(EVENFIRE_RELEASES_URL)
+    expect(downloadLink.getAttribute('target')).toBe('_blank')
     expect(screen.queryByRole('link', { name: 'Request a new recovery link' })).toBeNull()
   })
 
@@ -94,6 +98,9 @@ describe('InvitationClient entry states', () => {
     expect(
       screen.getByRole('link', { name: 'Request a new recovery link' }).getAttribute('href')
     ).toBe(PROFILE_ROUTES.forgotPassword({ email: baseInvitation.email }))
+    const downloadLink = screen.getByRole('link', { name: 'Download Evenfire' })
+    expect(downloadLink.getAttribute('href')).toBe(EVENFIRE_RELEASES_URL)
+    expect(downloadLink.getAttribute('target')).toBe('_blank')
   })
 
   it('shows the not-found state for an invented token without a password form', () => {
