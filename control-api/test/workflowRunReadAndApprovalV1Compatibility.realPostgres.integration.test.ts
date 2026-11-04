@@ -438,11 +438,11 @@ describeRealPostgres('PR334 S2 workflow run visibility and V1 approval replay', 
       session: {} as never,
     }
 
-    await expect(reader.canCallerReadWorkflowRun(caller, ownerRow)).resolves.toBe(true)
+    expect(reader.canCallerReadWorkflowRun(caller, ownerRow)).toBe(true)
     await expect(reader.canCallerReadWorkflowRunWithApprovalTarget(caller, ownerRow)).resolves.toBe(
       true
     )
-    await expect(reader.canCallerReadWorkflowRun(caller, otherRow)).resolves.toBe(false)
+    expect(reader.canCallerReadWorkflowRun(caller, otherRow)).toBe(false)
     await expect(reader.canCallerReadWorkflowRunWithApprovalTarget(caller, otherRow)).resolves.toBe(
       false
     )
