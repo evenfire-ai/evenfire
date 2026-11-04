@@ -836,9 +836,10 @@ async function writeArtifact(
   ) {
     throw new Error(`unsafe artifact filename: ${name}`)
   }
-  // Checked before the open below: 'w' truncates an existing artifact, so a body that
-  // writeFile would reject must not reach it (writeJson of a value that JSON.stringify
-  // turns into undefined, or writeMarkdown of a non-string).
+  // Artifact bodies are strings only, as the SDK types them: a boxed string, a byte array
+  // or any other non-string is rejected, including writeJson of a value that
+  // JSON.stringify turns into undefined. Checked before the open below, because 'w'
+  // truncates an existing artifact.
   if (typeof body !== 'string') {
     throw new Error(`artifact body must be a string: ${name}`)
   }
