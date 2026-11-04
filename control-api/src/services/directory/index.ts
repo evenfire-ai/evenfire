@@ -31,7 +31,6 @@ export {
 } from './teams.js'
 
 export {
-  acceptInvitation,
   acceptInvitationById,
   acceptInvitationForEmail,
   acceptInvitationForEmailInTransaction,

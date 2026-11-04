@@ -791,59 +791,6 @@ export async function getInvitationByToken(token: string) {
   return invitationResponse(invitation, user, teams)
 }
 
-export async function acceptInvitation(
-  userId: string,
-  email: string,
-  token: string,
-  invitationId: string
-) {
-  return withTransaction(async db => {
-    const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId, {
-      lock: true,
-    })
-    if (!invitation) {
-      return { error: 'not_found' as const }
-    }
-    if (invitation.email.toLowerCase() !== email.toLowerCase()) {
-      return { error: 'forbidden' as const }
-    }
-    if (invitation.purpose === 'password_reset') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'revoked' || invitation.status === 'draft') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
-      return { error: 'expired' as const }
-    }
-
-    const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
-    if (user.id !== userId) {
-      return { error: 'forbidden' as const }
-    }
-
-    const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
-    if (acceptance && 'error' in acceptance) return acceptance
-    const replay = acceptance?.replay === true
-
-    const refreshed = await getInvitationRecordByToken(db, invitation.token)
-    if (!refreshed) {
-      return { error: 'not_found' as const }
-    }
-    const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
-    const payload = invitationResponse(refreshed, user, teams)
-
-    return {
-      data: {
-        accepted: true as const,
-        ...payload,
-        ...(replay ? { replay: true as const } : {}),
-      },
-    }
-  })
-}
-
 export async function acceptInvitationForEmailInTransaction(
   db: Pick<DbClient, 'query'>,
   email: string,

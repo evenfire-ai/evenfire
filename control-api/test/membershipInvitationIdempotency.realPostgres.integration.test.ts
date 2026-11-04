@@ -3,7 +3,6 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import {
-  acceptInvitation,
   acceptInvitationById,
   acceptInvitationForEmail,
   resendManagedInvitationForUser,
@@ -294,32 +293,6 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     expect(rejectedState.accepted_at?.toISOString()).toBe(acceptedAt.toISOString())
   })
 
-  it('refuses an explicit user id that does not own the invitation email', async () => {
-    const invitation = await createInvitation({ label: 'explicit-user' })
-    const owner = await holder.pool.query<{ id: string }>(
-      `INSERT INTO users(email, name)
-       VALUES ($1, 'Invitation Owner')
-       RETURNING id::text AS id`,
-      [invitation.email]
-    )
-    const ownerId = owner.rows[0]!.id
-
-    await expect(
-      acceptInvitation(randomUUID(), invitation.email, invitation.token, invitation.id)
-    ).resolves.toEqual({ error: 'forbidden' })
-    await expect(invitationState(invitation.id)).resolves.toMatchObject({
-      status: 'pending',
-      accepted_user_id: null,
-    })
-
-    await expect(
-      acceptInvitation(ownerId, invitation.email, invitation.token, invitation.id)
-    ).resolves.toMatchObject({ data: { accepted: true, userId: ownerId } })
-    await expect(memberships(ownerId)).resolves.toEqual([
-      { team_id: teamId, role: 'member', status: 'active' },
-    ])
-  })
-
   it('refuses an accepted invitation recorded against a different user id', async () => {
     const invitation = await createInvitation({ label: 'accepted-other-owner' })
     const other = await holder.pool.query<{ id: string }>(
@@ -346,7 +319,7 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     )
 
     await expect(
-      acceptInvitation(ownerId, invitation.email, invitation.token, invitation.id)
+      acceptInvitationForEmail(invitation.email, invitation.token, invitation.id)
     ).resolves.toEqual({ error: 'forbidden' })
     await expect(invitationState(invitation.id)).resolves.toMatchObject({
       status: 'accepted',
@@ -362,16 +335,22 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
       email: invitation.email,
     })
     await expect(
-      acceptInvitation(ownerId, invitation.email, witnessInvitation.token, witnessInvitation.id)
+      acceptInvitationForEmail(invitation.email, witnessInvitation.token, witnessInvitation.id)
     ).resolves.toMatchObject({ data: { accepted: true, userId: ownerId } })
     await expect(memberships(ownerId)).resolves.toEqual([
       { team_id: teamId, role: 'member', status: 'active' },
     ])
 
+    // The FK clears accepted_user_id when the previous owner is deleted; the
+    // legacy backfill then records the current owner as a replay.
     await holder.pool.query(`DELETE FROM users WHERE id = $1`, [previousOwnerId])
-    await expect(
-      acceptInvitation(ownerId, invitation.email, invitation.token, invitation.id)
-    ).resolves.toMatchObject({ data: { accepted: true, userId: ownerId } })
+    await expect(invitationState(invitation.id)).resolves.toMatchObject({
+      status: 'accepted',
+      accepted_user_id: null,
+    })
+    await expect(acceptInvitationById(invitation.email, invitation.id)).resolves.toMatchObject({
+      data: { accepted: true, userId: ownerId, replay: true },
+    })
     await expect(invitationState(invitation.id)).resolves.toMatchObject({
       accepted_user_id: ownerId,
     })
