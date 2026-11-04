@@ -88,3 +88,34 @@ export function admissionDenialMessage(err: unknown): string | null {
   if (message === null || message.includes(SERVICE_ACCOUNT_SUBJECT)) return null
   return ADMISSION_DENIAL.test(message) ? message : null
 }
+
+/**
+ * HTTP status of a Kubernetes client or service-layer error, or null.
+ *
+ * Kept in this dependency-free module so that pure classifiers such as
+ * services/secretRead.ts do not load @kubernetes/client-node; control-ui tests
+ * import modules that depend on them without control-api's node_modules.
+ */
+export function extractHttpStatus(err: unknown): number | null {
+  if (!err || typeof err !== 'object') return null
+  const maybe = err as {
+    statusCode?: number
+    code?: number | string
+    httpStatus?: number
+    response?: { statusCode?: number; status?: number }
+  }
+  if (typeof maybe.statusCode === 'number') return maybe.statusCode
+  if (typeof maybe.code === 'number') return maybe.code
+  if (typeof maybe.code === 'string' && /^\d+$/.test(maybe.code)) return Number(maybe.code)
+  if (typeof (maybe as { status?: unknown }).status === 'number') {
+    return (maybe as { status: number }).status
+  }
+  // `.httpStatus` mirrors extractK8sError's chain above: the service-layer
+  // K8sNotFoundError/K8sConflictError expose their status only there, so read
+  // it after code/statusCode or their 404/409 collapses to null.
+  if (typeof maybe.httpStatus === 'number') return maybe.httpStatus
+  if (maybe.response && typeof maybe.response.statusCode === 'number')
+    return maybe.response.statusCode
+  if (maybe.response && typeof maybe.response.status === 'number') return maybe.response.status
+  return null
+}

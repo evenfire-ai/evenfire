@@ -1,5 +1,4 @@
-import { extractK8sError } from '../http/k8sError.js'
-import { extractHttpStatus } from '../k8s.js'
+import { extractHttpStatus, extractK8sError } from '../http/k8sError.js'
 
 /**
  * Status and client message for an apiserver call that control-api could not
