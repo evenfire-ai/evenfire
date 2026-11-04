@@ -4129,6 +4129,11 @@ export class HostReconciler {
           revalidate?.()
           if (existing.spec?.volumeName) return
           pvc.metadata!.resourceVersion = existing.metadata?.resourceVersion
+          // Keep what other controllers wrote on the Pending claim: the scheduler's
+          // volume.kubernetes.io/selected-node, the provisioner annotations and the
+          // kubernetes.io/pvc-protection finalizer. buildPvc has none of them.
+          pvc.metadata!.annotations = existing.metadata?.annotations
+          pvc.metadata!.finalizers = existing.metadata?.finalizers
           // With no class configured the claim defers to the cluster: the
           // DefaultStorageClass admission plugin sets the class on create, or the
           // PV controller sets it later. The apiserver allows only nil -> class on

@@ -2870,4 +2870,62 @@ describe('Host workspace PVC StorageClass from config', () => {
     expect(body.spec.storageClassName).toBe('standard-rwo')
     expect(body.metadata.resourceVersion).toBe('7')
   })
+
+  it.each([undefined, 'standard-rwo'])(
+    'keeps the live annotations and finalizers when it replaces an unbound PVC (configured class %s)',
+    async configuredClass => {
+      const original = config.hostWorkspaceStorageClassName
+      onTestFinished(() => {
+        config.hostWorkspaceStorageClassName = original
+      })
+      config.hostWorkspaceStorageClassName = configuredClass
+      const { reconciler, coreApi } = createReconciler()
+      // A Pending claim as other controllers leave it: the scheduler's
+      // selected-node, the provisioner annotation and the pvc-protection finalizer.
+      const liveAnnotations = {
+        'volume.kubernetes.io/selected-node': 'node-a',
+        'volume.kubernetes.io/storage-provisioner': 'pd.csi.storage.gke.io',
+      }
+      const live: k8s.V1PersistentVolumeClaim = {
+        metadata: {
+          name: 'alpha-host-workspace',
+          namespace: 'mcp-host',
+          uid: 'pvc-uid',
+          labels: {
+            'clerum.io/host': 'alpha-host',
+            'clerum.io/managed-by': 'host-context-controller',
+          },
+          annotations: { ...liveAnnotations },
+          finalizers: ['kubernetes.io/pvc-protection'],
+          resourceVersion: '7',
+        },
+        spec: {
+          storageClassName: 'standard-rwo',
+          volumeMode: 'Filesystem',
+          accessModes: ['ReadWriteOnce'],
+          resources: { requests: { storage: '10Gi' } },
+        },
+        status: { phase: 'Pending' },
+      }
+      coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
+      coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(
+        async ({ body }: { body: k8s.V1PersistentVolumeClaim }) => body
+      )
+
+      await expect(
+        (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
+      ).resolves.toBe(true)
+      // Liveness witness: the unbound-claim replace ran.
+      expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+      const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
+      expect(body.metadata.annotations).toEqual(liveAnnotations)
+      expect(body.metadata.finalizers).toEqual(['kubernetes.io/pvc-protection'])
+      expect(body.metadata.labels).toEqual({
+        'clerum.io/managed-by': 'host-context-controller',
+        'clerum.io/host': 'alpha-host',
+      })
+      expect(body.metadata.resourceVersion).toBe('7')
+      expect(body.spec.storageClassName).toBe('standard-rwo')
+    }
+  )
 })
