@@ -256,12 +256,18 @@ ran below about 0.83 MiB/s, while the new 100 s lowers the floor to 0.5 MiB/s.
 When the Host has to be woken first, the transfer is also bounded by the
 remaining request hold, which is at most 48 s (`MAX_REQUEST_HOLD_MS`).
 
-rpc-proxy sends nothing to the client until it has the whole body, so a larger
-value only helps when the client reaches rpc-proxy without a proxy that times
-out the origin. Behind Cloudflare, the origin read timeout (125 s by default)
-ends a longer transfer with an HTTP 524 while rpc-proxy keeps reading. Keep the
-value below your edge's timeout. Confirming the timeout of the operated zones is
-tracked in #1309.
+rpc-proxy sends nothing to the client until it has the whole body, so the edge
+waits for three phases in a row: the Host lookup against control-api and the
+Host's response headers, each bounded by `RPC_PROXY_UPSTREAM_TIMEOUT_MS` (8 s by
+default), and then this body timer. Behind Cloudflare, the origin read timeout
+(125 s by default) ends the request with an HTTP 524 when the three take longer,
+while rpc-proxy keeps reading. With the defaults the worst case is
+8 + 8 + 100 = 116 s. Keep twice `RPC_PROXY_UPSTREAM_TIMEOUT_MS` plus
+`RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` below your edge's timeout. If your
+`rpc-proxy-config` started as a copy of the minikube ConfigMap, as
+[the production guide](production.md) suggests, it sets `60000` and `300000`, a
+worst case of 420 s: lower both before you serve it behind an edge. Confirming
+the timeout of the operated zones is tracked in #1309.
 
 The six stream caps below keep their defaults, but an invalid value is now a
 startup error: anything that is not a positive integer (`abc`, `0`, `-1`, `1.5`,

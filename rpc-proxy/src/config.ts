@@ -244,15 +244,19 @@ export const config: Config = {
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
   // The Host refuses artifact files above 50 MiB (MAX_ARTIFACT_BYTES in
   // mcp-host/src/workflow/artifactPaths.ts) and checks that size before it redacts
-  // the file. Redaction can make the response slightly longer than the file
-  // (mcp-host/src/artifacts/artifactRedaction.ts), so with this default a file at the
-  // Host's cap can still be rejected here; a value below 50 rejects files the Host serves.
+  // the file. Redaction replaces every occurrence of a secret with a
+  // `[REDACTED:<name>]` marker (mcp-host/src/artifacts/artifactRedaction.ts), so the
+  // response can be longer than the file, and with this default a file at the Host's
+  // cap can still be rejected here; a value below 50 rejects files the Host serves.
   artifactDownloadMaxBytes: parseArtifactDownloadMaxBytes(
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB || '50'
   ),
   // rpc-proxy sends nothing to the client until the whole artifact body is buffered,
-  // so this default stays below the public edge's origin read timeout (Cloudflare's
-  // default is 125 s): a slow transfer then ends as rpc-proxy's own 504, not an edge 524.
+  // so the edge waits for the Host lookup and the Host's response headers (each bounded
+  // by upstreamTimeoutMs) and then for this body timer. With the default upstream
+  // timeout that is at most 8 + 8 + 100 = 116 s, below the public edge's origin read
+  // timeout (Cloudflare's default is 125 s): a slow transfer then ends as rpc-proxy's
+  // own 504, not an edge 524.
   artifactDownloadTimeoutMs: parsePositiveIntMs(
     'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS || '100000'
