@@ -75,11 +75,18 @@ describe('snippet runner startup Node permission check', () => {
   })
 
   it('starts on the pinned Node runtime with the real permission check', async () => {
+    // Spies through to the real spawnSync, so the check runs on the Node that runs the tests.
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    const spawnSync = vi.fn(actual.spawnSync)
+    vi.doMock('node:child_process', () => ({ ...actual, spawnSync }))
     const { createSnippetRunnerServer } = await import('../../../src/workflow/snippetRunnerServer')
 
     const server = createSnippetRunnerServer()
 
     expect(server).toBeInstanceOf(http.Server)
     expect(server.listening).toBe(false)
+    // Liveness witness: the real check ran once before the server was returned, and passed.
+    expect(spawnSync).toHaveBeenCalledOnce()
+    expect((spawnSync.mock.results[0].value as { status: number | null }).status).toBe(0)
   })
 })

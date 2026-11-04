@@ -300,6 +300,12 @@ describe('snippet runtime Node permission model', () => {
     const runtime = await loadCompiledSnippetRuntime()
     const outputDir = await makeOutputDir()
     vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_DIR', outputDir)
+    // The compiled runtime calls fork through the CommonJS child_process module, so a spy
+    // on that module object sees the real fork and its options; the call goes through.
+    const forkSpy = vi.spyOn(
+      nodeRequire('node:child_process') as typeof import('node:child_process'),
+      'fork'
+    )
 
     const response = await runtime.executeSnippetInWorker(
       snippetRequest("await sdk.artifacts.writeMarkdown('report.md', '# ok')\nreturn 'done'"),
@@ -323,7 +329,14 @@ describe('snippet runtime Node permission model', () => {
     await expect(fs.readFile(path.join(outputDir, 'report.md'), 'utf8')).resolves.toBe('# ok')
     // The fork above used these grants: the compiled runtime grants dist/, where the
     // worker that ships lives, not src/.
-    expect(runtime.buildPermissionArgs(outputDir)).toEqual([
+    expect(forkSpy).toHaveBeenCalledOnce()
+    const [workerPath, , options] = forkSpy.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { execArgv: string[] },
+    ]
+    expect(workerPath).toBe(path.join(DIST_ROOT, 'workflow', 'snippetWorker.js'))
+    expect(options.execArgv).toEqual([
       '--permission',
       `--allow-fs-read=${DIST_ROOT}`,
       `--allow-fs-read=${NODE_MODULES}`,
@@ -459,12 +472,14 @@ describe('snippet runtime Node permission model', () => {
     const [bin, args, options] = spawnSync.mock.calls[0] as unknown as [
       string,
       string[],
-      { timeout?: number },
+      { timeout?: number; stdio?: unknown },
     ]
     expect(bin).toBe(process.execPath)
     expect(args).toEqual([...buildPermissionArgs(outputDir), '-e', CHECK_SCRIPT])
     // A hung check is killed and reported through the status/signal error message.
     expect(options.timeout).toBe(10_000)
+    // stderr is captured, so a rejected flag's message can reach the startup error.
+    expect(options.stdio).toEqual(['ignore', 'ignore', 'pipe'])
     expect((spawnSync.mock.results[0].value as { status: number | null }).status).toBe(0)
   })
 
@@ -507,6 +522,29 @@ describe('snippet runtime Node permission model', () => {
       `snippet runner refuses to start: Node permission model check failed (status ${rejected.status}, signal ${rejected.signal}): ${firstStderrLine}`
     )
     expect(spawnSync).toHaveBeenCalledOnce()
+  })
+
+  it('throws when the runtime accepts the flags but process.permission is absent (status 3)', async () => {
+    // The check script exits 3 when the flags parse but the permission model is not active.
+    const spawnSync = await mockSpawnSync({
+      pid: 1,
+      output: [null, Buffer.alloc(0), Buffer.alloc(0)],
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      status: 3,
+      signal: null,
+    })
+    const { assertNodePermissionModel } = await import('../../../src/workflow/snippetRuntime')
+
+    const thrown = captureThrown(() => assertNodePermissionModel('/out'))
+
+    // Liveness witness: the check ran once; with an empty stderr the message comes from
+    // the status alone.
+    expect(spawnSync).toHaveBeenCalledOnce()
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toBe(
+      'snippet runner refuses to start: Node permission model check failed (status 3, signal null): '
+    )
   })
 
   it('names the launch error when the check process cannot be spawned', async () => {
