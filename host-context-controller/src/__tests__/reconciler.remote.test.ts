@@ -328,8 +328,8 @@ describe('McpServerReconciler remote egress proxy', () => {
       const conf = remoteConfig(reconciler, REMOTE_SERVER)
 
       // Bare envsubst name on purpose: the image exports NGINX_LOCAL_RESOLVERS
-      // from 15-local-resolvers.envsh, after the container-start template check,
-      // so the braced form would be refused there as an undefined reference.
+      // from 15-local-resolvers.envsh, and envsubst substitutes the bare form
+      // with the same value.
       expect(conf).toContain('resolver $NGINX_LOCAL_RESOLVERS ipv6=off;')
       expect(conf).not.toContain('$' + '{NGINX_LOCAL_RESOLVERS}')
       expect(conf).not.toMatch(/resolver[^;]*valid=/)
@@ -421,6 +421,39 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(message).toContain('${UNDECLARED_KEY}')
       expect(message).not.toContain(marker)
       expect(message).not.toContain('?m=')
+    })
+
+    it.each([['PATH'], ['KUBERNETES_SERVICE_HOST'], ['kubernetes_service_host']])(
+      'rejects a query placeholder declared only by a platform-owned envSecret name (%s)',
+      name => {
+        // An envSecret mapping does not make a platform-owned name safe: HCC
+        // still strips it from the container, so envsubst would fill the
+        // placeholder from the container's own environment and send it upstream.
+        const server = cloneServer(REMOTE_SERVER, {
+          remote: { baseUrl: `https://api.example.com/mcp?h=` + '$' + `{${name}}` },
+          envSecret: { name: 'remote-creds', keys: [{ secretKey: 'k', envVar: name }] },
+        })
+
+        expect(() => remoteConfig(reconciler, server)).toThrow(
+          `query placeholder \${${name}} is not declared`
+        )
+      }
+    )
+
+    it('renders a query placeholder declared by a legitimate envSecret name', () => {
+      // Positive witness: filtering platform-owned envSecret names must not
+      // drop an ordinary Secret-backed declaration.
+      const placeholder = '$' + '{REMOTE_API_KEY}'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?key=${placeholder}` },
+        envSecret: {
+          name: 'remote-creds',
+          keys: [{ secretKey: 'k', envVar: 'REMOTE_API_KEY' }],
+        },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain(`proxy_pass https://remote_upstream/mcp?key=${placeholder};`)
     })
 
     it('rejects a placeholder declared in a different case (A1.1)', () => {
@@ -802,7 +835,7 @@ describe('McpServerReconciler remote egress proxy', () => {
         warn.mockRestore()
       })
 
-      it('rejects a valueTemplate referencing a platform-owned or forbidden env name (V1 MINOR-1)', () => {
+      it('rejects a valueTemplate referencing a platform-owned or forbidden env name', () => {
         // `${NGINX_LOCAL_RESOLVERS}` would be resolved by envsubst from the
         // proxy container's environment (the image exports it there), and a
         // bare `$PATH` is read by NGINX from the container's environment.
@@ -1055,7 +1088,7 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(staticEntries).toEqual([{ name: 'STATIC_TOKEN', value: 'already-set' }])
     })
 
-    it('does not backfill platform-owned env names for authHeaders (V1 MINOR-1)', () => {
+    it('does not backfill platform-owned env names for authHeaders', () => {
       // The braced forms are what the backfill loop scans. A dropped header
       // must not leave PATH='' or a platform-owned resolver name behind.
       const { envSecret: _envSecret, ...specWithoutSecret } = REMOTE_SERVER.spec
@@ -1741,6 +1774,26 @@ describe('McpServerReconciler remote egress proxy', () => {
       }).toThrow('must not point to internal cluster services')
     })
 
+    it.each([
+      ['0x7f.0.0.1..'],
+      ['0x7f.0.0.1..:8443'],
+      ['0xa9fea9fe..'],
+      ['0xa.1..'],
+      ['0x7f.1..'],
+      ['0x08080808..'],
+      ['0X7F.0.0.1..'],
+      ['0x7f000001..'],
+      ['0x7f.0.0.1...'],
+    ])('rejects an IP-literal spelling the URL setter canonicalizes (H1) (%s)', host => {
+      // Stripping the trailing dots leaves a numeric spelling; assigning it
+      // back to parsed.hostname makes the URL parser canonicalize it to a
+      // dotted-decimal IPv4 address. The checks must run on that final value,
+      // not on the pre-setter string that was validated.
+      expect(() => {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://${host}/mcp`)
+      }).toThrow('must use a DNS hostname, not an IP address')
+    })
+
     it('should canonicalize a trailing dot on an external host before rendering (U10)', () => {
       const result = (reconciler as any).sanitizeRemoteUrl('https://API.EXAMPLE.COM./mcp')
 
@@ -2009,6 +2062,24 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
       expect(status.message).toContain('Resource sync failed')
       expect(status.message).toContain('query placeholder ${UNDECLARED_KEY} is not declared')
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(status.message).not.toContain(marker)
+    })
+
+    it('fails the reconcile without writing for an IP-literal host canonicalized by the URL setter (H1)', async () => {
+      const marker = 'zz-h1-marker'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://0xa9fea9fe../${marker}/mcp` },
+      })
+
+      await reconciler.reconcile(server)
+
+      const status = reconciler.getStatus(server.name)
+      // Witness: the reconcile reached the resource sync (it read the Secret).
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
+      expect(status.message).toContain('Resource sync failed')
+      expect(status.message).toContain('must use a DNS hostname, not an IP address')
       expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
       expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
       expect(status.message).not.toContain(marker)
