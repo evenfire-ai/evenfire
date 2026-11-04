@@ -2,7 +2,6 @@ import { NextFunction, Request, Response } from 'express'
 import { sendPublicApiError } from '../http/publicApiError.js'
 import { rootLogger } from '../observability/logger.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
-import type { AccessExecutionBudget } from '../services/access/accessExecutionBudget.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
 import {
   authenticateExternalUserSession,
@@ -60,9 +59,6 @@ export type ExternalAuthedRequest = Request & {
     teamId: string
     role: TeamRole
   }
-  // Retained until K9/K11 delete the /external/access routes and the budget
-  // module, which are its only remaining readers and writer.
-  accessExecutionBudget?: AccessExecutionBudget
 }
 
 function extractUserSessionToken(req: Request): string {

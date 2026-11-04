@@ -48,10 +48,6 @@ const policy = {
   issueV2: true,
   renewV2: true,
   switchCompatibility: true,
-  actionContextV2: false,
-  rpcDelegationV2: false,
-  desktopAllTeamMode: false,
-  profileV2Mode: false,
   minimumClientVersion: null,
   enforceMinimumClient: false,
 } as EffectiveUserAccessPolicy

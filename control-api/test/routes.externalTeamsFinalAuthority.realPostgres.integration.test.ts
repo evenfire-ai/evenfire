@@ -27,10 +27,6 @@ const runtimePolicy = vi.hoisted(() => ({
   issueV2: false,
   renewV2: false,
   switchCompatibility: true,
-  actionContextV2: false,
-  rpcDelegationV2: false,
-  desktopAllTeamMode: false,
-  profileV2Mode: false,
   minimumClientVersion: null,
   enforceMinimumClient: false,
 }))

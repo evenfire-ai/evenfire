@@ -15,11 +15,6 @@ function intent(overrides: Partial<ConfiguredUserAccessIntent> = {}): Configured
     legacyLifecycle: 'issue_and_accept',
     sessionV2Acceptance: true,
     sessionV2Issuance: false,
-    teamGfsMembershipAdmissionLimit: null,
-    actionContextV2: false,
-    rpcDelegationV2: false,
-    desktopAllTeamMode: false,
-    profileV2Mode: false,
     legacySwitchEndpoint: true,
     minimumClientVersion: null,
     minimumClientEnforcement: false,
@@ -37,12 +32,6 @@ function readiness(overrides: Partial<DeploymentReadiness> = {}): DeploymentRead
     legacyDrainAccepted: true,
     sessionV2Acceptance: 'ready',
     sessionV2Issuance: 'ready',
-    accessBudget: 'ready',
-    actionContext: 'ready',
-    rpcDelegationAllHops: 'ready',
-    desktop: 'ready',
-    explicitTeamAdapters: 'ready',
-    profile: 'ready',
     minimumClientEnforcement: 'ready',
     ...overrides,
   }
@@ -60,10 +49,6 @@ describe('central user-access rollout compiler', () => {
       issueV2: false,
       renewV2: false,
       switchCompatibility: true,
-      actionContextV2: false,
-      rpcDelegationV2: false,
-      desktopAllTeamMode: false,
-      profileV2Mode: false,
       enforceMinimumClient: false,
     })
   })
@@ -94,22 +79,6 @@ describe('central user-access rollout compiler', () => {
       'legacy_switch_requires_v1_issue_and_accept',
       intent({ legacyLifecycle: 'accept_only', sessionV2Issuance: true }),
     ],
-    ['rpc_v2_requires_action_context', intent({ rpcDelegationV2: true })],
-    ['desktop_mode_requires_v2_issuance', intent({ desktopAllTeamMode: true })],
-    [
-      'desktop_mode_requires_catalog_serving',
-      intent({
-        sessionV2Issuance: true,
-        actionContextV2: true,
-        rpcDelegationV2: true,
-        desktopAllTeamMode: true,
-      }),
-    ],
-    [
-      'profile_explicit_team_adapters_unavailable',
-      intent({ sessionV2Issuance: true, profileV2Mode: true }),
-      readiness({ explicitTeamAdapters: 'unavailable' }),
-    ],
     [
       'minimum_client_version_missing',
       intent({ sessionV2Issuance: true, minimumClientEnforcement: true }),
@@ -121,13 +90,10 @@ describe('central user-access rollout compiler', () => {
     )
   })
 
-  it('derives renewal and the gated flags only from ready dependencies', () => {
+  it('derives renewal and the minimum-client gate only from ready dependencies', () => {
     const policy = compileUserAccessPolicy(
       intent({
         sessionV2Issuance: true,
-        actionContextV2: true,
-        rpcDelegationV2: true,
-        profileV2Mode: true,
         minimumClientVersion: '2.3.0',
         minimumClientEnforcement: true,
       }),
@@ -136,9 +102,6 @@ describe('central user-access rollout compiler', () => {
 
     expect(policy).toMatchObject({
       renewV2: true,
-      actionContextV2: true,
-      rpcDelegationV2: true,
-      profileV2Mode: true,
       minimumClientVersion: '2.3.0',
       enforceMinimumClient: true,
     })
@@ -149,10 +112,6 @@ describe('central user-access rollout compiler', () => {
     const booleanKeys = [
       'sessionV2Acceptance',
       'sessionV2Issuance',
-      'actionContextV2',
-      'rpcDelegationV2',
-      'desktopAllTeamMode',
-      'profileV2Mode',
       'legacySwitchEndpoint',
       'minimumClientEnforcement',
     ] as const
@@ -163,7 +122,8 @@ describe('central user-access rollout compiler', () => {
       for (let mask = 0; mask < 1 << booleanKeys.length; mask += 1) {
         const configured = intent({
           legacyLifecycle,
-          minimumClientVersion: mask & (1 << 7) ? '2.0.0' : null,
+          minimumClientVersion:
+            mask & (1 << booleanKeys.indexOf('minimumClientEnforcement')) ? '2.0.0' : null,
         }) as Record<string, unknown>
         booleanKeys.forEach((key, index) => {
           configured[key] = Boolean(mask & (1 << index))
@@ -202,9 +162,23 @@ describe('central user-access rollout compiler', () => {
     expect(compareSemanticVersions('unbounded', '2.3.0')).toBeNull()
   })
 
-  it('keeps PR 1 action context unavailable even when configured', async () => {
+  it('compiles the runtime policy against the PR 1 deployment readiness', async () => {
+    await expect(resolveEffectiveUserAccessPolicy({ intent: intent() })).resolves.toMatchObject({
+      acceptV1: true,
+      acceptV2: true,
+      issueV2: false,
+    })
+    // Minimum-client enforcement is not deployed in PR 1, so configuring it stops startup.
     await expect(
-      resolveEffectiveUserAccessPolicy({ intent: intent({ actionContextV2: true }) })
-    ).rejects.toThrowError(new UserAccessPolicyConfigurationError('action_context_unavailable'))
+      resolveEffectiveUserAccessPolicy({
+        intent: intent({
+          sessionV2Issuance: true,
+          minimumClientVersion: '2.0.0',
+          minimumClientEnforcement: true,
+        }),
+      })
+    ).rejects.toThrowError(
+      new UserAccessPolicyConfigurationError('minimum_client_enforcement_unavailable')
+    )
   })
 })
