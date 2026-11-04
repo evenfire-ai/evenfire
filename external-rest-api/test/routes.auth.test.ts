@@ -322,7 +322,8 @@ describe('routes/auth password-login', () => {
       .set('x-forwarded-proto', 'https')
       .expect(200)
 
-    expect(response.body).toEqual({ ok: true })
+    expect(response.body).toEqual({ ok: true, sessionPresented: true })
+    expect(authServiceMock.logoutUserSession).toHaveBeenCalledWith('opaque-session')
     expect(String(response.headers['set-cookie'])).toContain(
       'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
     )
@@ -347,7 +348,7 @@ describe('routes/auth password-login', () => {
       .set('x-forwarded-proto', 'https')
       .expect(200)
 
-    expect(response.body).toEqual({ ok: true })
+    expect(response.body).toEqual({ ok: true, sessionPresented: true })
     expect(String(response.headers['set-cookie'])).toContain(
       'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
     )
@@ -372,10 +373,59 @@ describe('routes/auth password-login', () => {
     expect(authServiceMock.logoutUserSession).toHaveBeenCalledWith('opaque-session')
   })
 
+  it.each([
+    [401, { error: 'Unauthorized' }],
+    [429, { error: { code: 'rate_limited' } }],
+    [503, { error: { code: 'authority_unavailable' } }],
+  ] as const)(
+    'reports no presented session when a logout retry follows a failed logout (%s)',
+    async (status, body) => {
+      authServiceMock.loginWithPassword.mockResolvedValueOnce({
+        token: 'composed-session-token',
+        me: {
+          id: 'user-1',
+          email: 'user@example.invalid',
+          name: null,
+          picture: null,
+          teamId: null,
+          teamName: null,
+          role: 'member',
+        },
+      })
+      authServiceMock.logoutUserSession.mockRejectedValueOnce(
+        new ControlApiError('private upstream detail', status, body)
+      )
+      // No x-forwarded-proto: a Secure cookie would not travel over plain http in the agent's jar.
+      const agent = request.agent(buildApp())
+
+      const login = await agent
+        .post('/api/v1/auth/password-login')
+        .set('origin', 'http://localhost:3001')
+        .send({ email: 'user@example.invalid', password: 'synthetic-correct-password' })
+        .expect(200)
+      expect(String(login.headers['set-cookie'])).toContain(
+        'profile_session=composed-session-token'
+      )
+
+      const failed = await agent.post('/api/v1/auth/logout').expect(status)
+      // Send the retry before checking the failed answer's headers, so a kept cookie shows up
+      // as a retry that still presents a session rather than only as a missing header.
+      const retried = await agent.post('/api/v1/auth/logout').expect(200)
+
+      // The first logout carried the login cookie; the retry reached no session at all.
+      expect(authServiceMock.logoutUserSession.mock.calls).toEqual([['composed-session-token']])
+      expect(retried.body).toEqual({ ok: true, sessionPresented: false })
+      expect(failed.body.ok).toBeUndefined()
+      expect(String(failed.headers['set-cookie'])).toContain(
+        'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+      )
+    }
+  )
+
   it('does not call remote revocation or set a cookie when no session is present', async () => {
     const response = await request(buildApp()).post('/api/v1/auth/logout').expect(200)
 
-    expect(response.body).toEqual({ ok: true })
+    expect(response.body).toEqual({ ok: true, sessionPresented: false })
     expect(authServiceMock.logoutUserSession).not.toHaveBeenCalled()
     expect(String(response.headers['set-cookie'])).toContain(
       'Expires=Thu, 01 Jan 1970 00:00:00 GMT'

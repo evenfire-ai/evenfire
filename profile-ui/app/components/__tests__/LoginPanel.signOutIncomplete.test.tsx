@@ -4,13 +4,14 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { LoginPanel } from '@components/LoginPanel'
 
 const mocks = vi.hoisted(() => ({
-  authState: { signOutIncomplete: false, retrySignOut: vi.fn() },
+  authState: { signOutIncomplete: false, signOutPending: false, retrySignOut: vi.fn() },
 }))
 
 vi.mock('@components/AuthContext', () => ({
   useAuth: () => ({
     login: vi.fn(),
     signOutIncomplete: mocks.authState.signOutIncomplete,
+    signOutPending: mocks.authState.signOutPending,
     retrySignOut: mocks.authState.retrySignOut,
   }),
 }))
@@ -35,6 +36,7 @@ vi.mock('next/link', () => ({
 
 beforeEach(() => {
   mocks.authState.signOutIncomplete = false
+  mocks.authState.signOutPending = false
   mocks.authState.retrySignOut.mockReset()
 })
 
@@ -53,6 +55,20 @@ describe('LoginPanel incomplete sign-out banner', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry sign-out' }))
 
     expect(mocks.authState.retrySignOut).toHaveBeenCalledOnce()
+  })
+
+  it('disables the retry while a sign-out request is pending', () => {
+    mocks.authState.signOutIncomplete = true
+    mocks.authState.signOutPending = true
+
+    render(<LoginPanel />)
+
+    // Liveness: the banner and its retry button are on screen.
+    expect(screen.getByRole('alert')).toHaveTextContent(/sign-out is not complete/i)
+    const retry = screen.getByRole('button', { name: 'Retry sign-out' })
+    expect(retry).toBeDisabled()
+    fireEvent.click(retry)
+    expect(mocks.authState.retrySignOut).not.toHaveBeenCalled()
   })
 
   it('renders the ordinary login form when the sign-out completed', () => {

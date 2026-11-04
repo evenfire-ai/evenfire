@@ -13,7 +13,7 @@ import type { LoginPanelProps } from './types'
 export function LoginPanel({
   description = 'Sign in with your Evenfire account credentials.',
 }: LoginPanelProps) {
-  const { login, signOutIncomplete, retrySignOut } = useAuth()
+  const { login, signOutIncomplete, signOutPending, retrySignOut } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -104,7 +104,7 @@ export function LoginPanel({
             save the sign-out, so this session may come back after a reload or stay active in other
             Profile tabs.
           </p>
-          <Button variant="secondary" onClick={retrySignOut}>
+          <Button variant="secondary" onClick={retrySignOut} disabled={signOutPending}>
             Retry sign-out
           </Button>
         </div>

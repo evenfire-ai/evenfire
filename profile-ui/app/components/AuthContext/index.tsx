@@ -61,6 +61,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     me: null,
   })
   const [signOutIncomplete, setSignOutIncomplete] = useState(false)
+  const [signOutPending, setSignOutPending] = useState(false)
+  // The sign-out request whose answer may still change this screen. A newer sign-out or a
+  // login replaces it, so an answer that arrives late for an older request is ignored.
+  const pendingRevocationRef = useRef<object | null>(null)
 
   const checkAuth = useCallback(async (): Promise<AuthCheckResult> => {
     const sequence = ++authCheckSequenceRef.current
@@ -97,6 +101,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(async (email: string, password: string) => {
     authCheckSequenceRef.current += 1
+    pendingRevocationRef.current = null
+    setSignOutPending(false)
     try {
       const result = await loginWithPassword(email, password)
       resetProfileAccessCache()
@@ -119,25 +125,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const requestRevocation = useCallback(() => {
-    void logoutProfileUI()
-      .then(({ revocationConfirmed, fencePersisted }) => {
+    const attempt = {}
+    pendingRevocationRef.current = attempt
+    setSignOutPending(true)
+    const settle = () => {
+      if (pendingRevocationRef.current !== attempt) return false
+      pendingRevocationRef.current = null
+      setSignOutPending(false)
+      return true
+    }
+    void logoutProfileUI().then(
+      ({ revocationConfirmed, fencePersisted, sessionAbsent }) => {
+        if (!settle()) return
         if (revocationConfirmed) {
           setSignOutIncomplete(false)
           return
         }
-        if (!fencePersisted) {
+        if (!fencePersisted && !sessionAbsent) {
           // Browser storage could not record the logout fence, so the local sign-out
           // outlives only this page. The login screen says so and offers a retry.
+          // When the edge reports that no session reached it, this browser holds no
+          // Profile cookie any more, so the unconfirmed-revocation notice below applies.
           setSignOutIncomplete(true)
           return
         }
         setSignOutIncomplete(false)
         showToast(UNCONFIRMED_REVOCATION_MESSAGE, { tone: 'error', durationMs: 7000 })
-      })
-      .catch(() => {
+      },
+      () => {
+        if (!settle()) return
         showToast(UNCONFIRMED_REVOCATION_MESSAGE, { tone: 'error', durationMs: 7000 })
-      })
+      }
+    )
   }, [showToast])
+
+  const retrySignOut = useCallback(() => {
+    // One sign-out request at a time: two requests could answer in either order.
+    if (pendingRevocationRef.current) return
+    requestRevocation()
+  }, [requestRevocation])
 
   const logout = useCallback(() => {
     authCheckSequenceRef.current += 1
@@ -156,9 +182,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       logout,
       checkAuth,
       signOutIncomplete,
-      retrySignOut: requestRevocation,
+      signOutPending,
+      retrySignOut,
     }),
-    [authState, checkAuth, login, logout, signOutIncomplete, requestRevocation]
+    [authState, checkAuth, login, logout, signOutIncomplete, signOutPending, retrySignOut]
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

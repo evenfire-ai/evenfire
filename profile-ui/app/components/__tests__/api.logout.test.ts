@@ -31,6 +31,7 @@ describe('Profile logout client boundary', () => {
     await expect(logoutProfileUI()).resolves.toEqual({
       revocationConfirmed: false,
       fencePersisted: true,
+      sessionAbsent: false,
     })
 
     expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
@@ -61,6 +62,7 @@ describe('Profile logout client boundary', () => {
       await expect(logoutProfileUI()).resolves.toEqual({
         revocationConfirmed: false,
         fencePersisted: false,
+        sessionAbsent: false,
       })
 
       // Liveness: the API boundary wrote through the stubbed browser storage.
@@ -76,6 +78,109 @@ describe('Profile logout client boundary', () => {
       expect(fetch).toHaveBeenCalledOnce()
     }
   )
+
+  const jsonResponse = (body: string) =>
+    new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+
+  it('confirms revocation only when the edge answered for a presented session', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse('{"ok":true,"sessionPresented":true}'))
+      .mockResolvedValueOnce(jsonResponse('{"id":"user-1"}'))
+
+    await expect(logoutProfileUI()).resolves.toEqual({
+      revocationConfirmed: true,
+      fencePersisted: true,
+      sessionAbsent: false,
+    })
+
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBeNull()
+    // Liveness: the released fence lets the next session request reach the network.
+    await expect(apiGet('/api/v1/me')).resolves.toEqual({ id: 'user-1' })
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    [
+      'no presented session',
+      '{"ok":true,"sessionPresented":false}',
+      { revocationConfirmed: false, fencePersisted: true, sessionAbsent: true },
+    ],
+    [
+      'an edge without the field',
+      '{"ok":true}',
+      { revocationConfirmed: false, fencePersisted: true, sessionAbsent: false },
+    ],
+    [
+      'an empty body',
+      '',
+      { revocationConfirmed: false, fencePersisted: true, sessionAbsent: false },
+    ],
+    [
+      'the field as the string "true"',
+      '{"ok":true,"sessionPresented":"true"}',
+      { revocationConfirmed: false, fencePersisted: true, sessionAbsent: false },
+    ],
+    [
+      'the field as the number 1',
+      '{"ok":true,"sessionPresented":1}',
+      { revocationConfirmed: false, fencePersisted: true, sessionAbsent: false },
+    ],
+  ])('does not confirm revocation for a 200 with %s', async (_caseName, body, expected) => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(body))
+
+    await expect(logoutProfileUI()).resolves.toEqual(expected)
+
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+    // Liveness: the logout request was sent; the fence then blocks session requests.
+    expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain('/api/v1/auth/logout')
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]?.method).toBe('POST')
+    await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('does not confirm a retry that reached the edge after the first failure expired the cookie', async () => {
+    const storage = {
+      length: 0,
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(() => {
+        throw new DOMException('Quota exceeded', 'QuotaExceededError')
+      }),
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+      key: vi.fn(() => null),
+    }
+    vi.stubGlobal('localStorage', storage)
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        new Response('{"error":"Unauthorized"}', {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse('{"ok":true,"sessionPresented":false}'))
+
+    await expect(logoutProfileUI()).resolves.toEqual({
+      revocationConfirmed: false,
+      fencePersisted: false,
+      sessionAbsent: false,
+    })
+    await expect(logoutProfileUI()).resolves.toEqual({
+      revocationConfirmed: false,
+      fencePersisted: false,
+      sessionAbsent: true,
+    })
+
+    // Liveness: both logout requests were sent with the browser's credentials.
+    expect(fetch).toHaveBeenCalledTimes(2)
+    for (const call of vi.mocked(fetch).mock.calls) {
+      expect(String(call[0])).toContain('/api/v1/auth/logout')
+      expect(call[1]?.method).toBe('POST')
+      expect(call[1]?.credentials).toBe('include')
+    }
+    // The in-memory fence still holds after the unconfirmed retry.
+    await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
 
   it('restores session requests only after a successful new login', async () => {
     vi.mocked(fetch)
@@ -113,6 +218,7 @@ describe('Profile logout client boundary', () => {
     await expect(logoutProfileUI()).resolves.toEqual({
       revocationConfirmed: false,
       fencePersisted: true,
+      sessionAbsent: false,
     })
     expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
     await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)

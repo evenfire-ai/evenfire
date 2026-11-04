@@ -196,11 +196,13 @@ export function createAuthRouter(): Router {
       const token = bearer || readCookie(req, PROFILE_SESSION_COOKIE)
       if (token) await logoutUserSession(token)
       clearProfileSessionCookie(req, res)
-      res.status(200).json({ ok: true })
+      // sessionPresented says whether this request carried a session, so a client can
+      // tell a revocation from a request that arrived after its cookie had expired.
+      res.status(200).json({ ok: true, sessionPresented: Boolean(token) })
     } catch (error) {
       if (isInvalidSessionLogoutDenial(error)) {
         clearProfileSessionCookie(req, res)
-        res.status(200).json({ ok: true })
+        res.status(200).json({ ok: true, sessionPresented: true })
         return
       }
       clearProfileSessionCookie(req, res)

@@ -291,15 +291,24 @@ export async function loginWithPassword(
 export async function logoutProfileUI(): Promise<{
   revocationConfirmed: boolean
   fencePersisted: boolean
+  sessionAbsent: boolean
 }> {
   const fencePersisted = markLogoutUnconfirmed()
   let revocationConfirmed = false
+  let sessionAbsent = false
   try {
     const response = await fetch(`${EXTERNAL_REST_API_BASE_URL}/api/v1/auth/logout`, {
       method: 'POST',
       credentials: 'include',
     })
-    revocationConfirmed = response.ok
+    if (response.ok) {
+      // The edge also answers 200 when the request carried no session, for example after
+      // an earlier failed logout expired the cookie. Only an answer for a presented
+      // session confirms revocation; a missing field confirms nothing.
+      const body = (await response.json()) as { sessionPresented?: unknown }
+      revocationConfirmed = body.sessionPresented === true
+      sessionAbsent = body.sessionPresented === false
+    }
   } catch {
     // The browser cannot expire an HttpOnly cookie without a server response.
     // The local marker prevents that cookie from restoring or authorizing Profile state.
@@ -307,7 +316,7 @@ export async function logoutProfileUI(): Promise<{
     clearToken()
   }
   if (revocationConfirmed) clearUnconfirmedLogout()
-  return { revocationConfirmed, fencePersisted }
+  return { revocationConfirmed, fencePersisted, sessionAbsent }
 }
 
 export async function requestPasswordReset(email: string): Promise<{ requested: true }> {

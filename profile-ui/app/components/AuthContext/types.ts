@@ -19,5 +19,6 @@ export type AuthContextValue = {
   logout: () => void
   checkAuth: () => Promise<AuthCheckResult>
   signOutIncomplete: boolean
+  signOutPending: boolean
   retrySignOut: () => void
 }
