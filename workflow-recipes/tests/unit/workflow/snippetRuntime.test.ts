@@ -1,84 +1,590 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { fork } from 'node:child_process'
+import fs from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import net from 'node:net'
+import os from 'node:os'
+import path from 'node:path'
+import type {
+  SnippetExecuteRequest,
+  SnippetExecuteResponse,
+} from '../../../src/workflow/snippetTypes'
+import { rejectedNodeFlagSpawnSyncResult } from './rejectedNodeFlagSpawnSync'
 
-describe('snippet runtime worker permission args', () => {
-  afterEach(() => {
+const WORKFLOW_RECIPES_ROOT = path.resolve(__dirname, '..', '..', '..')
+const DIST_ROOT = path.join(WORKFLOW_RECIPES_ROOT, 'dist')
+const NODE_MODULES = path.join(WORKFLOW_RECIPES_ROOT, 'node_modules')
+const PERMISSION_PROBE = path.resolve(
+  __dirname,
+  '..',
+  '..',
+  'fixtures',
+  'workflow',
+  'snippetPermissionProbe.cjs'
+)
+const CHECK_SCRIPT = 'process.exit(process.permission ? 0 : 3)'
+// Below vitest's 15 s test timeout, so a stuck probe fails with its own message first.
+const PERMISSION_PROBE_TIMEOUT_MS = 10_000
+// The dist/workflow modules that the compiled runtime and its worker fork load.
+const COMPILED_SNIPPET_MODULES = ['snippetRuntime', 'snippetWorker', 'snippetTypes']
+// The packages src/workflow/snippetWorker.ts imports.
+const WORKER_PACKAGES = ['@modelcontextprotocol/sdk', 'mongodb', 'pg', 'typescript']
+const nodeRequire = createRequire(__filename)
+
+type SnippetRuntimeModule = typeof import('../../../src/workflow/snippetRuntime')
+
+interface PermissionProbeConfig {
+  outputDir: string
+  distRoot: string
+  nodeModules: string
+  outsideFile: string
+  plantedLink: string
+  escapeName: string
+  networkPort: number
+  // Test-only: never send a report, so the caller's timeout path runs.
+  hang?: boolean
+}
+
+interface PermissionProbeReport {
+  permission: string
+  artifact: { sizeBytes?: number; error?: string }
+  readGranted: string
+  network: string
+  readOutside: string
+  readOutput: string
+  readPlantedLink: string
+  writeDist: string
+  writeNodeModules: string
+  writeParent: string
+  createSymlink: string
+  createHardLink: string
+  childProcess: string
+}
+
+// The compiled worker may read node_modules only, and Node loads each module by its
+// realpath. A linked package (npm link, dependencies shared from another checkout) would
+// be denied and the worker would only exit with code 1, so name it here instead.
+async function assertWorkerPackagesStayInside(): Promise<void> {
+  const root = await fs.realpath(NODE_MODULES)
+  for (const name of WORKER_PACKAGES) {
+    const entry = path.join(NODE_MODULES, name)
+    const real = await fs.realpath(entry)
+    if (!real.startsWith(root + path.sep)) {
+      throw new Error(
+        `${entry} resolves to ${real}, outside ${NODE_MODULES}: the compiled worker cannot read it. ` +
+          'Install real dependencies with `npm ci` in workflow-recipes.'
+      )
+    }
+  }
+}
+
+// `npm test` builds dist/ first (the pretest script); a direct `vitest run` does not. A
+// missing dist/ module, or one older than its source, fails the test here instead of
+// testing a worker that no longer matches src/.
+async function loadCompiledSnippetRuntime(): Promise<SnippetRuntimeModule> {
+  await assertWorkerPackagesStayInside()
+  for (const name of COMPILED_SNIPPET_MODULES) {
+    const source = path.join(WORKFLOW_RECIPES_ROOT, 'src', 'workflow', `${name}.ts`)
+    const compiled = path.join(DIST_ROOT, 'workflow', `${name}.js`)
+    let compiledMtimeMs: number
+    try {
+      compiledMtimeMs = (await fs.stat(compiled)).mtimeMs
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      throw new Error(`${compiled} is missing: run \`npm run build\` in workflow-recipes`)
+    }
+    if (compiledMtimeMs < (await fs.stat(source)).mtimeMs) {
+      throw new Error(
+        `${compiled} is older than ${source}: run \`npm run build\` in workflow-recipes`
+      )
+    }
+  }
+  return nodeRequire(path.join(DIST_ROOT, 'workflow', 'snippetRuntime.js')) as SnippetRuntimeModule
+}
+
+function snippetRequest(code: string): SnippetExecuteRequest {
+  return {
+    workflowName: 'nightly-report',
+    stepId: 'render-report',
+    run: { type: 'snippet', language: 'typescript', code },
+    previousOutputs: {},
+    resolvedWorkloads: [],
+    resolvedMcpServers: [],
+  }
+}
+
+async function startLoopbackServer(): Promise<net.Server> {
+  const server = net.createServer(socket => socket.end('ok'))
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
+  return server
+}
+
+function runPermissionProbe(
+  execArgv: string[],
+  config: PermissionProbeConfig,
+  server: net.Server,
+  timeoutMs = PERMISSION_PROBE_TIMEOUT_MS
+): Promise<PermissionProbeReport> {
+  return new Promise((resolve, reject) => {
+    // executeSnippetInWorker (src/workflow/snippetRuntime.ts) forks the worker with an
+    // explicit env that has no NODE_OPTIONS.
+    const child = fork(PERMISSION_PROBE, [JSON.stringify(config)], {
+      execArgv,
+      env: {},
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    })
+    let stderr = ''
+    let report: PermissionProbeReport | undefined
+    let settled = false
+    const fail = (error: Error, killChild: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (killChild && !child.killed) child.kill('SIGKILL')
+      if (server.listening) server.close()
+      reject(error)
+    }
+    // A probe that never reports must not hold the test and the loopback server until
+    // vitest's own timeout: kill it, close the server and fail with this message.
+    const timer = setTimeout(() => {
+      fail(
+        new Error(
+          `permission probe did not report within ${timeoutMs} ms: killed the child with SIGKILL and closed the loopback server; stderr: ${stderr}`
+        ),
+        true
+      )
+    }, timeoutMs)
+    child.stderr?.on('data', chunk => {
+      stderr += String(chunk)
+    })
+    child.once('message', message => {
+      report = message as PermissionProbeReport
+    })
+    child.once('error', error => {
+      fail(error, true)
+    })
+    child.once('exit', (code, signal) => {
+      if (settled) return
+      if (report) {
+        settled = true
+        clearTimeout(timer)
+        resolve(report)
+      } else {
+        fail(
+          new Error(
+            `permission probe exited (code ${code}, signal ${signal}) without a report: ${stderr}`
+          ),
+          false
+        )
+      }
+    })
+  })
+}
+
+async function mockSpawnSync(result: Record<string, unknown>) {
+  const spawnSync = vi.fn(() => result)
+  vi.doMock('node:child_process', async () => {
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    return { ...actual, spawnSync }
+  })
+  return spawnSync
+}
+
+interface FakeWorkerChild {
+  stdout: null
+  stderr: null
+  killed: boolean
+  once: (event: string, handler: (...args: unknown[]) => void) => FakeWorkerChild
+  kill: () => boolean
+  send: () => boolean
+}
+
+// Captures the fork options instead of starting a real worker: the caller controls the
+// single reply the fake child delivers when the request is sent.
+function mockForkOnce(response: SnippetExecuteResponse): {
+  fork: ReturnType<typeof vi.fn>
+  child: FakeWorkerChild
+} {
+  const handlers = new Map<string, (...args: unknown[]) => void>()
+  const child: FakeWorkerChild = {
+    stdout: null,
+    stderr: null,
+    killed: false,
+    once: (event, handler) => {
+      handlers.set(event, handler)
+      return child
+    },
+    kill: () => {
+      child.killed = true
+      return true
+    },
+    send: () => {
+      // Deferred so executeSnippetInWorker has armed its timeout before the reply lands.
+      queueMicrotask(() => handlers.get('message')?.(response))
+      return true
+    },
+  }
+  const fork = vi.fn(() => child)
+  vi.doMock('node:child_process', async () => {
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    return { ...actual, fork }
+  })
+  return { fork, child }
+}
+
+// Spies through to the real spawnSync, so the check runs on the Node that runs the tests.
+async function spyOnRealSpawnSync() {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+  const spawnSync = vi.fn(actual.spawnSync)
+  vi.doMock('node:child_process', () => ({ ...actual, spawnSync }))
+  return spawnSync
+}
+
+function captureThrown(fn: () => unknown): unknown {
+  try {
+    fn()
+  } catch (error) {
+    return error
+  }
+  return undefined
+}
+
+describe('snippet runtime Node permission model', () => {
+  const tempDirs: string[] = []
+
+  afterEach(async () => {
     vi.resetModules()
     vi.doUnmock('node:child_process')
     vi.unstubAllEnvs()
     vi.restoreAllMocks()
+    await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })))
   })
 
-  it('uses Node permission flags when the current runtime supports them', async () => {
-    const spawnSync = vi.fn(() => ({ status: 0 }))
-    vi.doMock('node:child_process', async () => {
-      const actual =
-        await vi.importActual<typeof import('node:child_process')>('node:child_process')
-      return { ...actual, spawnSync }
-    })
+  async function makeOutputDir(): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-permission-'))
+    tempDirs.push(dir)
+    return dir
+  }
 
-    const { buildPermissionArgs, resetSnippetPermissionProbeForTests } =
+  it('uses the stable Node permission flag with one grant per path', async () => {
+    const { buildPermissionArgs } = await import('../../../src/workflow/snippetRuntime')
+
+    expect(buildPermissionArgs('/out')).toEqual([
+      '--permission',
+      `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'src')}`,
+      `--allow-fs-read=${NODE_MODULES}`,
+      '--allow-fs-write=/out',
+    ])
+  })
+
+  it('forks the snippet worker under the permission model with grants for the configured output directory', async () => {
+    const outputDir = await makeOutputDir()
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_DIR', outputDir)
+    const response: SnippetExecuteResponse = {
+      stepId: 'render-report',
+      status: 'completed',
+      output: 'ok',
+    }
+    const { fork } = mockForkOnce(response)
+    const { buildPermissionArgs, executeSnippetInWorker, resolveSnippetOutputDir } =
       await import('../../../src/workflow/snippetRuntime')
-    resetSnippetPermissionProbeForTests()
+    expect(resolveSnippetOutputDir()).toBe(outputDir)
 
-    const args = buildPermissionArgs('/output')
+    const result = await executeSnippetInWorker(snippetRequest('return 1'))
 
+    // Liveness witnesses: the single fork started the snippet worker with no argv of its
+    // own, the grants follow the configured output directory, and the reply reached the caller.
+    expect(result).toEqual(response)
+    expect(fork).toHaveBeenCalledOnce()
+    const [workerPath, args, options] = fork.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { execArgv: string[] },
+    ]
+    expect(workerPath).toBe(path.join(WORKFLOW_RECIPES_ROOT, 'src', 'workflow', 'snippetWorker.js'))
+    expect(args).toEqual([])
+    expect(options.execArgv).toEqual(buildPermissionArgs(outputDir))
+    // Spelled out so a hardcoded '/output' grant cannot pass the comparison above.
+    expect(options.execArgv).toEqual([
+      '--permission',
+      `--allow-fs-read=${path.join(WORKFLOW_RECIPES_ROOT, 'src')}`,
+      `--allow-fs-read=${NODE_MODULES}`,
+      `--allow-fs-write=${outputDir}`,
+    ])
+  })
+
+  it('runs a snippet that writes an artifact in the compiled worker, forked by the compiled runtime with its grants', async () => {
+    const runtime = await loadCompiledSnippetRuntime()
+    const outputDir = await makeOutputDir()
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_DIR', outputDir)
+    // The compiled runtime calls fork through the CommonJS child_process module, so a spy
+    // on that module object sees the real fork and its options; the call goes through.
+    const forkSpy = vi.spyOn(
+      nodeRequire('node:child_process') as typeof import('node:child_process'),
+      'fork'
+    )
+
+    const response = await runtime.executeSnippetInWorker(
+      snippetRequest("await sdk.artifacts.writeMarkdown('report.md', '# ok')\nreturn 'done'"),
+      10_000
+    )
+
+    expect(response).toEqual({
+      stepId: 'render-report',
+      status: 'completed',
+      output: 'done',
+      artifacts: [
+        {
+          name: 'report.md',
+          format: 'md',
+          sizeBytes: 4,
+          path: '/output/report.md',
+          createdAt: expect.any(String),
+        },
+      ],
+    })
+    await expect(fs.readFile(path.join(outputDir, 'report.md'), 'utf8')).resolves.toBe('# ok')
+    // The fork above used these grants: the compiled runtime grants dist/, where the
+    // worker that ships lives, not src/.
+    expect(forkSpy).toHaveBeenCalledOnce()
+    const [workerPath, , options] = forkSpy.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { execArgv: string[] },
+    ]
+    expect(workerPath).toBe(path.join(DIST_ROOT, 'workflow', 'snippetWorker.js'))
+    expect(options.execArgv).toEqual([
+      '--permission',
+      `--allow-fs-read=${DIST_ROOT}`,
+      `--allow-fs-read=${NODE_MODULES}`,
+      `--allow-fs-write=${outputDir}`,
+    ])
+  })
+
+  it('runs the compiled worker under the permission model: an artifact write into an output directory that was absent at fork time is denied', async () => {
+    const runtime = await loadCompiledSnippetRuntime()
+    const absentOutputDir = path.join(await makeOutputDir(), 'absent')
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_DIR', absentOutputDir)
+
+    const response = await runtime.executeSnippetInWorker(
+      snippetRequest("await sdk.artifacts.writeMarkdown('report.md', '# ok')\nreturn 'done'"),
+      10_000
+    )
+
+    // Without the permission model the worker creates the directory and the write
+    // succeeds. The worker's own failure reply (not an exit code) and the directory its
+    // mkdir created are the liveness witnesses; the file it could not open is absent.
+    expect(response).toEqual({
+      stepId: 'render-report',
+      status: 'failed',
+      error: expect.stringMatching(/^Access to this API has been restricted/),
+    })
+    expect((await fs.stat(absentOutputDir)).isDirectory()).toBe(true)
+    await expect(fs.stat(path.join(absentOutputDir, 'report.md'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+  })
+
+  it('on Node 24, lets a child forked with the compiled runtime grants write an artifact and open a TCP connection, and denies reads of the output directory, writes outside it, links and child processes', async () => {
+    const runtime = await loadCompiledSnippetRuntime()
+    const base = await makeOutputDir()
+    const outputDir = path.join(base, 'output')
+    await fs.mkdir(outputDir)
+    const outsideFile = path.join(await makeOutputDir(), 'outside.txt')
+    await fs.writeFile(outsideFile, 'outside', 'utf8')
+    // The kind of link another workload sharing the output volume can place there.
+    const plantedLink = path.join(outputDir, 'planted-link')
+    await fs.symlink(outsideFile, plantedLink)
+    const escapeName = `snippet-permission-escape-${process.pid}.txt`
+    const escapeTargets = [DIST_ROOT, NODE_MODULES, base].map(dir => path.join(dir, escapeName))
+    const server = await startLoopbackServer()
+
+    let report: PermissionProbeReport
+    try {
+      const { port } = server.address() as net.AddressInfo
+      report = await runPermissionProbe(
+        runtime.buildPermissionArgs(outputDir),
+        {
+          outputDir,
+          distRoot: DIST_ROOT,
+          nodeModules: NODE_MODULES,
+          outsideFile,
+          plantedLink,
+          escapeName,
+          networkPort: port,
+        },
+        server
+      )
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+      // Only a broken grant set creates these; remove them so no file stays in dist/
+      // or node_modules/.
+      await Promise.all(escapeTargets.map(file => fs.rm(file, { force: true })))
+    }
+
+    // One assertion, so a failure diff shows every field. permission, artifact,
+    // readGranted and network are the liveness witnesses (the model is on and the
+    // granted work succeeds under it); every other field is a negative assertion.
+    // Node 25 and later gate network access under --permission, so they turn network red
+    // until the grants add --allow-net; the repository image runs Node 24.
+    expect(report).toEqual({
+      permission: 'object',
+      artifact: { sizeBytes: 2 },
+      readGranted: 'ok',
+      network: 'ok',
+      readOutside: 'ERR_ACCESS_DENIED',
+      readOutput: 'ERR_ACCESS_DENIED',
+      readPlantedLink: 'ERR_ACCESS_DENIED',
+      writeDist: 'ERR_ACCESS_DENIED',
+      writeNodeModules: 'ERR_ACCESS_DENIED',
+      writeParent: 'ERR_ACCESS_DENIED',
+      createSymlink: 'ERR_ACCESS_DENIED',
+      createHardLink: 'ERR_ACCESS_DENIED',
+      childProcess: 'ERR_ACCESS_DENIED',
+    })
+  })
+
+  it('kills a permission probe that never reports, closes the loopback server and fails with the timeout', async () => {
+    const base = await makeOutputDir()
+    const outputDir = path.join(base, 'output')
+    const server = await startLoopbackServer()
+    const { port } = server.address() as net.AddressInfo
+
+    const thrown = await runPermissionProbe(
+      [],
+      {
+        outputDir,
+        distRoot: DIST_ROOT,
+        nodeModules: NODE_MODULES,
+        outsideFile: path.join(base, 'outside.txt'),
+        plantedLink: path.join(base, 'planted-link'),
+        escapeName: 'unused',
+        networkPort: port,
+        hang: true,
+      },
+      server,
+      250
+    ).then(
+      () => undefined,
+      (error: unknown) => error
+    )
+
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toMatch(
+      /permission probe did not report within 250 ms: killed the child with SIGKILL and closed the loopback server/
+    )
+    expect(server.listening).toBe(false)
+  })
+
+  it('runs the real permission model check on the pinned Node runtime', async () => {
+    const spawnSync = await spyOnRealSpawnSync()
+    const { assertNodePermissionModel, buildPermissionArgs } =
+      await import('../../../src/workflow/snippetRuntime')
+    const outputDir = await makeOutputDir()
+
+    expect(() => assertNodePermissionModel(outputDir)).not.toThrow()
+
+    // Liveness witnesses: the real check ran once, with the worker grants, and returned 0.
     expect(spawnSync).toHaveBeenCalledOnce()
-    expect(args).toContain('--experimental-permission')
-    expect(args.some(arg => arg.includes('--allow-fs-write=/output'))).toBe(true)
+    const [bin, args, options] = spawnSync.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { timeout?: number; stdio?: unknown },
+    ]
+    expect(bin).toBe(process.execPath)
+    expect(args).toEqual([...buildPermissionArgs(outputDir), '-e', CHECK_SCRIPT])
+    // A hung check is killed and reported through the status/signal error message.
+    expect(options.timeout).toBe(10_000)
+    // stderr is captured, so a rejected flag's message can reach the startup error.
+    expect(options.stdio).toEqual(['ignore', 'ignore', 'pipe'])
+    expect((spawnSync.mock.results[0].value as { status: number | null }).status).toBe(0)
   })
 
-  it('falls back when the current runtime does not support Node permission flags', async () => {
-    const spawnSync = vi.fn(() => ({ status: 9 }))
-    vi.doMock('node:child_process', async () => {
-      const actual =
-        await vi.importActual<typeof import('node:child_process')>('node:child_process')
-      return { ...actual, spawnSync }
-    })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-
-    const { buildPermissionArgs, resetSnippetPermissionProbeForTests } =
+  it('passes the real check when the output directory does not exist (runner Pod without an output volume)', async () => {
+    const spawnSync = await spyOnRealSpawnSync()
+    const { assertNodePermissionModel, buildPermissionArgs } =
       await import('../../../src/workflow/snippetRuntime')
-    resetSnippetPermissionProbeForTests()
+    const absentOutputDir = path.join(await makeOutputDir(), 'absent')
 
-    expect(buildPermissionArgs('/output')).toEqual([])
-    expect(buildPermissionArgs('/output')).toEqual([])
+    expect(() => assertNodePermissionModel(absentOutputDir)).not.toThrow()
+
+    // Liveness witnesses: the real check ran once, with the grants for the absent path,
+    // and returned 0; the path still does not exist afterwards.
     expect(spawnSync).toHaveBeenCalledOnce()
-    expect(warn).toHaveBeenCalledOnce()
-    expect(warn.mock.calls[0][0]).toMatch(/not supported by this Node runtime/)
+    const [bin, args] = spawnSync.mock.calls[0] as unknown as [string, string[]]
+    expect(bin).toBe(process.execPath)
+    expect(args).toEqual([...buildPermissionArgs(absentOutputDir), '-e', CHECK_SCRIPT])
+    expect((spawnSync.mock.results[0].value as { status: number | null }).status).toBe(0)
+    await expect(fs.stat(absentOutputDir)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('logs a distinct fallback reason when the permission probe cannot launch', async () => {
-    const spawnSync = vi.fn(() => ({ status: null, error: new Error('spawn failed') }))
-    vi.doMock('node:child_process', async () => {
-      const actual =
-        await vi.importActual<typeof import('node:child_process')>('node:child_process')
-      return { ...actual, spawnSync }
+  it('throws with the status, signal and first stderr line when the runtime rejects the flags', async () => {
+    // The status, signal and stderr come from a real `node --bogus` rejection; a second
+    // line proves only the first one reaches the error message.
+    const rejected = rejectedNodeFlagSpawnSyncResult()
+    const stderr = Buffer.concat([rejected.stderr, Buffer.from('more\n')])
+    const spawnSync = await mockSpawnSync({
+      ...rejected,
+      output: [null, rejected.stdout, stderr],
+      stderr,
     })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { assertNodePermissionModel } = await import('../../../src/workflow/snippetRuntime')
 
-    const { buildPermissionArgs, resetSnippetPermissionProbeForTests } =
-      await import('../../../src/workflow/snippetRuntime')
-    resetSnippetPermissionProbeForTests()
+    const thrown = captureThrown(() => assertNodePermissionModel('/out'))
 
-    expect(buildPermissionArgs('/output')).toEqual([])
-    expect(warn).toHaveBeenCalledOnce()
-    expect(warn.mock.calls[0][0]).toMatch(/probe failed to launch: spawn failed/)
+    const firstStderrLine = rejected.stderr.toString('utf8').split('\n', 1)[0]
+    expect(firstStderrLine).toContain('bad option: --permission')
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toBe(
+      `snippet runner refuses to start: Node permission model check failed (status ${rejected.status}, signal ${rejected.signal}): ${firstStderrLine}`
+    )
+    expect(spawnSync).toHaveBeenCalledOnce()
   })
 
-  it('keeps the explicit permission-flag opt out for local tests', async () => {
-    const spawnSync = vi.fn(() => ({ status: 0 }))
-    vi.doMock('node:child_process', async () => {
-      const actual =
-        await vi.importActual<typeof import('node:child_process')>('node:child_process')
-      return { ...actual, spawnSync }
+  it('throws when the runtime accepts the flags but process.permission is absent (status 3)', async () => {
+    // The check script exits 3 when the flags parse but the permission model is not active.
+    const spawnSync = await mockSpawnSync({
+      pid: 1,
+      output: [null, Buffer.alloc(0), Buffer.alloc(0)],
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      status: 3,
+      signal: null,
     })
-    vi.stubEnv('CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS', 'true')
+    const { assertNodePermissionModel } = await import('../../../src/workflow/snippetRuntime')
 
-    const { buildPermissionArgs, resetSnippetPermissionProbeForTests } =
-      await import('../../../src/workflow/snippetRuntime')
-    resetSnippetPermissionProbeForTests()
+    const thrown = captureThrown(() => assertNodePermissionModel('/out'))
 
-    expect(buildPermissionArgs('/output')).toEqual([])
-    expect(spawnSync).not.toHaveBeenCalled()
+    // Liveness witness: the check ran once; with an empty stderr the message comes from
+    // the status alone.
+    expect(spawnSync).toHaveBeenCalledOnce()
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toBe(
+      'snippet runner refuses to start: Node permission model check failed (status 3, signal null): '
+    )
+  })
+
+  it('names the launch error when the check process cannot be spawned', async () => {
+    const spawnSync = await mockSpawnSync({
+      pid: 0,
+      output: null,
+      stdout: null,
+      stderr: null,
+      status: null,
+      signal: null,
+      error: new Error('spawnSync node EAGAIN'),
+    })
+    const { assertNodePermissionModel } = await import('../../../src/workflow/snippetRuntime')
+
+    const thrown = captureThrown(() => assertNodePermissionModel('/out'))
+
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toBe(
+      'snippet runner refuses to start: Node permission model check failed (status null, signal null, error spawnSync node EAGAIN): '
+    )
+    expect(spawnSync).toHaveBeenCalledOnce()
   })
 })
