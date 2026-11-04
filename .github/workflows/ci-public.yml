@@ -846,6 +846,9 @@ jobs:
       - name: Test WRC egress oracle, DNS and lifecycle (unit/integration, cluster-free)
         run: bash scripts/tests/test-wrc-egress-degradation-gate.sh
 
+      - name: Test NP enforcement preflight namespace inventory (HCC env defaults, cluster-free)
+        run: bash scripts/tests/test-np-preflight-inventory.sh
+
       - name: Test Minikube mutation and WRC recovery admission (hermetic, cluster-free)
         run: bash scripts/tests/test-minikube-mutation-boundary.sh
 

@@ -77,38 +77,7 @@ if [ -n "$OVERLAY" ]; then
     exit 2
   fi
   DERIVED="$(
-    kubectl kustomize "$OVERLAY_DIR" 2>/dev/null | RUBYOPT=--disable=gems ruby -ryaml -e '
-      docs = YAML.load_stream(STDIN.read).select { |doc| doc.is_a?(Hash) }
-      quote = lambda { |value| "'"'"'" + value.gsub("'"'"'", "'"'"'\\\\'"'"''"'"'") + "'"'"'" }
-      namespaces = docs
-        .select { |doc| doc["kind"] == "Namespace" && (doc.dig("metadata", "labels") || {})["app.kubernetes.io/part-of"] == "clerum" }
-        .map { |doc| doc.dig("metadata", "name") }
-        .compact
-        .uniq
-        .sort
-      static_k8s = docs
-        .select { |doc| doc["kind"] == "NetworkPolicy" }
-        .map { |doc| [doc.dig("metadata", "namespace"), doc.dig("metadata", "name")] }
-        .select { |_ns, name| name&.start_with?("allow-k8s-api-egress-") }
-        .map(&:first)
-        .compact
-      hcc = docs.find { |doc| doc["kind"] == "Deployment" && doc.dig("metadata", "name") == "host-context-controller" }
-      env = (((hcc || {}).dig("spec", "template", "spec", "containers") || []).first || {})["env"] || []
-      env_value = lambda do |name|
-        item = env.find { |entry| entry["name"] == name }
-        (item && item["value"] || "").split(",").map(&:strip).reject(&:empty?)
-      end
-      runtime = env_value.call("CONTEXT_MAPPER_RUNTIME_NAMESPACES")
-      # HCC defaults this to sandbox-ui when the variable is absent
-      # (host-context-controller/src/config.ts). An explicit value, including
-      # "", overrides that, so the two cases are not the same.
-      minimal_declared = env.any? { |entry| entry["name"] == "CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES" }
-      minimal = minimal_declared ? env_value.call("CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES") : ["sandbox-ui"]
-      k8s_api = (static_k8s + (runtime - minimal)).uniq.sort
-      puts "ALL_NAMESPACES=#{quote.call(namespaces.join(" "))}"
-      puts "K8S_API_NAMESPACES=#{quote.call(k8s_api.join(" "))}"
-      puts "RUNTIME_NAMESPACES=#{quote.call(runtime.join(" "))}"
-    '
+    kubectl kustomize "$OVERLAY_DIR" 2>/dev/null | RUBYOPT=--disable=gems ruby -ryaml "$REPO_ROOT/deploy/scripts/np-preflight-inventory.rb"
   )"
   if [ -z "$DERIVED" ]; then
     echo "ERROR: failed to derive namespace inventory from overlay $OVERLAY" >&2
