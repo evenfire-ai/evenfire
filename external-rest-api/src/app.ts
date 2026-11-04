@@ -34,6 +34,51 @@ import { createExternalWorkflowsRouter } from './routes/workflows.js'
 // error before the canonical 4xx path is reached.
 const GFS_UPLOAD_PART_PATH = /^\/api\/v1\/me\/gfs\/uploads\/[^/]+\/parts\/[0-9]+$/i
 
+// Retry guidance the global handler relays from a ControlApiError. The client
+// has already filtered the upstream headers; the allowlist is repeated at this
+// last hop (as routes/gfs.ts does) so a hand-built ControlApiError cannot
+// publish arbitrary headers. `x-request-id` is never relayed here.
+const RETRY_AFTER_STATUSES = new Set([408, 425, 429, 502, 503, 504])
+const RATE_LIMIT_NUMERIC_HEADERS = [
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+] as const
+// The IETF RateLimit fields are structured (`limit=30, remaining=0, reset=17`,
+// `30;w=60`), so they are relayed as control-api wrote them, like routes/gfs.ts.
+const RATE_LIMIT_STRUCTURED_HEADERS = ['ratelimit', 'ratelimit-policy'] as const
+const UNSIGNED_INTEGER_HEADER = /^\d{1,10}$/
+const MAX_RETRY_AFTER_SECONDS = 86_400
+
+function unsignedIntegerHeader(raw: string | undefined): number | undefined {
+  if (!raw || !UNSIGNED_INTEGER_HEADER.test(raw)) return undefined
+  const value = Number(raw)
+  return Number.isSafeInteger(value) ? value : undefined
+}
+
+function relayControlApiRetryHeaders(err: ControlApiError, res: Response): void {
+  const headers = err.headers
+  if (RETRY_AFTER_STATUSES.has(err.status)) {
+    const retryAfter = unsignedIntegerHeader(headers['retry-after'])
+    if (retryAfter !== undefined && retryAfter >= 1 && retryAfter <= MAX_RETRY_AFTER_SECONDS) {
+      res.setHeader('retry-after', String(retryAfter))
+    }
+  }
+  if (err.status === 429) {
+    for (const name of RATE_LIMIT_NUMERIC_HEADERS) {
+      const value = unsignedIntegerHeader(headers[name])
+      if (value !== undefined) res.setHeader(name, String(value))
+    }
+    for (const name of RATE_LIMIT_STRUCTURED_HEADERS) {
+      const value = headers[name]
+      if (value) res.setHeader(name, value)
+    }
+  }
+  if (err.status === 503 && headers['cache-control']?.trim().toLowerCase() === 'no-store') {
+    res.setHeader('cache-control', 'no-store')
+  }
+}
+
 export function createApp() {
   const app = express()
   // The deployment admits traffic only from the cloudflared ingress namespace
@@ -116,13 +161,7 @@ export function externalRestPublicErrorHandler(
   // for a ControlApiError that is the internal request wrapper, which exposes
   // control-api paths and ids (#190).
   if (err instanceof ControlApiError) {
-    if (err.status === 503) {
-      const retryAfter = err.headers?.['retry-after']
-      if (retryAfter) res.setHeader('retry-after', retryAfter)
-      if (err.headers?.['cache-control']?.trim().toLowerCase() === 'no-store') {
-        res.setHeader('cache-control', 'no-store')
-      }
-    }
+    relayControlApiRetryHeaders(err, res)
     if (err.body !== null && typeof err.body === 'object') {
       res.status(err.status).json(err.body)
       return

@@ -119,7 +119,7 @@ describe('External REST public error contract', () => {
     expect(JSON.stringify(response.body)).not.toContain('Control API')
   })
 
-  it('forwards an upstream throttling body verbatim without relaying private state', async () => {
+  it('forwards an upstream throttling body verbatim with its quota headers and no private state', async () => {
     const upstream = new ControlApiError(
       'raw rate limiter state',
       429,
@@ -131,9 +131,12 @@ describe('External REST public error contract', () => {
       },
       {
         'retry-after': '17',
+        ratelimit: 'limit=30, remaining=0, reset=17',
+        'ratelimit-policy': '30;w=60',
         'x-ratelimit-limit': '30',
         'x-ratelimit-remaining': '0',
         'x-ratelimit-reset': '1900000000',
+        'x-request-id': 'upstream-request-7',
         'x-internal-bucket': 'secret-internal-bucket',
       }
     )
@@ -146,9 +149,101 @@ describe('External REST public error contract', () => {
         details: { retryAfterSeconds: 17, bucket: 'secret-internal-bucket' },
       },
     })
-    // The global handler relays outage headers for a 503 only; the GFS route
-    // keeps its own allowlist. The internal bucket never crosses.
-    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['retry-after']).toBe('17')
+    expect(response.headers.ratelimit).toBe('limit=30, remaining=0, reset=17')
+    expect(response.headers['ratelimit-policy']).toBe('30;w=60')
+    expect(response.headers['x-ratelimit-limit']).toBe('30')
+    expect(response.headers['x-ratelimit-remaining']).toBe('0')
+    expect(response.headers['x-ratelimit-reset']).toBe('1900000000')
+    // The request id stays a GFS-route relay; the internal bucket never crosses.
+    expect(response.headers['x-request-id']).toBeUndefined()
     expect(response.headers['x-internal-bucket']).toBeUndefined()
+  })
+
+  it('drops throttling header values outside the numeric public bounds', async () => {
+    const upstream = new ControlApiError(
+      'raw rate limiter state',
+      429,
+      { error: 'rate_limited' },
+      {
+        'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT',
+        'x-ratelimit-limit': '-1',
+        'x-ratelimit-remaining': '12345678901',
+        'x-ratelimit-reset': '1900000000',
+      }
+    )
+    const response = await request(appThrowing(upstream)).get('/failure')
+
+    expect(response.status).toBe(429)
+    expect(response.body).toEqual({ error: 'rate_limited' })
+    // Witness: the one in-bounds value of the same response is relayed.
+    expect(response.headers['x-ratelimit-reset']).toBe('1900000000')
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['x-ratelimit-limit']).toBeUndefined()
+    expect(response.headers['x-ratelimit-remaining']).toBeUndefined()
+
+    for (const outOfRange of ['0', '86401']) {
+      const outage = await request(
+        appThrowing(
+          new ControlApiError(
+            'raw outage',
+            503,
+            { error: 'session_backend_unavailable' },
+            { 'retry-after': outOfRange, 'cache-control': 'no-store' }
+          )
+        )
+      ).get('/failure')
+      expect(outage.status).toBe(503)
+      expect(outage.headers['cache-control']).toBe('no-store')
+      expect(outage.headers['retry-after']).toBeUndefined()
+    }
+  })
+
+  it.each([408, 425, 502, 504])(
+    'relays retry guidance, and no quota state, on a retryable %i',
+    async status => {
+      const upstream = new ControlApiError(
+        'raw upstream failure',
+        status,
+        { error: 'temporarily_unavailable' },
+        {
+          'retry-after': '5',
+          ratelimit: 'limit=30, remaining=0, reset=5',
+          'x-ratelimit-limit': '30',
+          'cache-control': 'no-store',
+        }
+      )
+      const response = await request(appThrowing(upstream)).get('/failure')
+
+      expect(response.status).toBe(status)
+      expect(response.body).toEqual({ error: 'temporarily_unavailable' })
+      expect(response.headers['retry-after']).toBe('5')
+      expect(response.headers.ratelimit).toBeUndefined()
+      expect(response.headers['x-ratelimit-limit']).toBeUndefined()
+      expect(response.headers['cache-control']).toBeUndefined()
+    }
+  )
+
+  it('relays no retry or quota header on a non-retryable client error', async () => {
+    const upstream = new ControlApiError(
+      'raw validation failure',
+      400,
+      { error: { code: 'invalid_request', message: 'name is required' } },
+      {
+        'retry-after': '5',
+        ratelimit: 'limit=30, remaining=29, reset=5',
+        'x-ratelimit-limit': '30',
+      }
+    )
+    const response = await request(appThrowing(upstream)).get('/failure')
+
+    // Witness: the handler ran the ControlApiError branch and forwarded the body.
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({
+      error: { code: 'invalid_request', message: 'name is required' },
+    })
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers.ratelimit).toBeUndefined()
+    expect(response.headers['x-ratelimit-limit']).toBeUndefined()
   })
 })
