@@ -227,12 +227,13 @@ Read the notes for every release you skip over, not only the target release.
 
 ### Feature-specific notes
 
-| Note                                                                               | Read it when                                                                                                      |
-| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.        |
-| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.              |
-| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential. |
-| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.       |
+| Note                                                                               | Read it when                                                                                                                     |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.                       |
+| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                             |
+| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                |
+| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                      |
+| [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap. |
 
 ### Changed code defaults (first release after v0.12.0)
 
@@ -244,3 +245,79 @@ Deployments against each item before you upgrade.
 - **External-egress window (HCC, WRC).** `HCC_EXTERNAL_EGRESS_OVERLAP_SEC` and `WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS` now default to `3600` (was `300`), and `WRC_EXTERNAL_EGRESS_MAX_ENTRIES` to `256` (was `128`). The overlap window keeps each resolved IP of an allowed hostname in the egress NetworkPolicy for one hour after its DNS TTL, so an IP that a provider rotates out of DNS stays allowed for that hour; the entry cap bounds how many IPs one policy keeps. While DNS lookups for that hostname fail, HCC and WRC keep the IPs they already have beyond that hour (fail-static) until a lookup succeeds or the hostname is removed from the declaration. This release's `deploy/base` also sets all three explicitly, so an install that uses it carries these values instead of relying on the code default. The minikube overlays keep `WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS` at `300`, because the WRC egress degradation E2E bounds its recovery wait by that window. Overlays that patch these `env` entries by name keep their values. A value supplied through `envFrom` (a ConfigMap or Secret) no longer applies, because `deploy/base` now declares the entries explicitly and an `env` entry takes precedence over `envFrom`: patch the `env` entries instead. To keep the old behaviour, set them to `300` and `128`.
 - **Defaults that `deploy/base` already sets.** An install that uses `deploy/base` sees no change; a Deployment from which you removed one of these variables gets the new value. `CONTEXT_MAPPER_RUNTIME_NAMESPACES` defaults to `mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui` (was `mcp-server,mcp-host,sandbox-recipes,rpc-proxy`, so `mcp-host` drops out) and `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES` to `sandbox-ui` (was empty, which gave every runtime namespace the full infrastructure set). HCC does not delete NetworkPolicies it wrote before. If you listed `sandbox-ui` in `CONTEXT_MAPPER_RUNTIME_NAMESPACES` and left `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES` unset, `allow-hcc-api-egress-sandbox-ui` and `allow-k8s-api-egress-sandbox-ui` stay after the upgrade and are no longer reconciled. To reach the DNS-only set, delete them if they carry the label `clerum.io/managed-by=host-context-controller`. If you relied on the old runtime default, the HCC-labelled policies in `mcp-host` also stay; keep `deny-all-mcp-host` unless another deny-all covers that namespace (`deploy/base/mcp-host/networkpolicies.yaml` ships one). With the new runtime default HCC also manages `sandbox-ui`. It needs that namespace and HCC's Role and RoleBinding there (`deploy/base/sandbox-ui/`), or HCC fails its startup NetworkPolicy pass. `WORKFLOW_APPROVAL_MAX_TTL_SEC` defaults to `172800` (was `604800`). `WORKFLOW_APPROVAL_READER_ENABLED_MEDIA` defaults to `telegram,slack,teams` (was `telegram,slack`).
 - **Plugin image allowlist default.** `CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES` and `CONTROL_API_ALLOWED_IMAGE_PREFIXES` default to `ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/,registry.evenfire.ai/`: the `deploy/base` list plus the Evenfire registry. The placeholder Artifact Registry path `us-central1-docker.pkg.dev/your-gcp-project/clerum/` is no longer listed. An install that uses `deploy/base` sets the variables and sees no change. Where a variable is unset, images from `ghcr.io/evenfire-ai/` now pass the check; with `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true` or `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST=true` they are accepted, and images under the placeholder path are refused.
+
+### rpc-proxy default changes
+
+The first release after v0.12.0 changes one rpc-proxy built-in default and makes
+an invalid status or activity stream cap stop startup. A built-in default
+applies when the variable is unset or empty in `rpc-proxy-config`.
+
+| Variable                                 | Old default       | New default         |
+| ---------------------------------------- | ----------------- | ------------------- |
+| `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` | `60000` ms (60 s) | `100000` ms (100 s) |
+
+If `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` is set in `rpc-proxy-config` or
+`rpc-proxy-secrets`, that value wins and nothing changes. rpc-proxy reads both
+through `envFrom`, the Secret last, so a key set in both takes the Secret's
+value. The common case is a ConfigMap without the variable, which was added in
+v0.11.0: rpc-proxy then used the old 60 s default and now uses 100 s. The timer
+bounds the in-cluster transfer of an artifact body from the Host after the
+Host's response headers arrive. It does not bound the client's download from
+rpc-proxy. The largest body it has to move is
+`RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB` (50 MiB by default), because rpc-proxy
+refuses a larger response. The Host's own 50 MiB limit applies to the file
+before the Host redacts secrets, and redaction can make the response longer. The
+slowest transfer that still completes is that cap divided by the timer: with the
+default 50 MiB, about 0.83 MiB/s with the old 60 s and 0.5 MiB/s with the new
+100 s.
+When the Host has to be woken first, the transfer is also bounded by the
+remaining request hold, which is at most 48 s (`MAX_REQUEST_HOLD_MS`).
+
+rpc-proxy sends nothing to the client until it has the whole body, so the edge
+waits for three phases in a row: the Host lookup against control-api and the
+Host's response headers, each bounded by `RPC_PROXY_UPSTREAM_TIMEOUT_MS` (8 s by
+default), and then this body timer. Behind Cloudflare, the origin read timeout
+(125 s by default) ends the request with an HTTP 524 when the three take longer,
+while rpc-proxy keeps reading. With the defaults the worst case is
+8 + 8 + 100 = 116 s. Keep twice `RPC_PROXY_UPSTREAM_TIMEOUT_MS` plus
+`RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` below your edge's timeout. If your
+`rpc-proxy-config` started as a copy of the minikube ConfigMap, as
+[the production guide](production.md) suggests, it sets `60000` and `300000`, a
+worst case of 420 s: lower both before you serve it behind an edge. A copy taken
+before v0.11.0 sets `RPC_PROXY_UPSTREAM_TIMEOUT_MS` to `60000` and
+`RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB` to `250` but not the download timer, so it
+now waits up to 60 + 60 + 100 = 220 s (180 s before this release), above
+Cloudflare's 125 s default: lower `RPC_PROXY_UPSTREAM_TIMEOUT_MS` so that the
+sum stays below your edge's timeout (the 8 s default gives 116 s). A body at its
+250 MiB cap also needs 2.5 MiB/s to finish within the 100 s timer. Confirming
+the timeout of the operated zones is tracked in #1309.
+
+The six stream caps below keep their defaults, but an invalid value is now a
+startup error. rpc-proxy reads the value as a number, as it already does for its
+timeouts, and stops with an error naming the variable unless that number is a
+whole number of at least 1: `abc`, `0`, `-1`, `1.5`, `Infinity` and a value that
+is only whitespace all stop it. A numeric form that evaluates to a whole number,
+such as `1e3` or `0x10`, is accepted as that number, and there is no upper
+limit. Each cap counts the open streams of one rpc-proxy pod, and
+a new stream gets HTTP 429 once its count reaches the cap. Before this release
+`abc` parsed as `NaN` and `Infinity` stayed unbounded, which turned the cap off
+in both cases, while `0` rejected every stream and a whitespace-only value parsed
+as `0` with the same effect.
+
+| Variable                                      | Limits                                  | Default |
+| --------------------------------------------- | --------------------------------------- | ------- |
+| `RPC_PROXY_STREAM_MAX_CONCURRENT`             | Host status streams, all users          | `1000`  |
+| `RPC_PROXY_STREAM_MAX_PER_USER`               | Host status streams per user            | `3`     |
+| `RPC_PROXY_STREAM_MAX_PER_USER_HOST`          | Host status streams per user and Host   | `1`     |
+| `RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT`    | Host activity streams, all users        | `1000`  |
+| `RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER`      | Host activity streams per user          | `3`     |
+| `RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST` | Host activity streams per user and Host | `1`     |
+
+To keep the old artifact download timeout, set
+`RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` in `rpc-proxy-config` before you roll
+out the new image, and check every stream cap set in `rpc-proxy-config` or
+`rpc-proxy-secrets` against the rule above. For the Secret, list its key names
+only, for example
+`kubectl -n rpc-proxy get secret rpc-proxy-secrets -o go-template='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}'`;
+do not print its values. rpc-proxy reads these values at startup, so the new
+default and the cap check apply when the new pods start.
