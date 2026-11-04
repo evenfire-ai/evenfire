@@ -46,6 +46,11 @@
 # that host-context-controller's SC-1 test can compare them with the TypeScript
 # sets instead of duplicating them.
 #
+# The host rule is out of scope: an internal hostname with a trailing dot
+# (for example sentry.svc.cluster.local.) is refused by the new HCC after
+# canonicalization, although the current HCC accepts it. This preflight judges
+# values, not hostnames, so it never reports such a host.
+#
 # Values the check must judge are resolved only for names the live template
 # references, with the reference patterns of egress-proxy-template-check's
 # reference_at. A container envFrom entry means the Deployment was changed
@@ -62,13 +67,25 @@
 # reason=unsafe-env-name. Refusing the name keeps a tenant value from
 # overwriting a variable this script depends on.
 #
-# A `value` literal holding `$(` is INCONCLUSIVE reason=dependent-env-reference:
+# A `value` literal holding `$(` is REJECT reason=dependent-env-reference:
 # Kubernetes expands dependent env references at container start, so the pod's
-# value is not the literal the CRD holds. The new HCC refuses such a literal by
-# design; replace it before the upgrade.
+# value is not the literal the CRD holds, and `$` belongs to neither value
+# class, so the new HCC refuses the literal itself. Replace it with the final
+# value before the upgrade.
 #
-# The live template is the one the current HCC rendered; the new renderer adds
-# directives and comments but no env reference and moves no placeholder.
+# A resolved value holding a NUL byte is REJECT reason=nul-byte. A bash
+# variable cannot hold NUL (command substitution silently drops it), so the
+# decoded bytes are inspected in the pipe before any assignment; both value
+# classes refuse 0x00.
+#
+# Scope: the live template is the one the deployed HCC rendered, and this
+# script judges the values that template references. That the renderer in
+# this checkout renders no fixed env reference beyond $remote_addr,
+# $proxy_add_x_forwarded_for and $scheme (plus $http_authorization for an
+# oauth server) is pinned by the golden template test in
+# host-context-controller (egressProxyTemplateGolden.test.ts and its
+# fixtures) and by the golden-fixed-refs section of the test suite for
+# this script.
 #
 # shellcheck shell=bash
 # shellcheck disable=SC2016 # awk and env -i child programs are literal: $0, $1
@@ -93,7 +110,7 @@ epvp_die() {
 [ -n "${NAMESPACE:-}" ] || epvp_die 'usage: NAMESPACE is required (McpServer namespace)'
 
 epvp_tool=
-for epvp_tool in kubectl jq awk bash base64; do
+for epvp_tool in kubectl jq awk bash base64 od grep; do
   command -v "$epvp_tool" >/dev/null 2>&1 || epvp_die "missing-tool=$epvp_tool"
 done
 epvp_awk_bin=$(command -v awk) || epvp_die 'missing-tool=awk'
@@ -163,6 +180,14 @@ epvp_valid_name() {
   return 0
 }
 
+# True when stdin holds a NUL byte. The bytes are judged in the pipe because
+# command substitution silently drops NUL (a bash variable cannot hold it) and
+# both value classes refuse 0x00. grep without -q reads the whole stream, so
+# od is never killed by SIGPIPE on a long value.
+epvp_stream_has_nul() {
+  LC_ALL=C od -An -tx1 -v | LC_ALL=C grep ' 00' >/dev/null 2>&1
+}
+
 # --- server selection -------------------------------------------------------
 #
 # The API responses stay in shell variables: a baseUrl query or an authHeader
@@ -175,9 +200,11 @@ epvp_valid_name() {
 
 epvp_servers=$(epvp_kc get mcpservers -n "$NAMESPACE" -o json 2>/dev/null) ||
   epvp_die 'kubectl-get-mcpservers'
+# Remote exactly when HCC's !!baseUrl holds: an empty baseUrl is not remote
+# (jq truthiness would keep "", so the comparison is explicit).
 printf '%s' "$epvp_servers" |
   jq -r '(.items // [])[]
-    | select(.spec.remote.baseUrl != null)
+    | select((.spec.remote.baseUrl // "") != "")
     | select(.spec.managed != false)
     | select(.spec.enabled != false)
     | .metadata.name' >"$epvp_work/names" 2>/dev/null ||
@@ -233,7 +260,10 @@ epvp_static_findings() {
 epvp_static_lines() {
   local url=$1 headers=$2 findings=$3
   : >"$findings"
-  epvp_static_findings "$url" >"$epvp_work/url-findings"
+  # A failed awk must not read as "no findings": skipping S1/S2 silently would
+  # let the later steps judge a URL the static checks never saw.
+  epvp_static_findings "$url" >"$epvp_work/url-findings" ||
+    epvp_die "static-findings $NAMESPACE/$epvp_name"
   while read -r epvp_kind epvp_found; do
     case $epvp_kind in
       s1)
@@ -286,6 +316,12 @@ epvp_name_inconclusive() {
   printf 'server=%s/%s verdict=INCONCLUSIVE reason=%s name=%s\n' \
     "$NAMESPACE" "$epvp_name" "$2" "$1"
   [ -n "$epvp_reason" ] || epvp_reason=$2
+}
+
+epvp_name_reject() {
+  printf 'server=%s/%s verdict=REJECT reason=%s name=%s\n' \
+    "$NAMESPACE" "$epvp_name" "$2" "$1"
+  [ -n "$epvp_reject" ] || epvp_reject=$2
 }
 
 epvp_server_inconclusive() {
@@ -369,6 +405,7 @@ while IFS= read -r epvp_name; do
 
   epvp_index=0
   epvp_reason=
+  epvp_reject=
   while IFS= read -r epvp_ref; do
     [ -n "$epvp_ref" ] || continue
     if ! epvp_valid_name "$epvp_ref" || epvp_unsafe_name "$epvp_ref"; then
@@ -429,15 +466,30 @@ while IFS= read -r epvp_name; do
           epvp_name_inconclusive "$epvp_ref" secret-unreadable
           continue
         fi
+        # Judged on the decoded bytes, before any variable holds them: the
+        # command substitution below would silently drop a NUL byte, and the
+        # value could then pass a class that refuses 0x00.
+        if printf '%s' "$epvp_encoded" | base64 -d 2>/dev/null | epvp_stream_has_nul; then
+          epvp_name_reject "$epvp_ref" nul-byte
+          printf '  the value of %s holds a NUL byte (0x00), which neither value class allows\n' "$epvp_ref"
+          continue
+        fi
         epvp_value=$( { printf '%s' "$epvp_encoded" | base64 -d; printf x; } )
         epvp_value=${epvp_value%x}
         ;;
       literal)
+        # Same loss point as the Secret branch: a JSON escape for U+0000 leaves
+        # jq -jr as a raw NUL byte, which the assignment below would drop.
+        if printf '%s' "$epvp_entry" | jq -jr '.value // ""' 2>/dev/null | epvp_stream_has_nul; then
+          epvp_name_reject "$epvp_ref" nul-byte
+          printf '  the value of %s holds a NUL byte (0x00), which neither value class allows\n' "$epvp_ref"
+          continue
+        fi
         epvp_value=$(printf '%s' "$epvp_entry" | jq -jr '.value // ""'; printf x)
         epvp_value=${epvp_value%x}
         case $epvp_value in
           *'$('*)
-            epvp_name_inconclusive "$epvp_ref" dependent-env-reference
+            epvp_name_reject "$epvp_ref" dependent-env-reference
             printf '  advice: Kubernetes expands $(NAME) in env[].value at container start; store the final value before upgrading\n'
             continue
             ;;
@@ -453,6 +505,15 @@ while IFS= read -r epvp_name; do
     printf -v "epvp_pv_$epvp_index" '%s' "$epvp_value"
     epvp_index=$((epvp_index + 1))
   done <"$epvp_work/refs"
+
+  if [ -n "$epvp_reject" ]; then
+    # A value already known to be refused decides the server even when another
+    # name could not be judged, and the check is not run on a partial env.
+    printf 'server=%s/%s verdict=REJECT reason=%s\n' \
+      "$NAMESPACE" "$epvp_name" "$epvp_reject"
+    epvp_rejected=$((epvp_rejected + 1))
+    continue
+  fi
 
   if [ -n "$epvp_reason" ]; then
     # A server with any INCONCLUSIVE name is not run through the check: its

@@ -80,10 +80,14 @@ STUB
 chmod +x "$TEST_DIR/bin/kubectl"
 
 # The wrapper records names only, and uses no external command: the child that
-# runs the check is `env -i`, so it has no PATH.
+# runs the check is `env -i`, so it has no PATH. The two failure flags are
+# selective so each keeps a single meaning: no-verdict fails only the awk that
+# runs the template check (-f .../egress-proxy-template-check), and
+# fail-static-awk fails only the awk program that prints the s2q findings.
 {
   printf '#!/bin/bash\n'
-  printf 'if [ -e %q ]; then exit 1; fi\n' "$TEST_DIR/no-verdict"
+  printf 'if [ -e %q ]; then case "$*" in *egress-proxy-template-check*) exit 1 ;; esac; fi\n' "$TEST_DIR/no-verdict"
+  printf 'if [ -e %q ]; then case "$*" in *s2q*) exit 1 ;; esac; fi\n' "$TEST_DIR/fail-static-awk"
   printf 'epvp_seen_line=""\n'
   printf 'for epvp_seen_name in $(compgen -e); do epvp_seen_line="$epvp_seen_line $epvp_seen_name"; done\n'
   printf 'printf "%%s\\n" "$epvp_seen_line" >> %q\n' "$TEST_DIR/awk-names"
@@ -101,7 +105,8 @@ pass() { printf 'PASS %s\n' "$*"; passed=$((passed + 1)); }
 fail() { printf 'FAIL %s\n' "$*"; failed=$((failed + 1)); }
 
 reset_fixture() {
-  rm -f -- "$FIXTURE_ROOT"/* "$TEST_DIR/awk-names" "$TEST_DIR/no-verdict"
+  rm -f -- "$FIXTURE_ROOT"/* "$TEST_DIR/awk-names" "$TEST_DIR/no-verdict" \
+    "$TEST_DIR/fail-static-awk"
   printf '{"items":[]}\n' >"$FIXTURE_ROOT/servers.json"
 }
 
@@ -245,6 +250,49 @@ secret_bytes 'TESTKEY-U2028\0342\0200\0250b'
 run_case quoted-obs-text-accept 0 'server=fixture-namespace/header verdict=OK'
 expect_output quoted-obs-text-summary 'VERDICT=CLEAN'
 
+# A NUL byte never survives command substitution, so it has to be judged on
+# the decoded bytes before any variable holds them: both value classes refuse
+# 0x00. In each case the same server without the NUL is the life witness that
+# the whole path ran and only the NUL decided the verdict.
+reset_fixture
+add_server nulquery 'https://example.com/mcp?q=${API_KEY}' \
+  'proxy_pass https://example.com/mcp?q=${API_KEY};' "$(secret_ref API_KEY)"
+secret_bytes 'TESTKEY-NULQ\000END'
+run_case nul-query 1 \
+  'server=fixture-namespace/nulquery verdict=REJECT reason=nul-byte name=API_KEY'
+expect_output nul-query-witness 'the value of API_KEY holds a NUL byte'
+expect_output nul-query-summary 'VERDICT=VALUES_REJECTED checked=1 ok=0 rejected=1'
+secret_bytes 'TESTKEY-NULQEND'
+run_case nul-query-clean-witness 0 'server=fixture-namespace/nulquery verdict=OK'
+expect_output nul-query-clean-summary \
+  'VERDICT=CLEAN checked=1 ok=1 rejected=0 inconclusive=0'
+
+reset_fixture
+add_server nulquoted 'https://example.com/mcp' 'proxy_set_header X-Key "${API_KEY}";' \
+  "$(secret_ref API_KEY)"
+secret_bytes 'TESTKEY-NULH\000END'
+run_case nul-quoted 1 \
+  'server=fixture-namespace/nulquoted verdict=REJECT reason=nul-byte name=API_KEY'
+expect_output nul-quoted-witness 'the value of API_KEY holds a NUL byte'
+secret_bytes 'TESTKEY-NULHEND'
+run_case nul-quoted-clean-witness 0 'server=fixture-namespace/nulquoted verdict=OK'
+expect_output nul-quoted-clean-summary 'VERDICT=CLEAN'
+
+# The literal branch reaches the same loss point through jq -jr: a JSON escape
+# for U+0000 is a raw NUL byte there. ([0] | implode builds that escape in the
+# fixture JSON without a NUL ever entering a shell variable of this suite.)
+reset_fixture
+envs=$(jq -cn '[{name:"API_KEY",value:("TESTKEY-NULL" + ([0] | implode) + "END")}]')
+add_server nullit 'https://example.com/mcp' 'proxy_set_header X-Key "${API_KEY}";' "$envs"
+run_case nul-literal 1 \
+  'server=fixture-namespace/nullit verdict=REJECT reason=nul-byte name=API_KEY'
+expect_output nul-literal-witness 'the value of API_KEY holds a NUL byte'
+reset_fixture
+add_server nullit 'https://example.com/mcp' 'proxy_set_header X-Key "${API_KEY}";' \
+  "$(literal API_KEY 'TESTKEY-NULLEND')"
+run_case nul-literal-clean-witness 0 'server=fixture-namespace/nullit verdict=OK'
+expect_output nul-literal-clean-summary 'VERDICT=CLEAN'
+
 # The preflight must report what the live check decides, not a class of its own.
 reset_fixture
 faithful_template='proxy_pass https://example.com/mcp?q=${API_KEY};'
@@ -365,12 +413,22 @@ else
 fi
 
 # --- dependent-env-reference ---------------------------------------------
+# `$` belongs to neither value class, so the literal itself is refused, not
+# left unjudged; the remediation advice stays.
 reset_fixture
 add_server dependent 'https://example.com/mcp' 'proxy_set_header X-Key "${API_KEY}";' \
   "$(literal API_KEY '$(TESTKEY_OTHER)')"
-run_case dependent-env-reference 3 \
-  'server=fixture-namespace/dependent verdict=INCONCLUSIVE reason=dependent-env-reference name=API_KEY'
+run_case dependent-env-reference 1 \
+  'server=fixture-namespace/dependent verdict=REJECT reason=dependent-env-reference name=API_KEY'
 expect_output dependent-advice 'advice: Kubernetes expands $(NAME)'
+expect_output dependent-summary 'VERDICT=VALUES_REJECTED checked=1 ok=0 rejected=1'
+# Life witness: the same server with the final value stored is CLEAN.
+reset_fixture
+add_server dependent 'https://example.com/mcp' 'proxy_set_header X-Key "${API_KEY}";' \
+  "$(literal API_KEY 'TESTKEY-CLEAN-9482')"
+run_case dependent-clean-witness 0 'server=fixture-namespace/dependent verdict=OK'
+expect_output dependent-clean-summary \
+  'VERDICT=CLEAN checked=1 ok=1 rejected=0 inconclusive=0'
 
 # --- unsupported value sources -------------------------------------------
 reset_fixture
@@ -420,6 +478,20 @@ add_server foreign 'https://example.com/mcp' 'return 200 ok;' '[]'
 set_server_flag foreign managed false
 run_case no-remote 4 'VERDICT=NO_REMOTE_SERVERS'
 
+# Remote follows HCC's !!baseUrl: an empty baseUrl is not remote, so the
+# server is never selected instead of surfacing later as no-configmap. Its
+# ConfigMap is removed so the unaligned predicate would have been caught:
+# checked=1 with the witness server OK is the life witness for the absence.
+reset_fixture
+add_server emptyurl '' 'return 200 ok;' '[]'
+rm -f "$FIXTURE_ROOT/configmap-emptyurl-nginx-conf.json"
+add_server emptywitness 'https://example.com/mcp' 'proxy_set_header X-Key "${API_KEY}";' \
+  "$(literal API_KEY 'TESTKEY-CLEAN-9482')"
+run_case empty-baseurl-not-remote 0 'server=fixture-namespace/emptywitness verdict=OK'
+expect_output empty-baseurl-summary \
+  'VERDICT=CLEAN checked=1 ok=1 rejected=0 inconclusive=0'
+expect_absent empty-baseurl-absent 'emptyurl'
+
 reset_fixture
 : >"$FIXTURE_ROOT/fail-kubectl"
 run_case kubectl-failure 2 'VERDICT=ERROR'
@@ -455,6 +527,17 @@ add_server noverdict 'https://example.com/mcp' 'return 200 ok;' '[]'
 : >"$TEST_DIR/no-verdict"
 run_case no-verdict-child 2 'VERDICT=ERROR'
 expect_output no-verdict-server 'fixture-namespace/noverdict'
+
+# A failed static-findings awk is an ERROR, never a silent skip of S1/S2:
+# judged with empty findings, this same fixture would report CLEAN.
+reset_fixture
+add_server staticfail 'https://example.com/mcp' 'proxy_set_header X-Key "${API_KEY}";' \
+  "$(literal API_KEY 'TESTKEY-CLEAN-9482')"
+: >"$TEST_DIR/fail-static-awk"
+run_case static-awk-failure 2 'VERDICT=ERROR'
+expect_output static-awk-failure-server 'fixture-namespace/staticfail'
+rm -f "$TEST_DIR/fail-static-awk"
+run_case static-awk-failure-witness 0 'server=fixture-namespace/staticfail verdict=OK'
 
 # --- m10 positive control: the no-value scan must catch a leaking copy -----
 anchor='# resolved: value of one referenced name'
@@ -640,6 +723,67 @@ elif [ ! -r "$HCC" ] || [ ! -r "$ENTRYPOINT" ]; then
   fail "sc1-source-list-drift (the suite needs $HCC and $ENTRYPOINT)"
 else
   fail 'sc1-source-list-drift (the HCC sets or the image NGINX_ENVSUBST_* assignments are missing)'
+fi
+
+# --- golden-fixed-refs: the golden templates carry no other fixed refs ---
+# The golden files are the renderer's own output for three deterministic
+# remote shapes (see egressProxyTemplateGolden.test.ts). Subtracting the
+# two dynamic names must leave exactly the four fixed NGINX variables,
+# and the real template check must accept each golden with a clean value.
+# A missing golden is a hard failure, never a skip.
+golden_dir="$ROOT/host-context-controller/src/__tests__/fixtures/egress-proxy-template"
+golden_total_refs=0
+golden_union=''
+golden_plain_fixed=0
+for golden_shape in plain query-header oauth; do
+  golden_file="$golden_dir/$golden_shape.default.conf.template"
+  if [ ! -r "$golden_file" ]; then
+    fail "golden-fixed-refs-$golden_shape-readable (the suite needs $golden_file)"
+    continue
+  fi
+  pass "golden-fixed-refs-$golden_shape-readable"
+  LC_ALL=C "$REAL_AWK" '
+    {
+      line = $0
+      while (match(line, /[$]([{][A-Za-z_][A-Za-z0-9_]*[}]|[A-Za-z_][A-Za-z0-9_]*)/)) {
+        token = substr(line, RSTART + 1, RLENGTH - 1)
+        if (substr(token, 1, 1) == "{") token = substr(token, 2, length(token) - 2)
+        print token
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }' "$golden_file" >"$TEST_DIR/golden-refs-$golden_shape"
+  golden_ref_count=$(wc -l <"$TEST_DIR/golden-refs-$golden_shape" | tr -d ' ')
+  golden_total_refs=$((golden_total_refs + golden_ref_count))
+  golden_fixed=$(LC_ALL=C "$REAL_AWK" '$0 != "API_KEY" && $0 != "UPSTREAM_TOKEN"' \
+    "$TEST_DIR/golden-refs-$golden_shape" | LC_ALL=C sort -u | tr '\n' ' ')
+  golden_union="$golden_union $golden_fixed"
+  if [ "$golden_shape" = plain ]; then
+    golden_plain_fixed=$(printf '%s\n' "$golden_fixed" | wc -w | tr -d ' ')
+  fi
+  LC_ALL=C API_KEY=TESTKEY-CLEAN-9482 UPSTREAM_TOKEN=TESTKEY-CLEAN-9482 \
+    "$REAL_AWK" -f "$CHECK" "$golden_file" >/dev/null 2>&1
+  golden_check_rc=$?
+  if [ "$golden_check_rc" -eq 0 ]; then
+    pass "golden-fixed-refs-$golden_shape-checker"
+  else
+    fail "golden-fixed-refs-$golden_shape-checker (exit=$golden_check_rc expected=0)"
+  fi
+done
+if [ "$golden_total_refs" -gt 0 ]; then
+  pass golden-fixed-refs-total-nonempty
+else
+  fail 'golden-fixed-refs-total-nonempty (no reference was extracted)'
+fi
+if [ "$golden_plain_fixed" -eq 3 ]; then
+  pass golden-fixed-refs-plain-three
+else
+  fail "golden-fixed-refs-plain-three (plain contributed $golden_plain_fixed fixed refs, expected 3)"
+fi
+if [ "$(sorted_words "$golden_union")" = \
+  "$(sorted_words 'http_authorization proxy_add_x_forwarded_for remote_addr scheme')" ]; then
+  pass golden-fixed-refs-union
+else
+  fail 'golden-fixed-refs-union (the fixed references differ from the expected four)'
 fi
 
 # --- every case's output, with a life witness ----------------------------
