@@ -126,6 +126,59 @@ describe('workspace overflow genuine focus transitions (R4-L3)', () => {
     expect(await focused(), 'keyboard-origin removal hands off').toBe('Files')
   })
 
+  it('preserves an independently scrollable ancestor during keyboard focus handoff', async () => {
+    await page.locator('#workspace-fixture').evaluate(node => {
+      const ancestor = document.createElement('div')
+      ancestor.id = 'scroll-ancestor'
+      ancestor.style.width = '180px'
+      ancestor.style.overflowX = 'auto'
+      node.parentElement!.insertBefore(ancestor, node)
+      ancestor.append(node)
+      ancestor.after(document.getElementById('outside')!)
+      ;(node as HTMLElement).style.width = '500px'
+    })
+    await page.evaluate(() => {
+      ;(
+        window as unknown as Window & {
+          workspaceTabsFixture: { setFilesTabCount: (count: number) => void }
+        }
+      ).workspaceTabsFixture.setFilesTabCount(8)
+    })
+    await frames()
+
+    const rightArrow = page.getByRole('button', { name: 'Scroll tabs right', exact: true })
+    await page.locator('#outside').click()
+    await page.keyboard.press('Shift+Tab')
+    expect(await focused()).toBe('Scroll tabs right')
+    expect(await rightArrow.evaluate(node => node.matches(':focus-visible'))).toBe(true)
+    expect(await page.locator('.chat-view-tabs__scroll-button').count()).toBe(2)
+    expect(await page.locator('#scroll-ancestor').evaluate(node => node.scrollLeft)).toBe(320)
+
+    const before = await page.evaluate(() => ({ scrollX, scrollY, innerWidth, innerHeight }))
+    const innerScrollBefore = await page
+      .locator('.chat-view-tabs__scroller')
+      .evaluate(node => node.scrollLeft)
+
+    await page.locator('#workspace-fixture').evaluate(node => {
+      ;(node as HTMLElement).style.width = '900px'
+    })
+    await page.waitForFunction(
+      () => document.querySelectorAll('.chat-view-tabs__scroll-button').length === 0
+    )
+    await frames(12)
+
+    expect(await focused(), 'keyboard-origin removal hands off to Files').toBe('Files')
+    expect(await page.locator('.chat-view-tabs__scroll-button').count()).toBe(0)
+    expect(await page.locator('.chat-view-tabs__scroller').evaluate(node => node.scrollLeft)).toBe(
+      0
+    )
+    expect(innerScrollBefore).toBe(0)
+    expect(await page.locator('#scroll-ancestor').evaluate(node => node.scrollLeft)).toBe(320)
+    expect(await page.evaluate(() => ({ scrollX, scrollY, innerWidth, innerHeight }))).toEqual(
+      before
+    )
+  })
+
   it('F1 cancels keyboard handoff on pointerdown on the SAME focused arrow', async () => {
     await keyboardArrow()
     // Force bypasses aria-disabled actionability only; real pointer input still fires.
