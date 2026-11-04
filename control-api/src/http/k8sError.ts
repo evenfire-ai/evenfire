@@ -63,22 +63,28 @@ export function statusMessageOf(err: unknown): string | null {
 }
 
 // The apiserver's wording for a request denied by admission control, as opposed
-// to the RBAC authorizer ("<resource> is forbidden: User \"…\" cannot <verb> …"):
-// a ValidatingAdmissionPolicy (`ValidatingAdmissionPolicy '<p>' with binding '<b>'
-// denied request: <message>`) or a validating webhook (`admission webhook "<w>"
-// denied the request: <message>`). Both answer 403 when the policy sets
-// reason Forbidden (deploy/base/cluster-wide/workflowrecipe-admission.yaml).
+// to the RBAC authorizer ("<resource> is forbidden: User \"…\" cannot <verb> …"),
+// anchored at the start of the Status message: a ValidatingAdmissionPolicy
+// (`<resource> "<name>" is forbidden: ValidatingAdmissionPolicy '<p>' with
+// binding '<b>' denied request: <message>`) or a validating webhook
+// (`admission webhook "<w>" denied the request: <message>`, optionally after the
+// same `is forbidden:` prefix). Both answer 403 when the policy sets reason
+// Forbidden (deploy/base/cluster-wide/workflowrecipe-admission.yaml).
 const ADMISSION_DENIAL =
-  /(ValidatingAdmissionPolicy '[^']*' with binding '[^']*' denied request|admission webhook "[^"]*" denied the request)/
+  /^(?:[^"]+ "[^"]*" is forbidden: )?(?:ValidatingAdmissionPolicy '[^']*' with binding '[^']*' denied request|admission webhook "[^"]*" denied the request): /
+const SERVICE_ACCOUNT_SUBJECT = 'system:serviceaccount:'
 
 /**
  * The Status message of a 403 that admission control (not RBAC) returned, or
  * null for any other error. That message is the policy's own explanation of
  * why the object was rejected, so it is the caller's to read; an RBAC 403 names
- * control-api's ServiceAccount and is never returned here.
+ * control-api's ServiceAccount and is never returned here. A policy message that
+ * names any ServiceAccount (e.g. through a messageExpression on
+ * request.userInfo) is not returned either, and the 403 is treated as RBAC.
  */
 export function admissionDenialMessage(err: unknown): string | null {
   if (extractK8sError(err)?.status !== 403) return null
   const message = statusMessageOf(err)
-  return message !== null && ADMISSION_DENIAL.test(message) ? message : null
+  if (message === null || message.includes(SERVICE_ACCOUNT_SUBJECT)) return null
+  return ADMISSION_DENIAL.test(message) ? message : null
 }

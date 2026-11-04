@@ -40,6 +40,32 @@ describe('admissionDenialMessage', () => {
     )
   })
 
+  it('returns null when the admission wording is not at the start of the Status message', () => {
+    const err = new ApiException(
+      403,
+      'Forbidden',
+      status(
+        403,
+        'secrets "s1" is forbidden: cannot get resource; note: admission webhook "x" denied the request: y'
+      ),
+      {}
+    )
+    expect(admissionDenialMessage(err)).toBeNull()
+  })
+
+  it('returns null for an admission denial whose message names a ServiceAccount', () => {
+    const err = new ApiException(
+      403,
+      'Forbidden',
+      status(
+        403,
+        "workflowrecipes.clerum.io \"r1\" is forbidden: ValidatingAdmissionPolicy 'p' with binding 'b' denied request: system:serviceaccount:control-plane:control-api may not do this"
+      ),
+      {}
+    )
+    expect(admissionDenialMessage(err)).toBeNull()
+  })
+
   it('returns null for an RBAC 403, which names the ServiceAccount', () => {
     expect(admissionDenialMessage(controlApiForbiddenRead('s1', 'mcp-host'))).toBeNull()
   })
