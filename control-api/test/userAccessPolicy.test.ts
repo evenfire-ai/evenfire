@@ -5,6 +5,7 @@ import {
   UserAccessPolicyConfigurationError,
   compareSemanticVersions,
   compileUserAccessPolicy,
+  configuredUserAccessIntent,
   loadConfiguredUserAccessIntent,
   reconstructionReadiness,
 } from '../src/services/access/userAccessPolicy.js'
@@ -215,5 +216,23 @@ describe('central user-access rollout compiler', () => {
     ).rejects.toThrowError(
       new UserAccessPolicyConfigurationError('minimum_client_enforcement_unavailable')
     )
+  })
+
+  it('compiles the configured runtime policy once and an explicit intent on every call', async () => {
+    const first = await resolveEffectiveUserAccessPolicy()
+    const second = await resolveEffectiveUserAccessPolicy()
+    expect(second).toBe(first)
+    expect(first).toEqual(
+      compileUserAccessPolicy(configuredUserAccessIntent, reconstructionReadiness)
+    )
+
+    // Witness: an explicit intent is compiled for that call and reflects that intent.
+    const explicit = await resolveEffectiveUserAccessPolicy({
+      intent: intent({ legacySwitchEndpoint: !first.switchCompatibility }),
+    })
+    expect(explicit).not.toBe(first)
+    expect(explicit.switchCompatibility).toBe(!first.switchCompatibility)
+    expect(explicit.policyRevision).not.toBe(first.policyRevision)
+    await expect(resolveEffectiveUserAccessPolicy()).resolves.toBe(first)
   })
 })
