@@ -837,7 +837,7 @@ jobs:
       - name: Test WRC-to-HCC contracts
         run: bash scripts/tests/test-wrc-hcc-contracts-gate.sh
 
-      - name: Test inter-service token HCC restart skip
+      - name: Test token consumer restart rules
         run: bash scripts/tests/test-inter-service-tokens.sh
 
       - name: Test WRC internal dependency NetworkPolicy contracts

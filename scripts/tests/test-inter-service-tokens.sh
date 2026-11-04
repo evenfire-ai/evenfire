@@ -1,15 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Tests for deploy/scripts/apply-inter-service-tokens.sh and
+# deploy/scripts/apply-workflow-approval-bot-secret.sh against a fake kubectl
+# that keeps Secrets in a directory store ($KUBE_STORE/<ns>/<secret>/<key>).
+# Merge patches write into the store, so a second run sees the first run's
+# values exactly as it would in a cluster.
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="${TMPDIR:-/tmp}/inter-service-tokens-test.$$"
 mkdir -p "$TMP/bin"
 trap 'rm -rf "$TMP"' EXIT
 
+TOKENS_SCRIPT="$ROOT/deploy/scripts/apply-inter-service-tokens.sh"
+BOT_SECRET_SCRIPT="$ROOT/deploy/scripts/apply-workflow-approval-bot-secret.sh"
+
 HCC_OLD="aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff6677889900"
 HCC_NEW="ff00ee11dd22cc33bb44aa5566778899ff00ee11dd22cc33bb44aa5566778899"
 WRC_OLD="1111111111111111111111111111111111111111111111111111111111111111"
 WRC_NEW="2222222222222222222222222222222222222222222222222222222222222222"
+ROTATED="3333333333333333333333333333333333333333333333333333333333333333"
+MEMBER_HMAC="test-member-registration-hmac"
+
+ALL_TOKEN_CONSUMERS=(
+  control-plane/control-api
+  control-plane/codex-llm-proxy
+  control-plane/grok-llm-proxy
+  control-plane/workflow-recipes
+  control-plane/host-context-controller
+  profiles/external-rest-api
+  rpc-proxy/rpc-proxy
+  webhook-ingress/webhook-proxy
+  channels/clerum-workflow-approval-request-reader
+  channels/app=channel-reader
+)
+TOKEN_SECRETS=(
+  control-plane/control-api-internal-tokens
+  control-plane/internal-control-jwt-secrets
+  control-plane/codex-llm-proxy-secrets
+  control-plane/grok-llm-proxy-secrets
+  profiles/external-rest-api-secrets
+  rpc-proxy/rpc-proxy-secrets
+  webhook-ingress/webhook-proxy-secrets
+  channels/workflow-approval-request-reader-credentials
+)
 
 cat > "$TMP/bin/openssl" <<'SH'
 #!/usr/bin/env bash
@@ -17,12 +51,13 @@ set -euo pipefail
 if [[ "${1:-}" == "rand" && "${2:-}" == "-hex" ]]; then
   count_file="${OPENSSL_RAND_COUNT_FILE:?}"
   count=0
-  if [[ -f "$count_file" ]]; then
+  if [[ -s "$count_file" ]]; then
     count="$(cat "$count_file")"
   fi
   count=$((count + 1))
   printf '%s' "$count" > "$count_file"
-  printf '%064x\n' "$count"
+  # Offset by a per-run salt so two runs never generate the same value.
+  printf '%064x\n' "$(( ${OPENSSL_RAND_SALT:-0} * 1000 + count ))"
   exit 0
 fi
 echo "unexpected openssl invocation" >&2
@@ -32,6 +67,7 @@ SH
 cat > "$TMP/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+store="${KUBE_STORE:?}"
 args=("$@")
 if [[ "${args[0]:-}" == "--context" ]]; then
   args=("${args[@]:2}")
@@ -46,53 +82,68 @@ case "${args[0]:-}" in
     case "${args[1]:-}" in
       ns) exit 0 ;;
       secret)
-        jsonpath=""
+        name="${args[2]:?}"
+        output=""
         for ((i=0; i<${#args[@]}; i++)); do
           if [[ "${args[$i]}" == "-o" ]]; then
-            jsonpath="${args[$((i+1))]:-}"
-          elif [[ "${args[$i]}" == -ojsonpath=* ]]; then
-            jsonpath="${args[$i]#-ojsonpath=}"
-          elif [[ "${args[$i]}" == -ojson ]]; then
-            jsonpath="json"
+            output="${args[$((i+1))]:-}"
           fi
         done
-        if [[ "$jsonpath" == "json" ]]; then
-          printf '%s\n' '{"data":{}}'
-          exit 0
-        fi
-        if [[ "$ns" == "control-plane" && "${args[2]:-}" == "internal-control-jwt-secrets" ]]; then
-          if [[ "$jsonpath" == *INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET* && -n "${KUBE_SECRET_HCC:-}" ]]; then
-            printf '%s' "$KUBE_SECRET_HCC" | base64 | tr -d '\n'
-          elif [[ "$jsonpath" == *INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET* && -n "${KUBE_SECRET_WRC:-}" ]]; then
-            printf '%s' "$KUBE_SECRET_WRC" | base64 | tr -d '\n'
-          fi
-        fi
-        exit 0
+        [[ -d "$store/$ns/$name" ]] || exit 1
+        case "$output" in
+          "") exit 0 ;;
+          json) printf '%s\n' '{"data":{}}'; exit 0 ;;
+          jsonpath=\{.data.*\})
+            key="${output#jsonpath=\{.data.}"
+            key="${key%\}}"
+            if [[ -f "$store/$ns/$name/$key" ]]; then
+              base64 < "$store/$ns/$name/$key" | tr -d '\n'
+            fi
+            exit 0
+            ;;
+        esac
+        echo "fake kubectl: unsupported get secret output '$output'" >&2
+        exit 2
         ;;
       deploy|deployment)
-        if [[ "${KUBE_DEPLOY_EXISTS:-}" == "1" ]]; then
-          exit 0
-        fi
+        [[ "${KUBE_DEPLOY_EXISTS:-}" == "1" ]] && exit 0
         exit 1
         ;;
     esac
     ;;
   create)
+    if [[ "${args[1]:-}" == "secret" && "${args[2]:-}" == "generic" ]]; then
+      mkdir -p "$store/$ns/${args[3]:?}"
+    fi
     exit 0
     ;;
   patch)
-    if [[ "$ns" == "control-plane" && "${args[1]:-}" == "secret" && "${args[2]:-}" == "control-api-internal-tokens" ]]; then
+    if [[ "${args[1]:-}" == "secret" ]]; then
+      name="${args[2]:?}"
+      patch=""
+      merge=false
       for ((i=0; i<${#args[@]}; i++)); do
-        if [[ "${args[$i]}" == "-p" ]]; then
-          printf '%s' "${args[$((i+1))]}" > "${CAPTURE_FILE:?}"
-        fi
+        case "${args[$i]}" in
+          -p) patch="${args[$((i+1))]}" ;;
+          --type=merge) merge=true ;;
+        esac
       done
+      if [[ "$merge" == "true" ]]; then
+        [[ -d "$store/$ns/$name" ]] || { echo "fake kubectl: secret $ns/$name not found" >&2; exit 1; }
+        while IFS=$'\t' read -r key value; do
+          printf '%s' "$value" | base64 --decode > "$store/$ns/$name/$key"
+        done < <(printf '%s' "$patch" | jq -r '.stringData | to_entries[] | "\(.key)\t\(.value | @base64)"')
+        printf '%s/%s\n' "$ns" "$name" >> "${PATCH_LOG:?}"
+        if [[ "$ns" == "control-plane" && "$name" == "control-api-internal-tokens" && -n "${CAPTURE_FILE:-}" ]]; then
+          printf '%s' "$patch" > "$CAPTURE_FILE"
+        fi
+      fi
     fi
     exit 0
     ;;
   rollout)
-    if [[ "${args[1]:-}" == "restart" && -n "${ROLLOUT_LOG:-}" ]]; then
-      printf '%s %s\n' "$ns" "${args[*]}" >> "$ROLLOUT_LOG"
+    if [[ "${args[1]:-}" == "restart" ]]; then
+      printf '%s %s\n' "$ns" "${args[*]}" >> "${ROLLOUT_LOG:?}"
     fi
     exit 0
     ;;
@@ -106,10 +157,67 @@ mkdir -p "$TMP/sibling/scripts/minikube"
 printf '%s\n' 'DEV_HMAC_SECRET="dev-member-registration-hmac-secret"' \
   > "$TMP/sibling/scripts/minikube/deploy-evenfire-member-registration.sh"
 
+fail() {
+  echo "FAIL: $*" >&2
+  echo "--- stderr of the last run ---" >&2
+  cat "$TMP/stderr" >&2 || true
+  exit 1
+}
+
+new_store() {
+  rm -rf "$TMP/store"
+  mkdir -p "$TMP/store"
+}
+
+store_set() {
+  local ns="$1" secret="$2" key="$3" value="$4"
+  mkdir -p "$TMP/store/$ns/$secret"
+  printf '%s' "$value" > "$TMP/store/$ns/$secret/$key"
+}
+
+store_get() {
+  cat "$TMP/store/$1/$2/$3"
+}
+
+store_delete() {
+  rm -f "$TMP/store/$1/$2/$3"
+}
+
+RUN_SALT=0
+# run_script <script> <rollout-log> [capture-file] -- env [VAR=value | -u VAR]...
+run_script() {
+  local script="$1" rollout="$2" capture="$3"
+  shift 3
+  RUN_SALT=$((RUN_SALT + 1))
+  : > "$rollout"
+  : > "$TMP/patches.log"
+  : > "$TMP/openssl-rand-count"
+  CAPTURE_FILE="$capture" ROLLOUT_LOG="$rollout" PATCH_LOG="$TMP/patches.log" \
+    KUBE_STORE="$TMP/store" KUBE_DEPLOY_EXISTS=1 PATH="$TMP/bin:$PATH" \
+    OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" OPENSSL_RAND_SALT="$RUN_SALT" \
+    CLERUM_PROJECT_DIR="$TMP/sibling" "$@" \
+    bash "$script" >"$TMP/stdout" 2>"$TMP/stderr"
+}
+
+# run_tokens <context> <rollout-log> [capture-file] env ...
+run_tokens() {
+  local context="$1" rollout="$2" capture="$3"
+  shift 3
+  run_script "$TOKENS_SCRIPT" "$rollout" "$capture" "$@" CONTEXT="$context"
+}
+
+run_bot_secret() {
+  local rollout="$1"
+  shift
+  run_script "$BOT_SECRET_SCRIPT" "$rollout" "" "$@" CONTEXT=gke-dev
+}
+
 assert_no_secret_material() {
   local log
   for log in "$TMP/stdout" "$TMP/stderr"; do
-    if grep -E 'aa11bb22cc33dd44|ff00ee11dd22cc33|1111111111111111|2222222222222222|0123456789abcdef0123456789abcdef' "$log" >/dev/null; then
+    # Every token in these tests is 64 hex characters (fixtures and the fake
+    # openssl), as are real `openssl rand -hex 32` tokens.
+    if grep -E '[0-9a-f]{64}|test-member-registration-hmac|dev-member-registration-hmac-secret' "$log" >/dev/null; then
       echo "secret material leaked into $log" >&2
       cat "$log" >&2
       exit 1
@@ -117,142 +225,222 @@ assert_no_secret_material() {
   done
 }
 
-run_apply() {
-  local context="$1" capture="$2"
-  shift 2
-  : > "$TMP/openssl-rand-count"
-  CAPTURE_FILE="$capture" PATH="$TMP/bin:$PATH" CONTEXT="$context" \
-    OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" \
-    CLERUM_PROJECT_DIR="$TMP/sibling" "$@" \
-    bash "$ROOT/deploy/scripts/apply-inter-service-tokens.sh" >"$TMP/stdout" 2>"$TMP/stderr"
-}
-
-run_hcc_apply() {
+# assert_restarted_exactly <rollout-log> [<ns>/<deployment-or-selector>]...
+assert_restarted_exactly() {
   local rollout="$1"
   shift
-  : > "$rollout"
-  : > "$TMP/openssl-rand-count"
-  CAPTURE_FILE="$TMP/hcc-capture.json" ROLLOUT_LOG="$rollout" KUBE_DEPLOY_EXISTS=1 \
-    PATH="$TMP/bin:$PATH" CONTEXT=gke-dev \
-    OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" \
-    CLERUM_PROJECT_DIR="$TMP/sibling" "$@" \
-    bash "$ROOT/deploy/scripts/apply-inter-service-tokens.sh" >"$TMP/stdout" 2>"$TMP/stderr"
+  local expected actual
+  expected="$(printf '%s\n' "$@" | sed '/^$/d' | sort)"
+  actual="$(awk '{print $1 "/" $NF}' "$rollout" | sort)"
+  if [[ "$expected" != "$actual" ]]; then
+    fail "restarted consumers differ
+expected:
+${expected:-<none>}
+actual:
+${actual:-<none>}"
+  fi
 }
 
-assert_other_consumers_restarted() {
-  local rollout="$1"
-  grep -q 'control-plane .*restart deploy control-api' "$rollout"
-  grep -q 'control-plane .*restart deploy workflow-recipes' "$rollout"
-  grep -q 'profiles .*restart deploy external-rest-api' "$rollout"
+# Liveness witness for a run that restarted nothing: the script reached the
+# end, patched every Secret it owns, and logged one skip line per consumer.
+assert_noop_witness() {
+  local consumer secret
+  grep -q '\] Done\.$' "$TMP/stderr" || fail "script did not reach Done."
+  for secret in "${TOKEN_SECRETS[@]}"; do
+    grep -qx "$secret" "$TMP/patches.log" || fail "Secret $secret was not patched"
+  done
+  for consumer in "${ALL_TOKEN_CONSUMERS[@]}"; do
+    grep -qF "Skipping rollout of ${consumer}: tokens unchanged" "$TMP/stderr" \
+      || fail "missing skip line for $consumer"
+  done
 }
 
+assert_openssl_rand_calls() {
+  local expected="$1" actual
+  actual="$(cat "$TMP/openssl-rand-count")"
+  [[ "${actual:-0}" == "$expected" ]] || fail "expected $expected openssl rand calls, got ${actual:-0}"
+}
+
+# --- Member-registration HMAC resolution (unchanged behaviour) ---
+
+new_store
 minikube_capture="$TMP/minikube-control-api-internal-tokens.json"
-run_apply clerum-codex-member-registration-test "$minikube_capture" env
+run_tokens clerum-codex-member-registration-test "$TMP/rollout.log" "$minikube_capture" env
 jq -e '.stringData.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET and .stringData.CONTROL_API_INTERNAL_TOKENS and .stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS' "$minikube_capture" >/dev/null
 jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("codex-llm-proxy=")' "$minikube_capture" >/dev/null
 jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("grok-llm-proxy=")' "$minikube_capture" >/dev/null
 
+new_store
 branch_profile_capture="$TMP/branch-profile-control-api-internal-tokens.json"
-run_apply clerum-cursor-46f812cd-185fc31b "$branch_profile_capture" env
+run_tokens clerum-cursor-46f812cd-185fc31b "$TMP/rollout.log" "$branch_profile_capture" env
 jq -e '.stringData.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET == "dev-member-registration-hmac-secret"' "$branch_profile_capture" >/dev/null
 
+new_store
 detached_profile_capture="$TMP/detached-profile-control-api-internal-tokens.json"
-run_apply clerum-detached-rwo-abc12345 "$detached_profile_capture" env
+run_tokens clerum-detached-rwo-abc12345 "$TMP/rollout.log" "$detached_profile_capture" env
 jq -e '.stringData.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET == "dev-member-registration-hmac-secret"' "$detached_profile_capture" >/dev/null
 
+new_store
 non_minikube_capture="$TMP/non-minikube-control-api-internal-tokens.json"
-if run_apply gke-dev "$non_minikube_capture" env; then
-  echo "expected non-minikube run without member-registration HMAC to fail" >&2
-  exit 1
+if run_tokens gke-dev "$TMP/rollout.log" "$non_minikube_capture" env; then
+  fail "expected non-minikube run without member-registration HMAC to fail"
 fi
 grep -q "is required when no existing control-api Secret value is present" "$TMP/stderr"
 
+new_store
 env_capture="$TMP/env-control-api-internal-tokens.json"
-run_apply gke-dev "$env_capture" env CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac
+run_tokens gke-dev "$TMP/rollout.log" "$env_capture" env CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET="$MEMBER_HMAC"
 jq -e '.stringData.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET == "test-member-registration-hmac"' "$env_capture" >/dev/null
 
-unchanged_rollout="$TMP/rollout-unchanged.log"
-KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
-  run_hcc_apply "$unchanged_rollout" env \
-  CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
+# --- Token consumer restarts ---
+
+# First deploy: every token is absent, so every consumer restarts.
+new_store
+rollout="$TMP/rollout-first-deploy.log"
+run_tokens gke-dev "$rollout" "" env CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET="$MEMBER_HMAC"
+assert_restarted_exactly "$rollout" "${ALL_TOKEN_CONSUMERS[@]}"
+assert_no_secret_material
+
+# Normal redeploy (preserve path): identical values are written, nothing restarts.
+rollout="$TMP/rollout-noop.log"
+run_tokens gke-dev "$rollout" "" env -u CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET
+assert_restarted_exactly "$rollout"
+assert_noop_witness
+assert_openssl_rand_calls 0
+assert_no_secret_material
+
+# control-api's own Secret drifted (stale service-token map): only control-api.
+store_set control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS stale-map
+rollout="$TMP/rollout-control-api-only.log"
+run_tokens gke-dev "$rollout" "" env
+assert_restarted_exactly "$rollout" control-plane/control-api
+grep -qF 'Skipping rollout of rpc-proxy/rpc-proxy: tokens unchanged' "$TMP/stderr" || fail "rpc-proxy skip line missing"
+assert_no_secret_material
+
+# rpc-proxy token rotated: rpc-proxy and control-api (which holds it in its map).
+rollout="$TMP/rollout-rpc-rotated.log"
+run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_RPC="$ROTATED"
+assert_restarted_exactly "$rollout" control-plane/control-api rpc-proxy/rpc-proxy
+[[ "$(store_get rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN)" == "$ROTATED" ]] \
+  || fail "rotated rpc-proxy token was not written"
+assert_no_secret_material
+
+# Reader handoff token rotated: the reader and the channel-readers only.
+rollout="$TMP/rollout-handoff-rotated.log"
+run_tokens gke-dev "$rollout" "" env CHANNEL_READER_HANDOFF_TOKEN="$ROTATED"
+assert_restarted_exactly "$rollout" \
+  channels/clerum-workflow-approval-request-reader channels/app=channel-reader
+assert_no_secret_material
+
+# A legacy `replace-with-*` placeholder counts as absent: regenerated, restarted.
+store_set control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN replace-with-codex-token
+rollout="$TMP/rollout-placeholder.log"
+run_tokens gke-dev "$rollout" "" env
+assert_restarted_exactly "$rollout" control-plane/control-api control-plane/codex-llm-proxy
+assert_openssl_rand_calls 1
+assert_no_secret_material
+
+# FORCE_CONSUMER_RESTART=true restarts every consumer although nothing changed.
+rollout="$TMP/rollout-force.log"
+run_tokens gke-dev "$rollout" "" env FORCE_CONSUMER_RESTART=true
+assert_restarted_exactly "$rollout" "${ALL_TOKEN_CONSUMERS[@]}"
+if grep -q 'tokens unchanged' "$TMP/stderr"; then
+  fail "FORCE_CONSUMER_RESTART must not skip any consumer"
+fi
+assert_no_secret_material
+
+# --- InternalControl JWT HMACs (WRC / HCC share one Secret) ---
+
+store_set control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET "$HCC_OLD"
+store_set control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET "$WRC_OLD"
+
+# Overrides equal to the stored values: nothing restarts.
+rollout="$TMP/rollout-hmac-unchanged.log"
+run_tokens gke-dev "$rollout" "" env \
   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_OLD" \
   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET="$WRC_OLD"
-grep -q 'Skipping rollout of control-plane/host-context-controller: hcc-hmac unchanged' "$TMP/stderr"
-if grep -q 'host-context-controller' "$unchanged_rollout"; then
-  echo "unchanged HCC HMAC must not restart host-context-controller" >&2
-  cat "$unchanged_rollout" >&2
-  exit 1
-fi
-assert_other_consumers_restarted "$unchanged_rollout"
+assert_restarted_exactly "$rollout"
+assert_noop_witness
 assert_no_secret_material
 
-# Dominant CI redeploy path: no INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET override.
-# Both resolve_token and HCC_HMAC_BEFORE read KUBE_SECRET_HCC.
-preserve_rollout="$TMP/rollout-preserve-or-generate.log"
-KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
-  run_hcc_apply "$preserve_rollout" env \
+# Dominant CI redeploy path: no HMAC override, values preserved from the Secret.
+rollout="$TMP/rollout-hmac-preserve.log"
+run_tokens gke-dev "$rollout" "" env \
   -u INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET \
-  -u INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET \
-  CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac
-grep -q 'Skipping rollout of control-plane/host-context-controller: hcc-hmac unchanged' "$TMP/stderr"
-if grep -q 'host-context-controller' "$preserve_rollout"; then
-  echo "preserve-or-generate HCC HMAC must not restart host-context-controller" >&2
-  cat "$preserve_rollout" >&2
-  exit 1
-fi
-assert_other_consumers_restarted "$preserve_rollout"
+  -u INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET
+assert_restarted_exactly "$rollout"
+assert_noop_witness
 assert_no_secret_material
 
-changed_rollout="$TMP/rollout-changed.log"
-KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
-  run_hcc_apply "$changed_rollout" env \
-  CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
+# HCC HMAC rotated: HCC and control-api, not WRC.
+rollout="$TMP/rollout-hcc-rotated.log"
+run_tokens gke-dev "$rollout" "" env \
   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_NEW" \
   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET="$WRC_OLD"
-if grep -q 'hcc-hmac unchanged' "$TMP/stderr"; then
-  echo "changed HCC HMAC must not skip HCC restart" >&2
-  exit 1
-fi
-grep -q 'Rolling deployment control-plane/host-context-controller' "$TMP/stderr"
-grep -q 'host-context-controller' "$changed_rollout"
+assert_restarted_exactly "$rollout" control-plane/control-api control-plane/host-context-controller
+grep -q 'Rolling deployment control-plane/host-context-controller' "$TMP/stderr" || fail "HCC roll line missing"
 assert_no_secret_material
 
-wrc_only_rollout="$TMP/rollout-wrc-only.log"
-KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
-  run_hcc_apply "$wrc_only_rollout" env \
-  CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
+# WRC-only rotation: WRC and control-api, HCC skipped.
+store_set control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET "$HCC_OLD"
+rollout="$TMP/rollout-wrc-only.log"
+run_tokens gke-dev "$rollout" "" env \
   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_OLD" \
   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET="$WRC_NEW"
-grep -q 'Skipping rollout of control-plane/host-context-controller: hcc-hmac unchanged' "$TMP/stderr"
-if grep -q 'host-context-controller' "$wrc_only_rollout"; then
-  echo "WRC-only rotation must not restart host-context-controller" >&2
-  cat "$wrc_only_rollout" >&2
-  exit 1
+assert_restarted_exactly "$rollout" control-plane/control-api control-plane/workflow-recipes
+grep -qF 'Skipping rollout of control-plane/host-context-controller: tokens unchanged' "$TMP/stderr" \
+  || fail "HCC skip line missing on WRC-only rotation"
+assert_no_secret_material
+
+# HCC key absent before the run: HCC restarts.
+store_delete control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET
+rollout="$TMP/rollout-hcc-empty-before.log"
+run_tokens gke-dev "$rollout" "" env INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_NEW"
+assert_restarted_exactly "$rollout" control-plane/control-api control-plane/host-context-controller
+assert_no_secret_material
+
+# --- apply-workflow-approval-bot-secret.sh ---
+
+READER=channels/clerum-workflow-approval-request-reader
+READER_SKIP="Skipping rollout of ${READER}: tokens unchanged"
+
+new_store
+rollout="$TMP/rollout-bot-first.log"
+run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET
+assert_restarted_exactly "$rollout" "$READER"
+assert_openssl_rand_calls 1
+assert_no_secret_material
+
+rollout="$TMP/rollout-bot-noop.log"
+run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET
+assert_restarted_exactly "$rollout"
+grep -qF "$READER_SKIP" "$TMP/stderr" || fail "bot-secret skip line missing"
+grep -qx 'channels/workflow-approval-request-reader-credentials' "$TMP/patches.log" \
+  || fail "bot-secret no-op run did not patch the reader Secret"
+grep -q '\] Done\.$' "$TMP/stderr" || fail "bot-secret script did not reach Done."
+assert_openssl_rand_calls 0
+assert_no_secret_material
+
+rollout="$TMP/rollout-bot-rotated.log"
+run_bot_secret "$rollout" env WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET="$ROTATED"
+assert_restarted_exactly "$rollout" "$READER"
+[[ "$(store_get channels workflow-approval-request-reader-credentials telegram-webhook-secret)" == "$ROTATED" ]] \
+  || fail "rotated telegram-webhook-secret was not written"
+assert_no_secret_material
+
+store_set channels workflow-approval-request-reader-credentials telegram-webhook-secret replace-with-telegram-secret
+rollout="$TMP/rollout-bot-placeholder.log"
+run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET
+assert_restarted_exactly "$rollout" "$READER"
+assert_openssl_rand_calls 1
+assert_no_secret_material
+
+rollout="$TMP/rollout-bot-force.log"
+run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET FORCE_CONSUMER_RESTART=true
+assert_restarted_exactly "$rollout" "$READER"
+if grep -qF "$READER_SKIP" "$TMP/stderr"; then
+  fail "FORCE_CONSUMER_RESTART must not skip the reader"
 fi
-assert_other_consumers_restarted "$wrc_only_rollout"
 assert_no_secret_material
 
-empty_before_rollout="$TMP/rollout-empty-before.log"
-run_hcc_apply "$empty_before_rollout" env \
-  CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
-  INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_NEW"
-grep -q 'Rolling deployment control-plane/host-context-controller' "$TMP/stderr"
-grep -q 'host-context-controller' "$empty_before_rollout"
-assert_no_secret_material
-
-force_rollout="$TMP/rollout-force.log"
-KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
-  run_hcc_apply "$force_rollout" env \
-  FORCE_CONSUMER_RESTART=true \
-  CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
-  INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_OLD" \
-  INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET="$WRC_OLD"
-if grep -q 'hcc-hmac unchanged' "$TMP/stderr"; then
-  echo "FORCE_CONSUMER_RESTART must restart HCC even when HMAC is unchanged" >&2
-  exit 1
-fi
-grep -q 'Rolling deployment control-plane/host-context-controller' "$TMP/stderr"
-grep -q 'host-context-controller' "$force_rollout"
-assert_no_secret_material
-
-echo "inter-service token patch tests passed"
+echo "inter-service token and bot-secret restart tests passed"

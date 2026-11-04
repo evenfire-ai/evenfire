@@ -43,8 +43,8 @@ set -euo pipefail
 #                                        control-api Secret already has a value.
 #   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET override WRC HMAC (default: preserve-or-generate)
 #   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET override HCC HMAC (default: preserve-or-generate)
-#   FORCE_CONSUMER_RESTART               if true, restart every consumer including
-#                                        HCC even when the HCC HMAC is unchanged
+#   FORCE_CONSUMER_RESTART               if true, restart every consumer even when
+#                                        none of the tokens it reads changed
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=lib/clerum-minikube-context.sh
@@ -217,6 +217,70 @@ fi
 SERVICE_TOKENS_MAP="external-rest-api=${TOKEN_EXT_REST},rpc-proxy=${TOKEN_RPC},webhook-proxy=${TOKEN_WEBHOOK_PROXY},workflow-approval-reader=${TOKEN_WA_READER},codex-llm-proxy=${TOKEN_CODEX_LLM_PROXY},grok-llm-proxy=${TOKEN_GROK_LLM_PROXY}"
 INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TOKEN_WA_READER},${TOKEN_CODEX_LLM_PROXY},${TOKEN_GROK_LLM_PROXY}"
 
+# --- Consumer change detection (runs before any Secret is patched) ---
+# A consumer is restarted only when at least one key it reads, among the keys
+# this script writes, is absent or differs from the value this run writes.
+# Keys are compared one by one rather than through the Secret's
+# resourceVersion or kubectl's `patched (no change)`, because several consumers
+# share a Secret and read different keys (WRC and HCC both read
+# internal-control-jwt-secrets). Current values stay in shell locals and are
+# never logged.
+#
+# Half-applied run: if a run patches a Secret and dies before the rollouts
+# below, the next run reads the new value, sees no change and skips the
+# restart, so the running pods keep the old value. The same holds after an
+# out-of-band `kubectl patch` of a key that the next run preserves. Recover
+# with FORCE_CONSUMER_RESTART=true.
+#
+# Prints "true" or "false". Arguments are repeated
+# (namespace, secret, key, value-this-run-writes) groups.
+consumer_tokens_changed() {
+  [ "$#" -gt 0 ] && [ $(( $# % 4 )) -eq 0 ] || \
+    die "consumer_tokens_changed: expected (namespace secret key value) groups"
+  if [ "${FORCE_CONSUMER_RESTART:-}" = "true" ]; then
+    echo true; return
+  fi
+  local current
+  while [ "$#" -gt 0 ]; do
+    current="$(read_secret_key "$1" "$2" "$3")"
+    if [ -z "$current" ] || [ "$current" != "$4" ]; then
+      echo true; return
+    fi
+    shift 4
+  done
+  echo false
+}
+
+# Consumer → keys it reads (deploy/base manifests; per-Host channel-reader
+# Deployments are built by host-context-controller buildChannelReaderDeployment).
+# control-api envFrom-loads control-api-internal-tokens and
+# internal-control-jwt-secrets whole; only the keys written here are compared.
+CONTROL_API_CHANGED="$(consumer_tokens_changed \
+  control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS "$SERVICE_TOKENS_MAP" \
+  control-plane control-api-internal-tokens CONTROL_API_INTERNAL_TOKENS "$INTERNAL_TOKENS_LIST" \
+  control-plane control-api-internal-tokens "$MEMBER_REGISTRATION_HMAC_KEY" "$MEMBER_REGISTRATION_HMAC" \
+  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET "$INTERNAL_CONTROL_WRC_HMAC" \
+  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET "$INTERNAL_CONTROL_HCC_HMAC")"
+WORKFLOW_RECIPES_CHANGED="$(consumer_tokens_changed \
+  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET "$INTERNAL_CONTROL_WRC_HMAC")"
+HCC_CHANGED="$(consumer_tokens_changed \
+  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET "$INTERNAL_CONTROL_HCC_HMAC")"
+CODEX_LLM_PROXY_CHANGED="$(consumer_tokens_changed \
+  control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN "$TOKEN_CODEX_LLM_PROXY")"
+GROK_LLM_PROXY_CHANGED="$(consumer_tokens_changed \
+  control-plane grok-llm-proxy-secrets GROK_LLM_PROXY_CONTROL_API_TOKEN "$TOKEN_GROK_LLM_PROXY")"
+EXTERNAL_REST_API_CHANGED="$(consumer_tokens_changed \
+  profiles external-rest-api-secrets EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN "$TOKEN_EXT_REST")"
+RPC_PROXY_CHANGED="$(consumer_tokens_changed \
+  rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN "$TOKEN_RPC")"
+WEBHOOK_PROXY_CHANGED="$(consumer_tokens_changed \
+  webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN "$TOKEN_WEBHOOK_PROXY")"
+WA_READER_CHANGED="$(consumer_tokens_changed \
+  channels workflow-approval-request-reader-credentials control-api-token "$TOKEN_WA_READER" \
+  channels workflow-approval-request-reader-credentials channel-reader-handoff-token "$READER_HANDOFF_TOKEN_VALUE")"
+CHANNEL_READER_CHANGED="$(consumer_tokens_changed \
+  channels workflow-approval-request-reader-credentials channel-reader-handoff-token "$READER_HANDOFF_TOKEN_VALUE")"
+
 # --- 1. control-api-internal-tokens (control-plane) ---
 log "Patching Secret control-api-internal-tokens (control-plane)"
 ensure_secret control-plane control-api-internal-tokens
@@ -240,17 +304,6 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials \
   -p='[{"op":"remove","path":"/data/service-token"}]' >/dev/null 2>&1 || true
 
 # --- 2. internal-control-jwt-secrets (control-plane) ---
-# Compare the HCC-consumed key only. The merge patch writes WRC + HCC together,
-# so a whole-Secret resourceVersion (or parsing `patched (no change)`) would
-# Recreate HCC on a WRC-only rotation. Values stay in shell locals — never logged.
-HCC_HMAC_BEFORE="$(read_secret_key control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET)"
-if [ "${FORCE_CONSUMER_RESTART:-}" = "true" ] || \
-   [ -z "$HCC_HMAC_BEFORE" ] || \
-   [ "$HCC_HMAC_BEFORE" != "$INTERNAL_CONTROL_HCC_HMAC" ]; then
-  HCC_SECRET_CHANGED=true
-else
-  HCC_SECRET_CHANGED=false
-fi
 log "Patching Secret internal-control-jwt-secrets (control-plane)"
 ensure_secret control-plane internal-control-jwt-secrets
 INTERNAL_CONTROL_PATCH="$(jq -cn \
@@ -333,28 +386,26 @@ WA_READER_PATCH="$(jq -cn \
   }}')"
 kctl -n channels patch secret workflow-approval-request-reader-credentials --type=merge -p "$WA_READER_PATCH"
 
-# Roll the consumers so they pick up the fresh tokens on first deploy. Safe
-# no-ops if the Deployments do not yet exist. HCC is Recreate + replicas:1
-# and reloads HMAC only at process start, so skip that extra rollout when the
-# HCC key this run writes equals the key already in the Secret (image/spec
-# applies still roll HCC themselves). This is not "the running pod env matches
-# the Secret": an out-of-band kubectl patch of the HCC key, then a re-run that
-# preserve-or-generates from the Secret, will skip. Heal that with
-# FORCE_CONSUMER_RESTART=true.
-for pair in "control-plane:control-api" \
-            "control-plane:codex-llm-proxy" \
-            "control-plane:grok-llm-proxy" \
-            "control-plane:workflow-recipes" \
-            "control-plane:host-context-controller" \
-            "profiles:external-rest-api" \
-            "rpc-proxy:rpc-proxy" \
-            "webhook-ingress:webhook-proxy" \
-            "channels:clerum-workflow-approval-request-reader"; do
-  ns="${pair%%:*}"
-  dep="${pair#*:}"
-  if [ "$ns" = "control-plane" ] && [ "$dep" = "host-context-controller" ] && \
-     [ "$HCC_SECRET_CHANGED" != "true" ]; then
-    log "Skipping rollout of $ns/$dep: hcc-hmac unchanged"
+# Roll only the consumers whose tokens changed (see "Consumer change
+# detection" above for the half-applied-run trade-off). Pods read these keys
+# as env vars, so they see a new value only after a restart; an unchanged
+# token needs no restart. Image/spec applies still roll Deployments on their
+# own. Safe no-ops if the Deployments do not yet exist.
+for entry in "control-plane:control-api:${CONTROL_API_CHANGED}" \
+             "control-plane:codex-llm-proxy:${CODEX_LLM_PROXY_CHANGED}" \
+             "control-plane:grok-llm-proxy:${GROK_LLM_PROXY_CHANGED}" \
+             "control-plane:workflow-recipes:${WORKFLOW_RECIPES_CHANGED}" \
+             "control-plane:host-context-controller:${HCC_CHANGED}" \
+             "profiles:external-rest-api:${EXTERNAL_REST_API_CHANGED}" \
+             "rpc-proxy:rpc-proxy:${RPC_PROXY_CHANGED}" \
+             "webhook-ingress:webhook-proxy:${WEBHOOK_PROXY_CHANGED}" \
+             "channels:clerum-workflow-approval-request-reader:${WA_READER_CHANGED}"; do
+  ns="${entry%%:*}"
+  rest="${entry#*:}"
+  dep="${rest%%:*}"
+  changed="${rest#*:}"
+  if [ "$changed" != "true" ]; then
+    log "Skipping rollout of $ns/$dep: tokens unchanged"
     continue
   fi
   if kctl -n "$ns" get deploy "$dep" >/dev/null 2>&1; then
@@ -363,7 +414,9 @@ for pair in "control-plane:control-api" \
   fi
 done
 
-if kctl -n channels get deploy -l app=channel-reader >/dev/null 2>&1; then
+if [ "$CHANNEL_READER_CHANGED" != "true" ]; then
+  log "Skipping rollout of channels/app=channel-reader: tokens unchanged"
+elif kctl -n channels get deploy -l app=channel-reader >/dev/null 2>&1; then
   log "Rolling channel-reader deployments to pick up fresh Secret values"
   kctl -n channels rollout restart deploy -l app=channel-reader >/dev/null || true
 fi

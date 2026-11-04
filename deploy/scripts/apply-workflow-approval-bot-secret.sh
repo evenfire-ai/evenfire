@@ -31,6 +31,9 @@ set -euo pipefail
 #   CONTEXT                              kubectl context (unset = current)
 #   WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET (optional) webhook secret-token;
 #                                            auto-generated if absent
+#   FORCE_CONSUMER_RESTART                   if true, restart the reader even
+#                                            when telegram-webhook-secret is
+#                                            unchanged
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/clerum-minikube-context.sh
 source "${SCRIPT_DIR}/lib/clerum-minikube-context.sh"
@@ -134,19 +137,34 @@ if [ -z "$WEBHOOK_SECRET" ]; then
   WEBHOOK_SECRET="$(openssl rand -hex 32)"
   log "Generated fresh telegram-webhook-secret (pre-wired defense; webhook path stays inactive)"
 fi
+# The reader reads telegram-webhook-secret as an env var
+# (deploy/base/channels/workflow-approval-request-reader/deployment.yaml), so it
+# needs a restart only when this run writes a value that is absent or differs
+# from the stored one. Compare before patching; values stay in shell locals and
+# are never logged. Half-applied run: if the patch lands and the script dies
+# before the restart, the next run sees no change and skips it; recover with
+# FORCE_CONSUMER_RESTART=true.
+WEBHOOK_SECRET_BEFORE="$(read_secret_key "$READER_NS" "$READER_SECRET" telegram-webhook-secret)"
+if [ "${FORCE_CONSUMER_RESTART:-}" = "true" ] || \
+   [ -z "$WEBHOOK_SECRET_BEFORE" ] || \
+   [ "$WEBHOOK_SECRET_BEFORE" != "$WEBHOOK_SECRET" ]; then
+  READER_CHANGED=true
+else
+  READER_CHANGED=false
+fi
+
 log "Patching Secret $READER_SECRET ($READER_NS)"
 ensure_secret "$READER_NS" "$READER_SECRET"
 READER_PATCH="$(jq -cn --arg s "$WEBHOOK_SECRET" '{stringData: {"telegram-webhook-secret": $s}}')"
 kctl -n "$READER_NS" patch secret "$READER_SECRET" --type=merge -p "$READER_PATCH"
 
-# --- Roll consumers to pick up fresh values (no-op if Deployments absent) ---
-for pair in "${READER_NS}:clerum-workflow-approval-request-reader"; do
-  ns="${pair%%:*}"
-  dep="${pair#*:}"
-  if kctl -n "$ns" get deploy "$dep" >/dev/null 2>&1; then
-    log "Rolling deployment $ns/$dep to pick up fresh Secret values"
-    rollout_restart_with_retry "$ns" "$dep" >/dev/null
-  fi
-done
+# --- Roll the reader only when its secret changed (no-op if Deployment absent) ---
+dep="clerum-workflow-approval-request-reader"
+if [ "$READER_CHANGED" != "true" ]; then
+  log "Skipping rollout of ${READER_NS}/${dep}: tokens unchanged"
+elif kctl -n "$READER_NS" get deploy "$dep" >/dev/null 2>&1; then
+  log "Rolling deployment ${READER_NS}/${dep} to pick up fresh Secret values"
+  rollout_restart_with_retry "$READER_NS" "$dep" >/dev/null
+fi
 
 log "Done."
