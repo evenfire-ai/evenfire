@@ -233,7 +233,7 @@ Read the notes for every release you skip over, not only the target release.
 | [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                                      |
 | [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                         |
 | [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                               |
-| [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must accept `--permission` and be below Node 25. |
+| [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.x; Node 25+ blocks its network. |
 
 #### Snippet runner Node permissions
 
@@ -260,12 +260,10 @@ allowlisted set of environment variables, and this variable is not in that set.
 
 No action is needed when you use the runner image built from this repository:
 the repository images use Node 24. If `CLERUM_SNIPPET_RUNNER_IMAGE` points at
-your own image, that image must run a Node that accepts `--permission` and is
-below the major that restricts network access under the permission model, which
-is Node 25. Node accepts `--permission` on 22.x from 22.13.0, on 23.x from
-23.5.0, and on every 24.x release. A runtime that does not accept it, meaning
-Node older than 22.13.0 or a 23.x release older than 23.5.0, refuses to start,
-so the runner exits at startup. On Node 25 and later the runner starts, but snippet workers
-cannot open network connections, because those releases also restrict network
-access under `--permission`, and the runner does not pass `--allow-net` (Node 24
-rejects that flag).
+your own image, run Node 24.x: `workflow-recipes` declares Node `>=24.22.1` and
+is tested only on Node 24. On Node 25 and later the runner starts, but snippet
+workers cannot open network connections, because those releases also restrict
+network access under `--permission`, and the runner does not pass `--allow-net`
+(Node 24 rejects that flag). On a runtime that rejects `--permission` (Node older
+than 22.13.0, or a 23.x release older than 23.5.0) the startup check fails and
+the runner exits.
