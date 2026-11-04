@@ -26,7 +26,20 @@ vi.mock('../chatStoreBinding.js', () => ({
 
 type LoginKind = 'google' | 'password'
 
-const unauthorized = () => new ApiError('401 Unauthorized', 401, '{"error":"Unauthorized"}')
+// The only /me answer that ends a session: the edge's invalid_session envelope.
+const sessionEnded = () =>
+  new ApiError(
+    '401 Unauthorized: invalid_session',
+    401,
+    JSON.stringify({
+      error: {
+        code: 'invalid_session',
+        message: 'The session is not valid.',
+        correlationId: 'synthetic-correlation',
+        retryable: false,
+      },
+    })
+  )
 const sessionMe = (id: string, teamId: string | null) => ({
   id,
   email: `${id}@example.test`,
@@ -89,7 +102,7 @@ async function rejectSessionDuringLogins(kinds: LoginKind[]) {
     await vi.waitFor(() => expect(settlers).toHaveLength(logins.length))
   }
 
-  rejectMe(unauthorized())
+  rejectMe(sessionEnded())
   await check
 
   // Liveness: the rejection of A reached the close decision.

@@ -451,6 +451,10 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     expect(fixtureRevoked.status).toBe(realRevoked.status)
     expect(bodyShape(fixtureRevoked.body)).toEqual(bodyShape(realRevoked.body))
     expect(realRevoked.status).toBe(401)
+    // The session probe declares a revoked session with the public envelope, never the
+    // bare 401 that the service-credential guard also sends.
+    expect(realRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
+    expect(fixtureRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
   })
 
   it('parities reset completion, the revoked prior session and the fresh login session', async () => {
@@ -501,6 +505,10 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     expect(fixtureRevoked.status).toBe(realRevoked.status)
     expect(bodyShape(fixtureRevoked.body)).toEqual(bodyShape(realRevoked.body))
     expect(realRevoked.status).toBe(401)
+    // The session probe declares a revoked session with the public envelope, never the
+    // bare 401 that the service-credential guard also sends.
+    expect(realRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
+    expect(fixtureRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
 
     await openPasswordPace()
     const realLogin = await loginReal(
@@ -572,6 +580,10 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     expect(fixtureRevoked.status).toBe(realRevoked.status)
     expect(bodyShape(fixtureRevoked.body)).toEqual(bodyShape(realRevoked.body))
     expect(realRevoked.status).toBe(401)
+    // The session probe declares a revoked session with the public envelope, never the
+    // bare 401 that the service-credential guard also sends.
+    expect(realRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
+    expect(fixtureRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
 
     // External REST treats only this envelope as an already-revoked logout; a bare 401 is
     // its own service credential being rejected.

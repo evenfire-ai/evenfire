@@ -11,6 +11,7 @@ const directory = vi.hoisted(() => ({
   findMemberRole: vi.fn(),
   getTeamContexts: vi.fn(),
   getTeamAgents: vi.fn(),
+  getMe: vi.fn(),
 }))
 const authority = vi.hoisted(() => ({
   validateLegacyUserSession: vi.fn(),
@@ -234,4 +235,84 @@ describe('external member visibility', () => {
       expect(directory.findMemberRole).not.toHaveBeenCalled()
     }
   )
+
+  describe('session probe /me', () => {
+    const mePath = '/external/users/user-1/me'
+
+    it('answers a revoked session with the invalid_session envelope', async () => {
+      const token = sessionToken()
+      authority.validateLegacyUserSession.mockResolvedValue({
+        status: 'revoked',
+        reason: 'legacy_token_revoked',
+      })
+
+      const response = await request(app())
+        .get(mePath)
+        .set('x-user-session-token', token)
+        .expect(401)
+
+      expect(response.body).toEqual({
+        error: {
+          code: 'invalid_session',
+          message: 'The session is not valid.',
+          correlationId: expect.any(String),
+          retryable: false,
+        },
+      })
+      // The live session check ran, and the revoked session stopped before the read.
+      expect(authority.validateLegacyUserSession).toHaveBeenCalledTimes(1)
+      expect(authority.validateLegacyUserSession).toHaveBeenCalledWith(
+        token,
+        expect.objectContaining({ userId: 'user-1' }),
+        expect.anything()
+      )
+      expect(directory.getMe).not.toHaveBeenCalled()
+    })
+
+    it('keeps the bare 401 on the other users routes for the same revoked session', async () => {
+      const token = sessionToken()
+      authority.validateLegacyUserSession.mockResolvedValue({
+        status: 'revoked',
+        reason: 'legacy_token_revoked',
+      })
+
+      await request(app())
+        .get('/external/users/user-1/teams')
+        .set('x-user-session-token', token)
+        .expect(401, { error: 'Unauthorized' })
+
+      expect(authority.validateLegacyUserSession).toHaveBeenCalledTimes(1)
+      expect(directory.listTeams).not.toHaveBeenCalled()
+    })
+
+    it('answers a missing token with the invalid_session envelope', async () => {
+      const response = await request(app()).get(mePath).expect(401)
+
+      expect(response.body.error.code).toBe('invalid_session')
+      expect(authority.validateLegacyUserSession).not.toHaveBeenCalled()
+      expect(directory.getMe).not.toHaveBeenCalled()
+    })
+
+    it('serves a live session through the rate limits and the user match', async () => {
+      directory.getMe.mockResolvedValue({ user: { id: 'user-1' } })
+
+      const response = await request(app())
+        .get(`${mePath}?teamId=team-1`)
+        .set('x-user-session-token', sessionToken())
+        .expect(200, { user: { id: 'user-1' } })
+
+      expect(response.headers.ratelimit).toEqual(expect.any(String))
+      expect(directory.getMe).toHaveBeenCalledWith('user-1', 'team-1')
+    })
+
+    it('denies another user /me after checking live session authority', async () => {
+      await request(app())
+        .get('/external/users/unrelated-user/me')
+        .set('x-user-session-token', sessionToken())
+        .expect(403, { error: 'Forbidden' })
+
+      expect(authority.validateLegacyUserSession).toHaveBeenCalledTimes(1)
+      expect(directory.getMe).not.toHaveBeenCalled()
+    })
+  })
 })

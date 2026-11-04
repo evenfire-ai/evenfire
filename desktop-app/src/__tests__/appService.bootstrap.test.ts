@@ -593,7 +593,20 @@ describe('AppService invitation configuration lookup', () => {
     }
 
     service.authClient = {
-      getMe: vi.fn().mockRejectedValue(new ApiError('401 Unauthorized', 401, '')),
+      getMe: vi.fn().mockRejectedValue(
+        new ApiError(
+          '401 Unauthorized: invalid_session',
+          401,
+          JSON.stringify({
+            error: {
+              code: 'invalid_session',
+              message: 'The session is not valid.',
+              correlationId: 'synthetic-correlation',
+              retryable: false,
+            },
+          })
+        )
+      ),
     } as never
     service.tokenStore = {
       getSessionToken: vi.fn().mockResolvedValue('stored-token'),
@@ -617,7 +630,7 @@ describe('AppService invitation configuration lookup', () => {
     )
   })
 
-  it('clears a saved token when startup session restore is forbidden', async () => {
+  it('keeps a saved token when /me gives startup session restore no verdict', async () => {
     const configPath = await createTempConfigPath('clerum-desktop-restore-forbidden')
     await fs.writeFile(
       configPath,
@@ -637,35 +650,44 @@ describe('AppService invitation configuration lookup', () => {
       import('../appService.js'),
       import('../httpClient.js'),
     ])
-    const clearSessionToken = vi.fn().mockResolvedValue(undefined)
-    const service = new AppService() as unknown as {
-      authClient: { getMe: ReturnType<typeof vi.fn> }
-      tokenStore: {
-        getSessionToken: ReturnType<typeof vi.fn>
-        clearSessionToken: ReturnType<typeof vi.fn>
+    // A bare 401 (the edge's service credential), a 403 and a 410 are not the
+    // session-ended envelope: this start signs out but keeps the saved token.
+    for (const answer of [
+      new ApiError('401 Unauthorized', 401, '{"error":"Unauthorized"}'),
+      new ApiError('403 Forbidden', 403, ''),
+      new ApiError('410 Gone', 410, ''),
+    ]) {
+      const clearSessionToken = vi.fn().mockResolvedValue(undefined)
+      const getMe = vi.fn().mockRejectedValue(answer)
+      const service = new AppService() as unknown as {
+        authClient: { getMe: ReturnType<typeof vi.fn> }
+        tokenStore: {
+          getSessionToken: ReturnType<typeof vi.fn>
+          clearSessionToken: ReturnType<typeof vi.fn>
+        }
+        rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
+        initialize: () => Promise<unknown>
       }
-      rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
-      initialize: () => Promise<unknown>
+
+      service.authClient = { getMe } as never
+      service.tokenStore = {
+        getSessionToken: vi.fn().mockResolvedValue('stored-token'),
+        clearSessionToken,
+      } as never
+      service.rpcTokenManager = {
+        clear: vi.fn(),
+      } as never
+
+      await expect(service.initialize()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+        sessionGeneration: 0,
+      })
+
+      // The restore asked /me with the saved token, and the answer gave no verdict.
+      expect(getMe).toHaveBeenCalledWith('stored-token')
+      expect(clearSessionToken).not.toHaveBeenCalled()
     }
-
-    service.authClient = {
-      getMe: vi.fn().mockRejectedValue(new ApiError('403 Forbidden', 403, '')),
-    } as never
-    service.tokenStore = {
-      getSessionToken: vi.fn().mockResolvedValue('stored-token'),
-      clearSessionToken,
-    } as never
-    service.rpcTokenManager = {
-      clear: vi.fn(),
-    } as never
-
-    await expect(service.initialize()).resolves.toEqual({
-      authenticated: false,
-      me: null,
-      sessionGeneration: 0,
-    })
-
-    expect(clearSessionToken).toHaveBeenCalled()
   })
 
   it('persists a manually saved runtime environment', async () => {

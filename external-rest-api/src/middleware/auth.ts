@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import { verifyToken } from '../authToken.js'
+import { sendPublicApiError } from '../http/publicApiError.js'
 import { PROFILE_SESSION_COOKIE, readCookie } from '../sessionCookie.js'
 import { AuthClaims } from '../types.js'
 
@@ -15,16 +16,32 @@ export function extractAuthToken(req: Request): string {
   return readCookie(req, PROFILE_SESSION_COOKIE)
 }
 
-export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
+/** The edge's own token check: claims for a present, bounded and verified token, else null. */
+export function authenticateRequest(req: Request): AuthClaims | null {
   const token = extractAuthToken(req)
-  if (!token || token.length > 4096) {
+  if (!token || token.length > 4096) return null
+  return verifyToken(token)
+}
+
+export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
+  const claims = authenticateRequest(req)
+  if (!claims) {
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
+  req.auth = claims
+  next()
+}
 
-  const claims = verifyToken(token)
+/**
+ * `requireAuth` for the session probe (`GET /me`): a missing, malformed, expired or
+ * badly signed token ends the session, so it is answered with the `invalid_session`
+ * envelope that clients treat as the only proof of a session end.
+ */
+export function requireSessionAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
+  const claims = authenticateRequest(req)
   if (!claims) {
-    res.status(401).json({ error: 'Unauthorized' })
+    sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
     return
   }
   req.auth = claims

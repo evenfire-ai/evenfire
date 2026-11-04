@@ -62,7 +62,38 @@ describe('External REST /me unavailable producer contract', () => {
     )
   })
 
-  it('answers a revoked upstream session with 401 so the client re-authenticates', async () => {
+  it('forwards a revoked upstream session envelope as 401 so the client re-authenticates', async () => {
+    const envelope = {
+      error: {
+        code: 'invalid_session',
+        message: 'The session is not valid.',
+        correlationId: 'upstream-correlation',
+        retryable: false,
+      },
+    }
+    mocks.controlApiRequest.mockRejectedValue(
+      new ControlApiError('private upstream detail', 401, envelope)
+    )
+    const app = express()
+    app.use(createMeRouter())
+    app.use(externalRestPublicErrorHandler)
+
+    const response = await request(app)
+      .get('/me')
+      .set('authorization', 'Bearer synthetic-session-token')
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual(envelope)
+    expect(JSON.stringify(response.body)).not.toMatch(/private upstream detail/)
+    expect(mocks.controlApiRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/users/synthetic-member-id/me',
+      expect.objectContaining({ userSessionToken: 'synthetic-session-token' })
+    )
+  })
+
+  it('answers a bare upstream 401 (the edge service credential) as an outage, never a session end', async () => {
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {})
     mocks.controlApiRequest.mockRejectedValue(
       new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
     )
@@ -74,14 +105,67 @@ describe('External REST /me unavailable producer contract', () => {
       .get('/me')
       .set('authorization', 'Bearer synthetic-session-token')
 
-    expect(response.status).toBe(401)
-    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({
+      error: {
+        code: 'authority_unavailable',
+        message: 'Authorization is temporarily unavailable.',
+        correlationId: expect.any(String),
+        retryable: true,
+      },
+    })
     expect(JSON.stringify(response.body)).not.toMatch(/private upstream detail/)
+    expect(mocks.controlApiRequest).toHaveBeenCalledTimes(1)
     expect(mocks.controlApiRequest).toHaveBeenCalledWith(
       'GET',
       '/external/users/synthetic-member-id/me',
       expect.objectContaining({ userSessionToken: 'synthetic-session-token' })
     )
+    expect(stderr).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(String(stderr.mock.calls[0][0]))).toEqual({
+      level: 'error',
+      event: 'external_rest_control_api_credential_rejected',
+      route: '/me',
+    })
+  })
+
+  it('answers a rejected edge token on /me with the invalid_session envelope', async () => {
+    mocks.verifyToken.mockReturnValue(null)
+    const app = express()
+    app.use(createMeRouter())
+    app.use(externalRestPublicErrorHandler)
+
+    const missing = await request(app).get('/me')
+    const rejected = await request(app)
+      .get('/me')
+      .set('authorization', 'Bearer synthetic-expired-token')
+
+    for (const response of [missing, rejected]) {
+      expect(response.status).toBe(401)
+      expect(response.body).toEqual({
+        error: {
+          code: 'invalid_session',
+          message: 'The session is not valid.',
+          correlationId: expect.any(String),
+          retryable: false,
+        },
+      })
+    }
+    // The edge verified the presented token itself and never reached control-api.
+    expect(mocks.verifyToken).toHaveBeenCalledWith('synthetic-expired-token')
+    expect(mocks.controlApiRequest).not.toHaveBeenCalled()
+  })
+
+  it('keeps the bare 401 on the other /me routes', async () => {
+    const app = express()
+    app.use(createMeRouter())
+    app.use(externalRestPublicErrorHandler)
+
+    const response = await request(app).get('/me/contexts')
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(mocks.controlApiRequest).not.toHaveBeenCalled()
   })
 
   it('preserves an authenticated /me response with no active team', async () => {

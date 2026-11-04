@@ -42,6 +42,25 @@ export class ControlApiError extends Error {
   }
 }
 
+/**
+ * control-api declares a session ended (invalid, expired or revoked) only with its
+ * public `401 {error:{code:'invalid_session'}}` envelope. A bare 401 from control-api
+ * comes from its service-credential guard, i.e. from this edge's own credential, and
+ * says nothing about the user's session.
+ */
+export function isControlApiInvalidSession(error: unknown): error is ControlApiError {
+  if (!(error instanceof ControlApiError) || error.status !== 401) return false
+  const body = error.body
+  if (body === null || typeof body !== 'object' || !('error' in body)) return false
+  const envelope = body.error
+  return (
+    typeof envelope === 'object' &&
+    envelope !== null &&
+    'code' in envelope &&
+    envelope.code === 'invalid_session'
+  )
+}
+
 export type ControlApiTransportOperation = 'read' | 'mutation'
 export type ControlApiTransportPhase = 'dispatch' | 'response'
 

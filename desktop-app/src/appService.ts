@@ -1032,10 +1032,28 @@ export class AppService {
     )
   }
 
-  private static isRejectedStoredSessionError(error: unknown): boolean {
+  /**
+   * True only when `/me` declared the session ended: a 401 carrying the edge's
+   * `invalid_session` envelope. Any other answer (a bare 401, which is the edge's
+   * own service credential being refused, a 403, a 410, an outage) is no verdict
+   * on the session, so the session is kept.
+   */
+  private static isSessionEndedByMe(error: unknown): boolean {
+    if (!(error instanceof ApiError) || error.status !== 401) return false
+    let body: unknown
+    try {
+      body = JSON.parse(error.bodyText)
+    } catch {
+      // A body that is not JSON is not the envelope: no verdict on the session.
+      return false
+    }
+    if (body === null || typeof body !== 'object' || !('error' in body)) return false
+    const envelope = body.error
     return (
-      error instanceof ApiError &&
-      (error.status === 401 || error.status === 403 || error.status === 410)
+      typeof envelope === 'object' &&
+      envelope !== null &&
+      'code' in envelope &&
+      envelope.code === 'invalid_session'
     )
   }
 
@@ -1363,7 +1381,7 @@ export class AppService {
         try {
           me = await this.authClient.getMe(session.sessionToken)
         } catch (error) {
-          if (AppService.isRejectedStoredSessionError(error)) {
+          if (AppService.isSessionEndedByMe(error)) {
             await this.withNativeAuthEnvironmentCommit(() =>
               this.endSessionRejectedByMe(session.sessionToken)
             )
@@ -1615,9 +1633,9 @@ export class AppService {
   }
 
   /**
-   * Ends a session that control-api rejected on `/me`. A token that is no longer
-   * the committed one belongs to a session that was already replaced, so it is
-   * left alone.
+   * Ends a session that `/me` declared ended with the `invalid_session` envelope.
+   * A token that is no longer the committed one belongs to a session that was
+   * already replaced, so it is left alone.
    */
   private async endSessionRejectedByMe(rejectedToken: string): Promise<void> {
     if (this.sessionToken !== rejectedToken) return
@@ -1652,8 +1670,8 @@ export class AppService {
 
   /**
    * Asks `/me` whether the committed session is still valid after another call
-   * answered 401. Only a rejection from `/me` ends the session; any other
-   * failure gives no verdict and leaves it in place.
+   * answered 401. Only `/me`'s `invalid_session` envelope ends the session; any
+   * other failure, a bare 401 included, gives no verdict and leaves it in place.
    */
   private async confirmCommittedSessionWithMe(): Promise<void> {
     const token = this.sessionToken
@@ -1661,7 +1679,7 @@ export class AppService {
     try {
       await this.authClient.getMe(token)
     } catch (error) {
-      if (!AppService.isRejectedStoredSessionError(error)) {
+      if (!AppService.isSessionEndedByMe(error)) {
         console.warn('[AppService] Session check returned no verdict:', error)
         return
       }
@@ -1939,7 +1957,9 @@ export class AppService {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
-        if (AppService.isRejectedStoredSessionError(error)) {
+        // Only `/me`'s session-ended envelope removes the saved token; any other
+        // restore failure signs this process out and keeps the token for the next start.
+        if (AppService.isSessionEndedByMe(error)) {
           await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
             legacyEnvKeys: getActiveLegacyEnvKeys(),
           })
@@ -4121,11 +4141,21 @@ export class AppService {
       if (sessionChanged())
         throw new Error('stale_auth_epoch: the session changed during the workflow listing')
     }
+    // A rejected workflow call (401) leaves the listing incomplete. If the session
+    // that started the listing is still the current one, /me decides whether it
+    // ended. The error is rethrown either way, so no list is returned. Callers keep
+    // their own handling of every other error.
+    const rethrowAfterSessionCheck = async (error: unknown): Promise<never> => {
+      if (!sessionChanged() && error instanceof ApiError && error.status === 401) {
+        await this.confirmCommittedSessionWithMe()
+      }
+      throw error
+    }
     // Without a team list, only the session's current team is listed.
     const listWithoutTeams = async () => {
       assertSameSession()
       this.workflowTeamByKey.clear()
-      const result = await this.authClient.listWorkflows(token)
+      const result = await this.authClient.listWorkflows(token).catch(rethrowAfterSessionCheck)
       assertSameSession()
       return result
     }
@@ -4165,13 +4195,10 @@ export class AppService {
           items.push(item)
         }
       } catch (error) {
-        // The session ended while this listing ran, so no list is returned.
-        if (sessionChanged()) throw error
-        if (error instanceof ApiError && error.status === 401) {
-          // A rejected team call leaves the list incomplete. Let /me decide
-          // whether the session ended; the list is not returned either way.
-          await this.confirmCommittedSessionWithMe()
-          throw error
+        // The session ended while this listing ran, or a team call was rejected:
+        // no list is returned. Any other team failure skips that team.
+        if (sessionChanged() || (error instanceof ApiError && error.status === 401)) {
+          await rethrowAfterSessionCheck(error)
         }
         console.warn(`[AppService] Failed loading workflows for team ${teamId}:`, error)
       }

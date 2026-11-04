@@ -5,6 +5,7 @@ import { createExternalClientRateLimiters } from '../../middleware/externalClien
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
+  requireExternalSessionRateLimitContext,
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
@@ -78,6 +79,33 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
     config.approvalRlExternalClientIpPerMin,
     config.approvalRlExternalEdgePerMin
   )
+  // `/me` is the session probe clients use to decide whether a stored session
+  // has ended, so it is registered before the generic chain below and answers
+  // a rejected session with the `invalid_session` envelope instead of the bare
+  // 401 that the service-credential guard also sends. Every other users route
+  // keeps the bare 401. The edge sends this GET with no body, so the body-token
+  // fallback of `requireExternalSessionRateLimitContext` never selects a token
+  // here; an outdated client receives the `upgrade_required` envelope (426).
+  router.get(
+    '/external/users/:userId/me',
+    ...externalUsersRateLimits,
+    requireExternalSessionRateLimitContext({
+      purpose: 'protected',
+      client: req => ({ version: req.header('x-evenfire-client-version') || undefined }),
+    }),
+    requireExternalUserParamMatch(),
+    async (req, res, next) => {
+      try {
+        const teamId = String(req.query.teamId || '')
+        const data = await getMe(req.params.userId, teamId)
+        if (!data) return res.status(404).json({ error: 'not_found' })
+        return res.status(200).json(data)
+      } catch (error) {
+        return next(error)
+      }
+    }
+  )
+
   router.use('/external/users', ...externalUsersRateLimits, requireValidExternalSessionToken)
 
   router.get(
@@ -193,21 +221,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         const membership = await findMembership(req.params.userId, req.params.teamId)
         if (!membership) return res.status(404).json({ error: 'not_found' })
         return res.status(200).json(membership)
-      } catch (error) {
-        return next(error)
-      }
-    }
-  )
-
-  router.get(
-    '/external/users/:userId/me',
-    requireExternalUserParamMatch(),
-    async (req, res, next) => {
-      try {
-        const teamId = String(req.query.teamId || '')
-        const data = await getMe(req.params.userId, teamId)
-        if (!data) return res.status(404).json({ error: 'not_found' })
-        return res.status(200).json(data)
       } catch (error) {
         return next(error)
       }

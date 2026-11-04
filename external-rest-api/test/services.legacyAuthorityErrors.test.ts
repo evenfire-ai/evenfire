@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createDesktopAuthorization } from '../src/services/invitationsService.js'
-import { getMe, switchTeam } from '../src/services/meService.js'
+import { ControlApiCredentialRejectedError, getMe, switchTeam } from '../src/services/meService.js'
 import {
   deleteMember,
   getCurrentTeam,
@@ -35,12 +35,14 @@ describe('legacy authority adapters', () => {
   })
 
   it('maps every other /me and switch-team failure to absence, keeping outages and /me revocation', async () => {
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {})
     for (const status of [404, 401, 500]) {
       clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
       if (status === 401) {
-        await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).rejects.toMatchObject({
-          status: 401,
-        })
+        // A bare 401 is the edge's service credential, never forwarded as a session end.
+        const rejection = getMe(auth.userId, auth.teamId, auth.sessionToken)
+        await expect(rejection).rejects.toBeInstanceOf(ControlApiCredentialRejectedError)
+        await expect(rejection).rejects.not.toBeInstanceOf(ControlApiError)
       } else {
         await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).resolves.toBeNull()
       }
@@ -50,6 +52,18 @@ describe('legacy authority adapters', () => {
         switchTeam(auth.userId, auth.email, 'team-2', auth.sessionToken)
       ).resolves.toBeNull()
     }
+    expect(stderr).toHaveBeenCalledTimes(1)
+    stderr.mockRestore()
+
+    clientMock.controlApiRequest.mockRejectedValueOnce(
+      new ControlApiError('control api failure', 401, {
+        error: { code: 'invalid_session', message: 'The session is not valid.', retryable: false },
+      })
+    )
+    await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).rejects.toMatchObject({
+      status: 401,
+      body: { error: { code: 'invalid_session' } },
+    })
 
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
     await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).rejects.toMatchObject({
@@ -61,7 +75,7 @@ describe('legacy authority adapters', () => {
       switchTeam(auth.userId, auth.email, 'team-2', auth.sessionToken)
     ).rejects.toMatchObject({ status: 503 })
 
-    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(8)
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(9)
   })
 
   it('does not convert current-team authority outages into an empty team', async () => {

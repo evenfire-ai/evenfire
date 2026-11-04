@@ -23,7 +23,20 @@ vi.mock('../chatStoreBinding.js', () => ({
   unbindChatStore: vi.fn(),
 }))
 
-const unauthorized = () => new ApiError('401 Unauthorized', 401, '{"error":"Unauthorized"}')
+// The only /me answer that ends a session: the edge's invalid_session envelope.
+const sessionEnded = () =>
+  new ApiError(
+    '401 Unauthorized: invalid_session',
+    401,
+    JSON.stringify({
+      error: {
+        code: 'invalid_session',
+        message: 'The session is not valid.',
+        correlationId: 'synthetic-correlation',
+        retryable: false,
+      },
+    })
+  )
 const sessionMe = (id: string, teamId: string | null) => ({
   id,
   email: `${id}@example.test`,
@@ -71,7 +84,7 @@ async function rejectOldSessionDuringReservedLogin(kind: 'google' | 'password') 
       : service.passwordLogin('user-b@example.test', 'password')
   await vi.waitFor(() => expect(dispatched).toHaveBeenCalledTimes(1))
 
-  rejectMe(unauthorized())
+  rejectMe(sessionEnded())
   await check
 
   // The rejection of the old token reached the close decision.
@@ -108,7 +121,7 @@ describe('AppService session rejected by /me while a login is in progress', () =
     const check = service.confirmCommittedSessionWithMe()
     await service.googleLogin('id-token')
 
-    rejectMe(unauthorized())
+    rejectMe(sessionEnded())
     await check
 
     expect(service.authClient.getMe).toHaveBeenCalledWith('token-a')
@@ -119,7 +132,7 @@ describe('AppService session rejected by /me while a login is in progress', () =
 
   it('ends the session when /me rejects it and no login is in progress', async () => {
     const { service, tokenStore, onSessionCleared } = createService()
-    service.authClient = { getMe: vi.fn().mockRejectedValue(unauthorized()) }
+    service.authClient = { getMe: vi.fn().mockRejectedValue(sessionEnded()) }
 
     await service.confirmCommittedSessionWithMe()
 

@@ -1,5 +1,5 @@
 import { Request, Response, Router } from 'express'
-import { ControlApiError } from '../controlApiClient.js'
+import { ControlApiError, isControlApiInvalidSession } from '../controlApiClient.js'
 import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
@@ -45,23 +45,6 @@ function isRejectedGoogleIdentity(error: unknown): error is ControlApiError {
     return false
   }
   return 'error' in error.body && error.body.error === 'Unauthorized'
-}
-
-// control-api answers an invalid, expired or revoked session on logout with its public
-// `invalid_session` envelope. A bare 401 on that route comes from the edge's own service
-// credential, so it does not prove that the session is already gone.
-function isInvalidSessionLogoutDenial(error: unknown): error is ControlApiError {
-  if (!isControlApiStatus(error, 401) || !error.body || typeof error.body !== 'object') {
-    return false
-  }
-  if (!('error' in error.body)) return false
-  const envelope = error.body.error
-  return (
-    typeof envelope === 'object' &&
-    envelope !== null &&
-    'code' in envelope &&
-    envelope.code === 'invalid_session'
-  )
 }
 
 type LoginResponse = {
@@ -200,7 +183,9 @@ export function createAuthRouter(): Router {
       // tell a revocation from a request that arrived after its cookie had expired.
       res.status(200).json({ ok: true, sessionPresented: Boolean(token) })
     } catch (error) {
-      if (isInvalidSessionLogoutDenial(error)) {
+      // Only control-api's `invalid_session` envelope proves the session is already
+      // gone; a bare 401 is a rejection of this edge's own service credential.
+      if (isControlApiInvalidSession(error)) {
         clearProfileSessionCookie(req, res)
         res.status(200).json({ ok: true, sessionPresented: true })
         return

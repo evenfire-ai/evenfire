@@ -1,14 +1,17 @@
 import { Router } from 'express'
 import { ControlApiError } from '../controlApiClient.js'
 import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
+import { sendPublicApiError } from '../http/publicApiError.js'
 import {
   type AuthedRequest,
   extractAuthToken,
   requireAuth,
   requireSelf,
+  requireSessionAuth,
 } from '../middleware/auth.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
+  ControlApiCredentialRejectedError,
   getMe,
   getMyAgents,
   getMyContexts,
@@ -81,7 +84,9 @@ export function createMeRouter(): Router {
     }
   })
 
-  router.get('/me', requireAuth, async (req: AuthedRequest, res, next) => {
+  // The session probe: only the `invalid_session` envelope (from this edge's token
+  // check or forwarded from control-api) declares the session ended.
+  router.get('/me', requireSessionAuth, async (req: AuthedRequest, res, next) => {
     try {
       const auth = req.auth!
       const sessionToken = extractAuthToken(req)
@@ -92,6 +97,17 @@ export function createMeRouter(): Router {
       }
       res.status(200).json(me)
     } catch (error) {
+      if (error instanceof ControlApiCredentialRejectedError) {
+        sendPublicApiError(
+          req,
+          res,
+          503,
+          'authority_unavailable',
+          'Authorization is temporarily unavailable.',
+          true
+        )
+        return
+      }
       next(error)
     }
   })

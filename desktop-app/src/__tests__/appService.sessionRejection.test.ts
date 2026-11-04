@@ -39,8 +39,26 @@ function sessionMe(overrides: Partial<SessionMe> = {}): SessionMe {
   }
 }
 
+// A bare 401: what a non-/me call answers, and what /me answers when the edge's own
+// service credential is refused. It is never a verdict on the session.
 function unauthorized(): ApiError {
   return new ApiError('401 Unauthorized', 401, '{"error":"Unauthorized"}')
+}
+
+// The only /me answer that ends a session: the edge's invalid_session envelope.
+function sessionEnded(): ApiError {
+  return new ApiError(
+    '401 Unauthorized: invalid_session',
+    401,
+    JSON.stringify({
+      error: {
+        code: 'invalid_session',
+        message: 'The session is not valid.',
+        correlationId: 'synthetic-correlation',
+        retryable: false,
+      },
+    })
+  )
 }
 
 function createService(me: SessionMe) {
@@ -77,7 +95,7 @@ function expectSessionEnded(
 describe('AppService session rejected by /me', () => {
   it('ends the session when /me rejects it during a team-context lookup', async () => {
     const { service, tokenStore, onSessionCleared } = createService(sessionMe({ teamId: null }))
-    const rejection = unauthorized()
+    const rejection = sessionEnded()
     const fenced: Array<{ token: string | null; ownerId: unknown }> = []
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(
       async (identity?: { ownerId?: string }) => {
@@ -110,9 +128,31 @@ describe('AppService session rejected by /me', () => {
     expect(onSessionCleared).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['a bare 401 (the edge service credential)', unauthorized()],
+    ['a 401 that is not JSON', new ApiError('401 Unauthorized', 401, 'Unauthorized')],
+    ['a 403', new ApiError('403 Forbidden', 403, '{"error":"Forbidden"}')],
+    ['a 410', new ApiError('410 Gone', 410, '')],
+  ])('keeps the session when /me answers %s during a team-context lookup', async (_name, error) => {
+    const { service, tokenStore, onSessionCleared } = createService(sessionMe({ teamId: null }))
+    service.authClient = { getMe: vi.fn().mockRejectedValue(error) }
+    const operation = vi.fn()
+
+    await expect(service.runWithTeamContext('team-b', operation)).rejects.toBe(error)
+
+    // /me was asked, and its answer was not the session-ended envelope.
+    expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
+    expect(service.authClient.getMe).toHaveBeenCalledWith('synthetic-session-token')
+    expect(operation).not.toHaveBeenCalled()
+    expect(service.sessionToken).toBe('synthetic-session-token')
+    expect(service.suspendDesktopGfsUploadsForAuthBoundary).not.toHaveBeenCalled()
+    expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
+    expect(onSessionCleared).not.toHaveBeenCalled()
+  })
+
   it('leaves a newer committed session alone when /me rejects the old token', async () => {
     const { service, tokenStore, onSessionCleared } = createService(sessionMe({ teamId: null }))
-    const rejection = unauthorized()
+    const rejection = sessionEnded()
     const newerMe = sessionMe({ id: 'user-a', teamId: 'team-c' })
     service.authClient = {
       getMe: vi.fn(async () => {
@@ -133,7 +173,7 @@ describe('AppService session rejected by /me', () => {
 
   it('stops a workflow listing and ends the session when /me rejects it', async () => {
     const { service, tokenStore, onSessionCleared } = createService(sessionMe({ teamId: null }))
-    const rejection = unauthorized()
+    const rejection = sessionEnded()
     service.workflowTeamByKey.set('sandbox-recipes/stale', 'team-old')
     service.authClient = {
       listTeams: vi.fn().mockResolvedValue({
@@ -203,7 +243,7 @@ describe('AppService session rejected by /me', () => {
       }),
       listWorkflows: vi.fn().mockRejectedValue(rejection),
       switchTeam: vi.fn(),
-      getMe: vi.fn().mockRejectedValue(unauthorized()),
+      getMe: vi.fn().mockRejectedValue(sessionEnded()),
     }
 
     await expect(service.listWorkflows()).rejects.toBe(rejection)
@@ -213,6 +253,99 @@ describe('AppService session rejected by /me', () => {
     expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
     expect(service.authClient.getMe).toHaveBeenCalledWith('synthetic-session-token')
     expectSessionEnded(service, tokenStore, onSessionCleared)
+  })
+
+  it('keeps the session when a team call answers 401 and /me answers a bare 401', async () => {
+    const { service, tokenStore, onSessionCleared } = createService(sessionMe())
+    const rejection = unauthorized()
+    const meAnswer = unauthorized()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    service.authClient = {
+      listTeams: vi.fn().mockResolvedValue({
+        currentTeamId: 'team-a',
+        items: [{ id: 'team-a', name: 'Team A', role: 'member' }],
+      }),
+      listWorkflows: vi.fn().mockRejectedValue(rejection),
+      switchTeam: vi.fn(),
+      getMe: vi.fn().mockRejectedValue(meAnswer),
+    }
+
+    try {
+      await expect(service.listWorkflows()).rejects.toBe(rejection)
+      // /me was asked and gave no verdict, so the session stays.
+      expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledWith('[AppService] Session check returned no verdict:', meAnswer)
+    } finally {
+      warn.mockRestore()
+    }
+    expect(service.sessionToken).toBe('synthetic-session-token')
+    expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
+    expect(onSessionCleared).not.toHaveBeenCalled()
+  })
+
+  describe('listing without a team list (F9)', () => {
+    const teamListings = [
+      ['the team list fails', () => vi.fn().mockRejectedValue(new ApiError('503', 503, ''))],
+      ['the team list is empty', () => vi.fn().mockResolvedValue({ currentTeamId: '', items: [] })],
+    ] as const
+
+    it.each(teamListings)(
+      'ends the session when %s, the fallback answers 401 and /me ends the session',
+      async (_name, listTeams) => {
+        const { service, tokenStore, onSessionCleared } = createService(sessionMe())
+        const rejection = unauthorized()
+        service.authClient = {
+          listTeams: listTeams(),
+          listWorkflows: vi.fn().mockRejectedValue(rejection),
+          getMe: vi.fn().mockRejectedValue(sessionEnded()),
+        }
+
+        await expect(service.listWorkflows()).rejects.toBe(rejection)
+
+        expect(service.authClient.listWorkflows).toHaveBeenCalledTimes(1)
+        expect(service.authClient.listWorkflows).toHaveBeenCalledWith('synthetic-session-token')
+        expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
+        expect(service.authClient.getMe).toHaveBeenCalledWith('synthetic-session-token')
+        expectSessionEnded(service, tokenStore, onSessionCleared)
+      }
+    )
+
+    it.each(teamListings)(
+      'keeps the session when %s, the fallback answers 401 and /me accepts it',
+      async (_name, listTeams) => {
+        const { service, tokenStore, onSessionCleared } = createService(sessionMe())
+        const rejection = unauthorized()
+        service.authClient = {
+          listTeams: listTeams(),
+          listWorkflows: vi.fn().mockRejectedValue(rejection),
+          getMe: vi.fn().mockResolvedValue(sessionMe()),
+        }
+
+        await expect(service.listWorkflows()).rejects.toBe(rejection)
+
+        // /me was asked and accepted the session.
+        expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
+        expect(service.sessionToken).toBe('synthetic-session-token')
+        expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
+        expect(onSessionCleared).not.toHaveBeenCalled()
+      }
+    )
+
+    it('rethrows a non-401 fallback failure without asking /me', async () => {
+      const { service, tokenStore } = createService(sessionMe())
+      const unavailable = new ApiError('503', 503, '')
+      service.authClient = {
+        listTeams: vi.fn().mockResolvedValue({ currentTeamId: '', items: [] }),
+        listWorkflows: vi.fn().mockRejectedValue(unavailable),
+        getMe: vi.fn(),
+      }
+
+      await expect(service.listWorkflows()).rejects.toBe(unavailable)
+
+      expect(service.authClient.listWorkflows).toHaveBeenCalledTimes(1)
+      expect(service.authClient.getMe).not.toHaveBeenCalled()
+      expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
+    })
   })
 
   it('fails a workflow listing with a 401 team call even when /me accepts the session', async () => {
@@ -308,7 +441,7 @@ describe('AppService session rejected by /me', () => {
     const { service, tokenStore, onSessionCleared } = createService(sessionMe({ teamId: null }))
     tokenStore.clearSessionToken.mockRejectedValue(new Error('keychain unavailable'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    const rejection = unauthorized()
+    const rejection = sessionEnded()
     service.authClient = { getMe: vi.fn().mockRejectedValue(rejection) }
 
     try {

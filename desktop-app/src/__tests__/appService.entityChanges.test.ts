@@ -45,6 +45,16 @@ function setSyntheticEntityChangeSession(service: object, value: string, generat
   state.entityChangeSessionGeneration = generation
 }
 
+// The edge's invalid_session envelope: the only /me answer that ends a session.
+const INVALID_SESSION_BODY = JSON.stringify({
+  error: {
+    code: 'invalid_session',
+    message: 'The session is not valid.',
+    correlationId: 'synthetic-correlation',
+    retryable: false,
+  },
+})
+
 describe('AppService entity-change fan-out', () => {
   it('rebinds a live subscriber after expiry through public Google login', async () => {
     const service = new AppService() as any
@@ -476,7 +486,9 @@ describe('AppService entity-change expiry asks /me about the session', () => {
   }
 
   it('ends the session when /me rejects it after the stream expired', async () => {
-    const getMe = vi.fn().mockRejectedValue(new ApiError('401 Unauthorized', 401, ''))
+    const getMe = vi
+      .fn()
+      .mockRejectedValue(new ApiError('401 Unauthorized', 401, INVALID_SESSION_BODY))
     const { service, tokenStore, onSessionCleared, events, expire } = expiringService(getMe)
     await flushAsyncWork()
 
@@ -540,7 +552,7 @@ describe('AppService entity-change stream team-context lifecycle', () => {
     service.me = { id: 'user-1', teamId: 'team-1' }
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
     service.authClient = {
-      getMe: vi.fn().mockRejectedValue(new ApiError('401 Unauthorized', 401, '')),
+      getMe: vi.fn().mockRejectedValue(new ApiError('401 Unauthorized', 401, INVALID_SESSION_BODY)),
     }
     const release = service.enterGfsTransientTeamHop()
 
