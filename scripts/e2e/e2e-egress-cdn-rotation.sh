@@ -218,7 +218,7 @@ count_substr() { # <needle> ; reads stdin
   awk -v needle="$1" 'index($0, needle) { n++ } END { print n + 0 }'
 }
 
-exists() { kctl get "$@" >/dev/null 2>&1; }
+exists() { kctl get "$@" --request-timeout=20s >/dev/null 2>&1; }
 
 is_public_ipv4() {
   local ip=$1 a b c d
@@ -330,6 +330,10 @@ dns_is() { # <expected-csv>
 }
 
 observed_at() { # <ips-json> <from-ms> -> first lastObservedAt of a target address
+  # lastObservedAt is written by HCC on the minikube clock; `from` is a host
+  # clock timestamp (ms_now). A large host/pod skew only moves the deadlines
+  # below (towards INCONCLUSIVE when the pod clock lags): every verdict still
+  # requires the policy to equal the exact expected address set.
   local state
   state="$(policy_state_json || :)" || return 1
   [ -n "$state" ] || return 1
@@ -555,14 +559,14 @@ resources_gone() {
     ! exists networkpolicy "$POLICY_NAME" -n "$RECIPE_NS" &&
     ! exists deployment "$CONTROL" -n "$RECIPE_NS" &&
     ! exists configmap "$CONTROL" -n "$RECIPE_NS" &&
-    [ -z "$(kctl get networkpolicy -n "$RECIPE_NS" -l "clerum.io/mcpserver=${SERVER}" -o name 2>/dev/null)" ]
+    [ -z "$(kctl get networkpolicy -n "$RECIPE_NS" -l "clerum.io/mcpserver=${SERVER}" --request-timeout=20s -o name 2>/dev/null)" ]
 }
 
 restore_hcc() {
   local restored="${EVIDENCE_DIR}/hcc-deployment-restored.json"
-  kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=json \
+  kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=json --request-timeout=20s \
     -p "$(cat "${EVIDENCE_DIR}/hcc-env-restore.json")" >/dev/null || return 1
-  kctl annotate deployment "$HCC_DEPLOY" -n "$HCC_NS" "${OVERRIDE_ANNOTATION}-" >/dev/null || return 1
+  kctl annotate deployment "$HCC_DEPLOY" -n "$HCC_NS" --request-timeout=20s "${OVERRIDE_ANNOTATION}-" >/dev/null || return 1
   kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout="${HCC_ROLLOUT_TIMEOUT}s" >/dev/null ||
     return 1
   # Read the Deployment once and derive both checks from that read, so a failed
@@ -583,7 +587,7 @@ restore_corefile() {
   patch="$(jq -cn --rawfile cf "${EVIDENCE_DIR}/corefile-original.txt" \
     --arg key "$OVERRIDE_ANNOTATION" \
     '{data:{Corefile:$cf},metadata:{annotations:{($key):null}}}')"
-  kctl patch configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --type=merge -p "$patch" >/dev/null || {
+  kctl patch configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --type=merge --request-timeout=20s -p "$patch" >/dev/null || {
     warn "the CoreDNS ConfigMap patch was rejected"
     return 1
   }
@@ -615,15 +619,15 @@ cleanup() {
   stop_loops
   if [ "$RESOURCES_CREATED" = 1 ]; then
     touched=1
-    kctl delete mcpserver "$SERVER" -n "$RECIPE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || {
+    kctl delete mcpserver "$SERVER" -n "$RECIPE_NS" --ignore-not-found --wait=false --request-timeout=20s >/dev/null 2>&1 || {
       warn "could not delete McpServer ${SERVER}"
       status=1
     }
-    kctl delete deployment "$CONTROL" -n "$RECIPE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || {
+    kctl delete deployment "$CONTROL" -n "$RECIPE_NS" --ignore-not-found --wait=false --request-timeout=20s >/dev/null 2>&1 || {
       warn "could not delete Deployment ${CONTROL}"
       status=1
     }
-    kctl delete configmap "$CONTROL" -n "$RECIPE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || {
+    kctl delete configmap "$CONTROL" -n "$RECIPE_NS" --ignore-not-found --wait=false --request-timeout=20s >/dev/null 2>&1 || {
       warn "could not delete ConfigMap ${CONTROL}"
       status=1
     }
@@ -631,17 +635,24 @@ cleanup() {
       status=1
     fi
   fi
-  if [ "$HCC_ENV_TOUCHED" = 1 ]; then
-    touched=1
-    if ! restore_hcc; then
-      warn "the host-context-controller env/annotation was not restored exactly"
-      status=1
-    fi
-  fi
+  # CoreDNS first, then HCC. restore_hcc Recreates HCC and waits for the new pod
+  # to be Ready; during that rollout HCC's initial reconciliation re-resolves
+  # every exact-host binding of the profile. If the override Corefile were still
+  # in place, that restored (production-cadence) HCC could persist the test
+  # answer set and `ttl 5` into those bindings' egress-fqdn-state. The two
+  # restores have no other dependency on each other, so the safer order is
+  # CoreDNS first.
   if [ "$COREFILE_TOUCHED" = 1 ]; then
     touched=1
     if ! restore_corefile; then
       warn "the CoreDNS restore did not complete (see the reason above)"
+      status=1
+    fi
+  fi
+  if [ "$HCC_ENV_TOUCHED" = 1 ]; then
+    touched=1
+    if ! restore_hcc; then
+      warn "the host-context-controller env/annotation was not restored exactly"
       status=1
     fi
   fi
@@ -655,10 +666,20 @@ cleanup() {
 
 on_exit() {
   local status=$? verdict
-  trap - EXIT INT TERM HUP
+  # A second INT/TERM/HUP must not kill the restore halfway. From here on the
+  # only writer is cleanup(), whose steps are bounded by their own timeouts.
+  # The ignored disposition is inherited by the kubectl children, so a retried
+  # signal cannot reopen the window while HCC or the Corefile is being restored.
+  trap - EXIT
+  trap '' INT TERM HUP
   if [ "$status" -ne "$EXIT_CODE" ]; then
-    EXIT_CODE=$status
-    [ "$REASON" != none ] || REASON=unexpected-error
+    # Only `finish` may hand a verdict to the exit trap. A raw exit status
+    # (set -e abort, a failed child command, a stray exit) is not a product
+    # verdict: map it to INCONCLUSIVE instead of reporting FAIL, PRECONDITION
+    # or RESTORE_FAILED from a status the script never chose. A cleanup failure
+    # below still overrides this with 4/restore-failed.
+    EXIT_CODE=3
+    REASON=unexpected-error
   fi
   case "$EXIT_CODE" in
     0|1|2|3|4) ;;
@@ -847,10 +868,13 @@ phase0() {
     fail "a previous run left a test override on HCC or CoreDNS; restore it before retrying"
     finish 2 leftover-state
   fi
-  if exists mcpserver "$SERVER" -n "$RECIPE_NS" ||
-     exists deployment "$CONTROL" -n "$RECIPE_NS" ||
-     exists configmap "$CONTROL" -n "$RECIPE_NS"; then
-    fail "test resources named ${SERVER}/${CONTROL} already exist"
+  # resources_gone also covers the HCC-owned side of an aborted run: the
+  # `${SERVER}` Deployment, the rendered `${SERVER}-nginx-conf` ConfigMap, the
+  # exact-host ${POLICY_NAME} and any policy labelled `clerum.io/mcpserver`.
+  # Without it a stale policy could be adopted by phase 3 before it is
+  # re-rendered, so the leftover check is the same predicate cleanup verifies.
+  if exists mcpserver "$SERVER" -n "$RECIPE_NS" || ! resources_gone; then
+    fail "a previous run left a test resource or an HCC-owned resource for ${SERVER}/${CONTROL}"
     finish 2 leftover-state
   fi
   ok "no leftover override or test resource from an aborted run"
@@ -875,7 +899,7 @@ phase0() {
   fi
   ok "Corefile saved and shaped as expected (one hosts block, no override row)"
 
-  local marker_json marker_head marker_worktree
+  local marker_json marker_head marker_worktree drift untracked
   marker_json="$(kctl get configmap clerum-pre-gate-sync-state -n "$HCC_NS" --request-timeout=20s -o json 2>/dev/null || :)"
   marker_head="$(printf '%s' "$marker_json" | jq -r '.data.gitHead // ""')"
   marker_worktree="$(printf '%s' "$marker_json" | jq -r '.data.worktreeId // ""')"
@@ -884,12 +908,30 @@ phase0() {
     finish 2 marker-missing
   fi
   printf '%s\n' "$marker_head" >"${EVIDENCE_DIR}/marker-git-head.txt"
-  git -C "$ROOT" diff --quiet "$marker_head" HEAD -- \
-    host-context-controller nginx-egress-proxy packages/network-policy-core || {
-    fail "host-context-controller, nginx-egress-proxy or packages/network-policy-core differ from ${marker_head}"
+  # Compare the marker against the real worktree, not against HEAD: `git diff
+  # <marker> HEAD` cannot see a dirty checkout, so uncommitted edits under these
+  # paths would certify code the pods never ran. `git diff <marker>` compares the
+  # marker tree with the working tree (staged and unstaged content alike);
+  # untracked files are listed separately because `git diff` cannot see them.
+  drift="$(git -C "$ROOT" diff --name-only "$marker_head" -- \
+    host-context-controller nginx-egress-proxy packages/network-policy-core)" || {
+    fail "could not compare the worktree with the pre-gate marker ${marker_head}"
     finish 2 source-drift
   }
-  ok "sources under test match the deployed pre-gate marker ${marker_head:0:12}"
+  untracked="$(git -C "$ROOT" ls-files --others --exclude-standard -- \
+    host-context-controller nginx-egress-proxy packages/network-policy-core)" || {
+    fail "could not list untracked files under the code under test"
+    finish 2 source-drift
+  }
+  if [ -n "$drift" ] || [ -n "$untracked" ]; then
+    {
+      [ -z "$drift" ] || awk '{ print "modified " $0 }' <<<"$drift"
+      [ -z "$untracked" ] || awk '{ print "untracked " $0 }' <<<"$untracked"
+    } >"${EVIDENCE_DIR}/source-drift.txt"
+    fail "host-context-controller, nginx-egress-proxy or packages/network-policy-core differ from ${marker_head} in the worktree"
+    finish 2 source-drift
+  fi
+  ok "the worktree under test matches the deployed pre-gate marker ${marker_head:0:12} (no uncommitted or untracked source)"
 
   # L6 evidence: every exact-host binding of the profile uses the short window.
   kctl get networkpolicy -n "$RECIPE_NS" -l clerum.io/policy-type=external-egress \
@@ -923,7 +965,7 @@ phase1() {
     fail "could not annotate ${HCC_NS}/${HCC_DEPLOY} with the temporary override"
     finish 2 hcc-env-not-applied
   }
-  kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" \
+  kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" -c "$HCC_CONTAINER" \
     HCC_EXTERNAL_EGRESS_OVERLAP_SEC=60 HCC_EXTERNAL_EGRESS_RESYNC_SEC=10 >/dev/null || {
     fail "could not set the HCC egress window environment"
     finish 2 hcc-env-not-applied
@@ -1031,7 +1073,10 @@ capture_coredns_reload_errors() {
   }
   grep -E 'Reloading|reload failed|Restart failed|Error during parsing' "${out}.raw" >"$out" || :
   rm -f "${out}.raw"
-  lines="$(grep -E 'reload failed|Error during parsing' "$out" | tail -n 2)"
+  # `|| :` keeps an empty grep under pipefail: a grep with no match exits 1 and
+  # would otherwise abort this evidence capture with a raw status instead of the
+  # phase's own INCONCLUSIVE reason.
+  lines="$({ grep -E 'reload failed|Error during parsing' "$out" || :; } | tail -n 2)"
   [ -z "$lines" ] || warn "CoreDNS refused the override Corefile: ${lines}"
 }
 
