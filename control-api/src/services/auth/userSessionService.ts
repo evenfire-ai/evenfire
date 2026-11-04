@@ -653,22 +653,23 @@ export async function validateLegacyUserSession(
       ])
       if ((locked.rowCount ?? 0) === 0) return { status: 'revoked', reason: 'user_unavailable' }
     }
-    const now = await loadSessionDatabaseNow(db)
     const result = await db.query(
-      `SELECT u.id, u.lifecycle_state, u.lifecycle_version,
+      `WITH observed_clock AS (SELECT date_trunc('second', now()) AS db_now)
+       SELECT u.id, u.lifecycle_state, u.lifecycle_version,
             epoch.valid_after,
             EXISTS (
               SELECT 1
                 FROM external_v1_session_revocations revoked
                WHERE revoked.token_hash = $2
                  AND revoked.user_id = u.id
-                 AND revoked.expires_at > $3
+                 AND revoked.expires_at > observed_clock.db_now
             ) AS token_revoked
        FROM users u
+       CROSS JOIN observed_clock
        LEFT JOIN external_user_session_security_epochs epoch ON epoch.user_id = u.id
       WHERE u.id = $1
       LIMIT 1`,
-      [claims.userId, legacySessionFingerprint(token), now]
+      [claims.userId, legacySessionFingerprint(token)]
     )
     const row = result.rows[0] as
       | {

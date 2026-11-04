@@ -314,4 +314,49 @@ describe('user session state machine', () => {
     expect(current.status).toBe('valid')
     expect(db.query).toHaveBeenCalled()
   })
+
+  it('decides a legacy session from one lifecycle query that carries the database clock', async () => {
+    const claims: AuthClaims = {
+      userId: randomUUID(),
+      email: 'legacy@example.com',
+      teamId: null,
+      role: 'member',
+      authGeneration: 1,
+      exp: Math.floor(now.getTime() / 1000) + 3600,
+      iat: Math.floor(now.getTime() / 1000) - 1,
+    }
+    let tokenRevoked = false
+    const db = {
+      query: vi.fn(async () => ({
+        rows: [
+          {
+            id: claims.userId,
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+            valid_after: null,
+            token_revoked: tokenRevoked,
+          },
+        ],
+        rowCount: 1,
+      })),
+    }
+
+    const current = await validateLegacyUserSession('legacy-v1-token', claims, { db })
+    expect(current.status).toBe('valid')
+    expect(db.query).toHaveBeenCalledTimes(1)
+    const [sql, values] = db.query.mock.calls[0] as unknown as [string, unknown[]]
+    expect(sql).toContain("WITH observed_clock AS (SELECT date_trunc('second', now()) AS db_now)")
+    expect(sql).toContain('CROSS JOIN observed_clock')
+    expect(sql).toContain('revoked.expires_at > observed_clock.db_now')
+    expect(values).toHaveLength(2)
+    expect(values[0]).toBe(claims.userId)
+
+    // The same single query decides: flipping its revocation flag flips the verdict.
+    tokenRevoked = true
+    await expect(validateLegacyUserSession('legacy-v1-token', claims, { db })).resolves.toEqual({
+      status: 'revoked',
+      reason: 'logout',
+    })
+    expect(db.query).toHaveBeenCalledTimes(2)
+  })
 })

@@ -67,22 +67,18 @@ function app() {
 describe('external session legacy token cut-over', () => {
   beforeEach(() => {
     poolQuery.mockClear()
-    poolQuery.mockImplementation(async (sql: string) =>
-      sql.includes('clock_timestamp()')
-        ? { rows: [{ db_now: new Date() }], rowCount: 1 }
-        : {
-            rows: [
-              {
-                id: '11111111-1111-4111-8111-111111111111',
-                lifecycle_state: 'active',
-                lifecycle_version: '1',
-                valid_after: null,
-                token_revoked: false,
-              },
-            ],
-            rowCount: 1,
-          }
-    )
+    poolQuery.mockImplementation(async () => ({
+      rows: [
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          lifecycle_state: 'active',
+          lifecycle_version: '1',
+          valid_after: null,
+          token_revoked: false,
+        },
+      ],
+      rowCount: 1,
+    }))
   })
 
   it('denies a signature-valid token without a lifecycle generation', async () => {
@@ -117,7 +113,12 @@ describe('external session legacy token cut-over', () => {
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ ok: true })
-    expect(poolQuery).toHaveBeenCalledTimes(2)
-    expect(String(poolQuery.mock.calls[0]?.[0])).toContain('clock_timestamp()')
+    expect(poolQuery).toHaveBeenCalledTimes(1)
+    const lifecycleSql = String(poolQuery.mock.calls[0]?.[0])
+    expect(lifecycleSql).toContain("date_trunc('second', now())")
+    expect(lifecycleSql).toContain('external_user_session_security_epochs')
+    expect(lifecycleSql).toContain('external_v1_session_revocations')
+    expect(lifecycleSql).toContain('revoked.expires_at > observed_clock.db_now')
+    expect(poolQuery.mock.calls[0]?.[1]).toHaveLength(2)
   })
 })

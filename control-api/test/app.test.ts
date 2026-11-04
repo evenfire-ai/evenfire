@@ -294,7 +294,6 @@ describe('app router wiring', () => {
     expect(transactionQuery.mock.calls.map(([sql]) => String(sql))).toEqual([
       'BEGIN',
       expect.stringContaining('SELECT id FROM users'),
-      expect.stringContaining('clock_timestamp()'),
       expect.stringContaining('external_user_session_security_epochs'),
       expect.stringContaining('JOIN team_members'),
       expect.stringContaining('SELECT lifecycle_state, lifecycle_version'),

@@ -82,11 +82,10 @@ describe('external session lifecycle gate', () => {
         token_revoked: false,
       },
     ]
-    poolQuery.mockImplementation(async (sql: string) =>
-      sql.includes('clock_timestamp()')
-        ? { rows: [{ db_now: new Date() }], rowCount: 1 }
-        : { rows: authorityRows, rowCount: authorityRows.length }
-    )
+    poolQuery.mockImplementation(async () => ({
+      rows: authorityRows,
+      rowCount: authorityRows.length,
+    }))
   })
 
   it('accepts an active session whose generation matches the user row', async () => {
@@ -121,9 +120,9 @@ describe('external session lifecycle gate', () => {
     expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
     expect(response.headers['cache-control']).toBe('no-store')
-    // Witness: session validation reached the database-authoritative clock.
+    // Witness: session validation reached the lifecycle query that carries the database clock.
     expect(poolQuery).toHaveBeenCalledTimes(1)
-    expect(String(poolQuery.mock.calls[0]?.[0])).toContain('clock_timestamp()')
+    expect(String(poolQuery.mock.calls[0]?.[0])).toContain("date_trunc('second', now())")
     expect(loggerWarn).toHaveBeenCalledTimes(1)
     expect(loggerWarn.mock.calls[0]?.[0]).toMatchObject({
       event: 'external_session_backend_unavailable',
@@ -162,24 +161,31 @@ describe('external session lifecycle gate', () => {
     // Witness: next() ran and the middleware fixed req.externalAuth.
     expect(response.body.userId).toBe(claims.userId)
     expect(poolConnect).not.toHaveBeenCalled()
-    expect(poolQuery).toHaveBeenCalledTimes(2)
+    expect(poolQuery).toHaveBeenCalledTimes(1)
     const statements = poolQuery.mock.calls.map(call => String(call[0])).join('\n')
     expect(statements).not.toContain('statement_timeout')
     expect(statements).not.toContain('READ ONLY')
   })
 
-  it('keeps a successful-query session clock invariant failure on the ordinary 500 path', async () => {
-    verifyToken.mockReturnValueOnce(claims)
-    poolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+  it('keeps a successful-query session clock invariant failure an ordinary error at session creation', async () => {
+    const { createUserSession } = await import('../src/services/auth/userSessionService.js')
+    const { ExternalSessionBackendUnavailableError } =
+      await import('../src/services/auth/sessionDatabaseFailure.js')
+    poolQuery
+      .mockResolvedValueOnce({ rows: [{ id: claims.userId }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
 
-    const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
+    const failure = await createUserSession(
+      { userId: claims.userId, email: claims.email, authenticationMethods: ['pwd'] },
+      { db: { query: (...args: unknown[]) => poolQuery(...args) } as never }
+    ).catch((error: unknown) => error)
 
-    expect(response.status).toBe(500)
-    expect(response.body).toEqual({ error: 'internal' })
-    expect(JSON.stringify(response.body)).not.toContain('database session clock unavailable')
-    expect(response.headers['retry-after']).toBeUndefined()
-    expect(response.headers['cache-control']).toBeUndefined()
-    expect(String(poolQuery.mock.calls[0]?.[0])).toContain('clock_timestamp()')
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe('database session clock unavailable')
+    expect(failure).not.toBeInstanceOf(ExternalSessionBackendUnavailableError)
+    // Witness: creation locked the user and then read the database clock.
+    expect(poolQuery).toHaveBeenCalledTimes(2)
+    expect(String(poolQuery.mock.calls[1]?.[0])).toContain('clock_timestamp()')
     expect(loggerWarn).not.toHaveBeenCalled()
   })
 
