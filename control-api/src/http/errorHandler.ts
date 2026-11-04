@@ -15,6 +15,12 @@ import { memberRegistrationErrorResponse } from '../services/memberRegistrationE
 export const FORWARDABLE_INTEGRATION_CODES = new Set([
   'registry_unavailable',
   'registry_integration_error',
+  // Kubernetes read errors (services/secretRead.ts): control-api's own
+  // apiserver read was rejected (502) or failed (503); the message is built
+  // from the kind, name, namespace and status only.
+  'secret_read_failed',
+  'workflow_recipe_list_failed',
+  'resource_read_failed',
 ])
 
 // Stable machine-readable codes added to a forwarded 4xx body. Internal
@@ -146,10 +152,12 @@ function safeErrorLogStack(err: unknown): string | undefined {
  * Exported (rather than an inline closure in createApp) so it can be unit-tested
  * in isolation. Behavior:
  *   - typed member-registration failures → their mapped status (spec §8.6);
- *   - any error carrying a 4xx status (via `.status` / `.statusCode` / `.code` /
- *     `.response.*`) is FORWARDED with a sanitized message — this is FIX-B: raw
- *     K8s 400/403/404/409/422 no longer collapse to 500;
- *   - allowlisted registry-integration 502/503 codes are forwarded verbatim;
+ *   - a raw K8s ApiException 401/403 → 502 `kubernetes_access_denied` with a
+ *     fixed message (the apiserver refused control-api, not the caller);
+ *   - any other error carrying a 4xx status (via `.status` / `.statusCode` /
+ *     `.code` / `.response.*`) is FORWARDED with a sanitized message — this is
+ *     FIX-B: raw K8s 400/404/409/422 no longer collapse to 500;
+ *   - allowlisted integration 502/503 codes are forwarded verbatim;
  *   - everything else (5xx, status-less, non-Error throws) → 500, unchanged.
  */
 export function clerumErrorHandler(
@@ -204,6 +212,32 @@ export function clerumErrorHandler(
   const errStatus = extractErrorStatus(err)
   const isClientError = errStatus !== undefined && errStatus >= 400 && errStatus < 500
 
+  // A raw K8s ApiException 401/403 is the apiserver refusing control-api's OWN
+  // ServiceAccount, never the caller's session: control-api calls Kubernetes
+  // with its own credentials. Forwarding it would log the Control UI operator
+  // out (401) or show them a Status message naming that ServiceAccount (403).
+  // Service-layer errors that set their own 401/403 are not ApiExceptions and
+  // still take the 4xx branch below.
+  if (isK8sApiException(err) && (errStatus === 401 || errStatus === 403)) {
+    log.warn(
+      {
+        event: 'kubernetes_access_denied',
+        correlationId,
+        upstreamStatus: errStatus,
+        err: safeErrorLogMessage(err),
+      },
+      'Kubernetes API server refused control-api credentials'
+    )
+    res.status(502).json({
+      error: 'kubernetes_access_denied',
+      message:
+        `The Kubernetes API server refused control-api's own credentials (HTTP ${errStatus}). ` +
+        'Your session is not the cause; check the control-api RBAC.',
+      correlationId,
+    })
+    return
+  }
+
   if (isClientError) {
     const clientCode = (err as { code?: unknown }).code
     const forwardedCode =
@@ -228,10 +262,11 @@ export function clerumErrorHandler(
     return
   }
 
-  // Allowlisted registry-integration errors carry a safe code + message we set
-  // ourselves (RegistryUnavailableError → 503; the 401 remap → 502). Forward
-  // them so the marketplace shows a clear message instead of a raw 500. The
-  // message is safe because only our own constructors set these codes.
+  // Allowlisted integration errors carry a safe code + message we set ourselves
+  // (RegistryUnavailableError → 503; the registry 401 remap → 502; the
+  // Kubernetes read errors → 502/503). Forward them so the UI shows a clear
+  // message instead of a raw 500. The message is safe because only our own
+  // constructors set these codes.
   const integrationCode = (err as { code?: unknown }).code
   const integrationStatus = (err as { status?: unknown }).status
   if (
@@ -240,19 +275,30 @@ export function clerumErrorHandler(
     typeof integrationCode === 'string' &&
     FORWARDABLE_INTEGRATION_CODES.has(integrationCode)
   ) {
+    // The Kubernetes read errors carry the upstream status and a log-safe
+    // reason (the metav1.Status message, the errno code of a FetchError of type
+    // 'system', or the AbortError name; never headers); log them with the
+    // correlation id so one line explains the forwarded 502/503.
+    const upstream = err as { upstreamStatus?: unknown; upstreamReason?: unknown }
     log.warn(
       {
-        event: 'forwarded_registry_integration_error',
+        event: 'forwarded_integration_error',
         correlationId,
         status: integrationStatus,
         code: integrationCode,
         err: safeErrorLogMessage(err),
+        ...(upstream.upstreamStatus !== undefined
+          ? { upstreamStatus: upstream.upstreamStatus }
+          : {}),
+        ...(upstream.upstreamReason !== undefined
+          ? { upstreamReason: upstream.upstreamReason }
+          : {}),
       },
-      'forwarded registry integration error'
+      'forwarded integration error'
     )
     res.status(integrationStatus).json({
       error: integrationCode,
-      message: err instanceof Error ? err.message : 'Registry integration error',
+      message: err instanceof Error ? err.message : 'Integration error',
       correlationId,
     })
     return

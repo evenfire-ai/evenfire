@@ -224,3 +224,59 @@ describe('clerumErrorHandler — K8s status forwarding (UT-2a)', () => {
     expect(logged).not.toContain(err.message)
   })
 })
+
+/**
+ * control-api calls Kubernetes with its OWN ServiceAccount, so a raw
+ * ApiException 401/403 is the apiserver refusing control-api, never the
+ * caller's session. Forwarded as-is, a 401 logs the Control UI operator out
+ * and a 403 shows a Status message naming the ServiceAccount.
+ */
+describe('clerumErrorHandler — K8s ApiException 401/403', () => {
+  const forbiddenBody = {
+    kind: 'Status',
+    apiVersion: 'v1',
+    status: 'Failure',
+    message:
+      'hosts.clerum.io "h1" is forbidden: User "system:serviceaccount:control-plane:control-api" cannot get resource "hosts"',
+    reason: 'Forbidden',
+    code: 403,
+  }
+  const headers = { 'audit-id': 'a1b2c3-secret-audit-uuid' }
+
+  it.each([401, 403] as const)(
+    'answers a real ApiException %i with 502 kubernetes_access_denied and no apiserver text',
+    async status => {
+      const err = new ApiException(status, 'Forbidden', { ...forbiddenBody, code: status }, headers)
+      const { app, warn } = appThrowingWithLogSpy(err)
+      const res = await request(app).get('/boom')
+
+      expect(res.status).toBe(502)
+      expect(res.body.error).toBe('kubernetes_access_denied')
+      expect(res.body.message).toBe(
+        `The Kubernetes API server refused control-api's own credentials (HTTP ${status}). ` +
+          'Your session is not the cause; check the control-api RBAC.'
+      )
+      const serialized = JSON.stringify(res.body)
+      expect(serialized).not.toContain('system:serviceaccount')
+      expect(serialized).not.toContain('audit-id')
+      // Witness: the branch ran and recorded the upstream status.
+      expect(warn).toHaveBeenCalledOnce()
+      expect(warn.mock.calls[0][0]).toMatchObject({
+        event: 'kubernetes_access_denied',
+        upstreamStatus: status,
+      })
+    }
+  )
+
+  it('keeps forwarding a service-layer 403 that is not an ApiException', async () => {
+    const res = await request(appThrowing({ code: 403 })).get('/boom')
+    expect(res.status).toBe(403)
+  })
+
+  it.each([404, 409])('keeps forwarding a real ApiException %i', async status => {
+    const err = new ApiException(status, 'x', { kind: 'Status', message: 'm', code: status }, {})
+    const res = await request(appThrowing(err)).get('/boom')
+    expect(res.status).toBe(status)
+    expect(res.body.error).toBe('m')
+  })
+})
