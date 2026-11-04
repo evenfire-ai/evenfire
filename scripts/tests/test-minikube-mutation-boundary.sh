@@ -3,6 +3,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd -P)"
 MUTATION_WRAPPER="${ROOT}/scripts/minikube/with-t2-mutation-lock.sh"
+# The lease owner must trap HUP like INT/TERM: an untrapped HUP kills the
+# wrapper and its EXIT cleanup releases the lease while a HUP-ignoring child
+# can still mutate the profile.
+for signal_trap in "trap 'exit 130' INT" "trap 'exit 143' TERM" "trap 'exit 129' HUP" 'trap - EXIT INT TERM HUP'; do
+  grep -Fq "$signal_trap" "$MUTATION_WRAPPER" || {
+    echo "FAIL: mutation wrapper is missing signal contract: $signal_trap" >&2
+    exit 1
+  }
+done
 TMP_DIR="$(mktemp -d)"
 source "${ROOT}/scripts/tests/lib/minikube-fixture-repo.sh"
 
