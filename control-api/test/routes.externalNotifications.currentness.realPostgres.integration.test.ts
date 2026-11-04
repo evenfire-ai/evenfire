@@ -19,6 +19,10 @@ const producerDatabase = vi.hoisted(() => ({
   listActive: vi.fn(),
   openListener: vi.fn(),
 }))
+const heartbeatAuthority = vi.hoisted(() => ({
+  gate: null as Promise<void> | null,
+  heldObservations: 0,
+}))
 
 vi.mock('../src/db.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/db.js')>()
@@ -28,6 +32,32 @@ vi.mock('../src/db.js', async importOriginal => {
       query: (text: string, values?: unknown[]) => producerDatabase.pool!.query(text, values),
     },
     withTransaction: <T>(work: (db: DbClient) => Promise<T>) => producerDatabase.transaction!(work),
+  }
+})
+vi.mock('../src/config.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/config.js')>()
+  return { ...actual, config: { ...actual.config, notificationStreamHeartbeatMs: 20 } }
+})
+// Every authority observation made after the stream's first event read has
+// started (that is, by a heartbeat) waits for the test's gate, then runs the
+// real observer against PostgreSQL. Startup observations all finish before that
+// first read and pass straight through.
+vi.mock('../src/services/auth/externalSessionCurrentnessObserver.js', async importOriginal => {
+  const actual =
+    await importOriginal<
+      typeof import('../src/services/auth/externalSessionCurrentnessObserver.js')
+    >()
+  return {
+    ...actual,
+    observeExternalSessionCurrentness: async (
+      ...args: Parameters<typeof actual.observeExternalSessionCurrentness>
+    ) => {
+      if (heartbeatAuthority.gate && producerDatabase.listEvents.mock.calls.length > 0) {
+        heartbeatAuthority.heldObservations += 1
+        await heartbeatAuthority.gate
+      }
+      return actual.observeExternalSessionCurrentness(...args)
+    },
   }
 })
 vi.mock('../src/middleware/externalClientIdentity.js', () => ({
@@ -134,7 +164,7 @@ describeRealPostgres('mounted notification stream currentness on real PostgreSQL
     }
   })
 
-  it('drops a real V2 notification batch after revoke-all during the awaited read', async () => {
+  it('writes a real V2 notification batch read before revoke-all and closes on the next heartbeat', async () => {
     const userId = randomUUID()
     const email = `notification-currentness-${userId}@example.test`
     await databasePool.query(`INSERT INTO users(id, email, name) VALUES ($1, $2, $3)`, [
@@ -153,6 +183,9 @@ describeRealPostgres('mounted notification stream currentness on real PostgreSQL
     expect(Number(generation.rows[0]?.lifecycle_version)).toBeGreaterThan(1)
 
     const events = deferred<unknown[]>()
+    const heartbeatGate = deferred<void>()
+    heartbeatAuthority.gate = heartbeatGate.promise
+    heartbeatAuthority.heldObservations = 0
     producerDatabase.listActive.mockResolvedValue([])
     producerDatabase.listEvents.mockReset().mockReturnValue(events.promise)
     producerDatabase.openListener.mockResolvedValue(
@@ -176,20 +209,31 @@ describeRealPostgres('mounted notification stream currentness on real PostgreSQL
     events.resolve([
       {
         eventType: 'approval.updated',
-        id: 'private-event-id',
-        cursor: 'private-cursor',
-        approvalRequestId: 'private-approval-id',
+        id: 'batch-event-id',
+        cursor: 'batch-cursor',
+        approvalRequestId: 'batch-approval-id',
         status: 'approved',
       },
     ])
+    // The batch is written in the microtasks after the resolve. Release the
+    // held heartbeat observations only once a heartbeat is waiting, so the
+    // first observation after the batch reads the committed revocation.
+    await vi.waitFor(() => expect(heartbeatAuthority.heldObservations).toBeGreaterThan(0))
+    heartbeatGate.resolve()
     const response = await responsePromise
 
     expect(response.status).toBe(200)
     expect(response.text).toContain('notification.snapshot')
-    expect(response.text).toContain('stream.closing')
-    expect(response.text).toContain('session_expired')
-    expect(response.text).not.toContain('private-event-id')
-    expect(response.text).not.toContain('private-cursor')
-    expect(response.text).not.toContain('private-approval-id')
+    // The batch read before the revocation is written, and the next heartbeat
+    // observes the revocation on the real database and closes the stream.
+    expect(response.text).toContain('batch-event-id')
+    const frames = response.text
+      .split('\n')
+      .filter(line => line.length > 0)
+      .map(line => JSON.parse(line) as { type: string; reason?: string })
+    expect(frames.at(-1)).toMatchObject({ type: 'stream.closing', reason: 'session_expired' })
+    expect(response.text.indexOf('batch-event-id')).toBeLessThan(
+      response.text.indexOf('stream.closing')
+    )
   })
 })

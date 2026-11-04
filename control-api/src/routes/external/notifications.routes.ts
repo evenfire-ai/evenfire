@@ -236,19 +236,16 @@ export function createExternalNotificationsRouter(): Router {
           if (closed || flushInFlight) return
           flushInFlight = true
           try {
-            if (!(await closeForAuthority())) return
             const events = await listNotificationStreamEventsForUser(claims.userId, {
               limit: config.notificationStreamSnapshotLimit,
               after: lastCursor ? parseNotificationCursor(lastCursor) : null,
             })
-            if (!(await closeForAuthority())) return
             if (events.length === 0) {
               notificationStreamEventsFilteredTotal.inc({ reason: 'no_new_active_events' }, 1)
               return
             }
             for (const event of events) {
               if (closed) break
-              if (!(await closeForAuthority())) break
               if (event.eventType === 'approval.requested') {
                 writeStreamMessage(res, {
                   type: 'approval.requested',
@@ -353,13 +350,13 @@ export function createExternalNotificationsRouter(): Router {
 
         heartbeatTimer = setInterval(() => {
           void (async () => {
-            void flushNewEvents()
             if (closed || !(await closeForAuthority())) return
             writeStreamMessage(res, {
               type: 'heartbeat',
               observedAt: new Date().toISOString(),
             })
             notificationStreamEventsSentTotal.inc({ event_type: 'heartbeat' }, 1)
+            void flushNewEvents()
           })()
         }, config.notificationStreamHeartbeatMs)
 

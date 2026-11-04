@@ -13,6 +13,10 @@ const streamState = vi.hoisted(() => ({
   backendFailure: vi.fn(),
 }))
 
+vi.mock('../src/config.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/config.js')>()
+  return { ...actual, config: { ...actual.config, notificationStreamHeartbeatMs: 20 } }
+})
 vi.mock('../src/middleware/externalClientIdentity.js', () => ({
   createExternalClientRateLimiters: () => [
     (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
@@ -157,14 +161,16 @@ describe('external notification stream currentness', () => {
     expect(streamState.openListener).not.toHaveBeenCalled()
   })
 
-  it('drops an awaited notification batch when original authority is revoked', async () => {
+  it('writes an in-flight batch and closes on the next heartbeat when original authority is revoked', async () => {
     const batch = deferred<unknown[]>()
+    const heartbeatAuthority = deferred<unknown>()
+    // Three startup observations are current; every heartbeat observation
+    // waits until the test decides the authority.
     streamState.observer
       .mockResolvedValueOnce({ status: 'current' })
       .mockResolvedValueOnce({ status: 'current' })
       .mockResolvedValueOnce({ status: 'current' })
-      .mockResolvedValueOnce({ status: 'current' })
-      .mockResolvedValueOnce({ status: 'denied', reason: 'v2_session_revoked_or_changed' })
+      .mockImplementation(() => heartbeatAuthority.promise)
     streamState.listEvents.mockReturnValueOnce(batch.promise)
 
     const responsePromise = request(makeApp()).get('/external/notifications/stream')
@@ -179,30 +185,36 @@ describe('external notification stream currentness', () => {
     batch.resolve([
       {
         eventType: 'approval.updated',
-        id: 'private-event-id',
-        cursor: 'private-cursor',
-        approvalRequestId: 'private-approval-id',
+        id: 'batch-event-id',
+        cursor: 'batch-cursor',
+        approvalRequestId: 'batch-approval-id',
         status: 'approved',
       },
     ])
+    await vi.waitFor(() => expect(streamState.observer.mock.calls.length).toBeGreaterThan(3))
+    heartbeatAuthority.resolve({ status: 'denied', reason: 'v2_session_revoked_or_changed' })
     const response = await responsePromise
 
     expect(response.status).toBe(200)
+    // The batch read before the revocation is written; the stream then closes
+    // on the next heartbeat, which observes the revocation.
+    expect(response.text).toContain('batch-event-id')
     expect(response.text).toContain('stream.closing')
     expect(response.text).toContain('session_expired')
-    expect(response.text).not.toContain('private-event-id')
-    expect(response.text).not.toContain('private-cursor')
-    expect(response.text).not.toContain('private-approval-id')
+    expect(response.text.indexOf('batch-event-id')).toBeLessThan(
+      response.text.indexOf('stream.closing')
+    )
+    expect(response.text).not.toContain('"type":"heartbeat"')
   })
 
-  it('ends without protected data or cursor when authority becomes unavailable after headers', async () => {
+  it('writes an in-flight batch and ends on the next heartbeat when authority becomes unavailable after headers', async () => {
     const batch = deferred<unknown[]>()
+    const heartbeatAuthority = deferred<unknown>()
     streamState.observer
       .mockResolvedValueOnce({ status: 'current' })
       .mockResolvedValueOnce({ status: 'current' })
       .mockResolvedValueOnce({ status: 'current' })
-      .mockResolvedValueOnce({ status: 'current' })
-      .mockResolvedValueOnce({ status: 'unavailable', error: new Error('database unavailable') })
+      .mockImplementation(() => heartbeatAuthority.promise)
     streamState.listEvents.mockReturnValueOnce(batch.promise)
 
     const responsePromise = request(makeApp()).get('/external/notifications/stream')
@@ -217,18 +229,28 @@ describe('external notification stream currentness', () => {
     batch.resolve([
       {
         eventType: 'approval.updated',
-        id: 'private-event-id',
-        cursor: 'private-cursor',
-        approvalRequestId: 'private-approval-id',
+        id: 'batch-event-id',
+        cursor: 'batch-cursor',
+        approvalRequestId: 'batch-approval-id',
         status: 'approved',
       },
     ])
+    await vi.waitFor(() => expect(streamState.observer.mock.calls.length).toBeGreaterThan(3))
+    heartbeatAuthority.resolve({ status: 'unavailable', error: new Error('database unavailable') })
     const response = await responsePromise
 
     expect(response.status).toBe(200)
     expect(response.text).toContain('notification.snapshot')
-    expect(response.text).not.toContain('private-event-id')
-    expect(response.text).not.toContain('private-cursor')
+    // The batch read before the outage is written; the next heartbeat ends the
+    // stream without a closing frame, heartbeat or backend error body.
+    expect(response.text).toContain('batch-event-id')
+    const frames = response.text
+      .split('\n')
+      .filter(line => line.length > 0)
+      .map(line => JSON.parse(line) as { type: string })
+    expect(frames.at(-1)?.type).toBe('approval.updated')
+    expect(response.text).not.toContain('stream.closing')
+    expect(response.text).not.toContain('"type":"heartbeat"')
     expect(response.text).not.toContain('session_backend_unavailable')
   })
 
