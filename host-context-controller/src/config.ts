@@ -655,10 +655,11 @@ export const config: Config = {
   // with per-pod-key ingress and scoped CoreDNS emitted by LlmHookReconciler
   // only for hooks that declare egressBindings.
   //
-  // mcp-host is not listed either: an HCC deny-all there blocks mcp-host pods
-  // from reaching LLM APIs, so its policies are static
-  // (deploy/base/mcp-host/networkpolicies.yaml). The default equals the
-  // deploy/base value.
+  // mcp-host is not listed either: it keeps static policies
+  // (deploy/base/mcp-host/networkpolicies.yaml) under the names HCC would
+  // write; they carry no HCC ownership label, so listing mcp-host makes HCC's
+  // startup NetworkPolicy pass fail on conflicting ownership. The default
+  // equals the deploy/base value.
   runtimeNamespaces: getEnv(
     'CONTEXT_MAPPER_RUNTIME_NAMESPACES',
     'mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui'
