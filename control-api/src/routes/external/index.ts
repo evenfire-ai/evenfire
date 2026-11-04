@@ -1,6 +1,5 @@
 import { Router } from 'express'
 import type { K8sGateway } from '../../k8s.js'
-import { createExternalAccessRouter } from './access.js'
 import { createExternalAuthRouter } from './auth.js'
 import { createExternalUserApprovalDecisionsRouter } from './decisions.routes.js'
 import { createExternalDirectoryRouter } from './directory.js'
@@ -18,7 +17,6 @@ import { createExternalWorkflowsRouter } from './workflows/index.js'
 
 export function createExternalRouter(gateway: K8sGateway): Router {
   const router = Router()
-  router.use(createExternalAccessRouter(gateway))
   router.use(createExternalAuthRouter(gateway))
   router.use(createExternalUsersRouter(gateway))
   router.use(createExternalTeamsRouter(gateway))

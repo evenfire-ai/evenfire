@@ -7,7 +7,6 @@ import { invitationPasswordErrorHandler } from './http/passwordAdmissionError.js
 import { sendPublicApiError } from './http/publicApiError.js'
 import { requireTrustedBrowserMutation } from './middleware/browserMutationGuard.js'
 import { withExternalRequestContext } from './requestContext.js'
-import { createAccessRouter } from './routes/access.js'
 import { createAuthRouter } from './routes/auth.js'
 import { createContextSharedFilesystemsRouter } from './routes/contextSharedFilesystems.js'
 import { createDesktopRouter } from './routes/desktop.js'
@@ -69,7 +68,6 @@ export function createApp() {
 
   const api = express.Router()
   api.use(createAuthRouter())
-  api.use(createAccessRouter())
   api.use(createDesktopRouter())
   api.use(createMeRouter())
   api.use(createMembersRouter())
