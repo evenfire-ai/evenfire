@@ -72,6 +72,13 @@ for what breaks without it.
   session.
 - `/desktop-setup` — the Desktop App handoff, above.
 
+## Sign-out
+
+If the server does not confirm a sign-out (a 404 during a rollout window, a 503,
+or a network failure), Profile UI stops using the session cookie until the next
+successful sign-in, a confirmed sign-out, or an accepted password reset, and
+tells the member.
+
 ## Deploy
 
 Profile UI ships in the platform Kustomize bases —

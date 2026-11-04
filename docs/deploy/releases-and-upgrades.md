@@ -223,6 +223,10 @@ Read the notes for every release you skip over, not only the target release.
    mark these fields. See also the [CRD reference](../crds/README.md).
 
 3. **Then roll out the images** for the new release, all from the same tag.
+   Before you do, check the feature-specific notes below for an order that
+   replaces this step. The [user access foundation
+   upgrade](user-access-foundation-upgrade.md) is one: it runs the migration
+   Job, then External REST and Profile UI, and only then control-api.
 4. **Follow any feature-specific runbook** below.
 
 ### Feature-specific notes
@@ -233,3 +237,4 @@ Read the notes for every release you skip over, not only the target release.
 | [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.              |
 | [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential. |
 | [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.       |
+| [User access foundation upgrade](user-access-foundation-upgrade.md)                | You upgrade to the release with External REST user sessions. It has a required order: edge before control-api.    |
