@@ -260,11 +260,12 @@ allowlisted set of environment variables, and this variable is not in that set.
 
 No action is needed when you use the runner image built from this repository:
 the repository images use Node 24. If `CLERUM_SNIPPET_RUNNER_IMAGE` points at
-your own image, that image must run a Node that accepts `--permission` (22.13.0
-or later) and is below the major that restricts network access under the
-permission model, which is Node 25. A runtime that does not accept
-`--permission`, meaning Node older than 22.13.0, refuses to start, so the runner
-exits at startup. On Node 25 and later the runner starts, but snippet workers
+your own image, that image must run a Node that accepts `--permission` and is
+below the major that restricts network access under the permission model, which
+is Node 25. Node accepts `--permission` on 22.x from 22.13.0, on 23.x from
+23.5.0, and on every 24.x release. A runtime that does not accept it, meaning
+Node older than 22.13.0 or a 23.x release older than 23.5.0, refuses to start,
+so the runner exits at startup. On Node 25 and later the runner starts, but snippet workers
 cannot open network connections, because those releases also restrict network
 access under `--permission`, and the runner does not pass `--allow-net` (Node 24
 rejects that flag).
