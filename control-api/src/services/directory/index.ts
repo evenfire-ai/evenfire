@@ -61,7 +61,6 @@ export {
   listMembers,
   listPendingInvitations,
   searchDirectory,
-  DirectorySearchCursorError,
   DIRECTORY_SEARCH_MAX_QUERY_LENGTH,
   softDeleteMember,
   startDraftInvitationCleanup,

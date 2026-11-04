@@ -60,7 +60,7 @@ describe('external directory authorization', () => {
       sessionContract: 'v1',
       authGeneration: 1,
     })
-    mocks.searchDirectory.mockResolvedValue({ items: [], nextCursor: null })
+    mocks.searchDirectory.mockResolvedValue({ items: [] })
     mocks.checkAndIncrement.mockResolvedValue(allowedRateLimitResult())
   })
 
@@ -77,7 +77,7 @@ describe('external directory authorization', () => {
       'team-1',
       expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
     )
-    expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person', undefined)
+    expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person')
   })
 
   it('refuses a caller without a live team membership', async () => {
@@ -128,7 +128,7 @@ describe('external directory authorization', () => {
       .set('x-user-session-token', 'session')
 
     expect(response.status).toBe(200)
-    expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person', undefined)
+    expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person')
   })
 
   it('keeps dev limits: an allowed search charges no per-user PG bucket', async () => {
@@ -145,7 +145,7 @@ describe('external directory authorization', () => {
       'team-1',
       expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
     )
-    expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person', undefined)
+    expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person')
     // dev has no per-user directory-search bucket on this route.
     expect(mocks.checkAndIncrement).not.toHaveBeenCalled()
     expect(response.headers['x-ratelimit-limit']).toBeUndefined()

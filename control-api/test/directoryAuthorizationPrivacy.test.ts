@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import bcrypt from 'bcryptjs'
 import { readFileSync } from 'node:fs'
 import {
-  DirectorySearchCursorError,
   acceptInvitationForEmail,
   createInvitationForTeams,
   createManagedInvitationForUser,
@@ -1017,34 +1016,32 @@ describe('directory privacy and atomic authorization', () => {
     ).toHaveLength(1)
   })
 
-  it('treats wildcard characters literally, excludes channels, and publishes a stable cursor', async () => {
-    mocks.query.mockImplementation(async (sql: string, values: unknown[]) => {
-      expect(sql).toContain('ILIKE $2 ESCAPE')
-      expect(sql).not.toContain('p.channels')
-      expect(values[1]).toBe('%\\%\\_%')
-      expect(values[4]).toBe(26)
-      return {
-        rows: Array.from({ length: 26 }, (_, index) => ({
-          id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
-          email: `person-${index}@example.com`,
-          name: `Person ${index}`,
-          display_name: `Person ${index}`,
-          sort_key: `person ${String(index).padStart(2, '0')}`,
-          channels: { emails: ['secret@example.com'] },
-        })),
-        rowCount: 26,
-      }
+  it('treats wildcard characters literally, excludes channels, and returns one bounded page without a cursor', async () => {
+    mocks.query.mockResolvedValue({
+      rows: Array.from({ length: 25 }, (_, index) => ({
+        id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+        email: `person-${index}@example.com`,
+        name: `Person ${index}`,
+        display_name: `Person ${index}`,
+        sort_key: `person ${String(index).padStart(2, '0')}`,
+        channels: { emails: ['secret@example.com'] },
+      })),
+      rowCount: 25,
     })
 
     const result = await searchDirectory(TEAM_A, '%_')
 
+    // Witness: the search ran once, with the escaped pattern.
+    expect(mocks.query).toHaveBeenCalledTimes(1)
+    const [sql, values] = mocks.query.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain('ILIKE $2 ESCAPE')
+    expect(sql).not.toContain('p.channels')
+    expect(sql).toMatch(/ORDER BY sort_key ASC, u\.id ASC\s+LIMIT 25$/)
+    expect(values).toEqual([TEAM_A, '%\\%\\_%'])
     expect(result.items).toHaveLength(25)
-    expect(result.nextCursor).toMatch(/^ds1\./)
+    expect(result).not.toHaveProperty('nextCursor')
     expect(JSON.stringify(result)).not.toContain('channels')
     expect(JSON.stringify(result)).not.toContain('secret@example.com')
-    await expect(
-      searchDirectory(TEAM_A, '%_', `${result.nextCursor}tampered`)
-    ).rejects.toBeInstanceOf(DirectorySearchCursorError)
   })
 
   function functionBody(source: string, name: string): string | null {

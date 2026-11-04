@@ -1,5 +1,3 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
-import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
 import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
@@ -946,72 +944,14 @@ export async function acceptInvitationById(email: string, invitationId: string) 
 }
 
 export const DIRECTORY_SEARCH_MAX_QUERY_LENGTH = 100
-export const DIRECTORY_SEARCH_PAGE_SIZE = 25
-
-export class DirectorySearchCursorError extends Error {
-  constructor() {
-    super('invalid directory search cursor')
-    this.name = 'DirectorySearchCursorError'
-  }
-}
 
 function escapeLikeLiteral(value: string): string {
   return value.replace(/[\\%_]/g, character => `\\${character}`)
 }
 
-function directorySearchCursorSignature(value: string): string {
-  return createHmac('sha256', config.sessionJwtPrivateKey).update(value).digest('base64url')
-}
-
-function encodeDirectorySearchCursor(input: {
-  teamId: string
-  query: string
-  sortKey: string
-  userId: string
-}): string {
-  const body = Buffer.from(JSON.stringify(input)).toString('base64url')
-  return `ds1.${body}.${directorySearchCursorSignature(body)}`
-}
-
-function decodeDirectorySearchCursor(
-  value: string,
-  teamId: string,
-  query: string
-): { sortKey: string; userId: string } {
-  const [prefix, body, signature, extra] = value.split('.')
-  if (prefix !== 'ds1' || !body || !signature || extra) throw new DirectorySearchCursorError()
-  const expected = directorySearchCursorSignature(body)
-  const suppliedBytes = Buffer.from(signature)
-  const expectedBytes = Buffer.from(expected)
-  if (
-    suppliedBytes.length !== expectedBytes.length ||
-    !timingSafeEqual(suppliedBytes, expectedBytes)
-  ) {
-    throw new DirectorySearchCursorError()
-  }
-  try {
-    const parsed = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Record<
-      string,
-      unknown
-    >
-    const sortKey = typeof parsed.sortKey === 'string' ? parsed.sortKey : ''
-    const userId = typeof parsed.userId === 'string' ? parsed.userId : ''
-    if (parsed.teamId !== teamId || parsed.query !== query || !sortKey || !userId) {
-      throw new Error('cursor mismatch')
-    }
-    return { sortKey, userId }
-  } catch {
-    throw new DirectorySearchCursorError()
-  }
-}
-
-export async function searchDirectory(teamId: string, q: string, cursor?: string) {
+export async function searchDirectory(teamId: string, q: string) {
   const query = q.trim()
-  if (!query) return { items: [], nextCursor: null }
-  if (query.length > DIRECTORY_SEARCH_MAX_QUERY_LENGTH) {
-    throw new DirectorySearchCursorError()
-  }
-  const after = cursor ? decodeDirectorySearchCursor(cursor, teamId, query) : null
+  if (!query) return { items: [] }
   const pattern = `%${escapeLikeLiteral(query)}%`
 
   const result = await pool.query(
@@ -1028,42 +968,23 @@ export async function searchDirectory(teamId: string, q: string, cursor?: string
           OR COALESCE(u.name, '') ILIKE $2 ESCAPE '\\'
           OR COALESCE(p.display_name, '') ILIKE $2 ESCAPE '\\'
         )
-        AND (
-          $3::text IS NULL
-          OR (
-            LOWER(COALESCE(NULLIF(p.display_name, ''), NULLIF(u.name, ''), u.email)),
-            u.id
-          ) > ($3, $4::uuid)
-        )
    ORDER BY sort_key ASC, u.id ASC
-      LIMIT $5`,
-    [teamId, pattern, after?.sortKey ?? null, after?.userId ?? null, DIRECTORY_SEARCH_PAGE_SIZE + 1]
+      LIMIT 25`,
+    [teamId, pattern]
   )
   const rows = result.rows as Array<{
     id: string
     email: string
     name: string | null
     display_name: string | null
-    sort_key: string
   }>
-  const page = rows.slice(0, DIRECTORY_SEARCH_PAGE_SIZE)
-  const last = page[page.length - 1]
   return {
-    items: page.map(row => ({
+    items: rows.map(row => ({
       id: row.id,
       email: row.email,
       name: row.name,
       displayName: row.display_name,
     })),
-    nextCursor:
-      rows.length > DIRECTORY_SEARCH_PAGE_SIZE && last
-        ? encodeDirectorySearchCursor({
-            teamId,
-            query,
-            sortKey: last.sort_key,
-            userId: last.id,
-          })
-        : null,
   }
 }
 
