@@ -39,6 +39,8 @@ import { useHostModels } from '@hooks/useHostModels'
 import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { getComposerDraft, getComposerDraftRevision } from '@lib/composerDraftStore'
 import { formatFileSize } from '@lib/composerFileAdmission'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
+import { hasExactGfsReadAuthority } from '@lib/gfsReadAuthority'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
 import type {
@@ -49,7 +51,10 @@ import type {
 import { AnnotationCanvas } from './AnnotationCanvas'
 import { ComposerAgentFilesModal } from './ComposerAgentFilesModal'
 import { ComposerGfsLinkPicker } from './ComposerGfsLinkPicker'
-import type { ComposerGfsLinkSelection } from './ComposerGfsLinkPicker.types'
+import type {
+  ComposerGfsAuthorityFailureHandler,
+  ComposerGfsLinkSelection,
+} from './ComposerGfsLinkPicker.types'
 import { ComposerGlobalFilesModal } from './ComposerGlobalFilesModal'
 import { ModelSelector } from './ModelSelector'
 
@@ -70,7 +75,29 @@ type GfsInsertionSession = {
   expectedDraft: string
   expectedRevision: number
   anchor: number
+  selectionStart: number
+  selectionEnd: number
+  intentGeneration: number
+  controllerGeneration: number | null
   controllerScope: string | null
+}
+
+type GfsCaretReceipt = {
+  operationId: number
+  sessionId: number
+  expectedDraft: string
+  expectedRevision: number
+  selectionStart: number
+  selectionEnd: number
+  intentGeneration: number
+}
+
+function gfsComposerOwnerKey(owner: {
+  chatId: string | null
+  agent: string | null
+  workspaceTabId: string | null
+}): string {
+  return JSON.stringify([owner.chatId, owner.agent, owner.workspaceTabId])
 }
 
 function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']): string {
@@ -240,7 +267,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const composerSubmenuRef = useRef<HTMLSpanElement | null>(null)
   const gfsInsertionSessionRef = useRef<GfsInsertionSession | null>(null)
   const gfsInsertionSessionCounterRef = useRef(0)
-  const gfsInsertionBusyRef = useRef(false)
+  const gfsInsertionLocksRef = useRef(new Map<string, number>())
+  const gfsInsertionOperationCounterRef = useRef(0)
+  const gfsCaretReceiptRef = useRef<GfsCaretReceipt | null>(null)
   const composerIdentityRef = useRef({
     chatId: activeChatId,
     agent: selectedAgent,
@@ -467,6 +496,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           workspaceChatTabId
         )
         session.anchor = selectionStart ?? value.length
+        session.selectionEnd = session.anchor
+        session.selectionStart = composerInputRef.current?.selectionStart ?? session.anchor
+        session.intentGeneration += 1
       }
       // Clear any pending send error as the user resumes typing. No re-render up-tree
       // unless an error is actually present.
@@ -492,13 +524,20 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       selectedAgent ?? undefined,
       workspaceChatTabId
     )
+    const nextStart = textarea.selectionStart
+    const nextEnd = textarea.selectionEnd
     session.expectedDraft = currentDraft
     session.expectedRevision = getComposerDraftRevision(
       activeChatId,
       selectedAgent ?? undefined,
       workspaceChatTabId
     )
-    session.anchor = textarea.selectionEnd
+    if (session.selectionStart !== nextStart || session.selectionEnd !== nextEnd) {
+      session.intentGeneration += 1
+    }
+    session.selectionStart = nextStart
+    session.selectionEnd = nextEnd
+    session.anchor = nextEnd
   }, [activeChatId, selectedAgent, workspaceChatTabId])
 
   // The controller clears the draft store only when the send is actually accepted
@@ -641,6 +680,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         workspaceChatTabId
       ),
       anchor: textarea?.selectionEnd ?? currentDraft.length,
+      selectionStart: textarea?.selectionStart ?? currentDraft.length,
+      selectionEnd: textarea?.selectionEnd ?? currentDraft.length,
+      intentGeneration: 0,
+      controllerGeneration: null,
       controllerScope: null,
     }
     setComposerMenuOpen(true)
@@ -648,12 +691,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     setComposerAttachmentError(null)
   }, [activeChatId, selectedAgent, workspaceChatTabId])
 
-  const captureGfsControllerScope = useCallback((sessionId: number, scope: string) => {
-    const session = gfsInsertionSessionRef.current
-    if (session?.id === sessionId && session.controllerScope === null) {
-      session.controllerScope = scope
-    }
-  }, [])
+  const captureGfsControllerScope = useCallback(
+    (sessionId: number, scope: string, generation: number | null) => {
+      const session = gfsInsertionSessionRef.current
+      if (session?.id === sessionId && session.controllerScope === null) {
+        session.controllerScope = scope
+        session.controllerGeneration = generation
+      }
+    },
+    []
+  )
 
   useEffect(() => {
     if (!composerMenuOpen) return
@@ -671,9 +718,17 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   }, [composerMenuOpen, composerSubmenu])
 
   const insertGfsLink = useCallback(
-    ({ uri }: ComposerGfsLinkSelection, controllerScope: string, sessionId: number) => {
+    async (
+      { uri, resourceId }: ComposerGfsLinkSelection,
+      controllerScope: string,
+      sessionId: number,
+      controllerGeneration: number | null,
+      handleAuthorityFailure: ComposerGfsAuthorityFailureHandler
+    ) => {
       const session = gfsInsertionSessionRef.current
-      if (!session || gfsInsertionBusyRef.current) return
+      if (!session) return
+      const ownerKey = gfsComposerOwnerKey(session)
+      if (gfsInsertionLocksRef.current.has(ownerKey)) return
       if (session.id !== sessionId) return
       if (
         session.chatId !== composerIdentityRef.current.chatId ||
@@ -682,7 +737,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         session.chatId !== activeChatId ||
         session.agent !== selectedAgent ||
         session.workspaceTabId !== workspaceChatTabId ||
-        session.controllerScope !== controllerScope
+        session.controllerScope !== controllerScope ||
+        session.controllerGeneration !== controllerGeneration ||
+        controllerGeneration === null
       ) {
         gfsInsertionSessionRef.current = null
         setComposerSubmenu(null)
@@ -705,41 +762,123 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       }
       const canonicalUri = normalizeGfsResourceUri(uri)
       if (!canonicalUri) return
-
-      gfsInsertionBusyRef.current = true
-      const anchor = Math.max(0, Math.min(session.anchor, currentDraft.length))
-      const insertion = `${canonicalUri} `
-      const nextDraft = `${currentDraft.slice(0, anchor)}${insertion}${currentDraft.slice(anchor)}`
-      const nextAnchor = anchor + insertion.length
-      const result = setDraft(nextDraft)
-      if (!result.accepted) {
-        gfsInsertionBusyRef.current = false
-        return
+      const operationId = ++gfsInsertionOperationCounterRef.current
+      const captured = {
+        sessionId: session.id,
+        ownerKey,
+        chatId: session.chatId,
+        agent: session.agent,
+        workspaceTabId: session.workspaceTabId,
+        controllerScope: session.controllerScope,
+        controllerGeneration: session.controllerGeneration,
+        draft: currentDraft,
+        revision: currentRevision,
+        anchor: session.anchor,
+        selectionStart: session.selectionStart,
+        selectionEnd: session.selectionEnd,
       }
-      session.expectedDraft = nextDraft
-      session.expectedRevision = getComposerDraftRevision(
-        activeChatId,
-        selectedAgent ?? undefined,
-        workspaceChatTabId
-      )
-      session.anchor = nextAnchor
-      window.requestAnimationFrame(() => {
-        const textarea = composerInputRef.current
+      gfsInsertionLocksRef.current.set(ownerKey, operationId)
+      setComposerAttachmentError(null)
+      try {
+        // This request is intentionally independent from the passive picker
+        // result and shared QueryClient cache. Its coherent server evaluation
+        // is the authorization point for this insertion.
+        const decision = await window.clerum.gfs.affordances(resourceId, 'main')
+        if (!hasExactGfsReadAuthority(decision)) return
+        if ((await window.clerum.auth.getSessionGeneration()) !== captured.controllerGeneration)
+          return
+        const liveSession = gfsInsertionSessionRef.current
         if (
-          !textarea ||
-          composerIdentityRef.current.chatId !== session.chatId ||
-          composerIdentityRef.current.agent !== session.agent ||
-          composerIdentityRef.current.workspaceTabId !== session.workspaceTabId ||
-          gfsInsertionSessionRef.current?.id !== session.id
+          !liveSession ||
+          liveSession.id !== captured.sessionId ||
+          liveSession.chatId !== captured.chatId ||
+          liveSession.agent !== captured.agent ||
+          liveSession.workspaceTabId !== captured.workspaceTabId ||
+          liveSession.controllerScope !== captured.controllerScope ||
+          liveSession.anchor !== captured.anchor ||
+          liveSession.selectionStart !== captured.selectionStart ||
+          liveSession.selectionEnd !== captured.selectionEnd ||
+          liveSession.expectedDraft !== captured.draft ||
+          liveSession.expectedRevision !== captured.revision ||
+          composerIdentityRef.current.chatId !== captured.chatId ||
+          composerIdentityRef.current.agent !== captured.agent ||
+          composerIdentityRef.current.workspaceTabId !== captured.workspaceTabId ||
+          activeChatId !== captured.chatId ||
+          selectedAgent !== captured.agent ||
+          workspaceChatTabId !== captured.workspaceTabId ||
+          getComposerDraft(activeChatId, selectedAgent ?? undefined, workspaceChatTabId) !==
+            captured.draft ||
+          getComposerDraftRevision(activeChatId, selectedAgent ?? undefined, workspaceChatTabId) !==
+            captured.revision
         ) {
-          gfsInsertionBusyRef.current = false
           return
         }
-        textarea.focus()
-        textarea.setSelectionRange(nextAnchor, nextAnchor)
-        resizeComposerInput()
-        gfsInsertionBusyRef.current = false
-      })
+
+        const anchor = Math.max(0, Math.min(captured.anchor, captured.draft.length))
+        const insertion = `${canonicalUri} `
+        const nextDraft = `${captured.draft.slice(0, anchor)}${insertion}${captured.draft.slice(anchor)}`
+        const nextAnchor = anchor + insertion.length
+        const result = setDraft(nextDraft)
+        if (!result.accepted) return
+
+        liveSession.expectedDraft = nextDraft
+        liveSession.expectedRevision = getComposerDraftRevision(
+          activeChatId,
+          selectedAgent ?? undefined,
+          workspaceChatTabId
+        )
+        liveSession.anchor = nextAnchor
+        liveSession.selectionStart = nextAnchor
+        liveSession.selectionEnd = nextAnchor
+        liveSession.intentGeneration += 1
+        const receipt: GfsCaretReceipt = {
+          operationId,
+          sessionId: liveSession.id,
+          expectedDraft: nextDraft,
+          expectedRevision: liveSession.expectedRevision,
+          selectionStart: nextAnchor,
+          selectionEnd: nextAnchor,
+          intentGeneration: liveSession.intentGeneration,
+        }
+        gfsCaretReceiptRef.current = receipt
+        window.requestAnimationFrame(() => {
+          try {
+            const current = gfsInsertionSessionRef.current
+            const textarea = composerInputRef.current
+            if (
+              gfsCaretReceiptRef.current !== receipt ||
+              !textarea ||
+              !current ||
+              current.id !== receipt.sessionId ||
+              current.expectedDraft !== receipt.expectedDraft ||
+              current.expectedRevision !== receipt.expectedRevision ||
+              current.intentGeneration !== receipt.intentGeneration ||
+              composerIdentityRef.current.chatId !== captured.chatId ||
+              composerIdentityRef.current.agent !== captured.agent ||
+              composerIdentityRef.current.workspaceTabId !== captured.workspaceTabId
+            ) {
+              return
+            }
+            textarea.focus()
+            textarea.setSelectionRange(receipt.selectionStart, receipt.selectionEnd)
+            resizeComposerInput()
+          } finally {
+            // A stale RAF cleans only its own receipt and operation. It cannot
+            // clear a newer insertion's caret receipt or lock.
+            if (gfsCaretReceiptRef.current === receipt) gfsCaretReceiptRef.current = null
+          }
+        })
+      } catch (error) {
+        const currentOwnerKey = gfsComposerOwnerKey(composerIdentityRef.current)
+        handleAuthorityFailure(error instanceof Error ? error.message : String(error))
+        if (currentOwnerKey === captured.ownerKey) {
+          setComposerAttachmentError(describeGfsReadError(error).message)
+        }
+      } finally {
+        // Same-owner admission stays closed until this operation reaches this
+        // synchronous finally; other owners have independent lock entries.
+        gfsInsertionLocksRef.current.delete(ownerKey)
+      }
     },
     [activeChatId, resizeComposerInput, selectedAgent, setDraft, workspaceChatTabId]
   )

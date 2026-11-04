@@ -11,18 +11,20 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import fc, { type AsyncCommand } from 'fast-check'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { FileExplorerTree } from '@components/SidebarNav/FileExplorerTree'
 import type { WorkspaceTabStripProps } from '@components/WorkspaceTabStrip/types'
+import { accessCatalogFromWire } from '@components/agents/__tests__/__fixtures__/accessCatalog'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { useAppController } from '@hooks/useAppController'
 import {
   getComposerDraft,
+  getComposerDraftRevision,
   resetComposerDraftStore,
   setComposerDraft,
 } from '@lib/composerDraftStore'
@@ -58,10 +60,13 @@ import {
   childView,
   gfsRouteFailureMessage,
   heldAffordances,
+  listAccessiblePage,
+  listChildrenPage,
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
+import { delegationAffordances } from '../../../src/gfs/delegation.js'
 import { GfsClient, type GfsTransport } from '../../../src/gfs/uriHandler'
 import {
   GfsResourceDeepLinkQueue,
@@ -208,6 +213,8 @@ const commonHarness = vi.hoisted(() => ({
   renderActualToastStack: false,
   renderActualButtons: false,
   renderWorkspaceSurfaces: false,
+  renderComposerInChatPage: false,
+  renderComposerButtons: false,
   draftProbe: {
     chatId: null as string | null,
     agentRef: null as string | null,
@@ -262,7 +269,8 @@ vi.mock('@components/Common', async () => {
             },
             props.children
           ),
-    IconButton: () => null,
+    IconButton: (props: Parameters<typeof actual.IconButton>[0]) =>
+      commonHarness.renderComposerButtons ? createElement(actual.IconButton, props) : null,
     ToastStack: (props: Parameters<typeof actual.ToastStack>[0]) =>
       commonHarness.renderActualToastStack ? createElement(actual.ToastStack, props) : null,
   }
@@ -320,15 +328,21 @@ vi.mock('@pages/AuthPage', () => ({
 vi.mock('@pages/ChatPage', async () => {
   const { getComposerDraft } =
     await vi.importActual<typeof import('@lib/composerDraftStore')>('@lib/composerDraftStore')
+  const { ComposerPanel } = await vi.importActual<
+    typeof import('@components/agents/ComposerPanel')
+  >('@components/agents/ComposerPanel')
   return {
     ChatPage: () => {
       if (!commonHarness.renderWorkspaceSurfaces) return null
       const { chatId, agentRef, tabId } = commonHarness.draftProbe
       const draft = chatId ? getComposerDraft(chatId, agentRef ?? undefined, tabId) : ''
       return (
-        <div data-testid="chat-page-pane">
-          <textarea aria-label="Draft in App pane" readOnly value={draft} />
-        </div>
+        <>
+          <div data-testid="chat-page-pane">
+            <textarea aria-label="Draft in App pane" readOnly value={draft} />
+          </div>
+          {commonHarness.renderComposerInChatPage ? <ComposerPanel inline={false} /> : null}
+        </>
       )
     },
   }
@@ -695,8 +709,10 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
 // App mounts GfsDragSessionProvider, which reads Query state: every bare
 // App render needs a real QueryClient (fresh per render, production cache
 // defaults) instead of the app-level singleton provider it gets in prod.
-function renderApp(ui: ReactElement) {
-  const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+function renderApp(
+  ui: ReactElement,
+  queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+) {
   return render(ui, {
     wrapper: ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
@@ -824,6 +840,8 @@ describe('App deep-link orchestration', () => {
     commonHarness.renderActualToastStack = false
     commonHarness.renderActualButtons = false
     commonHarness.renderWorkspaceSurfaces = false
+    commonHarness.renderComposerInChatPage = false
+    commonHarness.renderComposerButtons = false
     commonHarness.draftProbe = { chatId: null, agentRef: null, tabId: null }
     workspaceTabStripHarness.props = null
     sidebarHarness.props = null
@@ -898,6 +916,132 @@ describe('App deep-link orchestration', () => {
   }
 
   beforeEach(resetAppDeepLinkHarness)
+
+  it('fences and recovers a Composer picker through the authenticated App event bridge', async () => {
+    desktopQueryClient.clear()
+    let publishEntityChange: ((event: unknown) => void) | null = null
+    const resource = accessibleResource(
+      'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      'Bridge note.md',
+      'file'
+    )
+    const allowed = delegationAffordances(new Set(['read']), false)
+    const pendingPassive: Array<(value: typeof allowed) => void> = []
+    let resourceReads = 0
+    const affordances = vi.fn((resourceId: string) => {
+      if (resourceId !== resource.resourceId) return Promise.resolve(allowed)
+      resourceReads += 1
+      if (resourceReads === 1 || resourceReads >= 4) return Promise.resolve(allowed)
+      return new Promise<typeof allowed>(resolve => pendingPassive.push(resolve))
+    })
+    const subscribe = vi.fn((handler: (event: unknown) => void) => {
+      publishEntityChange = handler
+      return Promise.resolve(vi.fn(async () => undefined))
+    })
+    Object.assign(window.clerum, {
+      entityChanges: { subscribe },
+      auth: { getSessionGeneration: vi.fn(async () => 1) },
+      access: {
+        ...window.clerum.access,
+        refreshCatalog: vi.fn(async () =>
+          accessCatalogFromWire([{ name: 'agent-1', contextRef: null }])
+        ),
+      },
+      workflows: { list: vi.fn(async () => ({ items: [], count: 0 })) },
+      rpc: { getHostModels: vi.fn(async () => ({ models: [] })) },
+      gfs: {
+        ...window.clerum.gfs,
+        listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+        listChildren: vi.fn(async () => listChildrenPage([])),
+        affordances,
+      },
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      isAuthenticated: true,
+      me: {
+        id: 'user-1',
+        email: 'user-1@example.com',
+        name: 'User 1',
+        picture: null,
+        teamId: null,
+        teamName: null,
+        role: 'member',
+      },
+      selectedAgent: 'agent-1',
+      activeChatId: 'chat-1',
+      sessionGeneration: 1,
+      composerImageAttachments: [],
+      composerFileAttachments: [],
+      composerFileRefusals: [],
+      composerReferenceAttachments: [],
+      agentSending: false,
+      agentError: null,
+      failedAgentSend: null,
+      activeMessages: [],
+      composerFocusRequestId: 0,
+      requestComposerFocus: vi.fn(),
+    } as Partial<AppController>)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    commonHarness.renderWorkspaceSurfaces = true
+    commonHarness.renderComposerInChatPage = true
+    commonHarness.renderComposerButtons = true
+    commonHarness.draftProbe = { chatId: 'chat-1', agentRef: 'agent-1', tabId: 'chat-tab-1' }
+    setComposerDraft('chat-1', 'preserve me', 'agent-1', 'chat-tab-1')
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    queryClient.setQueryData(
+      desktopQueryKeys.accessCatalog,
+      await accessCatalogFromWire([{ name: 'agent-1', contextRef: null }])
+    )
+    renderApp(<App />, queryClient)
+    await waitFor(() => expect(subscribe).toHaveBeenCalledOnce())
+    const composerTextarea = screen.getByRole('textbox', { name: 'Agent message composer' })
+    composerTextarea.setSelectionRange('preserve me'.length, 'preserve me'.length)
+    fireEvent.select(composerTextarea)
+    fireEvent.click(await screen.findByRole('button', { name: 'Add context' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Insert EvenDrive link' }))
+    const staleControl = await screen.findByRole('menuitem', {
+      name: 'Insert link to Bridge note.md',
+    })
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(1))
+    expect(getComposerDraft('chat-1', 'agent-1', 'chat-tab-1')).toBe('preserve me')
+    const initialRevision = getComposerDraftRevision('chat-1', 'agent-1', 'chat-tab-1')
+
+    // The App subscription dispatches into the same renderer registry the mounted
+    // Composer hook observes. The click runs before this act can commit React's
+    // hidden/rechecking view, so it exercises the old committed DOM control.
+    act(() => {
+      publishEntityChange?.(USER_SCOPE_INVALIDATED)
+      fireEvent.click(staleControl)
+      expect(affordances).toHaveBeenCalledTimes(1)
+    })
+    expect(getComposerDraft('chat-1', 'agent-1', 'chat-tab-1')).toBe('preserve me')
+    expect(getComposerDraftRevision('chat-1', 'agent-1', 'chat-tab-1')).toBe(initialRevision)
+    await waitFor(() => expect(pendingPassive).toHaveLength(1))
+
+    // A second authenticated invalidation makes the already admitted passive
+    // result old while its physical request remains unresolved.
+    act(() => publishEntityChange?.(USER_SCOPE_INVALIDATED))
+    await act(async () => pendingPassive[0]?.(allowed))
+    await waitFor(() => expect(pendingPassive).toHaveLength(2))
+    expect(screen.queryByRole('menuitem', { name: 'Insert link to Bridge note.md' })).toBeNull()
+    expect(getComposerDraft('chat-1', 'agent-1', 'chat-tab-1')).toBe('preserve me')
+
+    await act(async () => pendingPassive[1]?.(allowed))
+    const recoveredControl = await screen.findByRole('menuitem', {
+      name: 'Insert link to Bridge note.md',
+    })
+    fireEvent.click(recoveredControl)
+    const inserted = `preserve me${resource.gfsUri} `
+    await waitFor(() => expect(getComposerDraft('chat-1', 'agent-1', 'chat-tab-1')).toBe(inserted))
+    expect(getComposerDraftRevision('chat-1', 'agent-1', 'chat-tab-1')).toBe(initialRevision + 1)
+    expect(affordances).toHaveBeenCalledTimes(4)
+    expect(pendingPassive).toHaveLength(2)
+    expect(publishEntityChange).toBeTypeOf('function')
+    queryClient.clear()
+    desktopQueryClient.clear()
+  })
 
   async function mountSessionBackedApp(
     me: NonNullable<AppController['me']>,

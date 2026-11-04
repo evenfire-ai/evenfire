@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { Button, MenuItem } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
@@ -7,7 +7,11 @@ import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
-import type { ComposerGfsLinkSelection } from './ComposerGfsLinkPicker.types'
+import type {
+  ComposerGfsAuthorityFailureHandler,
+  ComposerGfsLinkSelection,
+} from './ComposerGfsLinkPicker.types'
+import { useComposerGfsAuthority } from './useComposerGfsAuthority'
 
 export function ComposerGfsLinkPicker({
   sessionId,
@@ -16,15 +20,66 @@ export function ComposerGfsLinkPicker({
   onEscapeRoot,
 }: {
   sessionId: number
-  onInsert: (selection: ComposerGfsLinkSelection, sessionScope: string, sessionId: number) => void
-  onSessionScope: (sessionId: number, sessionScope: string) => void
+  onInsert: (
+    selection: ComposerGfsLinkSelection,
+    sessionScope: string,
+    sessionId: number,
+    sessionGeneration: number | null,
+    handleAuthorityFailure: ComposerGfsAuthorityFailureHandler
+  ) => void | Promise<void>
+  onSessionScope: (
+    sessionId: number,
+    sessionScope: string,
+    sessionGeneration: number | null
+  ) => void
   onEscapeRoot: () => void
 }) {
-  const ctrl = useGfsBrowserController()
+  const ctrl = useGfsBrowserController({ pickerAuthorityManaged: true })
   const menuRef = useRef<HTMLDivElement | null>(null)
   const backRef = useRef<HTMLButtonElement | null>(null)
   const entries = ctrl.current ? ctrl.items : ctrl.accessibleResources
-  const visibleEntries = useMemo(() => entries.filter(entry => entry.readable !== false), [entries])
+  const handlePassiveAuthorityFailure = useCallback(
+    (message: string) =>
+      ctrl.handleAuthorityFailure(message, 'operation', ctrl.sessionScope, ctrl.sessionGeneration),
+    [ctrl.handleAuthorityFailure, ctrl.sessionGeneration, ctrl.sessionScope]
+  )
+  const authority = useComposerGfsAuthority(
+    entries,
+    sessionId,
+    ctrl.sessionScope,
+    ctrl.sessionGeneration,
+    ctrl.accessState === 'active',
+    ctrl.isSessionAuthorityActive,
+    handlePassiveAuthorityFailure
+  )
+  const handleDirectAuthorityFailure = useCallback(
+    (message: string) => {
+      const handled = ctrl.handleAuthorityFailure(
+        message,
+        'operation',
+        ctrl.sessionScope,
+        ctrl.sessionGeneration
+      )
+      if (handled) authority.invalidate()
+      return handled
+    },
+    [authority.invalidate, ctrl.handleAuthorityFailure, ctrl.sessionGeneration, ctrl.sessionScope]
+  )
+  const visibleEntries = useMemo(
+    () =>
+      entries.filter(entry => authority.authorityByResourceId.get(entry.resourceId) === 'allowed'),
+    [authority.authorityByResourceId, entries]
+  )
+  const permissionRetryIds = useMemo(
+    () =>
+      entries
+        .filter(entry => {
+          const status = authority.authorityByResourceId.get(entry.resourceId)
+          return status === 'denied' || status === 'error' || status === 'paused'
+        })
+        .map(entry => entry.resourceId),
+    [authority.authorityByResourceId, entries]
+  )
   const currentResourceId = ctrl.current?.resourceId ?? null
   const previousCurrentResourceIdRef = useRef(currentResourceId)
   const loading = ctrl.current ? ctrl.loading : ctrl.loadingAccessible
@@ -34,8 +89,8 @@ export function ComposerGfsLinkPicker({
   const loadingMore = ctrl.current ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
 
   useEffect(() => {
-    onSessionScope(sessionId, ctrl.sessionScope)
-  }, [ctrl.sessionScope, onSessionScope, sessionId])
+    onSessionScope(sessionId, ctrl.sessionScope, ctrl.sessionGeneration)
+  }, [ctrl.sessionGeneration, ctrl.sessionScope, onSessionScope, sessionId])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -66,10 +121,19 @@ export function ComposerGfsLinkPicker({
   }, [currentResourceId, visibleEntries[0]?.resourceId])
 
   const insert = (entry: GfsBrowserChild) => {
+    // This ref-backed check is synchronous, so an event-fenced stale committed
+    // row cannot activate before React publishes the next disabled/hidden view.
+    if (!authority.isCurrentlyAllowed(entry.resourceId)) return
     onInsert(
-      { label: sanitizeAppTabTitle(entry.name) || 'Unnamed', uri: entry.gfsUri },
+      {
+        label: sanitizeAppTabTitle(entry.name) || 'Unnamed',
+        uri: entry.gfsUri,
+        resourceId: entry.resourceId,
+      },
       ctrl.sessionScope,
-      sessionId
+      sessionId,
+      ctrl.sessionGeneration,
+      handleDirectAuthorityFailure
     )
   }
 
@@ -144,6 +208,10 @@ export function ComposerGfsLinkPicker({
         <div className="composer-reference-menu-empty" role="status">
           Loading EvenDrive…
         </div>
+      ) : entries.length > 0 && visibleEntries.length === 0 && permissionRetryIds.length === 0 ? (
+        <div className="composer-reference-menu-empty" role="status">
+          Checking exact read permission…
+        </div>
       ) : visibleEntries.length > 0 ? (
         <div className="composer-gfs-picker-list">
           {visibleEntries.map(entry => {
@@ -204,6 +272,18 @@ export function ComposerGfsLinkPicker({
           {ctrl.current ? 'This folder has no readable items.' : 'No shared EvenDrive files.'}
         </p>
       )}
+      {permissionRetryIds.length > 0 ? (
+        <Button
+          block
+          className="composer-gfs-picker-permission-retry"
+          color="neutral"
+          onClick={() => permissionRetryIds.forEach(resourceId => authority.retry(resourceId))}
+          size="xs"
+          variant="text"
+        >
+          Retry resource permission checks
+        </Button>
+      ) : null}
     </div>
   )
 }

@@ -9,6 +9,7 @@ import {
   listAccessiblePage,
   listChildrenPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { delegationAffordances } from '../../../../../src/gfs/delegation.js'
 import { ComposerGfsLinkPicker } from '../ComposerGfsLinkPicker'
 
 const auth = {
@@ -38,11 +39,12 @@ function installProducers() {
   const listChildren = vi.fn(async (resourceId: string) =>
     listChildrenPage(resourceId === folderA.resourceId ? [folderB] : [note])
   )
+  const affordances = vi.fn(async () => delegationAffordances(new Set(['read']), false))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { listAccessible, listChildren } } as unknown as Window['clerum'],
+    value: { gfs: { listAccessible, listChildren, affordances } } as unknown as Window['clerum'],
   })
-  return { listAccessible, listChildren }
+  return { listAccessible, listChildren, affordances }
 }
 
 describe('ComposerGfsLinkPicker producer integration', () => {
@@ -81,15 +83,17 @@ describe('ComposerGfsLinkPicker producer integration', () => {
     expect(producers.listChildren).toHaveBeenCalledWith(folderB.resourceId, 'main', undefined)
     await waitFor(() =>
       expect(onInsert).toHaveBeenCalledWith(
-        { label: note.name, uri: note.gfsUri },
+        { label: note.name, uri: note.gfsUri, resourceId: note.resourceId },
         'test:user-1:team-1',
-        41
+        41,
+        1,
+        expect.any(Function)
       )
     )
     expect(screen.getByRole('menu')).toBeTruthy()
     expect(screen.getByText('Nested B')).toBeTruthy()
     expect(onEscapeRoot).not.toHaveBeenCalled()
-    expect(onSessionScope).toHaveBeenCalledWith(41, 'test:user-1:team-1')
+    expect(onSessionScope).toHaveBeenCalledWith(41, 'test:user-1:team-1', 1)
   })
 
   it('keeps a producer-backed second page available after browsing into and out of a folder', async () => {
@@ -103,7 +107,13 @@ describe('ComposerGfsLinkPicker producer integration', () => {
     )
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listAccessible, listChildren } } as unknown as Window['clerum'],
+      value: {
+        gfs: {
+          listAccessible,
+          listChildren,
+          affordances: vi.fn(async () => delegationAffordances(new Set(['read']), false)),
+        },
+      } as unknown as Window['clerum'],
     })
     const onInsert = vi.fn()
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -133,9 +143,15 @@ describe('ComposerGfsLinkPicker producer integration', () => {
     expect(listChildren).toHaveBeenCalledWith(folderA.resourceId, 'main', undefined)
     await waitFor(() =>
       expect(onInsert).toHaveBeenCalledWith(
-        { label: laterResource.name, uri: laterResource.gfsUri },
+        {
+          label: laterResource.name,
+          uri: laterResource.gfsUri,
+          resourceId: laterResource.resourceId,
+        },
         'test:user-1:team-1',
-        42
+        42,
+        1,
+        expect.any(Function)
       )
     )
     expect(screen.getByRole('menu')).toBeTruthy()

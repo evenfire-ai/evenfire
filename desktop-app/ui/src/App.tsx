@@ -53,7 +53,7 @@ import type { Launch, LaunchId, LaunchOutcome } from '@lib/embedOwnership.types'
 import { createEmbedOwnershipMachine } from '@lib/embedOwnershipMachine'
 import type { EmbedRefreshErrorEvent } from '@lib/embedOwnershipMachine.types'
 import { embedFailureMessage, embedViewState } from '@lib/embedOwnershipView'
-import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
+import { rendererEntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
 import {
   authoritativeGfsStatus,
@@ -324,7 +324,7 @@ function DesktopUpdateRequiredDialog({
 export function App() {
   const vm = useAppController()
   const queryClient = desktopQueryClient
-  const entityChangeRegistry = React.useMemo(() => new EntityChangeRegistry(), [])
+  const entityChangeRegistry = rendererEntityChangeRegistry
   // Electron never fires `visibilitychange` on OS-window switching; bridge
   // DOM focus/blur so focus-aware query revalidation actually runs.
   useWindowFocusBridge()

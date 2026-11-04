@@ -175,6 +175,8 @@ export interface GfsBrowserControllerOptions {
    * the only consumer, so the query runs only while it is open.
    */
   grantsListEnabled?: boolean
+  /** The Composer picker owns exact permission reads outside the shared QueryClient. */
+  pickerAuthorityManaged?: boolean
 }
 
 function toMessage(error: unknown): string {
@@ -292,6 +294,7 @@ const UNKNOWN_RATE_LIMIT_PAUSE_MS = 60_000
 export { isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
 
 export function useGfsBrowserController(options: GfsBrowserControllerOptions = {}) {
+  const pickerAuthorityManaged = options.pickerAuthorityManaged === true
   const { grantsListEnabled = false } = options
   const queryClient = useQueryClient()
   const {
@@ -574,7 +577,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       Boolean(sessionScope) &&
       sessionGeneration !== null &&
       Boolean(current) &&
-      accessState === 'active',
+      accessState === 'active' &&
+      !pickerAuthorityManaged,
     ...gfsAuthorityQueryPolicy,
   })
   const refreshAffordances = useCallback(async () => {
@@ -609,7 +613,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       Boolean(sessionScope) &&
       sessionGeneration !== null &&
       Boolean(rowAffordancesResourceId) &&
-      accessState === 'active',
+      accessState === 'active' &&
+      !pickerAuthorityManaged,
     ...gfsAuthorityQueryPolicy,
   })
   // The grants listing is the revoke-id source (the grant PUT returns no ids),
@@ -791,6 +796,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // the flag is shared, a retry here re-activates every mounted controller.
     setAccessState('active')
   }, [setAccessState, ownsPublishedAuthority])
+  const isSessionAuthorityActive = useCallback(
+    () =>
+      sessionGeneration !== null &&
+      queryClient.getQueryData<GfsAccessState>(
+        desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous', sessionGeneration)
+      ) !== 'revoked',
+    [queryClient, sessionGeneration, sessionScope]
+  )
   /** For imperative flows (openUri, revoke mutations): fail closed on a
    * session-authority rejection; returns true when it did. */
   const handleAuthorityFailure = useCallback(
@@ -983,7 +996,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         Boolean(current) &&
         currentIsDirectory &&
         !authorityPending &&
-        accessState === 'active',
+        accessState === 'active' &&
+        !pickerAuthorityManaged,
       notifyOnChangeProps: 'all',
       ...gfsAuthorityQueryPolicy,
       // Row data remains stale for authorization after 15 seconds, but a
@@ -1022,7 +1036,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         Boolean(sessionScope) &&
         sessionGeneration !== null &&
         !authorityPending &&
-        accessState === 'active',
+        accessState === 'active' &&
+        !pickerAuthorityManaged,
       ...gfsAuthorityQueryPolicy,
     })),
   })
@@ -1817,6 +1832,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     authorityPending,
     retryAccess,
     handleAuthorityFailure,
+    isSessionAuthorityActive,
     accessibleResources,
     items,
     affordances:

@@ -50,3 +50,6 @@ export class EntityChangeRegistry {
     for (const handler of uniqueHandlers) handler(invalidation)
   }
 }
+
+/** Shared renderer registry so mounted picker fences run in the same dispatch turn as App. */
+export const rendererEntityChangeRegistry = new EntityChangeRegistry()

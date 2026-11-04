@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
+import { delegationAffordances } from '../../../../../src/gfs/delegation.js'
 import { ComposerGfsLinkPicker } from '../ComposerGfsLinkPicker'
 
 const hookMock = vi.hoisted(() => ({
@@ -36,6 +37,10 @@ function baseController(overrides: Record<string, unknown> = {}) {
     crumbs: [],
     current: null,
     sessionScope: 'env:user:team',
+    sessionGeneration: 1,
+    accessState: 'active',
+    isSessionAuthorityActive: vi.fn(() => true),
+    handleAuthorityFailure: vi.fn(() => false),
     items: [],
     accessibleResources: [],
     loading: false,
@@ -61,12 +66,25 @@ function baseController(overrides: Record<string, unknown> = {}) {
 }
 
 describe('ComposerGfsLinkPicker', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          affordances: vi.fn(async (resourceId: string) => ({
+            ...delegationAffordances(new Set(resourceId === 'secret-file' ? [] : ['read']), false),
+          })),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
+    delete (window as Partial<typeof window>).clerum
   })
 
-  it('lists only readable producer rows and separates folder navigation from insertion', () => {
+  it('lists only exact-authorized rows and separates folder navigation from insertion', async () => {
     const folder = resource('folder-a', 'Folder A', 'directory')
     const secret = resource('secret-file', 'Secret file', 'file', false)
     const controller = baseController({ accessibleResources: [folder, secret] })
@@ -82,17 +100,17 @@ describe('ComposerGfsLinkPicker', () => {
       />
     )
 
-    expect(screen.getByRole('menuitem', { name: 'Open folder Folder A' })).toBeTruthy()
-    expect(screen.getByRole('menuitem', { name: 'Insert link to Folder A' })).toBeTruthy()
+    expect(await screen.findByRole('menuitem', { name: 'Open folder Folder A' })).toBeTruthy()
+    expect(await screen.findByRole('menuitem', { name: 'Insert link to Folder A' })).toBeTruthy()
     expect(screen.queryByText('Secret file')).toBeNull()
-    expect(onSessionScope).toHaveBeenCalledWith(7, 'env:user:team')
+    expect(onSessionScope).toHaveBeenCalledWith(7, 'env:user:team', 1)
 
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open folder Folder A' }))
     expect(controller.openResource).toHaveBeenCalledWith(folder)
     expect(onInsert).not.toHaveBeenCalled()
   })
 
-  it('supports arrow and Home/End menu navigation', () => {
+  it('supports arrow and Home/End menu navigation', async () => {
     const controller = baseController({
       accessibleResources: [
         resource('folder-a', 'Folder A', 'directory'),
@@ -109,9 +127,9 @@ describe('ComposerGfsLinkPicker', () => {
       />
     )
 
-    const openFolder = screen.getByRole('menuitem', { name: 'Open folder Folder A' })
-    const insertFolder = screen.getByRole('menuitem', { name: 'Insert link to Folder A' })
-    const insertFile = screen.getByRole('menuitem', { name: 'Insert link to File A' })
+    const openFolder = await screen.findByRole('menuitem', { name: 'Open folder Folder A' })
+    const insertFolder = await screen.findByRole('menuitem', { name: 'Insert link to Folder A' })
+    const insertFile = await screen.findByRole('menuitem', { name: 'Insert link to File A' })
     openFolder.focus()
     fireEvent.keyDown(openFolder, { key: 'ArrowDown' })
     expect(document.activeElement).toBe(insertFolder)
@@ -121,7 +139,7 @@ describe('ComposerGfsLinkPicker', () => {
     expect(document.activeElement).toBe(openFolder)
   })
 
-  it('inserts an exact file URI and keeps the current folder hierarchy mounted', () => {
+  it('inserts an exact file URI and keeps the current folder hierarchy mounted', async () => {
     const file = resource('exact-file', 'Notes.md', 'file')
     const controller = baseController({
       crumbs: [
@@ -149,17 +167,19 @@ describe('ComposerGfsLinkPicker', () => {
       />
     )
 
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Insert link to Notes.md' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Insert link to Notes.md' }))
     expect(onInsert).toHaveBeenCalledWith(
-      { label: 'Notes.md', uri: 'gfs://main/exact-file' },
+      { label: 'Notes.md', uri: 'gfs://main/exact-file', resourceId: 'exact-file' },
       'env:user:team',
-      9
+      9,
+      1,
+      expect.any(Function)
     )
     expect(container.querySelector('[role="menu"]')).toBeTruthy()
     expect(onEscapeRoot).not.toHaveBeenCalled()
   })
 
-  it('sanitizes bidi controls in displayed and inserted GFS names while retaining the URI', () => {
+  it('sanitizes bidi controls in displayed and inserted GFS names while retaining the URI', async () => {
     const maliciousName = 'invoice.pdf\u202Eexe'
     const resourceId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
     const uri = `gfs://main/${resourceId}`
@@ -177,11 +197,17 @@ describe('ComposerGfsLinkPicker', () => {
       />
     )
 
-    const insert = screen.getByRole('menuitem', { name: 'Insert link to invoice.pdfexe' })
+    const insert = await screen.findByRole('menuitem', { name: 'Insert link to invoice.pdfexe' })
     expect(screen.queryByText(maliciousName)).toBeNull()
     fireEvent.click(insert)
 
-    expect(onInsert).toHaveBeenCalledWith({ label: 'invoice.pdfexe', uri }, 'env:user:team', 13)
+    expect(onInsert).toHaveBeenCalledWith(
+      { label: 'invoice.pdfexe', uri, resourceId },
+      'env:user:team',
+      13,
+      1,
+      expect.any(Function)
+    )
   })
 
   it('uses Escape to navigate back one level, then closes the root picker', () => {
