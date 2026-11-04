@@ -110,15 +110,6 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'external_user_sessions_idle_idx',
   'external_v1_session_revocations_user_idx',
   'external_v1_session_revocations_expiry_idx',
-  'authorization_resource_revisions_updated_idx',
-  'operational_resource_source_idx',
-  'operational_relationship_target_idx',
-  'operational_relationship_catalog_target_idx',
-  'operational_relationship_generation_idx',
-  'operational_resource_staging_identity_idx',
-  'operational_relationship_staging_identity_idx',
-  'invitation_delivery_commands_authorized_idx',
-  'invitation_delivery_commands_invitation_idx',
 ])
 
 function databaseUrl(baseUrl: string, database: string): string {
@@ -312,11 +303,11 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
   it('classifies, creates, and reruns all PR1 indexes without replay', async () => {
     const firstVersions = await versions(databasePool)
-    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
-    expect(FRESH_TABLE_INDEXES).toHaveLength(13)
+    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(5)
+    expect(FRESH_TABLE_INDEXES).toHaveLength(4)
 
     const allNames = [...PR1_ONLINE_INDEX_PLAN.map(index => index.name), ...FRESH_TABLE_INDEXES]
-    expect(new Set(allNames)).toHaveLength(38)
+    expect(new Set(allNames)).toHaveLength(9)
     const indexes = await databasePool.query<{ relname: string; indisvalid: boolean }>(
       `SELECT relation.relname, index.indisvalid
          FROM pg_class relation
@@ -324,7 +315,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         WHERE relation.relname = ANY($1::text[])`,
       [allNames]
     )
-    expect(indexes.rows).toHaveLength(38)
+    expect(indexes.rows).toHaveLength(9)
     expect(indexes.rows.every(row => row.indisvalid)).toBe(true)
 
     await initDb({ connect: () => databasePool.connect() })
@@ -349,9 +340,9 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(await versions(databasePool)).toContain(entry.migrationVersion)
   })
 
-  it('reuses a deparsed partial index without rebuilding its physical index', async () => {
+  it('reuses a deparsed index without rebuilding its physical index', async () => {
     const entry = PR1_ONLINE_INDEX_PLAN.find(
-      index => index.name === 'workflow_runs_actor_catalog_idx'
+      index => index.name === 'team_members_user_active_idx'
     )!
     const before = await databasePool.query<{ oid: string }>(
       'SELECT $1::regclass::oid::text AS oid',
@@ -602,10 +593,13 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
   it('bounds ordinary DDL lock acquisition and never runs the later version', async () => {
     const locker = await databasePool.connect()
-    await removeMigrationReceiptForReplay(databasePool, '0134_composable_catalog_revisions')
+    // 0131 replays without touching users (its CREATE TABLE IF NOT EXISTS
+    // skips existing tables); 0132's SELECT FROM users is the first statement
+    // that waits on the lock.
+    await removeMigrationReceiptForReplay(databasePool, '0131_user_access_foundation')
     await removeMigrationReceiptForReplay(
       databasePool,
-      '0135_legacy_password_security_epoch_backfill'
+      '0132_legacy_password_security_epoch_backfill'
     )
     await locker.query('BEGIN')
     await locker.query('LOCK TABLE users IN ACCESS EXCLUSIVE MODE')
@@ -621,21 +615,21 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(9_000)
     expect(Date.now() - started).toBeLessThan(15_000)
     const failedVersions = await versions(databasePool)
-    expect(failedVersions).not.toContain('0134_composable_catalog_revisions')
-    expect(failedVersions).not.toContain('0135_legacy_password_security_epoch_backfill')
+    expect(failedVersions).toContain('0131_user_access_foundation')
+    expect(failedVersions).not.toContain('0132_legacy_password_security_epoch_backfill')
     await initDb({ connect: () => databasePool.connect() })
   }, 20_000)
 
   it('cancels and rolls back one ordinary migration statement within 15 seconds', async () => {
     const client = await databasePool.connect()
-    const appliedVersions = new Set<string>(PR1_MIGRATION_VERSIONS.slice(0, 3))
+    const appliedVersions = new Set<string>(PR1_MIGRATION_VERSIONS.slice(0, 1))
     const recordTable = `d34_record_${randomBytes(4).toString('hex')}`
     await client.query(`CREATE TEMP TABLE ${recordTable}(version text PRIMARY KEY)`)
     const migrations = [
       ...PR1_MIGRATION_VERSIONS.map(version => ({
         version,
         apply: async (db: DbClient) => {
-          if (version === '0134_composable_catalog_revisions') {
+          if (version === '0132_legacy_password_security_epoch_backfill') {
             await db.query('SELECT pg_sleep(20)')
           }
         },
@@ -659,7 +653,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         `SELECT version FROM ${recordTable} ORDER BY version`
       )
       expect(recorded.rows).toEqual([])
-      expect(appliedVersions).not.toContain('0135_legacy_password_security_epoch_backfill')
+      expect(appliedVersions).not.toContain('0132_legacy_password_security_epoch_backfill')
     } finally {
       client.release(true)
     }
@@ -705,8 +699,8 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       expect(
         (
           await isolatedPool.query(
-            // Keep the Admin UI usage-team sentinel while changing a guarded
-            // column, so the UPDATE still runs the revision trigger.
+            // The pre-PR1 Admin UI row keeps its usage-team sentinel and stays
+            // writable after the upgrade.
             "UPDATE workflow_runs SET phase = 'Running', actor_id = $2 WHERE run_id = $1 RETURNING run_id",
             [legacyAdminRun.rows[0]!.run_id, randomUUID()]
           )
@@ -742,7 +736,9 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       )
       expect(passwordAdmissionIndex).toBeGreaterThanOrEqual(0)
       expect(passwordAdmissionIndex).toBeLessThan(foundationIndex)
-      expect(upgrade.applyOrder[foundationIndex + 1]).toBe('0132_invitation_delivery_commands')
+      expect(upgrade.applyOrder[foundationIndex + 1]).toBe(
+        '0132_legacy_password_security_epoch_backfill'
+      )
       await assertDbReady(isolatedPool)
 
       // Rollback: the DEV image's migrator runs against the upgraded database.
@@ -836,7 +832,9 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       expect(scheduleIndex).toBeGreaterThanOrEqual(0)
       expect(scheduleIndex).toBeLessThan(passwordAdmissionIndex)
       expect(passwordAdmissionIndex).toBeLessThan(foundationIndex)
-      expect(firstRun.applyOrder[foundationIndex + 1]).toBe('0132_invitation_delivery_commands')
+      expect(firstRun.applyOrder[foundationIndex + 1]).toBe(
+        '0132_legacy_password_security_epoch_backfill'
+      )
       await assertDbReady(isolatedPool)
 
       const afterUpgrade = await versions(isolatedPool)
@@ -850,27 +848,5 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     } finally {
       await endPoolAndWaitForClients(isolatedPool)
     }
-  })
-
-  it('keeps legacy team-member payloads compatible with revision triggers', async () => {
-    const userId = randomUUID()
-    const teamId = randomUUID()
-    await databasePool.query(
-      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'D34 old writer')`,
-      [userId, `d34-${userId}@example.test`]
-    )
-    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'D34 old team')`, [teamId])
-    await databasePool.query(
-      `INSERT INTO team_members(team_id, user_id, role, status)
-       VALUES ($1, $2, 'member', 'active')`,
-      [teamId, userId]
-    )
-    const revision = await databasePool.query<{ count: string }>(
-      `SELECT count(*)::text AS count
-         FROM authorization_team_revisions
-        WHERE team_id = $1`,
-      [teamId]
-    )
-    expect(Number(revision.rows[0]?.count ?? 0)).toBeGreaterThan(0)
   })
 })

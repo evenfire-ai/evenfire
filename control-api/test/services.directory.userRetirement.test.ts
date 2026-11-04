@@ -78,15 +78,14 @@ describe('retireDesktopUser', () => {
   it('retires an active linked user atomically with exact control-admin actor and audit correlation', async () => {
     const { retireDesktopUser } = await import('../src/services/directory/users.js')
     const authorize = vi.fn(async () => {
-      expect(mocks.txQuery.mock.calls.at(-1)).toEqual([
-        'SELECT public.authorization_prelock_user_retirement_revisions($1::uuid[])',
-        [[USER_ID]],
-      ])
+      const [sql, params] = mocks.txQuery.mock.calls.at(-1) ?? []
+      expect(String(sql)).toContain('FROM users')
+      expect(String(sql)).toContain('FOR UPDATE')
+      expect(params).toEqual([USER_ID])
     })
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
@@ -123,18 +122,18 @@ describe('retireDesktopUser', () => {
         operationId: OPERATION_ID,
       })
     )
-    const userUpdate = String(mocks.txQuery.mock.calls[6]?.[0])
+    const userUpdate = String(mocks.txQuery.mock.calls[5]?.[0])
     expect(userUpdate).toContain("lifecycle_state = 'retired'")
-    expect(String(mocks.txQuery.mock.calls[4]?.[0])).toContain(
+    expect(String(mocks.txQuery.mock.calls[3]?.[0])).toContain(
       'UPDATE workflow_approval_medium_accounts'
     )
-    expect(String(mocks.txQuery.mock.calls[5]?.[0])).toContain(
+    expect(String(mocks.txQuery.mock.calls[4]?.[0])).toContain(
       'UPDATE workflow_approval_medium_challenges'
     )
     expect(userUpdate).toContain('retired_by_control_admin_id = $4::uuid')
     expect(userUpdate).toContain('retired_by_desktop_user_id = $5::uuid')
     expect(userUpdate).toContain('lifecycle_version = $8')
-    expect(mocks.txQuery.mock.calls[6]?.[1]).toEqual([
+    expect(mocks.txQuery.mock.calls[5]?.[1]).toEqual([
       USER_ID,
       'policy retirement',
       'control_admin',
@@ -151,7 +150,6 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
@@ -173,7 +171,7 @@ describe('retireDesktopUser', () => {
         actor: { kind: 'platform_user', desktopUserId: MANAGER_ID },
       })
     )
-    expect(mocks.txQuery.mock.calls[6]?.[1]).toEqual([
+    expect(mocks.txQuery.mock.calls[5]?.[1]).toEqual([
       USER_ID,
       'manager retirement',
       'platform_user',
@@ -249,7 +247,6 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ has_link_history: false }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
@@ -272,8 +269,8 @@ describe('retireDesktopUser', () => {
       replayed: false,
     })
     expect(mocks.retireParentInTransaction).not.toHaveBeenCalled()
-    expect(String(mocks.txQuery.mock.calls[6]?.[0])).toContain('DELETE FROM users')
-    expect(String(mocks.txQuery.mock.calls[7]?.[0])).toContain("outcome = 'deleted'")
+    expect(String(mocks.txQuery.mock.calls[5]?.[0])).toContain('DELETE FROM users')
+    expect(String(mocks.txQuery.mock.calls[6]?.[0])).toContain("outcome = 'deleted'")
   })
 
   it('retires a user after the Control UI already revoked the operator generation', async () => {
@@ -281,7 +278,6 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
@@ -327,7 +323,6 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
     mocks.retireParentInTransaction.mockRejectedValueOnce(new Error('audit unavailable'))
 
@@ -351,7 +346,6 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser(7))
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
@@ -367,8 +361,8 @@ describe('retireDesktopUser', () => {
         'request-cas-1'
       )
     ).rejects.toMatchObject({ code: 'retirement_conflict' })
-    expect(mocks.txQuery).toHaveBeenCalledTimes(7)
-    expect(String(mocks.txQuery.mock.calls[6]?.[0])).toContain('lifecycle_version = $8')
+    expect(mocks.txQuery).toHaveBeenCalledTimes(6)
+    expect(String(mocks.txQuery.mock.calls[5]?.[0])).toContain('lifecycle_version = $8')
   })
 
   it('rejects an actor with the wrong typed identity field before opening a transaction', async () => {
@@ -392,7 +386,6 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ has_link_history: false }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
@@ -421,9 +414,9 @@ describe('retireDesktopUser', () => {
     expect(mocks.withTransaction).not.toHaveBeenCalled()
     const sqls = mocks.txQuery.mock.calls.map(([sql]) => String(sql))
     expect(sqls.some(sql => sql.includes('DELETE FROM users'))).toBe(false)
-    expect(sqls[4]).toContain('UPDATE workflow_approval_medium_accounts')
-    expect(sqls[5]).toContain('UPDATE workflow_approval_medium_challenges')
-    expect(sqls[6]).toContain("SET lifecycle_state = 'retired'")
-    expect(sqls[7]).toContain("outcome = 'retired'")
+    expect(sqls[3]).toContain('UPDATE workflow_approval_medium_accounts')
+    expect(sqls[4]).toContain('UPDATE workflow_approval_medium_challenges')
+    expect(sqls[5]).toContain("SET lifecycle_state = 'retired'")
+    expect(sqls[6]).toContain("outcome = 'retired'")
   })
 })

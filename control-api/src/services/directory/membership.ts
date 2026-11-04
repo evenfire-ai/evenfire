@@ -1545,9 +1545,6 @@ export async function deleteManagedUserForUser(
       const principalIds = [...new Set([normalizedManagerUserId, normalizedTargetUserId])]
         .filter(id => USER_LOCK_UUID_PATTERN.test(id))
         .map(id => id.toLowerCase())
-      await db.query('SELECT public.authorization_prelock_user_retirement_revisions($1::uuid[])', [
-        principalIds,
-      ])
       await db.query(
         `SELECT id
            FROM users

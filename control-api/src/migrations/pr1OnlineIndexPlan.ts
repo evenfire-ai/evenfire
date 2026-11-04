@@ -1,11 +1,8 @@
 import type { DbClient } from '../db.js'
-import {
-  MIGRATION_EXECUTION_POLICY,
-  migrationSessionBoundsSql,
-} from './migrationExecutionPolicy.js'
+import { MIGRATION_EXECUTION_POLICY } from './migrationExecutionPolicy.js'
 
 export type OnlineIndexDefinition = Readonly<{
-  migrationVersion: '0131_user_access_foundation' | '0133_catalog_utf8_ordering'
+  migrationVersion: '0131_user_access_foundation'
   name: string
   table: string
   unique?: boolean
@@ -47,163 +44,6 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
     table: 'team_agents',
     createSql: `CREATE INDEX CONCURRENTLY team_agents_agent_team_idx
       ON team_agents (agent_name, team_id)`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'user_workflow_triggers_recipe_user_idx',
-    table: 'user_workflow_triggers',
-    createSql: `CREATE INDEX CONCURRENTLY user_workflow_triggers_recipe_user_idx
-      ON user_workflow_triggers (recipe_namespace, recipe_name, user_id)`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'team_workflow_triggers_recipe_team_idx',
-    table: 'team_workflow_triggers',
-    createSql: `CREATE INDEX CONCURRENTLY team_workflow_triggers_recipe_team_idx
-      ON team_workflow_triggers (recipe_namespace, recipe_name, team_id)`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'user_workflow_triggers_catalog_key_idx',
-    table: 'user_workflow_triggers',
-    createSql: `CREATE INDEX CONCURRENTLY user_workflow_triggers_catalog_key_idx
-      ON user_workflow_triggers (user_id, ((recipe_namespace || '/'::text) || recipe_name))`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'team_workflow_triggers_catalog_key_idx',
-    table: 'team_workflow_triggers',
-    createSql: `CREATE INDEX CONCURRENTLY team_workflow_triggers_catalog_key_idx
-      ON team_workflow_triggers (((recipe_namespace || '/'::text) || recipe_name), team_id)`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'workflow_runs_actor_catalog_idx',
-    table: 'workflow_runs',
-    createSql: `CREATE INDEX CONCURRENTLY workflow_runs_actor_catalog_idx
-      ON workflow_runs (actor_id, run_id)
-      INCLUDE (recipe_namespace, recipe_name, phase, team_id, usage_team_id)
-      WHERE actor_type = 'user' AND actor_id IS NOT NULL`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'workflow_runs_team_catalog_idx',
-    table: 'workflow_runs',
-    createSql: `CREATE INDEX CONCURRENTLY workflow_runs_team_catalog_idx
-      ON workflow_runs (team_id, run_id)
-      INCLUDE (recipe_namespace, recipe_name, phase, actor_type, actor_id, usage_team_id)
-      WHERE team_id IS NOT NULL`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'workflow_runs_usage_team_catalog_idx',
-    table: 'workflow_runs',
-    createSql: `CREATE INDEX CONCURRENTLY workflow_runs_usage_team_catalog_idx
-      ON workflow_runs (usage_team_id, run_id)
-      INCLUDE (recipe_namespace, recipe_name, phase, actor_type, actor_id, team_id)
-      WHERE usage_team_id IS NOT NULL`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'workflow_approval_user_catalog_idx',
-    table: 'workflow_approval_requests',
-    createSql: `CREATE INDEX CONCURRENTLY workflow_approval_user_catalog_idx
-      ON workflow_approval_requests (target_user_id, id)
-      INCLUDE (status, expires_at, recipe_namespace, recipe_name)
-      WHERE target_user_id IS NOT NULL`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'workflow_approval_team_catalog_idx',
-    table: 'workflow_approval_requests',
-    createSql: `CREATE INDEX CONCURRENTLY workflow_approval_team_catalog_idx
-      ON workflow_approval_requests (target_team_id, id)
-      INCLUDE (status, expires_at, recipe_namespace, recipe_name)
-      WHERE target_team_id IS NOT NULL`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'notification_user_catalog_idx',
-    table: 'notification_deliveries',
-    createSql: `CREATE INDEX CONCURRENTLY notification_user_catalog_idx
-      ON notification_deliveries ((audience->>'userId'), id)
-      INCLUDE (expires_at, status, event_type) WHERE audience ? 'userId'`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'notification_team_catalog_idx',
-    table: 'notification_deliveries',
-    createSql: `CREATE INDEX CONCURRENTLY notification_team_catalog_idx
-      ON notification_deliveries ((audience->>'teamId'), id)
-      INCLUDE (expires_at, status, event_type) WHERE audience ? 'teamId'`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'gfs_grants_subject_resource_catalog_idx',
-    table: 'gfs_grants',
-    createSql: `CREATE INDEX CONCURRENTLY gfs_grants_subject_resource_catalog_idx
-      ON gfs_grants (subject_type, subject_id, resource_id)
-      INCLUDE (id, drive, permissions, inherit)`,
-  },
-  {
-    migrationVersion: '0131_user_access_foundation',
-    name: 'gfs_shares_subject_resource_catalog_idx',
-    table: 'gfs_shares',
-    createSql: `CREATE INDEX CONCURRENTLY gfs_shares_subject_resource_catalog_idx
-      ON gfs_shares (subject_type, subject_id, resource_id)
-      INCLUDE (id, drive, permissions, include_descendants)`,
-  },
-  {
-    migrationVersion: '0133_catalog_utf8_ordering',
-    name: 'user_agents_catalog_utf8_idx',
-    table: 'user_agents',
-    createSql: `CREATE INDEX CONCURRENTLY user_agents_catalog_utf8_idx
-      ON user_agents (user_id, catalog_utf8_bytes(agent_name))`,
-  },
-  {
-    migrationVersion: '0133_catalog_utf8_ordering',
-    name: 'team_agents_catalog_utf8_idx',
-    table: 'team_agents',
-    createSql: `CREATE INDEX CONCURRENTLY team_agents_catalog_utf8_idx
-      ON team_agents (catalog_utf8_bytes(agent_name), team_id)`,
-  },
-  {
-    migrationVersion: '0133_catalog_utf8_ordering',
-    name: 'user_contexts_catalog_utf8_idx',
-    table: 'user_contexts',
-    createSql: `CREATE INDEX CONCURRENTLY user_contexts_catalog_utf8_idx
-      ON user_contexts (user_id, catalog_utf8_bytes(context_id))`,
-  },
-  {
-    migrationVersion: '0133_catalog_utf8_ordering',
-    name: 'team_contexts_catalog_utf8_idx',
-    table: 'team_contexts',
-    createSql: `CREATE INDEX CONCURRENTLY team_contexts_catalog_utf8_idx
-      ON team_contexts (catalog_utf8_bytes(context_id), team_id)`,
-  },
-  {
-    migrationVersion: '0133_catalog_utf8_ordering',
-    name: 'user_workflow_triggers_catalog_utf8_idx',
-    table: 'user_workflow_triggers',
-    createSql: `CREATE INDEX CONCURRENTLY user_workflow_triggers_catalog_utf8_idx
-      ON user_workflow_triggers
-      (user_id, catalog_utf8_bytes(recipe_namespace || '/' || recipe_name))`,
-  },
-  {
-    migrationVersion: '0133_catalog_utf8_ordering',
-    name: 'team_workflow_triggers_catalog_utf8_idx',
-    table: 'team_workflow_triggers',
-    createSql: `CREATE INDEX CONCURRENTLY team_workflow_triggers_catalog_utf8_idx
-      ON team_workflow_triggers
-      (catalog_utf8_bytes(recipe_namespace || '/' || recipe_name), team_id)`,
-  },
-  {
-    migrationVersion: '0133_catalog_utf8_ordering',
-    name: 'operational_relationship_catalog_utf8_target_idx',
-    table: 'operational_resource_relationships',
-    createSql: `CREATE INDEX CONCURRENTLY operational_relationship_catalog_utf8_target_idx
-      ON operational_resource_relationships
-      (environment_id, target_type, relationship_type, catalog_utf8_bytes(target_id))`,
   },
 ])
 
@@ -621,39 +461,8 @@ export async function ensureOnlineIndex(db: DbClient, entry: OnlineIndexDefiniti
   if (!created.indisvalid) throw new Error(`Online index is invalid after creation: ${entry.name}`)
 }
 
-async function prepareCatalogUtf8Function(db: DbClient): Promise<void> {
-  let started = false
-  try {
-    await db.query('BEGIN')
-    started = true
-    for (const sql of migrationSessionBoundsSql(true)) await db.query(sql)
-    await db.query(`
-      CREATE OR REPLACE FUNCTION catalog_utf8_bytes(value TEXT)
-      RETURNS BYTEA
-      LANGUAGE SQL
-      IMMUTABLE
-      STRICT
-      PARALLEL SAFE
-      AS $$
-        SELECT convert_to(value, 'UTF8');
-      $$
-    `)
-    await db.query('COMMIT')
-  } catch (error) {
-    if (started) {
-      try {
-        await db.query('ROLLBACK')
-      } catch {
-        // The migration owner destroys the session on failure.
-      }
-    }
-    throw error
-  }
-}
-
 export async function preparePr1Migration(db: DbClient, version: string): Promise<void> {
   const indexes = PR1_ONLINE_INDEX_PLAN.filter(entry => entry.migrationVersion === version)
   if (indexes.length === 0) return
-  if (version === '0133_catalog_utf8_ordering') await prepareCatalogUtf8Function(db)
   for (const index of indexes) await ensureOnlineIndex(db, index)
 }

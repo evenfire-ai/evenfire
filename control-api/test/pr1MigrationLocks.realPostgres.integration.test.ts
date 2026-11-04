@@ -18,7 +18,6 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 type DbConnector = NonNullable<Parameters<typeof initDb>[0]>
 type RelationLock = { relname: string; mode: string }
 type CommitSnapshot = { versions: string[]; locks: RelationLock[] }
-type Probe = { ok: boolean; sqlstate: string | null }
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -30,20 +29,36 @@ const runtimeRoles = [
 
 const PR1_VERSIONS = new Set<string>(PR1_MIGRATION_VERSIONS)
 const ACCESS_FOUNDATION_MARKER = 'CREATE TABLE IF NOT EXISTS external_user_sessions'
-const COMPOSABLE_CATALOG_VERSION = '0134_composable_catalog_revisions'
-const ROW_REVISION_TRIGGER_TABLES = [
-  'users',
-  'teams',
-  'workflow_runs',
-  'workflow_approval_requests',
-  'workflow_recipe_allowed_teams',
-  'workflow_approval_medium_accounts',
-  'workflow_runs_audit',
-  'notification_deliveries',
-  'gfs_grants',
-  'gfs_shares',
-  'gfs_resources',
+// Online indexes the removed catalog migration (0133) and the removed
+// catalog rows of 0131 used to build; none of them may exist.
+const REMOVED_CATALOG_INDEXES = [
+  'user_workflow_triggers_recipe_user_idx',
+  'team_workflow_triggers_recipe_team_idx',
+  'user_workflow_triggers_catalog_key_idx',
+  'team_workflow_triggers_catalog_key_idx',
+  'workflow_runs_actor_catalog_idx',
+  'workflow_runs_team_catalog_idx',
+  'workflow_runs_usage_team_catalog_idx',
+  'workflow_approval_user_catalog_idx',
+  'workflow_approval_team_catalog_idx',
+  'notification_user_catalog_idx',
+  'notification_team_catalog_idx',
+  'gfs_grants_subject_resource_catalog_idx',
+  'gfs_shares_subject_resource_catalog_idx',
+  'user_agents_catalog_utf8_idx',
+  'team_agents_catalog_utf8_idx',
+  'user_contexts_catalog_utf8_idx',
+  'team_contexts_catalog_utf8_idx',
+  'user_workflow_triggers_catalog_utf8_idx',
+  'team_workflow_triggers_catalog_utf8_idx',
+  'operational_relationship_catalog_utf8_target_idx',
 ] as const
+const SESSION_TABLES = [
+  'external_user_session_security_epochs',
+  'external_user_sessions',
+  'external_v1_session_revocations',
+] as const
+
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
   value.pathname = `/${database}`
@@ -80,27 +95,6 @@ async function committedTables(observer: Pool): Promise<Set<string>> {
   return new Set(result.rows.map(row => row.relname))
 }
 
-// Runs one statement in its own transaction with a short lock_timeout and
-// reports whether it got through or waited for a lock.
-async function probe(observer: Pool, sql: string): Promise<Probe> {
-  const client = await observer.connect()
-  try {
-    await client.query('BEGIN')
-    await client.query(`SET LOCAL lock_timeout = '1000ms'`)
-    try {
-      await client.query(sql)
-      return { ok: true, sqlstate: null }
-    } catch (error) {
-      const sqlstate = (error as { code?: string }).code ?? null
-      if (sqlstate !== '55P03') throw error
-      return { ok: false, sqlstate }
-    }
-  } finally {
-    await client.query('ROLLBACK')
-    client.release()
-  }
-}
-
 async function triggerDefinitions(pool: Pool): Promise<string[]> {
   const result = await pool.query<{ definition: string }>(
     `SELECT pg_get_triggerdef(t.oid) AS definition
@@ -116,14 +110,12 @@ async function triggerDefinitions(pool: Pool): Promise<string[]> {
 type MigrationRun = {
   preExistingTables: Set<string>
   commits: CommitSnapshot[]
-  composableCatalogProbes: Record<string, Probe> | null
 }
 
 async function migrate(pool: Pool, observer: Pool): Promise<MigrationRun> {
   const run: MigrationRun = {
     preExistingTables: new Set(),
     commits: [],
-    composableCatalogProbes: null,
   }
   const pendingVersions: string[] = []
   let accessFoundationSeen = false
@@ -147,13 +139,6 @@ async function migrate(pool: Pool, observer: Pool): Promise<MigrationRun> {
           if (text.trim() === 'COMMIT') {
             const versions = pendingVersions.splice(0)
             if (versions.some(version => PR1_VERSIONS.has(version))) {
-              if (versions.includes(COMPOSABLE_CATALOG_VERSION)) {
-                run.composableCatalogProbes = {
-                  readUsers: await probe(observer, 'SELECT count(*) FROM users'),
-                  readWorkflowRuns: await probe(observer, 'SELECT count(*) FROM workflow_runs'),
-                  writeUsers: await probe(observer, 'LOCK TABLE users IN ROW EXCLUSIVE MODE'),
-                }
-              }
               run.commits.push({ versions, locks: await relationLocks(observer, pid) })
             }
           }
@@ -218,8 +203,8 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
   })
 
   it('holds no AccessExclusive or Share lock on a pre-existing table in any PR1 transaction', () => {
-    // Liveness: every PR1 version committed under observation, the pre-PR1
-    // table set was captured, and the snapshots see the trigger locks 0134 takes.
+    // Liveness: every PR1 version committed under observation and the pre-PR1
+    // table set was captured.
     for (const version of PR1_MIGRATION_VERSIONS) {
       expect(
         fresh.commits.some(commit => commit.versions.includes(version)),
@@ -228,21 +213,8 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
     }
     expect(fresh.preExistingTables.has('users')).toBe(true)
     expect(fresh.preExistingTables.has('external_user_sessions')).toBe(false)
-    const composable = fresh.commits.find(commit =>
-      commit.versions.includes(COMPOSABLE_CATALOG_VERSION)
-    )
-    expect(composable?.locks).toContainEqual({ relname: 'users', mode: 'ShareRowExclusiveLock' })
 
     expect(blockingLocks(fresh)).toEqual([])
-  })
-
-  it('lets readers through and holds writers while 0134 is open', () => {
-    expect(fresh.composableCatalogProbes).toEqual({
-      readUsers: { ok: true, sqlstate: null },
-      readWorkflowRuns: { ok: true, sqlstate: null },
-      // Witness that the probe ran inside the open 0134 transaction.
-      writeUsers: { ok: false, sqlstate: '55P03' },
-    })
   })
 
   it('builds every planned index online and leaves it valid', async () => {
@@ -261,18 +233,64 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
     )
   })
 
-  it('installs the row revision triggers and no statement-level catalog trigger', async () => {
+  it('installs no revision, catalog, operational or invitation-delivery object', async () => {
+    // Witness: the fresh database holds the PR1 session tables and every
+    // planned online index, so the absence queries below ran after 0131.
+    const sessionTables = await freshPool.query<{ name: string }>(
+      `SELECT c.relname AS name
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema()
+          AND c.relkind IN ('r', 'p')
+          AND c.relname = ANY($1::text[])
+        ORDER BY 1`,
+      [[...SESSION_TABLES]]
+    )
+    expect(sessionTables.rows.map(row => row.name)).toEqual([...SESSION_TABLES])
+    const plannedIndexes = await freshPool.query<{ name: string }>(
+      `SELECT c.relname AS name
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema()
+          AND c.relkind = 'i'
+          AND c.relname = ANY($1::text[])
+        ORDER BY 1`,
+      [PR1_ONLINE_INDEX_PLAN.map(entry => entry.name)]
+    )
+    expect(plannedIndexes.rows).toHaveLength(5)
+
+    const functions = await freshPool.query<{ name: string }>(
+      `SELECT p.proname AS name
+         FROM pg_proc p
+         JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = current_schema()
+          AND (p.proname LIKE 'authorization\\_%' OR p.proname = 'catalog_utf8_bytes')
+        ORDER BY 1`
+    )
+    expect(functions.rows).toEqual([])
+
     const definitions = await triggerDefinitions(freshPool)
-    expect(definitions.filter(definition => definition.includes('_catalog_revision '))).toEqual([])
-    for (const table of ROW_REVISION_TRIGGER_TABLES) {
-      expect(
-        definitions.some(definition =>
-          definition.startsWith(
-            `CREATE TRIGGER ${table}_authorization_revision AFTER INSERT OR DELETE OR UPDATE ON public.${table} FOR EACH ROW`
+    expect(
+      definitions.filter(
+        definition =>
+          definition.includes('_authorization_revision') || definition.includes('_catalog_revision')
+      )
+    ).toEqual([])
+
+    const relations = await freshPool.query<{ name: string }>(
+      `SELECT c.relname AS name
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema()
+          AND (
+            c.relname LIKE 'authorization\\_%'
+            OR c.relname LIKE 'operational\\_%'
+            OR c.relname = 'invitation_delivery_commands'
+            OR c.relname = ANY($1::text[])
           )
-        ),
-        table
-      ).toBe(true)
-    }
+        ORDER BY 1`,
+      [[...REMOVED_CATALOG_INDEXES]]
+    )
+    expect(relations.rows).toEqual([])
   })
 })

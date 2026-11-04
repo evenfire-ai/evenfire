@@ -9,8 +9,6 @@ import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy
 import { applyPendingPr1Migrations } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
 import {
-  applyCatalogUtf8OrderingSchema,
-  applyComposableCatalogRevisionSchema,
   applyUserAccessFoundationSchema,
   backfillLegacyPasswordSecurityEpochs,
 } from './services/access/userAccessFoundationSchema.js'
@@ -33,7 +31,6 @@ import {
   applyCodexSubscriptionConnectionSchema,
 } from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
-import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import {
   applyEntityChangeCheckpointSchema,
   applyEntityChangeDefinerSearchPathSchema,
@@ -6424,19 +6421,7 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyUserAccessFoundationSchema,
   },
   {
-    version: '0132_invitation_delivery_commands',
-    apply: applyInvitationDeliveryCommandFoundation,
-  },
-  {
-    version: '0133_catalog_utf8_ordering',
-    apply: applyCatalogUtf8OrderingSchema,
-  },
-  {
-    version: '0134_composable_catalog_revisions',
-    apply: applyComposableCatalogRevisionSchema,
-  },
-  {
-    version: '0135_legacy_password_security_epoch_backfill',
+    version: '0132_legacy_password_security_epoch_backfill',
     apply: backfillLegacyPasswordSecurityEpochs,
   },
 ]

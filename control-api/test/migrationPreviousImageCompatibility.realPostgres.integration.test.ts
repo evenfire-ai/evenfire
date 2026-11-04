@@ -103,42 +103,6 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
       [team.id, userId]
     )
     expect(membership.rows).toEqual([{ role: 'admin', status: 'active' }])
-    const revision = await databasePool.query<{ count: string }>(
-      `SELECT count(*)::text AS count
-         FROM authorization_team_revisions
-        WHERE team_id = $1`,
-      [team.id]
-    )
-    expect(Number(revision.rows[0]?.count ?? 0)).toBeGreaterThan(0)
-  })
-
-  it('installs deletion-compatible revision functions on fresh initialization', async () => {
-    const functionState = await databasePool.query<{
-      name: string
-      config: string[] | null
-      definition: string
-    }>(`SELECT proname AS name, proconfig AS config, pg_get_functiondef(oid) AS definition
-         FROM pg_proc
-        WHERE oid = ANY(ARRAY[
-          'public.authorization_bump_team_revision(uuid)'::regprocedure,
-          'public.authorization_bump_user_revision(uuid)'::regprocedure
-        ])
-        ORDER BY proname`)
-    expect(functionState.rows.map(row => row.name)).toEqual([
-      'authorization_bump_team_revision',
-      'authorization_bump_user_revision',
-    ])
-    for (const [name, parentTable, targetId] of [
-      ['authorization_bump_team_revision', 'teams', 'target_team_id'],
-      ['authorization_bump_user_revision', 'users', 'target_user_id'],
-    ]) {
-      const state = functionState.rows.find(row => row.name === name)
-      expect(state?.config).toContain('search_path=pg_catalog, public, pg_temp')
-      expect(state?.definition).toMatch(
-        new RegExp(`SELECT ${parentTable}\\.id[\\s\\S]*FROM ${parentTable}`, 'i')
-      )
-      expect(state?.definition).not.toMatch(new RegExp(`VALUES\\s*\\(${targetId}`, 'i'))
-    }
   })
 
   it('lets the runtime role delete a user and a team with a deleted membership', async () => {

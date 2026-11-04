@@ -17,7 +17,6 @@ name_diff="$(comm -3 \
 # Existing sentinel rows, plus the three session rows. The expected relation
 # count is the peer workflow-recipes profile, not a handwritten literal.
 sentinels=(
-  $'authorization_catalog_environment\tread'
   $'dynamic_clients\tlegacy_dml'
   $'entity_change_feed\tnone'
   $'entity_change_outbox\tnone'

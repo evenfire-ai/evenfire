@@ -17,27 +17,15 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'external_user_sessions_idle_idx',
   'external_v1_session_revocations_user_idx',
   'external_v1_session_revocations_expiry_idx',
-  'authorization_resource_revisions_updated_idx',
-  'operational_resource_source_idx',
-  'operational_relationship_target_idx',
-  'operational_relationship_catalog_target_idx',
-  'operational_relationship_generation_idx',
-  'operational_resource_staging_identity_idx',
-  'operational_relationship_staging_identity_idx',
-  'invitation_delivery_commands_authorized_idx',
-  'invitation_delivery_commands_invitation_idx',
 ])
 
 const USER_ACCESS_FOUNDATION_VERSION = '0131_user_access_foundation'
 
 describe('D34 migration execution policy', () => {
-  it('classifies the five PR1 migrations that follow the dev batch', () => {
+  it('classifies the two PR1 migrations that follow the dev batch', () => {
     expect(PR1_MIGRATION_VERSIONS).toEqual([
       '0131_user_access_foundation',
-      '0132_invitation_delivery_commands',
-      '0133_catalog_utf8_ordering',
-      '0134_composable_catalog_revisions',
-      '0135_legacy_password_security_epoch_backfill',
+      '0132_legacy_password_security_epoch_backfill',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -71,15 +59,12 @@ describe('D34 migration execution policy', () => {
     expect(deployPolicy.equals(runtimePolicy)).toBe(true)
   })
 
-  it('classifies exactly 25 existing-table indexes and no fresh-table index', () => {
-    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
-    expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(25)
+  it('classifies exactly 5 existing-table indexes and no fresh-table index', () => {
+    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(5)
+    expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(5)
     expect(
       PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0131'))
-    ).toHaveLength(18)
-    expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0133'))
-    ).toHaveLength(7)
+    ).toHaveLength(5)
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
     ).toBe(false)
@@ -89,43 +74,16 @@ describe('D34 migration execution policy', () => {
   })
 
   it('pins the reviewed PR1 migration bodies byte-for-byte', async () => {
-    // S1d changed the PR1 bodies before any shared environment applied them:
-    // statement-level catalog triggers are no longer installed by the foundation
-    // migration, the composable-revision migration replaces row triggers in place,
-    // and planned indexes left the transactions. S1e folded three later PR1
-    // migrations into those two and dropped the authorization_catalog_revision
-    // table and function. PR1 now occupies slots 0131-0135, after dev's 0130.
-    // The 2026-10-28 review (still unapplied anywhere) dropped unused objects,
-    // made revision tables read-only for the runtime, ordered revision writers,
-    // kept the Admin UI attribution sentinel, added three revision triggers and
-    // a pre-lock for archive batches, now locking parents before revisions.
-    // RP-3 (PR #334 review r2) added the approval-batch pre-lock, which also
-    // covers the runs its DELETE cascade rewrites; RP-12 narrowed the
-    // session-revocation ledger to SELECT and INSERT. O1 added the
-    // approval-trigger pre-lock that both decision call sites take before they
-    // bump the approval target. CR-1 (PR #334 review r2) added the recipe-delete
-    // pre-lock, which the Workflow Recipes runtime executes and which locks the
-    // recipe's grant rows inside the function before any revision. The run
-    // revision trigger now returns early on
-    // an UPDATE that changes none of the columns catalog consumers read, so
-    // reconciler heartbeats stop bumping team and user revisions; the GFS
-    // resource trigger does the same for content saves that keep its identity,
-    // name, parent and tombstone, and the notification trigger does the same
-    // for delivery-state writes that keep its id, event type, audience and
-    // expiry. B4.1 (PR #334 review r2) then granted the approval prelock to the
-    // Workflow Recipes runtime, which holds the stuck-run sweep's approval
-    // subjects before its first run phase change. DB-2 B0 now guards the GFS
-    // backfill at 100000 resources and runs it before trigger DDL. DB-1
-    // (D-D1: no shared 0134 receipts) adds the retirement definer and atomic
-    // user/team coverage with fail-closed receipt postconditions in 0134.
+    // PR1 occupies slots 0131-0132, after dev's 0130, and no shared
+    // environment holds a receipt for either. 0131 creates the user-session
+    // tables (sessions, security epochs, the v1 revocation ledger) and their
+    // runtime grants; the indexes it needs on pre-existing tables are built
+    // online by PR1_ONLINE_INDEX_PLAN. 0132 backfills the security epochs from
+    // historical password events. PR1 installs no trigger and no function.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        '07fd931ec209d101282501d3fe148183cc9377b1e8f70ed9e2b039628e0a71f3',
-      ],
-      [
-        'src/services/directory/invitationDeliverySchema.ts',
-        'eafb103ae84541176c03486035503dda90eab91e55d881b643c2b5099493ee31',
+        '538c188790dda1eeca15b715a851c4d32148d4eae3986e563dfb50dcfe95994f',
       ],
     ] as const
     for (const [path, expected] of files) {
@@ -140,10 +98,6 @@ describe('D34 migration execution policy', () => {
         new URL('../src/services/access/userAccessFoundationSchema.ts', import.meta.url),
         'utf8'
       ),
-      readFile(
-        new URL('../src/services/directory/invitationDeliverySchema.ts', import.meta.url),
-        'utf8'
-      ),
     ])
     const inTransactionNames = historicalSql
       .flatMap(sql => [...sql.matchAll(/CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)/g)])
@@ -154,9 +108,9 @@ describe('D34 migration execution policy', () => {
     // Only indexes on tables PR1 itself creates are built inside a transaction;
     // every index on a pre-existing table is built online, and only online.
     expect(inTransactionNames).toEqual([...FRESH_TABLE_INDEXES].sort())
-    expect(plannedNames).toHaveLength(25)
-    // 25 online plus 13 fresh-table indexes (P-12 removed the duplicate source index).
-    expect(new Set([...plannedNames, ...inTransactionNames])).toHaveLength(38)
+    expect(plannedNames).toHaveLength(5)
+    // 5 online plus 4 fresh-table indexes.
+    expect(new Set([...plannedNames, ...inTransactionNames])).toHaveLength(9)
 
     // The planned definitions equal the in-transaction definitions S1d removed
     // (canonical form at 579ed2986), so an index built by either path is equivalent.
@@ -172,7 +126,7 @@ describe('D34 migration execution policy', () => {
       .map(index => `${index.name}\t${canonical(index.createSql)}`)
       .join('\n')
     expect(createHash('sha256').update(plannedDefinitions).digest('hex')).toBe(
-      'bc94e081bba8daa3708eb783a2c9abaf64e72fdfdf11d1b74ac6ba1926e834d2'
+      'ecb09f793b6d95cc9473a91270536e7e17184db23e808b8271625e9ed04a3e8f'
     )
   })
 
@@ -336,9 +290,8 @@ describe('D34 PR1 migration runner', () => {
     })
 
     expect(applied).toEqual([...PR1_MIGRATION_VERSIONS])
-    // One transaction per version, plus the catalog_utf8_bytes function that
-    // 0133 creates and commits before building its online indexes.
-    const transactions = PR1_MIGRATION_VERSIONS.length + 1
+    // One transaction per version.
+    const transactions = PR1_MIGRATION_VERSIONS.length
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
@@ -353,7 +306,7 @@ describe('D34 PR1 migration runner', () => {
         legacyVersions: [`legacy_${version}`],
         apply: vi.fn(async () => {
           applyOrder.push(version)
-          if (version === PR1_MIGRATION_VERSIONS[3]) throw new Error('boom')
+          if (version === PR1_MIGRATION_VERSIONS[1]) throw new Error('boom')
         }),
       })),
     ]
@@ -367,7 +320,7 @@ describe('D34 PR1 migration runner', () => {
         recordMigration: async () => undefined,
       })
     ).rejects.toThrow('boom')
-    expect(applyOrder).not.toContain(PR1_MIGRATION_VERSIONS[4])
+    expect(applyOrder).not.toContain(PR1_MIGRATION_VERSIONS[0])
     expect(query).toHaveBeenCalledWith('ROLLBACK')
   })
 
