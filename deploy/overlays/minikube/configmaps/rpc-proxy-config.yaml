@@ -36,8 +36,11 @@ data:
   RPC_PROXY_MAX_TOKEN_LENGTH: "4096"
   RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB: "250"
   # Body-transfer budget of one artifact download (the header wait is bounded by
-  # RPC_PROXY_UPSTREAM_TIMEOUT_MS). The Host serves at most 50 MiB, so 300 s
-  # moves such an artifact at 0.17 MiB/s or more; 60 s would need 0.83 MiB/s.
+  # RPC_PROXY_UPSTREAM_TIMEOUT_MS). The largest body it moves is
+  # RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB above: rpc-proxy refuses a larger response.
+  # That cap is above the Host's 50 MiB file limit because the Host redacts after
+  # its size check, which can make the response longer. 300 s moves 250 MiB at
+  # 0.83 MiB/s; 60 s would need 4.2 MiB/s.
   # minikube has no public edge in front of rpc-proxy (it does not include
   # base/ingress). Behind an edge such as Cloudflare, keep twice
   # RPC_PROXY_UPSTREAM_TIMEOUT_MS plus this value below the edge's origin read

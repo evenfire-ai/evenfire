@@ -281,10 +281,16 @@ describe('minikube rpc-proxy ConfigMap', () => {
     return Number(match[1])
   }
 
-  it("sets an artifact download timeout sized for the Host's 50 MiB artifact cap", () => {
+  it('sets an artifact download timeout sized for the largest response rpc-proxy accepts', () => {
     const timeoutMs = value('RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS')
-    // The Host refuses larger files, so its cap, not RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB,
-    // is the largest body this timer has to move.
+    // rpc-proxy answers 413 to a response above RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB, from
+    // its Content-Length or while reading it (readArtifactResponseBuffer in routes/rpc.ts),
+    // so that cap is the largest body this timer has to move.
+    const proxyCapMiB = value('RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB')
+    expect(parseArtifactDownloadMaxBytes(String(proxyCapMiB))).toBe(proxyCapMiB * 1024 * 1024)
+    // The Host checks its own cap on the file before it redacts it, and redaction can make
+    // the response longer, so the Host cap does not bound the response. A proxy cap below
+    // it would reject files the Host serves.
     const artifactPaths = readFileSync(
       resolve(__dirname, '../../../mcp-host/src/workflow/artifactPaths.ts'),
       'utf8'
@@ -293,11 +299,11 @@ describe('minikube rpc-proxy ConfigMap', () => {
     if (!cap) throw new Error('MAX_ARTIFACT_BYTES (in MiB) is missing from artifactPaths.ts')
     const hostCapMiB = Number(cap[1])
     expect(hostCapMiB).toBe(50)
-    // The built-in 100 s default moves 50 MiB at 0.5 MiB/s; the overlay must not ask
-    // for a faster transfer than that.
-    const requiredMiBPerSecond = hostCapMiB / (timeoutMs / 1000)
-    expect(requiredMiBPerSecond).toBeLessThanOrEqual(0.5)
-    // ...and it must load through the same parser as production.
+    expect(proxyCapMiB).toBeGreaterThanOrEqual(hostCapMiB)
+    // The overlay must move its largest accepted body at 1 MiB/s or slower.
+    const requiredMiBPerSecond = proxyCapMiB / (timeoutMs / 1000)
+    expect(requiredMiBPerSecond).toBeLessThanOrEqual(1)
+    // ...and the timer must load through the same parser as production.
     expect(parsePositiveIntMs('RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS', String(timeoutMs))).toBe(
       timeoutMs
     )

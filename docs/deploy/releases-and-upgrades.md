@@ -245,14 +245,20 @@ applies when the variable is unset or empty in `rpc-proxy-config`.
 | ---------------------------------------- | ----------------- | ------------------- |
 | `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` | `60000` ms (60 s) | `100000` ms (100 s) |
 
-If your `rpc-proxy-config` sets `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, that
-value wins and nothing changes. The common case is a ConfigMap without the
-variable, which was added in v0.11.0: rpc-proxy then used the old 60 s default
-and now uses 100 s. The timer bounds the in-cluster transfer of an artifact body
-from the Host after the Host's response headers arrive. It does not bound the
-client's download from rpc-proxy. The Host serves artifact files of at most
-50 MiB; with the old 60 s default a 50 MiB artifact was aborted if that transfer
-ran below about 0.83 MiB/s, while the new 100 s lowers the floor to 0.5 MiB/s.
+If `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` is set in `rpc-proxy-config` or
+`rpc-proxy-secrets`, that value wins and nothing changes. rpc-proxy reads both
+through `envFrom`, the Secret last, so a key set in both takes the Secret's
+value. The common case is a ConfigMap without the variable, which was added in
+v0.11.0: rpc-proxy then used the old 60 s default and now uses 100 s. The timer
+bounds the in-cluster transfer of an artifact body from the Host after the
+Host's response headers arrive. It does not bound the client's download from
+rpc-proxy. The largest body it has to move is
+`RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB` (50 MiB by default), because rpc-proxy
+refuses a larger response. The Host's own 50 MiB limit applies to the file
+before the Host redacts secrets, and redaction can make the response longer. The
+slowest transfer that still completes is that cap divided by the timer: with the
+default 50 MiB, about 0.83 MiB/s with the old 60 s and 0.5 MiB/s with the new
+100 s.
 When the Host has to be woken first, the transfer is also bounded by the
 remaining request hold, which is at most 48 s (`MAX_REQUEST_HOLD_MS`).
 
@@ -266,7 +272,13 @@ while rpc-proxy keeps reading. With the defaults the worst case is
 `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` below your edge's timeout. If your
 `rpc-proxy-config` started as a copy of the minikube ConfigMap, as
 [the production guide](production.md) suggests, it sets `60000` and `300000`, a
-worst case of 420 s: lower both before you serve it behind an edge. Confirming
+worst case of 420 s: lower both before you serve it behind an edge. A copy taken
+before v0.11.0 sets `RPC_PROXY_UPSTREAM_TIMEOUT_MS` to `60000` and
+`RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB` to `250` but not the download timer, so it
+now waits up to 60 + 60 + 100 = 220 s (180 s before this release), above
+Cloudflare's 125 s default: lower `RPC_PROXY_UPSTREAM_TIMEOUT_MS` so that the
+sum stays below your edge's timeout (the 8 s default gives 116 s). A body at its
+250 MiB cap also needs 2.5 MiB/s to finish within the 100 s timer. Confirming
 the timeout of the operated zones is tracked in #1309.
 
 The six stream caps below keep their defaults, but an invalid value is now a
@@ -289,6 +301,9 @@ as `0` with the same effect.
 
 To keep the old artifact download timeout, set
 `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` in `rpc-proxy-config` before you roll
-out the new image, and check that every stream cap the ConfigMap sets is a
-positive integer. rpc-proxy reads the ConfigMap at startup, so the new default
-and the cap check apply when the new pods start.
+out the new image, and check every stream cap set in `rpc-proxy-config` or
+`rpc-proxy-secrets` against the rule above. For the Secret, list its key names
+only, for example
+`kubectl -n rpc-proxy get secret rpc-proxy-secrets -o go-template='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}'`;
+do not print its values. rpc-proxy reads these values at startup, so the new
+default and the cap check apply when the new pods start.
