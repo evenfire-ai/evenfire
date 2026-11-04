@@ -307,7 +307,7 @@ describe('GET /admin/hosts/:hostRef/artifacts/:artifactName/download', () => {
   })
 
   it('never serves a text artifact unredacted when the env Secret read is refused', async () => {
-    const readFn = vi.fn(async () => Buffer.from('SECRET=host-secret-value-abcdef'))
+    const readFn = vi.fn(async () => Buffer.from('notes fixture-host-env-value'))
     const getSecret = vi.fn(async (name: string, ns: string) =>
       Promise.reject(controlApiForbiddenRead(name, ns))
     )
@@ -320,7 +320,7 @@ describe('GET /admin/hosts/:hostRef/artifacts/:artifactName/download', () => {
     const res = await request(app).get('/admin/hosts/chatllm/artifacts/notes.md/download')
 
     expectRejectedSecretRead(res, 'host-chatllm-env-secret', 'mcp-host')
-    expect(JSON.stringify(res.body)).not.toContain('host-secret-value-abcdef')
+    expect(JSON.stringify(res.body)).not.toContain('fixture-host-env-value')
     expect(res.headers['content-disposition']).toBeUndefined()
     // Witnesses: the artifact was read and the redaction read was attempted.
     expect(readFn).toHaveBeenCalledOnce()
