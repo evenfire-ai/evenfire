@@ -84,6 +84,41 @@ describe('central user-access rollout compiler', () => {
       intent({ sessionV2Issuance: true, minimumClientEnforcement: true }),
     ],
     ['readiness_snapshot_unavailable', intent(), readiness({ snapshot: 'unavailable' })],
+    ['readiness_revision_missing', intent(), readiness({ revision: '  ' })],
+    ['legacy_session_unavailable', intent(), readiness({ legacySession: 'unavailable' })],
+    [
+      'session_v2_acceptance_unavailable',
+      intent(),
+      readiness({ sessionV2Acceptance: 'unavailable' }),
+    ],
+    [
+      'session_v2_issuance_unavailable',
+      intent({ sessionV2Issuance: true }),
+      readiness({ sessionV2Issuance: 'unavailable' }),
+    ],
+    [
+      'legacy_disabled_requires_v2_issue_and_accept',
+      intent({ legacyLifecycle: 'disabled', legacySwitchEndpoint: false }),
+    ],
+    [
+      'legacy_switch_authorization_unavailable',
+      intent(),
+      readiness({ legacySwitchAuthorization: 'unavailable' }),
+    ],
+    ['minimum_client_version_invalid', intent({ minimumClientVersion: '2.0' })],
+    [
+      'minimum_client_enforcement_requires_v2_issuance',
+      intent({ minimumClientVersion: '2.0.0', minimumClientEnforcement: true }),
+    ],
+    [
+      'minimum_client_enforcement_unavailable',
+      intent({
+        sessionV2Issuance: true,
+        minimumClientVersion: '2.0.0',
+        minimumClientEnforcement: true,
+      }),
+      readiness({ minimumClientEnforcement: 'unavailable' }),
+    ],
   ])('rejects impossible state %s', (code, configured, deployed = readiness()) => {
     expect(() => compileUserAccessPolicy(configured, deployed)).toThrowError(
       new UserAccessPolicyConfigurationError(code)
