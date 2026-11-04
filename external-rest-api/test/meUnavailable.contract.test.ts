@@ -62,7 +62,7 @@ describe('External REST /me unavailable producer contract', () => {
     )
   })
 
-  it('answers a revoked upstream session with the dev not-found response', async () => {
+  it('answers a revoked upstream session with 401 so the client re-authenticates', async () => {
     mocks.controlApiRequest.mockRejectedValue(
       new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
     )
@@ -74,9 +74,9 @@ describe('External REST /me unavailable producer contract', () => {
       .get('/me')
       .set('authorization', 'Bearer synthetic-session-token')
 
-    expect(response.status).toBe(404)
-    expect(response.body).toEqual({ error: 'User not found' })
-    expect(JSON.stringify(response.body)).not.toMatch(/private upstream detail|Unauthorized/)
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(JSON.stringify(response.body)).not.toMatch(/private upstream detail/)
     expect(mocks.controlApiRequest).toHaveBeenCalledWith(
       'GET',
       '/external/users/synthetic-member-id/me',

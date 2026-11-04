@@ -131,7 +131,12 @@ export async function getMe(userId: string, teamId: string, sessionToken: string
       },
     }
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 503) throw error
+    // Exception to the dev error mapping: Control API revokes server sessions
+    // (password change, logout, revocation), and a revoked session must reach
+    // the client as 401 so it re-authenticates instead of reading "not found".
+    if (error instanceof ControlApiError && (error.status === 401 || error.status === 503)) {
+      throw error
+    }
     return null
   }
 }

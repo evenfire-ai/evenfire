@@ -34,10 +34,16 @@ describe('legacy authority adapters', () => {
     clientMock.controlApiRequest.mockReset()
   })
 
-  it('maps every non-outage /me and switch-team failure to absence', async () => {
+  it('maps every other /me and switch-team failure to absence, keeping outages and /me revocation', async () => {
     for (const status of [404, 401, 500]) {
       clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
-      await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).resolves.toBeNull()
+      if (status === 401) {
+        await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).rejects.toMatchObject({
+          status: 401,
+        })
+      } else {
+        await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).resolves.toBeNull()
+      }
 
       clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
       await expect(
