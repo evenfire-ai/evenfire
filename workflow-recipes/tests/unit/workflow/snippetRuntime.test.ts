@@ -27,6 +27,8 @@ const CHECK_SCRIPT = 'process.exit(process.permission ? 0 : 3)'
 const PERMISSION_PROBE_TIMEOUT_MS = 10_000
 // The dist/workflow modules that the compiled runtime and its worker fork load.
 const COMPILED_SNIPPET_MODULES = ['snippetRuntime', 'snippetWorker', 'snippetTypes']
+// The packages src/workflow/snippetWorker.ts imports.
+const WORKER_PACKAGES = ['@modelcontextprotocol/sdk', 'mongodb', 'pg', 'typescript']
 const nodeRequire = createRequire(__filename)
 
 type SnippetRuntimeModule = typeof import('../../../src/workflow/snippetRuntime')
@@ -59,10 +61,28 @@ interface PermissionProbeReport {
   childProcess: string
 }
 
+// The compiled worker may read node_modules only, and Node loads each module by its
+// realpath. A linked package (npm link, dependencies shared from another checkout) would
+// be denied and the worker would only exit with code 1, so name it here instead.
+async function assertWorkerPackagesStayInside(): Promise<void> {
+  const root = await fs.realpath(NODE_MODULES)
+  for (const name of WORKER_PACKAGES) {
+    const entry = path.join(NODE_MODULES, name)
+    const real = await fs.realpath(entry)
+    if (!real.startsWith(root + path.sep)) {
+      throw new Error(
+        `${entry} resolves to ${real}, outside ${NODE_MODULES}: the compiled worker cannot read it. ` +
+          'Install real dependencies with `npm ci` in workflow-recipes.'
+      )
+    }
+  }
+}
+
 // `npm test` builds dist/ first (the pretest script); a direct `vitest run` does not. A
 // missing dist/ module, or one older than its source, fails the test here instead of
 // testing a worker that no longer matches src/.
 async function loadCompiledSnippetRuntime(): Promise<SnippetRuntimeModule> {
+  await assertWorkerPackagesStayInside()
   for (const name of COMPILED_SNIPPET_MODULES) {
     const source = path.join(WORKFLOW_RECIPES_ROOT, 'src', 'workflow', `${name}.ts`)
     const compiled = path.join(DIST_ROOT, 'workflow', `${name}.js`)
