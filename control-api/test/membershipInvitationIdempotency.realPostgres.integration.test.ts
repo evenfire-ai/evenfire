@@ -253,7 +253,11 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
 
     const replay = await acceptInvitationForEmail(invitation.email, invitation.token, invitation.id)
 
-    expect(replay).toEqual({ data: { ...first.data, replay: true } })
+    // The replay returns the user row it locked first (AUTH-5), which is still active.
+    expect(replay).toEqual({
+      data: { ...first.data, replay: true },
+      lockedUser: { lifecycleState: 'active', lifecycleVersion: expect.any(String) },
+    })
     const replayState = await invitationState(invitation.id)
     expect(replayState.accepted_user_id).toBe(userId)
     const firstAcceptedAt = firstState.accepted_at
