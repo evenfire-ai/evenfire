@@ -26,6 +26,16 @@ const {
 } = require('./wrc-egress-lifecycle.cjs')
 
 const STATE = 'clerum.io/egress-fqdn-state'
+// Autonomous-recovery wait: the stored DNS window plus slack, refused above
+// the cap. The window is TTL + WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS, so the
+// overlay that runs this gate must keep that overlap at or below
+// maxSupportedExternalEgressOverlapSeconds()
+// (scripts/tests/test-wrc-egress-gate-overlap-render.sh).
+const GATE_RECOVERY_CAP_MS = 600_000
+const GATE_RECOVERY_SLACK_MS = 90_000
+const DNS_FIXTURE_TTL_SECONDS = 5
+const maxSupportedExternalEgressOverlapSeconds = () =>
+  (GATE_RECOVERY_CAP_MS - GATE_RECOVERY_SLACK_MS) / 1000 - DNS_FIXTURE_TTL_SECONDS
 const LOOPBACK = [127, 0, 0, 1].join('.')
 const endpointHost = 'example.com' // Existing mock-MCP fixture public endpoint contract.
 const deploymentReady = object =>
@@ -260,7 +270,7 @@ function fixtureObjects(config, runId, wrcImage, answerIp, upstream) {
                 command: ['node', '/fixture/server.cjs'],
                 env: [
                   { name: 'DNS_TARGETS_JSON', value: JSON.stringify(targets) },
-                  { name: 'DNS_TTL_SECONDS', value: '5' },
+                  { name: 'DNS_TTL_SECONDS', value: String(DNS_FIXTURE_TTL_SECONDS) },
                   { name: 'UPSTREAM_DNS', value: upstream },
                 ],
                 ports: [
@@ -1019,8 +1029,11 @@ async function exercise(config, kube, journal) {
   // or mistaking a DNS packet / old active phase for accepted convergence.
   const latestExpiry = Math.max(...lanes.map(lane => lane.latestExpiry))
   invariant(Number.isFinite(latestExpiry), 'MISSING_ACCEPTED_DNS_WINDOW')
-  const recoveryBudget = Math.max(90_000, latestExpiry - Date.now() + 90_000)
-  invariant(recoveryBudget <= 600_000, 'DNS_WINDOW_EXCEEDS_GATE_RECOVERY_BUDGET')
+  const recoveryBudget = Math.max(
+    GATE_RECOVERY_SLACK_MS,
+    latestExpiry - Date.now() + GATE_RECOVERY_SLACK_MS
+  )
+  invariant(recoveryBudget <= GATE_RECOVERY_CAP_MS, 'DNS_WINDOW_EXCEEDS_GATE_RECOVERY_BUDGET')
   for (const lane of lanes) {
     invariant(Number.isFinite(lane.lastAcceptedAt), 'MISSING_ACCEPTED_DNS_OBSERVATION')
     lane.recoveryAfter = lane.lastAcceptedAt
@@ -1215,6 +1228,10 @@ module.exports = {
   policyObservation,
   acceptPolicyIntentChange,
   main,
+  GATE_RECOVERY_CAP_MS,
+  GATE_RECOVERY_SLACK_MS,
+  DNS_FIXTURE_TTL_SECONDS,
+  maxSupportedExternalEgressOverlapSeconds,
 }
 if (require.main === module)
   main(process.argv.slice(2)).catch(() => {

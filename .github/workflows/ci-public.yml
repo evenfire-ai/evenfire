@@ -1131,6 +1131,14 @@ jobs:
             minikube-ghcr=/tmp/clerum-minikube-ghcr.yaml \
             minikube-no-uis-ghcr=/tmp/clerum-minikube-no-uis-ghcr.yaml
 
+      - name: Minikube overlays keep the WRC egress overlap within the E2E gate bound
+        run: |
+          bash scripts/tests/test-wrc-egress-gate-overlap-render.sh \
+            minikube=/tmp/clerum-minikube.yaml \
+            minikube-no-uis=/tmp/clerum-minikube-no-uis.yaml \
+            minikube-ghcr=/tmp/clerum-minikube-ghcr.yaml \
+            minikube-no-uis-ghcr=/tmp/clerum-minikube-no-uis-ghcr.yaml
+
       - name: Validate NP-08 caller-bound HCC contract
         run: |
           bash scripts/tests/test-np08-render-contract.sh \
