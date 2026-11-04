@@ -836,6 +836,12 @@ async function writeArtifact(
   ) {
     throw new Error(`unsafe artifact filename: ${name}`)
   }
+  // Checked before the open below: 'w' truncates an existing artifact, so a body that
+  // writeFile would reject must not reach it (writeJson of a value that JSON.stringify
+  // turns into undefined, or writeMarkdown of a non-string).
+  if (typeof body !== 'string') {
+    throw new Error(`artifact body must be a string: ${name}`)
+  }
   const outputDir = payload.outputDir
   const target = path.join(outputDir, name)
   await fs.mkdir(outputDir, { recursive: true })

@@ -242,6 +242,43 @@ describe('snippet worker security guards', () => {
     }
   })
 
+  it('rejects a non-string artifact body without truncating the existing artifact', async () => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-worker-'))
+    const existing = '{\n  "previous": true\n}'
+    await fs.writeFile(path.join(outputDir, 'report.json'), existing, 'utf8')
+    try {
+      const request: SnippetExecuteRequest = {
+        workflowName: 'wf',
+        stepId: 'report',
+        run: {
+          type: 'snippet',
+          language: 'typescript',
+          // JSON.stringify(undefined) is undefined, so writeJson passes no string body.
+          code: `
+            await sdk.artifacts.writeJson("report.json", sdk.previousOutputs.missing)
+            return { ok: true }
+          `,
+        },
+        previousOutputs: {},
+        resolvedWorkloads: [],
+        resolvedMcpServers: [],
+      }
+
+      // Liveness witness: the write was attempted and refused for its body.
+      await expect(
+        executeSnippetPayload({
+          request,
+          outputDir,
+          timeoutMs: 5_000,
+          env: {},
+        })
+      ).rejects.toThrow('artifact body must be a string: report.json')
+      await expect(fs.readFile(path.join(outputDir, 'report.json'), 'utf8')).resolves.toBe(existing)
+    } finally {
+      await fs.rm(outputDir, { recursive: true, force: true })
+    }
+  })
+
   it.each(['$out', '$merge'])(
     'accepts MongoDB aggregate stage %s only as valid syntax',
     operator => {
