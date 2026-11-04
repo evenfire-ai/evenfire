@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 import type { McpServerCondition } from '@lib/api'
 
 /**
- * The `SecretResolved` contract, READ OFF THE PRODUCER (R1-H2).
+ * The `SecretResolved` and `EgressProxyValuesValid` contracts, READ OFF THE
+ * PRODUCER (R1-H2).
  *
  * Every `SecretResolved` condition the credential screen can ever observe is
  * written by `host-context-controller/src/reconciler.ts`, and by nothing else.
@@ -675,4 +676,293 @@ export function producerFailure(
     fail(`the rendered '${role}' message still contains an interpolation: ${message}`)
   }
   return { reason: result.reason, message }
+}
+
+// ─── Extraction 4: the egress-proxy value-preflight writes ─────────────────
+//
+// The rollout wait reads a second condition: the egress-proxy preflight's
+// verdict. The producer writes it exactly twice — a refusal from the block
+// path (message forwarded from the verdict) and a within-class pass from the
+// managed reconcile (fully literal) — and the hand-written copy of that pair
+// in the rollout tests already drifted once ("1 value" where the producer
+// writes "1 value(s)"). So this section derives the pair the same way the
+// sections above derive `SecretResolved`: the condition TYPE is never assumed
+// here. The block path publishes its own verdict in `setStatus` as
+// `TYPE=STATUS: ${verdict.message}`; that template names the type whose two
+// `writeStatusCondition` calls this section then extracts from the already
+// parsed `conditionWrites`. A renamed type, status or reason therefore moves
+// the fixtures (and breaks the suites that assert the old behaviour), while
+// `../secretResolvedProducerContract.test.ts` pins the extracted values from
+// its own independent reading.
+
+function extractEgressBlockVerdict(): { type: string; status: McpServerCondition['status'] } {
+  const verdicts = [...source.matchAll(/`([A-Za-z]+)=([A-Za-z]+): \$\{verdict\.message\}`/g)]
+  if (verdicts.length !== 1) {
+    fail(
+      `expected exactly one \`TYPE=STATUS: \${verdict.message}\` status line naming the ` +
+        `egress-proxy block verdict, found ${verdicts.length}. Without it this contract ` +
+        `cannot derive which condition type the preflight writes.`
+    )
+  }
+  return {
+    type: verdicts[0][1],
+    status: asConditionStatus(`'${verdicts[0][2]}'`, 'egress-proxy block status'),
+  }
+}
+
+const egressBlockVerdict = extractEgressBlockVerdict()
+
+/** The preflight condition type, taken from the producer's own block verdict. */
+export const EGRESS_PRODUCER_CONDITION_TYPE: string = egressBlockVerdict.type
+
+function extractEgressWrites(): {
+  refusal: { status: McpServerCondition['status']; reason: string }
+  withinClass: { status: McpServerCondition['status']; reason: string; message: string }
+} {
+  const onType = conditionWrites.filter(write => write.type === EGRESS_PRODUCER_CONDITION_TYPE)
+  if (onType.length !== 2) {
+    fail(
+      `expected exactly TWO '${EGRESS_PRODUCER_CONDITION_TYPE}' condition writes (the block ` +
+        `refusal and the within-class pass), found ${onType.length}` +
+        `${onType.length ? ` at lines ${onType.map(write => write.line).join(', ')}` : ''}. ` +
+        `A third way for the UI to observe the preflight verdict has to be modelled here.`
+    )
+  }
+  const refusalWrites = onType.filter(write => write.message === 'verdict.message')
+  const literalWritesOnType = onType.filter(
+    write =>
+      isStringLiteral(write.status) &&
+      isStringLiteral(write.reason) &&
+      isStringLiteral(write.message)
+  )
+  if (refusalWrites.length !== 1 || literalWritesOnType.length !== 1) {
+    fail(
+      `the '${EGRESS_PRODUCER_CONDITION_TYPE}' writes are no longer one verdict-forwarding ` +
+        `refusal plus one fully-literal pass (lines ${onType.map(write => write.line).join(', ')}). ` +
+        `The UI can observe a preflight condition this contract says nothing about.`
+    )
+  }
+  const refusalWrite = refusalWrites[0]
+  if (!isStringLiteral(refusalWrite.status) || !isStringLiteral(refusalWrite.reason)) {
+    fail(
+      `the refusal write at line ${refusalWrite.line} no longer carries literal status and ` +
+        `reason next to \`verdict.message\` (status: ${refusalWrite.status}, reason: ` +
+        `${refusalWrite.reason}). The fixtures derive both from that literal pair.`
+    )
+  }
+  const refusalStatus = asConditionStatus(
+    refusalWrite.status,
+    `refusal write at line ${refusalWrite.line}`
+  )
+  if (refusalStatus !== egressBlockVerdict.status) {
+    fail(
+      `the block's status line says '${EGRESS_PRODUCER_CONDITION_TYPE}=${egressBlockVerdict.status}' ` +
+        `but the condition write at line ${refusalWrite.line} carries '${refusalStatus}'. The ` +
+        `producer disagrees with itself about the refusal, so no fixture can stand for it.`
+    )
+  }
+  const withinWrite = literalWritesOnType[0]
+  const withinStatus = asConditionStatus(
+    withinWrite.status,
+    `within-class write at line ${withinWrite.line}`
+  )
+  if (withinStatus === refusalStatus) {
+    fail(
+      `the literal '${EGRESS_PRODUCER_CONDITION_TYPE}' write at line ${withinWrite.line} carries ` +
+        `the REFUSAL status '${withinStatus}', so there is no within-class pass to derive.`
+    )
+  }
+  return {
+    refusal: { status: refusalStatus, reason: unquote(refusalWrite.reason) },
+    withinClass: {
+      status: withinStatus,
+      reason: unquote(withinWrite.reason),
+      message: unquote(withinWrite.message),
+    },
+  }
+}
+
+const egressWrites = extractEgressWrites()
+
+/** The block path's refusal: status and reason. The message is computed from
+ *  the violations; `egressProducerRefusalMessage` renders it below. */
+export const EGRESS_PRODUCER_REFUSAL: {
+  status: McpServerCondition['status']
+  reason: string
+} = egressWrites.refusal
+
+/** The managed reconcile's within-class pass: the full literal triple. */
+export const EGRESS_PRODUCER_WITHIN_CLASS: {
+  status: McpServerCondition['status']
+  reason: string
+  message: string
+} = egressWrites.withinClass
+
+// ─── Rendering the refusal message ─────────────────────────────────────────
+//
+// The refusal message is `formatEgressProxyValueMessage`'s output: a count, a
+// fixed middle, the spelled-out entries and a fixed tail. This renderer
+// extracts those templates (plus the query entry and the Secret source) from
+// the producer text and evaluates the ONE shape the rollout tests need: a
+// single query-position violation sourced from a Secret key, in the plain
+// value class (so the dependent-env suffix is empty and nothing is hidden
+// behind the "; and N more" cap). Multi-violation ordering and the other two
+// entry contexts stay producer-internal until a test needs them; an
+// interpolation this renderer does not map throws instead of rendering a
+// message no controller ever wrote.
+
+function egressMethodBody(name: string): { start: number; end: number } {
+  const start = lines.findIndex(line => new RegExp(`^\\s*private (?:async )?${name}\\(`).test(line))
+  if (start < 0) {
+    fail(`could not find the producer method \`${name}\`. The refusal message is built there.`)
+  }
+  const methodIndent = indentOf(lines[start])
+  for (let index = start + 1; index < lines.length; index++) {
+    if (indentOf(lines[index]) === methodIndent && lines[index].trim() === '}') {
+      return { start, end: index }
+    }
+  }
+  return fail(`the producer method \`${name}\` starting at line ${start + 1} is never closed.`)
+}
+
+/** The escaped placeholder opener the producer writes as `\${`, shielded while
+ *  real interpolations are substituted so the two are never confused. */
+const SHIELDED_PLACEHOLDER = '\u0000'
+
+function renderEgressTemplate(
+  template: string,
+  values: Record<string, string>,
+  what: string
+): string {
+  const shielded = template.replace(/\\\$\{/g, SHIELDED_PLACEHOLDER)
+  const rendered = shielded.replace(/\$\{([^}]+)\}/g, (_whole, expression: string) => {
+    const value = values[expression]
+    if (value === undefined) {
+      fail(
+        `the ${what} interpolates \${${expression}}, which this renderer does not map. ` +
+          `Thread the value through egressProducerRefusalMessage instead of guessing it.`
+      )
+    }
+    return value
+  })
+  // No leftover-interpolation check here: every `${...}` the template itself
+  // held was substituted above (an unmapped one throws), so a `${` in the
+  // result can only be the literal placeholder a substituted value carries.
+  return rendered.split(SHIELDED_PLACEHOLDER).join('${')
+}
+
+function extractEgressMessageTemplates(): {
+  secretSource: string
+  queryEntry: string
+  summaryHead: string
+  summaryMiddle: string
+  summaryTail: string
+} {
+  const describe = egressMethodBody('describeEnvSource')
+  let secretSource: string | undefined
+  for (let index = describe.start; index <= describe.end; index++) {
+    const matched = /if \(secretKeyRef\) return `([^`]*)`/.exec(lines[index])
+    if (matched) secretSource = matched[1]
+  }
+  if (secretSource === undefined) {
+    fail(
+      `describeEnvSource no longer returns a template literal for its Secret branch. ` +
+        `The refusal entry names its source through that template.`
+    )
+  }
+
+  const entry = egressMethodBody('formatEgressProxyValueEntry')
+  let queryEntry: string | undefined
+  for (let index = entry.start; index <= entry.end; index++) {
+    if (!/^\s*case 'query':$/.test(lines[index])) continue
+    const matched = /return `([^`]*)`/.exec(lines[index + 1] ?? '')
+    if (!matched) {
+      fail(
+        `the 'query' case of formatEgressProxyValueEntry (line ${index + 1}) no longer returns ` +
+          `a single template literal on the next line. Re-derive the entry extraction.`
+      )
+    }
+    queryEntry = matched[1]
+  }
+  if (queryEntry === undefined) {
+    fail(
+      `formatEgressProxyValueEntry has no 'query' case any more. The rollout fixtures model ` +
+        `a query-position refusal, which that case spells out.`
+    )
+  }
+
+  const summary = egressMethodBody('formatEgressProxyValueMessage')
+  let returnStart = -1
+  for (let index = summary.start; index <= summary.end; index++) {
+    if (/^\s*return \($/.test(lines[index])) returnStart = index
+  }
+  if (returnStart < 0) {
+    fail(
+      `formatEgressProxyValueMessage no longer returns a parenthesised concatenation. ` +
+        `Re-derive the summary extraction.`
+    )
+  }
+  const returnLines: string[] = []
+  for (let index = returnStart + 1; index <= summary.end; index++) {
+    if (lines[index].trim() === ')') break
+    returnLines.push(lines[index].trim())
+  }
+  const operands = [...returnLines.join(' ').matchAll(/`([^`]*)`|'([^']*)'/g)].map(
+    matched => matched[1] ?? matched[2]
+  )
+  if (operands.length !== 3) {
+    fail(
+      `expected the refusal summary to concatenate exactly three operands (count template, ` +
+        `fixed middle, entries template), found ${operands.length}. Re-derive the summary ` +
+        `extraction — a partial summary would invent a message no controller writes.`
+    )
+  }
+  return {
+    secretSource,
+    queryEntry,
+    summaryHead: operands[0],
+    summaryMiddle: operands[1],
+    summaryTail: operands[2],
+  }
+}
+
+const egressTemplates = extractEgressMessageTemplates()
+
+/** The names a single-violation refusal message is built from. */
+export type EgressRefusalMessageValues = {
+  placeholder: string
+  secretName: string
+  secretKey: string
+}
+
+/**
+ * The message the producer stamps on the refusal for one query-position
+ * Secret value outside its class, rendered from the producer's own templates.
+ */
+export function egressProducerRefusalMessage(values: EgressRefusalMessageValues): string {
+  const sourceText = renderEgressTemplate(
+    egressTemplates.secretSource,
+    { 'secretKeyRef.name': values.secretName, 'secretKeyRef.key': values.secretKey },
+    'describeEnvSource Secret template'
+  )
+  const entryText = renderEgressTemplate(
+    egressTemplates.queryEntry,
+    {
+      'violation.placeholder': values.placeholder,
+      'violation.source': sourceText,
+      dependent: '',
+    },
+    'query entry template'
+  )
+  const head = renderEgressTemplate(
+    egressTemplates.summaryHead,
+    { 'entries.length': '1' },
+    'refusal summary head'
+  )
+  const tail = renderEgressTemplate(
+    egressTemplates.summaryTail,
+    { "shown.join('; ')": entryText, more: '' },
+    'refusal summary tail'
+  )
+  return `${head}${egressTemplates.summaryMiddle}${tail}`
 }

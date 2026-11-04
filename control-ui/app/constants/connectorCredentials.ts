@@ -35,8 +35,10 @@ export const POLL_TIMEOUT_MS = 180_000
 // diagnostic value. Must match host-context-controller/src/reconciler.ts.
 export const ROLLOUT_INCOMPLETE_REASON = 'RolloutIncomplete'
 
-// The two McpServer condition types the credential-rotation rollout wait reads.
-// Both must stay in sync with host-context-controller/src/reconciler.ts.
+// The rollout verdict the credential-rotation wait polls for: the HCC writes
+// it when the connector's Deployment converges, or when its readiness budget
+// is exhausted (see ROLLOUT_INCOMPLETE_REASON above). Must stay in sync with
+// host-context-controller/src/reconciler.ts.
 export const DEPLOYMENT_READY_CONDITION = 'DeploymentReady'
 
 // The egress-proxy value preflight. Only a managed, enabled, remote connector

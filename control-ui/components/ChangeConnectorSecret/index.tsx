@@ -44,7 +44,7 @@ export function ChangeConnectorSecret({
   const completed = useRef(false)
   const callbacks = useRef({ onBusyChange, onFinished, onSpecSaved })
   callbacks.current = { onBusyChange, onFinished, onSpecSaved }
-  const { phase, phaseMessage, setPhase, setPhaseMessage } = useRolloutWait({
+  const { phase, phaseMessage, failureKind, setPhase, setPhaseMessage } = useRolloutWait({
     serverName,
     cutoff: saved?.cutoff ?? null,
     expectedUid: saved?.server.metadata?.uid,
@@ -161,7 +161,13 @@ export function ChangeConnectorSecret({
             Assignment saved. Waiting for {serverName} to become ready… {phaseMessage}
           </p>
         ) : null}
-        {phase === 'failed' || phase === 'timeout' ? (
+        {phase === 'failed' && failureKind === 'egress-refused' ? (
+          <p role="alert" className="cu-banner cu-banner--error">
+            Assignment saved, but the egress proxy refused the assigned Secret&rsquo;s value.
+            Correct the value in the Secret, then refresh to check status. {phaseMessage}
+          </p>
+        ) : null}
+        {(phase === 'failed' && failureKind !== 'egress-refused') || phase === 'timeout' ? (
           <p role="alert">
             Assignment saved, but readiness could not be verified. Refresh to check status.{' '}
             {phaseMessage}

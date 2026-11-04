@@ -10,7 +10,7 @@ import {
 } from '@constants/connectorCredentials'
 import { getMcpServer } from '@lib/api'
 import type { McpServerCondition } from '@lib/api'
-import type { RolloutWaitOptions, RotationPhase } from './types'
+import type { RolloutFailureKind, RolloutWaitOptions, RotationPhase } from './types'
 
 /**
  * Returns the condition of `type` ONLY if it transitioned strictly after
@@ -38,9 +38,21 @@ export function useRolloutWait({
   expectedUid,
   expectedGeneration,
 }: RolloutWaitOptions) {
-  const [phase, setPhase] = useState<RotationPhase>('idle')
+  const [phase, setPhaseState] = useState<RotationPhase>('idle')
   const [phaseMessage, setPhaseMessage] = useState('')
+  const [failureKind, setFailureKind] = useState<RolloutFailureKind | null>(null)
   const rolloutIncompleteMessage = useRef<string | null>(null)
+
+  // The diagnosis belongs to the transition that produced it: every phase
+  // change clears it, and the one branch that diagnoses a failure (the
+  // egress-proxy refusal below) sets it again right after its own
+  // `setPhase('failed')`. A caller raising `failed` for its own reasons —
+  // or starting a new attempt — therefore can never inherit a stale
+  // refusal verdict from a previous write.
+  function setPhase(next: RotationPhase) {
+    setFailureKind(null)
+    setPhaseState(next)
+  }
 
   // Poll THIS connector's own McpServer CRD until DeploymentReady resolves, the
   // egress-proxy preflight refuses the new value, or the bounded timeout
@@ -89,9 +101,9 @@ export function useRolloutWait({
       // A fresh egress-proxy refusal is a TERMINAL verdict for this write, and
       // it is checked BEFORE DeploymentReady on purpose: the blocking reconcile
       // never writes DeploymentReady, so any True still on the CRD belongs to
-      // the PREVIOUS rollout. Waiting for it is exactly the 180s timeout that
-      // ends under a stale DeploymentReady=True when an operator rotates onto a
-      // value outside the egress-proxy class (issue #1240, PR #1243 review).
+      // the PREVIOUS rollout. Waiting for it would spin to the 180s timeout and
+      // then report under a stale DeploymentReady=True, hiding that the new
+      // value sits outside the egress-proxy class and was refused outright.
       const refusal = findFreshCondition(conditions, EGRESS_PROXY_VALUES_VALID_CONDITION, cutoff!)
       if (
         refusal?.status === 'False' &&
@@ -100,8 +112,12 @@ export function useRolloutWait({
         cancelled = true
         clearInterval(id)
         setPhase('failed')
+        // After `setPhase`, which clears any earlier diagnosis: this failure
+        // is the refusal, and callers key their "correct the value" banner
+        // off this discriminator instead of re-reading the message text.
+        setFailureKind('egress-refused')
         // The HCC authors this message from placeholder/source/context names
-        // only (spec §4.7), so it carries no value bytes. Nothing else from the
+        // only, so it carries no value bytes. Nothing else from the
         // condition is shown, matching every other failure path here.
         setPhaseMessage(
           refusal.message ||
@@ -183,5 +199,5 @@ export function useRolloutWait({
     }
   }, [phase, cutoff, serverName, expectedUid, expectedGeneration])
 
-  return { phase, phaseMessage, setPhase, setPhaseMessage }
+  return { phase, phaseMessage, failureKind, setPhase, setPhaseMessage }
 }

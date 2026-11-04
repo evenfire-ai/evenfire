@@ -71,6 +71,17 @@ export type UpdateConnectorCredentialsProps = {
  */
 export type RotationPhase = 'idle' | 'saving' | 'rotating' | 'success' | 'failed' | 'timeout'
 
+/**
+ * Why a `failed` phase failed, when the rollout wait itself diagnosed it.
+ * Only the egress-proxy refusal is distinguished: unlike every other failure
+ * it is a verdict on the VALUE the operator just wrote — the controller
+ * blocked the update and kept the previous ConfigMap and Deployment — so
+ * callers must say the value was refused and has to be corrected, never that
+ * the rollout merely could not be verified. `null` in every other phase, and
+ * for failures a caller raises itself through `setPhase('failed')`.
+ */
+export type RolloutFailureKind = 'egress-refused'
+
 export type RolloutWaitOptions = {
   serverName: string
   cutoff: string | null

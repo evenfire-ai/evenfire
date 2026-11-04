@@ -51,7 +51,7 @@ export function ConnectorSecretKeys({
   const [cutoff, setCutoff] = useState<string | null>(null)
   const [rolloutIdentity, setRolloutIdentity] = useState<{ uid?: string; generation?: number }>({})
   const [otherAffected, setOtherAffected] = useState<string[]>([])
-  const { phase, phaseMessage, setPhase, setPhaseMessage } = useRolloutWait({
+  const { phase, phaseMessage, failureKind, setPhase, setPhaseMessage } = useRolloutWait({
     serverName: serverName ?? '',
     cutoff,
     expectedUid: rolloutIdentity.uid,
@@ -309,7 +309,13 @@ export function ConnectorSecretKeys({
             : ''}
         </div>
       ) : null}
-      {phase === 'failed' || phase === 'timeout' ? (
+      {phase === 'failed' && failureKind === 'egress-refused' ? (
+        <div className="cu-banner cu-banner--error" role="alert">
+          The egress proxy refused the new value, so the connector is not using it. Correct the
+          value and rotate again. {phaseMessage}
+        </div>
+      ) : null}
+      {(phase === 'failed' && failureKind !== 'egress-refused') || phase === 'timeout' ? (
         <div className="cu-banner cu-banner--warning" role="alert">
           Value saved, but the connector restart could not be verified. {phaseMessage}
         </div>

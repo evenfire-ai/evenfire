@@ -3,7 +3,13 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveCredentialSurface } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
+import { EGRESS_PROXY_VALUES_VALID_CONDITION } from '@constants/connectorCredentials'
 import type { McpServerCondition } from '@lib/api'
+import {
+  EGRESS_PROXY_VALUES_VALID,
+  egressValuesRefused,
+  egressValuesWithinClass,
+} from './fixtures/egressProxyConditions'
 import {
   SECRET_RESOLVED,
   secretAccessDenied,
@@ -557,5 +563,245 @@ describe('SecretResolved producer contract — adversarial fixtures are provably
   it('the producer always stamps lastTransitionTime, so the missing-stamp fixture is synthetic', () => {
     expect(/^\s*lastTransitionTime,$/m.test(source)).toBe(true)
     expect(withoutTimestamp(secretNotFound({ at: AT })).lastTransitionTime).toBeUndefined()
+  })
+})
+
+// ─── Extraction 3: every `EgressProxyValuesValid` condition write ──────────
+//
+// The rollout wait's second condition. `fixtures/producerContract.ts` derives
+// the pair from the block's `setStatus` verdict and the parsed
+// `writeStatusCondition` calls; this extraction deliberately re-derives it
+// differently — anchored on the type literal and keyed by the owning method —
+// and then PINS the triples. The pins are the rename tripwire: the hook
+// compares only type and status, so a producer rename of a reason would
+// otherwise travel through the derived fixtures with every suite green. Here
+// it fails by name.
+
+type EgressConditionWrite = {
+  line: number
+  owner: string
+  status: string
+  reason: string
+  message: string
+}
+
+function extractEgressConditionWrites(): EgressConditionWrite[] {
+  const anchors: number[] = []
+  lines.forEach((line, index) => {
+    if (/^\s*type: 'EgressProxyValuesValid',$/.test(line)) anchors.push(index)
+  })
+  if (anchors.length === 0) {
+    throw new Error(
+      `EgressProxyValuesValid producer contract: found NO \`type: 'EgressProxyValuesValid',\` ` +
+        `condition writes in ${RECONCILER_PATH}. Either the producer renamed the preflight ` +
+        `condition the rollout wait polls for, or this extractor no longer matches it.`
+    )
+  }
+  return anchors.map(index => ({
+    line: index + 1,
+    owner: enclosingMethod(index),
+    status: matchProperty(lines[index + 1], /^\s*status: '([A-Za-z]+)',$/, index + 2, 'status'),
+    reason: matchProperty(lines[index + 2], /^\s*reason: (.+),$/, index + 3, 'reason'),
+    message: matchProperty(lines[index + 3], /^\s*message: (.+),$/, index + 4, 'message'),
+  }))
+}
+
+const egressWrites = extractEgressConditionWrites()
+const egressRefusalWrites = egressWrites.filter(write => write.message === 'verdict.message')
+const egressLiteralWrites = egressWrites.filter(
+  write => isStringLiteral(write.reason) && isStringLiteral(write.message)
+)
+if (egressRefusalWrites.length !== 1 || egressLiteralWrites.length !== 1) {
+  throw new Error(
+    `EgressProxyValuesValid producer contract: expected one verdict-forwarding refusal and one ` +
+      `fully-literal pass, found ${egressRefusalWrites.length} and ${egressLiteralWrites.length} ` +
+      `(lines ${egressWrites.map(write => write.line).join(', ')}). The rollout fixtures model ` +
+      `exactly that pair; re-derive this contract for the new shape.`
+  )
+}
+const egressRefusalWrite = egressRefusalWrites[0]
+const egressWithinWrite = egressLiteralWrites[0]
+
+// ─── Rendering the refusal message, independently ──────────────────────────
+
+const EGRESS_SENTINEL = {
+  placeholder: 'SENTINEL_PLACEHOLDER',
+  secretName: 'sentinel-egress-secret',
+  secretKey: 'sentinel-egress-key',
+}
+
+function egressProducerLine(from: number, pattern: RegExp, what: string): number {
+  for (let index = from; index < lines.length; index++) {
+    if (pattern.test(lines[index])) return index
+  }
+  throw new Error(
+    `EgressProxyValuesValid producer contract: could not find ${what} in ${RECONCILER_PATH}. ` +
+      `The refusal message is assembled there; re-derive this renderer.`
+  )
+}
+
+function fillEgressTemplate(
+  template: string,
+  values: Record<string, string>,
+  what: string
+): string {
+  const shield = '\u0001'
+  const rendered = template
+    .replace(/\\\$\{/g, shield)
+    .replace(/\$\{([^}]+)\}/g, (_whole, expression: string) => {
+      const value = values[expression]
+      if (value === undefined) {
+        throw new Error(
+          `EgressProxyValuesValid producer contract: the ${what} interpolates ` +
+            `\${${expression}}, which no sentinel maps to. Thread it through this renderer ` +
+            `and the matching builder instead of rendering around it.`
+        )
+      }
+      return value
+    })
+  return rendered.split(shield).join('${')
+}
+
+/** The producer's refusal message for one query Secret violation, rebuilt
+ *  line by line from `formatEgressProxyValueMessage` and its helpers. */
+function renderProducerRefusalMessage(): string {
+  const describeAt = egressProducerLine(
+    0,
+    /private describeEnvSource\(/,
+    'the describeEnvSource method'
+  )
+  const sourceLine = egressProducerLine(
+    describeAt,
+    /if \(secretKeyRef\) return `/,
+    "describeEnvSource's Secret source template"
+  )
+  const sourceTemplate = /if \(secretKeyRef\) return `([^`]*)`/.exec(lines[sourceLine])![1]
+  const sourceText = fillEgressTemplate(
+    sourceTemplate,
+    {
+      'secretKeyRef.name': EGRESS_SENTINEL.secretName,
+      'secretKeyRef.key': EGRESS_SENTINEL.secretKey,
+    },
+    'Secret source template'
+  )
+
+  const entryAt = egressProducerLine(
+    0,
+    /private formatEgressProxyValueEntry\(/,
+    'the formatEgressProxyValueEntry method'
+  )
+  const queryAt = egressProducerLine(entryAt, /case 'query':/, "the entry formatter's query case")
+  const entryMatched = /return `([^`]*)`/.exec(lines[queryAt + 1] ?? '')
+  if (!entryMatched) {
+    throw new Error(
+      `EgressProxyValuesValid producer contract: the query case at ` +
+        `${path.basename(RECONCILER_PATH)}:${queryAt + 1} no longer returns a template literal ` +
+        `on the next line. Re-derive this renderer.`
+    )
+  }
+  const entryText = fillEgressTemplate(
+    entryMatched[1],
+    {
+      'violation.placeholder': EGRESS_SENTINEL.placeholder,
+      'violation.source': sourceText,
+      dependent: '',
+    },
+    'query entry template'
+  )
+
+  const summaryAt = egressProducerLine(
+    0,
+    /private formatEgressProxyValueMessage\(/,
+    'the formatEgressProxyValueMessage method'
+  )
+  const returnAt = egressProducerLine(summaryAt, /^\s*return \($/, "the summary's return")
+  const head = /^\s*`([^`]*)` \+$/.exec(lines[returnAt + 1] ?? '')
+  const middle = /^\s*'([^']*)' \+$/.exec(lines[returnAt + 2] ?? '')
+  const tail = /^\s*`([^`]*)`$/.exec(lines[returnAt + 3] ?? '')
+  if (!head || !middle || !tail) {
+    throw new Error(
+      `EgressProxyValuesValid producer contract: the summary return at ` +
+        `${path.basename(RECONCILER_PATH)}:${returnAt + 1} is no longer three concatenated ` +
+        `operands. Re-derive this renderer.`
+    )
+  }
+  return (
+    fillEgressTemplate(head[1], { 'entries.length': '1' }, 'summary head') +
+    middle[1] +
+    fillEgressTemplate(tail[1], { "shown.join('; ')": entryText, more: '' }, 'summary tail')
+  )
+}
+
+describe('EgressProxyValuesValid producer contract — extraction guards', () => {
+  it('finds exactly the two producer write sites, by owning method', () => {
+    expect(egressWrites).toHaveLength(2)
+    expect(egressWrites.map(write => write.owner).sort()).toEqual([
+      'blockEgressProxyValues',
+      'performReconcile',
+    ])
+    expect(egressRefusalWrite.owner).toBe('blockEgressProxyValues')
+    expect(egressWithinWrite.owner).toBe('performReconcile')
+  })
+
+  it('pins the refusal triple the rollout wait keys its failure off', () => {
+    // Pinned, not merely cross-checked against the builder: the hook compares
+    // status alone, so a reason rename must fail HERE by name.
+    expect(egressRefusalWrite.status).toBe('False')
+    expect(egressRefusalWrite.reason).toBe("'ValueOutsideClass'")
+    expect(egressRefusalWrite.message).toBe('verdict.message')
+  })
+
+  it('pins the within-class triple', () => {
+    expect(egressWithinWrite.status).toBe('True')
+    expect(egressWithinWrite.reason).toBe("'ValuesWithinClass'")
+    expect(egressWithinWrite.message).toBe(
+      "'Every value the egress-proxy template substitutes is within its class'"
+    )
+  })
+
+  it('the UI and the fixtures name the producer type under one value', () => {
+    expect(EGRESS_PROXY_VALUES_VALID_CONDITION).toBe('EgressProxyValuesValid')
+    expect(EGRESS_PROXY_VALUES_VALID).toBe(EGRESS_PROXY_VALUES_VALID_CONDITION)
+    for (const write of egressWrites) {
+      expect(lines[write.line - 1].trim()).toBe(`type: '${EGRESS_PROXY_VALUES_VALID}',`)
+    }
+  })
+})
+
+describe('EgressProxyValuesValid producer contract — fixture builders match the producer', () => {
+  it('egressValuesRefused() reproduces the block write and its rendered message', () => {
+    const fixture = egressValuesRefused({
+      at: AT,
+      observedGeneration: 7,
+      placeholder: EGRESS_SENTINEL.placeholder,
+      secretName: EGRESS_SENTINEL.secretName,
+      secretKey: EGRESS_SENTINEL.secretKey,
+    })
+    expect(fixture.type).toBe(EGRESS_PROXY_VALUES_VALID_CONDITION)
+    expect(fixture.status).toBe(egressRefusalWrite.status)
+    expect(fixture.reason).toBe(unquote(egressRefusalWrite.reason))
+    expect(fixture.message).toBe(renderProducerRefusalMessage())
+    // The wording the hand-written fixture drifted on, pinned as text.
+    expect(fixture.message).toContain('1 value(s) would be refused by the egress-proxy image')
+    expect(fixture.lastTransitionTime).toBe(AT)
+    expect(fixture.observedGeneration).toBe(7)
+  })
+
+  it('egressValuesWithinClass() reproduces the literal pass', () => {
+    const fixture = egressValuesWithinClass({ at: AT, observedGeneration: 7 })
+    expect(fixture.type).toBe(EGRESS_PROXY_VALUES_VALID_CONDITION)
+    expect(fixture.status).toBe(egressWithinWrite.status)
+    expect(fixture.reason).toBe(unquote(egressWithinWrite.reason))
+    expect(fixture.message).toBe(unquote(egressWithinWrite.message))
+    expect(fixture.lastTransitionTime).toBe(AT)
+    expect(fixture.observedGeneration).toBe(7)
+  })
+
+  it('the builders leave observedGeneration unstamped unless asked', () => {
+    const refused = egressValuesRefused({ at: AT })
+    expect(refused.observedGeneration).toBeUndefined()
+    // Witness: the same builder still produced the producer-shaped refusal.
+    expect(refused.status).toBe(egressRefusalWrite.status)
+    expect(refused.lastTransitionTime).toBe(AT)
   })
 })
