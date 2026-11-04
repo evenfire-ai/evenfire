@@ -670,7 +670,6 @@ jobs:
             routes.externalTeamsLegacyAdminRevocation.realPostgres.integration.test.ts \
             userAccessRuntimeContract.realPostgres.integration.test.ts \
             userSessionDatabaseClock.realPostgres.integration.test.ts \
-            archiveRevisionLockOrder.realPostgres.integration.test.ts \
             revisionWritersLockOrder.realPostgres.integration.test.ts \
             userRetirementRevisionLockOrder.realPostgres.integration.test.ts \
             workflowRunReadAndApprovalV1Compatibility.realPostgres.integration.test.ts
