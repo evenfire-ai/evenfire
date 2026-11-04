@@ -125,10 +125,10 @@ describeRealPostgres('external-session staged touch ownership on real PostgreSQL
       switchCompatibility: true,
       minimumClientVersion: null,
       enforceMinimumClient: false,
-      catalogMode: 'off',
-      serveCatalog: false,
-      shadowCatalog: false,
       actionContextV2: true,
+      rpcDelegationV2: false,
+      desktopAllTeamMode: false,
+      profileV2Mode: false,
     }
     await expect(
       authenticateExternalUserSession(issued.token, {

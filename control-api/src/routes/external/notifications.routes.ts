@@ -17,7 +17,6 @@ import {
   notificationStreamEventsSentTotal,
   notificationStreamSnapshotSize,
 } from '../../observability/metrics.js'
-import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { observeExternalSessionCurrentness } from '../../services/auth/externalSessionCurrentnessObserver.js'
 import { acknowledgeDesktopNotificationDelivery } from '../../services/notificationAckService.js'
 import {
@@ -238,28 +237,11 @@ export function createExternalNotificationsRouter(): Router {
           flushInFlight = true
           try {
             if (!(await closeForAuthority())) return
-            const initialSnapshot = lastCursor === null
             const events = await listNotificationStreamEventsForUser(claims.userId, {
               limit: config.notificationStreamSnapshotLimit,
               after: lastCursor ? parseNotificationCursor(lastCursor) : null,
             })
             if (!(await closeForAuthority())) return
-            const legacyComplete =
-              initialSnapshot && events.length < config.notificationStreamSnapshotLimit
-            scheduleAccessCatalogShadow({
-              session: extReq.externalSessionAuthority,
-              family: 'notification',
-              legacyLogicalIds: events.map(event => event.id),
-              legacyComplete,
-            })
-            scheduleAccessCatalogShadow({
-              session: extReq.externalSessionAuthority,
-              family: 'workflow_approval',
-              legacyLogicalIds: events.flatMap(event =>
-                event.eventType === 'approval.requested' ? [event.approval.id] : []
-              ),
-              legacyComplete,
-            })
             if (events.length === 0) {
               notificationStreamEventsFilteredTotal.inc({ reason: 'no_new_active_events' }, 1)
               return

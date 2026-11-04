@@ -248,12 +248,7 @@ export async function authenticateExternalUserSession(
   token: string,
   options: AuthenticationOptions
 ): Promise<ExternalSessionAuthentication> {
-  const policy =
-    options.policy ??
-    (await resolveEffectiveUserAccessPolicy({
-      databaseFailureMode: 'throw',
-      onDatabaseFailure: externalSessionDatabaseFailure,
-    }))
+  const policy = options.policy ?? (await resolveEffectiveUserAccessPolicy())
   const identity = options.identity
     ? await revalidateExternalUserSessionIdentity(token, options.identity, {
         now: options.now,

@@ -58,9 +58,6 @@ vi.mock('../src/observability/metrics.js', () => {
     notificationStreamSnapshotSize: metric,
   }
 })
-vi.mock('../src/services/access/accessCatalogShadow.js', () => ({
-  scheduleAccessCatalogShadow: vi.fn(),
-}))
 vi.mock('../src/services/notificationStreamService.js', () => ({
   listActiveApprovalNotificationsForUser: producerDatabase.listActive,
   listNotificationStreamEventsForUser: producerDatabase.listEvents,

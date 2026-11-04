@@ -166,15 +166,12 @@ describe('signCurrentExternalGfsUserToken', () => {
     issueV2: false,
     renewV2: false,
     switchCompatibility: true,
-    computeCatalogShadow: false,
-    serveCatalog: false,
     actionContextV2: false,
     rpcDelegationV2: false,
     desktopAllTeamMode: false,
     profileV2Mode: false,
     minimumClientVersion: null,
     enforceMinimumClient: false,
-    advertisedCatalogFamilies: [],
   }
   const tokenClaims = {
     userId: DESKTOP_USER_ID,

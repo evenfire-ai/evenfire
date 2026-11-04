@@ -10,7 +10,6 @@ const streamState = vi.hoisted(() => ({
   listEvents: vi.fn(),
   newestCursor: vi.fn(),
   openListener: vi.fn(),
-  scheduleShadow: vi.fn(),
   backendFailure: vi.fn(),
 }))
 
@@ -81,9 +80,6 @@ vi.mock('../src/observability/metrics.js', () => {
     notificationStreamSnapshotSize: metric,
   }
 })
-vi.mock('../src/services/access/accessCatalogShadow.js', () => ({
-  scheduleAccessCatalogShadow: streamState.scheduleShadow,
-}))
 vi.mock('../src/services/auth/externalSessionCurrentnessObserver.js', () => ({
   observeExternalSessionCurrentness: streamState.observer,
 }))

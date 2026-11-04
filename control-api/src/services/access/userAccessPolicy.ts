@@ -2,31 +2,13 @@ import { createHash } from 'node:crypto'
 
 export const USER_ACCESS_POLICY_VERSION = '1' as const
 
-export const CATALOG_FAMILIES = [
-  'user',
-  'team',
-  'host',
-  'context',
-  'mcp_server',
-  'workflow_recipe',
-  'workflow_run',
-  'workflow_approval',
-  'notification',
-  'gfs_resource',
-  'shared_filesystem',
-  'sandbox_app',
-] as const
-
-export type CatalogFamily = (typeof CATALOG_FAMILIES)[number]
 export type LegacyLifecycle = 'issue_and_accept' | 'accept_only' | 'disabled'
-export type CatalogMode = 'off' | 'shadow' | 'serve_and_shadow' | 'serve'
 export type Readiness = 'ready' | 'unavailable'
 
 export type ConfiguredUserAccessIntent = Readonly<{
   legacyLifecycle: LegacyLifecycle
   sessionV2Acceptance: boolean
   sessionV2Issuance: boolean
-  catalogMode: CatalogMode
   teamGfsMembershipAdmissionLimit: number | null
   actionContextV2: boolean
   rpcDelegationV2: boolean
@@ -46,13 +28,6 @@ export type DeploymentReadiness = Readonly<{
   sessionV2Acceptance: Readiness
   sessionV2Issuance: Readiness
   accessBudget: Readiness
-  catalogCoordinator: Readiness
-  catalogRegisteredFamilies: ReadonlySet<CatalogFamily>
-  catalogHarnessFamilies: ReadonlySet<CatalogFamily>
-  catalogOperationalFamilies: ReadonlySet<CatalogFamily>
-  catalogShadowComparison: Readiness
-  catalogParityAccepted: boolean
-  actionSafeRevisions: Readiness
   actionContext: Readiness
   rpcDelegationAllHops: Readiness
   desktop: Readiness
@@ -70,15 +45,12 @@ export type EffectiveUserAccessPolicy = Readonly<{
   issueV2: boolean
   renewV2: boolean
   switchCompatibility: boolean
-  computeCatalogShadow: boolean
-  serveCatalog: boolean
   actionContextV2: boolean
   rpcDelegationV2: boolean
   desktopAllTeamMode: boolean
   profileV2Mode: boolean
   minimumClientVersion: string | null
   enforceMinimumClient: boolean
-  advertisedCatalogFamilies: readonly CatalogFamily[]
 }>
 
 export class UserAccessPolicyConfigurationError extends Error {
@@ -94,18 +66,6 @@ function requireCondition(condition: boolean, code: string): void {
   if (!condition) throw new UserAccessPolicyConfigurationError(code)
 }
 
-function sortedFamilies(values: ReadonlySet<CatalogFamily>): CatalogFamily[] {
-  return CATALOG_FAMILIES.filter(family => values.has(family))
-}
-
-function intersection(...sets: ReadonlySet<CatalogFamily>[]): CatalogFamily[] {
-  return CATALOG_FAMILIES.filter(family => sets.every(set => set.has(family)))
-}
-
-function hasEveryCatalogFamily(families: readonly CatalogFamily[]): boolean {
-  return families.length === CATALOG_FAMILIES.length
-}
-
 function policyRevision(
   readinessRevision: string,
   effective: Omit<EffectiveUserAccessPolicy, 'policyVersion' | 'policyRevision'>
@@ -116,7 +76,6 @@ function policyRevision(
         v: USER_ACCESS_POLICY_VERSION,
         readinessRevision,
         ...effective,
-        advertisedCatalogFamilies: [...effective.advertisedCatalogFamilies],
       })
     )
     .digest('hex')
@@ -164,52 +123,6 @@ export function compileUserAccessPolicy(
     )
   }
 
-  const wantsShadow = intent.catalogMode === 'shadow' || intent.catalogMode === 'serve_and_shadow'
-  const wantsServe = intent.catalogMode === 'serve' || intent.catalogMode === 'serve_and_shadow'
-  if (wantsShadow || wantsServe) {
-    requireCondition(
-      intent.teamGfsMembershipAdmissionLimit !== null,
-      'catalog_team_gfs_membership_admission_missing'
-    )
-  }
-  const advertisedCatalogFamilies =
-    wantsShadow || wantsServe
-      ? intersection(
-          readiness.catalogRegisteredFamilies,
-          readiness.catalogHarnessFamilies,
-          readiness.catalogOperationalFamilies
-        )
-      : []
-  const everyCatalogFamilyReady = hasEveryCatalogFamily(advertisedCatalogFamilies)
-
-  if (wantsShadow) {
-    requireCondition(acceptV2, 'catalog_shadow_requires_v2_acceptance')
-    requireCondition(readiness.accessBudget === 'ready', 'catalog_shadow_budget_unavailable')
-    requireCondition(
-      readiness.catalogCoordinator === 'ready',
-      'catalog_shadow_coordinator_unavailable'
-    )
-    requireCondition(everyCatalogFamilyReady, 'catalog_shadow_families_incomplete')
-    requireCondition(
-      readiness.catalogShadowComparison === 'ready',
-      'catalog_shadow_comparison_unavailable'
-    )
-  }
-  if (wantsServe) {
-    requireCondition(acceptV2, 'catalog_serving_requires_v2_acceptance')
-    requireCondition(readiness.accessBudget === 'ready', 'catalog_serving_budget_unavailable')
-    requireCondition(
-      readiness.catalogCoordinator === 'ready',
-      'catalog_serving_coordinator_unavailable'
-    )
-    requireCondition(everyCatalogFamilyReady, 'catalog_serving_families_incomplete')
-    requireCondition(
-      readiness.actionSafeRevisions === 'ready',
-      'catalog_serving_revisions_unavailable'
-    )
-    requireCondition(readiness.catalogParityAccepted, 'catalog_serving_parity_not_accepted')
-  }
-
   if (intent.actionContextV2) {
     requireCondition(acceptV2, 'action_context_requires_v2_acceptance')
     requireCondition(readiness.accessBudget === 'ready', 'action_context_budget_unavailable')
@@ -221,7 +134,7 @@ export function compileUserAccessPolicy(
   }
   if (intent.desktopAllTeamMode) {
     requireCondition(issueV2, 'desktop_mode_requires_v2_issuance')
-    requireCondition(wantsServe, 'desktop_mode_requires_catalog_serving')
+    requireCondition(false, 'desktop_mode_requires_catalog_serving')
     requireCondition(intent.actionContextV2, 'desktop_mode_requires_action_context')
     requireCondition(intent.rpcDelegationV2, 'desktop_mode_requires_rpc_v2')
     requireCondition(readiness.desktop === 'ready', 'desktop_mode_unavailable')
@@ -258,15 +171,12 @@ export function compileUserAccessPolicy(
     issueV2,
     renewV2: acceptV2 && issueV2,
     switchCompatibility: intent.legacySwitchEndpoint,
-    computeCatalogShadow: wantsShadow,
-    serveCatalog: wantsServe,
     actionContextV2: intent.actionContextV2,
     rpcDelegationV2: intent.rpcDelegationV2,
     desktopAllTeamMode: intent.desktopAllTeamMode,
     profileV2Mode: intent.profileV2Mode,
     minimumClientVersion: intent.minimumClientEnforcement ? minimumVersion : null,
     enforceMinimumClient: intent.minimumClientEnforcement,
-    advertisedCatalogFamilies: Object.freeze(advertisedCatalogFamilies),
   })
 
   return Object.freeze({
@@ -319,21 +229,10 @@ function parseOptionalPositiveSafeInteger(env: NodeJS.ProcessEnv, name: string):
 }
 
 export function loadConfiguredUserAccessIntent(env: NodeJS.ProcessEnv): ConfiguredUserAccessIntent {
-  const catalogMode = parseEnum(
-    env,
-    'CONTROL_API_USER_ACCESS_CATALOG_MODE',
-    ['off', 'shadow', 'serve_and_shadow', 'serve'] as const,
-    'off'
-  )
   const teamGfsMembershipAdmissionLimit = parseOptionalPositiveSafeInteger(
     env,
     'CONTROL_API_USER_ACCESS_TEAM_GFS_MEMBERSHIP_ADMISSION_LIMIT'
   )
-  if (catalogMode !== 'off' && teamGfsMembershipAdmissionLimit === null) {
-    throw new UserAccessPolicyConfigurationError(
-      'control_api_user_access_team_gfs_membership_admission_limit_missing'
-    )
-  }
   return Object.freeze({
     legacyLifecycle: parseEnum(
       env,
@@ -343,7 +242,6 @@ export function loadConfiguredUserAccessIntent(env: NodeJS.ProcessEnv): Configur
     ),
     sessionV2Acceptance: parseBoolean(env, 'CONTROL_API_USER_ACCESS_SESSION_V2_ACCEPTANCE', true),
     sessionV2Issuance: parseBoolean(env, 'CONTROL_API_USER_ACCESS_SESSION_V2_ISSUANCE', false),
-    catalogMode,
     teamGfsMembershipAdmissionLimit,
     actionContextV2: parseBoolean(env, 'CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2', false),
     rpcDelegationV2: parseBoolean(env, 'CONTROL_API_USER_ACCESS_RPC_DELEGATION_V2', false),
@@ -368,13 +266,6 @@ export const reconstructionReadiness: DeploymentReadiness = Object.freeze({
   sessionV2Acceptance: 'ready',
   sessionV2Issuance: 'ready',
   accessBudget: 'ready',
-  catalogCoordinator: 'ready',
-  catalogRegisteredFamilies: new Set<CatalogFamily>(CATALOG_FAMILIES),
-  catalogHarnessFamilies: new Set<CatalogFamily>(CATALOG_FAMILIES),
-  catalogOperationalFamilies: new Set<CatalogFamily>(),
-  catalogShadowComparison: 'ready',
-  catalogParityAccepted: false,
-  actionSafeRevisions: 'ready',
   // The resolver exists for foundation validation, but its public rollout is
   // owned by the later runtime unit and remains unavailable in PR 1.
   actionContext: 'unavailable',
@@ -402,46 +293,6 @@ export const configuredCatalogBudgetOptions = catalogBudgetOptionsForIntent(
   configuredUserAccessIntent
 )
 
-export function userAccessCapabilityManifest(policy: EffectiveUserAccessPolicy): Readonly<{
-  policyVersion: string
-  policyRevision: string
-  v1Accepted: boolean
-  v1Issued: boolean
-  v2Accepted: boolean
-  v2Issued: boolean
-  v2Renewal: boolean
-  legacySwitch: boolean
-  catalogShadow: boolean
-  catalogServed: boolean
-  actionContextV2: boolean
-  rpcDelegationV2: boolean
-  desktopAllTeamMode: boolean
-  profileV2Mode: boolean
-  minimumClientVersion: string | null
-  minimumClientEnforced: boolean
-  catalogFamilies: readonly CatalogFamily[]
-}> {
-  return Object.freeze({
-    policyVersion: policy.policyVersion,
-    policyRevision: policy.policyRevision,
-    v1Accepted: policy.acceptV1,
-    v1Issued: policy.issueV1,
-    v2Accepted: policy.acceptV2,
-    v2Issued: policy.issueV2,
-    v2Renewal: policy.renewV2,
-    legacySwitch: policy.switchCompatibility,
-    catalogShadow: policy.computeCatalogShadow,
-    catalogServed: policy.serveCatalog,
-    actionContextV2: policy.actionContextV2,
-    rpcDelegationV2: policy.rpcDelegationV2,
-    desktopAllTeamMode: policy.desktopAllTeamMode,
-    profileV2Mode: policy.profileV2Mode,
-    minimumClientVersion: policy.minimumClientVersion,
-    minimumClientEnforced: policy.enforceMinimumClient,
-    catalogFamilies: Object.freeze([...policy.advertisedCatalogFamilies]),
-  })
-}
-
 export function compareSemanticVersions(left: string, right: string): number | null {
   const leftMatch = SEMANTIC_VERSION_PATTERN.exec(left)
   const rightMatch = SEMANTIC_VERSION_PATTERN.exec(right)
@@ -451,8 +302,4 @@ export function compareSemanticVersions(left: string, right: string): number | n
     if (difference !== 0) return difference < 0 ? -1 : 1
   }
   return 0
-}
-
-export function registeredCatalogFamilies(readiness: DeploymentReadiness): CatalogFamily[] {
-  return sortedFamilies(readiness.catalogRegisteredFamilies)
 }

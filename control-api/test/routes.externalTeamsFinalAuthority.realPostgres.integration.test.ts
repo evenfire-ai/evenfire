@@ -27,15 +27,12 @@ const runtimePolicy = vi.hoisted(() => ({
   issueV2: false,
   renewV2: false,
   switchCompatibility: true,
-  computeCatalogShadow: false,
-  serveCatalog: false,
   actionContextV2: false,
   rpcDelegationV2: false,
   desktopAllTeamMode: false,
   profileV2Mode: false,
   minimumClientVersion: null,
   enforceMinimumClient: false,
-  advertisedCatalogFamilies: [],
 }))
 
 vi.mock('../src/db.js', async importOriginal => {

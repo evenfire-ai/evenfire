@@ -656,16 +656,7 @@ jobs:
             routes.mcpOauth.legacyGrantLaneFence.realPostgres.integration.test.ts \
             oauth.dcrCredential.installIdentity.realPostgres.integration.test.ts \
             db.realPostgresMigration.integration.test.ts \
-            accessCatalogCoordinator.realPostgres.integration.test.ts \
-            accessCatalogFamilies.realPostgres.integration.test.ts \
-            accessCatalogPerformance.realPostgres.integration.test.ts \
-            accessCatalogShadow.realPostgres.integration.test.ts \
-            accessDatabaseCancellation.realPostgres.integration.test.ts \
-            catalogDistinctPagination.realPostgres.integration.test.ts \
-            catalogProducers.realPostgres.integration.test.ts \
-            catalogRevisionComponents.realPostgres.integration.test.ts \
             externalSessionSingleTouch.realPostgres.integration.test.ts \
-            finalAuthorityLifecycle.realPostgres.integration.test.ts \
             gfsRevisionLockOrder.realPostgres.integration.test.ts \
             invitationAcceptedOnboarding.realPostgres.integration.test.ts \
             legacyPasswordEpochBackfill.realPostgres.integration.test.ts \
