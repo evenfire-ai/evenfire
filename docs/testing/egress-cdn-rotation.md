@@ -34,14 +34,18 @@ a product failure (exit 1), not an inconclusive result.
   branch `nginx-egress-proxy` image already deployed (the normal precondition is
   a green T0/T1 lane on the same HEAD).
 - Internet access from the profile; CloudFront must answer the CDN host.
-- `jq` and `python3` on the host, `curl` in the proxy image (the script checks
-  `curl --version` in each pod before probing).
+- `jq`, `python3` and `node` on the host (`node` runs the bounded HCC rollout
+  runner `scripts/minikube/run-with-deadline.mjs`), `curl` in the proxy image
+  (the script checks `curl --version` in each pod before probing).
 - The `deny-all-mcp-server` NetworkPolicy (empty `podSelector`, `Egress`) in
   `mcp-server`; this is the T2 HCC contract shape.
 - No leftovers from an aborted run: no `HCC_EXTERNAL_EGRESS_OVERLAP_SEC` in the
   HCC env, no `clerum.io/e2e-temporary-override` annotation, no CDN host row in
-  the CoreDNS `hosts` block, no `e2e-cdn-rotation*` resources. The script refuses
-  to start otherwise.
+  the CoreDNS `hosts` block, and no `e2e-cdn-rotation*` resources (McpServer,
+  Service, Deployment, ConfigMap or NetworkPolicy). Absence must be confirmed by
+  the API server: a `kubectl get` that fails for any reason other than
+  `(NotFound)` is not an empty result, so the script refuses to start instead of
+  treating an unreadable API as "nothing left".
 - `host-context-controller`, `nginx-egress-proxy` and
   `packages/network-policy-core` must be identical to the git HEAD recorded by
   the pre-gate marker (`clerum-pre-gate-sync-state`), so a green run describes
@@ -109,13 +113,13 @@ with a specific REASON (see below):
 | Phase | What happens | Bounded failure |
 | ----- | ------------ | --------------- |
 | 0 | Inputs, ownership, lease, cluster prerequisites, leftovers, pre-gate marker and source diff, evidence setup | exit 2, nothing mutated |
-| 1 | HCC `HCC_EXTERNAL_EGRESS_OVERLAP_SEC=60`, `HCC_EXTERNAL_EGRESS_RESYNC_SEC=10`, rollout, startup resync log witness | exit 2 |
+| 1 | HCC `HCC_EXTERNAL_EGRESS_OVERLAP_SEC=60`, `HCC_EXTERNAL_EGRESS_RESYNC_SEC=10`, rollout (bounded by `HCC_ROLLOUT_TIMEOUT` plus a 60 s external deadline), startup resync log witness | exit 2 |
 | 2 | CoreDNS `hosts` block = set B with `ttl 5`; `resolve4` inside the HCC pod must return exactly B with ttl <= 5 (<= 150 s) | exit 3 |
 | 3 | Create the `e2e-cdn-rotation` McpServer; every `egress-fqdn-state` entry must satisfy `expiresAt - lastObservedAt <= 65 000 ms`; policy exactly B (<= 90 s); the branch proxy answers through CloudFront (<= 120 s from Ready) | 2 for the window witness, 3 otherwise |
 | 4 | CoreDNS = A; HCC sees A (<= 150 s); `t_dns` = first A `lastObservedAt`; policy exactly A (<= `t_dns` + 90 s); create the control, which must answer through CloudFront (<= 120 s from Ready); then the branch must have 0 failures with the policy exactly A, and at most 1 failure in the transition | 3 for A/DNS/policy/control; 1 for the branch |
 | 5 | CoreDNS = B; same DNS/policy deadlines; the branch must have 0 failures with the policy exactly B (at most 1 in the transition); the control must reach 3 consecutive failures within 120 s of the prune | 3 for B/DNS/policy; 1 for the branch or the control |
 | 6 | CoreDNS = A; same deadlines; the control must answer again within 60 s of policy = A; the branch must have 0 failures with the policy exactly A | 3 for A/DNS/policy; 1 for the branch or the control |
-| 7 | Delete the McpServer and the control, wait for the Deployment, ConfigMap and `ext-egress` policy to disappear, restore HCC and the Corefile, verify both | exit 4 |
+| 7 | Delete the McpServer and the control, wait for the McpServer, its HCC-owned Deployment, Service, ConfigMap and `ext-egress` policy to disappear, restore the Corefile, wait (<= 150 s) until HCC's resolver no longer sees the test rows, restore HCC, verify both | exit 4 |
 
 Timings are deliberately conservative because of HCC's re-resolution cadence.
 With `ttl 5` the effective cadence is 5 s (`externalEgressResyncDelayMs` clamps to
@@ -151,11 +155,11 @@ every step. Preconditions (exit 2):
 | REASON | Failed assertion |
 | ------ | ---------------- |
 | `usage` | Arguments, evidence directory, mutation name, host name or address sets |
-| `tooling-missing` | `jq` or `python3` missing on the host |
+| `tooling-missing` | `jq`, `node` or `python3` missing on the host |
 | `context-not-owned` | `KUBECONTEXT` is not a branch-scoped context or does not match the profile/context variables |
 | `lock-not-held` | `scripts/minikube/require-t2-mutation-lock.sh` refused the inherited lease |
-| `cluster-prerequisites` | HCC, CoreDNS, the McpServer CRD or `deny-all-mcp-server` missing (`deny-all-mcp-server` must be an empty-selector `Egress` default deny), the HCC container missing from the Deployment, or the HCC Deployment or the Corefile could not be read |
-| `leftover-state` | A previous run left an override, a `hosts` row or a test resource |
+| `cluster-prerequisites` | HCC, CoreDNS, the McpServer CRD or `deny-all-mcp-server` missing (`deny-all-mcp-server` must be an empty-selector `Egress` default deny), the HCC container missing from the Deployment, or the HCC Deployment, the CoreDNS ConfigMap or the Corefile could not be read |
+| `leftover-state` | A previous run left an override, a `hosts` row or a test resource, or its absence could not be proven (a failed read is not an empty result) |
 | `corefile-unexpected` | The Corefile is empty or does not have exactly one multi-line `hosts` block |
 | `marker-missing` | The pre-gate marker has no usable `gitHead` |
 | `source-drift` | The code under test differs from the marker HEAD |
@@ -220,20 +224,35 @@ Only two objects are modified, both with the annotation
    Corefile is saved and restored byte for byte; CoreDNS reloads itself, it is
    never restarted, so cluster DNS is not interrupted.
 
-The script verifies the restored ConfigMap, not what CoreDNS serves. CoreDNS
+The script verifies the restored ConfigMap **and** what CoreDNS serves. CoreDNS
 serves the restored Corefile only after the kubelet refreshes the mounted
 ConfigMap and the `reload` plugin detects the change. On the 2026-10-30 runs an
 override became visible to HCC's resolver 23-99 s after the patch (including
 HCC's 5 s sampling), and phases 2, 4, 5 and 6 wait up to 150 s
-(`DNS_VISIBLE_TIMEOUT`) before they fail. The script does not wait for that
-propagation after the restore, so until then cluster DNS can still answer
-`CDN_HOST` from the test rows.
+(`DNS_VISIBLE_TIMEOUT`) before they fail.
 
-Cleanup order: delete the McpServer and the control, wait until the Deployment,
-ConfigMap and `ext-egress` NetworkPolicy are gone, restore HCC, restore the
-Corefile, then verify the env JSON, the Corefile bytes, the removal of the
-annotations and that no NetworkPolicy with
-`clerum.io/mcpserver=e2e-cdn-rotation` remains. Only then is `PASS` possible.
+Cleanup waits for that same propagation in the other direction. After restoring
+the Corefile it re-resolves `CDN_HOST` inside the HCC pod, using the same
+`resolve4`-with-TTL witness as phases 2-6, and keeps waiting while the answer is
+still "every TTL <= 5 and the sorted set is A or B" — that is, while CoreDNS
+still serves the test rows. Up to 150 s (`DNS_VISIBLE_TIMEOUT`) are allowed. A
+failed exec or an unparseable answer counts as "not proven" and keeps waiting,
+never as success.
+
+If the witness cannot be proven within that window, or the CoreDNS restore
+itself fails, cleanup does **not** restart HCC. A restored, production-cadence
+HCC that started reconciling while the override was still served would persist
+the test answer set and `ttl 5` into the profile's egress bindings, so the run
+ends `RESTORE_FAILED` with HCC still carrying the test env and the repair
+commands printed. When the Corefile was never touched, HCC is restored exactly
+as before.
+
+Cleanup order: delete the McpServer and the control, wait until the McpServer,
+its HCC-owned Deployment, Service and ConfigMap, the control resources and the
+`ext-egress` NetworkPolicy are confirmed gone (a failed `kubectl get` is not an
+empty result), restore the Corefile, wait for the bounded served witness, then
+restore HCC and verify the env JSON, the Corefile bytes and the removal of the
+annotations. Only then is `PASS` possible.
 
 Side effects while the run lasts:
 
@@ -248,8 +267,12 @@ Side effects while the run lasts:
 The profile is still modified. The script prints the exact repair commands to
 stderr and appends them to `manual-repair.txt` in the evidence directory, next
 to the saved originals (`hcc-env-restore.json`, `corefile-original.txt`). Run
-them with an explicit `--context`. A retry refuses to start while an override is
-still present (`leftover-state`), so repair before re-running.
+them with an explicit `--context`. The commands are ordered like cleanup —
+CoreDNS first, HCC after — because a restarted HCC must never reconcile while
+the override is still served. If cleanup skipped the HCC step (the warning names
+the CoreDNS witness), repair CoreDNS first, confirm `CDN_HOST` no longer resolves
+to a test row, and only then restore HCC. A retry refuses to start while an
+override is still present (`leftover-state`), so repair before re-running.
 
 ## What it does not cover
 

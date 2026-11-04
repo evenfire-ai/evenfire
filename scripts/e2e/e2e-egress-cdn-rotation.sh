@@ -220,6 +220,18 @@ count_substr() { # <needle> ; reads stdin
 
 exists() { kctl get "$@" --request-timeout=20s >/dev/null 2>&1; }
 
+# FAIL-CLOSED absence predicate: true ONLY when the API server positively
+# answered `(NotFound)` for that exact object. A successful get means present;
+# any other failure (RBAC, request timeout, apiserver/proxy error, unusable
+# kubeconfig) is "absence not proven" and must never satisfy a leftover or a
+# restore check. Anchored on the API-server reason so a kubeconfig-level
+# `context "…" not found` can never read as a confirmed absence.
+resource_absent() { # <kind> <name> [kubectl args, e.g. -n <namespace>]
+  local err
+  err="$(kctl get "$@" --request-timeout=20s 2>&1 >/dev/null)" && return 1
+  [[ "$err" == *"(NotFound)"* ]]
+}
+
 is_public_ipv4() {
   local ip=$1 a b c d
   # Canonical dotted decimal only: no leading zeros, so the token is also the
@@ -313,14 +325,41 @@ policy_state_json() {
 
 hcc_pod() { ready_pod "$HCC_NS" "app=${HCC_DEPLOY}"; }
 
-dns_actual_set() { # prints the sorted address CSV, or fails
+# Raw resolver answer from inside the HCC pod: a JSON array of {address, ttl}.
+# Fails when the exec fails or the answer is not a non-empty array, so no caller
+# can mistake an executor/RBAC error for a DNS answer.
+dns_ttl_records() {
   local raw
   raw="$(kctl exec "deployment/${HCC_DEPLOY}" -n "$HCC_NS" -c "$HCC_CONTAINER" --request-timeout=40s -- \
     node -e 'require("dns").promises.resolve4(process.argv[1],{ttl:true}).then(r=>console.log(JSON.stringify(r))).catch(e=>{console.error(e.code||"ERR");process.exit(3)})' \
     "$CDN_HOST")" || return 1
-  printf '%s' "$raw" | jq -er '
-    select(length > 0 and all(.[]; (.ttl | type) == "number" and .ttl <= 5))
+  printf '%s' "$raw" | jq -e 'type == "array" and length > 0' >/dev/null || return 1
+  printf '%s' "$raw"
+}
+
+dns_actual_set() { # prints the sorted address CSV, or fails
+  dns_ttl_records | jq -er '
+    select(all(.[]; (.ttl | type) == "number" and .ttl <= 5))
     | map(.address) | sort | join(",")'
+}
+
+# The restore witness: CoreDNS must stop serving the test rows. Success requires
+# a non-empty answer that is NOT "every ttl <= 5 and the sorted set is A or B",
+# i.e. the resolver no longer answers with a short TTL and a test answer set. A
+# failed exec, an unparseable answer or an empty answer is "not proven" and
+# returns 1, so the caller keeps waiting: a transient API or DNS failure is
+# never read as a completed restore.
+dns_override_gone() {
+  local raw all_short csv
+  raw="$(dns_ttl_records)" || return 1
+  all_short="$(printf '%s' "$raw" | jq -r 'all(.[]; (.ttl | type) == "number" and .ttl <= 5)')" || return 1
+  csv="$(printf '%s' "$raw" | jq -r 'map(.address) | sort | join(",")')" || return 1
+  [ -n "$csv" ] || return 1
+  [ "$all_short" = true ] || return 0
+  case "$csv" in
+    "$CSV_A"|"$CSV_B") return 1 ;;
+  esac
+  return 0
 }
 
 dns_is() { # <expected-csv>
@@ -355,6 +394,25 @@ hcc_log_has_resync() {
 hcc_env_json() {
   kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" --request-timeout=20s -o json |
     jq -c --argjson i "$HCC_ENV_INDEX" '.spec.template.spec.containers[$i].env'
+}
+
+# Every `rollout status` of the HCC Deployment runs under a finite external
+# deadline. kubectl's --timeout bounds the API-side wait, but a hung client, a
+# stuck credential plugin or a lost connection can outlive it; the repository
+# runner adds a wall-clock bound above HCC_ROLLOUT_TIMEOUT plus a finite
+# heartbeat and kill grace, and records both in the evidence log. The runner
+# execs `"$KUBECTL_BIN" --context …` directly because kctl is a shell function
+# and cannot be spawned.
+hcc_rollout_status() {
+  local log="${EVIDENCE_DIR}/hcc-rollout-deadline.log"
+  [ -n "$EVIDENCE_DIR" ] || log=/dev/null
+  node "${ROOT}/scripts/minikube/run-with-deadline.mjs" \
+    --timeout-seconds "$((HCC_ROLLOUT_TIMEOUT + 60))" \
+    --heartbeat-seconds 20 --kill-grace-seconds 5 \
+    --label e2e-cdn-rotation-hcc-rollout -- \
+    "$KUBECTL_BIN" --context "$E2E_KUBECONTEXT" rollout status "deployment/${HCC_DEPLOY}" \
+    -n "$HCC_NS" --timeout="${HCC_ROLLOUT_TIMEOUT}s" \
+    >>"$log" 2>&1
 }
 
 # ── Probe loop (one independent loop per pod, plus one for the policy) ─
@@ -543,23 +601,45 @@ print_manual_repair() {
   local ctx=${KUBECONTEXT:-}
   {
     echo "MANUAL REPAIR REQUIRED — the profile is still modified:"
+    # CoreDNS first, then HCC, for the same reason as cleanup: a restored HCC
+    # that reconciles while the override Corefile is still served can persist
+    # the test answer set and `ttl 5` into the profile's egress bindings.
+    echo "  kubectl --context=${ctx} -n ${DNS_NS} patch configmap ${DNS_CONFIGMAP} --type=merge \\"
+    echo "    -p \"\$(jq -cn --rawfile cf ${EVIDENCE_DIR}/corefile-original.txt '{data:{Corefile:\$cf},metadata:{annotations:{\"${OVERRIDE_ANNOTATION}\":null}}}')\""
     echo "  kubectl --context=${ctx} -n ${HCC_NS} patch deployment ${HCC_DEPLOY} --type=json \\"
     echo "    -p \"\$(cat ${EVIDENCE_DIR}/hcc-env-restore.json)\""
     echo "  kubectl --context=${ctx} -n ${HCC_NS} annotate deployment ${HCC_DEPLOY} ${OVERRIDE_ANNOTATION}-"
-    echo "  kubectl --context=${ctx} -n ${DNS_NS} patch configmap ${DNS_CONFIGMAP} --type=merge \\"
-    echo "    -p \"\$(jq -cn --rawfile cf ${EVIDENCE_DIR}/corefile-original.txt '{data:{Corefile:\$cf},metadata:{annotations:{\"${OVERRIDE_ANNOTATION}\":null}}}')\""
-    echo "  kubectl --context=${ctx} -n ${RECIPE_NS} delete mcpserver ${SERVER} --ignore-not-found"
+    echo "  kubectl --context=${ctx} -n ${RECIPE_NS} delete mcpserver,deployment,service ${SERVER} --ignore-not-found"
+    echo "  kubectl --context=${ctx} -n ${RECIPE_NS} delete configmap ${SERVER}-nginx-conf --ignore-not-found"
+    echo "  kubectl --context=${ctx} -n ${RECIPE_NS} delete networkpolicy ${POLICY_NAME} --ignore-not-found"
     echo "  kubectl --context=${ctx} -n ${RECIPE_NS} delete deployment,configmap ${CONTROL} --ignore-not-found"
   } | tee -a "${EVIDENCE_DIR}/manual-repair.txt" >&2
 }
 
+# The label sweep is fail-closed too: a failed `kubectl get` is not an empty
+# list, so it must never report "no labelled policies left". The status is what
+# decides; stderr stays quiet because cleanup polls this predicate every second.
+no_labelled_policies() {
+  local names
+  names="$(kctl get networkpolicy -n "$RECIPE_NS" -l "clerum.io/mcpserver=${SERVER}" \
+    --request-timeout=20s -o name 2>/dev/null)" || return 1
+  [ -z "$names" ]
+}
+
+# Everything phase 3 and phase 4 create, directly or through HCC: the McpServer,
+# its HCC-owned Deployment/Service/rendered ConfigMap, the exact-host policy, any
+# leftover policy labelled with the server, and the control fixture. Every
+# absence is confirmed by resource_absent, so an unreadable API fails the check
+# instead of passing as "nothing left".
 resources_gone() {
-  ! exists deployment "$SERVER" -n "$RECIPE_NS" &&
-    ! exists configmap "${SERVER}-nginx-conf" -n "$RECIPE_NS" &&
-    ! exists networkpolicy "$POLICY_NAME" -n "$RECIPE_NS" &&
-    ! exists deployment "$CONTROL" -n "$RECIPE_NS" &&
-    ! exists configmap "$CONTROL" -n "$RECIPE_NS" &&
-    [ -z "$(kctl get networkpolicy -n "$RECIPE_NS" -l "clerum.io/mcpserver=${SERVER}" --request-timeout=20s -o name 2>/dev/null)" ]
+  resource_absent mcpserver "$SERVER" -n "$RECIPE_NS" &&
+    resource_absent deployment "$SERVER" -n "$RECIPE_NS" &&
+    resource_absent service "$SERVER" -n "$RECIPE_NS" &&
+    resource_absent configmap "${SERVER}-nginx-conf" -n "$RECIPE_NS" &&
+    resource_absent networkpolicy "$POLICY_NAME" -n "$RECIPE_NS" &&
+    no_labelled_policies &&
+    resource_absent deployment "$CONTROL" -n "$RECIPE_NS" &&
+    resource_absent configmap "$CONTROL" -n "$RECIPE_NS"
 }
 
 restore_hcc() {
@@ -567,8 +647,7 @@ restore_hcc() {
   kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=json --request-timeout=20s \
     -p "$(cat "${EVIDENCE_DIR}/hcc-env-restore.json")" >/dev/null || return 1
   kctl annotate deployment "$HCC_DEPLOY" -n "$HCC_NS" --request-timeout=20s "${OVERRIDE_ANNOTATION}-" >/dev/null || return 1
-  kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout="${HCC_ROLLOUT_TIMEOUT}s" >/dev/null ||
-    return 1
+  hcc_rollout_status || return 1
   # Read the Deployment once and derive both checks from that read, so a failed
   # read cannot pass as "env restored and annotation absent".
   kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" --request-timeout=20s -o json >"$restored" || {
@@ -591,10 +670,12 @@ restore_corefile() {
     warn "the CoreDNS ConfigMap patch was rejected"
     return 1
   }
-  # Read the ConfigMap once and derive both checks from that read. The restore is
-  # proven by what the script wrote and can read back deterministically; an
-  # external DNS lookup would also fail when a complete restore meets a network
-  # outage, and would pass while CoreDNS still serves the override.
+  # Read the ConfigMap once and derive both checks from that read: the restore is
+  # proven by what this script wrote and can read back deterministically. That
+  # read cannot prove what CoreDNS *serves* (kubelet refreshes the mounted file
+  # and the `reload` plugin picks it up later), so cleanup adds a separate,
+  # bounded served witness (dns_override_gone) after this step. The two checks
+  # are complementary: this one must hold before HCC is restarted at all.
   kctl get configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --request-timeout=20s -o json >"$restored" || {
     warn "the restored ConfigMap could not be read back"
     return 1
@@ -615,7 +696,7 @@ restore_corefile() {
 }
 
 cleanup() {
-  local status=0 touched=0
+  local status=0 touched=0 dns_restored=1
   stop_loops
   if [ "$RESOURCES_CREATED" = 1 ]; then
     touched=1
@@ -642,22 +723,39 @@ cleanup() {
   # answer set and `ttl 5` into those bindings' egress-fqdn-state. The two
   # restores have no other dependency on each other, so the safer order is
   # CoreDNS first.
+  #
+  # Writing the restored ConfigMap is not proof that CoreDNS serves it: kubelet
+  # must refresh the mounted file and the `reload` plugin must pick it up, which
+  # took 23-99 s on the 2026-10-30 runs. So the restarted HCC waits for a
+  # bounded served witness (dns_override_gone) first. If the witness cannot be
+  # proven, HCC is deliberately left untouched: restarting it while the override
+  # is still served is exactly the contamination this order prevents.
   if [ "$COREFILE_TOUCHED" = 1 ]; then
     touched=1
     if ! restore_corefile; then
       warn "the CoreDNS restore did not complete (see the reason above)"
       status=1
+      dns_restored=0
+    elif ! wait_until "$DNS_VISIBLE_TIMEOUT" \
+      "CoreDNS to stop serving the ${CDN_HOST} test rows" dns_override_gone; then
+      warn "CoreDNS still served the ${CDN_HOST} test rows after ${DNS_VISIBLE_TIMEOUT}s; HCC was not restarted on purpose"
+      status=1
+      dns_restored=0
     fi
   fi
   if [ "$HCC_ENV_TOUCHED" = 1 ]; then
     touched=1
-    if ! restore_hcc; then
+    if [ "$dns_restored" = 0 ]; then
+      warn "skipping the host-context-controller restore: the CoreDNS override is not proven gone"
+      status=1
+    elif ! restore_hcc; then
       warn "the host-context-controller env/annotation was not restored exactly"
       status=1
     fi
   fi
   if [ "$status" -eq 0 ]; then
-    [ "$touched" -eq 0 ] || ok "profile restored: HCC env JSON identical, Corefile byte-identical, no test resources or policies left"
+    [ "$touched" -eq 0 ] ||
+      ok "profile restored: HCC env JSON identical, Corefile byte-identical and no longer served, no test resources or policies left"
     return 0
   fi
   print_manual_repair
@@ -668,8 +766,11 @@ on_exit() {
   local status=$? verdict
   # A second INT/TERM/HUP must not kill the restore halfway. From here on the
   # only writer is cleanup(), whose steps are bounded by their own timeouts.
-  # The ignored disposition is inherited by the kubectl children, so a retried
-  # signal cannot reopen the window while HCC or the Corefile is being restored.
+  # kubectl children inherit the ignored disposition, so a retried signal cannot
+  # reopen the window while the Corefile is being restored. The bounded HCC
+  # rollout goes through the Node deadline runner, which installs its own signal
+  # handlers: a retried signal stops that one command, and cleanup then reports
+  # RESTORE_FAILED instead of claiming a restore it did not verify.
   trap - EXIT
   trap '' INT TERM HUP
   if [ "$status" -ne "$EXIT_CODE" ]; then
@@ -741,7 +842,7 @@ phase0() {
   : >"$POLICY_SAMPLES"
   rm -f "$BRANCH_REDIRECT_FILE"
 
-  for tool in jq python3; do
+  for tool in jq node python3; do
     command -v "$tool" >/dev/null 2>&1 || {
       fail "required host tool '${tool}' is missing"
       finish 2 tooling-missing
@@ -859,28 +960,44 @@ phase0() {
       >"${EVIDENCE_DIR}/hcc-env-restore.json"
   fi
 
+  # Save the CoreDNS ConfigMap once, before any write. Every later read of the
+  # original Corefile and of its override annotation comes from this snapshot,
+  # so a failed read aborts as `cluster-prerequisites` instead of an empty
+  # string (or an empty Corefile) passing as "nothing to see".
+  kctl get configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --request-timeout=20s -o json \
+    >"${EVIDENCE_DIR}/coredns-configmap-original.json" || {
+    fail "configmap ${DNS_NS}/${DNS_CONFIGMAP} could not be read back"
+    finish 2 cluster-prerequisites
+  }
+
   # Leftovers from an aborted run are a precondition failure, never adopted.
+  # Both annotation checks read the JSON saved above, so a failed read cannot
+  # leave the annotation empty and pass as "no override".
   if printf '%s' "$HCC_ENV_ORIGINAL" | jq -e 'any(.[]?; .name == "HCC_EXTERNAL_EGRESS_OVERLAP_SEC")' >/dev/null ||
-     [ "$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o json |
-       jq -r --arg key "$OVERRIDE_ANNOTATION" '.metadata.annotations[$key] // ""')" = "$OVERRIDE_VALUE" ] ||
-     [ "$(kctl get configmap "$DNS_CONFIGMAP" -n "$DNS_NS" -o json |
-       jq -r --arg key "$OVERRIDE_ANNOTATION" '.metadata.annotations[$key] // ""')" = "$OVERRIDE_VALUE" ]; then
+     jq -e --arg key "$OVERRIDE_ANNOTATION" --arg value "$OVERRIDE_VALUE" \
+       '.metadata.annotations[$key] == $value' \
+       "${EVIDENCE_DIR}/hcc-deployment-original.json" >/dev/null ||
+     jq -e --arg key "$OVERRIDE_ANNOTATION" --arg value "$OVERRIDE_VALUE" \
+       '.metadata.annotations[$key] == $value' \
+       "${EVIDENCE_DIR}/coredns-configmap-original.json" >/dev/null; then
     fail "a previous run left a test override on HCC or CoreDNS; restore it before retrying"
     finish 2 leftover-state
   fi
-  # resources_gone also covers the HCC-owned side of an aborted run: the
-  # `${SERVER}` Deployment, the rendered `${SERVER}-nginx-conf` ConfigMap, the
-  # exact-host ${POLICY_NAME} and any policy labelled `clerum.io/mcpserver`.
-  # Without it a stale policy could be adopted by phase 3 before it is
-  # re-rendered, so the leftover check is the same predicate cleanup verifies.
-  if exists mcpserver "$SERVER" -n "$RECIPE_NS" || ! resources_gone; then
-    fail "a previous run left a test resource or an HCC-owned resource for ${SERVER}/${CONTROL}"
+  # resources_gone is the same fail-closed predicate cleanup verifies, and it
+  # covers every object phase 3/phase 4 create: the McpServer ${SERVER}, its
+  # HCC-owned Deployment, Service and rendered ${SERVER}-nginx-conf ConfigMap,
+  # the exact-host ${POLICY_NAME}, any policy labelled `clerum.io/mcpserver`,
+  # and the control Deployment/ConfigMap. It is also the HCC-owned side of an
+  # aborted run; without it a stale policy could be adopted by phase 3 before it
+  # is re-rendered. A failed `kubectl get` never reads as "nothing left".
+  if ! resources_gone; then
+    fail "a previous run left a test or HCC-owned resource for ${SERVER}/${CONTROL}, or its absence could not be proven"
     finish 2 leftover-state
   fi
   ok "no leftover override or test resource from an aborted run"
 
-  kctl get configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --request-timeout=20s -o json |
-    jq -j '.data.Corefile' >"$ORIGINAL_COREFILE" || finish 2 cluster-prerequisites
+  jq -j '.data.Corefile' "${EVIDENCE_DIR}/coredns-configmap-original.json" >"$ORIGINAL_COREFILE" ||
+    finish 2 cluster-prerequisites
   [ -s "$ORIGINAL_COREFILE" ] || {
     fail "the CoreDNS Corefile is empty"
     finish 2 corefile-unexpected
@@ -970,11 +1087,10 @@ phase1() {
     fail "could not set the HCC egress window environment"
     finish 2 hcc-env-not-applied
   }
-  kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" \
-    --timeout="${HCC_ROLLOUT_TIMEOUT}s" >/dev/null || {
+  if ! hcc_rollout_status; then
     fail "HCC did not become Ready with the accelerated window"
     finish 2 hcc-env-not-applied
-  }
+  fi
   if ! hcc_env_json | jq -e '
     any(.[]?; .name == "HCC_EXTERNAL_EGRESS_OVERLAP_SEC" and .value == "60") and
     any(.[]?; .name == "HCC_EXTERNAL_EGRESS_RESYNC_SEC" and .value == "10")' >/dev/null; then
