@@ -76,6 +76,11 @@ describe('parsePositiveInt (stream admission caps)', () => {
       'RPC_PROXY_STREAM_MAX_PER_USER contains invalid value "Infinity" (must be a positive integer)'
     )
   })
+
+  it('accepts a numeric form that evaluates to a positive integer, as the timeouts do', () => {
+    expect(parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', '1e3')).toBe(1000)
+    expect(parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', '0x10')).toBe(16)
+  })
 })
 
 describe('parsePositiveIntMs (wake-and-hold intervals)', () => {
@@ -148,7 +153,8 @@ describe('parseWakeMaxHoldMs', () => {
 describe('config values loaded from the environment', () => {
   // Each stream admission cap is compared with `>=` in its route's 429 check
   // (rpcHostStatusStream.ts, rpcHostActivityStream.ts): NaN turns the cap off and
-  // 0 rejects every stream, so anything but a positive integer must stop startup.
+  // 0 rejects every stream, so a value that does not read as a whole number of at
+  // least 1 must stop startup.
   const STREAM_CAPS = [
     ['RPC_PROXY_STREAM_MAX_CONCURRENT', 'streamMaxConcurrent', 1000],
     ['RPC_PROXY_STREAM_MAX_PER_USER', 'streamMaxPerUser', 3],
@@ -157,8 +163,9 @@ describe('config values loaded from the environment', () => {
     ['RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER', 'activityStreamMaxPerUser', 3],
     ['RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST', 'activityStreamMaxPerUserHost', 1],
   ] as const
-  // `' '` and `Infinity` were accepted before this change (cap 0 and no cap);
-  // both are startup errors now.
+  // Before this change the caps used bare `Number()` and accepted every one of these:
+  // `abc` (NaN) and `Infinity` turned the cap off, `0`, `-1` and `' '` (0) rejected
+  // every stream, and `1.5` acted as a cap of 2. All of them are startup errors now.
   const INVALID_STREAM_CAPS = ['abc', '0', '-1', '1.5', ' ', 'Infinity']
   const ENV_KEYS = [
     'RPC_PROXY_UPSTREAM_TIMEOUT_MS',

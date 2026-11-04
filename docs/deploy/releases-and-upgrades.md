@@ -282,9 +282,12 @@ sum stays below your edge's timeout (the 8 s default gives 116 s). A body at its
 the timeout of the operated zones is tracked in #1309.
 
 The six stream caps below keep their defaults, but an invalid value is now a
-startup error: anything that is not a positive integer (`abc`, `0`, `-1`, `1.5`,
-`Infinity`, or a value that is only whitespace) stops rpc-proxy with an error
-naming the variable. Each cap counts the open streams of one rpc-proxy pod, and
+startup error. rpc-proxy reads the value as a number, as it already does for its
+timeouts, and stops with an error naming the variable unless that number is a
+whole number of at least 1: `abc`, `0`, `-1`, `1.5`, `Infinity` and a value that
+is only whitespace all stop it. A numeric form that evaluates to a whole number,
+such as `1e3` or `0x10`, is accepted as that number, and there is no upper
+limit. Each cap counts the open streams of one rpc-proxy pod, and
 a new stream gets HTTP 429 once its count reaches the cap. Before this release
 `abc` parsed as `NaN` and `Infinity` stayed unbounded, which turned the cap off
 in both cases, while `0` rejected every stream and a whitespace-only value parsed

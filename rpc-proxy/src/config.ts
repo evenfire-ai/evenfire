@@ -266,7 +266,8 @@ export const config: Config = {
   streamKeepaliveMs: Number(process.env.RPC_PROXY_STREAM_KEEPALIVE_MS || 15000),
   // Stream admission caps (status and activity streams): each route rejects with 429
   // when a count is `>=` its cap, so NaN would turn a cap off and 0 would reject
-  // every stream. Anything but a positive integer stops startup.
+  // every stream. A value that does not read as a whole number of at least 1
+  // (`Number()`, as for the timeouts) stops startup.
   streamMaxConcurrent: parsePositiveInt(
     'RPC_PROXY_STREAM_MAX_CONCURRENT',
     process.env.RPC_PROXY_STREAM_MAX_CONCURRENT || '1000'
