@@ -10,7 +10,7 @@ import {
 
 export type SecretCleanupCapture =
   | { status: 'ready'; name: string; precondition: SecretPreconditions }
-  | { status: 'read-failed'; name: string; error: SecretReadError }
+  | { status: 'read-failed'; name: string; error: unknown }
   | {
       status: 'absent' | 'recipe-owned' | 'not-managed' | 'identity-unavailable'
       name: string
@@ -23,10 +23,10 @@ export type SecretCleanupCapture =
  * reference mode lets an operator Secret share — uid/RV proves same object, not same
  * owner, so only a Secret labelled as created by control-api's install saga qualifies.
  *
- * Only a 404 is `absent`. Any other apiserver or transport failure is
- * `read-failed` and carries the SecretReadError (502/503), so a caller that
- * must not continue can throw it; an error that is not an apiserver failure is
- * rethrown.
+ * Only a 404 is `absent`. Any other failure is `read-failed` and carries the
+ * error, so a caller that must not continue can throw it: an apiserver or
+ * transport failure as a SecretReadError (502/503), anything else as raised.
+ * The McpServer uninstall instead reports `read-failed` in its 503 body.
  */
 export async function captureSecretForCleanup(
   gateway: Pick<K8sGateway, 'getSecret'>,
@@ -39,14 +39,15 @@ export async function captureSecretForCleanup(
   try {
     raw = await readSecretOrNull(gateway, secretName, namespace)
   } catch (err) {
-    if (!(err instanceof SecretReadError)) throw err
     logger.error(
-      {
-        secretName,
-        namespace,
-        upstreamStatus: err.upstreamStatus,
-        upstreamReason: err.upstreamReason,
-      },
+      err instanceof SecretReadError
+        ? {
+            secretName,
+            namespace,
+            upstreamStatus: err.upstreamStatus,
+            upstreamReason: err.upstreamReason,
+          }
+        : { secretName, namespace, errorName: err instanceof Error ? err.name : typeof err },
       'Secret cleanup capture failed'
     )
     return { status: 'read-failed', name: secretName, error: err }

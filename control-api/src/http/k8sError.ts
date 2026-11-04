@@ -35,18 +35,20 @@ export function extractK8sError(err: unknown): { status: number; message: string
 
 /**
  * Client-safe reason for a failed K8s call, for text that leaves the process (response
- * bodies, warnings). Unlike `extractK8sError` it never falls back to `err.message`: a
- * client-node `ApiException` builds that message from the full apiserver response,
- * response headers included. Only the metav1.Status `message` is used, then a fixed
- * status text; an error without a K8s status gets the caller's fixed fallback.
- * A 401/403 always gets the fixed text: its Status message names control-api's own
- * ServiceAccount ("User \"system:serviceaccount:…\" cannot delete resource …").
+ * bodies, warnings): the fixed `K8s error <status>`, or the caller's fixed fallback for
+ * an error without a K8s status. Neither `err.message` (a client-node `ApiException`
+ * builds it from the full apiserver response, headers included) nor the metav1.Status
+ * message (a 401/403 names control-api's own ServiceAccount, and other statuses can
+ * carry apiserver internals) is ever returned; the server log keeps the Status message.
  */
 export function k8sSafeFailureMessage(err: unknown, fallback: string): string {
   const status = extractK8sError(err)?.status
-  if (status === undefined) return fallback
-  if (status === 401 || status === 403) return `K8s error ${status}`
-  const body = (err as { body?: unknown }).body
+  return status === undefined ? fallback : `K8s error ${status}`
+}
+
+/** The metav1.Status `message` of a K8s client error, or null. Never the raw body. */
+export function statusMessageOf(err: unknown): string | null {
+  const body = (err as { body?: unknown } | null)?.body
   let statusMessage: unknown
   if (body && typeof body === 'object') {
     statusMessage = (body as { message?: unknown }).message
@@ -57,7 +59,26 @@ export function k8sSafeFailureMessage(err: unknown, fallback: string): string {
       // Not a metav1.Status: never forward the raw body.
     }
   }
-  return typeof statusMessage === 'string' && statusMessage.length > 0
-    ? statusMessage
-    : `K8s error ${status}`
+  return typeof statusMessage === 'string' && statusMessage.length > 0 ? statusMessage : null
+}
+
+// The apiserver's wording for a request denied by admission control, as opposed
+// to the RBAC authorizer ("<resource> is forbidden: User \"…\" cannot <verb> …"):
+// a ValidatingAdmissionPolicy (`ValidatingAdmissionPolicy '<p>' with binding '<b>'
+// denied request: <message>`) or a validating webhook (`admission webhook "<w>"
+// denied the request: <message>`). Both answer 403 when the policy sets
+// reason Forbidden (deploy/base/cluster-wide/workflowrecipe-admission.yaml).
+const ADMISSION_DENIAL =
+  /(ValidatingAdmissionPolicy '[^']*' with binding '[^']*' denied request|admission webhook "[^"]*" denied the request)/
+
+/**
+ * The Status message of a 403 that admission control (not RBAC) returned, or
+ * null for any other error. That message is the policy's own explanation of
+ * why the object was rejected, so it is the caller's to read; an RBAC 403 names
+ * control-api's ServiceAccount and is never returned here.
+ */
+export function admissionDenialMessage(err: unknown): string | null {
+  if (extractK8sError(err)?.status !== 403) return null
+  const message = statusMessageOf(err)
+  return message !== null && ADMISSION_DENIAL.test(message) ? message : null
 }

@@ -268,6 +268,22 @@ describe('clerumErrorHandler — K8s ApiException 401/403', () => {
     }
   )
 
+  it('keeps forwarding an admission-control 403 as 403 with the policy message', async () => {
+    const message =
+      "workflowrecipes.clerum.io \"r1\" is forbidden: ValidatingAdmissionPolicy 'workflowrecipe-namespace-allowlist' with binding 'workflowrecipe-namespace-allowlist' denied request: Only the workflow-recipes controller may set WorkflowRecipe ownerReferences."
+    const err = new ApiException(
+      403,
+      'Forbidden',
+      { kind: 'Status', status: 'Failure', message, reason: 'Forbidden', code: 403 },
+      headers
+    )
+    const res = await request(appThrowing(err)).get('/boom')
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe(message)
+    expect(JSON.stringify(res.body)).not.toContain('audit-id')
+  })
+
   it('keeps forwarding a service-layer 403 that is not an ApiException', async () => {
     const res = await request(appThrowing({ code: 403 })).get('/boom')
     expect(res.status).toBe(403)

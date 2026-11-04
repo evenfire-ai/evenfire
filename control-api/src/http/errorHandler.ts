@@ -8,6 +8,7 @@ import {
   passwordMutationCauseKind,
 } from '../services/auth/passwordAdmissionError.js'
 import { memberRegistrationErrorResponse } from '../services/memberRegistrationErrors.js'
+import { admissionDenialMessage } from './k8sError.js'
 
 // Only errors we construct with these codes are ever forwarded verbatim by the
 // global handler. Keeps the blast radius tight: every other status-less or
@@ -216,9 +217,14 @@ export function clerumErrorHandler(
   // ServiceAccount, never the caller's session: control-api calls Kubernetes
   // with its own credentials. Forwarding it would log the Control UI operator
   // out (401) or show them a Status message naming that ServiceAccount (403).
-  // Service-layer errors that set their own 401/403 are not ApiExceptions and
-  // still take the 4xx branch below.
-  if (isK8sApiException(err) && (errStatus === 401 || errStatus === 403)) {
+  // A 403 from admission control is different: the policy rejected the object
+  // the request asked for, so it keeps the 4xx branch below with the policy's
+  // message. Service-layer errors that set their own 401/403 are not
+  // ApiExceptions and also take the 4xx branch.
+  if (
+    isK8sApiException(err) &&
+    (errStatus === 401 || (errStatus === 403 && admissionDenialMessage(err) === null))
+  ) {
     log.warn(
       {
         event: 'kubernetes_access_denied',

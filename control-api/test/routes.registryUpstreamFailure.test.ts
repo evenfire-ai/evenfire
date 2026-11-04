@@ -353,16 +353,20 @@ describe('POST /admin/registry/install-recipe — apiserver failures', () => {
       'a 500',
       () => apiserverError(500),
       503,
-      (subject: string) =>
-        `control-api could not ${subject}: the Kubernetes API server returned HTTP 500.`,
+      (_subject: string, name: string) =>
+        `control-api did not receive the outcome of creating WorkflowRecipe "${name}" in namespace ` +
+        `"${config.sandboxNamespace}": the Kubernetes API server returned HTTP 500. ` +
+        'The WorkflowRecipe may exist; check before retrying.',
       500,
     ],
     [
       'a refused connection',
       connectionRefused,
       503,
-      (subject: string) =>
-        `control-api could not ${subject}: the Kubernetes API server could not be reached.`,
+      (_subject: string, name: string) =>
+        `control-api did not receive the outcome of creating WorkflowRecipe "${name}" in namespace ` +
+        `"${config.sandboxNamespace}": the Kubernetes API server could not be reached. ` +
+        'The WorkflowRecipe may exist; check before retrying.',
       null,
     ],
   ] as const)(

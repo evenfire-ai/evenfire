@@ -2,9 +2,11 @@ import { type Response, Router } from 'express'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { CONTENT_TYPES } from '../../http/contentTypes.js'
+import { statusMessageOf } from '../../http/k8sError.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { RFC1123_RE } from '../../http/rfc1123.js'
 import { K8sGateway } from '../../k8s.js'
+import { rootLogger } from '../../observability/logger.js'
 import { loadHostSecretEntries, redactArtifactBuffer } from '../../services/artifactRedactor.js'
 import { ResourceReadError, SecretReadError } from '../../services/secretRead.js'
 
@@ -20,6 +22,9 @@ class HostPodNotFoundError extends Error {
     this.name = 'HostPodNotFoundError'
   }
 }
+
+const logger = rootLogger
+const MODULE = 'admin-host-artifacts'
 
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message
@@ -187,8 +192,9 @@ export function createAdminHostArtifactsRouter(gateway: K8sGateway): Router {
           return
         }
         if (isPodNotFoundError(err)) {
-          console.warn(
-            `[hostArtifacts] host pod not found host=${hostRef} pod=${podName}: ${errorMessage(err)}`
+          logger.warn(
+            { module: MODULE, hostRef, podName, err: errorMessage(err) },
+            'Host pod not found while listing artifacts'
           )
           sendPodNotFound(res, hostRef, podName)
           return
@@ -201,8 +207,9 @@ export function createAdminHostArtifactsRouter(gateway: K8sGateway): Router {
           res.status(403).json({ error: 'Artifact listing rejected by exec policy' })
           return
         }
-        console.warn(
-          `[hostArtifacts] failed to list artifacts host=${hostRef} pod=${podName}: ${errorMessage(err)}`
+        logger.warn(
+          { module: MODULE, hostRef, podName, err: errorMessage(err) },
+          'Failed to list artifacts'
         )
         res.status(502).json({ error: 'Failed to list artifacts from host pod' })
       }
@@ -240,8 +247,9 @@ export function createAdminHostArtifactsRouter(gateway: K8sGateway): Router {
             return
           }
           if (isPodNotFoundError(err)) {
-            console.warn(
-              `[hostArtifacts] host pod not found host=${hostRef} pod=${podName}: ${errorMessage(err)}`
+            logger.warn(
+              { module: MODULE, hostRef, podName, err: errorMessage(err) },
+              'Host pod not found while reading an artifact'
             )
             sendPodNotFound(res, hostRef, podNameFromError(err, podName))
             return
@@ -256,8 +264,9 @@ export function createAdminHostArtifactsRouter(gateway: K8sGateway): Router {
             res.status(403).json({ error: 'Artifact read rejected by exec policy' })
             return
           }
-          console.warn(
-            `[hostArtifacts] failed to read artifact host=${hostRef} pod=${podName} artifact=${artifactName}: ${errorMessage(err)}`
+          logger.warn(
+            { module: MODULE, hostRef, podName, artifactName, err: errorMessage(err) },
+            'Failed to read artifact'
           )
           res.status(502).json({ error: 'Failed to read artifact from host pod' })
           return
@@ -276,8 +285,9 @@ export function createAdminHostArtifactsRouter(gateway: K8sGateway): Router {
           ? { buffer: fileBuffer, redactedCount: 0 }
           : redactArtifactBuffer(fileBuffer, secretEntries)
         if (redactedCount > 0) {
-          console.warn(
-            `[hostArtifacts] redacted ${redactedCount} secret value(s) from "${artifactName}" (host=${hostRef})`
+          logger.warn(
+            { module: MODULE, hostRef, artifactName, redactedCount },
+            'Redacted secret values from an artifact'
           )
         }
 
@@ -299,11 +309,22 @@ export function createAdminHostArtifactsRouter(gateway: K8sGateway): Router {
           sendPodNotFound(res, hostRef, podNameFromError(err, hostRef))
           return
         }
-        const msg = err instanceof Error ? err.message : 'Failed to read artifact'
+        // Never echo the error text: a K8s ApiException message (e.g. from the
+        // pod lookup) embeds the apiserver's Status body and response headers.
+        const msg = err instanceof Error ? err.message : ''
+        logger.warn(
+          {
+            module: MODULE,
+            hostRef,
+            artifactName,
+            err: statusMessageOf(err) ?? (err instanceof Error ? err.name : typeof err),
+          },
+          'Artifact download failed'
+        )
         if (msg.includes('not found') || msg.includes('No such file')) {
-          res.status(404).json({ error: msg })
+          res.status(404).json({ error: `Artifact "${artifactName}" not found` })
         } else {
-          res.status(500).json({ error: msg })
+          res.status(500).json({ error: 'Failed to read artifact' })
         }
       }
     })

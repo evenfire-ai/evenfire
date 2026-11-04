@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { ApiException } from '@kubernetes/client-node'
 import {
   type RegistryUpstreamStep,
   classifyRegistryUpstreamFailure,
@@ -68,6 +69,36 @@ describe('classifyRegistryUpstreamFailure', () => {
     expect(failure.severity).toBe('error')
     // Witness that the Status body was parsed: its message reaches the log field.
     expect(failure.upstreamReason).toContain(APISERVER_LEAK_MARKERS.statusMessage)
+  })
+
+  it('maps an admission-control 403 to a 403 carrying the policy message', () => {
+    const policyMessage =
+      "workflowrecipes.clerum.io \"r1\" is forbidden: ValidatingAdmissionPolicy 'workflowrecipe-namespace-allowlist' with binding 'workflowrecipe-namespace-allowlist' denied request: Only the workflow-recipes controller may set WorkflowRecipe ownerReferences."
+    const err = new ApiException(
+      403,
+      'Forbidden',
+      JSON.stringify({ kind: 'Status', message: policyMessage, reason: 'Forbidden', code: 403 }),
+      { 'audit-id': APISERVER_LEAK_MARKERS.auditId }
+    )
+    const step: RegistryUpstreamStep = {
+      verb: 'create',
+      kind: 'WorkflowRecipe',
+      name: 'r1',
+      namespace: 'sandbox-recipes',
+      content: registryContent,
+    }
+
+    const failure = classify(err, step)
+
+    expect(failure.status).toBe(403)
+    expect(failure.body).toEqual({
+      error: 'registry_upstream_rejected',
+      message: `WorkflowRecipe "r1" in namespace "sandbox-recipes" was rejected by admission control: ${policyMessage}`,
+      resourceType: 'recipe',
+      resourceName: 'r1',
+      namespace: 'sandbox-recipes',
+    })
+    expect(failure.severity).toBe('warn')
   })
 
   it('maps a 409 on a create to "already exists"', () => {
@@ -199,7 +230,7 @@ describe('classifyRegistryUpstreamFailure', () => {
     ],
     ['400', 400, hostUpdate, 'update Host "chatllm" in namespace "mcp-host"'],
     ['429', 429, secretCreate, 'create Secret "mcp-weather-creds" in namespace "mcp-host"'],
-    ['500', 500, mcpServerCreate, 'create McpServer "mcp-weather" in namespace "mcp-host"'],
+    ['500', 500, hostUpdate, 'update Host "chatllm" in namespace "mcp-host"'],
   ] as const)('maps a %s to a 503 naming the status', (_label, status, step, subject) => {
     const failure = classify(apiserverError(status), step)
     expect(failure.status).toBe(503)
@@ -211,12 +242,23 @@ describe('classifyRegistryUpstreamFailure', () => {
     expect(failure.severity).toBe('error')
   })
 
-  it('maps a refused connection to a 503 "could not be reached"', () => {
+  it('says a create that failed with a 5xx may have been committed', () => {
+    const failure = classify(apiserverError(500), mcpServerCreate)
+    expect(failure.status).toBe(503)
+    expect(failure.body.message).toBe(
+      'control-api did not receive the outcome of creating McpServer "mcp-weather" in namespace ' +
+        '"mcp-host": the Kubernetes API server returned HTTP 500. The McpServer may exist; check ' +
+        'before retrying.'
+    )
+  })
+
+  it('maps a refused connection on a create to a 503 with an unknown outcome', () => {
     const failure = classify(connectionRefused(), secretCreate)
     expect(failure.status).toBe(503)
     expect(failure.body.message).toBe(
-      'control-api could not create Secret "mcp-weather-creds" in namespace "mcp-host": ' +
-        'the Kubernetes API server could not be reached.'
+      'control-api did not receive the outcome of creating Secret "mcp-weather-creds" in namespace ' +
+        '"mcp-host": the Kubernetes API server could not be reached. The Secret may exist; check ' +
+        'before retrying.'
     )
     expect(failure.upstreamStatus).toBeNull()
     expect(failure.upstreamReason).toBe('ECONNREFUSED')

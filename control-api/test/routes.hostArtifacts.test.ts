@@ -328,6 +328,24 @@ describe('GET /admin/hosts/:hostRef/artifacts/:artifactName/download', () => {
     expect(getResource).not.toHaveBeenCalled()
   })
 
+  it('never echoes the apiserver text when the host pod lookup fails', async () => {
+    const findPodByLabel = vi.fn(async () =>
+      Promise.reject(controlApiForbiddenRead('chatllm', 'mcp-host'))
+    )
+    const gateway = createGateway({ findPodByLabel })
+    const app = makeApp(gateway)
+
+    const res = await request(app).get('/admin/hosts/chatllm/artifacts/notes.md/download')
+
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({ error: 'Failed to read artifact' })
+    const serialized = JSON.stringify(res.body)
+    expect(serialized).not.toContain('system:serviceaccount')
+    expect(serialized).not.toContain('5f0c7a4e-secret-read')
+    // Witness: the failing lookup is what produced the 500.
+    expect(findPodByLabel).toHaveBeenCalledOnce()
+  })
+
   it('answers 502 resource_read_failed when the Host read for redaction is refused', async () => {
     const readFn = vi.fn(async () => Buffer.from('plain text'))
     const getResource = vi.fn(async (_plural: string, name: string, ns: string) =>

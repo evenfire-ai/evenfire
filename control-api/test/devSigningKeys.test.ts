@@ -111,6 +111,7 @@ function runWrapperRuntime(runtime: 'src' | 'dist', override: string | undefined
     for (const relative of [
       'devSigningKeys.ts',
       'observability/logger.ts',
+      'http/k8sError.ts',
       'utils/log/redact.ts',
     ]) {
       const destination = join(moduleDir, relative)

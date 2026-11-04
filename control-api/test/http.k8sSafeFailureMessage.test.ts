@@ -28,15 +28,17 @@ describe('k8sSafeFailureMessage', () => {
     expect(k8sSafeFailureMessage(err, 'fallback')).toBe('K8s error 401')
   })
 
-  it('keeps the Status message for other statuses', () => {
+  it('never forwards the Status message of other statuses either', () => {
     const err = new ApiException(
-      409,
-      'Conflict',
-      statusBody(409, 'the object has been modified'),
+      500,
+      'Internal Server Error',
+      statusBody(500, 'etcd member 10.0.0.12:2379 unreachable'),
       {}
     )
+    // Witness: the Status body really carries the internal detail.
+    expect(String(err.body)).toContain('10.0.0.12')
 
-    expect(k8sSafeFailureMessage(err, 'fallback')).toBe('the object has been modified')
+    expect(k8sSafeFailureMessage(err, 'fallback')).toBe('K8s error 500')
   })
 
   it('falls back to the status text when the body is not a Status', () => {

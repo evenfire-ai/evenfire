@@ -1,3 +1,4 @@
+import { admissionDenialMessage } from '../http/k8sError.js'
 import { isTransportError, upstreamReason, upstreamStatusOrRethrow } from './secretRead.js'
 
 /**
@@ -12,7 +13,9 @@ import { isTransportError, upstreamReason, upstreamStatusOrRethrow } from './sec
  * the step (verb, kind, name, namespace, registry entry@version), the numeric
  * upstream status and the filtered field paths of a 422 only. The name and
  * entry can be request input; the response goes back to the same caller as
- * JSON. The apiserver's own text goes to the server log, never the response.
+ * JSON. The apiserver's own text goes to the server log, never the response;
+ * the one exception is an admission-control denial, whose message is the
+ * policy's explanation of why the object was rejected.
  */
 
 export type RegistryUpstreamKind = 'Secret' | 'McpServer' | 'LlmHook' | 'WorkflowRecipe' | 'Host'
@@ -36,7 +39,7 @@ export type RegistryUpstreamStep = {
 }
 
 export type RegistryUpstreamFailure = {
-  status: 404 | 409 | 413 | 422 | 502 | 503
+  status: 403 | 404 | 409 | 413 | 422 | 502 | 503
   body: {
     error: 'registry_upstream_failed' | 'registry_upstream_rejected'
     message: string
@@ -103,7 +106,9 @@ function isSyntheticError(err: unknown): boolean {
 /**
  * Classify a failed Kubernetes call of a registry step.
  *
- * - 401/403 → 502 `registry_upstream_failed`.
+ * - 403 from admission control (a ValidatingAdmissionPolicy or webhook denial)
+ *   → 403 `registry_upstream_rejected` with the policy's message.
+ * - any other 401/403 → 502 `registry_upstream_failed`.
  * - 409 → 409 on a create or update; 422 → 422 on a create or update, naming
  *   the registry entry when control-api built the spec; 413 → 413 for
  *   operator content only.
@@ -146,8 +151,26 @@ export function classifyRegistryUpstreamFailure(
     severity,
   })
 
+  // A create that failed in transport or with a 5xx may still have been
+  // committed; say so rather than "could not create".
+  const unknownCreateOutcome = (cause: string) =>
+    `control-api did not receive the outcome of creating ${target}: ${cause}. ` +
+    `The ${step.kind} may exist; check before retrying.`
+
   if (upstreamStatus === null) {
-    return result(503, `${prefix}: the Kubernetes API server could not be reached.`, 'error')
+    return result(
+      503,
+      step.verb === 'create'
+        ? unknownCreateOutcome('the Kubernetes API server could not be reached')
+        : `${prefix}: the Kubernetes API server could not be reached.`,
+      'error'
+    )
+  }
+  // Admission control rejected the object itself: the policy's message says
+  // why, and retrying the same request cannot succeed.
+  const admissionDenial = admissionDenialMessage(err)
+  if (admissionDenial !== null) {
+    return result(403, `${target} was rejected by admission control: ${admissionDenial}`, 'warn')
   }
   if (upstreamStatus === 401 || upstreamStatus === 403) {
     return result(
@@ -208,7 +231,9 @@ export function classifyRegistryUpstreamFailure(
   }
   return result(
     503,
-    `${prefix}: the Kubernetes API server returned HTTP ${upstreamStatus}.`,
+    step.verb === 'create' && upstreamStatus >= 500
+      ? unknownCreateOutcome(`the Kubernetes API server returned HTTP ${upstreamStatus}`)
+      : `${prefix}: the Kubernetes API server returned HTTP ${upstreamStatus}.`,
     'error'
   )
 }
