@@ -15,9 +15,15 @@ set -euo pipefail
 #   6. inter-service-tokens (placeholder tokens + desktop-api-token)
 #   7. WRC signing key + configmaps
 #   8. control-api-public-key ConfigMap (admin JWT public key for WRC verification)
+# Then restarts every deployed consumer of the rotated keys (see the restart
+# section near the end).
 # (#273: legacy clerum-channel-reader-credentials Secret retired — per-Host
 #  channel-reader-<host>-credentials Secrets are written by control-api's
 #  /admin/channel-secrets, not bootstrap-time.)
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/restart-jwt-key-consumers.sh
+source "${SCRIPT_DIR}/lib/restart-jwt-key-consumers.sh"
 
 kctl() {
   if [ -n "${CONTEXT:-}" ]; then
@@ -203,6 +209,16 @@ else
   echo "  Deploy services first (make gcp-prod-deploy-all or gcp-dev-deploy-all),"
   echo "  then re-run this script or manually create mcp-host-config."
 fi
+
+# --- Restart the consumers of the rotated keys ---
+# Every run regenerates every key above. The consumer list and the reason each
+# one is on it live in lib/restart-jwt-key-consumers.sh. Not restarted there:
+# mcp-host (restarted above with mcp-host-config), control-postgres (constant
+# values, read by the server only when it initialises its data directory) and
+# inter-service-tokens (no Deployment reads it).
+echo ""
+echo "=== Restarting consumers of the rotated keys ==="
+restart_jwt_key_consumers kctl || exit 1
 
 echo ""
 echo "=== Post-deploy validation ==="

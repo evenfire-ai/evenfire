@@ -23,6 +23,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=../../deploy/scripts/lib/restart-jwt-key-consumers.sh
+source "${PROJECT_DIR}/deploy/scripts/lib/restart-jwt-key-consumers.sh"
 
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
@@ -256,6 +258,12 @@ if [[ "${1:-}" == "--apply" ]]; then
   log "Applying secrets to cluster..."
   $KC apply -f "$OUTPUT"
   ok "Secrets applied to cluster"
+  # Regenerating over existing keys (FORCE_REGEN=true) rotates them in a live
+  # profile: restart their consumers so signers and verifiers load the same keys.
+  if [ -n "$EXISTING_SECRET" ]; then
+    log "Restarting consumers of the rotated keys..."
+    restart_jwt_key_consumers kubectl --context="${PROFILE}"
+  fi
 fi
 
 log "Done. Key pairs generated and written to deploy/minikube/secrets/jwt-signing-keys.yaml"

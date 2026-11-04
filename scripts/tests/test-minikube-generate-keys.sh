@@ -12,8 +12,9 @@ assert_generate_keys_creates_output_dir() {
   project="$tmp/project"
   stubbin="$tmp/bin"
 
-  mkdir -p "$project/scripts/minikube" "$stubbin"
+  mkdir -p "$project/scripts/minikube" "$project/deploy/scripts/lib" "$stubbin"
   cp scripts/minikube/generate-keys.sh "$project/scripts/minikube/generate-keys.sh"
+  cp deploy/scripts/lib/restart-jwt-key-consumers.sh "$project/deploy/scripts/lib/"
   chmod +x "$project/scripts/minikube/generate-keys.sh"
 
   cat > "$stubbin/kubectl" <<'STUB'
@@ -63,8 +64,9 @@ assert_existing_secret_is_patched_once() {
   state="$tmp/prompt-key-present"
   log="$tmp/kubectl.log"
 
-  mkdir -p "$project/scripts/minikube" "$stubbin"
+  mkdir -p "$project/scripts/minikube" "$project/deploy/scripts/lib" "$stubbin"
   cp scripts/minikube/generate-keys.sh "$project/scripts/minikube/generate-keys.sh"
+  cp deploy/scripts/lib/restart-jwt-key-consumers.sh "$project/deploy/scripts/lib/"
   chmod +x "$project/scripts/minikube/generate-keys.sh"
 
   cat > "$stubbin/kubectl" <<'STUB'

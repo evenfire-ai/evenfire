@@ -10,7 +10,25 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="${TMPDIR:-/tmp}/inter-service-tokens-test.$$"
 mkdir -p "$TMP/bin"
-trap 'rm -rf "$TMP"' EXIT
+# On an unexpected exit (a script crash under `set -e`), show the last run's
+# output before the store is removed.
+on_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "--- last run stdout/stderr (exit $rc) ---" >&2
+    cat "$TMP/stdout" "$TMP/stderr" >&2 2>/dev/null || true
+  fi
+  rm -rf "$TMP"
+}
+trap on_exit EXIT
+
+# Runs must not inherit overrides from the caller's environment.
+unset FORCE_CONSUMER_RESTART CONTROL_API_INTERNAL_TOKEN_EXT_REST CONTROL_API_INTERNAL_TOKEN_RPC \
+  CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY CONTROL_API_INTERNAL_TOKEN_WA_READER \
+  CONTROL_API_INTERNAL_TOKEN_CODEX_LLM_PROXY CONTROL_API_INTERNAL_TOKEN_GROK_LLM_PROXY \
+  CHANNEL_READER_HANDOFF_TOKEN CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET \
+  INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET \
+  WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET CONTEXT
 
 TOKENS_SCRIPT="$ROOT/deploy/scripts/apply-inter-service-tokens.sh"
 BOT_SECRET_SCRIPT="$ROOT/deploy/scripts/apply-workflow-approval-bot-secret.sh"
@@ -69,9 +87,12 @@ cat > "$TMP/bin/kubectl" <<'SH'
 set -euo pipefail
 store="${KUBE_STORE:?}"
 args=("$@")
-if [[ "${args[0]:-}" == "--context" ]]; then
-  args=("${args[@]:2}")
+# Every call must name the context the script was given, never the current one.
+if [[ "${args[0]:-}" != "--context" || "${args[1]:-}" != "${CONTEXT:?}" ]]; then
+  echo "fake kubectl: expected --context ${CONTEXT}, got: $*" >&2
+  exit 9
 fi
+args=("${args[@]:2}")
 ns=""
 if [[ "${args[0]:-}" == "-n" ]]; then
   ns="${args[1]}"
@@ -183,6 +204,22 @@ store_delete() {
   rm -f "$TMP/store/$1/$2/$3"
 }
 
+# Replace one caller's entry in control-api's stored service-token map.
+store_set_map_entry() {
+  local name="$1" value="$2" map entry out="" found=false entries=()
+  map="$(store_get control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)"
+  IFS=',' read -r -a entries <<<"$map"
+  for entry in "${entries[@]}"; do
+    if [[ "${entry%%=*}" == "$name" ]]; then
+      entry="$name=$value"
+      found=true
+    fi
+    out="${out:+$out,}$entry"
+  done
+  [[ "$found" == "true" ]] || fail "map entry $name not found"
+  store_set control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS "$out"
+}
+
 RUN_SALT=0
 # run_script <script> <rollout-log> [capture-file] -- env [VAR=value | -u VAR]...
 run_script() {
@@ -217,7 +254,7 @@ assert_no_secret_material() {
   for log in "$TMP/stdout" "$TMP/stderr"; do
     # Every token in these tests is 64 hex characters (fixtures and the fake
     # openssl), as are real `openssl rand -hex 32` tokens.
-    if grep -E '[0-9a-f]{64}|test-member-registration-hmac|dev-member-registration-hmac-secret' "$log" >/dev/null; then
+    if grep -E '[0-9a-f]{64}|member-registration-hmac' "$log" >/dev/null; then
       echo "secret material leaked into $log" >&2
       cat "$log" >&2
       exit 1
@@ -309,12 +346,21 @@ assert_noop_witness
 assert_openssl_rand_calls 0
 assert_no_secret_material
 
-# control-api's own Secret drifted (stale service-token map): only control-api.
-store_set control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS stale-map
+# A key only control-api reads drifted (the flat token list): only control-api.
+store_set control-plane control-api-internal-tokens CONTROL_API_INTERNAL_TOKENS stale-list
 rollout="$TMP/rollout-control-api-only.log"
 run_tokens gke-dev "$rollout" "" env
 assert_restarted_exactly "$rollout" control-plane/control-api
 grep -qF 'Skipping rollout of rpc-proxy/rpc-proxy: tokens unchanged' "$TMP/stderr" || fail "rpc-proxy skip line missing"
+assert_no_secret_material
+
+# control-api's map holds an extra entry while every caller entry is current:
+# only control-api, whose env changes when the map is rewritten.
+store_set control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS \
+  "$(store_get control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS),retired-service=retired"
+rollout="$TMP/rollout-map-extra-entry.log"
+run_tokens gke-dev "$rollout" "" env
+assert_restarted_exactly "$rollout" control-plane/control-api
 assert_no_secret_material
 
 # rpc-proxy token rotated: rpc-proxy and control-api (which holds it in its map).
@@ -323,6 +369,54 @@ run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_RPC="$ROTATED"
 assert_restarted_exactly "$rollout" control-plane/control-api rpc-proxy/rpc-proxy
 [[ "$(store_get rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN)" == "$ROTATED" ]] \
   || fail "rotated rpc-proxy token was not written"
+assert_no_secret_material
+
+# Out-of-band rotation of a caller's Secret: the run copies the new value into
+# control-api's map, so both ends restart (the caller's own key is unchanged).
+store_set profiles external-rest-api-secrets EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN "$WRC_NEW"
+rollout="$TMP/rollout-out-of-band.log"
+run_tokens gke-dev "$rollout" "" env
+assert_restarted_exactly "$rollout" control-plane/control-api profiles/external-rest-api
+assert_no_secret_material
+
+# A previous run patched control-api-internal-tokens and died before patching
+# the caller: every control-api key already holds the new token and only the
+# caller's key differs, yet both ends restart (control-api's pods were never
+# restarted onto the new map).
+webhook_before="$(store_get webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN)"
+run_tokens gke-dev "$TMP/rollout-setup.log" "" env CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY="$HCC_NEW"
+store_set webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN "$webhook_before"
+rollout="$TMP/rollout-half-applied.log"
+run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY="$HCC_NEW"
+assert_restarted_exactly "$rollout" control-plane/control-api webhook-ingress/webhook-proxy
+assert_no_secret_material
+
+# The map entry for one caller is stale while its Secret is current: both ends.
+store_set_map_entry grok-llm-proxy stale-grok-entry
+rollout="$TMP/rollout-stale-map-entry.log"
+run_tokens gke-dev "$rollout" "" env
+assert_restarted_exactly "$rollout" control-plane/control-api control-plane/grok-llm-proxy
+assert_no_secret_material
+
+# One rotation per remaining override: exactly the caller and control-api.
+rotation_case() {
+  local env_var="$1" value="$2" consumer="$3"
+  local rollout="$TMP/rollout-rotate-$env_var.log"
+  run_tokens gke-dev "$rollout" "" env "$env_var=$value"
+  assert_restarted_exactly "$rollout" control-plane/control-api "$consumer"
+  assert_no_secret_material
+}
+rotation_case CONTROL_API_INTERNAL_TOKEN_EXT_REST "$ROTATED" profiles/external-rest-api
+rotation_case CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY "$WRC_OLD" webhook-ingress/webhook-proxy
+rotation_case CONTROL_API_INTERNAL_TOKEN_CODEX_LLM_PROXY "$HCC_OLD" control-plane/codex-llm-proxy
+rotation_case CONTROL_API_INTERNAL_TOKEN_GROK_LLM_PROXY "$HCC_NEW" control-plane/grok-llm-proxy
+# The reader's control-api token: the reader, not the channel-readers.
+rotation_case CONTROL_API_INTERNAL_TOKEN_WA_READER "$WRC_NEW" channels/clerum-workflow-approval-request-reader
+
+# Member-registration HMAC rotated: control-api only.
+rollout="$TMP/rollout-member-hmac.log"
+run_tokens gke-dev "$rollout" "" env CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=rotated-member-registration-hmac
+assert_restarted_exactly "$rollout" control-plane/control-api
 assert_no_secret_material
 
 # Reader handoff token rotated: the reader and the channel-readers only.

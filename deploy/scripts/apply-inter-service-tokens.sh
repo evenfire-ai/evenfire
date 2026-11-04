@@ -226,11 +226,16 @@ INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TO
 # internal-control-jwt-secrets). Current values stay in shell locals and are
 # never logged.
 #
-# Half-applied run: if a run patches a Secret and dies before the rollouts
-# below, the next run reads the new value, sees no change and skips the
-# restart, so the running pods keep the old value. The same holds after an
-# out-of-band `kubectl patch` of a key that the next run preserves. Recover
-# with FORCE_CONSUMER_RESTART=true.
+# Each control-api service token has two ends: the caller reads it from its own
+# Secret, and control-api verifies it from CONTROL_API_INTERNAL_SERVICE_TOKENS.
+# A token that changed at either end restarts both ends, so they never end up
+# holding different values (for example after an out-of-band `kubectl patch`
+# of the caller's Secret, which this run then copies into control-api's map).
+#
+# Half-applied run: if a run patches every Secret and dies before the rollouts
+# below, the next run reads the new values, sees no change and skips the
+# restarts, so the running pods keep the old values. Recover with
+# FORCE_CONSUMER_RESTART=true.
 #
 # Prints "true" or "false". Arguments are repeated
 # (namespace, secret, key, value-this-run-writes) groups.
@@ -251,35 +256,79 @@ consumer_tokens_changed() {
   echo false
 }
 
+# Current control-api service-token map ("name=token,..."), read once.
+CURRENT_SERVICE_TOKENS_MAP="$(read_secret_key control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)"
+
+# Prints "true" when a control-api service token changed at either end: the
+# caller's Secret key (namespace, secret, key) or the caller's entry (name) in
+# control-api's current service-token map. Arguments:
+# name namespace secret key value-this-run-writes.
+service_token_changed() {
+  local name="$1" ns="$2" secret="$3" key="$4" value="$5"
+  local entry current_entry="" entries=()
+  if [ "$(consumer_tokens_changed "$ns" "$secret" "$key" "$value")" = "true" ]; then
+    echo true; return
+  fi
+  if [ -n "$CURRENT_SERVICE_TOKENS_MAP" ]; then
+    IFS=',' read -r -a entries <<<"$CURRENT_SERVICE_TOKENS_MAP"
+  fi
+  for entry in "${entries[@]+"${entries[@]}"}"; do
+    if [ "${entry%%=*}" = "$name" ]; then
+      current_entry="${entry#*=}"
+      break
+    fi
+  done
+  if [ "$current_entry" != "$value" ]; then
+    echo true; return
+  fi
+  echo false
+}
+
 # Consumer → keys it reads (deploy/base manifests; per-Host channel-reader
 # Deployments are built by host-context-controller buildChannelReaderDeployment).
+# Map entry names match SERVICE_TOKENS_MAP above.
+EXTERNAL_REST_API_CHANGED="$(service_token_changed external-rest-api \
+  profiles external-rest-api-secrets EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN "$TOKEN_EXT_REST")"
+RPC_PROXY_CHANGED="$(service_token_changed rpc-proxy \
+  rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN "$TOKEN_RPC")"
+WEBHOOK_PROXY_CHANGED="$(service_token_changed webhook-proxy \
+  webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN "$TOKEN_WEBHOOK_PROXY")"
+CODEX_LLM_PROXY_CHANGED="$(service_token_changed codex-llm-proxy \
+  control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN "$TOKEN_CODEX_LLM_PROXY")"
+GROK_LLM_PROXY_CHANGED="$(service_token_changed grok-llm-proxy \
+  control-plane grok-llm-proxy-secrets GROK_LLM_PROXY_CONTROL_API_TOKEN "$TOKEN_GROK_LLM_PROXY")"
+WA_READER_CONTROL_API_TOKEN_CHANGED="$(service_token_changed workflow-approval-reader \
+  channels workflow-approval-request-reader-credentials control-api-token "$TOKEN_WA_READER")"
+# The reader sends the handoff token and the channel-readers verify it; both
+# read the same key, so one comparison decides both restarts.
+CHANNEL_READER_CHANGED="$(consumer_tokens_changed \
+  channels workflow-approval-request-reader-credentials channel-reader-handoff-token "$READER_HANDOFF_TOKEN_VALUE")"
+if [ "$WA_READER_CONTROL_API_TOKEN_CHANGED" = "true" ] || [ "$CHANNEL_READER_CHANGED" = "true" ]; then
+  WA_READER_CHANGED=true
+else
+  WA_READER_CHANGED=false
+fi
+WORKFLOW_RECIPES_CHANGED="$(consumer_tokens_changed \
+  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET "$INTERNAL_CONTROL_WRC_HMAC")"
+HCC_CHANGED="$(consumer_tokens_changed \
+  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET "$INTERNAL_CONTROL_HCC_HMAC")"
 # control-api envFrom-loads control-api-internal-tokens and
 # internal-control-jwt-secrets whole; only the keys written here are compared.
+# It also restarts whenever a service token it verifies changed at the caller's
+# end (the other end of each pair above).
 CONTROL_API_CHANGED="$(consumer_tokens_changed \
   control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS "$SERVICE_TOKENS_MAP" \
   control-plane control-api-internal-tokens CONTROL_API_INTERNAL_TOKENS "$INTERNAL_TOKENS_LIST" \
   control-plane control-api-internal-tokens "$MEMBER_REGISTRATION_HMAC_KEY" "$MEMBER_REGISTRATION_HMAC" \
   control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET "$INTERNAL_CONTROL_WRC_HMAC" \
   control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET "$INTERNAL_CONTROL_HCC_HMAC")"
-WORKFLOW_RECIPES_CHANGED="$(consumer_tokens_changed \
-  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET "$INTERNAL_CONTROL_WRC_HMAC")"
-HCC_CHANGED="$(consumer_tokens_changed \
-  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET "$INTERNAL_CONTROL_HCC_HMAC")"
-CODEX_LLM_PROXY_CHANGED="$(consumer_tokens_changed \
-  control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN "$TOKEN_CODEX_LLM_PROXY")"
-GROK_LLM_PROXY_CHANGED="$(consumer_tokens_changed \
-  control-plane grok-llm-proxy-secrets GROK_LLM_PROXY_CONTROL_API_TOKEN "$TOKEN_GROK_LLM_PROXY")"
-EXTERNAL_REST_API_CHANGED="$(consumer_tokens_changed \
-  profiles external-rest-api-secrets EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN "$TOKEN_EXT_REST")"
-RPC_PROXY_CHANGED="$(consumer_tokens_changed \
-  rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN "$TOKEN_RPC")"
-WEBHOOK_PROXY_CHANGED="$(consumer_tokens_changed \
-  webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN "$TOKEN_WEBHOOK_PROXY")"
-WA_READER_CHANGED="$(consumer_tokens_changed \
-  channels workflow-approval-request-reader-credentials control-api-token "$TOKEN_WA_READER" \
-  channels workflow-approval-request-reader-credentials channel-reader-handoff-token "$READER_HANDOFF_TOKEN_VALUE")"
-CHANNEL_READER_CHANGED="$(consumer_tokens_changed \
-  channels workflow-approval-request-reader-credentials channel-reader-handoff-token "$READER_HANDOFF_TOKEN_VALUE")"
+for caller_changed in "$EXTERNAL_REST_API_CHANGED" "$RPC_PROXY_CHANGED" "$WEBHOOK_PROXY_CHANGED" \
+                      "$CODEX_LLM_PROXY_CHANGED" "$GROK_LLM_PROXY_CHANGED" \
+                      "$WA_READER_CONTROL_API_TOKEN_CHANGED"; do
+  if [ "$caller_changed" = "true" ]; then
+    CONTROL_API_CHANGED=true
+  fi
+done
 
 # --- 1. control-api-internal-tokens (control-plane) ---
 log "Patching Secret control-api-internal-tokens (control-plane)"
