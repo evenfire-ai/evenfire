@@ -381,7 +381,7 @@ describe('routes/auth password-login', () => {
     'reports no presented session when a logout retry follows a failed logout (%s)',
     async (status, body) => {
       authServiceMock.loginWithPassword.mockResolvedValueOnce({
-        token: 'composed-session-token',
+        token: 'synthetic-composed-session-token',
         me: {
           id: 'user-1',
           email: 'user@example.invalid',
@@ -404,7 +404,7 @@ describe('routes/auth password-login', () => {
         .send({ email: 'user@example.invalid', password: 'synthetic-correct-password' })
         .expect(200)
       expect(String(login.headers['set-cookie'])).toContain(
-        'profile_session=composed-session-token'
+        'profile_session=synthetic-composed-session-token'
       )
 
       const failed = await agent.post('/api/v1/auth/logout').expect(status)
@@ -413,7 +413,9 @@ describe('routes/auth password-login', () => {
       const retried = await agent.post('/api/v1/auth/logout').expect(200)
 
       // The first logout carried the login cookie; the retry reached no session at all.
-      expect(authServiceMock.logoutUserSession.mock.calls).toEqual([['composed-session-token']])
+      expect(authServiceMock.logoutUserSession.mock.calls).toEqual([
+        ['synthetic-composed-session-token'],
+      ])
       expect(retried.body).toEqual({ ok: true, sessionPresented: false })
       expect(failed.body.ok).toBeUndefined()
       expect(String(failed.headers['set-cookie'])).toContain(

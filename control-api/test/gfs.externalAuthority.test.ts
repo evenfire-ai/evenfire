@@ -199,10 +199,13 @@ describe('signCurrentExternalGfsUserToken', () => {
       rowCount: 1,
     })
     dbMock.withTransaction.mockImplementation(async work => work({ query }))
-    gfsTokenMock.signGfsToken.mockReturnValue({ token: 'signed-gfs-token', expiresInSeconds: 600 })
+    gfsTokenMock.signGfsToken.mockReturnValue({
+      token: 'synthetic-signed-gfs-token',
+      expiresInSeconds: 600,
+    })
 
     await expect(signCurrentExternalGfsUserToken(authentication, input)).resolves.toEqual({
-      token: 'signed-gfs-token',
+      token: 'synthetic-signed-gfs-token',
       expiresInSeconds: 600,
     })
 

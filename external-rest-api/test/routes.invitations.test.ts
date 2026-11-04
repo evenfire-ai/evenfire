@@ -603,7 +603,7 @@ describe('routes/invitations', () => {
         teamId: 'team-1',
         teamName: 'Team 1',
         role: 'member',
-        token: 'accepted-session-token',
+        token: 'synthetic-accepted-session-token',
       },
     })
 
@@ -618,7 +618,9 @@ describe('routes/invitations', () => {
       userId: 'user-1',
       email: 'invitee@example.com',
     })
-    expect(String(res.headers['set-cookie'])).toContain('profile_session=accepted-session-token')
+    expect(String(res.headers['set-cookie'])).toContain(
+      'profile_session=synthetic-accepted-session-token'
+    )
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
   })
 
@@ -646,7 +648,7 @@ describe('routes/invitations', () => {
         teamId: 'team-1',
         teamName: 'Team 1',
         role: 'member',
-        token: 'accepted-session-token',
+        token: 'synthetic-accepted-session-token',
       },
     })
 

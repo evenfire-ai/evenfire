@@ -54,7 +54,7 @@ function createService(me: SessionMe) {
     tokenStore: tokenStore as never,
     onSessionCleared,
   }) as unknown as TestService
-  service.sessionToken = 'session-token'
+  service.sessionToken = 'synthetic-session-token'
   service.me = me
   service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
   return { service, tokenStore, onSessionCleared }
@@ -90,10 +90,10 @@ describe('AppService session rejected by /me', () => {
     await expect(service.runWithTeamContext('team-b', operation)).rejects.toBe(rejection)
 
     expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
-    expect(service.authClient.getMe).toHaveBeenCalledWith('session-token')
+    expect(service.authClient.getMe).toHaveBeenCalledWith('synthetic-session-token')
     expect(operation).not.toHaveBeenCalled()
     // The uploads of the rejected session are fenced before it is cleared, with its identity.
-    expect(fenced).toEqual([{ token: 'session-token', ownerId: 'user-a' }])
+    expect(fenced).toEqual([{ token: 'synthetic-session-token', ownerId: 'user-a' }])
     expectSessionEnded(service, tokenStore, onSessionCleared)
   })
 
@@ -105,7 +105,7 @@ describe('AppService session rejected by /me', () => {
     await expect(service.runWithTeamContext('team-b', vi.fn())).rejects.toBe(unavailable)
 
     expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
-    expect(service.sessionToken).toBe('session-token')
+    expect(service.sessionToken).toBe('synthetic-session-token')
     expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
     expect(onSessionCleared).not.toHaveBeenCalled()
   })
@@ -172,7 +172,7 @@ describe('AppService session rejected by /me', () => {
         ],
       }),
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'session-team-b',
+        token: 'synthetic-session-team-b',
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
       getMe: vi.fn().mockResolvedValue(sessionMe({ teamId: 'team-b' })),
@@ -211,7 +211,7 @@ describe('AppService session rejected by /me', () => {
     expect(service.authClient.listWorkflows).toHaveBeenCalledTimes(1)
     expect(service.authClient.switchTeam).not.toHaveBeenCalled()
     expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
-    expect(service.authClient.getMe).toHaveBeenCalledWith('session-token')
+    expect(service.authClient.getMe).toHaveBeenCalledWith('synthetic-session-token')
     expectSessionEnded(service, tokenStore, onSessionCleared)
   })
 
@@ -235,7 +235,7 @@ describe('AppService session rejected by /me', () => {
     await expect(service.listWorkflows()).rejects.toBe(rejection)
 
     expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
-    expect(service.sessionToken).toBe('session-token')
+    expect(service.sessionToken).toBe('synthetic-session-token')
     expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
     expect(onSessionCleared).not.toHaveBeenCalled()
     expect([...service.workflowTeamByKey]).toEqual([['sandbox-recipes/kept', 'team-a']])
@@ -263,7 +263,7 @@ describe('AppService session rejected by /me', () => {
 
     expect(service.authClient.switchTeam).toHaveBeenCalledTimes(1)
     expect(service.authClient.getMe).not.toHaveBeenCalled()
-    expect(service.sessionToken).toBe('session-token')
+    expect(service.sessionToken).toBe('synthetic-session-token')
     expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
     expect(onSessionCleared).not.toHaveBeenCalled()
   })
@@ -273,7 +273,7 @@ describe('AppService session rejected by /me', () => {
     const rejection = unauthorized()
     service.authClient = {
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'session-team-b',
+        token: 'synthetic-session-team-b',
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
       getMe: vi.fn().mockRejectedValue(rejection),
@@ -282,7 +282,7 @@ describe('AppService session rejected by /me', () => {
     await expect(service.switchTeam('team-b')).rejects.toBe(rejection)
 
     expect(service.authClient.switchTeam).toHaveBeenCalledTimes(1)
-    expect(service.authClient.getMe).toHaveBeenCalledWith('session-team-b')
+    expect(service.authClient.getMe).toHaveBeenCalledWith('synthetic-session-team-b')
     expectSessionEnded(service, tokenStore, onSessionCleared)
   })
 
@@ -292,7 +292,7 @@ describe('AppService session rejected by /me', () => {
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockRejectedValue(fenceFailure)
     service.authClient = {
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'session-team-b',
+        token: 'synthetic-session-team-b',
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
       getMe: vi.fn().mockResolvedValue(sessionMe({ teamId: 'team-b', teamName: 'Team B' })),
@@ -361,7 +361,7 @@ describe('AppService workflow listing when the session is replaced', () => {
     const { service, replaceSession } = listingService()
     let releaseTeamA!: () => void
     service.authClient.listWorkflows.mockImplementation(async (token: string) => {
-      if (token !== 'session-token') return { items: [recipe(`via-${token}`)], count: 1 }
+      if (token !== 'synthetic-session-token') return { items: [recipe(`via-${token}`)], count: 1 }
       await new Promise<void>(resolve => (releaseTeamA = resolve))
       return { items: [recipe('from-a')], count: 1 }
     })
@@ -372,7 +372,7 @@ describe('AppService workflow listing when the session is replaced', () => {
         () => 'rejected'
       )
       await vi.waitFor(() => expect(service.authClient.listWorkflows).toHaveBeenCalledTimes(1))
-      expect(service.authClient.listWorkflows).toHaveBeenCalledWith('session-token')
+      expect(service.authClient.listWorkflows).toHaveBeenCalledWith('synthetic-session-token')
       await replaceSession()
       releaseTeamA()
 
@@ -387,7 +387,7 @@ describe('AppService workflow listing when the session is replaced', () => {
   it('rejects a listing whose session was replaced inside a team request', async () => {
     const { service, replaceSession } = listingService()
     service.authClient.listWorkflows.mockImplementation(async (token: string) => {
-      if (token !== 'session-token') return { items: [recipe(`via-${token}`)], count: 1 }
+      if (token !== 'synthetic-session-token') return { items: [recipe(`via-${token}`)], count: 1 }
       await replaceSession()
       return { items: [recipe('from-a')], count: 1 }
     })
@@ -426,7 +426,7 @@ describe('AppService workflow listing when the session is replaced', () => {
     )
 
     // The current team was listed with the session that started the listing.
-    expect(service.authClient.listWorkflows).toHaveBeenCalledWith('session-token')
+    expect(service.authClient.listWorkflows).toHaveBeenCalledWith('synthetic-session-token')
     expect(outcome).toBe('rejected')
     expect([...service.workflowTeamByKey]).toEqual([['sandbox-recipes/b-own', 'team-c']])
   })
