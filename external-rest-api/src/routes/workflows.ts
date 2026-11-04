@@ -5,23 +5,7 @@ import {
   controlApiRequest,
   controlApiRequestWithStatus,
 } from '../controlApiClient.js'
-import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
-
-const PROPAGATED_STATUSES = new Set([400, 403, 404, 409, 410, 422])
-
-function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  const sanitized = sanitizeControlApiPublicError(
-    error,
-    PROPAGATED_STATUSES,
-    publicCorrelationId(res.req)
-  )
-  if (sanitized) {
-    res.status(sanitized.status).json(sanitized.body)
-    return
-  }
-  next(error)
-}
 
 export function createExternalWorkflowsRouter(): Router {
   const router = Router()
@@ -37,7 +21,7 @@ export function createExternalWorkflowsRouter(): Router {
         })
         res.status(200).json(result)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -63,7 +47,7 @@ export function createExternalWorkflowsRouter(): Router {
         )
         res.status(200).json(result)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -89,7 +73,7 @@ export function createExternalWorkflowsRouter(): Router {
         )
         res.status(200).json(result)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -122,7 +106,7 @@ export function createExternalWorkflowsRouter(): Router {
         )
         res.status(status).json(data)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -151,7 +135,7 @@ export function createExternalWorkflowsRouter(): Router {
         )
         res.status(200).json(result)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -178,7 +162,7 @@ export function createExternalWorkflowsRouter(): Router {
         )
         res.status(200).json(result)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -210,7 +194,7 @@ export function createExternalWorkflowsRouter(): Router {
         }
         res.end(result.body)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )

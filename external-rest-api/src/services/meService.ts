@@ -73,8 +73,7 @@ export async function switchTeam(
   userId: string,
   email: string,
   nextTeamId: string,
-  sessionToken: string,
-  clientIp?: string
+  sessionToken: string
 ) {
   let membership: { team_id: string; role: TeamRole; team_name: string }
   try {
@@ -84,8 +83,8 @@ export async function switchTeam(
       { userSessionToken: sessionToken }
     )
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 404) return null
-    throw error
+    if (error instanceof ControlApiError && error.status === 503) throw error
+    return null
   }
 
   const role = membership.role as TeamRole
@@ -100,7 +99,6 @@ export async function switchTeam(
         role,
       },
       userSessionToken: sessionToken,
-      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
     }
   )
   return {
@@ -133,8 +131,8 @@ export async function getMe(userId: string, teamId: string, sessionToken: string
       },
     }
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 404) return null
-    throw error
+    if (error instanceof ControlApiError && error.status === 503) throw error
+    return null
   }
 }
 

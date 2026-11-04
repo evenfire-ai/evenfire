@@ -1,7 +1,6 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
 import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
-import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
 /**
@@ -22,7 +21,6 @@ export type ContextSharedFilesystemSummary = {
   message: string | null
 }
 
-const PROPAGATED_STATUSES = new Set([400, 403, 404, 409, 410, 422])
 const PASSTHROUGH_HEADERS = [
   'retry-after',
   'ratelimit',
@@ -32,19 +30,6 @@ const PASSTHROUGH_HEADERS = [
   'x-ratelimit-reset',
   'x-request-id',
 ] as const
-
-function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  const sanitized = sanitizeControlApiPublicError(
-    error,
-    PROPAGATED_STATUSES,
-    publicCorrelationId(res.req)
-  )
-  if (sanitized) {
-    res.status(sanitized.status).json(sanitized.body)
-    return
-  }
-  next(error)
-}
 
 export function createContextSharedFilesystemsRouter(): Router {
   const router = Router()
@@ -74,7 +59,7 @@ export function createContextSharedFilesystemsRouter(): Router {
         )
         res.status(200).json(data)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )

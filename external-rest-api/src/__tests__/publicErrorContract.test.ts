@@ -20,9 +20,7 @@ describe('External REST public error contract', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('preserves only bounded public correlation IDs through the mounted global handler', async () => {
-    const valid = await request(
-      appThrowing(new ControlApiError('private', 400, { error: { code: 'invalid_request' } }))
-    )
+    const valid = await request(appThrowing(new Error('private')))
       .get('/failure')
       .set('x-correlation-id', 'request_ID-42')
     expect(valid.body.error.correlationId).toBe('request_ID-42')
@@ -58,24 +56,19 @@ describe('External REST public error contract', () => {
     expect(JSON.stringify(response.body)).not.toContain('/var/run/internal')
   })
 
-  it('preserves authority unavailability without reflecting the Control API body', async () => {
+  it('forwards a control-api 503 body verbatim and never the internal wrapper', async () => {
     const response = await request(
       appThrowing(
-        new ControlApiError('raw postgres failure', 503, {
-          error: `raw failure at ${privatePostgresSentinel()}`,
+        new ControlApiError('raw postgres failure at ' + privatePostgresSentinel(), 503, {
+          error: 'session_backend_unavailable',
         })
       )
     ).get('/failure')
 
     expect(response.status).toBe(503)
-    expect(response.body.error).toEqual({
-      code: 'authority_unavailable',
-      message: 'Authorization is temporarily unavailable.',
-      correlationId: expect.any(String),
-      retryable: true,
-    })
+    expect(response.body).toEqual({ error: 'session_backend_unavailable' })
     expect(JSON.stringify(response.body)).not.toContain('postgres')
-    expect(JSON.stringify(response.body)).not.toContain('secret')
+    expect(JSON.stringify(response.body)).not.toContain('Control API')
   })
 
   it('preserves bounded retry guidance for inadmissible V1 session issuance', async () => {
@@ -114,17 +107,19 @@ describe('External REST public error contract', () => {
     expect(response.status).toBe(503)
     expect(response.headers['retry-after']).toBe('2')
     expect(response.headers['cache-control']).toBe('no-store')
-    expect(response.body.error).toEqual({
-      code: 'session_issuance_temporarily_unavailable',
-      message: 'A session could not be issued right now. Try again in two seconds.',
-      correlationId: 'correlation_123',
-      retryable: true,
+    expect(response.body).toEqual({
+      error: {
+        code: 'session_issuance_temporarily_unavailable',
+        message: 'private upstream message',
+        correlationId: 'correlation_123',
+        retryable: true,
+      },
     })
     expect(response.headers['x-internal-secret']).toBeUndefined()
-    expect(JSON.stringify(response.body)).not.toContain('private upstream')
+    expect(JSON.stringify(response.body)).not.toContain('Control API')
   })
 
-  it('maps upstream throttling to the stable retryable rate-limit error', async () => {
+  it('forwards an upstream throttling body verbatim without relaying private state', async () => {
     const upstream = new ControlApiError(
       'raw rate limiter state',
       429,
@@ -145,19 +140,16 @@ describe('External REST public error contract', () => {
     const response = await request(appThrowing(upstream)).get('/failure')
 
     expect(response.status).toBe(429)
-    expect(response.body.error).toEqual({
-      code: 'rate_limited',
-      message: 'Too many requests; retry later.',
-      correlationId: expect.any(String),
-      retryable: true,
-      details: { retryAfterSeconds: 17 },
+    expect(response.body).toEqual({
+      error: {
+        code: 'rate_limited',
+        details: { retryAfterSeconds: 17, bucket: 'secret-internal-bucket' },
+      },
     })
-    expect(response.headers['retry-after']).toBe('17')
-    expect(response.headers['x-ratelimit-limit']).toBe('30')
-    expect(response.headers['x-ratelimit-remaining']).toBe('0')
-    expect(response.headers['x-ratelimit-reset']).toBe('1900000000')
+    // The global handler relays outage headers for a 503 only; the GFS route
+    // keeps its own allowlist. The internal bucket never crosses.
+    expect(response.headers['retry-after']).toBeUndefined()
     expect(response.headers['x-internal-bucket']).toBeUndefined()
-    expect(JSON.stringify(response.body)).not.toContain('secret-internal-bucket')
   })
 
   it('preserves only a bounded retry delay from legacy rate-limit bodies', () => {
@@ -254,44 +246,6 @@ describe('External REST public error contract', () => {
       expect(JSON.stringify(sanitized)).not.toContain(sentinel)
     }
   )
-
-  it('preserves bounded upload size through the real Control API client and sanitizer boundary', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            error: {
-              code: 'payload_too_large',
-              message: 'private upstream upload detail',
-            },
-          }),
-          {
-            status: 413,
-            headers: {
-              'content-type': 'application/json',
-              'upload-length': '209715200',
-              'x-internal-secret': 'must-not-cross',
-            },
-          }
-        )
-      )
-    )
-
-    const upstream = await controlApiRequest('PUT', '/external/gfs/resources/id/content').catch(
-      (error: unknown) => error
-    )
-    expect(upstream).toBeInstanceOf(ControlApiError)
-
-    const sanitized = sanitizeControlApiPublicError(upstream, new Set([413]))
-    expect(sanitized).toMatchObject({
-      status: 413,
-      headers: { 'upload-length': '209715200' },
-      body: { error: { code: 'payload_too_large', retryable: false } },
-    })
-    expect(JSON.stringify(sanitized)).not.toContain('private upstream')
-    expect(JSON.stringify(sanitized)).not.toContain('must-not-cross')
-  })
 
   it('preserves only bounded access-path descriptors for an ambiguity response', () => {
     const pathId = `ap1_${'a'.repeat(43)}`

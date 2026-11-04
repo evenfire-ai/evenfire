@@ -96,7 +96,7 @@ describe('routes/auth password-login', () => {
     expect(res.body).toEqual({ error: 'Unauthorized' })
   })
 
-  it('keeps any other Google login 401 on the sanitized public envelope', async () => {
+  it('forwards any other Google login 401 body verbatim', async () => {
     authServiceMock.loginWithGoogle.mockReset()
     authServiceMock.loginWithGoogle.mockRejectedValueOnce(
       new ControlApiError('private upstream detail', 401, { error: 'session_revoked' })
@@ -108,8 +108,8 @@ describe('routes/auth password-login', () => {
 
     expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
     expect(res.status).toBe(401)
-    expect(res.body).not.toEqual({ error: 'Unauthorized' })
-    expect(res.body.error).toEqual(expect.objectContaining({ code: expect.any(String) }))
+    expect(res.body).toEqual({ error: 'session_revoked' })
+    expect(JSON.stringify(res.body)).not.toContain('private upstream detail')
   })
 
   it('keeps password setup state opaque on password-login', async () => {
@@ -199,7 +199,7 @@ describe('routes/auth password-login', () => {
     )
   })
 
-  it('delegates Google verification with the trusted client IP', async () => {
+  it('delegates Google verification without an edge-supplied client IP', async () => {
     authServiceMock.loginWithGoogle.mockResolvedValueOnce({
       token: 'google-session-test-token',
       me: { id: 'user-1', email: 'user@example.test' },
@@ -211,10 +211,7 @@ describe('routes/auth password-login', () => {
       .send({ idToken: 'opaque-test-token' })
 
     expect(response.status).toBe(200)
-    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith(
-      { idToken: 'opaque-test-token' },
-      '198.51.100.52'
-    )
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith({ idToken: 'opaque-test-token' })
   })
 
   it('forwards more than ten session renewals without a local rate limit', async () => {
@@ -235,7 +232,29 @@ describe('routes/auth password-login', () => {
       expect(response.headers['x-ratelimit-limit']).toBeUndefined()
     }
     expect(authServiceMock.renewUserSession).toHaveBeenCalledTimes(12)
-    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(session, '198.51.100.89')
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(session)
+  })
+
+  it('keeps a V1 profile cookie when renewal is refused with 401', async () => {
+    const v1Session = 'synthetic-v1-profile-session'
+    authServiceMock.renewUserSession.mockRejectedValueOnce(
+      new ControlApiError('Control API POST /external/auth/session/renew failed (401)', 401, {
+        error: 'Unauthorized',
+      })
+    )
+
+    const response = await request(buildApp())
+      .post('/api/v1/auth/session/renew')
+      .set('cookie', `profile_session=${v1Session}`)
+      .expect(401)
+
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    // E-2: control-api renews V2 sessions only, so a 401 on a still-valid V1
+    // cookie must not delete it.
+    expect(String(response.headers['set-cookie'] ?? '')).not.toContain('profile_session')
+    // Witness: the route reached the renewal with the cookie's token.
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledOnce()
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(v1Session)
   })
 
   it('documents the password-reset limiter headers and client-IP contract', async () => {

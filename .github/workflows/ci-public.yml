@@ -146,7 +146,7 @@ jobs:
             pinned_suites: helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts passwordRecovery.http.contract.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/control-api.json
           - service: external-rest-api
-            pinned_suites: invitations.passwordRecovery.public.test.ts
+            pinned_suites: invitations.passwordRecovery.public.test.ts mixedVersion.baseControlApi.test.ts
           - service: codex-llm-proxy
             pinned_suites: originPolicy.test.ts server.security.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/codex-llm-proxy.json

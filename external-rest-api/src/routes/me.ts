@@ -68,7 +68,7 @@ export function createMeRouter(): Router {
         return
       }
 
-      const result = await switchTeam(auth.userId, auth.email, nextTeamId, sessionToken, req.ip)
+      const result = await switchTeam(auth.userId, auth.email, nextTeamId, sessionToken)
       if (!result) {
         res.status(403).json({ error: 'You are not a member of this team' })
         return

@@ -1,16 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { externalRestPublicErrorHandler } from '../src/app.js'
 import { createContextSharedFilesystemsRouter } from '../src/routes/contextSharedFilesystems.js'
 
 const authTokenMock = vi.hoisted(() => ({
   verifyToken: vi.fn(),
 }))
 
-const controlApiClientMock = vi.hoisted(() => ({
-  controlApiRequest: vi.fn(),
-  controlApiStreamRequest: vi.fn(),
-  ControlApiError: class ControlApiError extends Error {
+const controlApiClientMock = vi.hoisted(() => {
+  class ControlApiError extends Error {
     status: number
     body: unknown
     constructor(message: string, status: number, body: unknown) {
@@ -18,8 +17,19 @@ const controlApiClientMock = vi.hoisted(() => ({
       this.status = status
       this.body = body
     }
-  },
-}))
+  }
+  class ControlApiPathError extends ControlApiError {
+    constructor() {
+      super('Control API request path is not allowed', 400, { error: 'invalid_request' })
+    }
+  }
+  return {
+    controlApiRequest: vi.fn(),
+    controlApiStreamRequest: vi.fn(),
+    ControlApiError,
+    ControlApiPathError,
+  }
+})
 
 vi.mock('../src/authToken.js', () => authTokenMock)
 vi.mock('../src/controlApiClient.js', () => ({
@@ -38,6 +48,7 @@ function buildApp() {
   const app = express()
   app.use(express.json())
   app.use(createContextSharedFilesystemsRouter())
+  app.use(externalRestPublicErrorHandler)
   return app
 }
 
@@ -81,7 +92,7 @@ describe('GET /me/contexts/:contextId/shared-filesystems', () => {
     expect(controlApiClientMock.controlApiRequest).not.toHaveBeenCalled()
   })
 
-  it('uses the request correlation when a sanitized upstream error has none', async () => {
+  it('forwards an upstream error body verbatim', async () => {
     authTokenMock.verifyToken.mockReturnValue(claims)
     controlApiClientMock.controlApiRequest.mockRejectedValueOnce(
       new controlApiClientMock.ControlApiError('private upstream detail', 403, {
@@ -95,7 +106,8 @@ describe('GET /me/contexts/:contextId/shared-filesystems', () => {
       .set('x-correlation-id', 'shared_filesystems_ID-42')
       .expect(403)
 
-    expect(response.body.error.correlationId).toBe('shared_filesystems_ID-42')
+    expect(response.body).toEqual({ error: { code: 'forbidden' } })
+    expect(controlApiClientMock.controlApiRequest).toHaveBeenCalledTimes(1)
   })
 })
 

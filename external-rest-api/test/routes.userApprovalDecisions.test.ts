@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { externalRestPublicErrorHandler } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createUserApprovalDecisionsRouter } from '../src/routes/userApprovalDecisions.js'
 
@@ -35,6 +36,7 @@ describe('routes/userApprovalDecisions', () => {
     const app = express()
     app.use(express.json())
     app.use(createUserApprovalDecisionsRouter())
+    app.use(externalRestPublicErrorHandler)
     return app
   }
 
@@ -169,7 +171,7 @@ describe('routes/userApprovalDecisions', () => {
     expect(userApprovalDecisionsServiceMock.decideUserApprovalDecision).not.toHaveBeenCalled()
   })
 
-  it('sanitizes expected control-api errors from pending list', async () => {
+  it('forwards expected control-api errors from pending list', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     userApprovalDecisionsServiceMock.listPendingUserApprovalDecisions.mockRejectedValueOnce(
       new ControlApiError('gone', 410, { error: 'expired' })
@@ -182,17 +184,13 @@ describe('routes/userApprovalDecisions', () => {
       .set('x-correlation-id', 'approval_decisions_ID-42')
       .expect(410)
 
-    expect(response.body).toEqual({
-      error: {
-        code: 'gone',
-        message: 'The resource is no longer available.',
-        correlationId: 'approval_decisions_ID-42',
-        retryable: false,
-      },
-    })
+    expect(response.body).toEqual({ error: 'expired' })
+    expect(userApprovalDecisionsServiceMock.listPendingUserApprovalDecisions).toHaveBeenCalledTimes(
+      1
+    )
   })
 
-  it('sanitizes expected control-api errors with message fallback bodies', async () => {
+  it('answers the status sentence for a non-object upstream body', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     userApprovalDecisionsServiceMock.decideUserApprovalDecision.mockRejectedValueOnce(
       new ControlApiError('conflict', 409, 'not-json')
@@ -205,14 +203,8 @@ describe('routes/userApprovalDecisions', () => {
       .send({ decision: 'deny' })
       .expect(409)
 
-    expect(response.body).toEqual({
-      error: {
-        code: 'conflict',
-        message: 'The request conflicts with current state.',
-        correlationId: expect.any(String),
-        retryable: false,
-      },
-    })
+    expect(response.body).toEqual({ error: 'Conflict' })
+    expect(userApprovalDecisionsServiceMock.decideUserApprovalDecision).toHaveBeenCalledTimes(1)
   })
 
   it('delegates unexpected service errors to the express error handler', async () => {

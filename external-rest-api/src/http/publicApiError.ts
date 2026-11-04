@@ -33,10 +33,6 @@ const PUBLIC_CODE_BY_STATUS: Readonly<Record<number, string>> = {
   507: 'insufficient_storage',
 }
 
-const SUPPORTED_CONTROL_API_PUBLIC_STATUSES = new Set(
-  Object.keys(PUBLIC_CODE_BY_STATUS).map(Number)
-)
-
 const PUBLIC_MESSAGE_BY_CODE: Readonly<Record<string, string>> = {
   invalid_request: 'The request is not valid.',
   invalid_session: 'The session is not valid.',
@@ -275,17 +271,6 @@ export function sanitizeControlApiPublicError(
       },
     },
   }
-}
-
-export function sanitizeSupportedControlApiPublicError(
-  error: unknown,
-  fallbackCorrelationId = ''
-): SanitizedControlApiPublicError | null {
-  return sanitizeControlApiPublicError(
-    error,
-    SUPPORTED_CONTROL_API_PUBLIC_STATUSES,
-    fallbackCorrelationId
-  )
 }
 
 export function sendSanitizedControlApiPublicError(

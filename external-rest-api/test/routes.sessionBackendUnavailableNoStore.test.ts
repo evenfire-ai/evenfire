@@ -104,26 +104,26 @@ describe('External REST session backend 503 cache semantics', () => {
     })
   })
 
-  it('keeps upstream no-store on the sanitized switch-team authority 503', async () => {
+  it('keeps upstream no-store on the forwarded switch-team authority 503', async () => {
     const response = await request(createApp())
       .post('/api/v1/me/switch-team')
       .set('authorization', 'Bearer synthetic-session-token')
       .send({ teamId: 'team-b' })
 
     expect(response.status).toBe(503)
-    expect(response.body.error).toMatchObject({ code: 'authority_unavailable', retryable: true })
+    expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
     expect(response.headers['cache-control']).toBe('no-store')
   })
 
-  it('keeps upstream no-store on the sanitized create-team authority 503', async () => {
+  it('keeps upstream no-store on the forwarded create-team authority 503', async () => {
     const response = await request(createApp())
       .post('/api/v1/team')
       .set('authorization', 'Bearer synthetic-session-token')
       .send({ name: 'Team New' })
 
     expect(response.status).toBe(503)
-    expect(response.body.error).toMatchObject({ code: 'authority_unavailable', retryable: true })
+    expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
     expect(response.headers['cache-control']).toBe('no-store')
   })
@@ -141,7 +141,7 @@ describe('External REST session backend 503 cache semantics', () => {
       .send({ teamId: 'team-b' })
 
     expect(response.status).toBe(503)
-    expect(response.body.error).toMatchObject({ code: 'authority_unavailable', retryable: true })
+    expect(response.body).toEqual({ error: 'authority_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
     expect(response.headers['cache-control']).toBeUndefined()
   })
