@@ -150,6 +150,7 @@ export async function exchangeLegacyExternalUserSession(
     userId: string
     email: string
     teamId: string
+    role: TeamRole
   },
   options: {
     policy: EffectiveUserAccessPolicy
@@ -190,7 +191,7 @@ export async function exchangeLegacyExternalUserSession(
     const row = membership.rows[0] as
       | { role?: TeamRole; lifecycle_version?: number | string }
       | undefined
-    if (!row?.role) return { status: 'membership_not_found' }
+    if (!row?.role || row.role !== input.role) return { status: 'membership_not_found' }
 
     const issued = await issueExternalUserSession(
       {

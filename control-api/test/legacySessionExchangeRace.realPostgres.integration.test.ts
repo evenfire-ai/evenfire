@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { type DbTransactionClient, type DbTransactionOptions, initDb } from '../src/db.js'
-import type { AuthClaims } from '../src/profileTypes.js'
+import type { AuthClaims, TeamRole } from '../src/profileTypes.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import { exchangeLegacyExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
 import {
@@ -123,7 +123,10 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
     throw new Error('expected real password producer to block on the user security boundary')
   }
 
-  async function principal(label: string): Promise<{
+  async function principal(
+    label: string,
+    role: TeamRole = 'admin'
+  ): Promise<{
     userId: string
     teamId: string
     email: string
@@ -141,14 +144,14 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
     await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, $2)`, [teamId, label])
     await databasePool.query(
       `INSERT INTO team_members(team_id, user_id, role, status)
-       VALUES ($1, $2, 'admin', 'active')`,
-      [teamId, userId]
+       VALUES ($1, $2, $3, 'active')`,
+      [teamId, userId, role]
     )
     const token = signExternalSessionToken({
       userId,
       email,
       teamId,
-      role: 'admin',
+      role,
       authGeneration: 1,
     })
     const claims = verifyExternalSessionToken(token)
@@ -264,6 +267,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
             userId: source.userId,
             email: source.email,
             teamId: source.teamId,
+            role: 'admin',
           },
           {
             policy,
@@ -301,6 +305,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
               userId: source.userId,
               email: source.email,
               teamId: source.teamId,
+              role: 'admin',
             },
             { policy }
           )
@@ -333,6 +338,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
           userId: source.userId,
           email: source.email,
           teamId: source.teamId,
+          role: 'admin',
         },
         {
           policy,
@@ -381,6 +387,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
               userId: source.userId,
               email: source.email,
               teamId: source.teamId,
+              role: 'admin',
             },
             { policy }
           )
@@ -409,6 +416,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
         userId: source.userId,
         email: source.email,
         teamId: source.teamId,
+        role: 'admin',
       },
       {
         policy,
@@ -470,6 +478,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
           userId: source.userId,
           email: source.email,
           teamId: source.teamId,
+          role: 'admin',
         },
         {
           policy,
@@ -508,6 +517,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
             userId: source.userId,
             email: source.email,
             teamId: source.teamId,
+            role: 'admin',
           },
           { policy }
         )
@@ -516,6 +526,30 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
       await gate.query('ROLLBACK').catch(() => undefined)
       gate.release()
     }
+  })
+
+  it('rejects an exchange whose requested role differs from the locked membership role', async () => {
+    const source = await principal('role-mismatch', 'member')
+    const input = {
+      token: source.token,
+      claims: source.claims,
+      userId: source.userId,
+      email: source.email,
+      teamId: source.teamId,
+    }
+
+    await expect(
+      exchangeLegacyExternalUserSession({ ...input, role: 'admin' }, { policy })
+    ).resolves.toEqual({ status: 'membership_not_found' })
+
+    const issued = await exchangeLegacyExternalUserSession({ ...input, role: 'member' }, { policy })
+    expect(issued).toMatchObject({ status: 'issued', role: 'member' })
+    if (issued.status !== 'issued') throw new Error('exchange did not issue a token')
+    expect(verifyExternalSessionToken(issued.token)).toMatchObject({
+      userId: source.userId,
+      teamId: source.teamId,
+      role: 'member',
+    })
   })
 
   it('keeps revoke-all rollback safe and monotonic on real PostgreSQL', async () => {

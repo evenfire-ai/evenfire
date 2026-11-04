@@ -377,5 +377,34 @@ describe('external auth authority unavailability parity', () => {
       expect(JSON.stringify(response.body)).not.toContain('boom')
       expect(response.headers['retry-after']).toBeUndefined()
     })
+
+    it('answers the session backend 503 for a classified outage in the session stage', async () => {
+      sessions.authenticateExternalUserSession.mockRejectedValue(unavailable())
+
+      const response = await rpcTokenRequest()
+
+      expect(response.status).toBe(503)
+      expect(response.body).toEqual({
+        error: 'session_backend_unavailable',
+        retryAfterSeconds: 2,
+      })
+      expect(response.headers['retry-after']).toBe('2')
+      expect(response.headers['cache-control']).toBe('no-store')
+      expect(sessions.authenticateExternalUserSession).toHaveBeenCalledOnce()
+      expect(liveTeam.getLiveTeamMembership).not.toHaveBeenCalled()
+    })
+
+    it('keeps a plain session-stage error on the sanitized 500 path', async () => {
+      vi.stubEnv('NODE_ENV', 'production')
+      sessions.authenticateExternalUserSession.mockRejectedValue(new Error('boom'))
+
+      const response = await rpcTokenRequest()
+
+      expect(response.status).toBe(500)
+      expect(response.body).toMatchObject({ error: 'Internal Server Error' })
+      expect(JSON.stringify(response.body)).not.toContain('boom')
+      expect(response.headers['retry-after']).toBeUndefined()
+      expect(sessions.authenticateExternalUserSession).toHaveBeenCalledOnce()
+    })
   })
 })

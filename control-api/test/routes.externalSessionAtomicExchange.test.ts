@@ -84,13 +84,18 @@ describe('legacy external-session replacement exchange', () => {
     expect(response.status).toBe(401)
     expect(response.body).toMatchObject({ error: { code: 'invalid_session' } })
     expect(issuance.exchangeLegacyExternalUserSession).toHaveBeenCalledWith(
-      expect.objectContaining({ token: 'synthetic-source-token', teamId: 'team-new', claims }),
+      expect.objectContaining({
+        token: 'synthetic-source-token',
+        teamId: 'team-new',
+        role: 'admin',
+        claims,
+      }),
       expect.objectContaining({ policy: expect.any(Object) })
     )
     expect(issuance.issueExternalUserSession).not.toHaveBeenCalled()
   })
 
-  it('uses the current locked membership role for the replacement representation', async () => {
+  it('passes the requested role to the locked exchange and returns its replacement', async () => {
     issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
       status: 'issued',
       token: 'synthetic-replacement-token',
@@ -101,12 +106,73 @@ describe('legacy external-session replacement exchange', () => {
       .post('/external/auth/session-token')
       .set('x-forwarded-for', '203.0.113.44')
       .set('x-user-session-token', 'synthetic-source-token')
-      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'admin' })
+      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'member' })
       .expect(200)
 
     expect(response.body).toEqual({
       token: 'synthetic-replacement-token',
       sessionContract: 'v1',
+      deprecated: true,
+    })
+    expect(issuance.exchangeLegacyExternalUserSession).toHaveBeenCalledWith(
+      expect.objectContaining({ teamId: 'team-new', role: 'member' }),
+      expect.objectContaining({ policy: expect.any(Object) })
+    )
+  })
+
+  it('rejects a v2 switch whose requested role differs from the live membership role', async () => {
+    const v2Claims = {
+      userId: claims.userId,
+      email: claims.email,
+      sid: 'source-session',
+      jti: 'source-jti',
+    }
+    const v2Authentication = {
+      status: 'authenticated',
+      contract: 'v2',
+      claims: v2Claims,
+      authorityContext: {
+        contract: 'v2' as const,
+        userId: claims.userId,
+        sid: v2Claims.sid,
+        jti: v2Claims.jti,
+        sessionVersion: 1,
+      },
+      policy: { issueV1: true, switchCompatibility: true },
+    }
+    sessions.authenticateExternalUserSession.mockResolvedValue(v2Authentication)
+    database.query.mockResolvedValue({
+      rows: [{ role: 'member', lifecycle_version: 1 }],
+      rowCount: 1,
+    })
+    const payload = { userId: claims.userId, email: claims.email, teamId: 'team-new' }
+
+    const mismatch = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'admin' })
+
+    expect(mismatch.status).toBe(403)
+    expect(mismatch.body).toEqual({ error: 'membership_not_found' })
+    // Witness: the live membership read ran for this identity and team.
+    expect(database.query).toHaveBeenCalledWith(expect.stringContaining('SELECT tm.role'), [
+      claims.userId,
+      claims.email,
+      'team-new',
+    ])
+    expect(issuance.exchangeLegacyExternalUserSession).not.toHaveBeenCalled()
+
+    const control = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'member' })
+
+    expect(control.status).toBe(200)
+    expect(control.body).toEqual({
+      token: 'synthetic-source-token',
+      sessionContract: 'v2',
       deprecated: true,
     })
   })

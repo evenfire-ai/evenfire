@@ -162,7 +162,7 @@ async function requireLegacyRpcSessionRateLimitContext(
     req.externalSessionAuthentication = authentication
     next()
   } catch (error) {
-    next(error)
+    handleExternalSessionBackendFailure(error, req, res, next)
   }
 }
 
@@ -375,6 +375,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
               userId,
               email,
               teamId,
+              role: role as AuthClaims['role'],
             },
             {
               policy: authentication.policy,
@@ -414,7 +415,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
             | { role?: 'admin' | 'inviter' | 'member'; lifecycle_version?: number | string }
             | undefined
         )?.role
-        if (!liveRole) {
+        if (!liveRole || liveRole !== role) {
           return res.status(403).json({ error: 'membership_not_found' })
         }
         return res.status(200).json({
