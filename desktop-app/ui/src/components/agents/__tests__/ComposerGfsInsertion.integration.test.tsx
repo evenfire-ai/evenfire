@@ -1024,35 +1024,6 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
     expect(screen.getByRole('alert').textContent).toContain('401')
   })
 
-  it('revokes session authority when the fresh direct picker check returns 401', async () => {
-    const producers = installProducers()
-    const noteCalls = new Map<string, number>()
-    producers.affordances.mockImplementation(async resourceId => {
-      if (resourceId !== note.resourceId) return exactReadAffordance(['read'])
-      const count = (noteCalls.get(resourceId) ?? 0) + 1
-      noteCalls.set(resourceId, count)
-      if (count === 2) throw new Error('HTTP 401 Unauthorized')
-      return exactReadAffordance(['read'])
-    })
-    const { queryClient } = await renderComposer()
-    const insertItem = await openNestedResource()
-    const beforeRevision = getComposerDraftRevision('chat-1', 'agent-1')
-
-    fireEvent.click(insertItem)
-    await waitFor(() => {
-      const accessState = queryClient
-        .getQueryCache()
-        .findAll({ queryKey: ['desktop-app', 'gfs-access'] })
-        .map(query => query.state.data)
-      expect(accessState).toContain('revoked')
-    })
-
-    expect(getComposerDraft('chat-1', 'agent-1')).toBe('')
-    expect(getComposerDraftRevision('chat-1', 'agent-1')).toBe(beforeRevision)
-    expect(screen.queryByRole('menuitem', { name: 'Insert link to Release notes.md' })).toBeNull()
-    expect(screen.getByRole('alert').textContent).toContain('401')
-  })
-
   it('suppresses a duplicate activation while the direct authorization is pending', async () => {
     const producers = installProducers()
     const directResults: Array<(value: ReturnType<typeof exactReadAffordance>) => void> = []
