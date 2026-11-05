@@ -11,6 +11,7 @@ import {
 } from 'react'
 import { PROFILE_ROUTES } from '@constants/routes'
 import {
+  AuthExpiredError,
   ProfileApiError,
   acceptInvitation,
   clearUnconfirmedLogout,
@@ -330,6 +331,15 @@ export function InvitationClient({
         setError(
           'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.'
         )
+      } else if (!isPasswordReset && nextError instanceof AuthExpiredError) {
+        // The accepted-invitation password call does not pass the logout fence:
+        // the edge treats a presented session cookie as its only proof, and the
+        // fenced cookie may belong to another user. Resubmitting the form would
+        // hit the same fence, so end at Sign in and the recovery link instead.
+        setPasswordPhase('terminal')
+        setPassword('')
+        setConfirmPassword('')
+        setError(friendlyInvitationError(nextError, isPasswordReset))
       } else if (isTerminalPasswordError(nextError)) {
         // The proof was invalidated after this screen loaded. Offering the same
         // dead form again would trap the person, so end at a usable action.

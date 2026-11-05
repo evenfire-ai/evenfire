@@ -306,6 +306,56 @@ describe('InvitationClient guided password reauthentication', () => {
     }
   )
 
+  it('ends an accepted-invitation password setup blocked by the logout fence at Sign in and recovery', async () => {
+    const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    // The real API function produces the rejection: the persisted fence makes
+    // apiSend throw AuthExpiredError before any request leaves the browser.
+    window.localStorage.setItem('profile_logout_unconfirmed', 'true')
+    mocks.setupAcceptedInvitationPasswordWithToken.mockImplementation(
+      async (invitationUrlId: string, email: string, invitationId: string, password: string) =>
+        actual.setupAcceptedInvitationPasswordWithToken(
+          invitationUrlId,
+          email,
+          invitationId,
+          password
+        )
+    )
+    vi.stubGlobal('fetch', vi.fn())
+
+    render(
+      <InvitationClient
+        invitationToken="fenced-member-invitation-proof"
+        initialInvitation={acceptedMemberInvitation}
+        initialError=""
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'Set password and continue' })).toBeInTheDocument()
+    fillPassword()
+    fireEvent.click(screen.getByRole('button', { name: 'Set password and continue' }))
+
+    expect(await screen.findByText('Sign in to continue with your account.')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Session expired')
+    expect(screen.queryByLabelText('Password')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Set password and continue' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Password updated' })).toBeNull()
+    expect(screen.getByRole('link', { name: 'Sign in' }).getAttribute('href')).toBe(
+      PROFILE_ROUTES.login({ email: acceptedMemberInvitation.email })
+    )
+    expect(
+      screen.getByRole('link', { name: 'Request a new recovery link' }).getAttribute('href')
+    ).toBe(PROFILE_ROUTES.forgotPassword({ email: acceptedMemberInvitation.email }))
+    // Witness: the password call ran once and was rejected by the fence itself.
+    expect(mocks.setupAcceptedInvitationPasswordWithToken).toHaveBeenCalledOnce()
+    await expect(
+      mocks.setupAcceptedInvitationPasswordWithToken.mock.results[0]?.value
+    ).rejects.toBeInstanceOf(actual.AuthExpiredError)
+    expect(fetch).not.toHaveBeenCalled()
+    expect(mocks.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
+    // Only an accepted reset releases the fence; this path leaves it in place.
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+  })
+
   it('keeps the logout fence on every preview and clears it only after the reset is accepted', async () => {
     window.localStorage.setItem('profile_logout_unconfirmed', 'true')
 
