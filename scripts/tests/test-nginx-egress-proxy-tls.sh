@@ -515,7 +515,7 @@ const proxies = deployment.spec.template.spec.containers.filter((c: any) => c.na
 if (proxies.length !== 1) throw new Error(`expected one egress-proxy container, found ${proxies.length}`)
 const proxy = proxies[0]
 
-// Plan §3.3: the resolver entry must be present and last, because
+// The resolver entry must be present and last, because
 // 15-local-resolvers.envsh returns early on an empty value and the CRD env
 // would otherwise win. The harness passes exactly this entry to docker run, so
 // a template that needs the variable while the Deployment stopped setting it
