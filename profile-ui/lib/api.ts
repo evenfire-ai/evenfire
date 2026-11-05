@@ -34,10 +34,13 @@ type ApiRequestOptions = {
   silentUnauthorized?: boolean
   /**
    * Allows one invitation-proof request through the unconfirmed-logout fence.
-   * Only a password-reset submission uses it: that route ignores the surviving
-   * cookie and clears it server-side, so the fence can be released after the
-   * server accepts the recovery action. Ordinary session requests must not
-   * bypass the fence.
+   * Two token-plus-email proofs use it, and neither reads the surviving cookie:
+   * - a password-reset submission clears that cookie server-side, so the screen
+   *   releases the fence after the server accepts the recovery action;
+   * - an invitation acceptance that is not a replay sets a new session cookie
+   *   for the invitee, which replaces the fenced cookie, so `acceptInvitation`
+   *   releases the fence; a replay sets no cookie and keeps it.
+   * Ordinary session requests must not bypass the fence.
    */
   allowUnconfirmedLogout?: boolean
 }
@@ -69,8 +72,9 @@ function markLogoutUnconfirmed(): boolean {
 
 /**
  * Clears the logout fence. The fence is released only after a successful
- * password login (parsed response), a confirmed logout, or an accepted recovery submission; a
- * recovery page view never releases it.
+ * password login (parsed response), a confirmed logout, an accepted recovery submission, or a
+ * non-replay invitation acceptance that set a new session cookie; a recovery page view never
+ * releases it.
  */
 export function clearUnconfirmedLogout(): void {
   if (typeof window === 'undefined') return
@@ -342,11 +346,18 @@ export async function acceptInvitation(
   invitationUrlId: string,
   email: string
 ): Promise<AcceptInvitationResponse> {
-  const response = (await apiSend('POST', '/api/v1/invitations/accept', {
-    token: invitationUrlId,
-    email,
-  })) as AcceptInvitationResponse
+  const response = (await apiSend(
+    'POST',
+    '/api/v1/invitations/accept',
+    { token: invitationUrlId, email },
+    {},
+    {},
+    { allowUnconfirmedLogout: true }
+  )) as AcceptInvitationResponse
   clearToken()
+  // A non-replay accept set a new session cookie for the invitee, replacing the
+  // cookie the fence protected. A replay sets no cookie, so the fence stays.
+  if (!response.replay) clearUnconfirmedLogout()
   return response
 }
 
