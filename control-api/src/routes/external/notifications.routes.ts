@@ -144,6 +144,11 @@ export function createExternalNotificationsRouter(): Router {
 
         let closed = false
         let flushInFlight = false
+        // A wake-up that arrives while a flush is reading, observing authority
+        // or writing is recorded here; the flush runs once more when it ends,
+        // so a notification committed after its read is not left for the next
+        // heartbeat.
+        let flushRequested = false
         // Delivery opens only once the snapshot frame is written. Listener
         // notifications that arrive during startup read and write nothing; the
         // first flush after the snapshot catches up from lastCursor.
@@ -237,8 +242,13 @@ export function createExternalNotificationsRouter(): Router {
         )
 
         const flushNewEvents = async () => {
-          if (closed || flushInFlight || !deliveryOpen) return
+          if (closed || !deliveryOpen) return
+          if (flushInFlight) {
+            flushRequested = true
+            return
+          }
           flushInFlight = true
+          flushRequested = false
           try {
             const events = await listNotificationStreamEventsForUser(claims.userId, {
               limit: config.notificationStreamSnapshotLimit,
@@ -308,6 +318,12 @@ export function createExternalNotificationsRouter(): Router {
             cleanup()
           } finally {
             flushInFlight = false
+            // One more flush per recorded wake-up. An error path above has
+            // already called cleanup(), so `closed` stops it from running.
+            if (flushRequested && !closed) {
+              flushRequested = false
+              void flushNewEvents()
+            }
           }
         }
 

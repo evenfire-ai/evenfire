@@ -100,7 +100,8 @@ export async function signCurrentExternalGfsUserToken(
               )
             : await transaction.query(
                 `SELECT u.lifecycle_state, u.lifecycle_version, clock_timestamp() AS db_now,
-                        s.revoked_at, s.session_version
+                        s.revoked_at, s.session_version,
+                        s.absolute_expires_at, s.idle_expires_at
                    FROM users u
                    JOIN external_user_sessions s ON s.sid = $2 AND s.user_id = u.id
                   WHERE u.id = $1`,
@@ -113,11 +114,13 @@ export async function signCurrentExternalGfsUserToken(
               db_now?: Date | string
               revoked_at?: unknown
               session_version?: unknown
+              absolute_expires_at?: unknown
+              idle_expires_at?: unknown
             }
           | undefined
         if (!row) return null
         const generation = Number(row.lifecycle_version)
-        const dbNow = row.db_now instanceof Date ? row.db_now : new Date(String(row.db_now ?? ''))
+        const dbNow = timestampOf(row.db_now)
         if (
           row.lifecycle_state !== 'active' ||
           !Number.isSafeInteger(generation) ||
@@ -129,11 +132,23 @@ export async function signCurrentExternalGfsUserToken(
         }
         if (context.contract === 'v1') {
           if (generation !== context.authGeneration) return null
-        } else if (
-          row.revoked_at !== null ||
-          Number(row.session_version) !== context.sessionVersion
-        ) {
-          return null
+        } else {
+          // Same expiry rules as the V2 session validator
+          // (userSessionService.ts validateLoadedSession), judged against the
+          // one db_now read above. Mint stays read-only: it refuses and leaves
+          // the revocation write to the validator.
+          const absoluteExpiresAt = timestampOf(row.absolute_expires_at)
+          const idleExpiresAt = timestampOf(row.idle_expires_at)
+          if (
+            row.revoked_at !== null ||
+            Number(row.session_version) !== context.sessionVersion ||
+            !Number.isFinite(absoluteExpiresAt.getTime()) ||
+            !Number.isFinite(idleExpiresAt.getTime()) ||
+            dbNow.getTime() >= absoluteExpiresAt.getTime() ||
+            dbNow.getTime() >= idleExpiresAt.getTime()
+          ) {
+            return null
+          }
         }
 
         return signGfsToken({
@@ -154,6 +169,10 @@ export async function signCurrentExternalGfsUserToken(
     }
     throw error
   }
+}
+
+function timestampOf(value: unknown): Date {
+  return value instanceof Date ? value : new Date(String(value ?? ''))
 }
 
 export class ExternalGfsAuthorityError extends Error {

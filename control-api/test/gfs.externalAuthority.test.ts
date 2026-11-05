@@ -278,12 +278,15 @@ describe('signCurrentExternalGfsUserToken', () => {
       tokenClaims: v2TokenClaims,
       policy: { ...policy, acceptV2: true, issueV2: true, renewV2: true },
     }
+    const DB_NOW = new Date()
     const currentRow = {
       lifecycle_state: 'active',
       lifecycle_version: 5,
-      db_now: new Date(),
+      db_now: DB_NOW,
       revoked_at: null,
       session_version: 2,
+      absolute_expires_at: new Date(DB_NOW.getTime() + 60 * 60 * 1000),
+      idle_expires_at: new Date(DB_NOW.getTime() + 10 * 60 * 1000),
     }
 
     function expectSessionSnapshotRead(query: ReturnType<typeof vi.fn>) {
@@ -328,6 +331,38 @@ describe('signCurrentExternalGfsUserToken', () => {
       await expect(signCurrentExternalGfsUserToken(v2Authentication, input)).resolves.toBeNull()
 
       expectSessionSnapshotRead(query)
+      expect(gfsTokenMock.signGfsToken).not.toHaveBeenCalled()
+    })
+
+    function expectExpiryColumnsRead(query: ReturnType<typeof vi.fn>) {
+      const sql = String(query.mock.calls[0]?.[0])
+      expect(sql).toContain('s.absolute_expires_at')
+      expect(sql).toContain('s.idle_expires_at')
+    }
+
+    it('refuses a session whose absolute expiry is the database time', async () => {
+      const query = mockSingleRowQuery([
+        { ...currentRow, absolute_expires_at: new Date(DB_NOW.getTime()) },
+      ])
+
+      await expect(signCurrentExternalGfsUserToken(v2Authentication, input)).resolves.toBeNull()
+
+      // Witness: the one unlocked snapshot read, carrying both expiry columns,
+      // ran before the refusal.
+      expectSessionSnapshotRead(query)
+      expectExpiryColumnsRead(query)
+      expect(gfsTokenMock.signGfsToken).not.toHaveBeenCalled()
+    })
+
+    it('refuses a session whose idle expiry passed before the database time', async () => {
+      const query = mockSingleRowQuery([
+        { ...currentRow, idle_expires_at: new Date(DB_NOW.getTime() - 1000) },
+      ])
+
+      await expect(signCurrentExternalGfsUserToken(v2Authentication, input)).resolves.toBeNull()
+
+      expectSessionSnapshotRead(query)
+      expectExpiryColumnsRead(query)
       expect(gfsTokenMock.signGfsToken).not.toHaveBeenCalled()
     })
 
