@@ -213,12 +213,21 @@ fi
 # --- Restart the consumers of the rotated keys ---
 # Every run regenerates every key above. The consumer list and the reason each
 # one is on it live in lib/restart-jwt-key-consumers.sh. Not restarted there:
-# mcp-host (restarted above with mcp-host-config), control-postgres (constant
-# values, read by the server only when it initialises its data directory) and
-# inter-service-tokens (no Deployment reads it).
+# mcp-host (restarted above with mcp-host-config), gfsc (this script does not
+# write gfs-config; run sync-auth-key.sh after a rotation), control-postgres
+# (constant values, read by the server only when it initialises its data
+# directory) and inter-service-tokens (no Deployment reads it).
+# A pending restart does not skip the validation below; the script exits 1
+# after it. The literal kubectl argv is passed so the printed recovery commands
+# can be run as they are.
 echo ""
 echo "=== Restarting consumers of the rotated keys ==="
-restart_jwt_key_consumers kctl || exit 1
+RESTARTS_PENDING=0
+if [ -n "${CONTEXT:-}" ]; then
+  restart_jwt_key_consumers kubectl --context "$CONTEXT" || RESTARTS_PENDING=1
+else
+  restart_jwt_key_consumers kubectl || RESTARTS_PENDING=1
+fi
 
 echo ""
 echo "=== Post-deploy validation ==="
@@ -236,6 +245,11 @@ if [[ "$VALIDATION_FAILED" -eq 1 ]]; then
   echo ""
   echo "VALIDATION FAILED: One or more ConfigMaps still have placeholder values."
   echo "This will cause model-config-failed errors in workflow pods."
+  exit 1
+fi
+if [[ "$RESTARTS_PENDING" -eq 1 ]]; then
+  echo ""
+  echo "RESTARTS PENDING: the keys are rotated but some consumers were not restarted (see the commands above)."
   exit 1
 fi
 

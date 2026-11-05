@@ -6,11 +6,19 @@ FAIL=0
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
+assert_no_context_violations() {
+  if [[ -s "$1" ]]; then
+    fail "kubectl called without --context=clerum-test: $(head -1 "$1")"
+  fi
+}
+
 assert_generate_keys_creates_output_dir() {
-  local tmp project stubbin
+  local tmp project stubbin violations
   tmp="$(mktemp -d)"
   project="$tmp/project"
   stubbin="$tmp/bin"
+  violations="$tmp/context-violations"
+  : > "$violations"
 
   mkdir -p "$project/scripts/minikube" "$project/deploy/scripts/lib" "$stubbin"
   cp scripts/minikube/generate-keys.sh "$project/scripts/minikube/generate-keys.sh"
@@ -19,9 +27,13 @@ assert_generate_keys_creates_output_dir() {
 
   cat > "$stubbin/kubectl" <<'STUB'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "--context=clerum-test" ]]; then
-  shift
+# Every call must carry the profile's context, as in the other fake kubectls.
+if [[ "${1:-}" != "--context=clerum-test" ]]; then
+  echo "fake kubectl: expected --context=clerum-test first, got: $*" >&2
+  printf '%s\n' "$*" >> "$STUB_CONTEXT_VIOLATIONS"
+  exit 9
 fi
+shift
 if [[ "${1:-}" == "get" && "${2:-}" == "secret" ]]; then
   exit 1
 fi
@@ -32,7 +44,7 @@ exit 0
 STUB
   chmod +x "$stubbin/kubectl"
 
-  if PATH="$stubbin:$PATH" \
+  if PATH="$stubbin:$PATH" MINIKUBE_PROFILE=clerum-test STUB_CONTEXT_VIOLATIONS="$violations" \
      "$project/scripts/minikube/generate-keys.sh" >/dev/null 2>&1; then
     if [[ ! -f "$project/deploy/minikube/secrets/jwt-signing-keys.yaml" ]]; then
       fail "generate-keys did not create jwt-signing-keys.yaml"
@@ -53,14 +65,17 @@ STUB
     fail "generate-keys failed in clean-worktree test"
   fi
 
+  assert_no_context_violations "$violations"
   rm -rf "$tmp"
 }
 
 assert_existing_secret_is_patched_once() {
-  local tmp project stubbin state log
+  local tmp project stubbin state log violations
   tmp="$(mktemp -d)"
   project="$tmp/project"
   stubbin="$tmp/bin"
+  violations="$tmp/context-violations"
+  : > "$violations"
   state="$tmp/prompt-key-present"
   log="$tmp/kubectl.log"
 
@@ -71,9 +86,13 @@ assert_existing_secret_is_patched_once() {
 
   cat > "$stubbin/kubectl" <<'STUB'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "--context=clerum-test" ]]; then
-  shift
+# Every call must carry the profile's context, as in the other fake kubectls.
+if [[ "${1:-}" != "--context=clerum-test" ]]; then
+  echo "fake kubectl: expected --context=clerum-test first, got: $*" >&2
+  printf '%s\n' "$*" >> "$STUB_CONTEXT_VIOLATIONS"
+  exit 9
 fi
+shift
 if [[ "${1:-}" == "get" && "${2:-}" == "secret" && "$*" == *"-o name"* ]]; then
   echo "secret/control-api-secrets"
   exit 0
@@ -94,9 +113,11 @@ exit 0
 STUB
   chmod +x "$stubbin/kubectl"
 
-  if PATH="$stubbin:$PATH" STUB_STATE="$state" STUB_LOG="$log" \
+  if PATH="$stubbin:$PATH" MINIKUBE_PROFILE=clerum-test STUB_CONTEXT_VIOLATIONS="$violations" \
+    STUB_STATE="$state" STUB_LOG="$log" \
     "$project/scripts/minikube/generate-keys.sh" >/dev/null 2>&1 && \
-    PATH="$stubbin:$PATH" STUB_STATE="$state" STUB_LOG="$log" \
+    PATH="$stubbin:$PATH" MINIKUBE_PROFILE=clerum-test STUB_CONTEXT_VIOLATIONS="$violations" \
+    STUB_STATE="$state" STUB_LOG="$log" \
     "$project/scripts/minikube/generate-keys.sh" >/dev/null 2>&1; then
     if [[ "$(wc -l < "$log" | tr -d ' ')" != "1" ]]; then
       fail "existing control-api secret was not patched exactly once"
@@ -109,6 +130,7 @@ STUB
     fail "generate-keys failed while repairing an existing control-api secret"
   fi
 
+  assert_no_context_violations "$violations"
   rm -rf "$tmp"
 }
 

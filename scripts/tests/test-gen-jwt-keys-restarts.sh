@@ -73,6 +73,18 @@ has_arg() {
   for a in "${rest[@]}"; do [[ "$a" == "$1" ]] && return 0; done
   return 1
 }
+# KUBE_FLAKY lists "<op>:<ns>/<name>" that fail on their first attempt only.
+flaky_once() {
+  local marker
+  if [[ " ${KUBE_FLAKY:-} " == *" $1:$2 "* ]]; then
+    marker="${FLAKY_STATE:?}/$1-${2//\//_}"
+    if [[ ! -e "$marker" ]]; then
+      : > "$marker"
+      echo "fake kubectl: transient $1 failure for $2" >&2
+      exit 1
+    fi
+  fi
+}
 case "${rest[0]:-}" in
   create)
     printf 'kind: %s\n' "${rest[1]}"
@@ -88,9 +100,17 @@ case "${rest[0]:-}" in
   get)
     case "${rest[1]:-}" in
       secret)
-        # generate-keys.sh probes control-api-secrets with `-o name`.
+        # generate-keys.sh probes control-api-secrets with `-o name`, its
+        # prompt-history key with a go-template, and control-ui-secrets by name.
         if [[ "${rest[2]:-}" == "control-api-secrets" ]] && has_arg name; then
           [[ "${EXISTING_KEYS:-}" == "1" ]] && echo "secret/control-api-secrets"
+          exit 0
+        fi
+        if [[ "${rest[2]:-}" == "control-api-secrets" && " ${rest[*]} " == *" go-template="* ]]; then
+          [[ "${EXISTING_KEYS:-}" == "1" ]] && printf 'present'
+          exit 0
+        fi
+        if [[ "${rest[2]:-}" == "control-ui-secrets" && "${EXISTING_KEYS:-}" == "1" ]]; then
           exit 0
         fi
         exit 1
@@ -109,6 +129,7 @@ case "${rest[0]:-}" in
           echo "fake kubectl: connection refused" >&2
           exit 1
         fi
+        flaky_once get "$ns/$dep"
         if [[ " ${KUBE_DEPLOYS:-} " == *" $ns/$dep "* ]]; then
           if has_arg name; then
             printf 'deployment.apps/%s\n' "$dep"
@@ -130,6 +151,7 @@ case "${rest[0]:-}" in
         echo "fake kubectl: rollout restart failed for $target" >&2
         exit 1
       fi
+      flaky_once rollout "$target"
       printf '%s\n' "$target" >> "${ROLLOUT_LOG:?}"
       echo "restart $target" >> "${EVENT_LOG:?}"
     fi
@@ -150,13 +172,40 @@ fail() {
 reset_logs() {
   : > "$TMP/rollout.log"
   : > "$TMP/events.log"
+  rm -rf "$TMP/flaky"
+  mkdir -p "$TMP/flaky"
 }
 
 run_gen_keys() {
   reset_logs
-  ROLLOUT_LOG="$TMP/rollout.log" EVENT_LOG="$TMP/events.log" PATH="$TMP/bin:$PATH" \
+  ROLLOUT_LOG="$TMP/rollout.log" EVENT_LOG="$TMP/events.log" FLAKY_STATE="$TMP/flaky" \
+    PATH="$TMP/bin:$PATH" JWT_KEY_RESTART_RETRY_SECONDS=0 \
     CONTEXT=gke-dev EXPECTED_CONTEXT=gke-dev "$@" \
     bash "$SCRIPT" > "$TMP/out" 2>&1 </dev/null
+}
+
+# A run that left restarts pending: the walk went on, the validation ran, the
+# script failed before Done and printed one runnable command per pending one.
+assert_key_restarts_pending() {
+  local kubectl_prefix="$1" item
+  shift
+  grep -q '^=== Done ===$' "$TMP/out" && fail "a run with pending restarts must stop before Done"
+  grep -qF 'these restarts are pending' "$TMP/out" || fail "missing pending-restarts error"
+  grep -qF 'Do not re-run the key script' "$TMP/out" || fail "missing do-not-rerun notice"
+  for item in "$@"; do
+    grep -qF "    $kubectl_prefix -n ${item%%/*} rollout restart deploy ${item#*/}" "$TMP/out" \
+      || fail "missing restart command for $item"
+  done
+}
+
+# KEY_CONSUMERS without the given ones.
+consumers_except() {
+  local c skip keep
+  for c in "${KEY_CONSUMERS[@]}"; do
+    keep=true
+    for skip in "$@"; do [[ "$c" == "$skip" ]] && keep=false; done
+    [[ "$keep" == "true" ]] && printf '%s\n' "$c"
+  done
 }
 
 assert_restarted_exactly() {
@@ -206,31 +255,47 @@ for consumer in "${KEY_CONSUMERS[@]}"; do
   grep -qF "  $consumer not deployed yet; skipped." "$TMP/out" || fail "missing skip line for $consumer"
 done
 grep -q '^=== Done ===$' "$TMP/out" || fail "script did not reach Done"
+assert_no_key_material
 
 # Only some consumers deployed: exactly those restart.
 run_gen_keys env KUBE_DEPLOYS="control-plane/control-api rpc-proxy/rpc-proxy" \
   || fail "gen-jwt-keys.sh exited non-zero with a partial deployment"
 assert_restarted_exactly control-plane/control-api rpc-proxy/rpc-proxy 'mcp-host/*'
+assert_no_key_material
 
-# A failed deployment read stops the script instead of skipping the consumer.
+# A failed deployment read: every other consumer still restarts, the validation
+# runs, and the script fails with the command that restarts the unread one.
 if run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_GET_DEPLOY_FAIL="profiles/external-rest-api"; then
   fail "a failed deployment read must fail the script"
 fi
 grep -qF 'ERROR: cannot read deployment profiles/external-rest-api' "$TMP/out" \
   || fail "missing error line for the failed deployment read"
-if grep -q '^=== Done ===$' "$TMP/out"; then
-  fail "script must stop before Done after a failed deployment read"
-fi
+mapfile -t restarted_others < <(consumers_except profiles/external-rest-api)
+assert_restarted_exactly "${restarted_others[@]}" 'mcp-host/*'
+grep -q '^=== Post-deploy validation ===$' "$TMP/out" || fail "validation must run after a pending restart"
+grep -qF 'RESTARTS PENDING' "$TMP/out" || fail "missing RESTARTS PENDING line"
+assert_key_restarts_pending "kubectl --context gke-dev" profiles/external-rest-api
+assert_no_key_material
 
-# A failed restart stops the script too.
+# A failed restart (every attempt): same, for the consumer that failed.
 if run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_ROLLOUT_FAIL="rpc-proxy/rpc-proxy"; then
   fail "a failed rollout restart must fail the script"
 fi
 grep -qF 'rollout restart failed for rpc-proxy/rpc-proxy' "$TMP/out" \
   || fail "the failed rollout was not reached"
-if grep -q '^=== Done ===$' "$TMP/out"; then
-  fail "script must stop before Done after a failed rollout restart"
-fi
+mapfile -t restarted_others < <(consumers_except rpc-proxy/rpc-proxy)
+assert_restarted_exactly "${restarted_others[@]}" 'mcp-host/*'
+assert_key_restarts_pending "kubectl --context gke-dev" rpc-proxy/rpc-proxy
+assert_no_key_material
+
+# Failures on the first attempt only are retried: every consumer restarts.
+run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" \
+  KUBE_FLAKY="get:control-plane/control-ui rollout:control-plane/workflow-recipes" \
+  || fail "transient failures must be absorbed by the retries"
+assert_restarted_exactly "${KEY_CONSUMERS[@]}" 'mcp-host/*'
+[[ -e "$TMP/flaky/rollout-control-plane_workflow-recipes" ]] || fail "the transient rollout failure was never injected"
+grep -q '^=== Done ===$' "$TMP/out" || fail "script did not reach Done after transient failures"
+assert_no_key_material
 
 # --- scripts/minikube/generate-keys.sh (minikube profiles) ---
 # Every --apply that writes new keys restarts the deployed consumers after the
@@ -244,7 +309,8 @@ cp "$ROOT/deploy/scripts/lib/restart-jwt-key-consumers.sh" "$PROJECT/deploy/scri
 
 run_minikube_keys() {
   reset_logs
-  ROLLOUT_LOG="$TMP/rollout.log" EVENT_LOG="$TMP/events.log" PATH="$TMP/bin:$PATH" \
+  ROLLOUT_LOG="$TMP/rollout.log" EVENT_LOG="$TMP/events.log" FLAKY_STATE="$TMP/flaky" \
+    PATH="$TMP/bin:$PATH" JWT_KEY_RESTART_RETRY_SECONDS=0 \
     MINIKUBE_PROFILE=clerum-test EXPECTED_CONTEXT=clerum-test "$@" \
     bash "$PROJECT/scripts/minikube/generate-keys.sh" ${GEN_ARGS[@]+"${GEN_ARGS[@]}"} > "$TMP/out" 2>&1 </dev/null
 }
@@ -256,6 +322,7 @@ run_minikube_keys env EXISTING_KEYS=1 FORCE_REGEN=true KUBE_DEPLOYS="${KEY_CONSU
 assert_restarted_exactly "${KEY_CONSUMERS[@]}"
 assert_restarts_after_writes
 grep -qF 'Restarting consumers of the new keys' "$TMP/out" || fail "missing restart log line"
+assert_no_key_material
 
 # Keys missing while the consumers still run (Secret deleted out of band): the
 # regenerated keys are new to the running pods, so they restart too.
@@ -263,6 +330,7 @@ run_minikube_keys env EXISTING_KEYS=0 KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" \
   || fail "generate-keys.sh regeneration with running consumers exited non-zero"
 assert_restarted_exactly "${KEY_CONSUMERS[@]}"
 assert_restarts_after_writes
+assert_no_key_material
 
 # Fresh profile: keys applied, no consumer deployed yet, each skip logged.
 run_minikube_keys env EXISTING_KEYS=0 KUBE_DEPLOYS="" \
@@ -272,14 +340,31 @@ grep -q '^write apply$' "$TMP/events.log" || fail "first creation did not apply 
 for consumer in "${KEY_CONSUMERS[@]}"; do
   grep -qF "  $consumer not deployed yet; skipped." "$TMP/out" || fail "missing skip line for $consumer"
 done
+assert_no_key_material
 
-# A failed deployment read stops the script.
+# Keys already present and no FORCE_REGEN (the common full-setup.sh path): no
+# key is regenerated, nothing is applied, nothing restarts.
+run_minikube_keys env EXISTING_KEYS=1 KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" \
+  || fail "generate-keys.sh --apply with existing keys exited non-zero"
+assert_restarted_exactly
+grep -qF 'Using existing keys (no regeneration)' "$TMP/out" || fail "the existing-keys path was not taken"
+if grep -q '^write' "$TMP/events.log"; then
+  fail "generate-keys.sh must not write keys when they already exist"
+fi
+assert_no_key_material
+
+# A failed deployment read: the other consumers restart, then the script fails
+# with the command that restarts the unread one.
 if run_minikube_keys env EXISTING_KEYS=1 FORCE_REGEN=true KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" \
      KUBE_GET_DEPLOY_FAIL="control-plane/control-ui"; then
   fail "generate-keys.sh must fail on a failed deployment read"
 fi
 grep -qF 'ERROR: cannot read deployment control-plane/control-ui' "$TMP/out" \
   || fail "missing error line for the failed deployment read"
+mapfile -t restarted_others < <(consumers_except control-plane/control-ui)
+assert_restarted_exactly "${restarted_others[@]}"
+assert_key_restarts_pending "kubectl --context=clerum-test" control-plane/control-ui
+assert_no_key_material
 
 GEN_ARGS=()
 # Without --apply: the manifest is written, nothing is applied or restarted.

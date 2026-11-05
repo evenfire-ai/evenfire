@@ -37,6 +37,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/clerum-minikube-context.sh
 source "${SCRIPT_DIR}/lib/clerum-minikube-context.sh"
+# shellcheck source=lib/token-consumer-stamp.sh
+source "${SCRIPT_DIR}/lib/token-consumer-stamp.sh"
 
 READER_NS="channels"
 READER_SECRET="workflow-approval-request-reader-credentials"
@@ -51,28 +53,6 @@ kctl() {
 
 log() { printf '[workflow-approval-bot-secret] %s\n' "$*" >&2; }
 
-rollout_restart_with_retry() {
-  local namespace="$1"
-  local deployment="$2"
-  local attempt
-  local output
-
-  for attempt in 1 2 3; do
-    if output="$(kctl -n "$namespace" rollout restart deploy "$deployment" 2>&1)"; then
-      [[ -n "$output" ]] && printf '%s\n' "$output"
-      return 0
-    fi
-
-    if [[ "$output" == *"within the past second"* && "$attempt" != "3" ]]; then
-      log "Retrying rollout restart for ${namespace}/${deployment} after recent restart"
-      sleep 2
-      continue
-    fi
-
-    printf '%s\n' "$output" >&2
-    return 1
-  done
-}
 die() { printf '[workflow-approval-bot-secret] ERROR: %s\n' "$*" >&2; exit 1; }
 
 is_minikube_context() {
@@ -122,9 +102,7 @@ command -v jq >/dev/null 2>&1 || die "jq is required (apt-get install jq)"
 
 log "Resolving Figure D workflow-approval reader secrets (context: ${CONTEXT:-<current>})"
 
-for ns in "$READER_NS"; do
-  ensure_namespace "$ns"
-done
+ensure_namespace "$READER_NS"
 
 # --- Reader webhook secret-token (channels/...) — PRE-WIRED for Mode B ---
 # Auto-generate if absent. This does NOT activate the webhook path; it only
@@ -139,32 +117,31 @@ if [ -z "$WEBHOOK_SECRET" ]; then
 fi
 # The reader reads telegram-webhook-secret as an env var
 # (deploy/base/channels/workflow-approval-request-reader/deployment.yaml), so it
-# needs a restart only when this run writes a value that is absent or differs
-# from the stored one. Compare before patching; values stay in shell locals and
-# are never logged. Half-applied run: if the patch lands and the script dies
-# before the restart, the next run sees no change and skips it; recover with
-# FORCE_CONSUMER_RESTART=true.
+# restarts when that value differs from its token stamp
+# (lib/token-consumer-stamp.sh; this script's stamp annotation is separate from
+# apply-inter-service-tokens.sh's, which covers the reader's other keys). A
+# missed or failed restart keeps the old stamp and is retried by the next run.
+# READER_CHANGED (stored value before this run versus the value it writes) is
+# used only when the reader has no stamp yet. Values stay in shell locals and
+# are never logged.
 WEBHOOK_SECRET_BEFORE="$(read_secret_key "$READER_NS" "$READER_SECRET" telegram-webhook-secret)"
-if [ "${FORCE_CONSUMER_RESTART:-}" = "true" ] || \
-   [ -z "$WEBHOOK_SECRET_BEFORE" ] || \
-   [ "$WEBHOOK_SECRET_BEFORE" != "$WEBHOOK_SECRET" ]; then
+if [ -z "$WEBHOOK_SECRET_BEFORE" ] || [ "$WEBHOOK_SECRET_BEFORE" != "$WEBHOOK_SECRET" ]; then
   READER_CHANGED=true
 else
   READER_CHANGED=false
 fi
+READER_STAMP="$(token_stamp_of "telegram-webhook-secret=$WEBHOOK_SECRET")"
 
 log "Patching Secret $READER_SECRET ($READER_NS)"
 ensure_secret "$READER_NS" "$READER_SECRET"
 READER_PATCH="$(jq -cn --arg s "$WEBHOOK_SECRET" '{stringData: {"telegram-webhook-secret": $s}}')"
 kctl -n "$READER_NS" patch secret "$READER_SECRET" --type=merge -p "$READER_PATCH"
 
-# --- Roll the reader only when its secret changed (no-op if Deployment absent) ---
-dep="clerum-workflow-approval-request-reader"
-if [ "$READER_CHANGED" != "true" ]; then
-  log "Skipping rollout of ${READER_NS}/${dep}: tokens unchanged"
-elif kctl -n "$READER_NS" get deploy "$dep" >/dev/null 2>&1; then
-  log "Rolling deployment ${READER_NS}/${dep} to pick up fresh Secret values"
-  rollout_restart_with_retry "$READER_NS" "$dep" >/dev/null
-fi
+# --- Roll the reader when its stamp differs (skipped if not deployed) ---
+# shellcheck disable=SC2034 # filled and read by lib/token-consumer-stamp.sh
+TOKEN_RESTART_PENDING=()
+reconcile_token_consumer "clerum.io/workflow-approval-bot-secret-sha256" \
+  "$READER_NS" clerum-workflow-approval-request-reader "$READER_CHANGED" "$READER_STAMP"
+token_stamp_fail_if_pending "${CONTEXT:-}" || exit 1
 
 log "Done."
