@@ -5,9 +5,14 @@
 # from a rendered overlay (multi-document YAML on stdin). Prints three shell
 # assignments: ALL_NAMESPACES, K8S_API_NAMESPACES and RUNTIME_NAMESPACES.
 #
-# HCC's namespace variables are interpreted the way HCC reads them: an absent
-# entry means HCC's code default, an explicit value (including "") overrides
-# it. A value the render cannot show (valueFrom, or a possible envFrom source)
+# HCC's namespace variables follow HCC's precedence: an absent entry means
+# HCC's code default, an explicit value (including "") overrides it, and of
+# duplicated env entries the last one applies, as in Kubernetes. List values are
+# split on commas, trimmed and stripped of empty entries; HCC only splits. The
+# two agree on every list the overlays set, but not on an explicitly empty
+# runtime list: HCC reads it as [""] and this helper would read it as no
+# namespace, letting the preflight skip the runtime checks, so it aborts. A
+# value the render cannot show (valueFrom, or a possible envFrom source) also
 # aborts with a message on stderr, because guessing it would let the preflight
 # skip namespaces it has to check.
 
@@ -43,7 +48,7 @@ def derive_inventory(rendered)
   env = container["env"] || []
   env_from = !(container["envFrom"] || []).empty?
   resolve = lambda do |name, default|
-    item = env.find { |entry| entry["name"] == name }
+    item = env.reverse.find { |entry| entry["name"] == name }
     if item.nil?
       abort("np-preflight-inventory: #{name} may come from envFrom; cannot derive") if env_from
       default.dup
@@ -54,6 +59,9 @@ def derive_inventory(rendered)
     end
   end
   runtime = resolve.call("CONTEXT_MAPPER_RUNTIME_NAMESPACES", HCC_DEFAULT_RUNTIME_NAMESPACES)
+  if runtime.empty?
+    abort("np-preflight-inventory: CONTEXT_MAPPER_RUNTIME_NAMESPACES is set but lists no namespace; cannot derive")
+  end
   minimal = resolve.call("CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES", HCC_DEFAULT_MINIMAL_INFRA_NAMESPACES)
   k8s_api = (static_k8s + (runtime - minimal)).uniq.sort
   [

@@ -4,9 +4,11 @@
 #
 # The preflight must read HCC's namespace variables the way HCC does: an absent
 # entry means HCC's code default, an explicit value (including "") overrides
-# it, and a value the render cannot show (valueFrom, envFrom) or a missing HCC
-# Deployment is refused. An empty runtime list would make the preflight skip
-# the runtime namespaces' checks and still report them as passed.
+# it, the last of duplicated env entries applies, and the HCC container is
+# found by name. A value the render cannot show (valueFrom, envFrom), a missing
+# HCC Deployment and an explicitly empty runtime list are refused: an empty
+# runtime list would make the preflight skip the runtime namespaces' checks and
+# still report them as passed.
 #
 # Case g compares the helper's default constants with the literals in
 # host-context-controller/src/config.ts, so the two copies cannot drift apart.
@@ -15,7 +17,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 INV="$ROOT/deploy/scripts/np-preflight-inventory.rb"
 HCC_CONFIG="$ROOT/host-context-controller/src/config.ts"
-EXPECTED_PASSES=7
+EXPECTED_PASSES=10
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -33,6 +35,10 @@ MINIMAL_BASE='            - name: CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES
               value: sandbox-ui'
 MINIMAL_EMPTY='            - name: CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES
               value: ""'
+RUNTIME_EMPTY='            - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
+              value: ""'
+RUNTIME_SHADOWED='            - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
+              value: shadowed-only'
 RUNTIME_VALUE_FROM='            - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
               valueFrom:
                 configMapKeyRef:
@@ -70,7 +76,7 @@ spec:
   podSelector: {}
   policyTypes: [Egress]
 YAML
-  [ "$mode" = "hcc" ] || return 0
+  [ "$mode" = "hcc" ] || [ "$mode" = "hcc-sidecar" ] || return 0
   cat >>"$out" <<'YAML'
 ---
 apiVersion: apps/v1
@@ -82,6 +88,16 @@ spec:
   template:
     spec:
       containers:
+YAML
+  # A sidecar listed before HCC, carrying its own copy of the runtime variable.
+  [ "$mode" = "hcc-sidecar" ] && cat >>"$out" <<'YAML'
+        - name: proxy-sidecar
+          image: proxy:test
+          env:
+            - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
+              value: sidecar-only
+YAML
+  cat >>"$out" <<'YAML'
         - name: host-context-controller
           image: host-context-controller:test
           env:
@@ -168,6 +184,20 @@ fixture "$TMP/f.yaml" no-hcc
 derive "$TMP/f.yaml"
 expect_refusal "f. render without the HCC Deployment is refused" \
   "has no Deployment host-context-controller"
+
+fixture "$TMP/h.yaml" hcc "$RUNTIME_EMPTY" "$MINIMAL_BASE"
+derive "$TMP/h.yaml"
+expect_refusal "h. explicitly empty runtime list is refused (HCC would read [\"\"])" \
+  "CONTEXT_MAPPER_RUNTIME_NAMESPACES is set but lists no namespace"
+
+fixture "$TMP/i.yaml" hcc-sidecar "$RUNTIME_BASE" "$MINIMAL_BASE"
+derive "$TMP/i.yaml"
+expect_inventory "i. HCC is picked by container name, not position" "$DEFAULT_RUNTIME" "$DEFAULT_K8S"
+
+fixture "$TMP/j.yaml" hcc "$RUNTIME_SHADOWED" "$RUNTIME_BASE" "$MINIMAL_BASE"
+derive "$TMP/j.yaml"
+expect_inventory "j. a duplicated env entry resolves to the last one, as Kubernetes does" \
+  "$DEFAULT_RUNTIME" "$DEFAULT_K8S"
 
 # shellcheck disable=SC2016 # Ruby source; $PROGRAM_NAME is a Ruby global.
 if drift="$(RUBYOPT=--disable=gems ruby -ryaml -e '
