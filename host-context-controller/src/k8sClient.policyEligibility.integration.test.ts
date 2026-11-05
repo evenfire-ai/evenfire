@@ -34,6 +34,8 @@ vi.mock('./config', () => ({
     controlPlaneNamespace: 'control-plane',
     port: 8081,
     hostK8sRequestTimeoutMs: 30000,
+    k8sRequestTimeoutMs: 30_000,
+    netPolPassHardLimitMs: 1_800_000,
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'rpc-proxy'],
     netPolOrphanDeleteCap: 10,
     netPolOrphanDeleteCapPercent: 100,
@@ -352,7 +354,11 @@ describe('WATCH and recovered LIST policy effects', () => {
       }
       expect([...fixture.policies.keys()].sort()).toEqual(keys)
       if (source === 'LIST')
-        expect(fixture.list).toHaveBeenCalledWith(expect.objectContaining({ plural: 'mcpservers' }))
+        // The second argument is the per-request deadline the client carries (#1338).
+        expect(fixture.list).toHaveBeenCalledWith(
+          expect.objectContaining({ plural: 'mcpservers' }),
+          expect.objectContaining({ middlewareMergeStrategy: 'append' })
+        )
     }
   )
   async function settled(): Promise<Harness> {

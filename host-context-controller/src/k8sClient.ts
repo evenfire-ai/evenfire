@@ -14,6 +14,7 @@ import {
 } from './administrativeOutcomeReporter'
 import { BindingDef, BindingPolicyReconciler } from './bindingPolicyReconciler'
 import { config } from './config'
+import { NETPOL_PASS_OVERRUN_WARN_MS } from './constants'
 import {
   ExternalEgressConvergenceCoordinator,
   type ExternalEgressRetryHandle,
@@ -38,7 +39,7 @@ import {
   createInfrastructureTelemetryReporter,
 } from './infrastructureTelemetryReporter'
 import { K8sGfsApi } from './k8s/gfsK8sApi'
-import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
+import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
 import { LlmHookReconciler, computePodKey, referencedHookIds } from './llmHookReconciler'
 import { hccLogger } from './logger'
@@ -72,9 +73,11 @@ import {
   netPolDefaultsOnlyTickDurationSeconds,
   netPolDefaultsOnlyTicksTotal,
   netPolResyncTicksSkippedTotal,
+  networkPolicyPassOverrunsTotal,
 } from './metrics'
 import {
   DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
+  type NetworkPolicyPassPhase,
   NetworkPolicyReconciler,
   sameContextDesiredRevision,
 } from './networkPolicyReconciler'
@@ -108,13 +111,19 @@ let kc: k8s.KubeConfig | null = null
 if (!config.devMode) {
   kc = new k8s.KubeConfig()
   kc.loadFromDefault()
-  customObjectsApi = kc.makeApiClient(k8s.CustomObjectsApi)
-  hostCustomObjectsApi = makeHostK8sApiClient(
+  // These clients serve McpServer/Context inventory reads, including reads on
+  // the keyed effect queues the NetworkPolicy pass waits on (#1338).
+  customObjectsApi = makeK8sApiClientWithDeadline(
+    kc,
+    k8s.CustomObjectsApi,
+    config.k8sRequestTimeoutMs
+  )
+  hostCustomObjectsApi = makeK8sApiClientWithDeadline(
     kc,
     k8s.CustomObjectsApi,
     config.hostK8sRequestTimeoutMs
   )
-  coreApi = kc.makeApiClient(k8s.CoreV1Api)
+  coreApi = makeK8sApiClientWithDeadline(kc, k8s.CoreV1Api, config.k8sRequestTimeoutMs)
 }
 
 /**
@@ -305,6 +314,30 @@ type NetworkPolicySafetyCertificate = {
 type ActiveInitialConvergenceRun = {
   trailingRequested: boolean
   promise: Promise<void>
+}
+
+/** The keyed effect a NetworkPolicy pass is waiting on: queued behind other work, or running. */
+type NetworkPolicyPassEffect = {
+  kind: 'context' | 'server'
+  key: string
+  state: 'queued' | 'running'
+  sinceMs: number
+}
+
+/**
+ * Where an active NetworkPolicy pass is. A pass is single-flight, so one that
+ * never settles blocks every later pass (#1338); this is what its overrun
+ * report names.
+ */
+type NetworkPolicyPassProgress = {
+  startedAtMs: number
+  phase: NetworkPolicyPassPhase | 'starting'
+  pendingEffect: NetworkPolicyPassEffect | null
+}
+
+export type McpServerWatcherDeps = {
+  /** Ends the process when a NetworkPolicy pass exceeds its hard limit. */
+  exitProcess?: (code: number) => void
 }
 
 type HostInventoryRecoveryRequest = {
@@ -826,6 +859,12 @@ export class McpServerWatcher implements McpServerProvider {
     contextRevision: number
     serverRevision: number
   } | null = null
+  private networkPolicyPassProgress: NetworkPolicyPassProgress | null = null
+  private networkPolicyPassWatchdog: {
+    overrun: ReturnType<typeof setInterval>
+    hardLimit: ReturnType<typeof setTimeout>
+  } | null = null
+  private readonly exitProcess: (code: number) => void
   private mcpServerCacheSynced = false
   private contextCacheSynced = false
   private mcpServerCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
@@ -972,10 +1011,19 @@ export class McpServerWatcher implements McpServerProvider {
   // — start() already ran ensureDefaultPolicies as a bootstrap barrier.
   private netPolConvergenceEnsureDefaults = false
 
-  constructor() {
+  constructor(deps: McpServerWatcherDeps = {}) {
     if (!kc) {
       throw new Error('K8s client not initialized - are you in dev mode?')
     }
+    if (
+      !Number.isSafeInteger(config.netPolPassHardLimitMs) ||
+      config.netPolPassHardLimitMs <= NETPOL_PASS_OVERRUN_WARN_MS
+    ) {
+      throw new Error(
+        `NetworkPolicy pass hard limit must be an integer above ${NETPOL_PASS_OVERRUN_WARN_MS}ms, got ${config.netPolPassHardLimitMs}`
+      )
+    }
+    this.exitProcess = deps.exitProcess ?? (code => process.exit(code))
     this.watch = new k8s.Watch(kc)
     this.reconciler = new McpServerReconciler(kc)
     this.reconciler.setInventoryAuthority(() => ({
@@ -3377,6 +3425,7 @@ export class McpServerWatcher implements McpServerProvider {
             }
             this.pendingNetworkPolicyCauses.clear()
             this.activeNetworkPolicyPass = pass
+            this.startNetworkPolicyPassWatchdog()
             hccLogger.info('[K8s] NetworkPolicy pass started', {
               event: 'networkpolicy-pass-start',
               ...pass,
@@ -3384,6 +3433,7 @@ export class McpServerWatcher implements McpServerProvider {
             try {
               await this.runInitialNetworkPolicyConvergenceCore()
             } finally {
+              this.stopNetworkPolicyPassWatchdog()
               this.activeNetworkPolicyPass = null
             }
           }
@@ -3405,7 +3455,106 @@ export class McpServerWatcher implements McpServerProvider {
     return run.promise
   }
 
+  /**
+   * Bounds one NetworkPolicy pass (#1338). The pass is single-flight and every
+   * later request only attaches to it, so a pass that never settles keeps the
+   * provider inventory non-authoritative while the probe lane stays green.
+   * Each overrun mark logs where the pass is; at the hard limit the process
+   * exits so the container restarts and the startup pass reconverges.
+   * Abandoning the pass instead would leave its effects running beside a new
+   * pass, i.e. two NetworkPolicy writers.
+   */
+  private startNetworkPolicyPassWatchdog(): void {
+    if (this.networkPolicyPassWatchdog !== null) {
+      throw new Error('NetworkPolicy pass watchdog is already armed')
+    }
+    this.networkPolicyPassProgress = {
+      startedAtMs: Date.now(),
+      phase: 'starting',
+      pendingEffect: null,
+    }
+    this.networkPolicyPassWatchdog = {
+      overrun: setInterval(
+        () => this.reportNetworkPolicyPassOverrun('warn'),
+        NETPOL_PASS_OVERRUN_WARN_MS
+      ),
+      hardLimit: setTimeout(
+        () => this.reportNetworkPolicyPassOverrun('fatal'),
+        config.netPolPassHardLimitMs
+      ),
+    }
+  }
+
+  private stopNetworkPolicyPassWatchdog(): void {
+    if (this.networkPolicyPassWatchdog !== null) {
+      clearInterval(this.networkPolicyPassWatchdog.overrun)
+      clearTimeout(this.networkPolicyPassWatchdog.hardLimit)
+      this.networkPolicyPassWatchdog = null
+    }
+    this.networkPolicyPassProgress = null
+  }
+
+  private reportNetworkPolicyPassOverrun(severity: 'warn' | 'fatal'): void {
+    const pass = this.activeNetworkPolicyPass
+    const progress = this.networkPolicyPassProgress
+    if (pass === null || progress === null) {
+      throw new Error('NetworkPolicy pass watchdog fired without an active pass')
+    }
+    const now = Date.now()
+    const effect = progress.pendingEffect
+    const fields = {
+      event: severity === 'warn' ? 'networkpolicy-pass-overrun' : 'networkpolicy-pass-hard-limit',
+      ...pass,
+      elapsedSeconds: Math.round((now - progress.startedAtMs) / 1000),
+      hardLimitSeconds: Math.round(config.netPolPassHardLimitMs / 1000),
+      phase: progress.phase,
+      pendingEffect:
+        effect === null
+          ? null
+          : {
+              kind: effect.kind,
+              key: effect.key,
+              state: effect.state,
+              seconds: Math.round((now - effect.sinceMs) / 1000),
+            },
+    }
+    networkPolicyPassOverrunsTotal.inc({ severity, phase: progress.phase })
+    if (severity === 'warn') {
+      hccLogger.warn('[K8s] NetworkPolicy pass overrun', fields)
+      return
+    }
+    hccLogger.error(
+      '[K8s] NetworkPolicy pass exceeded its hard limit; exiting so the container restarts',
+      fields
+    )
+    this.exitProcess(1)
+  }
+
+  /**
+   * Runs one keyed effect of the active NetworkPolicy pass and records it as
+   * the pass's pending effect while it waits for its queue and while it runs.
+   */
+  private trackNetworkPolicyPassEffect(
+    progress: NetworkPolicyPassProgress,
+    kind: NetworkPolicyPassEffect['kind'],
+    key: string,
+    enqueue: (markRunning: () => void) => Promise<void>
+  ): Promise<void> {
+    const effect: NetworkPolicyPassEffect = { kind, key, state: 'queued', sinceMs: Date.now() }
+    progress.pendingEffect = effect
+    return enqueue(() => {
+      effect.state = 'running'
+      effect.sinceMs = Date.now()
+    }).finally(() => {
+      if (progress.pendingEffect === effect) progress.pendingEffect = null
+    })
+  }
+
   private async runInitialNetworkPolicyConvergenceCore(): Promise<void> {
+    const progress = this.networkPolicyPassProgress
+    if (progress === null) {
+      throw new Error('NetworkPolicy convergence core ran outside a watched pass')
+    }
     // A NetworkPolicy full pass combines authoritative Context/McpServer allow
     // revocation with additive Context policy effects. External egress
     // creation and DNS refresh have one separate owner: the startup/resync
@@ -3470,35 +3619,44 @@ export class McpServerWatcher implements McpServerProvider {
         ensureDefaults,
         contextInventoryAuthoritative,
         serverInventoryAuthoritative,
+        onPhase: phase => {
+          progress.phase = phase
+        },
         runContextEffect: (contextId, work) =>
-          this.enqueueContextReconciliation(contextId, async () => {
-            if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) {
-              effectsComplete = false
-              this.networkPolicyRepairPending = true
-              initialConvergenceEffectsDroppedTotal.inc({
-                lane: 'NetworkPolicy',
-                kind: 'context',
-              })
-              return
-            }
-            await work()
-          }),
-        runServerEffect: (serverName, work) => {
-          const selected = this.servers.get(serverName)
-          return this.enqueueMcpServerReconciliation(
-            selected ?? { name: serverName, namespace: config.namespace },
-            async () => {
-              if (!serverInventoryAuthoritative()) {
+          this.trackNetworkPolicyPassEffect(progress, 'context', contextId, markRunning =>
+            this.enqueueContextReconciliation(contextId, async () => {
+              markRunning()
+              if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) {
                 effectsComplete = false
                 this.networkPolicyRepairPending = true
                 initialConvergenceEffectsDroppedTotal.inc({
                   lane: 'NetworkPolicy',
-                  kind: 'server',
+                  kind: 'context',
                 })
                 return
               }
               await work()
-            }
+            })
+          ),
+        runServerEffect: (serverName, work) => {
+          const selected = this.servers.get(serverName)
+          return this.trackNetworkPolicyPassEffect(progress, 'server', serverName, markRunning =>
+            this.enqueueMcpServerReconciliation(
+              selected ?? { name: serverName, namespace: config.namespace },
+              async () => {
+                markRunning()
+                if (!serverInventoryAuthoritative()) {
+                  effectsComplete = false
+                  this.networkPolicyRepairPending = true
+                  initialConvergenceEffectsDroppedTotal.inc({
+                    lane: 'NetworkPolicy',
+                    kind: 'server',
+                  })
+                  return
+                }
+                await work()
+              }
+            )
           )
         },
         resolveCurrentContext: name => this.contexts.get(name),
@@ -4971,6 +5129,7 @@ export class McpServerWatcher implements McpServerProvider {
    */
   async stop(): Promise<void> {
     this.stopped = true
+    this.stopNetworkPolicyPassWatchdog()
     this.externalEgressCoordinator.stop()
     this.retireMcpServerWatch()
     this.retireContextWatch()

@@ -124,6 +124,12 @@ export const initialConvergencePassDurationSeconds = histogram({
   buckets: NETWORKPOLICY_PASS_DURATION_BUCKETS,
 })
 
+export const networkPolicyPassOverrunsTotal = counter({
+  name: 'clerum_hcc_networkpolicy_pass_overruns_total',
+  help: 'NetworkPolicy passes still running at an overrun mark (warn) or at the hard limit (fatal), by the stage they were in.',
+  labelNames: ['severity', 'phase'] as const,
+})
+
 export const networkPolicySafetyPassDurationSeconds = histogram({
   name: 'clerum_hcc_networkpolicy_safety_pass_duration_seconds',
   help: 'Seconds until an authoritative NetworkPolicy safety pass has revoked stale allows.',

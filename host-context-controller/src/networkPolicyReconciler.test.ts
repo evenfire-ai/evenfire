@@ -57,6 +57,7 @@ const resolve4Mock = vi.mocked(dns.resolve4) as unknown as Mock
 vi.mock('./config', () => ({
   config: {
     namespace: 'mcp-server',
+    k8sRequestTimeoutMs: 30_000,
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
@@ -563,7 +564,8 @@ describe('NetworkPolicyReconciler', () => {
           expect.objectContaining({ name: targetName })
         )
         expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-          expect.objectContaining({ name: targetName })
+          expect.objectContaining({ name: targetName }),
+          expect.anything()
         )
       }
     )
@@ -809,7 +811,8 @@ describe('NetworkPolicyReconciler', () => {
 
       await expect(reconciler.ensureDefaultPolicies()).rejects.toThrow(/ownership/i)
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-        expect.objectContaining({ namespace: targetNamespace, name: targetName })
+        expect.objectContaining({ namespace: targetNamespace, name: targetName }),
+        expect.anything()
       )
     })
 
@@ -4178,7 +4181,8 @@ describe('NetworkPolicyReconciler', () => {
         ).rejects.toThrow(/ownership/i)
 
         expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-          expect.objectContaining({ namespace: targetNamespace })
+          expect.objectContaining({ namespace: targetNamespace }),
+          expect.anything()
         )
         expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
       }
@@ -5331,10 +5335,13 @@ describe('NetworkPolicyReconciler', () => {
 
       await reconciler.fullReconcile([], [], { serverInventoryComplete: false })
 
-      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
-        name: 'ext-egress-old-server-api-example-com-443',
-        namespace: 'mcp-server',
-      })
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'ext-egress-old-server-api-example-com-443',
+          namespace: 'mcp-server',
+        }),
+        expect.anything()
+      )
     })
 
     it('finishes desired Context reconciliation but stops Context and rpc-proxy orphan cleanup when authority is lost after inventory listing', async () => {
@@ -5378,15 +5385,19 @@ describe('NetworkPolicyReconciler', () => {
         isCurrent: expect.any(Function),
       })
       expect(contextInventoryAuthoritative).toHaveBeenCalled()
-      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
-        name: 'ctx-deleted-context-old-server',
-        namespace: 'mcp-server',
-      })
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'ctx-deleted-context-old-server',
+          namespace: 'mcp-server',
+        }),
+        expect.anything()
+      )
       expect(mockApi.listNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
         expect.objectContaining({
           namespace: 'rpc-proxy',
           labelSelector: expect.stringContaining('policy-type=rpc-proxy-egress'),
-        })
+        }),
+        expect.anything()
       )
     })
 
@@ -5430,10 +5441,13 @@ describe('NetworkPolicyReconciler', () => {
       })
 
       expect(serverInventoryAuthoritative).toHaveBeenCalled()
-      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
-        name: 'ext-egress-deleted-server-api-example-com-443',
-        namespace: 'mcp-server',
-      })
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'ext-egress-deleted-server-api-example-com-443',
+          namespace: 'mcp-server',
+        }),
+        expect.anything()
+      )
     })
 
     it('does not delete any Context policy lane when a same-contextId CRD exists before its watch event arrives', async () => {

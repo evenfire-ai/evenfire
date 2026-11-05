@@ -8,6 +8,7 @@ import { applyNetworkPolicy } from '../src/utils'
 vi.mock('../src/config', () => ({
   config: {
     namespace: 'mcp-server',
+    k8sRequestTimeoutMs: 30_000,
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'rpc-proxy'],
@@ -188,20 +189,27 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
     const serverNames = rpcProxyCalls.map(call => call[1])
     expect(serverNames).toContain('rpc-egress-ctx-delta-mongodb-mcp')
     expect(serverNames).not.toContain('rpc-egress-ctx-delta-airtable-mcp')
-    expect(mockNetApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
-      name: 'rpc-egress-ctx-delta-airtable-mcp',
-      namespace: 'rpc-proxy',
-      body: {
-        preconditions: {
-          uid: 'rpc-proxy:rpc-egress-ctx-delta-airtable-mcp:uid',
-          resourceVersion: '1',
+    // The second argument is the per-request deadline the client carries (#1338).
+    expect(mockNetApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      {
+        name: 'rpc-egress-ctx-delta-airtable-mcp',
+        namespace: 'rpc-proxy',
+        body: {
+          preconditions: {
+            uid: 'rpc-proxy:rpc-egress-ctx-delta-airtable-mcp:uid',
+            resourceVersion: '1',
+          },
         },
       },
-    })
-    expect(mockNetApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
-      name: 'rpc-egress-ctx-delta-mongodb-mcp',
-      namespace: 'rpc-proxy',
-    })
+      expect.objectContaining({ middlewareMergeStrategy: 'append' })
+    )
+    expect(mockNetApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'rpc-egress-ctx-delta-mongodb-mcp',
+        namespace: 'rpc-proxy',
+      }),
+      expect.anything()
+    )
   })
 
   it('skips egress generation when server not found in cache', async () => {

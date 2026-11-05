@@ -21,6 +21,7 @@ import {
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from './constants'
+import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import { hccLogger } from './logger'
 import {
   confirmAuthoritativeMcpServerAbsence,
@@ -426,9 +427,16 @@ export class McpServerReconciler {
   }
 
   constructor(kc: k8s.KubeConfig, deps?: McpServerReconcilerDeps) {
-    this.appsApi = deps?.appsApi ?? kc.makeApiClient(k8s.AppsV1Api)
-    this.coreApi = deps?.coreApi ?? kc.makeApiClient(k8s.CoreV1Api)
-    this.customApi = deps?.customApi ?? kc.makeApiClient(k8s.CustomObjectsApi)
+    // McpServer runtime work shares its keyed effect queue with the
+    // authoritative NetworkPolicy pass, so a request that never settles here
+    // would hold that pass forever (#1338).
+    this.appsApi =
+      deps?.appsApi ?? makeK8sApiClientWithDeadline(kc, k8s.AppsV1Api, config.k8sRequestTimeoutMs)
+    this.coreApi =
+      deps?.coreApi ?? makeK8sApiClientWithDeadline(kc, k8s.CoreV1Api, config.k8sRequestTimeoutMs)
+    this.customApi =
+      deps?.customApi ??
+      makeK8sApiClientWithDeadline(kc, k8s.CustomObjectsApi, config.k8sRequestTimeoutMs)
     this.assumeInventoryAuthorityWhenUnconfigured =
       deps?.assumeInventoryAuthorityWhenUnconfigured ?? false
   }

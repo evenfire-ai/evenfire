@@ -39,8 +39,12 @@ vi.mock('./config', () => ({
     rpcProxyNamespace: 'rpc-proxy',
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'rpc-proxy'],
     hostK8sRequestTimeoutMs: 30000,
+    k8sRequestTimeoutMs: 30_000,
+    netPolPassHardLimitMs: 1_800_000,
     hostResyncIntervalSec: 0,
-    netPolResyncIntervalSec: 3600,
+    // Below the 30 min NetworkPolicy pass hard limit: A-T7a holds a pass open
+    // across one full tick, and a pass held past the limit ends the process.
+    netPolResyncIntervalSec: 600,
     netPolDefaultsResyncIntervalSec: 0,
     externalEgressResyncIntervalSec: 0,
     allowedPluginImagePrefixes: ['ghcr.io/palmeradao/'],
@@ -278,7 +282,7 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
     fixture.services.delete('runtime-witness')
     const writesBefore = fixture.writes.length
     const skipsBefore = await skippedTickCount()
-    await vi.advanceTimersByTimeAsync(3600_000)
+    await vi.advanceTimersByTimeAsync(600_000)
     expect(await skippedTickCount()).toBe(skipsBefore + 1)
     expect(fixture.services.has('runtime-witness')).toBe(false)
     expect(fixture.writes).toHaveLength(writesBefore)
@@ -296,7 +300,7 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
     )
     expect(fixture.services.has('runtime-witness')).toBe(false)
     expect(fixture.writes).toHaveLength(writesBefore)
-    await vi.advanceTimersByTimeAsync(3600_000)
+    await vi.advanceTimersByTimeAsync(600_000)
     await drain(state)
     expect(fixture.services.get('runtime-witness')?.spec?.ports?.[0].port).toBe(3000)
     expect(fixture.writes.slice(writesBefore)).toContain('Service/runtime-witness')

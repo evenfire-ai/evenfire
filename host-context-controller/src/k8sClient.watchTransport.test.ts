@@ -31,6 +31,8 @@ vi.mock('./config', () => ({
     rpcProxyNamespace: 'rpc-proxy',
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'rpc-proxy'],
     hostK8sRequestTimeoutMs: 30_000,
+    k8sRequestTimeoutMs: 30_000,
+    netPolPassHardLimitMs: 1_800_000,
     hostResyncIntervalSec: 0,
     netPolResyncIntervalSec: 0,
     netPolDefaultsResyncIntervalSec: 0,

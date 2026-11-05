@@ -347,8 +347,8 @@ describe('HostReconciler Codex scope provenance', () => {
     wireAllowlist(
       coreApi,
       Object.assign(new Error('Kubernetes request timed out'), {
-        code: 'HCC_HOST_K8S_REQUEST_TIMEOUT',
-        name: 'HostK8sRequestTimeoutError',
+        code: 'HCC_K8S_REQUEST_TIMEOUT',
+        name: 'K8sRequestTimeoutError',
       })
     )
 
