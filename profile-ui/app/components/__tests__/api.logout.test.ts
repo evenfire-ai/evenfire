@@ -205,6 +205,37 @@ describe('Profile logout client boundary', () => {
     expect(vi.mocked(fetch).mock.calls[2]?.[1]?.credentials).toBe('include')
   })
 
+  it('keeps the logout fence when a successful login response cannot be parsed', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('', { status: 503 }))
+      .mockResolvedValueOnce(
+        new Response('{"token":', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 'user-1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+
+    await expect(logoutProfileUI()).resolves.toEqual({
+      revocationConfirmed: false,
+      fencePersisted: true,
+      sessionAbsent: false,
+    })
+    await expect(loginWithPassword('user@example.invalid', 'new-password')).rejects.toThrow()
+
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+    await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
+    // Liveness: the login reached its 200 branch (logout + login), and the fenced
+    // session request never reached the network.
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(String(vi.mocked(fetch).mock.calls[1]?.[0])).toContain('/api/v1/auth/password-login')
+  })
+
   it('clears the in-memory and stored logout fence', async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response('', { status: 503 }))

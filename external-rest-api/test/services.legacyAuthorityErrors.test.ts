@@ -52,7 +52,8 @@ describe('legacy authority adapters', () => {
         switchTeam(auth.userId, auth.email, 'team-2', auth.sessionToken)
       ).resolves.toBeNull()
     }
-    expect(stderr).toHaveBeenCalledTimes(1)
+    // Service code writes no console output; the typed rejection above is the signal.
+    expect(stderr).not.toHaveBeenCalled()
     stderr.mockRestore()
 
     clientMock.controlApiRequest.mockRejectedValueOnce(

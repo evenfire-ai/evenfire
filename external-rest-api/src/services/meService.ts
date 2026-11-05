@@ -157,14 +157,6 @@ export async function getMe(userId: string, teamId: string, sessionToken: string
     if (isControlApiInvalidSession(error)) throw error
     if (error instanceof ControlApiError && error.status === 503) throw error
     if (error instanceof ControlApiError && error.status === 401) {
-      // The edge has no structured logger; one JSON line on stderr carries the event.
-      console.error(
-        JSON.stringify({
-          level: 'error',
-          event: 'external_rest_control_api_credential_rejected',
-          route: '/me',
-        })
-      )
       throw new ControlApiCredentialRejectedError()
     }
     return null

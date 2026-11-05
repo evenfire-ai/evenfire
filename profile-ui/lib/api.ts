@@ -69,7 +69,7 @@ function markLogoutUnconfirmed(): boolean {
 
 /**
  * Clears the logout fence. The fence is released only after a successful
- * password login, a confirmed logout, or an accepted recovery submission; a
+ * password login (parsed response), a confirmed logout, or an accepted recovery submission; a
  * recovery page view never releases it.
  */
 export function clearUnconfirmedLogout(): void {
@@ -283,9 +283,10 @@ export async function loginWithPassword(
     const detail = publicErrorFields(text).detail || res.statusText
     throw new Error(`${res.status} ${res.statusText} - ${detail}`)
   }
+  const body = (await res.json()) as PasswordLoginResponse
   clearToken()
   clearUnconfirmedLogout()
-  return (await res.json()) as PasswordLoginResponse
+  return body
 }
 
 export async function logoutProfileUI(): Promise<{

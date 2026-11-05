@@ -121,12 +121,8 @@ describe('External REST /me unavailable producer contract', () => {
       '/external/users/synthetic-member-id/me',
       expect.objectContaining({ userSessionToken: 'synthetic-session-token' })
     )
-    expect(stderr).toHaveBeenCalledTimes(1)
-    expect(JSON.parse(String(stderr.mock.calls[0][0]))).toEqual({
-      level: 'error',
-      event: 'external_rest_control_api_credential_rejected',
-      route: '/me',
-    })
+    // Service code writes no console output; the 503 with its correlationId above is the signal.
+    expect(stderr).not.toHaveBeenCalled()
   })
 
   it('answers a rejected edge token on /me with the invalid_session envelope', async () => {
