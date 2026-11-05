@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { config, parseCorsOrigin } from '../src/config.js'
 
 describe('parseCorsOrigin', () => {
@@ -24,7 +24,19 @@ describe('parseCorsOrigin', () => {
 
 describe('config', () => {
   it('uses the configured profile session cookie TTL default', () => {
-    expect(config.profileSessionCookieTtlSeconds).toBe(60 * 60 * 12)
+    expect(config.profileSessionCookieTtlSeconds).toBe(604_800)
+  })
+
+  it('preserves an explicit profile session cookie TTL override', async () => {
+    vi.stubEnv('EXTERNAL_REST_API_PROFILE_SESSION_COOKIE_TTL_SECONDS', '7200')
+    vi.resetModules()
+    try {
+      const overridden = await import('../src/config.js')
+      expect(overridden.config.profileSessionCookieTtlSeconds).toBe(7_200)
+    } finally {
+      vi.unstubAllEnvs()
+      vi.resetModules()
+    }
   })
 
   it('uses the approved independent GFS edge backstop defaults', () => {
@@ -32,4 +44,9 @@ describe('config', () => {
     expect(config.externalGfsEdgeAuthenticatedIpRlPerMin).toBe(1_200)
     expect(config.externalGfsEdgeTokenIpRlPerMin).toBe(600)
   })
+})
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+  vi.resetModules()
 })
