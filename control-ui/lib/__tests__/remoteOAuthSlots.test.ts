@@ -83,13 +83,11 @@ describe('remoteOAuthSlotRows', () => {
   })
 
   it('finds no manual match when the URL differs', () => {
-    expect(
-      remoteOAuthSlotRows(
-        validView('@evenfire/linear-remote'),
-        '@evenfire/linear-remote',
-        CATALOG_SLOTS.installed
-      ).every(row => row.manualMatches.length === 0)
-    ).toBe(true)
+    const view = validView('@evenfire/linear-remote')
+    const rows = remoteOAuthSlotRows(view, '@evenfire/linear-remote', CATALOG_SLOTS.installed)
+    expect(view.block.allowedGrantScopes.length).toBeGreaterThan(0)
+    expect(rows).toHaveLength(view.block.allowedGrantScopes.length)
+    for (const row of rows) expect(row.manualMatches).toEqual([])
   })
 })
 
