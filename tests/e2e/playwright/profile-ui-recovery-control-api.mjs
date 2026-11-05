@@ -471,7 +471,7 @@ export async function createRecoveryControlApi({
     const meMatch = pathname.match(/^\/external\/users\/([^/]+)\/me$/)
     if (method === 'GET' && meMatch) {
       const session = activeSession(sessionToken(headers))
-      if (!session || session.user.id !== meMatch[1]) {
+      if (!session) {
         metrics.unauthorizedMeRequests.push({ userId: meMatch[1] })
         // Same public envelope as the real producer (sendPublicApiError): External REST
         // forwards only invalid_session as a session end and maps a bare 401 (its own
@@ -487,6 +487,12 @@ export async function createRecoveryControlApi({
             },
           },
         }
+      }
+      // The real route authenticates the session first and then checks the path user
+      // (requireExternalUserParamMatch): a valid session asking for another user's /me
+      // is a 403, never the session-end envelope the edge forwards as a logout.
+      if (session.user.id !== meMatch[1]) {
+        return { status: 403, body: { error: 'Forbidden' } }
       }
       const user = session.user
       const requestedTeamId = new URLSearchParams(search).get('teamId') || ''
