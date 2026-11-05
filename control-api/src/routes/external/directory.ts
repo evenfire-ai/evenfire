@@ -31,9 +31,9 @@ export function createExternalDirectoryRouter(): Router {
       try {
         const teamId = String(req.query.teamId || '').trim()
         const q = String(req.query.q || '').trim()
-        if (!teamId || !q || q.length > DIRECTORY_SEARCH_MAX_QUERY_LENGTH) {
-          res.status(400).json({ error: 'Invalid directory search request.' })
-          return
+        if (!teamId) return res.status(400).json({ error: 'teamId is required' })
+        if (q.length > DIRECTORY_SEARCH_MAX_QUERY_LENGTH) {
+          return res.status(400).json({ error: 'Invalid directory search request.' })
         }
         return res.status(200).json(await searchDirectory(teamId, q))
       } catch (error) {

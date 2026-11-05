@@ -923,8 +923,7 @@ export async function searchDirectory(teamId: string, q: string) {
   const pattern = `%${escapeLikeLiteral(query)}%`
 
   const result = await pool.query(
-    `SELECT u.id, u.email, u.name, p.display_name,
-            LOWER(COALESCE(NULLIF(p.display_name, ''), NULLIF(u.name, ''), u.email)) AS sort_key
+    `SELECT u.id, u.email, u.name, p.display_name
        FROM team_members tm
        JOIN users u ON u.id = tm.user_id
   LEFT JOIN profiles p ON p.user_id = u.id
@@ -936,24 +935,12 @@ export async function searchDirectory(teamId: string, q: string) {
           OR COALESCE(u.name, '') ILIKE $2 ESCAPE '\\'
           OR COALESCE(p.display_name, '') ILIKE $2 ESCAPE '\\'
         )
-   ORDER BY sort_key ASC, u.id ASC
+   ORDER BY LOWER(COALESCE(NULLIF(p.display_name, ''), NULLIF(u.name, ''), u.email)) ASC,
+            u.id ASC
       LIMIT 25`,
     [teamId, pattern]
   )
-  const rows = result.rows as Array<{
-    id: string
-    email: string
-    name: string | null
-    display_name: string | null
-  }>
-  return {
-    items: rows.map(row => ({
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      displayName: row.display_name,
-    })),
-  }
+  return { items: result.rows }
 }
 
 export async function listManageableTeamsForUser(userId: string) {
@@ -1296,16 +1283,25 @@ export async function updateManagedMemberRoleForUser(
   if (!normalizedRole) {
     return { error: 'invalid_role' as const }
   }
+  // The lock map is keyed by the database's lower-case UUID text, so every id
+  // is normalised once and the same value is used for lookups and events.
+  const managerId = managerUserId.trim().toLowerCase()
+  const targetId = targetUserId.trim().toLowerCase()
+  const normalizedTeamId = teamId.trim().toLowerCase()
   return withTransaction(async db => {
+    // A retired user keeps team_members.status = 'active'; as in dev's
+    // findMemberRole, only users whose lifecycle is active hold a role here.
     const locked = await db.query(
-      `SELECT user_id::text AS user_id, role
-         FROM team_members
-        WHERE team_id = $1
-          AND user_id = ANY($2::uuid[])
-          AND status = 'active'
-        ORDER BY user_id
-        FOR UPDATE`,
-      [teamId.trim(), [managerUserId.trim(), targetUserId.trim()]]
+      `SELECT tm.user_id::text AS user_id, tm.role
+         FROM team_members tm
+         JOIN users u ON u.id = tm.user_id
+        WHERE tm.team_id = $1
+          AND tm.user_id = ANY($2::uuid[])
+          AND tm.status = 'active'
+          AND u.lifecycle_state = 'active'
+        ORDER BY tm.user_id
+        FOR UPDATE OF tm`,
+      [normalizedTeamId, [managerId, targetId]]
     )
     const memberships = new Map(
       (locked.rows as Array<{ user_id: string; role: TeamRole }>).map(row => [
@@ -1313,10 +1309,10 @@ export async function updateManagedMemberRoleForUser(
         row.role,
       ])
     )
-    if (!roleCanDeleteMembers(memberships.get(managerUserId.trim()))) {
+    if (!roleCanDeleteMembers(memberships.get(managerId))) {
       return { error: 'forbidden' as const }
     }
-    const previousRole = memberships.get(targetUserId.trim())
+    const previousRole = memberships.get(targetId)
     if (!previousRole) return { error: 'not_found' as const }
 
     const result = await db.query(
@@ -1327,28 +1323,28 @@ export async function updateManagedMemberRoleForUser(
           AND user_id = $2
           AND status = 'active'
       RETURNING team_id, user_id, role, status`,
-      [teamId.trim(), targetUserId.trim(), normalizedRole]
+      [normalizedTeamId, targetId, normalizedRole]
     )
     const membership = result.rows[0]
     if (!membership) return { error: 'not_found' as const }
     if (previousRole !== normalizedRole) {
       await appendControlApiPermissionEventsInTransaction(db, {
-        operatorSub: managerUserId.trim(),
+        operatorSub: managerId,
         changes: [
           {
             action: 'revoke',
             resourceClass: 'team_membership',
-            resourceRef: `team_membership:${teamId}:role:${previousRole}`,
-            subject: { kind: 'user', id: targetUserId.trim() },
-            teamId: teamId.trim(),
+            resourceRef: `team_membership:${normalizedTeamId}:role:${previousRole}`,
+            subject: { kind: 'user', id: targetId },
+            teamId: normalizedTeamId,
             status: 'role_replaced',
           },
           {
             action: 'grant',
             resourceClass: 'team_membership',
-            resourceRef: `team_membership:${teamId}:role:${normalizedRole}`,
-            subject: { kind: 'user', id: targetUserId.trim() },
-            teamId: teamId.trim(),
+            resourceRef: `team_membership:${normalizedTeamId}:role:${normalizedRole}`,
+            subject: { kind: 'user', id: targetId },
+            teamId: normalizedTeamId,
             status: 'role_assigned',
           },
         ],
@@ -1363,6 +1359,11 @@ export async function deleteManagedMemberForUser(
   targetUserId: string,
   teamId: string
 ) {
+  // The lock map is keyed by the database's lower-case UUID text, so every id
+  // is normalised once and the same value is used for lookups and events.
+  const managerId = managerUserId.trim().toLowerCase()
+  const targetId = targetUserId.trim().toLowerCase()
+  const normalizedTeamId = teamId.trim().toLowerCase()
   return withTransaction(async db => {
     const locked = await db.query(
       `SELECT user_id::text AS user_id, role
@@ -1372,7 +1373,7 @@ export async function deleteManagedMemberForUser(
           AND status = 'active'
         ORDER BY user_id
         FOR UPDATE`,
-      [teamId.trim(), [managerUserId.trim(), targetUserId.trim()]]
+      [normalizedTeamId, [managerId, targetId]]
     )
     const memberships = new Map(
       (locked.rows as Array<{ user_id: string; role: TeamRole }>).map(row => [
@@ -1380,10 +1381,10 @@ export async function deleteManagedMemberForUser(
         row.role,
       ])
     )
-    if (!roleCanDeleteMembers(memberships.get(managerUserId.trim()))) {
+    if (!roleCanDeleteMembers(memberships.get(managerId))) {
       return { error: 'forbidden' as const }
     }
-    const targetRole = memberships.get(targetUserId.trim())
+    const targetRole = memberships.get(targetId)
     if (!targetRole) return { error: 'not_found' as const }
 
     const result = await db.query(
@@ -1394,19 +1395,19 @@ export async function deleteManagedMemberForUser(
           AND user_id = $2
           AND status = 'active'
       RETURNING team_id, user_id, role, status`,
-      [teamId.trim(), targetUserId.trim()]
+      [normalizedTeamId, targetId]
     )
     const deleted = result.rows[0]
     if (!deleted) return { error: 'not_found' as const }
     await appendControlApiPermissionEventsInTransaction(db, {
-      operatorSub: managerUserId.trim(),
+      operatorSub: managerId,
       changes: [
         {
           action: 'revoke',
           resourceClass: 'team_membership',
-          resourceRef: `team_membership:${teamId}:role:${targetRole}`,
-          subject: { kind: 'user', id: targetUserId.trim() },
-          teamId: teamId.trim(),
+          resourceRef: `team_membership:${normalizedTeamId}:role:${targetRole}`,
+          subject: { kind: 'user', id: targetId },
+          teamId: normalizedTeamId,
           status: 'membership_removed',
         },
       ],
@@ -1425,7 +1426,9 @@ export async function deleteManagedUserForUser(
   if (!normalizedManagerUserId || !normalizedTargetUserId) {
     return { error: 'not_found' as const }
   }
-  if (normalizedManagerUserId === normalizedTargetUserId) {
+  // UUIDs compare case-insensitively in the database, so an upper-case copy of
+  // the caller's own id is still the caller.
+  if (normalizedManagerUserId.toLowerCase() === normalizedTargetUserId.toLowerCase()) {
     return { error: 'invalid_target' as const }
   }
 

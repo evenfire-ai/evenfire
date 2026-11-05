@@ -189,6 +189,46 @@ describe('external members routes', () => {
     expect(directoryMock.deleteManagedMemberForUser).not.toHaveBeenCalled()
   })
 
+  it('rejects an upper-case copy of the caller id as a managed self target', async () => {
+    // One answer each, consumed by the witness requests below.
+    directoryMock.updateManagedMemberRoleForUser.mockResolvedValueOnce({
+      membership: { team_id: 'team-1', user_id: 'target-1', role: 'member', status: 'active' },
+    })
+    directoryMock.deleteManagedMemberForUser.mockResolvedValueOnce({
+      deleted: { team_id: 'team-1', user_id: 'target-1', role: 'member', status: 'deleted' },
+    })
+
+    await request(makeApp())
+      .patch('/external/members/MANAGER-1/teams/team-1/role')
+      .send({ role: 'member' })
+      .expect(400, { error: 'invalid_target' })
+    await request(makeApp())
+      .delete('/external/members/MANAGER-1/teams/team-1')
+      .expect(400, { error: 'invalid_target' })
+    expect(directoryMock.updateManagedMemberRoleForUser).not.toHaveBeenCalled()
+    expect(directoryMock.deleteManagedMemberForUser).not.toHaveBeenCalled()
+
+    // Witness: a different user's id reaches each service once.
+    await request(makeApp())
+      .patch('/external/members/target-1/teams/team-1/role')
+      .send({ role: 'member' })
+      .expect(200)
+    await request(makeApp()).delete('/external/members/target-1/teams/team-1').expect(200)
+    expect(directoryMock.updateManagedMemberRoleForUser).toHaveBeenCalledOnce()
+    expect(directoryMock.updateManagedMemberRoleForUser).toHaveBeenCalledWith(
+      'manager-1',
+      'target-1',
+      'team-1',
+      'member'
+    )
+    expect(directoryMock.deleteManagedMemberForUser).toHaveBeenCalledOnce()
+    expect(directoryMock.deleteManagedMemberForUser).toHaveBeenCalledWith(
+      'manager-1',
+      'target-1',
+      'team-1'
+    )
+  })
+
   it('creates invitations without an added user quota', async () => {
     directoryMock.createManagedInvitationForUser.mockResolvedValue({
       invitation: { id: 'inv-parity' },

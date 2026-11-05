@@ -170,7 +170,7 @@ export function createExternalMembersRouter(): Router {
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
         const role = normalizeTeamRoleInput(req.body?.role)
         if (!role) return res.status(400).json({ error: 'invalid_role' })
-        if (managerUserId.trim() === req.params.userId.trim()) {
+        if (managerUserId.trim().toLowerCase() === req.params.userId.trim().toLowerCase()) {
           return res.status(400).json({ error: 'invalid_target' })
         }
         const result = await updateManagedMemberRoleForUser(
@@ -231,7 +231,7 @@ export function createExternalMembersRouter(): Router {
       try {
         const managerUserId = currentUserId(req)
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
-        if (managerUserId.trim() === req.params.userId.trim()) {
+        if (managerUserId.trim().toLowerCase() === req.params.userId.trim().toLowerCase()) {
           return res.status(400).json({ error: 'invalid_target' })
         }
         const result = await deleteManagedMemberForUser(

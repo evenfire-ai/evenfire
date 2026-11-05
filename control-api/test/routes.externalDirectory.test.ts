@@ -120,6 +120,35 @@ describe('external directory authorization', () => {
     expect(mocks.searchDirectory).not.toHaveBeenCalled()
   })
 
+  it("answers dev's 200 with an empty page for a blank query", async () => {
+    mocks.membership.mockResolvedValue({ teamId: 'team-1', role: 'member' })
+
+    const response = await request(app())
+      .get('/external/directory/search?teamId=team-1&q=')
+      .set('x-user-session-token', 'session')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ items: [] })
+    // Witness: the blank query reached the directory service.
+    expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', '')
+  })
+
+  it('relays the directory item shape unchanged', async () => {
+    mocks.membership.mockResolvedValue({ teamId: 'team-1', role: 'member' })
+    const page = {
+      items: [{ id: 'u1', email: 'a@example.test', name: null, display_name: 'A' }],
+    }
+    mocks.searchDirectory.mockResolvedValueOnce(page)
+
+    const response = await request(app())
+      .get('/external/directory/search?teamId=team-1&q=a')
+      .set('x-user-session-token', 'session')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual(page)
+    expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'a')
+  })
+
   it.each(['admin', 'inviter'] as const)('allows a current %s to search', async role => {
     mocks.membership.mockResolvedValue({ teamId: 'team-1', role })
 

@@ -7,10 +7,7 @@ import { type DbClient, initDb } from '../src/db.js'
 import { createExternalMembersRouter } from '../src/routes/external/members.js'
 import { createExternalTeamsRouter } from '../src/routes/external/teams.js'
 import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
-import {
-  acceptInvitationForEmail,
-  createManagedInvitationForUser,
-} from '../src/services/directory/index.js'
+import { createManagedInvitationForUser } from '../src/services/directory/index.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -435,6 +432,35 @@ describeRealPostgres('external team mutations final source authority on real Pos
       [teamId, adminUserId]
     )
     expect(result.rows[0]?.status).toBe('active')
+  })
+
+  it('refuses a managed role change on a retired user who keeps an active membership', async () => {
+    await resetPrincipal('managed-role-retired-target')
+    // Witness: the same manager, route and membership change the active target's role.
+    await request(app())
+      .patch(`/external/members/${targetUserId}/teams/${teamId}/role`)
+      .set('x-user-session-token', token)
+      .send({ role: 'inviter' })
+      .expect(200)
+    const before = await databasePool.query<{ role: string; status: string }>(
+      `SELECT role, status FROM team_members WHERE team_id = $1 AND user_id = $2`,
+      [teamId, targetUserId]
+    )
+    expect(before.rows[0]).toEqual({ role: 'inviter', status: 'active' })
+
+    // Retirement leaves team_members.status = 'active'.
+    await retireAdmin(databasePool, targetUserId, retirementActorId)
+    const response = await request(app())
+      .patch(`/external/members/${targetUserId}/teams/${teamId}/role`)
+      .set('x-user-session-token', token)
+      .send({ role: 'member' })
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({ error: 'not_found' })
+    const after = await databasePool.query<{ role: string; status: string }>(
+      `SELECT role, status FROM team_members WHERE team_id = $1 AND user_id = $2`,
+      [teamId, targetUserId]
+    )
+    expect(after.rows[0]).toEqual({ role: 'inviter', status: 'active' })
   })
 
   it('activates a managed invitation after delivery', async () => {

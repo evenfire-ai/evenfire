@@ -7,6 +7,7 @@ import {
   createInvitationForTeams,
   createManagedInvitationForUser,
   deleteManagedMemberForUser,
+  deleteManagedUserForUser,
   listManagedMembersForUser,
   listManagedPendingInvitationsForUser,
   resendManagedInvitationForUser,
@@ -361,13 +362,7 @@ describe('directory privacy and atomic authorization', () => {
         rowCount: 1,
       })
 
-    const result = await updateManagedMemberRoleForUser(MANAGER, TARGET, TEAM_A, 'inviter', {
-      contract: 'v1',
-      userId: MANAGER,
-      tokenHash: 'legacy-token-hash',
-      issuedAt: Math.floor(Date.now() / 1000),
-      authGeneration: 1,
-    })
+    const result = await updateManagedMemberRoleForUser(MANAGER, TARGET, TEAM_A, 'inviter')
 
     expect(result).toEqual({
       membership: { team_id: TEAM_A, user_id: TARGET, role: 'inviter', status: 'active' },
@@ -1297,13 +1292,7 @@ describe('directory privacy and atomic authorization', () => {
         rowCount: 1,
       })
 
-    const result = await deleteManagedMemberForUser(MANAGER, TARGET, TEAM_A, {
-      contract: 'v1',
-      userId: MANAGER,
-      tokenHash: 'legacy-token-hash',
-      issuedAt: Math.floor(Date.now() / 1000),
-      authGeneration: 1,
-    })
+    const result = await deleteManagedMemberForUser(MANAGER, TARGET, TEAM_A)
 
     expect(result).toEqual({
       deleted: { team_id: TEAM_A, user_id: TARGET, role: 'member', status: 'deleted' },
@@ -1318,6 +1307,153 @@ describe('directory privacy and atomic authorization', () => {
     // Witness: the removal completed and emitted its UPDATE.
     expect(String(mocks.query.mock.calls[1]?.[0])).toContain('UPDATE team_members')
     expect(mocks.appendEvents).toHaveBeenCalledTimes(1)
+  })
+
+  // Emulates the role-change lock: the target is retired but keeps an active
+  // membership, so its row comes back only when the query ignores the user
+  // lifecycle.
+  function managedRoleDatabase(options: { targetRetired: boolean }) {
+    const query = async (sql: string) => {
+      if (sql.includes('FROM team_members') && sql.includes('FOR UPDATE')) {
+        const rows = [{ user_id: MANAGER, role: 'admin' }]
+        if (!options.targetRetired || !sql.includes("u.lifecycle_state = 'active'")) {
+          rows.push({ user_id: TARGET, role: 'member' })
+        }
+        return { rows, rowCount: rows.length }
+      }
+      if (sql.includes('UPDATE team_members')) {
+        return {
+          rows: [{ team_id: TEAM_A, user_id: TARGET, role: 'inviter', status: 'active' }],
+          rowCount: 1,
+        }
+      }
+      throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+    }
+    return query
+  }
+
+  it('refuses a role change on a retired target as dev did', async () => {
+    mocks.query.mockImplementation(managedRoleDatabase({ targetRetired: true }))
+
+    const refused = await updateManagedMemberRoleForUser(MANAGER, TARGET, TEAM_A, 'inviter')
+
+    expect(refused).toEqual({ error: 'not_found' })
+    // Witness: the lock query ran once and locked only the membership rows.
+    expect(mocks.query).toHaveBeenCalledTimes(1)
+    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE OF tm')
+    expect(
+      mocks.query.mock.calls.some(call => String(call[0]).includes('UPDATE team_members'))
+    ).toBe(false)
+    expect(mocks.appendEvents).not.toHaveBeenCalled()
+
+    // Sibling: an active target passes the same lock and is updated.
+    mocks.query.mockReset()
+    mocks.query.mockImplementation(managedRoleDatabase({ targetRetired: false }))
+
+    const changed = await updateManagedMemberRoleForUser(MANAGER, TARGET, TEAM_A, 'inviter')
+
+    expect(changed).toEqual({
+      membership: { team_id: TEAM_A, user_id: TARGET, role: 'inviter', status: 'active' },
+    })
+    expect(String(mocks.query.mock.calls[1]?.[0])).toContain('UPDATE team_members')
+    expect(mocks.appendEvents).toHaveBeenCalledTimes(1)
+  })
+
+  it('matches upper-case manager, target and team ids against the lower-case lock rows', async () => {
+    const manager = 'aaaaaaaa-0000-4000-8000-000000000001'
+    const target = 'bbbbbbbb-0000-4000-8000-000000000002'
+    const team = 'cccccccc-0000-4000-8000-000000000010'
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM team_members') && sql.includes('FOR UPDATE')) {
+        // PostgreSQL renders uuid::text in lower case.
+        return {
+          rows: [
+            { user_id: manager, role: 'admin' },
+            { user_id: target, role: 'member' },
+          ],
+          rowCount: 2,
+        }
+      }
+      if (sql.includes("SET status = 'deleted'")) {
+        return {
+          rows: [{ team_id: team, user_id: target, role: 'member', status: 'deleted' }],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('UPDATE team_members')) {
+        return {
+          rows: [{ team_id: team, user_id: target, role: 'inviter', status: 'active' }],
+          rowCount: 1,
+        }
+      }
+      throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
+    })
+
+    const changed = await updateManagedMemberRoleForUser(
+      manager.toUpperCase(),
+      target.toUpperCase(),
+      ` ${team.toUpperCase()} `,
+      'inviter'
+    )
+    const removed = await deleteManagedMemberForUser(
+      manager.toUpperCase(),
+      target.toUpperCase(),
+      team.toUpperCase()
+    )
+
+    expect(changed).toMatchObject({ membership: { role: 'inviter' } })
+    expect(removed).toMatchObject({ deleted: { status: 'deleted' } })
+    const statements = mocks.query.mock.calls as Array<[string, unknown[]]>
+    const locks = statements.filter(([sql]) => sql.includes('FOR UPDATE'))
+    const updates = statements.filter(([sql]) => sql.includes('UPDATE team_members'))
+    expect(locks.map(([, values]) => values)).toEqual([
+      [team, [manager, target]],
+      [team, [manager, target]],
+    ])
+    // Witness: both mutations wrote with the lower-case ids.
+    expect(updates.map(([, values]) => values.slice(0, 2))).toEqual([
+      [team, target],
+      [team, target],
+    ])
+    const events = mocks.appendEvents.mock.calls.map(
+      call =>
+        call[1] as {
+          operatorSub: string
+          changes: Array<{ resourceRef: string; subject: { id: string }; teamId: string }>
+        }
+    )
+    expect(events).toHaveLength(2)
+    for (const event of events) {
+      expect(event.operatorSub).toBe(manager)
+      for (const change of event.changes) {
+        expect(change.subject.id).toBe(target)
+        expect(change.teamId).toBe(team)
+        expect(change.resourceRef.startsWith(`team_membership:${team}:role:`)).toBe(true)
+      }
+    }
+  })
+
+  it('refuses a managed retirement of an upper-case copy of the caller', async () => {
+    const manager = 'aaaaaaaa-0000-4000-8000-000000000001'
+    const target = 'bbbbbbbb-0000-4000-8000-000000000002'
+    const retirement = {
+      reason: 'synthetic self retirement',
+      idempotencyKey: 'synthetic-self-retirement',
+      requestId: null,
+    }
+    mocks.withTransaction.mockRejectedValue(new Error('retirement transaction reached'))
+
+    await expect(
+      deleteManagedUserForUser(manager, manager.toUpperCase(), retirement)
+    ).resolves.toEqual({ error: 'invalid_target' })
+    expect(mocks.withTransaction).not.toHaveBeenCalled()
+
+    // Witness: a different target passes the guard and opens the retirement
+    // transaction.
+    await expect(deleteManagedUserForUser(manager, target, retirement)).rejects.toThrow(
+      'retirement transaction reached'
+    )
+    expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
   })
 
   it('changes a password and revokes every session in one conditional transaction', async () => {
@@ -1356,18 +1492,23 @@ describe('directory privacy and atomic authorization', () => {
     ).toHaveLength(1)
   })
 
+  function directoryRows(count: number) {
+    return Array.from({ length: count }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+      email: `person-${index}@example.com`,
+      name: `Person ${index}`,
+      display_name: index % 2 === 0 ? `Person ${index}` : null,
+    }))
+  }
+
+  function selectList(sql: string): string {
+    const match = /^\s*SELECT\s+([\s\S]*?)\s+FROM team_members tm/.exec(sql)
+    if (!match) throw new Error('directory search SQL has no SELECT list')
+    return match[1]!.replace(/\s+/g, ' ')
+  }
+
   it('treats wildcard characters literally, excludes channels, and returns one bounded page without a cursor', async () => {
-    mocks.query.mockResolvedValue({
-      rows: Array.from({ length: 25 }, (_, index) => ({
-        id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
-        email: `person-${index}@example.com`,
-        name: `Person ${index}`,
-        display_name: `Person ${index}`,
-        sort_key: `person ${String(index).padStart(2, '0')}`,
-        channels: { emails: ['secret@example.com'] },
-      })),
-      rowCount: 25,
-    })
+    mocks.query.mockResolvedValue({ rows: directoryRows(25), rowCount: 25 })
 
     const result = await searchDirectory(TEAM_A, '%_')
 
@@ -1375,13 +1516,37 @@ describe('directory privacy and atomic authorization', () => {
     expect(mocks.query).toHaveBeenCalledTimes(1)
     const [sql, values] = mocks.query.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain('ILIKE $2 ESCAPE')
-    expect(sql).not.toContain('p.channels')
-    expect(sql).toMatch(/ORDER BY sort_key ASC, u\.id ASC\s+LIMIT 25$/)
     expect(values).toEqual([TEAM_A, '%\\%\\_%'])
+    // channels never leave the database: the SELECT list does not read them.
+    expect(selectList(sql)).not.toContain('channels')
+    expect(sql).not.toContain('p.channels')
+    expect(sql).toMatch(
+      /ORDER BY LOWER\(COALESCE\(NULLIF\(p\.display_name, ''\), NULLIF\(u\.name, ''\), u\.email\)\) ASC,\s+u\.id ASC\s+LIMIT 25$/
+    )
     expect(result.items).toHaveLength(25)
     expect(result).not.toHaveProperty('nextCursor')
-    expect(JSON.stringify(result)).not.toContain('channels')
-    expect(JSON.stringify(result)).not.toContain('secret@example.com')
+  })
+
+  it("returns dev's raw row shape without channels or a sort key", async () => {
+    const rows = directoryRows(3)
+    mocks.query.mockResolvedValue({ rows, rowCount: rows.length })
+
+    const result = await searchDirectory(TEAM_A, 'person')
+
+    // Witness: the search ran once with the plain pattern.
+    expect(mocks.query).toHaveBeenCalledTimes(1)
+    const [sql, values] = mocks.query.mock.calls[0] as [string, unknown[]]
+    expect(values).toEqual([TEAM_A, '%person%'])
+    expect(selectList(sql)).toBe('u.id, u.email, u.name, p.display_name')
+    expect(sql).not.toContain('sort_key')
+    expect(result).toEqual({ items: rows })
+    for (const item of result.items as Array<Record<string, unknown>>) {
+      expect(Object.keys(item).sort()).toEqual(['display_name', 'email', 'id', 'name'])
+    }
+
+    // A blank query answers an empty page without another search.
+    await expect(searchDirectory(TEAM_A, '   ')).resolves.toEqual({ items: [] })
+    expect(mocks.query).toHaveBeenCalledTimes(1)
   })
 
   function functionBody(source: string, name: string): string | null {
