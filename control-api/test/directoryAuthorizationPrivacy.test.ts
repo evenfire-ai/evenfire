@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import bcrypt from 'bcryptjs'
 import { readFileSync } from 'node:fs'
+import type { TeamRole } from '../src/profileTypes.js'
 import {
   acceptInvitationById,
   acceptInvitationForEmail,
@@ -1454,6 +1455,88 @@ describe('directory privacy and atomic authorization', () => {
       'retirement transaction reached'
     )
     expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
+  })
+
+  // Cheap pin of the retirement lock statement; the lock order itself is
+  // proven on real PostgreSQL by
+  // directoryManagedWriterLockOrder.realPostgres.integration.test.ts.
+  it('locks the managed retirement authority in one (team_id, user_id) ordered statement', async () => {
+    const manager = 'aaaaaaaa-0000-4000-8000-000000000001'
+    const target = 'bbbbbbbb-0000-4000-8000-000000000002'
+    const teamOne = 'cccccccc-0000-4000-8000-000000000010'
+    const teamTwo = 'dddddddd-0000-4000-8000-000000000020'
+    const operationId = 'eeeeeeee-0000-4000-8000-000000000030'
+    let managerRoleOnTeamTwo: TeamRole = 'member'
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM users') && sql.includes('ANY($1::uuid[])')) {
+        return { rows: [{ id: manager }, { id: target }], rowCount: 2 }
+      }
+      if (sql.includes('INSERT INTO desktop_user_retirement_operations')) {
+        return { rows: [{ id: operationId }], rowCount: 1 }
+      }
+      if (sql.includes('FROM users') && sql.includes('WHERE id = $1::uuid')) {
+        return {
+          rows: [{ id: target, lifecycle_state: 'active', lifecycle_version: 1 }],
+          rowCount: 1,
+        }
+      }
+      // PostgreSQL returns uuid::text in lower case, in (team_id, user_id) order.
+      const memberships = [
+        { team_id: teamOne, user_id: manager, role: 'admin' },
+        { team_id: teamOne, user_id: target, role: 'member' },
+        { team_id: teamTwo, user_id: manager, role: managerRoleOnTeamTwo },
+        { team_id: teamTwo, user_id: target, role: 'member' },
+      ]
+      if (sql.includes('FROM team_members tm') && sql.includes('ANY($1::uuid[])')) {
+        return { rows: memberships, rowCount: memberships.length }
+      }
+      // Answers for a two-step order (target rows, then manager rows), so that
+      // reverting to it fails at the single-statement pin below rather than here.
+      if (sql.includes(MANAGER_USER_LOCK)) return { rows: [], rowCount: 0 }
+      if (sql.includes('FROM team_members')) {
+        const userId = sql.includes('FROM team_members tm') ? manager : target
+        const rows = memberships.filter(row => row.user_id === userId)
+        return { rows, rowCount: rows.length }
+      }
+      if (sql.includes('gfs_desktop_operator_links')) {
+        throw new Error('retirement passed authorization')
+      }
+      throw new Error(`unexpected query: ${sql.slice(0, 60)}`)
+    })
+    const retirement = {
+      reason: 'synthetic lock order retirement',
+      idempotencyKey: 'synthetic-lock-order-retirement',
+      requestId: null,
+    }
+
+    await expect(
+      deleteManagedUserForUser(manager.toUpperCase(), target.toUpperCase(), retirement)
+    ).resolves.toEqual({ error: 'forbidden_uncontrolled_teams' })
+
+    const statements = (mocks.query.mock.calls as Array<[string, unknown[]]>).map(
+      ([sql, values]) => ({ sql: sql.replace(/\s+/g, ' '), values })
+    )
+    const membershipLocks = statements.filter(
+      ({ sql }) => sql.includes('team_members') && sql.includes('FOR UPDATE')
+    )
+    expect(membershipLocks).toHaveLength(1)
+    expect(membershipLocks[0]!.sql).toContain('ORDER BY tm.team_id, tm.user_id FOR UPDATE OF tm')
+    expect(membershipLocks[0]!.sql).toContain("AND u.lifecycle_state = 'active'")
+    expect(membershipLocks[0]!.values).toEqual([[manager, target], target])
+    // The principal pair lock already holds the manager row; no second lock.
+    expect(statements.filter(({ sql }) => sql.includes(MANAGER_USER_LOCK))).toHaveLength(0)
+    // Witness: the principal pair lock ran before the one membership lock.
+    const pairLock = statements.findIndex(({ sql }) => sql.includes('ANY($1::uuid[]) ORDER BY id'))
+    expect(pairLock).toBeGreaterThanOrEqual(0)
+    expect(pairLock).toBeLessThan(statements.indexOf(membershipLocks[0]!))
+
+    // Witness for the forbidden decision: with control of both teams, the
+    // upper-case manager id matches the lower-case rows and retirement
+    // proceeds past authorization.
+    managerRoleOnTeamTwo = 'admin'
+    await expect(
+      deleteManagedUserForUser(manager.toUpperCase(), target.toUpperCase(), retirement)
+    ).rejects.toThrow('retirement passed authorization')
   })
 
   it('changes a password and revokes every session in one conditional transaction', async () => {

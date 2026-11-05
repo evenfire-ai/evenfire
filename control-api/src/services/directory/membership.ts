@@ -1291,6 +1291,9 @@ export async function updateManagedMemberRoleForUser(
   return withTransaction(async db => {
     // A retired user keeps team_members.status = 'active'; as in dev's
     // findMemberRole, only users whose lifecycle is active hold a role here.
+    // Global lock order for team_members rows: (team_id, user_id), shared
+    // with deleteManagedMemberForUser and the deleteManagedUserForUser
+    // authorization; one team, so ORDER BY user_id follows it.
     const locked = await db.query(
       `SELECT tm.user_id::text AS user_id, tm.role
          FROM team_members tm
@@ -1365,6 +1368,9 @@ export async function deleteManagedMemberForUser(
   const targetId = targetUserId.trim().toLowerCase()
   const normalizedTeamId = teamId.trim().toLowerCase()
   return withTransaction(async db => {
+    // Global lock order for team_members rows: (team_id, user_id), shared
+    // with updateManagedMemberRoleForUser and the deleteManagedUserForUser
+    // authorization; one team, so ORDER BY user_id follows it.
     const locked = await db.query(
       `SELECT user_id::text AS user_id, role
          FROM team_members
@@ -1465,24 +1471,42 @@ export async function deleteManagedUserForUser(
         {
           db,
           authorize: async retirementDb => {
-            const teamsResult = await retirementDb.query(
-              `SELECT team_id
-                 FROM team_members
-                WHERE user_id = $1
-                  AND status = 'active'
-                ORDER BY team_id
-                FOR UPDATE`,
-              [normalizedTargetUserId]
+            // Global lock order for team_members rows: (team_id, user_id).
+            // The member writers lock one team's rows ORDER BY user_id, so
+            // the manager's and the target's rows across every team of the
+            // target are locked in one statement in that same order. Two
+            // statements (target rows, then manager rows) can hold a target
+            // row while waiting for a manager row that a member writer holds
+            // while it waits for that target row: a deadlock. The lifecycle
+            // filter keeps the manager filter dev applied; retireDesktopUser
+            // has already refused a target whose lifecycle is not active.
+            // The ids are compared with the database's lower-case UUID text.
+            const managerId = normalizedManagerUserId.toLowerCase()
+            const targetId = normalizedTargetUserId.toLowerCase()
+            const locked = await retirementDb.query(
+              `SELECT tm.team_id::text AS team_id, tm.user_id::text AS user_id, tm.role
+                 FROM team_members tm
+                 JOIN users u ON u.id = tm.user_id
+                WHERE tm.status = 'active'
+                  AND u.lifecycle_state = 'active'
+                  AND tm.user_id = ANY($1::uuid[])
+                  AND tm.team_id IN (
+                    SELECT team_id
+                      FROM team_members
+                     WHERE user_id = $2
+                       AND status = 'active'
+                  )
+                ORDER BY tm.team_id, tm.user_id
+                FOR UPDATE OF tm`,
+              [[managerId, targetId], targetId]
             )
-            const teamIds = (teamsResult.rows as Array<{ team_id: string }>).map(row => row.team_id)
+            const rows = locked.rows as Array<{ team_id: string; user_id: string; role: TeamRole }>
+            const teamIds = rows.filter(row => row.user_id === targetId).map(row => row.team_id)
             if (teamIds.length === 0) {
               throw new ManagedRetirementAuthorizationError('not_found')
             }
-            const managerRoles = await getManagerRolesForTeams(
-              retirementDb,
-              normalizedManagerUserId,
-              teamIds,
-              true
+            const managerRoles = new Map(
+              rows.filter(row => row.user_id === managerId).map(row => [row.team_id, row.role])
             )
             if (!teamIds.every(teamId => roleCanDeleteMembers(managerRoles.get(teamId)))) {
               throw new ManagedRetirementAuthorizationError('forbidden_uncontrolled_teams')
