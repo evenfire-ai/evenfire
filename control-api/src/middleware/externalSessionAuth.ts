@@ -39,6 +39,17 @@ export function handleExternalSessionBackendFailure(
   })
 }
 
+/**
+ * Marks a handler-level 503 as a retryable outage before its body is sent:
+ * sets `Retry-After` and `Cache-Control: no-store` and logs the failure's
+ * cause under `event`. The caller still sends its own response body.
+ */
+export function markAuthorityUnavailable(res: Response, error: Error, event: string): void {
+  rootLogger.warn({ event, err: error.cause }, 'external authority is unavailable')
+  res.setHeader('Retry-After', String(SESSION_BACKEND_RETRY_AFTER_SECONDS))
+  res.setHeader('Cache-Control', 'no-store')
+}
+
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
   externalSessionAuthentication?: Extract<
@@ -55,7 +66,7 @@ function extractUserSessionToken(req: Request): string {
   return String(req.header('x-user-session-token') || '').trim()
 }
 
-function extractRouteSessionToken(req: Request): string {
+export function extractRouteSessionToken(req: Request): string {
   const body = (req.body ?? {}) as { token?: unknown; sessionToken?: unknown }
   const selected = req.header('x-user-session-token') || body.token || body.sessionToken || ''
   // A non-string body value is an invalid token, never a value to coerce:
@@ -193,6 +204,7 @@ export function requireExternalTeamParamMatch(paramName = 'teamId') {
         next(error)
         return
       }
+      markAuthorityUnavailable(res, error, 'external_team_authority_unavailable')
       res.status(503).json({ error: 'authority_unavailable' })
     }
   }

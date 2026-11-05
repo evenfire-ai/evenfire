@@ -96,6 +96,19 @@ function rateLimitContextApp() {
   return value
 }
 
+/**
+ * A JSON value whose String() coercion throws: `toString` is not callable and
+ * `valueOf` returns the object itself, so String() raises a TypeError.
+ */
+const THROWING_JSON_VALUE = { toString: 1 }
+
+const SESSION_TOKEN_PAYLOAD = {
+  userId: claims.userId,
+  email: claims.email,
+  teamId: 'team-1',
+  role: 'member',
+}
+
 function authRouterApp() {
   const value = express()
   value.use(express.json())
@@ -136,7 +149,7 @@ describe('external session token type boundary', () => {
   it('answers the rpc-token 401 for a non-string sessionToken without coercing it', async () => {
     const response = await request(authRouterApp())
       .post('/external/rpc/token')
-      .send({ sessionToken: { synthetic: 'synthetic-non-string-token' } })
+      .send({ sessionToken: THROWING_JSON_VALUE })
 
     expect(response.status).toBe(401)
     expect(response.body).toEqual({ error: 'Unauthorized' })
@@ -154,5 +167,70 @@ describe('external session token type boundary', () => {
     )
     expect(response.status).toBe(403)
     expect(response.body).toEqual({ error: 'invalid_host_refs' })
+  })
+
+  it('answers the session-token 400 for a non-string body token without coercing it', async () => {
+    const response = await request(authRouterApp())
+      .post('/external/auth/session-token')
+      .send({ ...SESSION_TOKEN_PAYLOAD, token: THROWING_JSON_VALUE })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid payload' })
+    expect(sessions.authenticateExternalUserSession).not.toHaveBeenCalled()
+  })
+
+  it('answers the session-token 400 for a non-string payload field without coercing it', async () => {
+    const response = await request(authRouterApp())
+      .post('/external/auth/session-token')
+      .send({ ...SESSION_TOKEN_PAYLOAD, userId: THROWING_JSON_VALUE, token: 'synthetic-id-token' })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid payload' })
+    expect(sessions.authenticateExternalUserSession).not.toHaveBeenCalled()
+  })
+
+  it('still authenticates a string body token at the session-token boundary', async () => {
+    issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
+      status: 'issued',
+      token: 'synthetic-replacement-token',
+    })
+
+    const response = await request(authRouterApp())
+      .post('/external/auth/session-token')
+      .send({ ...SESSION_TOKEN_PAYLOAD, token: 'synthetic-id-token' })
+
+    expect(sessions.authenticateExternalUserSession).toHaveBeenCalledWith(
+      'synthetic-id-token',
+      expect.objectContaining({ purpose: 'switch' })
+    )
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      token: 'synthetic-replacement-token',
+      sessionContract: 'v1',
+      deprecated: true,
+    })
+  })
+
+  it('answers the verify 401 for a non-string body token without coercing it', async () => {
+    const response = await request(authRouterApp())
+      .post('/external/auth/verify')
+      .send({ token: THROWING_JSON_VALUE })
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(sessions.authenticateExternalUserSession).not.toHaveBeenCalled()
+  })
+
+  it('still authenticates a string body token at the verify boundary', async () => {
+    const response = await request(authRouterApp())
+      .post('/external/auth/verify')
+      .send({ token: 'synthetic-id-token' })
+
+    expect(sessions.authenticateExternalUserSession).toHaveBeenCalledWith(
+      'synthetic-id-token',
+      expect.objectContaining({ purpose: 'verify' })
+    )
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ claims })
   })
 })

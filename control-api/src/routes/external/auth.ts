@@ -5,7 +5,9 @@ import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
 import {
   type ExternalAuthedRequest,
+  extractRouteSessionToken,
   handleExternalSessionBackendFailure,
+  markAuthorityUnavailable,
   requireExternalSessionRateLimitContext,
 } from '../../middleware/externalSessionAuth.js'
 import { requireAuthenticatedExternalUserRateLimitContext } from '../../middleware/externalUserRateLimitPolicy.js'
@@ -70,12 +72,13 @@ function externalSessionClient(req: { body?: unknown; header(name: string): stri
   }
 }
 
-function sessionTokenFromRequest(req: {
-  body?: unknown
-  header(name: string): string | undefined
-}): string {
-  const body = (req.body ?? {}) as { token?: unknown; sessionToken?: unknown }
-  return String(req.header('x-user-session-token') || body.token || body.sessionToken || '').trim()
+function sessionTokenFromRequest(req: Request): string {
+  return extractRouteSessionToken(req)
+}
+
+/** A non-string body field is an invalid value, never one to coerce with String(). */
+function trimmedBodyString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 function requireLegacySessionTokenPayload(req: Request, res: Response, next: NextFunction): void {
@@ -85,10 +88,10 @@ function requireLegacySessionTokenPayload(req: Request, res: Response, next: Nex
     teamId?: unknown
     role?: unknown
   }
-  const userId = String(body.userId || '').trim()
-  const email = String(body.email || '').trim()
-  const teamId = String(body.teamId || '').trim()
-  const role = String(body.role || '').trim()
+  const userId = trimmedBodyString(body.userId)
+  const email = trimmedBodyString(body.email)
+  const teamId = trimmedBodyString(body.teamId)
+  const role = trimmedBodyString(body.role)
   const token = sessionTokenFromRequest(req)
   if (
     !userId ||
@@ -128,6 +131,7 @@ function handleExternalAuthorityUnavailable(
     next(error)
     return
   }
+  markAuthorityUnavailable(res, error, 'external_auth_authority_unavailable')
   sendPublicApiError(req, res, 503, 'authority_unavailable', message, true)
 }
 
@@ -316,7 +320,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post('/external/auth/verify', async (req, res, next) => {
     try {
-      const token = String(req.body?.token || '').trim()
+      const token = typeof req.body?.token === 'string' ? req.body.token.trim() : ''
       if (!token || token.length > 4096) return res.status(401).json({ error: 'Unauthorized' })
       const authentication = await authenticateExternalUserSession(token, {
         purpose: 'verify',

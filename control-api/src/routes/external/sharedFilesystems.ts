@@ -1,13 +1,19 @@
-import { Router } from 'express'
+import { type Response, Router } from 'express'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
+  markAuthorityUnavailable,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
+import {
+  type ExternalSessionBackendUnavailableError,
+  externalSessionDatabaseFailure,
+  isExternalSessionBackendUnavailableError,
+} from '../../services/auth/sessionDatabaseFailure.js'
 import {
   listActiveContextIds,
   partitionAccessValues,
@@ -60,7 +66,7 @@ class ContextAccessReconciliationError extends Error {
 }
 
 class ContextAuthorizationUnavailableError extends Error {
-  constructor(cause: unknown) {
+  constructor(cause: ExternalSessionBackendUnavailableError) {
     super('Context authorization is unavailable')
     this.name = 'ContextAuthorizationUnavailableError'
     this.cause = cause
@@ -77,7 +83,7 @@ async function loadAccessibleContextIds(
   try {
     activeContextIds = await listActiveContextIds(gateway)
   } catch (err) {
-    console.warn('[external/shared-filesystems] context reconciliation failed:', err)
+    // Logged once, where the 503 is answered (resolveAccessibleContextIdsForRequest).
     throw new ContextAccessReconciliationError(err)
   }
   const userCtx = await getUserContexts(userId)
@@ -89,8 +95,13 @@ async function loadAccessibleContextIds(
     const compatibilityTeamId = teamId.trim()
     let membership
     try {
-      membership = await getLiveTeamMembership(userId, compatibilityTeamId)
+      membership = await getLiveTeamMembership(userId, compatibilityTeamId, {
+        onDatabaseFailure: externalSessionDatabaseFailure,
+      })
     } catch (err) {
+      // Only the database-outage provenance is an outage. Anything else (a
+      // programmer or policy failure) keeps the global handler's sanitized 500.
+      if (!isExternalSessionBackendUnavailableError(err)) throw err
       throw new ContextAuthorizationUnavailableError(err)
     }
     if (membership) {
@@ -125,19 +136,22 @@ function loadAccessibleContextIdsForRequest(
 async function resolveAccessibleContextIdsForRequest(
   gateway: K8sGateway,
   req: ExternalAuthedRequest,
-  res: {
-    locals: Record<string, unknown>
-    status: (code: number) => { json: (body: unknown) => void }
-  }
+  res: Response
 ): Promise<Set<string> | null> {
   try {
     return await loadAccessibleContextIdsForRequest(gateway, req, res)
   } catch (err) {
     if (err instanceof ContextAccessReconciliationError) {
+      markAuthorityUnavailable(
+        res,
+        err,
+        'external_shared_filesystems_context_reconciliation_failed'
+      )
       res.status(503).json({ error: 'context_reconciliation_unavailable' })
       return null
     }
     if (!(err instanceof ContextAuthorizationUnavailableError)) throw err
+    markAuthorityUnavailable(res, err, 'external_shared_filesystems_authority_unavailable')
     res.status(503).json({ error: 'authority_unavailable' })
     return null
   }
