@@ -78,11 +78,14 @@ nginx_ref_problem() {
   nginx_tag_problem "$ref_tag"
 }
 
-# Any image named nginx or nginxinc/nginx-unprivileged, under any registry
-# path, is treated as upstream NGINX and held to the floors.
+# Any image named nginx, nginx/nginx-unprivileged, or the legacy
+# nginxinc/nginx-unprivileged, under any registry path, is treated as upstream
+# NGINX and held to the floors.
 is_nginx_name() {
   case "$1" in
-    nginx | */nginx | nginxinc/nginx-unprivileged | */nginxinc/nginx-unprivileged) return 0 ;;
+    nginx | */nginx | \
+      nginx/nginx-unprivileged | */nginx/nginx-unprivileged | \
+      nginxinc/nginx-unprivileged | */nginxinc/nginx-unprivileged) return 0 ;;
   esac
   return 1
 }
