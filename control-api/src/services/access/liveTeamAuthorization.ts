@@ -6,6 +6,8 @@ export type LiveTeamMembership = {
   role: TeamRole
 }
 
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export async function getLiveTeamMembership(
   userId: string,
   teamId: string,
@@ -14,6 +16,9 @@ export async function getLiveTeamMembership(
     onDatabaseFailure?: (error: unknown) => unknown
   } = {}
 ): Promise<LiveTeamMembership | null> {
+  // team_members.user_id and team_id are UUID columns: a value that is not a
+  // UUID cannot name a team or user row, so it has no membership.
+  if (!CANONICAL_UUID_RE.test(teamId) || !CANONICAL_UUID_RE.test(userId)) return null
   const db = options.db ?? pool
   const text = `SELECT tm.team_id, tm.role
        FROM team_members tm

@@ -926,6 +926,106 @@ describe('routes/profile', () => {
     )
   })
 
+  it('signs the live team role for rpc tokens, not the session token role', async () => {
+    const sessionToken = signExternalSessionToken({
+      userId: 'user-live-role',
+      email: 'live-role@example.com',
+      teamId: 't1',
+      role: 'admin',
+      authGeneration: 1,
+    })
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue({
+      teamId: 't1',
+      role: 'member',
+    })
+    svc.getUserAgents.mockResolvedValue({ userId: 'user-live-role', agentNames: [] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['team-host'] })
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'synthetic-rpc-token',
+      accessScope: 'team',
+      teamId: 't1',
+      scopes: ['mcp:servers:list'],
+      hostRefs: ['team-host'],
+      expiresInSeconds: 300,
+    })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/rpc/token'))
+      .send({ sessionToken, scopes: ['mcp:servers:list'], hostRefs: ['team-host'] })
+      .expect(200)
+
+    // Witness: the role decision came from the live membership lookup.
+    expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledWith(
+      'user-live-role',
+      't1',
+      expect.anything()
+    )
+    expect(svc.getTeamAgents).toHaveBeenCalledWith('t1')
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledWith(
+      { userId: 'user-live-role', teamId: 't1', role: 'member' },
+      ['mcp:servers:list'],
+      ['team-host'],
+      []
+    )
+  })
+
+  it('keeps only direct host grants for rpc tokens once the live team membership is gone', async () => {
+    const sessionToken = signExternalSessionToken({
+      userId: 'user-removed',
+      email: 'removed@example.com',
+      teamId: 't1',
+      role: 'admin',
+      authGeneration: 1,
+    })
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue(null)
+    svc.getUserAgents.mockResolvedValue({ userId: 'user-removed', agentNames: ['direct-host'] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['team-host'] })
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'synthetic-rpc-token',
+      accessScope: 'user',
+      teamId: null,
+      scopes: ['mcp:servers:list'],
+      hostRefs: ['direct-host'],
+      expiresInSeconds: 300,
+    })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/rpc/token'))
+      .send({ sessionToken, scopes: ['mcp:servers:list'], hostRefs: ['team-host'] })
+      .expect(403)
+      .expect({ error: 'direct_host_access_required' })
+
+    expect(svc.getTeamAgents).not.toHaveBeenCalled()
+    expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
+    // Witness: the request reached the live lookup and the grant decision.
+    expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledTimes(1)
+    expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledWith(
+      'user-removed',
+      't1',
+      expect.anything()
+    )
+    expect(svc.getUserAgents).toHaveBeenCalledTimes(1)
+
+    await withInternalServiceAuth(request(app).post('/external/rpc/token'))
+      .send({ sessionToken, scopes: ['mcp:servers:list'], hostRefs: ['direct-host'] })
+      .expect(200)
+
+    expect(svc.getTeamAgents).not.toHaveBeenCalled()
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledTimes(1)
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledWith(
+      { userId: 'user-removed', teamId: null, role: 'member' },
+      ['mcp:servers:list'],
+      ['direct-host'],
+      []
+    )
+  })
+
   it('issues the existing RPC token as user-scoped for a directly granted teamless agent', async () => {
     const sessionToken = signExternalSessionToken({
       userId: 'user-teamless',
