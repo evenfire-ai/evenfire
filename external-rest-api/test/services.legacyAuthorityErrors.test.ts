@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import request from 'supertest'
+import { createApp } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createDesktopAuthorization } from '../src/services/invitationsService.js'
 import { ControlApiCredentialRejectedError, getMe, switchTeam } from '../src/services/meService.js'
@@ -15,6 +17,12 @@ vi.mock('../src/controlApiClient.js', async importOriginal => {
   return { ...actual, controlApiRequest: clientMock.controlApiRequest }
 })
 
+const authTokenMock = vi.hoisted(() => ({ verifyToken: vi.fn() }))
+vi.mock('../src/authToken.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/authToken.js')>()
+  return { ...actual, verifyToken: authTokenMock.verifyToken }
+})
+
 const auth = {
   userId: 'user-1',
   email: 'user@example.com',
@@ -29,9 +37,23 @@ function upstream(status: number): ControlApiError {
   })
 }
 
+// control-api's public session-end envelope (revoked, expired or invalid session).
+const INVALID_SESSION_BODY = {
+  error: { code: 'invalid_session', message: 'The session is not valid.', retryable: false },
+}
+const INVALID_SESSION_REJECTION = {
+  status: 401,
+  body: { error: { code: 'invalid_session' } },
+}
+
+function invalidSession(): ControlApiError {
+  return new ControlApiError('control api failure', 401, INVALID_SESSION_BODY)
+}
+
 describe('legacy authority adapters', () => {
   beforeEach(() => {
     clientMock.controlApiRequest.mockReset()
+    authTokenMock.verifyToken.mockReset()
   })
 
   it('maps every other /me and switch-team failure to absence, keeping outages and /me revocation', async () => {
@@ -79,20 +101,29 @@ describe('legacy authority adapters', () => {
     expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(9)
   })
 
-  it('does not convert current-team authority outages into an empty team', async () => {
-    for (const status of [404, 401, 500]) {
+  it('keeps the current-team session end and outages, and maps every other failure to no team', async () => {
+    for (const status of [403, 404, 401, 500]) {
       clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
       await expect(getCurrentTeam(auth)).resolves.toBeNull()
     }
 
+    clientMock.controlApiRequest.mockRejectedValueOnce(invalidSession())
+    await expect(getCurrentTeam(auth)).rejects.toMatchObject(INVALID_SESSION_REJECTION)
+
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
     await expect(getCurrentTeam(auth)).rejects.toMatchObject({ status: 503 })
 
-    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(4)
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(6)
   })
 
-  it('maps every rename failure except an outage to not_found', async () => {
-    for (const status of [403, 404, 401, 500]) {
+  it('keeps the rename session end, live demotion and outages, and maps the rest to not_found', async () => {
+    clientMock.controlApiRequest.mockRejectedValueOnce(invalidSession())
+    await expect(renameTeam(auth, 'Renamed')).rejects.toMatchObject(INVALID_SESSION_REJECTION)
+
+    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(403))
+    await expect(renameTeam(auth, 'Renamed')).resolves.toEqual({ error: 'forbidden' })
+
+    for (const status of [404, 401, 500]) {
       clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
       await expect(renameTeam(auth, 'Renamed')).resolves.toEqual({ error: 'not_found' })
     }
@@ -100,11 +131,21 @@ describe('legacy authority adapters', () => {
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
     await expect(renameTeam(auth, 'Renamed')).rejects.toMatchObject({ status: 503 })
 
-    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(5)
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(6)
   })
 
-  it('maps every member-read failure except an outage to not_found', async () => {
-    for (const status of [403, 404, 401, 500]) {
+  it('keeps the member-read session end, live demotion and outages, and maps the rest to not_found', async () => {
+    clientMock.controlApiRequest.mockRejectedValueOnce(invalidSession())
+    await expect(updateMemberRole(auth, 'user-2', 'member')).rejects.toMatchObject(
+      INVALID_SESSION_REJECTION
+    )
+
+    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(403))
+    await expect(updateMemberRole(auth, 'user-2', 'member')).resolves.toEqual({
+      error: 'forbidden',
+    })
+
+    for (const status of [404, 401, 500]) {
       clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
       await expect(updateMemberRole(auth, 'user-2', 'member')).resolves.toEqual({
         error: 'not_found',
@@ -116,11 +157,19 @@ describe('legacy authority adapters', () => {
       status: 503,
     })
 
-    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(5)
+    // Every case stops at the existence read: the PATCH is never sent.
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(6)
+    for (const [method] of clientMock.controlApiRequest.mock.calls) expect(method).toBe('GET')
   })
 
-  it('maps every member-delete failure except an outage to not_found', async () => {
-    for (const status of [403, 404, 401, 500]) {
+  it('keeps the member-delete session end, live demotion and outages, and maps the rest to not_found', async () => {
+    clientMock.controlApiRequest.mockRejectedValueOnce(invalidSession())
+    await expect(deleteMember(auth, 'user-2')).rejects.toMatchObject(INVALID_SESSION_REJECTION)
+
+    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(403))
+    await expect(deleteMember(auth, 'user-2')).resolves.toEqual({ error: 'forbidden' })
+
+    for (const status of [404, 401, 500]) {
       clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
       await expect(deleteMember(auth, 'user-2')).resolves.toEqual({ error: 'not_found' })
     }
@@ -128,7 +177,26 @@ describe('legacy authority adapters', () => {
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
     await expect(deleteMember(auth, 'user-2')).rejects.toMatchObject({ status: 503 })
 
-    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(5)
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(6)
+  })
+
+  it('relays the invalid_session envelope from GET /api/v1/team instead of answering no team', async () => {
+    authTokenMock.verifyToken.mockReturnValue({ ...auth, exp: 9999999999 })
+    clientMock.controlApiRequest.mockRejectedValueOnce(invalidSession())
+
+    const response = await request(createApp())
+      .get('/api/v1/team')
+      .set('authorization', 'Bearer synthetic-session-token')
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual(INVALID_SESSION_BODY)
+
+    // Witness: the request reached the current-team read with the caller's session.
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(1)
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith(
+      'GET',
+      `/external/teams/${auth.teamId}/users/${auth.userId}/current`,
+      { userSessionToken: 'synthetic-session-token' }
+    )
   })
 
   it('does not convert desktop-authorization authority outages into bad passwords', async () => {
