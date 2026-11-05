@@ -12,6 +12,7 @@ import {
   within,
 } from '@testing-library/react'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
@@ -710,6 +711,19 @@ describe('FilePreviewPage', () => {
       await waitFor(() =>
         expect(affordances).toHaveBeenCalledTimes(permissionReadsBeforeReplacement + 2)
       )
+      // The call count does not say which key the authority was cached under:
+      // generation 2's reads must land under generation 2's keys.
+      const queryClient = queryClients.at(-1)
+      if (!queryClient) throw new Error('Preview query client is unavailable')
+      await waitFor(() => {
+        for (const resourceId of ['0123456789abcdef0123456789abcdef', 'preview-parent']) {
+          expect(
+            queryClient.getQueryState(
+              desktopQueryKeys.gfsAffordances(controllerState.sessionScope, resourceId, 'main', 2)
+            )?.status
+          ).toBe('success')
+        }
+      })
       expect(renameResource).not.toHaveBeenCalled()
     } finally {
       releaseDigest(new ArrayBuffer(0))
