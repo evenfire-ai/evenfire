@@ -232,7 +232,10 @@ INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TO
 # The "changed in this run" flags below (Secret value before this run versus
 # the value it writes, computed before any Secret is patched) are used only
 # when a Deployment has no stamp yet (first run with stamps, or a recreated
-# Deployment). Values stay in shell locals and are never logged.
+# Deployment): before any Secret is written, such a Deployment is marked
+# restart-pending when a value it reads changes, so a failed restart or a run
+# that dies half-way is still restarted by the next run. Values stay in shell
+# locals and are never logged.
 #
 # Each control-api service token has two ends: the caller reads it from its own
 # Secret, and control-api verifies it from CONTROL_API_INTERNAL_SERVICE_TOKENS.
@@ -351,6 +354,37 @@ STAMP_WA_READER="$(token_stamp_of \
   "channel-reader-handoff-token=$READER_HANDOFF_TOKEN_VALUE")"
 STAMP_CHANNEL_READER="$(token_stamp_of "channel-reader-handoff-token=$READER_HANDOFF_TOKEN_VALUE")"
 
+# Fixed consumers: "namespace:deployment:changed-in-run:desired-stamp".
+TOKEN_CONSUMERS=(
+  "control-plane:control-api:${CONTROL_API_CHANGED}:${STAMP_CONTROL_API}"
+  "control-plane:codex-llm-proxy:${CODEX_LLM_PROXY_CHANGED}:${STAMP_CODEX_LLM_PROXY}"
+  "control-plane:grok-llm-proxy:${GROK_LLM_PROXY_CHANGED}:${STAMP_GROK_LLM_PROXY}"
+  "control-plane:workflow-recipes:${WORKFLOW_RECIPES_CHANGED}:${STAMP_WORKFLOW_RECIPES}"
+  "control-plane:host-context-controller:${HCC_CHANGED}:${STAMP_HCC}"
+  "profiles:external-rest-api:${EXTERNAL_REST_API_CHANGED}:${STAMP_EXTERNAL_REST_API}"
+  "rpc-proxy:rpc-proxy:${RPC_PROXY_CHANGED}:${STAMP_RPC_PROXY}"
+  "webhook-ingress:webhook-proxy:${WEBHOOK_PROXY_CHANGED}:${STAMP_WEBHOOK_PROXY}"
+  "channels:clerum-workflow-approval-request-reader:${WA_READER_CHANGED}:${STAMP_WA_READER}"
+)
+
+# --- 0. Record restart obligations before any Secret is written ---
+# An existing consumer without a stamp whose values change is marked
+# restart-pending here (see "Consumer restart decision"). If a mark cannot be
+# written, the run stops before changing any Secret.
+for entry in "${TOKEN_CONSUMERS[@]}"; do
+  IFS=':' read -r ns dep changed _stamp <<<"$entry"
+  token_stamp_mark_pending "$TOKEN_STAMP_ANNOTATION" "$ns" "$dep" "$changed" || exit 1
+done
+if [ "$CHANNEL_READER_CHANGED" = "true" ]; then
+  channel_readers_before="$(token_stamp_retry kctl -n channels get deploy -l app=channel-reader \
+      -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}')" \
+    || die "cannot list channel-reader deployments before writing Secrets; no Secret was written"
+  while IFS= read -r channel_reader; do
+    [ -n "$channel_reader" ] || continue
+    token_stamp_mark_pending "$TOKEN_STAMP_ANNOTATION" channels "$channel_reader" true || exit 1
+  done <<<"$channel_readers_before"
+fi
+
 # --- 1. control-api-internal-tokens (control-plane) ---
 log "Patching Secret control-api-internal-tokens (control-plane)"
 ensure_secret control-plane control-api-internal-tokens
@@ -460,15 +494,7 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials --typ
 # (see "Consumer restart decision"). Image/spec applies still roll Deployments
 # on their own; a Deployment that does not exist yet is skipped.
 TOKEN_RESTART_PENDING=()
-for entry in "control-plane:control-api:${CONTROL_API_CHANGED}:${STAMP_CONTROL_API}" \
-             "control-plane:codex-llm-proxy:${CODEX_LLM_PROXY_CHANGED}:${STAMP_CODEX_LLM_PROXY}" \
-             "control-plane:grok-llm-proxy:${GROK_LLM_PROXY_CHANGED}:${STAMP_GROK_LLM_PROXY}" \
-             "control-plane:workflow-recipes:${WORKFLOW_RECIPES_CHANGED}:${STAMP_WORKFLOW_RECIPES}" \
-             "control-plane:host-context-controller:${HCC_CHANGED}:${STAMP_HCC}" \
-             "profiles:external-rest-api:${EXTERNAL_REST_API_CHANGED}:${STAMP_EXTERNAL_REST_API}" \
-             "rpc-proxy:rpc-proxy:${RPC_PROXY_CHANGED}:${STAMP_RPC_PROXY}" \
-             "webhook-ingress:webhook-proxy:${WEBHOOK_PROXY_CHANGED}:${STAMP_WEBHOOK_PROXY}" \
-             "channels:clerum-workflow-approval-request-reader:${WA_READER_CHANGED}:${STAMP_WA_READER}"; do
+for entry in "${TOKEN_CONSUMERS[@]}"; do
   IFS=':' read -r ns dep changed stamp <<<"$entry"
   reconcile_token_consumer "$TOKEN_STAMP_ANNOTATION" "$ns" "$dep" "$changed" "$stamp"
 done

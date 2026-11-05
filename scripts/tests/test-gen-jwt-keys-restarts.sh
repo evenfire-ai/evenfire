@@ -26,6 +26,8 @@ KEY_CONSUMERS=(
   control-plane/codex-llm-proxy
   control-plane/grok-llm-proxy
 )
+# Deployments the fake lists in the mcp-host namespace by default.
+MCP_DEPLOYS=(mcp-host/mcp-host mcp-host/workspace-files-controller-h1)
 
 cat > "$TMP/bin/openssl" <<'SH'
 #!/usr/bin/env bash
@@ -46,13 +48,24 @@ esac
 SH
 
 # One fake for both scripts. Every call must carry the expected context, as
-# `--context X` (gen-jwt-keys.sh) or `--context=X` (generate-keys.sh). Writes
+# `--context X` (gen-jwt-keys.sh) or `--context=X` (generate-keys.sh); with
+# EXPECTED_CONTEXT=__none__ every call must carry no context at all. Writes
 # (apply, patch) and restarts are appended to EVENT_LOG in call order.
+# mcp-host: KUBE_MCP_CM=present|absent|fail drives mcp-host-config,
+# KUBE_MCP_APPLY_FAIL=1 fails its apply, KUBE_MCP_DEPLOYS lists the namespace's
+# Deployments. annotate calls are appended to ANNOTATE_LOG.
 cat > "$TMP/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 expected="${EXPECTED_CONTEXT:?}"
-if [[ "${1:-}" == "--context" && "${2:-}" == "$expected" ]]; then
+if [[ "$expected" == "__none__" ]]; then
+  for a in "$@"; do
+    if [[ "$a" == --context* ]]; then
+      echo "fake kubectl: expected no context, got: $*" >&2
+      exit 9
+    fi
+  done
+elif [[ "${1:-}" == "--context" && "${2:-}" == "$expected" ]]; then
   shift 2
 elif [[ "${1:-}" == "--context=$expected" ]]; then
   shift
@@ -91,8 +104,22 @@ case "${rest[0]:-}" in
     ;;
   apply)
     # Read stdin only for `-f -`, as kubectl does.
-    if has_arg -; then cat > /dev/null; fi
+    manifest=""
+    if has_arg -; then manifest="$(cat)"; fi
+    # The mcp-host-config patch is the only JSON manifest these scripts apply.
+    if [[ "$manifest" == "{"* && "${KUBE_MCP_APPLY_FAIL:-}" == "1" ]]; then
+      echo "fake kubectl: apply of mcp-host-config failed" >&2
+      exit 1
+    fi
     echo "write apply" >> "${EVENT_LOG:?}"
+    ;;
+  annotate)
+    target="$ns/${rest[2]:?}"
+    if [[ " ${KUBE_ANNOTATE_FAIL:-} " == *" $target "* ]]; then
+      echo "fake kubectl: annotate failed for $target" >&2
+      exit 1
+    fi
+    printf '%s %s\n' "$target" "${rest[${#rest[@]}-1]}" >> "${ANNOTATE_LOG:?}"
     ;;
   patch)
     echo "write patch ${rest[2]:-}" >> "${EVENT_LOG:?}"
@@ -116,7 +143,13 @@ case "${rest[0]:-}" in
         exit 1
         ;;
       configmap)
-        # gen-jwt-keys.sh: mcp-host-config exists; minimal object for the patch.
+        # gen-jwt-keys.sh: mcp-host-config, by name (`-o name`, existence
+        # probe) and as a minimal object for the patch (`-o json`).
+        case "${KUBE_MCP_CM:-present}" in
+          fail) echo "fake kubectl: connection refused" >&2; exit 1 ;;
+          absent) has_arg --ignore-not-found && exit 0; exit 1 ;;
+        esac
+        has_arg name && echo "configmap/mcp-host-config"
         has_arg json && printf '%s\n' '{"data":{},"metadata":{}}'
         exit 0
         ;;
@@ -125,6 +158,22 @@ case "${rest[0]:-}" in
         ;;
       deploy)
         dep="${rest[2]:?}"
+        if [[ "$dep" == -* ]]; then
+          # Namespace listing (`get deploy -o name`), used for mcp-host.
+          if [[ " ${KUBE_GET_DEPLOY_FAIL:-} " == *" $ns/* "* ]]; then
+            echo "fake kubectl: connection refused" >&2
+            exit 1
+          fi
+          if [[ "$ns" == "mcp-host" ]]; then
+            for d in ${KUBE_MCP_DEPLOYS:-}; do printf 'deployment.apps/%s\n' "$d"; done
+          fi
+          exit 0
+        fi
+        if [[ "$ns" == "mcp-host" && " ${KUBE_MCP_DEPLOYS:-} " == *" $dep "* ]]; then
+          flaky_once get "$ns/$dep"
+          has_arg name && printf 'deployment.apps/%s\n' "$dep"
+          exit 0
+        fi
         if [[ " ${KUBE_GET_DEPLOY_FAIL:-} " == *" $ns/$dep "* ]]; then
           echo "fake kubectl: connection refused" >&2
           exit 1
@@ -172,6 +221,7 @@ fail() {
 reset_logs() {
   : > "$TMP/rollout.log"
   : > "$TMP/events.log"
+  : > "$TMP/annotate.log"
   rm -rf "$TMP/flaky"
   mkdir -p "$TMP/flaky"
 }
@@ -179,8 +229,19 @@ reset_logs() {
 run_gen_keys() {
   reset_logs
   ROLLOUT_LOG="$TMP/rollout.log" EVENT_LOG="$TMP/events.log" FLAKY_STATE="$TMP/flaky" \
-    PATH="$TMP/bin:$PATH" JWT_KEY_RESTART_RETRY_SECONDS=0 \
+    ANNOTATE_LOG="$TMP/annotate.log" PATH="$TMP/bin:$PATH" JWT_KEY_RESTART_RETRY_SECONDS=0 \
+    KUBE_MCP_DEPLOYS="mcp-host workspace-files-controller-h1" \
     CONTEXT=gke-dev EXPECTED_CONTEXT=gke-dev "$@" \
+    bash "$SCRIPT" > "$TMP/out" 2>&1 </dev/null
+}
+
+# Same, with CONTEXT unset: every kubectl call must carry no context.
+run_gen_keys_no_context() {
+  reset_logs
+  ROLLOUT_LOG="$TMP/rollout.log" EVENT_LOG="$TMP/events.log" FLAKY_STATE="$TMP/flaky" \
+    ANNOTATE_LOG="$TMP/annotate.log" PATH="$TMP/bin:$PATH" JWT_KEY_RESTART_RETRY_SECONDS=0 \
+    KUBE_MCP_DEPLOYS="mcp-host workspace-files-controller-h1" \
+    EXPECTED_CONTEXT=__none__ "$@" \
     bash "$SCRIPT" > "$TMP/out" 2>&1 </dev/null
 }
 
@@ -223,7 +284,7 @@ ${actual:-<none>}"
 assert_restarts_after_writes() {
   local last_write first_restart
   last_write="$(grep -n '^write' "$TMP/events.log" | tail -1 | cut -d: -f1)"
-  first_restart="$(grep -n '^restart ' "$TMP/events.log" | grep -v 'mcp-host/\*' | head -1 | cut -d: -f1)"
+  first_restart="$(grep -n '^restart ' "$TMP/events.log" | head -1 | cut -d: -f1)"
   [[ -n "$last_write" ]] || fail "no key write was recorded"
   [[ -n "$first_restart" ]] || fail "no consumer restart was recorded"
   [[ "$first_restart" -gt "$last_write" ]] \
@@ -240,7 +301,7 @@ assert_no_key_material() {
 
 # Every consumer deployed: each one restarts after the writes, plus mcp-host.
 run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" || fail "gen-jwt-keys.sh exited non-zero"
-assert_restarted_exactly "${KEY_CONSUMERS[@]}" 'mcp-host/*'
+assert_restarted_exactly "${KEY_CONSUMERS[@]}" "${MCP_DEPLOYS[@]}"
 assert_restarts_after_writes
 for consumer in "${KEY_CONSUMERS[@]}"; do
   grep -qF "  $consumer restarted." "$TMP/out" || fail "missing restart line for $consumer"
@@ -250,7 +311,7 @@ assert_no_key_material
 
 # Keys generated before the first deploy: nothing to restart, each skip is logged.
 run_gen_keys env KUBE_DEPLOYS="" || fail "gen-jwt-keys.sh exited non-zero with no consumers deployed"
-assert_restarted_exactly 'mcp-host/*'
+assert_restarted_exactly "${MCP_DEPLOYS[@]}"
 for consumer in "${KEY_CONSUMERS[@]}"; do
   grep -qF "  $consumer not deployed yet; skipped." "$TMP/out" || fail "missing skip line for $consumer"
 done
@@ -260,7 +321,7 @@ assert_no_key_material
 # Only some consumers deployed: exactly those restart.
 run_gen_keys env KUBE_DEPLOYS="control-plane/control-api rpc-proxy/rpc-proxy" \
   || fail "gen-jwt-keys.sh exited non-zero with a partial deployment"
-assert_restarted_exactly control-plane/control-api rpc-proxy/rpc-proxy 'mcp-host/*'
+assert_restarted_exactly control-plane/control-api rpc-proxy/rpc-proxy "${MCP_DEPLOYS[@]}"
 assert_no_key_material
 
 # A failed deployment read: every other consumer still restarts, the validation
@@ -271,7 +332,7 @@ fi
 grep -qF 'ERROR: cannot read deployment profiles/external-rest-api' "$TMP/out" \
   || fail "missing error line for the failed deployment read"
 mapfile -t restarted_others < <(consumers_except profiles/external-rest-api)
-assert_restarted_exactly "${restarted_others[@]}" 'mcp-host/*'
+assert_restarted_exactly "${restarted_others[@]}" "${MCP_DEPLOYS[@]}"
 grep -q '^=== Post-deploy validation ===$' "$TMP/out" || fail "validation must run after a pending restart"
 grep -qF 'RESTARTS PENDING' "$TMP/out" || fail "missing RESTARTS PENDING line"
 assert_key_restarts_pending "kubectl --context gke-dev" profiles/external-rest-api
@@ -284,7 +345,7 @@ fi
 grep -qF 'rollout restart failed for rpc-proxy/rpc-proxy' "$TMP/out" \
   || fail "the failed rollout was not reached"
 mapfile -t restarted_others < <(consumers_except rpc-proxy/rpc-proxy)
-assert_restarted_exactly "${restarted_others[@]}" 'mcp-host/*'
+assert_restarted_exactly "${restarted_others[@]}" "${MCP_DEPLOYS[@]}"
 assert_key_restarts_pending "kubectl --context gke-dev" rpc-proxy/rpc-proxy
 assert_no_key_material
 
@@ -292,9 +353,110 @@ assert_no_key_material
 run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" \
   KUBE_FLAKY="get:control-plane/control-ui rollout:control-plane/workflow-recipes" \
   || fail "transient failures must be absorbed by the retries"
-assert_restarted_exactly "${KEY_CONSUMERS[@]}" 'mcp-host/*'
+assert_restarted_exactly "${KEY_CONSUMERS[@]}" "${MCP_DEPLOYS[@]}"
 [[ -e "$TMP/flaky/rollout-control-plane_workflow-recipes" ]] || fail "the transient rollout failure was never injected"
 grep -q '^=== Done ===$' "$TMP/out" || fail "script did not reach Done after transient failures"
+assert_no_key_material
+
+# --- mcp-host: synced and restarted under the same contract (BR-2) ---
+# Every Deployment in the namespace restarts after its ConfigMap is written.
+run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" || fail "gen-jwt-keys.sh exited non-zero"
+for dep in "${MCP_DEPLOYS[@]}"; do
+  grep -qF "  $dep restarted." "$TMP/out" || fail "missing restart line for $dep"
+done
+grep -qF 'mcp-host-config patched with new RPC public key.' "$TMP/out" || fail "mcp-host-config was not patched"
+
+# A failed mcp-host restart is no longer swallowed: the rest still restarts,
+# validation runs, the run fails with the exact command, and no token-stamp
+# mark is written for mcp-host (its next-deploy healer is sync-auth-key.sh).
+if run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_ROLLOUT_FAIL="mcp-host/mcp-host"; then
+  fail "a failed mcp-host restart must fail the script"
+fi
+grep -qF 'rollout restart failed for mcp-host/mcp-host' "$TMP/out" || fail "the mcp-host failure was not reached"
+assert_restarted_exactly "${KEY_CONSUMERS[@]}" mcp-host/workspace-files-controller-h1
+grep -q '^=== Post-deploy validation ===$' "$TMP/out" || fail "validation must run after a pending mcp-host restart"
+assert_key_restarts_pending "kubectl --context gke-dev" mcp-host/mcp-host
+if grep -q 'mcp-host/' "$TMP/annotate.log"; then fail "mcp-host must not get a token-stamp mark"; fi
+assert_no_key_material
+
+# The mcp-host listing fails: the namespace-wide command is printed.
+if run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_GET_DEPLOY_FAIL="mcp-host/*"; then
+  fail "a failed mcp-host listing must fail the script"
+fi
+grep -qF 'ERROR: cannot list deployments in mcp-host' "$TMP/out" || fail "missing mcp-host listing error"
+grep -qx '    kubectl --context gke-dev -n mcp-host rollout restart deploy' "$TMP/out" \
+  || fail "missing the namespace-wide mcp-host restart command"
+assert_restarted_exactly "${KEY_CONSUMERS[@]}"
+
+# No Deployment in mcp-host yet: logged, not a failure.
+run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_MCP_DEPLOYS="" \
+  || fail "an empty mcp-host namespace must not fail the script"
+grep -qF 'no deployment in mcp-host yet; skipped.' "$TMP/out" || fail "missing empty-namespace line"
+assert_restarted_exactly "${KEY_CONSUMERS[@]}"
+
+# mcp-host-config cannot be read: no mcp-host restart (it would reload the old
+# key), the consumers still restart, and the run fails naming the sync path.
+if run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_MCP_CM=fail; then
+  fail "an unreadable mcp-host-config must fail the script"
+fi
+grep -qF 'ERROR: cannot read mcp-host/mcp-host-config' "$TMP/out" || fail "missing mcp-host-config read error"
+assert_restarted_exactly "${KEY_CONSUMERS[@]}"
+grep -qF 'MCP-HOST SYNC PENDING' "$TMP/out" || fail "missing MCP-HOST SYNC PENDING line"
+grep -qF 'sync-auth-key.sh' "$TMP/out" || fail "the pending sync must name sync-auth-key.sh"
+grep -q '^=== Done ===$' "$TMP/out" && fail "a pending mcp-host sync must stop before Done"
+
+# mcp-host-config cannot be written: same outcome.
+if run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_MCP_APPLY_FAIL=1; then
+  fail "a failed mcp-host-config write must fail the script"
+fi
+grep -qF 'ERROR: cannot write the new RPC public key to mcp-host-config' "$TMP/out" \
+  || fail "missing mcp-host-config write error"
+assert_restarted_exactly "${KEY_CONSUMERS[@]}"
+grep -qF 'MCP-HOST SYNC PENDING' "$TMP/out" || fail "missing MCP-HOST SYNC PENDING line"
+
+# mcp-host not deployed (no ConfigMap): warning, exit 0, consumers restart.
+run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_MCP_CM=absent \
+  || fail "a missing mcp-host-config must keep the existing warning path"
+grep -qF 'WARNING: mcp-host-config ConfigMap not found' "$TMP/out" || fail "missing mcp-host-config warning"
+assert_restarted_exactly "${KEY_CONSUMERS[@]}"
+
+# A transient mcp-host restart failure is absorbed by the retries.
+run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_FLAKY="rollout:mcp-host/mcp-host" \
+  || fail "a transient mcp-host failure must be absorbed"
+[[ -e "$TMP/flaky/rollout-mcp-host_mcp-host" ]] || fail "the transient mcp-host failure was never injected"
+assert_restarted_exactly "${KEY_CONSUMERS[@]}" "${MCP_DEPLOYS[@]}"
+
+# --- A pending key-consumer restart is handed to the next token step ---
+# rpc-proxy is also reconciled by apply-inter-service-tokens.sh, so it gets the
+# restart-pending token stamp; control-ui is not, so it keeps only its command.
+if run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" \
+     KUBE_ROLLOUT_FAIL="rpc-proxy/rpc-proxy control-plane/control-ui"; then
+  fail "failed restarts must fail the script"
+fi
+assert_key_restarts_pending "kubectl --context gke-dev" rpc-proxy/rpc-proxy control-plane/control-ui
+grep -qx 'rpc-proxy/rpc-proxy clerum.io/inter-service-tokens-sha256=restart-pending' "$TMP/annotate.log" \
+  || fail "rpc-proxy was not marked restart-pending"
+grep -qF 'rpc-proxy/rpc-proxy marked restart-pending' "$TMP/out" || fail "missing mark line for rpc-proxy"
+if grep -q '^control-plane/control-ui ' "$TMP/annotate.log"; then fail "control-ui must not be marked"; fi
+[[ "$(wc -l < "$TMP/annotate.log" | tr -d ' ')" == "1" ]] || fail "only the pending token consumer may be marked"
+
+# The mark itself fails: the run says so and the command stays the recovery.
+if run_gen_keys env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_ROLLOUT_FAIL="rpc-proxy/rpc-proxy" \
+     KUBE_ANNOTATE_FAIL="rpc-proxy/rpc-proxy"; then
+  fail "a failed restart must fail the script"
+fi
+grep -qF 'ERROR: cannot mark rpc-proxy/rpc-proxy restart-pending' "$TMP/out" || fail "missing mark failure line"
+assert_key_restarts_pending "kubectl --context gke-dev" rpc-proxy/rpc-proxy
+
+# --- CONTEXT unset: plain kubectl, and the printed commands carry no context ---
+run_gen_keys_no_context env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" \
+  || fail "gen-jwt-keys.sh without CONTEXT exited non-zero"
+assert_restarted_exactly "${KEY_CONSUMERS[@]}" "${MCP_DEPLOYS[@]}"
+if run_gen_keys_no_context env KUBE_DEPLOYS="${KEY_CONSUMERS[*]}" KUBE_ROLLOUT_FAIL="rpc-proxy/rpc-proxy"; then
+  fail "a failed restart without CONTEXT must fail the script"
+fi
+grep -qx '    kubectl -n rpc-proxy rollout restart deploy rpc-proxy' "$TMP/out" \
+  || fail "missing context-free recovery command"
 assert_no_key_material
 
 # --- scripts/minikube/generate-keys.sh (minikube profiles) ---
@@ -310,7 +472,7 @@ cp "$ROOT/deploy/scripts/lib/restart-jwt-key-consumers.sh" "$PROJECT/deploy/scri
 run_minikube_keys() {
   reset_logs
   ROLLOUT_LOG="$TMP/rollout.log" EVENT_LOG="$TMP/events.log" FLAKY_STATE="$TMP/flaky" \
-    PATH="$TMP/bin:$PATH" JWT_KEY_RESTART_RETRY_SECONDS=0 \
+    ANNOTATE_LOG="$TMP/annotate.log" PATH="$TMP/bin:$PATH" JWT_KEY_RESTART_RETRY_SECONDS=0 \
     MINIKUBE_PROFILE=clerum-test EXPECTED_CONTEXT=clerum-test "$@" \
     bash "$PROJECT/scripts/minikube/generate-keys.sh" ${GEN_ARGS[@]+"${GEN_ARGS[@]}"} > "$TMP/out" 2>&1 </dev/null
 }

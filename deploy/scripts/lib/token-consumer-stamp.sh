@@ -11,25 +11,37 @@
 # onto. The stamp is written only after a successful `rollout restart`.
 #
 #   stamp present and equal to the values this run writes  -> no restart
-#   stamp present and different                             -> restart, then stamp
+#   stamp present and different (or restart-pending)        -> restart, then stamp
 #   stamp missing (first run, or the Deployment was recreated):
 #     a value it reads changed in this run                  -> restart, then stamp
 #     nothing it reads changed in this run                  -> stamp only; the pods
-#       already run these values (every earlier deploy restarted every consumer,
-#       and a Deployment created since reads the current Secret at creation)
+#       already run these values (an unstamped consumer whose value changes is
+#       marked restart-pending before the Secret write, and a Deployment created
+#       since reads the current Secret at creation)
 #   FORCE_CONSUMER_RESTART=true                             -> restart, then stamp
 #
-# A failed read, restart or stamp write is retried, then recorded as pending
-# and the walk continues. A pending consumer keeps its old stamp, so the next
-# run restarts it without any manual step; the calling script exits non-zero so
-# the failure is visible in the job. A stamp write never rolls pods (it is
-# metadata, not the pod template).
+# Before any Secret write, the caller marks every existing unstamped consumer
+# whose values change with the restart-pending stamp (token_stamp_mark_pending),
+# so the obligation survives a failed restart or a run that dies half-way. A
+# failed read, restart or stamp write is retried, then recorded as pending and
+# the walk continues. A pending consumer keeps a stamp that differs from the
+# written values (its old stamp or restart-pending), so the next run restarts it
+# without any manual step; the calling script exits non-zero so the failure is
+# visible in the job. A stamp write never rolls pods (it is metadata, not the
+# pod template). Not covered: a Deployment created between the caller's
+# pre-write listing and the Secret patch whose restart then also fails (it may
+# start on the old value and has no mark); closing it needs the creator to
+# stamp what it creates.
 #
 # Callers define `kctl` (kubectl with the explicit context) and `log`, and
 # initialise TOKEN_RESTART_PENDING=() before the first call.
 
 TOKEN_STAMP_ATTEMPTS="${TOKEN_STAMP_ATTEMPTS:-3}"
 TOKEN_STAMP_RETRY_SECONDS="${TOKEN_STAMP_RETRY_SECONDS:-2}"
+# Stamp value that records a restart obligation. It never equals a sha256, so
+# the consumer restarts on the run that writes it or, if that fails or the run
+# dies, on the next one.
+TOKEN_STAMP_PENDING_VALUE="restart-pending"
 
 # Prints the sha256 (hex) of the given "KEY=value" lines. Values reach openssl
 # through a pipe from the printf builtin, never through argv.
@@ -74,6 +86,28 @@ token_stamp_read() {
   fi
 }
 
+# token_stamp_mark_pending <annotation> <namespace> <deployment> <changed-in-run>
+# Call before any Secret write. When a value the consumer reads changes in this
+# run and the Deployment exists without a stamp, writes the restart-pending
+# stamp. A missing Deployment reads the new value when it is created; a stamped
+# one already keeps its old stamp until it restarts. Returns 1 when the
+# obligation cannot be recorded; the caller then exits before writing.
+token_stamp_mark_pending() {
+  local annotation="$1" ns="$2" dep="$3" changed="$4" current
+  [ "$changed" = "true" ] || return 0
+  if ! current="$(token_stamp_read "$annotation" "$ns" "$dep")"; then
+    log "ERROR: cannot read deployment $ns/$dep before writing Secrets; no Secret was written"
+    return 1
+  fi
+  [ "$current" = "none" ] || return 0
+  if ! token_stamp_retry kctl -n "$ns" annotate deploy "$dep" --overwrite \
+       "$annotation=$TOKEN_STAMP_PENDING_VALUE" >/dev/null; then
+    log "ERROR: cannot record the pending restart of $ns/$dep; no Secret was written"
+    return 1
+  fi
+  log "Recorded pending restart on $ns/$dep before writing Secrets (no stamp yet)"
+}
+
 # reconcile_token_consumer <annotation> <namespace> <deployment> <changed-in-run> <desired-stamp>
 reconcile_token_consumer() {
   local annotation="$1" ns="$2" dep="$3" changed="$4" desired="$5" current reason
@@ -93,12 +127,14 @@ reconcile_token_consumer() {
       if token_stamp_retry kctl -n "$ns" annotate deploy "$dep" --overwrite "$annotation=$desired" >/dev/null; then
         log "Recording token stamp on $ns/$dep: tokens unchanged, no restart"
       else
-        log "ERROR: cannot write the token stamp on $ns/$dep; it will restart on the next run"
+        log "ERROR: cannot write the token stamp on $ns/$dep; the next run records it"
         TOKEN_RESTART_PENDING+=("$ns/$dep")
       fi
       return 0
     fi
     reason="no stamp and tokens changed"
+  elif [ "$current" = "$TOKEN_STAMP_PENDING_VALUE" ]; then
+    reason="restart pending from an earlier run"
   elif [ "$current" != "$desired" ]; then
     reason="tokens differ from the stamp"
   else
@@ -121,13 +157,19 @@ reconcile_token_consumer() {
 # Fails the calling script when any restart is pending, naming each Deployment
 # and both ways to recover now. Without any action the next run retries them.
 token_stamp_fail_if_pending() {
-  local context="$1" item
+  local context="$1" item target
   [ "${#TOKEN_RESTART_PENDING[@]}" -eq 0 ] && return 0
   log "ERROR: Secrets are written but these restarts are pending: ${TOKEN_RESTART_PENDING[*]}"
-  log "They keep their old token stamp, so the next run of this script restarts them automatically."
+  log "They keep a stamp that differs from the written values (their old stamp or restart-pending), so the next run of this script restarts them automatically."
   log "To recover now, restart each one:"
   for item in "${TOKEN_RESTART_PENDING[@]}"; do
-    log "  kubectl --context ${context:-<current>} -n ${item%%/*} rollout restart deploy ${item#*/}"
+    target="${item#*/}"
+    # A Deployment name cannot contain "=", so such an entry is a label selector.
+    if [[ "$target" == *=* ]]; then
+      log "  kubectl --context ${context:-<current>} -n ${item%%/*} rollout restart deploy -l $target"
+    else
+      log "  kubectl --context ${context:-<current>} -n ${item%%/*} rollout restart deploy $target"
+    fi
   done
   log "or re-run this script with FORCE_CONSUMER_RESTART=true (restarts every consumer)."
   return 1

@@ -42,6 +42,9 @@ source "${SCRIPT_DIR}/lib/token-consumer-stamp.sh"
 
 READER_NS="channels"
 READER_SECRET="workflow-approval-request-reader-credentials"
+# Token stamp annotation this script writes on the reader Deployment (separate
+# from apply-inter-service-tokens.sh's, which covers the reader's other keys).
+READER_STAMP_ANNOTATION="clerum.io/workflow-approval-bot-secret-sha256"
 
 kctl() {
   if [ -n "${CONTEXT:-}" ]; then
@@ -118,12 +121,11 @@ fi
 # The reader reads telegram-webhook-secret as an env var
 # (deploy/base/channels/workflow-approval-request-reader/deployment.yaml), so it
 # restarts when that value differs from its token stamp
-# (lib/token-consumer-stamp.sh; this script's stamp annotation is separate from
-# apply-inter-service-tokens.sh's, which covers the reader's other keys). A
-# missed or failed restart keeps the old stamp and is retried by the next run.
-# READER_CHANGED (stored value before this run versus the value it writes) is
-# used only when the reader has no stamp yet. Values stay in shell locals and
-# are never logged.
+# (lib/token-consumer-stamp.sh). A missed or failed restart keeps a stamp that
+# differs from the written value and is retried by the next run. READER_CHANGED
+# (stored value before this run versus the value it writes) is used only when
+# the reader has no stamp yet: it is then marked restart-pending before the
+# Secret is patched. Values stay in shell locals and are never logged.
 WEBHOOK_SECRET_BEFORE="$(read_secret_key "$READER_NS" "$READER_SECRET" telegram-webhook-secret)"
 if [ -z "$WEBHOOK_SECRET_BEFORE" ] || [ "$WEBHOOK_SECRET_BEFORE" != "$WEBHOOK_SECRET" ]; then
   READER_CHANGED=true
@@ -131,6 +133,11 @@ else
   READER_CHANGED=false
 fi
 READER_STAMP="$(token_stamp_of "telegram-webhook-secret=$WEBHOOK_SECRET")"
+
+# Record the reader's restart obligation before the Secret changes; stop
+# before writing if it cannot be recorded.
+token_stamp_mark_pending "$READER_STAMP_ANNOTATION" \
+  "$READER_NS" clerum-workflow-approval-request-reader "$READER_CHANGED" || exit 1
 
 log "Patching Secret $READER_SECRET ($READER_NS)"
 ensure_secret "$READER_NS" "$READER_SECRET"
@@ -140,7 +147,7 @@ kctl -n "$READER_NS" patch secret "$READER_SECRET" --type=merge -p "$READER_PATC
 # --- Roll the reader when its stamp differs (skipped if not deployed) ---
 # shellcheck disable=SC2034 # filled and read by lib/token-consumer-stamp.sh
 TOKEN_RESTART_PENDING=()
-reconcile_token_consumer "clerum.io/workflow-approval-bot-secret-sha256" \
+reconcile_token_consumer "$READER_STAMP_ANNOTATION" \
   "$READER_NS" clerum-workflow-approval-request-reader "$READER_CHANGED" "$READER_STAMP"
 token_stamp_fail_if_pending "${CONTEXT:-}" || exit 1
 

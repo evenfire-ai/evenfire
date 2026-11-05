@@ -170,6 +170,15 @@ case "${args[0]:-}" in
         if [[ "${args[2]:-}" == "-l" ]]; then
           label="${args[3]#app=}"
           inject get "$ns/app=$label" "${KUBE_GET_DEPLOY_FAIL:-}"
+          # KUBE_LIST_FAIL_FROM=<n>: the label list fails from its n-th call on.
+          if [[ -n "${KUBE_LIST_FAIL_FROM:-}" ]]; then
+            list_calls=$(( $(cat "${FLAKY_STATE:?}/list-calls" 2>/dev/null || echo 0) + 1 ))
+            printf '%s' "$list_calls" > "$FLAKY_STATE/list-calls"
+            if (( list_calls >= KUBE_LIST_FAIL_FROM )); then
+              echo "fake kubectl: injected list failure for $ns/app=$label" >&2
+              exit 1
+            fi
+          fi
           for dir in "$dstore/$ns"/*/; do
             [[ -d "$dir" ]] || continue
             if [[ "$(cat "$dir/app" 2>/dev/null)" == "$label" ]]; then
@@ -243,12 +252,18 @@ case "${args[0]:-}" in
     pair="${args[$((${#args[@]} - 1))]}"
     mkdir -p "$dstore/$ns/$name/annotations"
     printf '%s' "${pair#*=}" > "$(annotation_file "$name" "${pair%%=*}")"
-    printf '%s/%s %s\n' "$ns" "$name" "${pair%%=*}" >> "${ANNOTATE_LOG:?}"
+    printf '%s/%s %s\n' "$ns" "$name" "$pair" >> "${ANNOTATE_LOG:?}"
     exit 0
     ;;
   rollout)
     if [[ "${args[1]:-}" == "restart" && "${args[2]:-}" == "deploy" ]]; then
       name="${args[3]:?}"
+      # KUBE_KILL_AT_ROLLOUT=<pidfile>: the first restart SIGKILLs the script
+      # under test (a run that dies after the Secret patches).
+      if [[ -n "${KUBE_KILL_AT_ROLLOUT:-}" ]]; then
+        kill -KILL "$(cat "$KUBE_KILL_AT_ROLLOUT")"
+        exit 1
+      fi
       inject rollout "$ns/$name" "${KUBE_ROLLOUT_FAIL:-}"
       [[ -d "$dstore/$ns/$name" ]] || { echo "Error from server (NotFound): deployments.apps \"$name\" not found" >&2; exit 1; }
       printf '%s/%s\n' "$ns" "$name" >> "${ROLLOUT_LOG:?}"
@@ -415,10 +430,47 @@ assert_pending() {
   grep -qF 'the next run of this script restarts them automatically' "$TMP/stderr" \
     || fail "missing automatic-retry notice"
   grep -qF 'FORCE_CONSUMER_RESTART=true' "$TMP/stderr" || fail "missing FORCE recovery"
+  local target command
   for item in "$@"; do
-    grep -qF "kubectl --context gke-dev -n ${item%%/*} rollout restart deploy ${item#*/}" "$TMP/stderr" \
+    target="${item#*/}"
+    if [[ "$target" == *=* ]]; then
+      command="kubectl --context gke-dev -n ${item%%/*} rollout restart deploy -l $target"
+    else
+      command="kubectl --context gke-dev -n ${item%%/*} rollout restart deploy $target"
+    fi
+    grep -qxF "[inter-service-tokens]   $command" "$TMP/stderr" \
+      || grep -qxF "[workflow-approval-bot-secret]   $command" "$TMP/stderr" \
       || fail "missing restart command for $item"
   done
+}
+
+# A cluster as a pre-stamp deploy leaves it: every token written, every
+# consumer running, no token stamp anywhere.
+seed_unstamped() {
+  local consumer
+  new_cluster
+  run_tokens gke-dev "$TMP/rollout-seed.log" "" env CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET="$MEMBER_HMAC" \
+    || fail "seed run failed"
+  for consumer in "${ALL_TOKEN_CONSUMERS[@]}"; do unstamp "$consumer"; done
+}
+
+# run_tokens_killable <rollout-log> env ... — like run_tokens on gke-dev, with
+# the script's PID in $TMP/script.pid (exec keeps it) for KUBE_KILL_AT_ROLLOUT.
+run_tokens_killable() {
+  local rollout="$1"
+  shift
+  : > "$rollout"
+  : > "$TMP/patches.log"
+  : > "$TMP/annotations.log"
+  : > "$TMP/openssl-rand-count"
+  RUN_SALT=$((RUN_SALT + 1))
+  CAPTURE_FILE="" ROLLOUT_LOG="$rollout" PATCH_LOG="$TMP/patches.log" \
+    ANNOTATE_LOG="$TMP/annotations.log" FLAKY_STATE="$TMP/flaky" \
+    KUBE_STORE="$TMP/store" PATH="$TMP/bin:$PATH" TOKEN_STAMP_RETRY_SECONDS=0 \
+    OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" OPENSSL_RAND_SALT="$RUN_SALT" \
+    CLERUM_PROJECT_DIR="$TMP/sibling" "$@" CONTEXT=gke-dev KUBE_KILL_AT_ROLLOUT="$TMP/script.pid" \
+    bash -c 'printf %s "$$" > "$1"; exec bash "$2"' _ "$TMP/script.pid" "$TOKENS_SCRIPT" \
+    >"$TMP/stdout" 2>"$TMP/stderr" </dev/null
 }
 
 # --- Member-registration HMAC resolution (unchanged behaviour) ---
@@ -575,19 +627,42 @@ for caller in "${SERVICE_TOKEN_CALLERS[@]}"; do
   assert_no_secret_material
 done
 
-# A failed Deployment read (not NotFound) during a rotation: the other end
-# restarts, the run fails, and the next plain run restarts the unread one.
+# A failed Deployment read (not NotFound) of a consumer whose token rotates:
+# the restart obligation cannot be checked before the write, so the run stops
+# before writing any Secret, and the next run does the whole rotation.
+rpc_before="$(store_get rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN)"
 rollout="$TMP/rollout-read-fails.log"
 if run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_RPC="$WRC_OLD" \
      KUBE_GET_DEPLOY_FAIL="rpc-proxy/rpc-proxy"; then
   fail "a failed Deployment read must fail the run"
 fi
-assert_restarted_exactly "$rollout" control-plane/control-api
-assert_pending rpc-proxy/rpc-proxy
-grep -qF 'cannot read deployment rpc-proxy/rpc-proxy' "$TMP/stderr" || fail "missing read error line"
+grep -qF 'cannot read deployment rpc-proxy/rpc-proxy before writing Secrets; no Secret was written' "$TMP/stderr" \
+  || fail "missing pre-write read error line"
+grep -qF 'injected get failure for rpc-proxy/rpc-proxy' "$TMP/stderr" || fail "the read failure was never injected"
+[[ ! -s "$TMP/patches.log" ]] || fail "no Secret may be written after a failed pre-write read"
+assert_restarted_exactly "$rollout"
+[[ "$(store_get rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN)" == "$rpc_before" ]] \
+  || fail "the rpc-proxy token changed although the run stopped before writing"
 rollout="$TMP/rollout-read-heals.log"
-run_tokens gke-dev "$rollout" "" env || fail "the healing run after a read failure failed"
-assert_restarted_exactly "$rollout" rpc-proxy/rpc-proxy
+run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_RPC="$WRC_OLD" \
+  || fail "the rotation after a read failure failed"
+assert_restarted_exactly "$rollout" control-plane/control-api rpc-proxy/rpc-proxy
+assert_no_secret_material
+
+# A failed read of a consumer whose values do not change: the rotation goes on,
+# the unread consumer is reported pending, and it keeps its (still valid) stamp.
+rollout="$TMP/rollout-read-unchanged-fails.log"
+if run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_RPC="$WRC_NEW" \
+     KUBE_GET_DEPLOY_FAIL="profiles/external-rest-api"; then
+  fail "a failed Deployment read must fail the run"
+fi
+assert_restarted_exactly "$rollout" control-plane/control-api rpc-proxy/rpc-proxy
+assert_pending profiles/external-rest-api
+grep -qF 'cannot read deployment profiles/external-rest-api; its restart is pending' "$TMP/stderr" \
+  || fail "missing reconcile read error line"
+rollout="$TMP/rollout-read-unchanged-heals.log"
+run_tokens gke-dev "$rollout" "" env || fail "the run after an unchanged-consumer read failure failed"
+assert_restarted_exactly "$rollout"
 assert_no_secret_material
 
 # A failed stamp write after a successful restart: the run fails, and the next
@@ -617,18 +692,45 @@ grep -q '\] Done\.$' "$TMP/stderr" || fail "the run with transient failures did 
 [[ -e "$TMP/flaky/rollout-rpc-proxy_rpc-proxy" ]] || fail "the transient rollout failure was never injected"
 assert_no_secret_material
 
-# The channel-reader list cannot be read during a handoff rotation: the reader
-# restarts, the run fails, and the next plain run restarts the channel-readers.
+# The channel-reader list cannot be read before a handoff rotation: the run
+# stops before writing any Secret, and the next run does the whole rotation.
 rollout="$TMP/rollout-selector-fails.log"
 if run_tokens gke-dev "$rollout" "" env CHANNEL_READER_HANDOFF_TOKEN="$WRC_NEW" \
      KUBE_GET_DEPLOY_FAIL="channels/app=channel-reader"; then
   fail "a failed channel-reader list must fail the run"
 fi
-assert_restarted_exactly "$rollout" channels/clerum-workflow-approval-request-reader
-grep -qF 'restarts are pending: channels/app=channel-reader' "$TMP/stderr" || fail "missing selector pending entry"
+grep -qF 'cannot list channel-reader deployments before writing Secrets; no Secret was written' "$TMP/stderr" \
+  || fail "missing pre-write list error line"
+grep -qF 'injected get failure for channels/app=channel-reader' "$TMP/stderr" || fail "the list failure was never injected"
+[[ ! -s "$TMP/patches.log" ]] || fail "no Secret may be written after a failed pre-write list"
+assert_restarted_exactly "$rollout"
 rollout="$TMP/rollout-selector-heals.log"
-run_tokens gke-dev "$rollout" "" env || fail "the healing run after a selector failure failed"
+run_tokens gke-dev "$rollout" "" env CHANNEL_READER_HANDOFF_TOKEN="$WRC_NEW" \
+  || fail "the handoff rotation after a list failure failed"
+assert_restarted_exactly "$rollout" channels/clerum-workflow-approval-request-reader channels/channel-reader-stubhost
+assert_no_secret_material
+
+# The list succeeds before the write and fails after it (BR-3): the listed
+# channel-reader was marked, so the next plain run restarts it, and the printed
+# command uses the selector.
+seed_unstamped
+rollout="$TMP/rollout-selector-post-fails.log"
+if run_tokens gke-dev "$rollout" "" env CHANNEL_READER_HANDOFF_TOKEN="$HCC_NEW" KUBE_LIST_FAIL_FROM=2; then
+  fail "a failed post-write channel-reader list must fail the run"
+fi
+grep -qF 'injected list failure for channels/app=channel-reader' "$TMP/stderr" || fail "the post-write list failure was never injected"
+assert_restarted_exactly "$rollout" channels/clerum-workflow-approval-request-reader
+[[ "$(stamp_of channels/channel-reader-stubhost)" == "restart-pending" ]] || fail "the listed channel-reader was not marked"
+grep -qF 'restarts are pending: channels/app=channel-reader' "$TMP/stderr" || fail "missing selector pending entry"
+assert_pending channels/app=channel-reader
+if grep -qF 'rollout restart deploy app=channel-reader' "$TMP/stderr"; then
+  fail "the selector must not be printed as a Deployment name"
+fi
+rollout="$TMP/rollout-selector-post-heals.log"
+run_tokens gke-dev "$rollout" "" env || fail "the healing run after a post-write list failure failed"
 assert_restarted_exactly "$rollout" channels/channel-reader-stubhost
+grep -qF 'Rolling deployment channels/channel-reader-stubhost to pick up fresh Secret values (restart pending from an earlier run)' \
+  "$TMP/stderr" || fail "missing restart-pending reason"
 assert_no_secret_material
 
 # --- Stamps missing (first run with stamps, or a recreated Deployment) ---
@@ -651,6 +753,10 @@ rollout="$TMP/rollout-bootstrap-changed.log"
 run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_RPC="$ROTATED"
 assert_restarted_exactly "$rollout" control-plane/control-api rpc-proxy/rpc-proxy
 assert_all_stamped
+# Only the two changed ends were marked restart-pending before the write.
+marked="$(grep ' clerum.io/inter-service-tokens-sha256=restart-pending$' "$TMP/annotations.log" | cut -d' ' -f1 | sort)"
+[[ "$marked" == "$(printf '%s\n' control-plane/control-api rpc-proxy/rpc-proxy)" ]] \
+  || fail "unexpected restart-pending marks: ${marked:-<none>}"
 assert_no_secret_material
 
 # No stamps and a run that died between the control-api patch and the caller
@@ -666,6 +772,180 @@ run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY="$
 assert_restarted_exactly "$rollout" control-plane/control-api webhook-ingress/webhook-proxy
 assert_all_stamped
 assert_no_secret_material
+
+# --- Unstamped consumers: a failed restart is retried by the next run (BR-1) ---
+
+# Every service-token caller without a stamp: its restart fails on every
+# attempt. It was marked restart-pending before the write, so the next plain
+# run restarts exactly it, and the run after that is a no-op.
+caller_index=0
+for caller in "${SERVICE_TOKEN_CALLERS[@]}"; do
+  IFS='|' read -r caller_env caller_consumer <<<"$caller"
+  caller_index=$((caller_index + 1))
+  new_token="$(printf '%064x' $((0xC000 + caller_index)))"
+  seed_unstamped
+  rollout="$TMP/rollout-unstamped-fails-$caller_index.log"
+  if run_tokens gke-dev "$rollout" "" env "$caller_env=$new_token" KUBE_ROLLOUT_FAIL="$caller_consumer"; then
+    fail "a failed restart of unstamped $caller_consumer must fail the run"
+  fi
+  assert_restarted_exactly "$rollout" control-plane/control-api
+  assert_pending "$caller_consumer"
+  [[ "$(stamp_of "$caller_consumer")" == "restart-pending" ]] || fail "$caller_consumer was not marked restart-pending"
+  rollout="$TMP/rollout-unstamped-heals-$caller_index.log"
+  run_tokens gke-dev "$rollout" "" env || fail "the healing run for unstamped $caller_consumer failed"
+  assert_restarted_exactly "$rollout" "$caller_consumer"
+  [[ "$(stamp_of "$caller_consumer")" =~ ^[0-9a-f]{64}$ ]] || fail "$caller_consumer has no stamp after healing"
+  grep -q '\] Done\.$' "$TMP/stderr" || fail "the healing run for $caller_consumer did not reach Done."
+  rollout="$TMP/rollout-unstamped-settled-$caller_index.log"
+  run_tokens gke-dev "$rollout" "" env
+  assert_restarted_exactly "$rollout"
+  assert_noop_witness
+  assert_no_secret_material
+done
+
+# Unstamped WRC and HCC with their HMAC rotated and their restart failing.
+for hmac in "INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET|control-plane/workflow-recipes" \
+            "INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET|control-plane/host-context-controller"; do
+  IFS='|' read -r hmac_env hmac_consumer <<<"$hmac"
+  seed_unstamped
+  rollout="$TMP/rollout-unstamped-hmac-fails.log"
+  if run_tokens gke-dev "$rollout" "" env "$hmac_env=$ROTATED" KUBE_ROLLOUT_FAIL="$hmac_consumer"; then
+    fail "a failed restart of unstamped $hmac_consumer must fail the run"
+  fi
+  assert_restarted_exactly "$rollout" control-plane/control-api
+  assert_pending "$hmac_consumer"
+  rollout="$TMP/rollout-unstamped-hmac-heals.log"
+  run_tokens gke-dev "$rollout" "" env || fail "the healing run for unstamped $hmac_consumer failed"
+  assert_restarted_exactly "$rollout" "$hmac_consumer"
+  assert_no_secret_material
+done
+
+# The restart-pending mark cannot be written: the run stops before writing any
+# Secret, and the next run does the whole rotation.
+seed_unstamped
+rpc_before="$(store_get rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN)"
+rollout="$TMP/rollout-mark-fails.log"
+if run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_RPC="$ROTATED" \
+     KUBE_ANNOTATE_FAIL="rpc-proxy/rpc-proxy"; then
+  fail "a failed restart-pending mark must fail the run"
+fi
+grep -qF 'cannot record the pending restart of rpc-proxy/rpc-proxy; no Secret was written' "$TMP/stderr" \
+  || fail "missing mark error line"
+[[ "$(grep -c 'injected annotate failure for rpc-proxy/rpc-proxy' "$TMP/stderr")" == "3" ]] \
+  || fail "the mark was not attempted three times"
+[[ ! -s "$TMP/patches.log" ]] || fail "no Secret may be written after a failed mark"
+assert_restarted_exactly "$rollout"
+[[ "$(store_get rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN)" == "$rpc_before" ]] \
+  || fail "the rpc-proxy token changed although the run stopped before writing"
+rollout="$TMP/rollout-mark-heals.log"
+run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_RPC="$ROTATED" \
+  || fail "the rotation after a failed mark failed"
+assert_restarted_exactly "$rollout" control-plane/control-api rpc-proxy/rpc-proxy
+assert_no_secret_material
+
+# The run dies (SIGKILL) after every Secret is written and before any restart:
+# the marks survive, and the next plain run restarts exactly the changed ends.
+seed_unstamped
+rollout="$TMP/rollout-killed.log"
+killed_exit=0
+run_tokens_killable "$rollout" env CONTROL_API_INTERNAL_TOKEN_RPC="$WRC_OLD" || killed_exit=$?
+[[ "$killed_exit" == "137" ]] || fail "the run was not killed (exit $killed_exit)"
+assert_restarted_exactly "$rollout"
+for secret in "${TOKEN_SECRETS[@]}"; do
+  grep -qx "$secret" "$TMP/patches.log" || fail "Secret $secret was not written before the kill"
+done
+grep -q '\] Done\.$' "$TMP/stderr" && fail "a killed run must not reach Done."
+[[ "$(stamp_of rpc-proxy/rpc-proxy)" == "restart-pending" ]] || fail "rpc-proxy lost its mark"
+[[ "$(stamp_of control-plane/control-api)" == "restart-pending" ]] || fail "control-api lost its mark"
+rollout="$TMP/rollout-killed-heals.log"
+run_tokens gke-dev "$rollout" "" env || fail "the run after a killed run failed"
+assert_restarted_exactly "$rollout" control-plane/control-api rpc-proxy/rpc-proxy
+assert_no_secret_material
+
+# BR-4 M4: half-applied run on unstamped consumers for every caller (control-api
+# already holds the new token in its map and flat list, the caller's Secret
+# does not): control-api and that caller restart, nothing else.
+caller_index=0
+for caller in "${SERVICE_TOKEN_CALLERS[@]}"; do
+  IFS='|' read -r caller_env caller_consumer <<<"$caller"
+  caller_index=$((caller_index + 1))
+  token_a="$(printf '%064x' $((0xD000 + caller_index)))"
+  token_b="$(printf '%064x' $((0xE000 + caller_index)))"
+  seed_unstamped
+  run_tokens gke-dev "$TMP/rollout-setup.log" "" env "$caller_env=$token_a" || fail "half-applied setup A failed"
+  case "$caller_consumer" in
+    profiles/external-rest-api) caller_secret="profiles external-rest-api-secrets EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN" ;;
+    rpc-proxy/rpc-proxy) caller_secret="rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN" ;;
+    webhook-ingress/webhook-proxy) caller_secret="webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN" ;;
+    control-plane/codex-llm-proxy) caller_secret="control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN" ;;
+    control-plane/grok-llm-proxy) caller_secret="control-plane grok-llm-proxy-secrets GROK_LLM_PROXY_CONTROL_API_TOKEN" ;;
+    channels/clerum-workflow-approval-request-reader) caller_secret="channels workflow-approval-request-reader-credentials control-api-token" ;;
+  esac
+  run_tokens gke-dev "$TMP/rollout-setup.log" "" env "$caller_env=$token_b" || fail "half-applied setup B failed"
+  # shellcheck disable=SC2086 # three words: namespace secret key
+  store_set $caller_secret "$token_a"
+  for consumer in "${ALL_TOKEN_CONSUMERS[@]}"; do unstamp "$consumer"; done
+  rollout="$TMP/rollout-half-applied-$caller_index.log"
+  run_tokens gke-dev "$rollout" "" env "$caller_env=$token_b" || fail "half-applied run for $caller_consumer failed"
+  assert_restarted_exactly "$rollout" control-plane/control-api "$caller_consumer"
+  if [[ "$caller_consumer" == channels/clerum-workflow-approval-request-reader ]]; then
+    grep -qF 'Recording token stamp on channels/channel-reader-stubhost: tokens unchanged, no restart' "$TMP/stderr" \
+      || fail "the channel-reader must only be stamped when the reader's control-api token is half-applied"
+  fi
+  assert_no_secret_material
+done
+
+# BR-4 M6: a caller's Secret rotated out of band on an unstamped cluster:
+# control-api's map does not hold it yet, so both ends restart and the map
+# entry is updated.
+caller_index=0
+for caller in "${SERVICE_TOKEN_CALLERS[@]}"; do
+  IFS='|' read -r caller_env caller_consumer <<<"$caller"
+  caller_index=$((caller_index + 1))
+  token_oob="$(printf '%064x' $((0xF000 + caller_index)))"
+  seed_unstamped
+  case "$caller_consumer" in
+    profiles/external-rest-api) caller_secret="profiles external-rest-api-secrets EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN"; map_name=external-rest-api ;;
+    rpc-proxy/rpc-proxy) caller_secret="rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN"; map_name=rpc-proxy ;;
+    webhook-ingress/webhook-proxy) caller_secret="webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN"; map_name=webhook-proxy ;;
+    control-plane/codex-llm-proxy) caller_secret="control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN"; map_name=codex-llm-proxy ;;
+    control-plane/grok-llm-proxy) caller_secret="control-plane grok-llm-proxy-secrets GROK_LLM_PROXY_CONTROL_API_TOKEN"; map_name=grok-llm-proxy ;;
+    channels/clerum-workflow-approval-request-reader) caller_secret="channels workflow-approval-request-reader-credentials control-api-token"; map_name=workflow-approval-reader ;;
+  esac
+  # shellcheck disable=SC2086 # three words: namespace secret key
+  store_set $caller_secret "$token_oob"
+  rollout="$TMP/rollout-oob-unstamped-$caller_index.log"
+  run_tokens gke-dev "$rollout" "" env || fail "out-of-band run for unstamped $caller_consumer failed"
+  assert_restarted_exactly "$rollout" control-plane/control-api "$caller_consumer"
+  [[ ",$(store_get control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)," == *",$map_name=$token_oob,"* ]] \
+    || fail "control-api's map was not updated for $map_name"
+  assert_no_secret_material
+done
+
+# BR-4 M5: the stamp-only write fails on an unstamped, unchanged consumer: the
+# run fails naming it, nothing restarts, and the next run records the stamp.
+seed_unstamped
+rollout="$TMP/rollout-stamp-only-fails.log"
+if run_tokens gke-dev "$rollout" "" env KUBE_ANNOTATE_FAIL="rpc-proxy/rpc-proxy"; then
+  fail "a failed stamp-only write must fail the run"
+fi
+grep -qF 'cannot write the token stamp on rpc-proxy/rpc-proxy; the next run records it' "$TMP/stderr" \
+  || fail "missing stamp-only write error line"
+assert_pending rpc-proxy/rpc-proxy
+assert_restarted_exactly "$rollout"
+grep -qF 'Recording token stamp on control-plane/control-api: tokens unchanged, no restart' "$TMP/stderr" \
+  || fail "the other consumers were not stamped"
+rollout="$TMP/rollout-stamp-only-heals.log"
+run_tokens gke-dev "$rollout" "" env || fail "the run after a failed stamp-only write failed"
+assert_restarted_exactly "$rollout"
+grep -qF 'Recording token stamp on rpc-proxy/rpc-proxy: tokens unchanged, no restart' "$TMP/stderr" \
+  || fail "rpc-proxy's stamp was not recorded on the next run"
+[[ "$(stamp_of rpc-proxy/rpc-proxy)" =~ ^[0-9a-f]{64}$ ]] || fail "rpc-proxy has no stamp"
+assert_no_secret_material
+
+# Restore a fully stamped cluster for the cases below.
+seed_unstamped
+run_tokens gke-dev "$TMP/rollout-restamp.log" "" env || fail "re-stamp run failed"
 
 # HCC rebuilt a channel-reader Deployment without the stamp: it is re-stamped.
 unstamp channels/channel-reader-stubhost
@@ -799,6 +1079,22 @@ assert_pending "$READER"
 rollout="$TMP/rollout-bot-heals.log"
 run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET || fail "the bot-secret healing run failed"
 assert_restarted_exactly "$rollout" "$READER"
+assert_no_secret_material
+
+# The same with no bot-secret stamp on the reader (BR-1): it is marked before
+# the write, so the next plain run restarts it.
+unstamp "$READER" "$BOT_STAMP_KEY"
+rollout="$TMP/rollout-bot-unstamped-fails.log"
+if run_bot_secret "$rollout" env WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET="$WRC_NEW" KUBE_ROLLOUT_FAIL="$READER"; then
+  fail "a failed restart of the unstamped reader must fail the bot-secret run"
+fi
+assert_restarted_exactly "$rollout"
+assert_pending "$READER"
+[[ "$(stamp_of "$READER" "$BOT_STAMP_KEY")" == "restart-pending" ]] || fail "the unstamped reader was not marked"
+rollout="$TMP/rollout-bot-unstamped-heals.log"
+run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET || fail "the unstamped reader healing run failed"
+assert_restarted_exactly "$rollout" "$READER"
+[[ "$(stamp_of "$READER" "$BOT_STAMP_KEY")" =~ ^[0-9a-f]{64}$ ]] || fail "the reader has no bot-secret stamp after healing"
 assert_no_secret_material
 
 store_set channels workflow-approval-request-reader-credentials telegram-webhook-secret replace-with-telegram-secret
