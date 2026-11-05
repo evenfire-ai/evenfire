@@ -12,6 +12,7 @@ const RESOLVED_AT = 'clerum.io/egress-fqdn-resolved-at'
 // Mirrors WRC's DEFAULT_EXTERNAL_EGRESS_MAX_ENTRIES (workflow-recipes/src/config.ts).
 // The oracle stays independent of the production builders, so this is a hand-kept
 // copy: raising the WRC default without raising this cap rejects a valid policy.
+// scripts/tests/wrc-egress-proof.test.cjs fails when the two values differ.
 const MAX_ENTRIES = 256
 const MAX_INPUT_BYTES = 1024 * 1024
 
@@ -358,7 +359,7 @@ async function main(argv) {
   process.stdout.write(`${JSON.stringify(assertPolicy(policy, expected))}\n`)
 }
 
-module.exports = { assertPolicy, validatePolicy, ProofError }
+module.exports = { assertPolicy, validatePolicy, ProofError, MAX_ENTRIES }
 if (require.main === module) {
   main(process.argv.slice(2)).catch(error => {
     process.stderr.write(
