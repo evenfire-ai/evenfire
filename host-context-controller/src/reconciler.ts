@@ -72,6 +72,11 @@ export type SecretValidationResult =
       ok: false
       reason: 'SecretNotFound' | 'SecretMissingKey' | 'SecretAccessDenied' | 'ReadError'
       message: string
+      /**
+       * Set only on ReadError: `isTransientKubernetesFailure` of the read
+       * error, classified where the error still exists (#1338 F1).
+       */
+      transient?: boolean
     }
 
 /**
@@ -117,13 +122,6 @@ export type McpServerFullReconcileOptions = {
 
 export type McpServerMutationOptions = {
   isCurrent?: () => boolean
-  /**
-   * The caller observed a change to this server's envSecret (a SecretInformer
-   * MODIFIED or DELETED event). A failed Secret read then withdraws a ready
-   * verdict instead of keeping it, because the runtime may no longer match
-   * the Secret it was rolled out with.
-   */
-  secretChangeObserved?: boolean
 }
 
 /**
@@ -134,16 +132,39 @@ export type McpServerMutationOptions = {
 type VerdictCallSite = 'secret_read' | 'resource_sync' | 'pre_deploy_handshake' | 'rollout_read'
 
 /**
+ * Transport error codes that mean the request got no answer from the
+ * apiserver and that resolve without a change to HCC (#1338 F3):
+ * - ECONNRESET, EPIPE: the connection broke mid-request;
+ * - ECONNREFUSED: the apiserver is restarting;
+ * - ETIMEDOUT: the connect timed out;
+ * - EHOSTUNREACH, ENETUNREACH: the network path is down;
+ * - ERR_STREAM_PREMATURE_CLOSE: node-fetch (the client-node transport) sets
+ *   it on `FetchError.code` when a chunked response body ends early.
+ * DNS codes (HCC's in-cluster apiserver address is an IP, so a DNS failure is
+ * misconfiguration), TLS and certificate codes, and every other Node `ERR_*`
+ * code name a defect in HCC or its configuration and are not listed.
+ */
+const TRANSIENT_TRANSPORT_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ECONNRESET',
+  'EPIPE',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ERR_STREAM_PREMATURE_CLOSE',
+])
+
+/**
  * A failure that says nothing about the object that was asked for: the
- * request hit HCC's deadline, the connection failed (a Node system error code
- * such as ECONNRESET or ETIMEDOUT), or the apiserver answered 429 or 5xx.
- * Every other status (404, 403, 409, 422, ...) is an answer about the object
- * and keeps its meaning.
+ * request hit HCC's deadline, the connection failed with a code in
+ * TRANSIENT_TRANSPORT_ERROR_CODES, or the apiserver answered 429 or 5xx.
+ * Every other status (404, 403, 409, 422, ...) and every other code is an
+ * answer about the object or a defect, and keeps its meaning.
  */
 function isTransientKubernetesFailure(error: unknown): boolean {
   const code = (error as { code?: unknown } | null | undefined)?.code
   if (code === K8S_REQUEST_TIMEOUT_CODE) return true
-  if (typeof code === 'string') return /^E[A-Z0-9_]+$/.test(code)
+  if (typeof code === 'string') return TRANSIENT_TRANSPORT_ERROR_CODES.has(code)
   const status = getErrorCode(error)
   return status === 429 || (typeof status === 'number' && status >= 500 && status <= 599)
 }
@@ -418,6 +439,54 @@ export class McpServerReconciler {
   // (runInitialMcpServerConvergenceCore), never through the listener, so a
   // mid-pass obligation does not arm a second, trailing run.
   private readonly fleetPassFences = new WeakSet<() => boolean>()
+
+  /**
+   * #1338 F2 Layer A: Secret-change evidence (E of user decision Q1 (a)) is
+   * per-server state, not an argument of one reconcile call, so a superseded
+   * reconcile, a fleet pass or a D2 retry still sees it. The value is the
+   * sequence number of the latest record. An entry is discharged only by a
+   * completed reconcile that started after it was recorded (seq <= the
+   * watermark taken when that reconcile started), or by a completed delete.
+   */
+  private secretEvidenceSeq = 0
+  private readonly secretChangeEvidence = new Map<string, number>()
+
+  /** Record that this server's envSecret was observed to change (MODIFIED or DELETED). */
+  recordSecretChangeEvidence(serverName: string): void {
+    this.secretEvidenceSeq += 1
+    this.secretChangeEvidence.set(serverName, this.secretEvidenceSeq)
+  }
+
+  /**
+   * True while a server still in the inventory carries undischarged evidence.
+   * Entries for names the inventory no longer holds are pruned here (#1338
+   * M1): a server that left the inventory without a delete reaching this
+   * reconciler (a relist that dropped it, a WRC-owned server with no
+   * Deployment to clean up) has nothing left to converge.
+   */
+  hasSecretChangeEvidence(): boolean {
+    let present = false
+    for (const name of [...this.secretChangeEvidence.keys()]) {
+      if (
+        this.resolveCurrentServer !== undefined &&
+        this.resolveCurrentServer(name) === undefined
+      ) {
+        this.secretChangeEvidence.delete(name)
+        continue
+      }
+      present = true
+    }
+    return present
+  }
+
+  private secretChangeObserved(serverName: string): boolean {
+    return this.secretChangeEvidence.has(serverName)
+  }
+
+  private dischargeSecretChangeEvidence(serverName: string, watermark: number): void {
+    const seq = this.secretChangeEvidence.get(serverName)
+    if (seq !== undefined && seq <= watermark) this.secretChangeEvidence.delete(serverName)
+  }
 
   hasIncompleteReconciliation(): boolean {
     return this.pendingReconciliations.size > 0
@@ -906,6 +975,11 @@ export class McpServerReconciler {
         // operator with the numbers that prove it, never left as a stale
         // condition or a silent Unknown.
         if (retiredNow()) return
+        // #1338 H1: the terminal verdict leaves a convergence obligation.
+        // HCC has no Deployment watch, so without it nothing re-observes a
+        // rollout that converges later; D2's bounded retry owns it instead.
+        this.pendingReconciliations.set(name, { namespace })
+        this.notifyIncompleteReconciliation(name)
         await this.updateStatusConditions(
           state.server,
           false,
@@ -976,6 +1050,7 @@ export class McpServerReconciler {
         ok: false,
         reason: 'ReadError',
         message: `Failed to read Secret "${secretName}": ${errMsg}`,
+        transient: isTransientKubernetesFailure(error),
       }
     }
 
@@ -2518,20 +2593,28 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * #1338 H3 (D1.a). A failed Secret read observed nothing about the runtime,
    * which the ReadError branch leaves running. Over an authoritative verdict
    * (same uid and generation in memory, or a generation-matched persisted
-   * Ready) it therefore publishes nothing: no in-memory change and no
+   * Ready) it may therefore publish nothing: no in-memory change and no
    * condition write, so consumers keep the verdict they had and
-   * credentialRevision does not move. A ready verdict is withdrawn only when
-   * the caller saw the Secret change. A not-ready verdict, fail-closed
-   * included, is kept even then, so a ReadError never overwrites
-   * SecretNotFound. The obligation stays pending; the McpServer lane retries.
+   * credentialRevision does not move. The rule, with P the published verdict
+   * and E undischarged Secret-change evidence for this server, keeps iff
+   * `P.authoritative && (!P.ready || (transient && !E))`:
+   * - a ready verdict is kept only for a transient read failure (F1) and only
+   *   while no Secret change is pending;
+   * - a not-ready verdict, fail-closed included, is kept unconditionally, so a
+   *   ReadError never overwrites SecretNotFound and the policy intent cannot
+   *   flip.
+   * The obligation stays pending; the McpServer lane retries.
    */
   private keepVerdictOverSecretReadError(
     server: McpServerCRD,
-    secretChangeObserved: boolean,
+    transient: boolean,
     detail: string
   ): boolean {
     const published = this.getStatus(server)
-    if (published.authoritative !== true || (secretChangeObserved && published.ready)) {
+    const keep =
+      published.authoritative === true &&
+      (!published.ready || (transient && !this.secretChangeObserved(server.name)))
+    if (!keep) {
       mcpserverReconcileCallFailuresTotal.inc({
         site: 'secret_read',
         outcome: 'not_ready_published',
@@ -2557,13 +2640,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     server: McpServerCRD,
     site: Exclude<VerdictCallSite, 'secret_read'>,
     error: unknown,
-    runtime: { writeAttempted: boolean; secretChangeObserved: boolean }
+    runtime: { writeAttempted: boolean }
   ): boolean {
     const published = this.getStatus(server)
     const keep =
       isTransientKubernetesFailure(error) &&
       !runtime.writeAttempted &&
-      !runtime.secretChangeObserved &&
+      !this.secretChangeObserved(server.name) &&
       published.authoritative === true &&
       published.ready
     if (!keep) {
@@ -2600,7 +2683,6 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const callerIsCurrent = options.isCurrent ?? (() => true)
     const fleetPassOwned =
       options.isCurrent !== undefined && this.fleetPassFences.has(options.isCurrent)
-    const secretChangeObserved = options.secretChangeObserved === true
     const isCurrent = () => {
       if (!callerIsCurrent()) return false
       if (!this.inventoryAuthorityConfigured) return this.currentWhenUnconfigured()
@@ -2616,7 +2698,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       .catch(() => undefined)
       .then(async () => {
         if (!isCurrent()) return
-        const completed = await this.performReconcile(server, isCurrent, secretChangeObserved)
+        // #1338 F2 Layer A (M1): the watermark is taken where the reconcile
+        // starts, before any branch, so every completed return discharges
+        // only evidence recorded before this reconcile could observe it.
+        const watermark = this.secretEvidenceSeq
+        const completed = await this.performReconcile(server, isCurrent)
+        if (completed) this.dischargeSecretChangeEvidence(key, watermark)
         if (completed && this.pendingReconciliations.get(key) === obligation) {
           this.pendingReconciliations.delete(key)
         }
@@ -2639,11 +2726,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
   }
 
-  private async performReconcile(
-    server: McpServerCRD,
-    isCurrent: () => boolean,
-    secretChangeObserved: boolean
-  ): Promise<boolean> {
+  private async performReconcile(server: McpServerCRD, isCurrent: () => boolean): Promise<boolean> {
     if (!isCurrent()) return false
     this.beginStatusTracking(server)
 
@@ -2703,7 +2786,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     if (!currentManaged) {
-      return this.reconcileWrcOwnedServer(server, isCurrent, secretChangeObserved)
+      return this.reconcileWrcOwnedServer(server, isCurrent)
     }
 
     // Validate secret before creating/updating
@@ -2712,7 +2795,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     if (!secretResult.ok) {
       if (
         secretResult.reason === 'ReadError' &&
-        this.keepVerdictOverSecretReadError(server, secretChangeObserved, secretResult.message)
+        this.keepVerdictOverSecretReadError(
+          server,
+          secretResult.transient === true,
+          secretResult.message
+        )
       ) {
         return false
       }
@@ -2738,10 +2825,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
         cleanupComplete = retract.cleanupComplete
       } else {
-        hccLogger.warn(
-          '[Reconciler] Preserving existing runtime after transient Secret read failure',
-          { serverName: server.name }
-        )
+        hccLogger.warn('[Reconciler] Preserving existing runtime after a Secret read failure', {
+          serverName: server.name,
+          transient: secretResult.transient === true,
+        })
       }
       if (!isCurrent()) return false
       this.setStatus(server.name, {
@@ -2770,6 +2857,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         isCurrent
       )
       if (retract && !retract.retracted && !retract.foreignRuntime) return false
+      // #1338 H1: a 401/403 is an answer about HCC's identity or
+      // authorization, not about the Secret, so no Secret event follows when
+      // it recovers. The fail-closed verdict stands, and the obligation stays
+      // pending so D2's bounded retry re-reads the Secret.
+      if (secretResult.reason === 'SecretAccessDenied') return false
       return withdrawRuntime && cleanupComplete && isCurrent()
     }
 
@@ -2831,7 +2923,6 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       if (
         this.keepReadyVerdictOverTransientFailure(server, 'resource_sync', err, {
           writeAttempted: runtimeWriteAttempted,
-          secretChangeObserved,
         })
       ) {
         return false
@@ -2862,7 +2953,6 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (
           this.keepReadyVerdictOverTransientFailure(server, 'pre_deploy_handshake', err, {
             writeAttempted: runtimeWriteAttempted,
-            secretChangeObserved,
           })
         ) {
           return false
@@ -2883,7 +2973,6 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       'readFailure' in rollout &&
       this.keepReadyVerdictOverTransientFailure(server, 'rollout_read', rollout.readFailure, {
         writeAttempted: runtimeWriteAttempted,
-        secretChangeObserved,
       })
     ) {
       return false
@@ -2961,13 +3050,16 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     if (!ready && isCurrent()) {
       this.pollReadiness(server, 5000, 24, isCurrent)
     }
+    // #1338 H1: a terminal RolloutIncomplete for this Deployment generation
+    // is not convergence. The obligation stays pending, so D2's bounded retry
+    // re-observes the rollout; HCC has no Deployment watch that would.
+    if (exhaustedDetail !== undefined) return false
     return isCurrent()
   }
 
   private async reconcileWrcOwnedServer(
     server: McpServerCRD,
-    isCurrent: () => boolean,
-    secretChangeObserved: boolean
+    isCurrent: () => boolean
   ): Promise<boolean> {
     if (!isCurrent()) return false
     hccLogger.info(
@@ -2981,7 +3073,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     if (!secretResult.ok) {
       if (
         secretResult.reason === 'ReadError' &&
-        this.keepVerdictOverSecretReadError(server, secretChangeObserved, secretResult.message)
+        this.keepVerdictOverSecretReadError(
+          server,
+          secretResult.transient === true,
+          secretResult.message
+        )
       ) {
         return false
       }
@@ -3012,6 +3108,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
+      // #1338 H1: as in the managed branch, a denied read leaves the
+      // obligation pending for D2's retry.
+      if (secretResult.reason === 'SecretAccessDenied') return false
       return shouldFailClosedForSecretFailure(secretResult.reason) && isCurrent()
     }
 
@@ -3066,6 +3165,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       const complete = await this.deleteRuntimeResources(name, namespace, () =>
         this.orphanDeleteAllowed(name, namespace, capturedAuthority)
       )
+      // #1338 M1: a completed delete clears Secret-change evidence on both
+      // delete paths (a watch DELETED and a fleet-pass orphan cleanup).
+      if (complete) this.secretChangeEvidence.delete(name)
       if (complete && this.pendingReconciliations.get(name) === obligation) {
         this.pendingReconciliations.delete(name)
         this.clearStatus(name)

@@ -34,7 +34,7 @@ import {
   HostReconciler,
   type ResolvedSfsMount,
 } from './hostReconciler'
-import type { SecretEventType } from './informers/secretInformer'
+import type { SecretEvent, SecretEventType } from './informers/secretInformer'
 import {
   type InfrastructureTelemetryReporter,
   createInfrastructureTelemetryReporter,
@@ -959,6 +959,10 @@ export class McpServerWatcher implements McpServerProvider {
   // member cannot block unrelated live events while same-resource updates
   // still retain last-writer ordering.
   private readonly mcpServerReconciliationQueues = new Map<string, KeyedReconciliationQueue>()
+  // #1338 F2 Layer A: `namespace/name` of Secrets that changed while the
+  // McpServer inventory was not authoritative. Bounded by the Secrets in the
+  // namespace and emptied at every authority gain (restartMcpServerWatch).
+  private readonly unroutedSecretChanges = new Set<string>()
   private readonly contextReconciliationQueues = new Map<string, KeyedReconciliationQueue>()
   private readonly sharedFileSystemReconciliationQueues = new Map<
     string,
@@ -1566,7 +1570,30 @@ export class McpServerWatcher implements McpServerProvider {
       throw new Error('McpServer snapshot could not be paired with an active watch')
     }
     this.mcpServerCacheSynced = true
+    this.routeUnroutedSecretChanges()
     return watchGeneration
+  }
+
+  /** Record Secret-change evidence for every cached McpServer that references the Secret. */
+  private recordSecretChangeEvidence(secretNamespace: string, secretName: string): void {
+    for (const server of this.servers.values()) {
+      if (server.namespace === secretNamespace && server.spec.envSecret?.name === secretName) {
+        this.reconciler.recordSecretChangeEvidence(server.name)
+      }
+    }
+  }
+
+  /**
+   * #1338 F2 Layer A: route the Secret changes deferred while the inventory
+   * was not authoritative against the inventory just installed. The recovery
+   * decision that follows sees the evidence and requests a full convergence.
+   */
+  private routeUnroutedSecretChanges(): void {
+    for (const entry of this.unroutedSecretChanges) {
+      const separator = entry.indexOf('/')
+      this.recordSecretChangeEvidence(entry.slice(0, separator), entry.slice(separator + 1))
+    }
+    this.unroutedSecretChanges.clear()
   }
 
   private async restartContextWatch(snapshot: ContextSnapshot): Promise<number> {
@@ -2678,30 +2705,63 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
+   * The mcp-server SecretInformer's consumer (#1338 F5). It passes the event
+   * type through unchanged: that type decides whether the change is evidence.
+   */
+  readonly handleSecretEvent = (evt: SecretEvent): void => {
+    this.reconcileByEnvSecret(evt.name, evt.namespace, evt.type).catch(err => {
+      hccLogger.error('[K8s] reconcileByEnvSecret failed', { err })
+    })
+  }
+
+  /**
    * Trigger a reconcile for any cached McpServer whose `envSecret.name`
    * matches the given Secret. Used by SecretInformer to react to Secret
    * lifecycle changes (create/update/delete) without waiting for a CRD
    * event.
    *
-   * `eventType` decides whether the reconcile carries Secret-change evidence:
-   * MODIFIED and DELETED do, ADDED does not, because an informer reconnect
-   * replays ADDED for every Secret (#1338 H3, user decision Q1 (a)).
+   * `eventType` decides whether the change is Secret-change evidence:
+   * MODIFIED and DELETED are, ADDED is not (#1338 H3, user decision Q1 (a)).
+   * The evidence is recorded before any authority check, as reconciler state
+   * (F2 Layer A): while the McpServer inventory is not authoritative the
+   * Secret is kept unrouted and routed at the next authority gain, whose
+   * recovery decision then requests a full convergence.
    */
   async reconcileByEnvSecret(
     secretName: string,
     secretNamespace: string,
     eventType: SecretEventType
   ): Promise<void> {
-    const secretChangeObserved = eventType !== 'ADDED'
     const inventoryGeneration = this.mcpWatchGeneration
-    if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) return
+    const authoritative = this.hasMcpServerInventoryAuthority(inventoryGeneration)
+    if (eventType !== 'ADDED') {
+      if (authoritative) {
+        this.recordSecretChangeEvidence(secretNamespace, secretName)
+      } else {
+        this.unroutedSecretChanges.add(`${secretNamespace}/${secretName}`)
+        hccLogger.warn(
+          `[K8s] Secret change deferred until the McpServer inventory is authoritative: ` +
+            `${secretNamespace}/${secretName} ${eventType}`,
+          { event: 'secret-change-deferred', eventType }
+        )
+      }
+    }
+    if (!authoritative) return
     const selected = [...this.servers.values()].filter(
       server => server.namespace === secretNamespace && server.spec.envSecret?.name === secretName
     )
     await Promise.all(
       selected.map(server =>
         this.enqueueMcpServerReconciliation(server, async () => {
-          if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) return
+          if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) {
+            // Any evidence was recorded at the event; the recovery that
+            // restores authority sees it and requests a full convergence.
+            hccLogger.warn(
+              '[K8s] Secret-triggered reconcile dropped: McpServer inventory authority changed',
+              { event: 'secret-reconcile-dropped', serverName: server.name, eventType }
+            )
+            return
+          }
           const current = this.servers.get(server.name)
           if (
             !current ||
@@ -2716,7 +2776,6 @@ export class McpServerWatcher implements McpServerProvider {
               { serverName: current.name }
             )
             await this.reconciler.reconcile(current, {
-              secretChangeObserved,
               isCurrent: () => {
                 if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) return false
                 const latest = this.servers.get(current.name)
@@ -3180,6 +3239,7 @@ export class McpServerWatcher implements McpServerProvider {
       this.networkPolicyRepairPending ||
       this.runtimeRepairPending ||
       this.reconciler.hasPendingReconciliation() ||
+      this.reconciler.hasSecretChangeEvidence() ||
       (this.runtimeInventoryGeneration !== null &&
         this.runtimeInventoryGeneration !== this.mcpWatchGeneration) ||
       this.initialConvergenceRetryTimers.has('NetworkPolicy') ||

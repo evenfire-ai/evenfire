@@ -218,6 +218,10 @@ vi.mock('./reconciler', () => ({
     hasIncompleteReconciliation() {
       return false
     }
+    hasSecretChangeEvidence() {
+      return false
+    }
+    recordSecretChangeEvidence() {}
     setInventoryAuthority() {}
     setResolveCurrentServer() {}
     setIncompleteReconciliationListener() {}

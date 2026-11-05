@@ -434,9 +434,11 @@ For the create and existence-read counters, including PromQL examples, see [CREA
 
 | Metric                                               | Type    | Labels                        | Meaning                                                                                                 |
 | ---------------------------------------------------- | ------- | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `clerum_hcc_secret_informer_events_total`            | counter | `type`                        | Secret informer events received.                                                                        |
-| `clerum_hcc_secret_informer_reconnects_total`        | counter | —                             | Secret informer reconnect attempts.                                                                     |
-| `clerum_hcc_secret_informer_running`                 | gauge   | —                             | `1` while the Secret watch is established.                                                              |
+| `clerum_hcc_secret_informer_events_total`            | counter | `namespace`, `type`           | Secret informer events delivered to the consumer.                                                       |
+| `clerum_hcc_secret_informer_reconnects_total`        | counter | `namespace`                   | Secret informer reconnect attempts.                                                                     |
+| `clerum_hcc_secret_informer_running`                 | gauge   | `namespace`                   | `1` while the Secret watch is established; `0` while reconnecting or until a complete list succeeds.    |
+| `clerum_hcc_secret_informer_lists_total`             | counter | `namespace`, `outcome`        | Paginated Secret lists of the resume-mode informer (`initial`, `relist` after a 410, `failed`).         |
+| `clerum_hcc_secret_informer_resumes_total`           | counter | `namespace`                   | Secret watches the resume-mode informer reopened from the last resourceVersion it saw.                  |
 | `clerum_hcc_mcp_host_api_requests_total`             | counter | `action`, `outcome`, `reason` | Host-scoped MCP API requests (inventory, credential).                                                   |
 | `clerum_hcc_infrastructure_telemetry_enqueued_total` | counter | `telemetry_type`              | Telemetry items accepted by the bounded reporter.                                                       |
 | `clerum_hcc_infrastructure_telemetry_dropped_total`  | counter | `telemetry_type`, `reason`    | Telemetry items dropped.                                                                                |

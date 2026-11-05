@@ -378,6 +378,10 @@ vi.mock('./reconciler', () => ({
     hasIncompleteReconciliation() {
       return false
     }
+    hasSecretChangeEvidence() {
+      return false
+    }
+    recordSecretChangeEvidence = vi.fn()
     fullReconcile = mocks.serverFullReconcile
     reconcile = vi.fn()
     reconcileDelete = vi.fn()
@@ -3203,12 +3207,17 @@ describe('McpServerWatcher startup', () => {
     await vi.waitFor(() =>
       expect(reconciler.reconcile).toHaveBeenCalledWith(
         expect.objectContaining({ name: currentServer.name }),
-        { isCurrent: expect.any(Function), secretChangeObserved: true }
+        { isCurrent: expect.any(Function) }
       )
     )
     releaseBlocker.resolve(undefined)
     await Promise.all([blocker, convergence])
 
+    // MODIFIED is Secret-change evidence for every server that referenced
+    // the Secret when the event arrived (#1338 F2 Layer A).
+    expect(
+      reconciler.recordSecretChangeEvidence.mock.calls.map(([name]: [string]) => name).sort()
+    ).toEqual([currentServer.name, staleServer.name].sort())
     expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
     expect(
       reconciler.reconcile.mock.calls.some(
@@ -3241,6 +3250,9 @@ describe('McpServerWatcher startup', () => {
     await watcher.reconcileByEnvSecret('shared-env', 'mcp-server', 'MODIFIED')
 
     expect(reconciler.reconcile).not.toHaveBeenCalled()
+    // Deferred, not dropped: the change waits for the next authority gain.
+    expect(reconciler.recordSecretChangeEvidence).not.toHaveBeenCalled()
+    expect([...(watcher as any).unroutedSecretChanges]).toEqual(['mcp-server/shared-env'])
 
     markMcpServerInventoryAuthoritative(watcher)
     await watcher.reconcileByEnvSecret('shared-env', 'mcp-server', 'MODIFIED')
@@ -3248,8 +3260,9 @@ describe('McpServerWatcher startup', () => {
     expect(reconciler.reconcile).toHaveBeenCalledOnce()
     expect(reconciler.reconcile).toHaveBeenCalledWith(
       expect.objectContaining({ name: selected.name }),
-      { isCurrent: expect.any(Function), secretChangeObserved: true }
+      { isCurrent: expect.any(Function) }
     )
+    expect(reconciler.recordSecretChangeEvidence).toHaveBeenCalledExactlyOnceWith(selected.name)
     await watcher.stop()
   })
 

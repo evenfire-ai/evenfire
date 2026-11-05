@@ -3256,12 +3256,13 @@ describe('#1338 H3 D1.a — a Secret read error keeps an authoritative verdict',
     expect(f.condition('SecretResolved')).toMatchObject({ status: 'False', reason: 'ReadError' })
   })
 
-  it('U5 withdraws a ready verdict when the caller observed the Secret change', async () => {
+  it('U5 withdraws a ready verdict when Secret-change evidence is pending', async () => {
     const server = h3Server()
     const f = await h3ReadyCluster(server)
     f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Timeout())
+    f.reconciler.recordSecretChangeEvidence('h3-server')
 
-    await f.reconciler.reconcile(server, { secretChangeObserved: true })
+    await f.reconciler.reconcile(server)
 
     expect(f.secretReads()).toBe(2)
     expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
@@ -3337,15 +3338,16 @@ describe('#1338 H3 D1.a — a Secret read error keeps an authoritative verdict',
     expect(f.reconciler.hasIncompleteReconciliation()).toBe(true)
   })
 
-  it('U12 keeps a SecretNotFound verdict even when the caller observed the Secret change', async () => {
+  it('U12 keeps a SecretNotFound verdict even when Secret-change evidence is pending', async () => {
     const f = h3Cluster()
     const server = h3Server()
     f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Absent())
     await f.reconciler.reconcile(server)
     const patchesBefore = f.patches()
     f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Timeout())
+    f.reconciler.recordSecretChangeEvidence('h3-server')
 
-    await f.reconciler.reconcile(server, { secretChangeObserved: true })
+    await f.reconciler.reconcile(server)
 
     expect(f.secretReads()).toBe(2)
     expect(f.patches()).toBe(patchesBefore)
@@ -3376,17 +3378,25 @@ describe('#1338 H3 D1.a — a Secret read error keeps an authoritative verdict',
     expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
   })
 
-  it('U14 pins the accepted residual: Secret-change evidence is lost when its reconcile is superseded at entry', async () => {
+  // #1338 F2 Layer A inverts the residual this test used to pin: evidence is
+  // reconciler state, so a reconcile superseded at entry no longer loses it,
+  // and the next ReadError publishes not-ready instead of keeping ready.
+  it('U14 Secret-change evidence survives a reconcile superseded at entry, so the next ReadError publishes', async () => {
     const server = h3Server()
     const f = await h3ReadyCluster(server)
-    await f.reconciler.reconcile(server, { secretChangeObserved: true, isCurrent: () => false })
+    f.reconciler.recordSecretChangeEvidence('h3-server')
+    await f.reconciler.reconcile(server, { isCurrent: () => false })
     expect(f.secretReads()).toBe(1)
     f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Timeout())
 
     await f.reconciler.reconcile(server)
 
     expect(f.secretReads()).toBe(2)
-    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true, authoritative: true })
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+    expect(f.condition('Ready')).toMatchObject({
+      status: 'False',
+      reason: 'SecretValidationFailed',
+    })
   })
 
   it('U15 rejects reconcile when processing the Secret data fails, instead of reporting ReadError', async () => {
@@ -3402,6 +3412,277 @@ describe('#1338 H3 D1.a — a Secret read error keeps an authoritative verdict',
     expect(f.secretReads()).toBe(1)
     expect(f.condition('SecretResolved')).toBeUndefined()
     expect(f.reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  const NON_TRANSIENT_READ_FAILURES: Array<[string, () => unknown]> = [
+    ['an apiserver 400', () => Object.assign(new Error('bad request'), { code: 400 })],
+    ['an apiserver 409', () => Object.assign(new Error('conflict'), { code: 409 })],
+    ['an apiserver 422', () => Object.assign(new Error('invalid'), { code: 422 })],
+    ['an untyped error', () => new Error('opaque failure')],
+    [
+      'a Node ERR_INVALID_ARG_TYPE defect',
+      () => Object.assign(new TypeError('invalid argument'), { code: 'ERR_INVALID_ARG_TYPE' }),
+    ],
+  ]
+
+  it.each(NON_TRANSIENT_READ_FAILURES)(
+    'U16 publishes not-ready over a ready verdict when the Secret read fails with %s (#1338 F1)',
+    async (_label, failure) => {
+      const server = h3Server()
+      const f = await h3ReadyCluster(server)
+      const publishedBefore = await reconcileCallFailures('secret_read', 'not_ready_published')
+      const keptBefore = await reconcileCallFailures('secret_read', 'verdict_kept')
+      f.coreApi.readNamespacedSecret.mockRejectedValueOnce(failure())
+
+      await f.reconciler.reconcile(server)
+
+      expect(f.secretReads()).toBe(2)
+      expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+      expect(f.condition('SecretResolved')).toMatchObject({ status: 'False', reason: 'ReadError' })
+      expect(f.condition('Ready')).toMatchObject({
+        status: 'False',
+        reason: 'SecretValidationFailed',
+      })
+      expect(await reconcileCallFailures('secret_read', 'not_ready_published')).toBe(
+        publishedBefore + 1
+      )
+      expect(await reconcileCallFailures('secret_read', 'verdict_kept')).toBe(keptBefore)
+      // A ReadError never fails closed.
+      expect(f.appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    }
+  )
+
+  it('U17 keeps a SecretNotFound verdict when the next Secret read fails with a non-transient 422', async () => {
+    const f = h3Cluster()
+    const server = h3Server()
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Absent())
+    await f.reconciler.reconcile(server)
+    expect(f.condition('SecretResolved')).toMatchObject({ reason: 'SecretNotFound' })
+    const patchesBefore = f.patches()
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(
+      Object.assign(new Error('invalid'), { code: 422 })
+    )
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(2)
+    expect(f.patches()).toBe(patchesBefore)
+    expect(f.condition('SecretResolved')).toMatchObject({ reason: 'SecretNotFound' })
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+  })
+
+  it('U8b publishes not-ready for a WRC-owned ready verdict when the Secret read fails with a non-transient 422', async () => {
+    const server = h3Server({ spec: { ...h3Server().spec, managed: false } })
+    const f = h3Cluster()
+    await f.reconciler.reconcile(server)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true, authoritative: true })
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(
+      Object.assign(new Error('invalid'), { code: 422 })
+    )
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(2)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+    expect(f.condition('Ready')).toMatchObject({
+      status: 'False',
+      reason: 'SecretValidationFailed',
+    })
+  })
+
+  const TRANSIENT_TRANSPORT_CODES = [
+    'ECONNRESET',
+    'EPIPE',
+    'ECONNREFUSED',
+    'ETIMEDOUT',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'ERR_STREAM_PREMATURE_CLOSE',
+  ]
+
+  it.each([
+    ...TRANSIENT_TRANSPORT_CODES.map(
+      code => [code, () => Object.assign(new Error(`transport ${code}`), { code })] as const
+    ),
+    ['the request deadline', () => h3Timeout()] as const,
+  ])(
+    'U18 keeps a ready verdict when the Secret read fails with %s (#1338 F3)',
+    async (_label, failure) => {
+      const server = h3Server()
+      const f = await h3ReadyCluster(server)
+      const patchesBefore = f.patches()
+      const keptBefore = await reconcileCallFailures('secret_read', 'verdict_kept')
+      f.coreApi.readNamespacedSecret.mockRejectedValueOnce(failure())
+
+      await f.reconciler.reconcile(server)
+
+      expect(f.secretReads()).toBe(2)
+      expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true, authoritative: true })
+      expect(f.patches()).toBe(patchesBefore)
+      expect(await reconcileCallFailures('secret_read', 'verdict_kept')).toBe(keptBefore + 1)
+    }
+  )
+
+  it('U20 evidence recorded while the Secret read is in flight survives the completion that used the older content', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const readGate = deferred()
+    f.coreApi.readNamespacedSecret.mockImplementationOnce(async (request: any) => {
+      await readGate.promise
+      return f.readSecret(request)
+    })
+
+    const inFlight = f.reconciler.reconcile(server)
+    await vi.waitFor(() => expect(f.secretReads()).toBe(2))
+    f.reconciler.recordSecretChangeEvidence('h3-server')
+    readGate.resolve()
+    await inFlight
+
+    // The reconcile completed (its obligation is cleared) with the old content.
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+    expect(f.reconciler.hasSecretChangeEvidence()).toBe(true)
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Timeout())
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(3)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+  })
+
+  it('U21 evidence is discharged by the first completed reconcile, so a later transient read error keeps ready', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    f.reconciler.recordSecretChangeEvidence('h3-server')
+    await f.reconciler.reconcile(server)
+    expect(f.secretReads()).toBe(2)
+    expect(f.reconciler.hasSecretChangeEvidence()).toBe(false)
+    const keptBefore = await reconcileCallFailures('secret_read', 'verdict_kept')
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Timeout())
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(3)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true, authoritative: true })
+    expect(await reconcileCallFailures('secret_read', 'verdict_kept')).toBe(keptBefore + 1)
+  })
+
+  it('U22 two servers sharing one Secret: only the server whose reconcile completed is discharged', async () => {
+    const serverA = h3Server()
+    const serverB = h3Server({ name: 'h3-peer', uid: 'uid-h3-peer' })
+    const f = await h3ReadyCluster(serverA)
+    await f.reconciler.reconcile(serverB)
+    expect(f.reconciler.getStatus(serverB)).toMatchObject({ ready: true, authoritative: true })
+    f.reconciler.recordSecretChangeEvidence('h3-server')
+    f.reconciler.recordSecretChangeEvidence('h3-peer')
+    await f.reconciler.reconcile(serverA)
+    expect(f.secretReads()).toBe(3)
+    f.coreApi.readNamespacedSecret
+      .mockRejectedValueOnce(h3Timeout())
+      .mockRejectedValueOnce(h3Timeout())
+
+    await f.reconciler.reconcile(serverA)
+    await f.reconciler.reconcile(serverB)
+
+    expect(f.secretReads()).toBe(5)
+    expect(f.reconciler.getStatus(serverA)).toMatchObject({ ready: true, authoritative: true })
+    expect(f.reconciler.getStatus(serverB)).toMatchObject({ ready: false, authoritative: true })
+  })
+
+  it('U23 a completed delete clears the evidence', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    let present = true
+    f.reconciler.setInventoryAuthority(() => ({ known: true, generation: 1 }))
+    f.reconciler.setResolveCurrentServer(name =>
+      present && name === 'h3-server' ? server : undefined
+    )
+    f.customApi.getNamespacedCustomObject.mockRejectedValue(h3Absent())
+    f.reconciler.recordSecretChangeEvidence('h3-server')
+    expect(f.reconciler.hasSecretChangeEvidence()).toBe(true)
+
+    present = false
+    await f.reconciler.reconcileDelete('h3-server', 'mcp-server')
+    // Resolve the name again so pruning cannot be what removed the entry.
+    present = true
+
+    expect(f.appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
+      name: 'h3-server',
+      namespace: 'mcp-server',
+    })
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+    expect(f.reconciler.hasSecretChangeEvidence()).toBe(false)
+  })
+
+  it('U24 a completed reconcile that never reads the Secret (disabled) discharges the evidence', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const disabled: McpServerCRD = {
+      ...server,
+      generation: 2,
+      spec: { ...server.spec, enabled: false },
+    }
+    f.reconciler.recordSecretChangeEvidence('h3-server')
+
+    await f.reconciler.reconcile(disabled)
+
+    expect(f.appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
+      name: 'h3-server',
+      namespace: 'mcp-server',
+    })
+    expect(f.secretReads()).toBe(1)
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+    expect(f.reconciler.hasSecretChangeEvidence()).toBe(false)
+  })
+})
+
+describe('#1338 F3 — only listed transport codes are transient', () => {
+  let logs: ReturnType<typeof captureH3Logs>
+  beforeEach(() => {
+    logs = captureH3Logs()
+  })
+  afterEach(() => {
+    logs.restore()
+  })
+
+  const DEFECT_CODES = [
+    'ERR_INVALID_ARG_TYPE',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+    'EPROTO',
+    'ENOTFOUND',
+  ]
+  const coded = (code: string) => Object.assign(new Error(`failure ${code}`), { code })
+
+  it.each(DEFECT_CODES)('U19 the Secret read failing with %s publishes not-ready', async code => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const publishedBefore = await reconcileCallFailures('secret_read', 'not_ready_published')
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(coded(code))
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(2)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+    expect(await reconcileCallFailures('secret_read', 'not_ready_published')).toBe(
+      publishedBefore + 1
+    )
+  })
+
+  it.each(DEFECT_CODES)('U19 the rollout read failing with %s publishes not-ready', async code => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const publishedBefore = await reconcileCallFailures('rollout_read', 'not_ready_published')
+    const readsBefore = f.appsApi.readNamespacedDeployment.mock.calls.length
+    f.appsApi.readNamespacedDeployment
+      .mockImplementationOnce(f.readDeployment)
+      .mockRejectedValueOnce(coded(code))
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.readNamespacedDeployment.mock.calls.length - readsBefore).toBe(2)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+    expect(await reconcileCallFailures('rollout_read', 'not_ready_published')).toBe(
+      publishedBefore + 1
+    )
   })
 })
 
@@ -3671,6 +3952,38 @@ describe('#1338 H3 D2 — out-of-pass obligations reach the incomplete-reconcili
     expect((f.reconciler as any).deleteRuntimeResources).toHaveBeenCalledTimes(1)
     expect(f.reconciler.incompleteReconciliationNames()).toEqual(['h3-orphan'])
     expect(f.listener).not.toHaveBeenCalled()
+  })
+
+  it('U25 a terminal RolloutIncomplete leaves the obligation pending until a reconcile observes the converged rollout (#1338 H1)', async () => {
+    vi.useFakeTimers()
+    const f = h3Cluster({ rolloutReady: false })
+    const server = h3Server()
+    await f.reconciler.reconcile(server)
+    expect((f.reconciler as any).readinessPolls.size).toBe(1)
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+    expect(f.listener).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(24 * 5000)
+
+    expect(f.condition('DeploymentReady')).toMatchObject({
+      status: 'False',
+      reason: 'RolloutIncomplete',
+    })
+    expect(f.reconciler.incompleteReconciliationNames()).toEqual(['h3-server'])
+    expect(f.listener).toHaveBeenCalledExactlyOnceWith('h3-server')
+
+    // A retry while the rollout is still stuck keeps the obligation.
+    const rolloutReadsBefore = f.appsApi.readNamespacedDeployment.mock.calls.length
+    await f.reconciler.reconcile(server)
+    expect(f.appsApi.readNamespacedDeployment.mock.calls.length).toBeGreaterThan(rolloutReadsBefore)
+    expect(f.reconciler.incompleteReconciliationNames()).toEqual(['h3-server'])
+    expect(f.listener).toHaveBeenCalledTimes(2)
+
+    // The rollout converges; the next retry observes it and discharges.
+    f.setRolloutReady(true)
+    await f.reconciler.reconcile(server)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
   })
 
   it('U9h a successful reconcile does not fire the listener', async () => {

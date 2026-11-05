@@ -9,9 +9,11 @@
  * In dev mode, it reads MCP servers from environment variables
  * and skips Kubernetes reconciliation.
  */
+import * as k8s from '@kubernetes/client-node'
 import { config } from './config'
 import { HeartbeatPoller } from './heartbeatPoller'
 import { SecretInformer } from './informers/secretInformer'
+import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import {
   McpServerProvider,
   McpServerWatcher,
@@ -227,23 +229,33 @@ async function main(): Promise<void> {
   if (!config.devMode && provider instanceof McpServerWatcher) {
     const kc = getKubeConfig()
     if (kc) {
-      const watcher = provider
-      secretInformer = new SecretInformer(kc, config.namespace, evt => {
-        watcher.reconcileByEnvSecret(evt.name, evt.namespace, evt.type).catch(err => {
-          hccLogger.error('[Main] reconcileByEnvSecret failed', { err })
-        })
+      // #1338 F2 Layer B, user decision D-C (1): only this informer runs in
+      // resume mode. Each page of its list runs on HCC's request deadline.
+      const secretListApi = makeK8sApiClientWithDeadline(
+        kc,
+        k8s.CoreV1Api,
+        config.k8sRequestTimeoutMs
+      )
+      secretInformer = new SecretInformer(kc, config.namespace, provider.handleSecretEvent, {
+        mode: 'resume',
+        list: (namespace, page) =>
+          secretListApi.listNamespacedSecret({
+            namespace,
+            limit: page.limit,
+            _continue: page.continueToken,
+          }),
       })
       try {
         const running = await secretInformer.start()
         if (running) {
-          console.log(`[Main] SecretInformer started on namespace ${config.namespace}`)
+          hccLogger.info(`[Main] SecretInformer started on namespace ${config.namespace}`)
         } else {
-          console.warn(
+          hccLogger.warn(
             `[Main] SecretInformer degraded on namespace ${config.namespace}; reconnect will continue in background`
           )
         }
       } catch (err) {
-        console.error('[Main] SecretInformer failed to start:', err)
+        hccLogger.error('[Main] SecretInformer failed to start', { err })
       }
     }
   }
@@ -258,18 +270,24 @@ async function main(): Promise<void> {
   if (!config.devMode && watcher) {
     const kc = getKubeConfig()
     if (kc) {
-      channelSecretInformer = new SecretInformer(kc, config.channelsNamespace, evt => {
-        watcher.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
-          console.error('[Main] reconcileChannelReaderRevision failed:', err)
-        })
-      })
+      channelSecretInformer = new SecretInformer(
+        kc,
+        config.channelsNamespace,
+        evt => {
+          watcher.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
+            hccLogger.error('[Main] reconcileChannelReaderRevision failed', { err })
+          })
+        },
+        // D-C (1): replay mode until this consumer has its own retry owner.
+        { mode: 'replay' }
+      )
       try {
         await channelSecretInformer.start()
-        console.log(
+        hccLogger.info(
           `[Main] channels SecretInformer started on namespace ${config.channelsNamespace}`
         )
       } catch (err) {
-        console.error('[Main] channels SecretInformer failed to start:', err)
+        hccLogger.error('[Main] channels SecretInformer failed to start', { err })
       }
     }
   }
@@ -281,18 +299,24 @@ async function main(): Promise<void> {
     const kc = getKubeConfig()
     if (kc) {
       const watcher = provider
-      llmHooksSecretInformer = new SecretInformer(kc, config.llmHooksNamespace, evt => {
-        watcher.reconcileLlmHookByEnvSecret(evt.name, evt.namespace).catch(err => {
-          console.error('[Main] reconcileLlmHookByEnvSecret failed:', err)
-        })
-      })
+      llmHooksSecretInformer = new SecretInformer(
+        kc,
+        config.llmHooksNamespace,
+        evt => {
+          watcher.reconcileLlmHookByEnvSecret(evt.name, evt.namespace).catch(err => {
+            hccLogger.error('[Main] reconcileLlmHookByEnvSecret failed', { err })
+          })
+        },
+        // D-C (1): replay mode until this consumer has its own retry owner.
+        { mode: 'replay' }
+      )
       try {
         await llmHooksSecretInformer.start()
-        console.log(
+        hccLogger.info(
           `[Main] llm-hooks SecretInformer started on namespace ${config.llmHooksNamespace}`
         )
       } catch (err) {
-        console.error('[Main] llm-hooks SecretInformer failed to start:', err)
+        hccLogger.error('[Main] llm-hooks SecretInformer failed to start', { err })
       }
     }
   }
