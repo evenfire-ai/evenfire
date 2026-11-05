@@ -229,10 +229,16 @@ for raw in sys.stdin:
 print(last)'
 }
 
+# The request lane opens when a pass records its safety certificate; the pass
+# logs its result only after its additive phase, so callers wait for this.
+# The log is read into a file with a checked status (a failed read is never
+# "not yet") and matched without a pipe, because `grep -q` exiting early under
+# pipefail can turn a match into a failure.
 certified_pass_logged() {
-  local pod=$1
-  kctl logs "pod/$pod" -n "$HCC_NS" -c host-context-controller |
-    grep -F '"event":"networkpolicy-pass-result"' | grep -qF '"result":"certified"'
+  local pod=$1 log="${EVIDENCE_DIR}/hcc-restarted-${1}.log"
+  kctl logs "pod/$pod" -n "$HCC_NS" -c host-context-controller >"$log" ||
+    die "could not read the logs of HCC pod ${pod}"
+  grep -qE '"event":"networkpolicy-pass-result".*"result":"certified"' "$log"
 }
 
 selector_of() {
@@ -905,7 +911,7 @@ if [ "$(hcc_pod_uid "$HCC_POD")" = "$HCC_UID" ] &&
 else
   fail "HCC pod identity/restartCount unexpected (uid $(hcc_pod_uid "$HCC_POD"), restarts $(hcc_restart_count "$HCC_POD"), kills ${KILLS})"
 fi
-if certified_pass_logged "$HCC_POD"; then
+if wait_until 60 "a certified NetworkPolicy pass from the restarted HCC" certified_pass_logged "$HCC_POD"; then
   ok "restarted HCC logged a certified NetworkPolicy pass"
 else
   fail "restarted HCC logged no certified NetworkPolicy pass"
