@@ -6,14 +6,16 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Pool, type PoolClient } from 'pg'
 import { CONTROL_API_MIGRATIONS, type DbClient, assertDbReady, initDb } from '../src/db.js'
+import { migrationSessionBoundsSql } from '../src/migrations/migrationExecutionPolicy.js'
 import {
   PR1_MIGRATION_VERSIONS,
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
 import {
-  type OnlineIndexDefinition,
   PR1_ONLINE_INDEX_PLAN,
   ensureOnlineIndex,
+  expectedIndexDefinition,
+  onlineIndex,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -111,6 +113,9 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'external_v1_session_revocations_user_idx',
   'external_v1_session_revocations_expiry_idx',
 ])
+
+const EARLIER_HEAD_DOC_REFERENCE =
+  'see docs/deploy/user-access-foundation-upgrade.md#databases-that-ran-an-earlier-head-of-this-change'
 
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
@@ -322,6 +327,18 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(await versions(databasePool)).toEqual(firstVersions)
   })
 
+  it('builds every planned index with exactly the expected PostgreSQL definition', async () => {
+    for (const entry of PR1_ONLINE_INDEX_PLAN) {
+      const actual = await databasePool.query<{ definition: string }>(
+        'SELECT pg_get_indexdef($1::regclass) AS definition',
+        [entry.name]
+      )
+      expect(actual.rows, entry.name).toEqual([
+        { definition: expectedIndexDefinition(entry, 'public') },
+      ])
+    }
+  })
+
   it('adopts an exact valid online index when the version row is absent', async () => {
     const entry = PR1_ONLINE_INDEX_PLAN[0]!
     const before = await databasePool.query<{ oid: string }>(
@@ -340,104 +357,124 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(await versions(databasePool)).toContain(entry.migrationVersion)
   })
 
-  it('reuses a deparsed index without rebuilding its physical index', async () => {
-    const entry = PR1_ONLINE_INDEX_PLAN.find(
-      index => index.name === 'team_members_user_active_idx'
-    )!
-    const before = await databasePool.query<{ oid: string }>(
-      'SELECT $1::regclass::oid::text AS oid',
-      [entry.name]
-    )
-    await removeMigrationReceiptForReplay(databasePool, entry.migrationVersion)
+  it('reuses every deparsed planned index without rebuilding its physical index', async () => {
+    const oids = async () =>
+      (
+        await databasePool.query<{ index_name: string; oid: string }>(
+          `SELECT index_name, index_name::regclass::oid::text AS oid
+             FROM unnest($1::text[]) AS index_name
+            ORDER BY index_name`,
+          [PR1_ONLINE_INDEX_PLAN.map(index => index.name)]
+        )
+      ).rows
+    const before = await oids()
+    expect(before).toHaveLength(PR1_ONLINE_INDEX_PLAN.length)
+    await removeMigrationReceiptForReplay(databasePool, '0131_user_access_foundation')
 
     await initDb({ connect: () => databasePool.connect() })
 
-    const after = await databasePool.query<{ oid: string }>(
-      'SELECT $1::regclass::oid::text AS oid',
-      [entry.name]
-    )
-    expect(after.rows[0]?.oid).toBe(before.rows[0]?.oid)
-    expect(await versions(databasePool)).toContain(entry.migrationVersion)
+    expect(await oids()).toEqual(before)
+    expect(await versions(databasePool)).toContain('0131_user_access_foundation')
   })
 
-  it('rejects same-name indexes with changed identity, grouping, predicate, or order', async () => {
+  it('rejects same-name indexes with changed order, predicate, expression, uniqueness or table', async () => {
     const suffix = randomBytes(4).toString('hex')
     const table = `d34_index_semantics_${suffix}`
+    const otherTable = `d34_index_other_${suffix}`
     await databasePool.query(`
       CREATE TABLE ${table} (
         userid text,
-        "userId" text,
         id integer,
         a integer,
         b integer,
-        c integer,
         included_a text,
         included_b text
       )
     `)
+    await databasePool.query(`CREATE TABLE ${otherTable} (userid text)`)
+    const structural = (name: string, keys: string[], extra: { include?: string[] } = {}) =>
+      onlineIndex({
+        migrationVersion: '0131_user_access_foundation',
+        name,
+        table,
+        keys,
+        ...extra,
+      })
+
+    // Positive control: an index built exactly as planned is reused, not rebuilt.
+    const exact = structural(`d34_exact_${suffix}`, ['userid', 'id'], { include: ['included_a'] })
+    await databasePool.query(
+      `CREATE INDEX ${exact.name} ON ${table} (userid, id) INCLUDE (included_a)`
+    )
+    const exactOid = await databasePool.query<{ oid: string }>(
+      'SELECT $1::regclass::oid::text AS oid',
+      [exact.name]
+    )
+    await ensureOnlineIndex(databasePool, exact)
+    expect(
+      (
+        await databasePool.query<{ oid: string }>('SELECT $1::regclass::oid::text AS oid', [
+          exact.name,
+        ])
+      ).rows
+    ).toEqual(exactOid.rows)
+
     const cases = [
       {
-        name: `d34_quoted_identity_${suffix}`,
-        expected: `(${quoteIdentifier('userId')})`,
-        actual: '(userid)',
+        entry: structural(`d34_key_order_${suffix}`, ['userid', 'id']),
+        actual: `ON ${table} (id, userid)`,
       },
       {
-        name: `d34_grouping_${suffix}`,
-        expected: '(((a + b) * c))',
-        actual: '((a + b * c))',
+        entry: structural(`d34_include_order_${suffix}`, ['userid'], {
+          include: ['included_a', 'included_b'],
+        }),
+        actual: `ON ${table} (userid) INCLUDE (included_b, included_a)`,
       },
       {
-        name: `d34_predicate_${suffix}`,
-        expected: '(userid) WHERE userid IS NOT NULL',
-        actual: `(userid) WHERE userid <> ''`,
+        entry: structural(`d34_predicate_${suffix}`, ['userid']),
+        actual: `ON ${table} (userid) WHERE userid IS NOT NULL`,
       },
       {
-        name: `d34_key_order_${suffix}`,
-        expected: '(userid, id)',
-        actual: '(id, userid)',
+        entry: structural(`d34_expression_${suffix}`, ['a']),
+        actual: `ON ${table} ((a + b))`,
       },
       {
-        name: `d34_include_order_${suffix}`,
-        expected: '(userid) INCLUDE (included_a, included_b)',
-        actual: '(userid) INCLUDE (included_b, included_a)',
+        entry: structural(`d34_other_table_${suffix}`, ['userid']),
+        actual: `ON ${otherTable} (userid)`,
       },
     ]
-
     for (const candidate of cases) {
-      await databasePool.query(`CREATE INDEX ${candidate.name} ON ${table} ${candidate.actual}`)
-      const entry: OnlineIndexDefinition = {
-        migrationVersion: '0131_user_access_foundation',
-        name: candidate.name,
-        table,
-        createSql: `CREATE INDEX CONCURRENTLY ${candidate.name} ON ${table} ${candidate.expected}`,
-      }
-      await expect(ensureOnlineIndex(databasePool, entry)).rejects.toThrow(
-        `Non-equivalent existing index: ${candidate.name}`
+      await databasePool.query(`CREATE INDEX ${candidate.entry.name} ${candidate.actual}`)
+      await expect(ensureOnlineIndex(databasePool, candidate.entry)).rejects.toThrow(
+        `Non-equivalent existing index: ${candidate.entry.name}`
       )
     }
 
     const uniqueName = `d34_unique_mismatch_${suffix}`
     await databasePool.query(`CREATE INDEX ${uniqueName} ON ${table} (userid)`)
     await expect(
-      ensureOnlineIndex(databasePool, {
-        migrationVersion: '0131_user_access_foundation',
-        name: uniqueName,
-        table,
-        unique: true,
-        createSql: `CREATE UNIQUE INDEX CONCURRENTLY ${uniqueName} ON ${table} (userid)`,
-      })
+      ensureOnlineIndex(
+        databasePool,
+        onlineIndex({
+          migrationVersion: '0131_user_access_foundation',
+          name: uniqueName,
+          table,
+          unique: true,
+          keys: ['userid'],
+        })
+      )
     ).rejects.toThrow(`Non-equivalent existing index: ${uniqueName}`)
   })
 
   it('repairs an equivalent interrupted index and enforces the online bound', async () => {
     const name = `d34_interrupted_${randomBytes(4).toString('hex')}`
-    const entry: OnlineIndexDefinition = {
+    const entry = onlineIndex({
       migrationVersion: '0131_user_access_foundation',
       name,
       table: 'd34_interrupted_index',
       unique: true,
-      createSql: `CREATE UNIQUE INDEX CONCURRENTLY ${name} ON d34_interrupted_index (value)`,
-    }
+      keys: ['value'],
+    })
     await databasePool.query(`CREATE TABLE d34_interrupted_index(value integer NOT NULL)`)
     await databasePool.query(`INSERT INTO d34_interrupted_index(value) VALUES (1), (1)`)
     await expect(ensureOnlineIndex(databasePool, entry)).rejects.toThrow()
@@ -473,46 +510,62 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       onlineClient.release()
     }
     expect(observedStatementTimeout).toBe('2min')
-  })
-
-  it('cancels online index construction at 120 seconds and leaves classified state', async () => {
-    const suffix = randomBytes(4).toString('hex')
-    const table = `d34_slow_index_${suffix}`
-    const functionName = `d34_slow_index_value_${suffix}`
-    const name = `d34_slow_index_${suffix}_idx`
-    const entry: OnlineIndexDefinition = {
-      migrationVersion: '0131_user_access_foundation',
-      name,
-      table,
-      createSql: `CREATE INDEX CONCURRENTLY ${name} ON ${table} (${functionName}(value))`,
-    }
-    await databasePool.query(`CREATE TABLE ${table}(value integer NOT NULL)`)
-    await databasePool.query(`INSERT INTO ${table}(value) VALUES (1)`)
-    await databasePool.query(`
-      CREATE FUNCTION ${functionName}(input integer)
-      RETURNS integer
-      LANGUAGE plpgsql
-      IMMUTABLE
-      STRICT
-      AS $$
-      BEGIN
-        PERFORM pg_sleep(121);
-        RETURN input;
-      END;
-      $$
-    `)
-
-    const started = Date.now()
-    await expect(ensureOnlineIndex(databasePool, entry)).rejects.toMatchObject({ code: '57014' })
-    const elapsed = Date.now() - started
-    expect(elapsed).toBeGreaterThanOrEqual(119_000)
-    expect(elapsed).toBeLessThan(130_000)
-    const interrupted = await databasePool.query<{ indisvalid: boolean }>(
+    const repaired = await databasePool.query<{ indisvalid: boolean }>(
       `SELECT index.indisvalid
          FROM pg_class relation
          JOIN pg_index index ON index.indexrelid = relation.oid
         WHERE relation.relname = $1`,
       [name]
+    )
+    expect(repaired.rows).toEqual([{ indisvalid: true }])
+  })
+
+  it('cancels online index construction at 120 seconds and leaves classified state', async () => {
+    const suffix = randomBytes(4).toString('hex')
+    const table = `d34_slow_index_${suffix}`
+    const entry = onlineIndex({
+      migrationVersion: '0131_user_access_foundation',
+      name: `d34_slow_index_${suffix}_idx`,
+      table,
+      keys: ['value'],
+    })
+    await databasePool.query(`CREATE TABLE ${table}(value integer NOT NULL)`)
+    await databasePool.query(`INSERT INTO ${table}(value) VALUES (1)`)
+    // An open writer keeps CREATE INDEX CONCURRENTLY waiting after it has
+    // committed the invalid catalog entry. Both sessions are fresh (initDb's
+    // session bounds live on databasePool's connections): the writer has no
+    // idle-in-transaction timeout and the online client no lock timeout, so
+    // only the 120 s statement bound can end that wait.
+    const writerPool = new Pool({ connectionString, max: 1 })
+    const onlinePool = new Pool({ connectionString, max: 1 })
+    const writer = await writerPool.connect()
+    try {
+      const idleTimeout = await writer.query<{ idle_in_transaction_session_timeout: string }>(
+        'SHOW idle_in_transaction_session_timeout'
+      )
+      expect(idleTimeout.rows).toEqual([{ idle_in_transaction_session_timeout: '0' }])
+      await writer.query('BEGIN')
+      await writer.query(`INSERT INTO ${table}(value) VALUES (2)`)
+      const lockTimeout = await onlinePool.query<{ lock_timeout: string }>('SHOW lock_timeout')
+      expect(lockTimeout.rows).toEqual([{ lock_timeout: '0' }])
+
+      const started = Date.now()
+      await expect(ensureOnlineIndex(onlinePool, entry)).rejects.toMatchObject({ code: '57014' })
+      const elapsed = Date.now() - started
+      expect(elapsed).toBeGreaterThanOrEqual(119_000)
+      expect(elapsed).toBeLessThan(130_000)
+    } finally {
+      await writer.query('ROLLBACK')
+      writer.release()
+      await endPoolAndWaitForClients(onlinePool)
+      await endPoolAndWaitForClients(writerPool)
+    }
+    const interrupted = await databasePool.query<{ indisvalid: boolean }>(
+      `SELECT index.indisvalid
+         FROM pg_class relation
+         JOIN pg_index index ON index.indexrelid = relation.oid
+        WHERE relation.relname = $1`,
+      [entry.name]
     )
     expect(interrupted.rows).toEqual([{ indisvalid: false }])
   }, 135_000)
@@ -541,15 +594,21 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     await initDb({ connect: () => databasePool.connect() })
   })
 
-  it('releases the migration advisory lock when its owning process is terminated', async () => {
+  it('releases the migration advisory lock when its owning process is terminated mid-statement', async () => {
+    // The child applies the migration session bounds exactly as initDb does,
+    // takes the advisory lock and blocks in a long statement. Without the
+    // connection check its backend would keep the lock until the 15 s
+    // statement bound cancels the sleep.
     const childScript = `
       const { Client } = require('pg');
       (async () => {
         const client = new Client({ connectionString: process.env.D34_DATABASE_URL });
         await client.connect();
+        for (const sql of JSON.parse(process.env.D34_SESSION_BOUNDS_SQL)) await client.query(sql);
+        const backend = await client.query('SELECT pg_backend_pid() AS pid');
         await client.query("SELECT pg_advisory_lock(hashtext('control-api-init-db-v1')::bigint)");
-        process.stdout.write('locked\\n');
-        await new Promise(() => {});
+        process.stdout.write('locked ' + backend.rows[0].pid + '\\n');
+        await client.query('SELECT pg_sleep(60)');
       })().catch(error => {
         process.stderr.write(String(error));
         process.exit(1);
@@ -557,39 +616,68 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     `
     const child = spawn(process.execPath, ['-e', childScript], {
       cwd: new URL('..', import.meta.url),
-      env: { ...process.env, D34_DATABASE_URL: connectionString },
+      env: {
+        ...process.env,
+        D34_DATABASE_URL: connectionString,
+        D34_SESSION_BOUNDS_SQL: JSON.stringify(migrationSessionBoundsSql(false)),
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    const locked = new Promise<void>((resolve, reject) => {
+    const backendPid = new Promise<number>((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error('child did not acquire advisory lock')),
         10_000
       )
       child.stdout.on('data', chunk => {
-        if (!String(chunk).includes('locked')) return
+        const match = /locked (\d+)/.exec(String(chunk))
+        if (!match) return
         clearTimeout(timer)
-        resolve()
+        resolve(Number(match[1]))
       })
       child.once('error', error => {
         clearTimeout(timer)
         reject(error)
       })
     })
-    await locked
+    const pid = await backendPid
+
+    // Liveness witness: the child's backend is running the sleep, with the
+    // connection check applied, before the process is killed.
+    const sleepDeadline = Date.now() + 5_000
+    let sleeping = false
+    while (!sleeping) {
+      const activity = await databasePool.query<{ running: boolean }>(
+        `SELECT state = 'active' AND query = 'SELECT pg_sleep(60)' AS running
+           FROM pg_stat_activity
+          WHERE pid = $1`,
+        [pid]
+      )
+      sleeping = activity.rows[0]?.running === true
+      if (!sleeping) {
+        if (Date.now() > sleepDeadline) throw new Error('child backend never started its sleep')
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+    }
     child.kill('SIGKILL')
     await once(child, 'exit')
 
+    const killedAt = Date.now()
     const lockCheck = await databasePool.connect()
     try {
-      const acquired = await lockCheck.query<{ acquired: boolean }>(
-        `SELECT pg_try_advisory_lock(hashtext('control-api-init-db-v1')::bigint) AS acquired`
-      )
-      expect(acquired.rows).toEqual([{ acquired: true }])
+      let acquired = false
+      while (!acquired && Date.now() - killedAt < 5_000) {
+        const attempt = await lockCheck.query<{ acquired: boolean }>(
+          `SELECT pg_try_advisory_lock(hashtext('control-api-init-db-v1')::bigint) AS acquired`
+        )
+        acquired = attempt.rows[0]?.acquired === true
+        if (!acquired) await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      expect(acquired).toBe(true)
       await lockCheck.query(`SELECT pg_advisory_unlock(hashtext('control-api-init-db-v1')::bigint)`)
     } finally {
       lockCheck.release()
     }
-  }, 15_000)
+  }, 20_000)
 
   it('bounds ordinary DDL lock acquisition and never runs the later version', async () => {
     const locker = await databasePool.connect()
@@ -658,6 +746,116 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       client.release(true)
     }
   }, 25_000)
+
+  async function withFreshHeadDatabase(work: (pool: Pool) => Promise<void>): Promise<void> {
+    const databaseName = `r7_earlier_head_${randomBytes(6).toString('hex')}`
+    await adminPool.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`)
+    isolatedDatabases.push(databaseName)
+    const isolatedPool = new Pool({ connectionString: databaseUrl(adminUrl!, databaseName) })
+    try {
+      await initDb({ connect: () => isolatedPool.connect() })
+      await work(isolatedPool)
+    } finally {
+      await endPoolAndWaitForClients(isolatedPool)
+    }
+  }
+
+  it('rejects a database that recorded an earlier-head migration version', async () => {
+    await withFreshHeadDatabase(async pool => {
+      for (const earlierVersion of ['0133_catalog_utf8_ordering', '0126_user_access_foundation']) {
+        await pool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [earlierVersion])
+        const rejection = initDb({ connect: () => pool.connect() })
+        await expect(rejection).rejects.toThrow(earlierVersion)
+        await expect(rejection).rejects.toThrow(EARLIER_HEAD_DOC_REFERENCE)
+        await pool.query('DELETE FROM schema_migrations WHERE version = $1', [earlierVersion])
+      }
+      // Witness that the rejections came from the recorded versions alone.
+      await initDb({ connect: () => pool.connect() })
+    })
+  })
+
+  it('rejects earlier-head objects, and accepts the database after the cleanup SQL', async () => {
+    await withFreshHeadDatabase(async pool => {
+      await pool.query(`
+        CREATE FUNCTION authorization_bump_user_row_revision() RETURNS trigger
+          LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+        CREATE TRIGGER users_authorization_revision
+          AFTER UPDATE ON users
+          FOR EACH ROW EXECUTE FUNCTION authorization_bump_user_row_revision();
+        CREATE FUNCTION authorization_bump_user_revision(target_user_id uuid) RETURNS void
+          LANGUAGE plpgsql AS $$ BEGIN NULL; END $$;
+        CREATE TABLE authorization_catalog_writer_components(component text PRIMARY KEY);
+        INSERT INTO schema_migrations(version) VALUES ('0131_invitation_delivery_commands');
+      `)
+
+      const rejection = initDb({ connect: () => pool.connect() })
+      for (const named of [
+        'authorization_bump_user_row_revision()',
+        'authorization_bump_user_revision(uuid)',
+        'authorization_catalog_writer_components',
+        '0131_invitation_delivery_commands',
+        EARLIER_HEAD_DOC_REFERENCE,
+      ]) {
+        await expect(rejection, named).rejects.toThrow(named)
+      }
+
+      const cleanupSql = readFileSync(
+        new URL(
+          '../../docs/deploy/sql/user-access-foundation-earlier-head-cleanup.sql',
+          import.meta.url
+        ),
+        'utf8'
+      )
+      await pool.query(cleanupSql)
+
+      const remaining = await pool.query<{
+        row_trigger_function: string | null
+        argument_function: string | null
+        trigger_count: number
+        writer_components: string | null
+        earlier_receipts: number
+      }>(
+        `SELECT to_regprocedure('authorization_bump_user_row_revision()')::text
+                  AS row_trigger_function,
+                to_regprocedure('authorization_bump_user_revision(uuid)')::text
+                  AS argument_function,
+                (SELECT count(*)::int FROM pg_trigger
+                  WHERE tgname = 'users_authorization_revision') AS trigger_count,
+                to_regclass('authorization_catalog_writer_components')::text
+                  AS writer_components,
+                (SELECT count(*)::int FROM schema_migrations
+                  WHERE version = '0131_invitation_delivery_commands') AS earlier_receipts`
+      )
+      expect(remaining.rows).toEqual([
+        {
+          row_trigger_function: null,
+          argument_function: null,
+          trigger_count: 0,
+          writer_components: null,
+          earlier_receipts: 0,
+        },
+      ])
+
+      await initDb({ connect: () => pool.connect() })
+      const sessionTableNames = [
+        'external_user_sessions',
+        'external_user_session_security_epochs',
+        'external_v1_session_revocations',
+      ]
+      const sessionTables = await pool.query<{ table_name: string }>(
+        `SELECT table_name
+           FROM unnest($1::text[]) AS table_name
+          WHERE to_regclass(table_name) IS NOT NULL`,
+        [sessionTableNames]
+      )
+      expect(sessionTables.rows.map(row => row.table_name).sort()).toEqual(
+        [...sessionTableNames].sort()
+      )
+      const receipts = await versions(pool)
+      expect(receipts).toContain('0131_user_access_foundation')
+      expect(receipts).toContain('0132_legacy_password_security_epoch_backfill')
+    })
+  })
 
   it('installs the exact fetched DEV graph and upgrades it without replay', async () => {
     const databaseName = `r61_latest_dev_${randomBytes(6).toString('hex')}`

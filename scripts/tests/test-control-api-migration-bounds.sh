@@ -41,7 +41,7 @@ NODE
 
 grep -q 'applyPendingPr1Migrations' "$DB_FILE" || \
   fail "PR1 migrations are not dispatched through the bounded runner"
-grep -q 'CREATE INDEX CONCURRENTLY' "$INDEX_PLAN_FILE" || \
+grep -q 'INDEX CONCURRENTLY' "$INDEX_PLAN_FILE" || \
   fail "existing-table indexes are not prepared concurrently"
 
 index_count="$(grep -c "^    migrationVersion: '0131_" "$INDEX_PLAN_FILE")"
@@ -170,6 +170,15 @@ if [[ "${1:-}" == "delete" && "${2:-}" == "--raw" ]]; then
   body="$(cat "$body_path")"
   printf '%s' "$body" >"$capture.delete-body"
   if [[ "$mode" == "timeout-delete-fails" ]]; then exit 1; fi
+  if [[ "$mode" == "terminal-replaced" ]]; then
+    printf 'Error from server (Conflict): Precondition failed: UID in precondition: %s, UID in object meta: 44444444-4444-4444-4444-444444444444\n' \
+      "33333333-3333-3333-3333-333333333333" >&2
+    exit 1
+  fi
+  if [[ "$mode" == "terminal-gone" ]]; then
+    printf 'Error from server (NotFound): jobs.batch "control-api-db-migrate" not found\n' >&2
+    exit 1
+  fi
   if [[ "$mode" == "owner-replaced" && \
     "$body" == *'"preconditions":{"uid":"'"$fixture_uid"'"}'* ]]; then
     printf 'Error from server (Conflict): Precondition failed: UID in precondition: %s, UID in object meta: 22222222-2222-2222-2222-222222222222\n' \
@@ -493,6 +502,80 @@ job_timeout="$(sed -nE 's/.*--for=delete --timeout=([0-9]+)s job\/.*/\1/p' "$log
 pod_timeout="$(sed -nE 's/.*--for=delete --timeout=([0-9]+)s pod .*/\1/p' "$log_file" | tail -1)"
 [ -n "$job_timeout" ] && [ -n "$pod_timeout" ] && [ "$pod_timeout" -lt "$job_timeout" ] || \
   fail "Job and pod cleanup did not share one decreasing termination deadline"
+
+# A Job that was terminal when its status was read is deleted only by its UID:
+# another caller may have replaced it with a running Job of the same name.
+terminal_uid="33333333-3333-3333-3333-333333333333"
+cp "$capture" "$fixture_root/terminal-base.json"
+terminal_job_fixture() {
+  ruby -rjson -e '
+    job = JSON.parse(File.read(ARGV.fetch(0)))
+    if ARGV.fetch(1).empty?
+      job["metadata"].delete("uid")
+    else
+      job["metadata"]["uid"] = ARGV.fetch(1)
+    end
+    job["status"] = {"conditions" => [{"type" => "Complete", "status" => "True"}]}
+    File.write(ARGV.fetch(0), JSON.generate(job))
+  ' "$capture" "$1" || fail "could not build the terminal Job fixture"
+}
+
+cp "$fixture_root/terminal-base.json" "$capture"
+terminal_job_fixture "$terminal_uid"
+rm -f "$capture.delete-body"
+: >"$log_file"
+run_fixture terminal-complete >/dev/null || fail "terminal migration Job was not replaced"
+[ -f "$capture.delete-body" ] || \
+  fail "terminal migration Job was not deleted through a UID-bound raw DELETE"
+terminal_body="$(cat "$capture.delete-body")"
+[[ "$terminal_body" == *'"preconditions":{"uid":"'"$terminal_uid"'"}'* ]] || \
+  fail "terminal Job DELETE body did not carry the UID read with its status"
+[[ "$terminal_body" == *'"propagationPolicy":"Foreground"'* ]] || \
+  fail "terminal Job DELETE body did not request foreground propagation"
+grep -Eq 'wait --for=delete --timeout=(59|60)s job/control-api-db-migrate' "$log_file" && \
+  grep -Eq 'wait --for=delete --timeout=(59|60)s pod -l job-name=control-api-db-migrate' "$log_file" || \
+  fail "terminal Job deletion was not proven before the new Job"
+terminal_delete_line="$(grep -n 'delete --raw /apis/batch/v1/namespaces/control-plane/jobs/control-api-db-migrate -f ' "$log_file" | head -1 | cut -d: -f1)"
+terminal_create_line="$(grep -n 'create -f -' "$log_file" | head -1 | cut -d: -f1)"
+[ -n "$terminal_delete_line" ] && [ -n "$terminal_create_line" ] && \
+  [ "$terminal_delete_line" -lt "$terminal_create_line" ] || \
+  fail "terminal migration Job was not deleted before the new Job was created (witness)"
+
+cp "$fixture_root/terminal-base.json" "$capture"
+terminal_job_fixture "$terminal_uid"
+: >"$log_file"
+terminal_replaced_output="$(expect_fixture_failure 'replaced terminal migration Job' \
+  run_fixture terminal-replaced)"
+[[ "$terminal_replaced_output" == *'migration Job was replaced by another caller; not deleting it'* ]] || \
+  fail "replaced terminal migration Job did not fail closed"
+grep -q 'delete --raw /apis/batch/v1/namespaces/control-plane/jobs/control-api-db-migrate -f ' "$log_file" || \
+  fail "replaced terminal migration Job was not deleted by UID (witness)"
+if grep -q 'create -f -' "$log_file"; then
+  fail "a Job was created over a replaced terminal migration Job"
+fi
+
+cp "$fixture_root/terminal-base.json" "$capture"
+terminal_job_fixture "$terminal_uid"
+: >"$log_file"
+run_fixture terminal-gone >/dev/null || fail "an already deleted terminal migration Job blocked the run"
+grep -q 'delete --raw /apis/batch/v1/namespaces/control-plane/jobs/control-api-db-migrate -f ' "$log_file" || \
+  fail "already deleted terminal migration Job was not deleted by UID (witness)"
+grep -q 'create -f -' "$log_file" || \
+  fail "no Job was created after the terminal migration Job was already gone"
+
+cp "$fixture_root/terminal-base.json" "$capture"
+terminal_job_fixture ""
+: >"$log_file"
+terminal_no_uid_output="$(expect_fixture_failure 'terminal migration Job without a UID' \
+  run_fixture terminal-no-uid)"
+[[ "$terminal_no_uid_output" == *'could not determine existing migration Job status'* ]] || \
+  fail "terminal migration Job without a UID did not fail closed"
+grep -q 'get job control-api-db-migrate -n control-plane -o json' "$log_file" || \
+  fail "terminal migration Job status was not read (witness)"
+if grep -Eq '(^| )delete (job|--raw)|create -f -' "$log_file"; then
+  fail "terminal migration Job without a UID was deleted or replaced"
+fi
+mv "$fixture_root/terminal-base.json" "$capture"
 
 if CONTEXT=d34-context ALLOWED_CONTEXTS=d34-context \
   bash "$DEPLOY_FILE" --overlay "$overlay" --timeout 359s >/dev/null 2>&1; then

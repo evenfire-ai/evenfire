@@ -34,13 +34,14 @@ describe('db.initDb', () => {
 
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql).trim())
 
-    expect(sqls.slice(0, 3)).toEqual([
+    expect(sqls.slice(0, 4)).toEqual([
       "SET lock_timeout = '10000ms'",
       "SET statement_timeout = '15000ms'",
       "SET idle_in_transaction_session_timeout = '15000ms'",
+      "SET client_connection_check_interval = '1s'",
     ])
-    expect(sqls[3]).toContain('SELECT pg_advisory_lock')
-    expect(sqls[4]).toBe('BEGIN')
+    expect(sqls[4]).toContain('SELECT pg_advisory_lock')
+    expect(sqls[5]).toBe('BEGIN')
     expect(sqls).toContainEqual(
       expect.stringContaining('CREATE TABLE IF NOT EXISTS schema_migrations')
     )
@@ -994,8 +995,8 @@ describe('db.initDb', () => {
 
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql).trim())
 
-    expect(sqls[3]).toContain('SELECT pg_advisory_lock')
-    expect(sqls[4]).toBe('BEGIN')
+    expect(sqls[4]).toContain('SELECT pg_advisory_lock')
+    expect(sqls[5]).toBe('BEGIN')
     expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(1)
     expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2)
     expect(sqls).toContainEqual(

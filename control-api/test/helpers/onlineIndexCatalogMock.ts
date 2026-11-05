@@ -1,12 +1,16 @@
 import type { Mock } from 'vitest'
-import { PR1_ONLINE_INDEX_PLAN } from '../../src/migrations/pr1OnlineIndexPlan.js'
+import {
+  PR1_ONLINE_INDEX_PLAN,
+  expectedIndexDefinition,
+} from '../../src/migrations/pr1OnlineIndexPlan.js'
 
 type QueryResult = { rows: unknown[]; rowCount: number | null }
 
 /**
- * Adds the minimum PostgreSQL index-catalog behavior to legacy initDb mocks.
- * The wrapped mock still records and owns every query/result outside the new
- * D34 catalog boundary.
+ * Adds the minimum PostgreSQL catalog behavior to legacy initDb mocks: the
+ * D34 index-state read and the PR1 earlier-head guard, which finds no
+ * earlier-head object. The wrapped mock still records and owns every
+ * query/result outside these catalog boundaries.
  */
 export function onlineIndexAwareQuery(
   query: Mock
@@ -14,6 +18,7 @@ export function onlineIndexAwareQuery(
   const states = new Map<
     string,
     {
+      schema_name: string
       table_name: string
       indisunique: boolean
       indisvalid: boolean
@@ -23,6 +28,9 @@ export function onlineIndexAwareQuery(
 
   return async (sql: string, values?: unknown[]): Promise<QueryResult> => {
     const result = (await query(sql, values)) as QueryResult
+    if (sql.includes('/* pr1-earlier-head-guard */')) {
+      return { rows: [], rowCount: 0 }
+    }
     if (sql.includes('FROM pg_class index_rel')) {
       const state = states.get(String(values?.[0]))
       return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
@@ -34,10 +42,11 @@ export function onlineIndexAwareQuery(
       const entry = PR1_ONLINE_INDEX_PLAN.find(candidate => candidate.createSql === sql)
       if (entry) {
         states.set(entry.name, {
+          schema_name: 'public',
           table_name: entry.table,
           indisunique: Boolean(entry.unique),
           indisvalid: true,
-          definition: entry.createSql,
+          definition: expectedIndexDefinition(entry, 'public'),
         })
       }
     }

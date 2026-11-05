@@ -6821,9 +6821,9 @@ async function preparePasswordAdmissionMigrationFence(
     )
   }
 
-  // Dev waits up to 60 s for in-flight legacy verifiers here. The migration
-  // session's ordinary statement bound would cut that wait short, so this
-  // transaction alone raises it to the same 60 s.
+  // dev set only a 60 s lock timeout here and inherited the pool's 15 s
+  // statement timeout. The migration session sets its own 15 s statement
+  // bound, so this transaction raises both to 60 s for the fence wait.
   await db.query("SET LOCAL lock_timeout = '60s'")
   await db.query("SET LOCAL statement_timeout = '60s'")
   await preparePasswordAdmissionRolloutFence(db)

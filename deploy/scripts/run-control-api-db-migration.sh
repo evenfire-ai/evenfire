@@ -305,29 +305,27 @@ verify_active_job_identity() {
   return "$status"
 }
 
-terminate_migration_job() {
-  local deadline now remaining body_file delete_output delete_status
-  [ "$JOB_ROLE" = owner ] || return 1
-  [ -n "$JOB_UID" ] || return 1
+# Sends a foreground DELETE for the Job named $JOB_NAME that only the API
+# server's UID precondition lets through: a Job another caller created under
+# the same name is never deleted. Prints kubectl's output and returns its
+# status; the caller classifies a failure.
+delete_job_with_uid_precondition() {
+  local uid="$1" body_file delete_status=0
   body_file="$(mktemp)"
   printf '%s' \
-    '{"apiVersion":"v1","kind":"DeleteOptions","propagationPolicy":"Foreground","preconditions":{"uid":"'"$JOB_UID"'"}}' \
+    '{"apiVersion":"v1","kind":"DeleteOptions","propagationPolicy":"Foreground","preconditions":{"uid":"'"$uid"'"}}' \
     >"$body_file"
-  set +e
-  delete_output="$(kctl delete --raw \
-    "/apis/batch/v1/namespaces/control-plane/jobs/$JOB_NAME" -f "$body_file" 2>&1)"
-  delete_status=$?
-  set -e
+  kctl delete --raw \
+    "/apis/batch/v1/namespaces/control-plane/jobs/$JOB_NAME" -f "$body_file" 2>&1 || \
+    delete_status=$?
   rm -f "$body_file"
-  if [ "$delete_status" -ne 0 ]; then
-    if [[ "$delete_output" == *"Precondition failed"* || "$delete_output" == *"NotFound"* ]]; then
-      die "migration Job was replaced or removed by another caller; not deleting it"
-    fi
-    if [ -n "$delete_output" ]; then
-      printf '%s\n' "$delete_output" >&2
-    fi
-    return 1
-  fi
+  return "$delete_status"
+}
+
+# Waits until the Job and its pods are gone, within one shared
+# MIGRATION_TERMINATION_PROOF_SECONDS deadline.
+prove_job_and_pods_deleted() {
+  local deadline now remaining
   deadline="$(( SECONDS + MIGRATION_TERMINATION_PROOF_SECONDS ))"
   now="$SECONDS"
   remaining="$(( deadline - now ))"
@@ -343,6 +341,54 @@ terminate_migration_job() {
     -l "job-name=$JOB_NAME" -n control-plane >/dev/null; then
     return 1
   fi
+}
+
+terminate_migration_job() {
+  local delete_output delete_status
+  [ "$JOB_ROLE" = owner ] || return 1
+  [ -n "$JOB_UID" ] || return 1
+  if delete_output="$(delete_job_with_uid_precondition "$JOB_UID")"; then
+    delete_status=0
+  else
+    delete_status=$?
+  fi
+  if [ "$delete_status" -ne 0 ]; then
+    if [[ "$delete_output" == *"Precondition failed"* || "$delete_output" == *"NotFound"* ]]; then
+      die "migration Job was replaced or removed by another caller; not deleting it"
+    fi
+    if [ -n "$delete_output" ]; then
+      printf '%s\n' "$delete_output" >&2
+    fi
+    return 1
+  fi
+  prove_job_and_pods_deleted
+}
+
+# Replaces a Job that was terminal when its status was read. The delete is
+# bound to that Job's UID, so a running Job another caller created under the
+# same name in the meantime is never deleted.
+delete_terminal_job_by_uid() {
+  local uid="$1" delete_output delete_status
+  if delete_output="$(delete_job_with_uid_precondition "$uid")"; then
+    delete_status=0
+  else
+    delete_status=$?
+  fi
+  if [ "$delete_status" -ne 0 ]; then
+    if [[ "$delete_output" == *"Precondition failed"* ]]; then
+      die "migration Job was replaced by another caller; not deleting it"
+    fi
+    if [[ "$delete_output" == *"NotFound"* ]]; then
+      log "Previous terminal migration job $JOB_NAME is already gone"
+      return 0
+    fi
+    if [ -n "$delete_output" ]; then
+      printf '%s\n' "$delete_output" >&2
+    fi
+    die "could not delete previous terminal migration Job $JOB_NAME"
+  fi
+  prove_job_and_pods_deleted || \
+    die "previous terminal migration Job deletion could not be proven within ${MIGRATION_TERMINATION_PROOF_SECONDS}s"
 }
 
 OVERLAY=""
@@ -1463,18 +1509,27 @@ if job_exists; then
       terminal = conditions.any? do |condition|
         %w[Complete Failed].include?(condition["type"]) && condition["status"] == "True"
       end
-      puts(terminal ? "terminal" : "nonterminal")
+      if terminal
+        uid = job.dig("metadata", "uid").to_s
+        abort("terminal migration Job has no metadata.uid") if uid.empty?
+        puts("terminal #{uid}")
+      else
+        puts("nonterminal")
+      end
     ')"; then
     die "could not determine existing migration Job status"
   fi
+  read -r job_state terminal_job_uid <<<"$job_state"
   if [ "$job_state" = "nonterminal" ]; then
     verify_active_job_identity || die "active migration Job identity does not match the current deployment"
     log "Migration job $JOB_NAME is queued or active; waiting for the existing run"
-  else
-    log "Deleting previous terminal migration job $JOB_NAME"
-    kctl delete job "$JOB_NAME" -n control-plane --ignore-not-found >/dev/null 2>&1 || true
+  elif [ "$job_state" = "terminal" ] && [ -n "$terminal_job_uid" ]; then
+    log "Deleting previous terminal migration job $JOB_NAME (uid $terminal_job_uid)"
+    delete_terminal_job_by_uid "$terminal_job_uid"
     log "Starting migration job $JOB_NAME"
     create_job
+  else
+    die "could not determine existing migration Job status"
   fi
 else
   log "Starting migration job $JOB_NAME"

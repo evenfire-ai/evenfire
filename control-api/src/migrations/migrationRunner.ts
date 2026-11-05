@@ -11,6 +11,40 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
 // single dev batch; this runner owns only the PR1 versions that follow it.
 const LAST_DEV_MIGRATION_VERSION = '0130_password_login_success_admission'
 
+// Migration names that earlier heads of this change recorded under other
+// four-digit prefixes (some below 0130, and the same 0131 version with a
+// larger body). The name after the prefix is the identity.
+const EARLIER_PR1_MIGRATION_NAMES: readonly string[] = Object.freeze([
+  'user_access_foundation',
+  'invitation_delivery_commands',
+  'catalog_utf8_ordering',
+  'composable_catalog_revisions',
+  'gfs_catalog_revision_components',
+  'legacy_password_security_epoch_backfill',
+  'user_access_foundation_definer_temp_shadow_hardening',
+  'authorization_revision_delete_compatibility',
+])
+
+// Tables that only earlier heads created. Their trigger functions are found by
+// name prefix: a trigger cannot outlive its function.
+const EARLIER_PR1_TABLES = Object.freeze([
+  'authorization_catalog_environment',
+  'authorization_catalog_revision',
+  'authorization_catalog_writer_components',
+  'authorization_resource_revisions',
+  'authorization_team_revisions',
+  'authorization_user_revisions',
+  'invitation_delivery_commands',
+  'operational_catalog_source_state',
+  'operational_relationships_staging',
+  'operational_resource_index',
+  'operational_resource_index_staging',
+  'operational_resource_relationships',
+])
+
+const EARLIER_PR1_HEAD_CLEANUP_REFERENCE =
+  'see docs/deploy/user-access-foundation-upgrade.md#databases-that-ran-an-earlier-head-of-this-change'
+
 export type MigrationDescriptor = {
   version: string
   legacyVersions?: readonly string[]
@@ -46,6 +80,57 @@ async function runBoundedTransaction(db: DbClient, work: () => Promise<void>): P
   }
 }
 
+/**
+ * Rejects a database that ran an earlier head of this change. Such a database
+ * holds triggers whose writers no longer take the matching pre-locks, so it is
+ * cleaned up by an operator (the referenced SQL), never automatically.
+ */
+async function assertNoEarlierPr1Head(
+  db: DbClient,
+  appliedVersions: ReadonlySet<string>,
+  registeredVersions: ReadonlySet<string>
+): Promise<void> {
+  const versions = [...appliedVersions]
+    .filter(version => {
+      const name = /^\d{4}_(.+)$/.exec(version)?.[1]
+      return (
+        name !== undefined &&
+        EARLIER_PR1_MIGRATION_NAMES.includes(name) &&
+        !registeredVersions.has(version)
+      )
+    })
+    .sort()
+  const result = await db.query(
+    `/* pr1-earlier-head-guard */
+     SELECT 'function' AS kind, fn.oid::regprocedure::text AS name
+       FROM pg_proc fn
+       JOIN pg_namespace fn_ns ON fn_ns.oid = fn.pronamespace
+      WHERE fn_ns.nspname = current_schema()
+        AND (fn.proname LIKE 'authorization\\_bump\\_%' ESCAPE '\\'
+          OR fn.proname LIKE 'authorization\\_prelock\\_%' ESCAPE '\\'
+          OR fn.proname = 'catalog_utf8_bytes')
+     UNION ALL
+     SELECT 'table' AS kind, rel.relname::text AS name
+       FROM pg_class rel
+       JOIN pg_namespace rel_ns ON rel_ns.oid = rel.relnamespace
+      WHERE rel_ns.nspname = current_schema()
+        AND rel.relname = ANY($1::text[])
+      ORDER BY kind, name`,
+    [EARLIER_PR1_TABLES]
+  )
+  const objects = result.rows as Array<{ kind: 'function' | 'table'; name: string }>
+  if (versions.length === 0 && objects.length === 0) return
+  const functions = objects.filter(row => row.kind === 'function').map(row => row.name)
+  const tables = objects.filter(row => row.kind === 'table').map(row => row.name)
+  throw new Error(
+    'Database ran an earlier head of the user access foundation change: ' +
+      `recorded versions [${versions.join(', ')}]; ` +
+      `functions [${functions.join(', ')}]; ` +
+      `tables [${tables.join(', ')}]; ` +
+      EARLIER_PR1_HEAD_CLEANUP_REFERENCE
+  )
+}
+
 export async function applyPendingPr1Migrations({
   db,
   migrations,
@@ -76,6 +161,11 @@ export async function applyPendingPr1Migrations({
       `Unclassified post-dev migrations: ${unclassified.map(item => item.version).join(', ')}`
     )
   }
+  await assertNoEarlierPr1Head(
+    db,
+    appliedVersions,
+    new Set([...PR1_MIGRATION_VERSIONS, ...canonicalVersions, ...aliasOwners.keys()])
+  )
 
   for (const version of PR1_MIGRATION_VERSIONS) {
     const migration = byVersion.get(version)

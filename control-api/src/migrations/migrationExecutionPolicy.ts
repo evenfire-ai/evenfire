@@ -54,5 +54,9 @@ export const migrationSessionBoundsSql = (local: boolean): string[] => {
     `${scope} lock_timeout = '${MIGRATION_EXECUTION_POLICY.lockTimeoutMs}ms'`,
     `${scope} statement_timeout = '${MIGRATION_EXECUTION_POLICY.ordinaryStatementTimeoutMs}ms'`,
     `${scope} idle_in_transaction_session_timeout = '${MIGRATION_EXECUTION_POLICY.idleInTransactionTimeoutMs}ms'`,
+    // A Job pod killed during a long statement would otherwise leave its
+    // backend running, and holding the session advisory lock, until the
+    // statement ends. PostgreSQL >= 14 checks the client socket every second.
+    `${scope} client_connection_check_interval = '1s'`,
   ]
 }

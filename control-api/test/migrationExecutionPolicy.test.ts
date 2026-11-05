@@ -8,9 +8,32 @@ import {
 } from '../src/migrations/migrationRunner.js'
 import {
   PR1_ONLINE_INDEX_PLAN,
-  canonicalOnlineIndexDefinition,
+  expectedIndexDefinition,
+  onlineIndex,
   preparePr1Migration,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
+
+const EARLIER_HEAD_GUARD_MARKER = '/* pr1-earlier-head-guard */'
+const EARLIER_HEAD_DOC_REFERENCE =
+  'see docs/deploy/user-access-foundation-upgrade.md#databases-that-ran-an-earlier-head-of-this-change'
+
+type IndexStateRow = {
+  schema_name: string
+  table_name: string
+  indisunique: boolean
+  indisvalid: boolean
+  definition: string
+}
+
+function plannedIndexState(entry: (typeof PR1_ONLINE_INDEX_PLAN)[number]): IndexStateRow {
+  return {
+    schema_name: 'public',
+    table_name: entry.table,
+    indisunique: Boolean(entry.unique),
+    indisvalid: true,
+    definition: expectedIndexDefinition(entry, 'public'),
+  }
+}
 
 const FRESH_TABLE_INDEXES = Object.freeze([
   'external_user_sessions_user_live_idx',
@@ -130,71 +153,71 @@ describe('D34 migration execution policy', () => {
     )
   })
 
-  it('normalizes PostgreSQL deparser syntax without accepting changed index tokens', () => {
-    const expected = `CREATE INDEX workflow_runs_actor_catalog_idx
-      ON workflow_runs (actor_id, run_id)
-      INCLUDE (recipe_namespace, recipe_name, phase, team_id, usage_team_id)
-      WHERE actor_type = 'user' AND actor_id IS NOT NULL`
-    const deparsed = `CREATE INDEX workflow_runs_actor_catalog_idx
-      ON public.workflow_runs USING btree (actor_id, run_id)
-      INCLUDE (recipe_namespace, recipe_name, phase, team_id, usage_team_id)
-      WHERE ((actor_type = 'user'::text) AND (actor_id IS NOT NULL))`
-    const changed = deparsed.replace('(actor_id, run_id)', '(run_id, actor_id)')
-
-    expect(canonicalOnlineIndexDefinition(deparsed)).toBe(canonicalOnlineIndexDefinition(expected))
-    expect(canonicalOnlineIndexDefinition(changed)).not.toBe(
-      canonicalOnlineIndexDefinition(expected)
-    )
-
-    const notificationExpected = `CREATE INDEX notification_user_catalog_idx
-      ON notification_deliveries ((audience->>'userId'), id)
-      INCLUDE (expires_at, status, event_type) WHERE audience ? 'userId'`
-    const notificationDeparsed = `CREATE INDEX notification_user_catalog_idx
-      ON public.notification_deliveries USING btree (((audience ->> 'userId'::text)), id)
-      INCLUDE (expires_at, status, event_type) WHERE (audience ? 'userId'::text)`
-    const nonEquivalentNotifications = [
-      notificationDeparsed.replace('audience ->>', 'audience ->'),
-      notificationDeparsed.replaceAll("'userId'", "'teamId'"),
-      notificationDeparsed.replace(', id)', ', event_type)'),
-      notificationDeparsed.replace('expires_at, status', 'expires_at, delivered_at'),
-      notificationDeparsed.replace('WHERE (audience ?', 'WHERE (audience ='),
-      notificationDeparsed.replace('CREATE INDEX', 'CREATE UNIQUE INDEX'),
-      notificationDeparsed.replace('notification_deliveries', 'notification_archive'),
-    ]
-
-    expect(canonicalOnlineIndexDefinition(notificationDeparsed)).toBe(
-      canonicalOnlineIndexDefinition(notificationExpected)
-    )
-    for (const changed of nonEquivalentNotifications) {
-      expect(canonicalOnlineIndexDefinition(changed)).not.toBe(
-        canonicalOnlineIndexDefinition(notificationExpected)
+  it('derives every planned createSql as an online CREATE INDEX statement', () => {
+    for (const index of PR1_ONLINE_INDEX_PLAN) {
+      expect(index.createSql, index.name).toMatch(/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY /)
+      expect(index.createSql, index.name).toBe(
+        `CREATE ${index.unique ? 'UNIQUE ' : ''}INDEX CONCURRENTLY ${index.name} ON ${index.table} (${index.keys.join(', ')})` +
+          (index.include ? ` INCLUDE (${index.include.join(', ')})` : '')
       )
     }
+  })
 
-    const workflowCatalogExpected = `CREATE INDEX user_workflow_triggers_catalog_utf8_idx
-      ON user_workflow_triggers
-      (user_id, catalog_utf8_bytes(recipe_namespace || '/' || recipe_name))`
-    const workflowCatalogDeparsed = `CREATE INDEX user_workflow_triggers_catalog_utf8_idx
-      ON public.user_workflow_triggers USING btree
-      (user_id, catalog_utf8_bytes((((recipe_namespace)::text || '/'::text) ||
-        (recipe_name)::text)))`
-    const nonEquivalentWorkflowCatalog = [
-      workflowCatalogDeparsed.replace("|| '/'::text", "+ '/'::text"),
-      workflowCatalogDeparsed.replace('recipe_namespace', 'recipe_scope'),
-      workflowCatalogDeparsed.replace('recipe_name', 'recipe_version'),
-      workflowCatalogDeparsed.replace('(user_id,', '(team_id,'),
-      workflowCatalogDeparsed.replace('CREATE INDEX', 'CREATE UNIQUE INDEX'),
-      workflowCatalogDeparsed.replace('user_workflow_triggers', 'team_workflow_triggers'),
-    ]
-
-    expect(canonicalOnlineIndexDefinition(workflowCatalogDeparsed)).toBe(
-      canonicalOnlineIndexDefinition(workflowCatalogExpected)
+  it('states the exact PostgreSQL 16 deparsed definition of a planned index', () => {
+    const entry = PR1_ONLINE_INDEX_PLAN.find(
+      index => index.name === 'team_members_user_active_idx'
+    )!
+    expect(expectedIndexDefinition(entry, 'public')).toBe(
+      'CREATE INDEX team_members_user_active_idx ON public.team_members USING btree (user_id, status, team_id) INCLUDE (role, updated_at)'
     )
-    for (const changed of nonEquivalentWorkflowCatalog) {
-      expect(canonicalOnlineIndexDefinition(changed)).not.toBe(
-        canonicalOnlineIndexDefinition(workflowCatalogExpected)
-      )
-    }
+    const unique = onlineIndex({
+      migrationVersion: USER_ACCESS_FOUNDATION_VERSION,
+      name: 'synthetic_unique_idx',
+      table: 'synthetic_table',
+      unique: true,
+      keys: ['value'],
+    })
+    expect(unique.createSql).toBe(
+      'CREATE UNIQUE INDEX CONCURRENTLY synthetic_unique_idx ON synthetic_table (value)'
+    )
+    expect(expectedIndexDefinition(unique, 'tenant_schema')).toBe(
+      'CREATE UNIQUE INDEX synthetic_unique_idx ON tenant_schema.synthetic_table USING btree (value)'
+    )
+    expect(() => expectedIndexDefinition(unique, 'Tenant-Schema')).toThrow(
+      'Online index synthetic_unique_idx has a non-plain schema: "Tenant-Schema"'
+    )
+  })
+
+  it.each([
+    ['a quoted key', { keys: ['"userId"'] }, 'key'],
+    ['a mixed-case key', { keys: ['userId'] }, 'key'],
+    ['an expression key', { keys: ['a + b'] }, 'key'],
+    ['a parenthesized key', { keys: ['(a)'] }, 'key'],
+    ['an expression INCLUDE column', { keys: ['a'], include: ['lower(b)'] }, 'INCLUDE column'],
+    ['a schema-qualified table', { keys: ['a'], table: 'public.sample' }, 'table'],
+  ])('rejects %s at plan load', (_case, override, role) => {
+    expect(() =>
+      onlineIndex({
+        migrationVersion: USER_ACCESS_FOUNDATION_VERSION,
+        name: 'synthetic_idx',
+        table: 'sample',
+        ...override,
+      })
+    ).toThrow(`Online index synthetic_idx has a non-plain ${role}`)
+  })
+
+  it('rejects an index without keys or with an empty INCLUDE list', () => {
+    const base = {
+      migrationVersion: USER_ACCESS_FOUNDATION_VERSION,
+      name: 'synthetic_idx',
+      table: 'sample',
+    } as const
+    expect(() => onlineIndex({ ...base, keys: [] })).toThrow(
+      'Online index synthetic_idx has no keys'
+    )
+    expect(() => onlineIndex({ ...base, keys: ['a'], include: [] })).toThrow(
+      'Online index synthetic_idx has an empty INCLUDE list'
+    )
   })
 })
 
@@ -243,37 +266,22 @@ describe('D34 PR1 migration runner', () => {
 
   it('commits and records each PR1 version independently in order', async () => {
     const queries: Array<{ sql: string; values?: unknown[] }> = []
+    const indexStates = new Map<string, IndexStateRow>()
     const db = {
       query: vi.fn(async (sql: string, values?: unknown[]) => {
         queries.push({ sql, values })
-        if (sql.includes('FROM pg_class index_rel')) return { rows: [], rowCount: 0 }
+        if (sql.includes(EARLIER_HEAD_GUARD_MARKER)) return { rows: [], rowCount: 0 }
+        if (sql.includes('FROM pg_class index_rel')) {
+          const state = indexStates.get(String(values?.[0]))
+          return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
+        }
         if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
           const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
-          if (entry) indexStates.set(entry.name, { ...entry, indisvalid: true, definition: sql })
+          if (entry) indexStates.set(entry.name, plannedIndexState(entry))
         }
         return { rows: [], rowCount: 0 }
       }),
     }
-    const indexStates = new Map<string, Record<string, unknown>>()
-    db.query.mockImplementation(async (sql: string, values?: unknown[]) => {
-      queries.push({ sql, values })
-      if (sql.includes('FROM pg_class index_rel')) {
-        const state = indexStates.get(String(values?.[0]))
-        return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
-      }
-      if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
-        const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
-        if (entry) {
-          indexStates.set(entry.name, {
-            table_name: entry.table,
-            indisunique: Boolean(entry.unique),
-            indisvalid: true,
-            definition: sql,
-          })
-        }
-      }
-      return { rows: [], rowCount: 0 }
-    })
     const applied: string[] = []
     const migrations = PR1_MIGRATION_VERSIONS.map(version => ({
       version,
@@ -362,23 +370,17 @@ describe('D34 PR1 migration runner', () => {
   })
 
   it('leaves dev migrations to the initDb dev batch and applies only PR1 versions', async () => {
-    const indexStates = new Map<string, Record<string, unknown>>()
+    const indexStates = new Map<string, IndexStateRow>()
     const db = {
       query: vi.fn(async (sql: string, values?: unknown[]) => {
+        if (sql.includes(EARLIER_HEAD_GUARD_MARKER)) return { rows: [], rowCount: 0 }
         if (sql.includes('FROM pg_class index_rel')) {
           const state = indexStates.get(String(values?.[0]))
           return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
         }
         if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
           const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
-          if (entry) {
-            indexStates.set(entry.name, {
-              table_name: entry.table,
-              indisunique: Boolean(entry.unique),
-              indisvalid: true,
-              definition: sql,
-            })
-          }
+          if (entry) indexStates.set(entry.name, plannedIndexState(entry))
         }
         return { rows: [], rowCount: 0 }
       }),
@@ -415,67 +417,108 @@ describe('D34 PR1 migration runner', () => {
   })
 })
 
+describe('PR1 earlier-head guard', () => {
+  function guardedDb(guardRows: unknown[]) {
+    const queries: Array<{ sql: string; values?: unknown[] }> = []
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      queries.push({ sql, values })
+      if (sql.includes(EARLIER_HEAD_GUARD_MARKER)) {
+        return { rows: guardRows, rowCount: guardRows.length }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    return { db: { query }, queries }
+  }
+
+  function pr1Migrations(legacyVersionsFor: Record<string, readonly string[]> = {}) {
+    return PR1_MIGRATION_VERSIONS.map(version => ({
+      version,
+      ...(legacyVersionsFor[version] ? { legacyVersions: legacyVersionsFor[version] } : {}),
+      apply: vi.fn(async () => undefined),
+    }))
+  }
+
+  it('rejects recorded earlier-head versions, including prefixes below 0130, before any PR1 work', async () => {
+    const { db, queries } = guardedDb([])
+    const migrations = pr1Migrations()
+    const recordMigration = vi.fn()
+
+    const rejection = applyPendingPr1Migrations({
+      db,
+      migrations,
+      appliedVersions: new Set([
+        '0129_workflow_schedules_concurrency_policy',
+        '0130_password_login_success_admission',
+        '0126_user_access_foundation',
+        '0133_catalog_utf8_ordering',
+        '0131_user_access_foundation',
+      ]),
+      recordMigration,
+    })
+
+    await expect(rejection).rejects.toThrow(
+      'recorded versions [0126_user_access_foundation, 0133_catalog_utf8_ordering]; functions []; tables []; ' +
+        EARLIER_HEAD_DOC_REFERENCE
+    )
+    // Liveness witness: the guard ran its catalog probe once, with the table list.
+    const guardQueries = queries.filter(({ sql }) => sql.includes(EARLIER_HEAD_GUARD_MARKER))
+    expect(guardQueries).toHaveLength(1)
+    expect(guardQueries[0]!.values?.[0]).toHaveLength(12)
+    expect(queries.map(({ sql }) => sql)).toEqual([guardQueries[0]!.sql])
+    for (const migration of migrations) expect(migration.apply).not.toHaveBeenCalled()
+    expect(recordMigration).not.toHaveBeenCalled()
+  })
+
+  it('rejects earlier-head functions and tables that the catalog probe finds', async () => {
+    const { db, queries } = guardedDb([
+      { kind: 'function', name: 'authorization_bump_user_revision(uuid)' },
+      { kind: 'function', name: 'authorization_bump_user_row_revision()' },
+      { kind: 'table', name: 'authorization_catalog_writer_components' },
+    ])
+
+    await expect(
+      applyPendingPr1Migrations({
+        db,
+        migrations: pr1Migrations(),
+        appliedVersions: new Set(['0131_invitation_delivery_commands']),
+        recordMigration: vi.fn(),
+      })
+    ).rejects.toThrow(
+      'recorded versions [0131_invitation_delivery_commands]; ' +
+        'functions [authorization_bump_user_revision(uuid), authorization_bump_user_row_revision()]; ' +
+        'tables [authorization_catalog_writer_components]; ' +
+        EARLIER_HEAD_DOC_REFERENCE
+    )
+    expect(queries).toHaveLength(1)
+  })
+
+  it('accepts a registered alias of an earlier name and proceeds when the probe is empty', async () => {
+    const { db, queries } = guardedDb([])
+    const recorded: string[] = []
+    const migrations = pr1Migrations({
+      '0132_legacy_password_security_epoch_backfill': [
+        '0134_legacy_password_security_epoch_backfill',
+      ],
+    })
+
+    await applyPendingPr1Migrations({
+      db,
+      migrations,
+      appliedVersions: new Set([
+        '0131_user_access_foundation',
+        '0134_legacy_password_security_epoch_backfill',
+      ]),
+      recordMigration: async (_db, version) => {
+        recorded.push(version)
+      },
+    })
+
+    expect(queries.filter(({ sql }) => sql.includes(EARLIER_HEAD_GUARD_MARKER))).toHaveLength(1)
+    expect(recorded).toEqual(['0132_legacy_password_security_epoch_backfill'])
+  })
+})
+
 describe('D34 online-index recovery', () => {
-  it.each([
-    [
-      'quoted identifier case',
-      'CREATE INDEX idx ON team_members ("userId")',
-      'CREATE INDEX idx ON team_members (userid)',
-    ],
-    [
-      'significant expression grouping',
-      'CREATE INDEX idx ON sample ((a + b) * c)',
-      'CREATE INDEX idx ON sample (a + b * c)',
-    ],
-    [
-      'column casts',
-      'CREATE INDEX idx ON sample (value::text)',
-      'CREATE INDEX idx ON sample (value)',
-    ],
-    [
-      'quoted literal contents',
-      "CREATE INDEX idx ON sample ((payload ->> 'userId'))",
-      "CREATE INDEX idx ON sample ((payload ->> 'userid'))",
-    ],
-  ])('preserves %s in canonical definitions', (_case, left, right) => {
-    expect(canonicalOnlineIndexDefinition(left)).not.toBe(canonicalOnlineIndexDefinition(right))
-  })
-
-  it('normalizes only harmless PostgreSQL index DDL decoration', () => {
-    expect(
-      canonicalOnlineIndexDefinition(
-        'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx ON sample (((a + b)))'
-      )
-    ).toBe(canonicalOnlineIndexDefinition('CREATE INDEX idx ON public.sample USING btree (a+b)'))
-  })
-
-  it('retains significant predicate grouping across boolean operators', () => {
-    const grouped = `CREATE INDEX idx ON sample (value)
-      WHERE ((first_value = 1 OR second_value = 2) AND third_value = 3)`
-    const regrouped = `CREATE INDEX idx ON sample (value)
-      WHERE first_value = 1 OR (second_value = 2 AND third_value = 3)`
-
-    expect(canonicalOnlineIndexDefinition(grouped)).not.toBe(
-      canonicalOnlineIndexDefinition(regrouped)
-    )
-
-    const precedence = `CREATE INDEX idx ON sample (value)
-      WHERE first_value = 1 OR second_value = 2 AND third_value = 3`
-    const explicitGrouping = `CREATE INDEX idx ON sample (value)
-      WHERE (first_value = 1 OR second_value = 2) AND third_value = 3`
-    expect(canonicalOnlineIndexDefinition(precedence)).not.toBe(
-      canonicalOnlineIndexDefinition(explicitGrouping)
-    )
-  })
-
-  it('retains text casts except at the fixed deparser coercion seams', () => {
-    const castedColumn = 'CREATE INDEX idx ON sample (recipe_namespace::text)'
-    const uncastColumn = 'CREATE INDEX idx ON sample (recipe_namespace)'
-    expect(canonicalOnlineIndexDefinition(castedColumn)).not.toBe(
-      canonicalOnlineIndexDefinition(uncastColumn)
-    )
-  })
-
   it('repairs only an equivalent invalid index and rejects a different definition', async () => {
     const entry = PR1_ONLINE_INDEX_PLAN[0]!
     const states = new Map(
@@ -483,12 +526,7 @@ describe('D34 online-index recovery', () => {
         candidate => candidate.migrationVersion === entry.migrationVersion
       ).map(candidate => [
         candidate.name,
-        {
-          table_name: candidate.table,
-          indisunique: Boolean(candidate.unique),
-          indisvalid: candidate.name !== entry.name,
-          definition: candidate.createSql,
-        },
+        { ...plannedIndexState(candidate), indisvalid: candidate.name !== entry.name },
       ])
     )
     const query = vi.fn(async (sql: string, values?: unknown[]) => {
@@ -502,12 +540,7 @@ describe('D34 online-index recovery', () => {
       }
       if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
         const candidate = PR1_ONLINE_INDEX_PLAN.find(index => index.createSql === sql)!
-        states.set(candidate.name, {
-          table_name: candidate.table,
-          indisunique: Boolean(candidate.unique),
-          indisvalid: true,
-          definition: candidate.createSql,
-        })
+        states.set(candidate.name, plannedIndexState(candidate))
       }
       return { rows: [], rowCount: 0 }
     })
@@ -515,12 +548,20 @@ describe('D34 online-index recovery', () => {
     expect(query).toHaveBeenCalledWith(`DROP INDEX CONCURRENTLY ${entry.name}`)
     expect(query).toHaveBeenCalledWith(entry.createSql)
 
-    states.set(entry.name, {
-      ...states.get(entry.name)!,
-      definition: 'CREATE INDEX wrong ON team_members (team_id)',
-    })
-    await expect(preparePr1Migration({ query }, entry.migrationVersion)).rejects.toThrow(
-      `Non-equivalent existing index: ${entry.name}`
-    )
+    // Exact comparison: the createSql text (not PostgreSQL's deparsed form) and
+    // a reordered INCLUDE list are both rejected.
+    for (const definition of [
+      entry.createSql,
+      expectedIndexDefinition(entry, 'public').replace(
+        'INCLUDE (role, updated_at)',
+        'INCLUDE (updated_at, role)'
+      ),
+      'CREATE INDEX wrong ON team_members (team_id)',
+    ]) {
+      states.set(entry.name, { ...plannedIndexState(entry), definition })
+      await expect(preparePr1Migration({ query }, entry.migrationVersion)).rejects.toThrow(
+        `Non-equivalent existing index: ${entry.name}`
+      )
+    }
   })
 })
