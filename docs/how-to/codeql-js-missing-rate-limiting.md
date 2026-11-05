@@ -44,6 +44,36 @@ paths. Treat the absence of admission as an accepted parity decision, not as a
 false positive caused by an enforcing limiter. This document does not change
 GitHub alert state.
 
+### PR #334 External REST alerts — won't fix (dev parity)
+
+The analysis of `refs/pull/334/merge` reports two External REST routes that
+had no frequency limit on dev either. Under the parity decision above they
+keep none. Adding the edge's `createRateLimiter` would not clear the alerts:
+the stock query models `express-rate-limit`, not that in-process middleware,
+which is why alert #1767, on the invitation routes it guards, is recorded as a
+false positive (below).
+
+| Alert                                                                        | Location (PR head)      | Route                  | Dev location     |
+| ---------------------------------------------------------------------------- | ----------------------- | ---------------------- | ---------------- |
+| [#1971](https://github.com/evenfire-ai/evenfire/security/code-scanning/1971) | `routes/me.ts:89`       | `GET /me`              | `me.ts:81`       |
+| [#1972](https://github.com/evenfire-ai/evenfire/security/code-scanning/1972) | `routes/me.ts:89`       | `GET /me`              | `me.ts:81`       |
+| [#1973](https://github.com/evenfire-ai/evenfire/security/code-scanning/1973) | `routes/members.ts:152` | `POST /members/invite` | `members.ts:151` |
+| [#1974](https://github.com/evenfire-ai/evenfire/security/code-scanning/1974) | `routes/members.ts:152` | `POST /members/invite` | `members.ts:151` |
+
+Paths are under `external-rest-api/src/`. Neither dev route had a limiter. `GET /me` is reported anew because its
+handler changed (`requireSessionAuth` and the `503 authority_unavailable`
+response), not because a limit was removed. `POST /members/invite` carries the
+same finding as the open default-branch alerts
+[#252](https://github.com/evenfire-ai/evenfire/security/code-scanning/252) and
+[#253](https://github.com/evenfire-ai/evenfire/security/code-scanning/253) at
+`members.ts:151`; the route moved one line.
+
+`GET /me` is the session probe that Desktop and Profile UI call on every
+session restore; a limiter there would add a new `429` response to that probe.
+If a limit is wanted on either route later, the CodeQL-visible form is a
+per-user `express-rate-limit` bucket after `requireAuth`, as on member
+retirement (`routes/members.ts:44-56`); it is a behaviour change against dev.
+
 ## Approved patterns
 
 | Pattern                                                | Purpose                                                         |

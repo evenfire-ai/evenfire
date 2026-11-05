@@ -6,7 +6,6 @@ import { spawnSync } from 'node:child_process'
 import {
   existsSync,
   lstatSync,
-  mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,

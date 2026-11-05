@@ -53,9 +53,21 @@ revision functions, so nothing keeps running against the old image.
 - The target database has no `schema_migrations` row with a version from
   `0131` to `0135`. The release adds `0131_user_access_foundation` and
   `0132_legacy_password_security_epoch_backfill`.
-- Every migration statement waits at most 10 s for a lock (`lock_timeout`).
-  Ordinary statements are bounded at 15 s (`statement_timeout`), and the whole
-  Job at 300 s (`activeDeadlineSeconds`).
+- For a database already at `0130`, every statement of `0131` and `0132`
+  waits at most 10 s for a lock (`lock_timeout`), and ordinary statements are
+  bounded at 15 s (`statement_timeout`); the online index builds have their own
+  120 s bound (below). The whole Job is bounded at 300 s
+  (`activeDeadlineSeconds`).
+- An existing database below `0130` must already have `0126` to `0128`; the
+  Job stops with an error otherwise. For such a database the 10 s lock bound
+  does not hold before `0131`. The Job first sets the `0130` password-login
+  fence, which waits up to 60 s for a lock and allows 60 s per statement. It
+  then waits, with no limit of its own, until password checks already in
+  progress finish. It then applies `0129` (when missing) and `0130` in one
+  transaction. `0129` raises `lock_timeout` to 60 s and then sets it to 0 (no
+  limit) for the rest of that transaction, so a lock wait there is bounded only
+  by the 15 s statement timeout. In that case the only bound on the whole
+  catch-up is the Job's 300 s deadline; plan the maintenance window for it.
 - `0131_user_access_foundation` first builds five indexes online
   (`CREATE INDEX CONCURRENTLY`, which takes `ShareUpdateExclusiveLock`) on
   the existing tables `team_members`, `user_contexts`, `team_contexts`,
@@ -72,6 +84,15 @@ revision functions, so nothing keeps running against the old image.
   `ALTER TABLE` forms. It must finish within the 15 s statement timeout.
   Measured at about 6 µs per row on one laptop, it reaches that timeout near
   2.4 million users and then fails without a partial write.
+- `0132` treats every V1 session issued at or before the second of a user's
+  `password_set_at` as issued before that password event, and rejects it. The
+  previous release kept existing sessions when a password was set or changed,
+  and a V1 session lasts 12 hours. So a user whose password was set or changed
+  within 12 hours before the migration loses the sessions issued up to that
+  second and must sign in again. This includes the session issued in the same second
+  when a first password was set from an invitation, and the session from which
+  a user changed their password in Profile UI. No other session is affected by
+  the backfill.
 
 ## Variables this release does not read
 
