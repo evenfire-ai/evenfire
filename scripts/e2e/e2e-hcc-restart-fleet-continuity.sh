@@ -51,6 +51,11 @@
 #                                  one Host resync period)
 #   E2E_CONTINUITY_VACUITY         empty | roll-host-fixture
 #   E2E_CONTINUITY_MID_PASS_ATTEMPTS  default 3
+#   E2E_CONTINUITY_PEER_CONTEXTS   extra Contexts selecting the McpServer
+#                                  fixture (default 30 in mid-pass, 0 in idle).
+#                                  A pass on a small fleet ends in tens of
+#                                  milliseconds, faster than a kill can land;
+#                                  each Context adds policy work to the pass.
 #   MINIKUBE_BIN                   default minikube
 #
 # EXIT CODES
@@ -98,6 +103,10 @@ VACUITY="${E2E_CONTINUITY_VACUITY:-}"
 case "$VACUITY" in ''|roll-host-fixture) ;; *) usage "E2E_CONTINUITY_VACUITY must be empty or roll-host-fixture" ;; esac
 MID_PASS_ATTEMPTS="${E2E_CONTINUITY_MID_PASS_ATTEMPTS:-3}"
 [[ "$MID_PASS_ATTEMPTS" =~ ^[1-9]$ ]] || usage "E2E_CONTINUITY_MID_PASS_ATTEMPTS must be 1-9"
+if [ "$MODE" = mid-pass ]; then PEER_CONTEXTS_DEFAULT=30; else PEER_CONTEXTS_DEFAULT=0; fi
+PEER_CONTEXTS="${E2E_CONTINUITY_PEER_CONTEXTS:-$PEER_CONTEXTS_DEFAULT}"
+[[ "$PEER_CONTEXTS" =~ ^[0-9]+$ ]] && [ "$PEER_CONTEXTS" -le 60 ] ||
+  usage "E2E_CONTINUITY_PEER_CONTEXTS must be an integer 0-60"
 MINIKUBE_BIN="${MINIKUBE_BIN:-minikube}"
 for tool in jq python3 "$MINIKUBE_BIN"; do
   command -v "$tool" >/dev/null 2>&1 || usage "$tool is required"
@@ -522,6 +531,39 @@ spec:
   description: Gate-owned Context no Host uses; editing it starts a NetworkPolicy pass.
   mcpServers: []
 EOF
+  local index peer
+  for ((index = 1; index <= PEER_CONTEXTS; index++)); do
+    peer="$(peer_context_name "$index")"
+    kctl apply -f - >/dev/null <<EOF
+apiVersion: clerum.io/v1alpha1
+kind: Context
+metadata:
+  name: ${peer}
+  namespace: ${MCP_NS}
+  labels:
+    e2e.clerum.io/suite: ${SUITE}
+    e2e.clerum.io/run: "${RUN_LABEL}"
+spec:
+  contextId: ${peer}
+  description: Gate-owned peer Context that lengthens the NetworkPolicy pass.
+  mcpServers: [${MCP_FIXTURE}]
+EOF
+  done
+}
+
+peer_context_name() {
+  truncate_rfc1123 "e2e-hrc-p$(printf '%02d' "$1")-${RUN_ID}"
+}
+
+# Every peer Context has its HCC context policy, so the snapshot holds it and
+# the triggered pass re-checks it.
+peer_contexts_converged() {
+  local index peer count
+  for ((index = 1; index <= PEER_CONTEXTS; index++)); do
+    peer="$(peer_context_name "$index")"
+    count="$(kctl get networkpolicies -n "$MCP_NS" -l "clerum.io/context=${peer}" -o name | grep -c . || true)"
+    [ "$count" -ge 1 ] || return 1
+  done
 }
 
 # Clone of the seeded Host (as scripts/e2e/seed-stateless-host.sh does),
@@ -696,6 +738,11 @@ apply_fixture_inputs
 wait_until 240 "McpServer fixture runtime, Ready condition and external egress" mcp_fixture_converged ||
   die "McpServer fixture did not converge (external egress needs ${EGRESS_DNS} to resolve from HCC)"
 ok "McpServer fixture ${MCP_FIXTURE} Ready with external egress"
+if [ "$PEER_CONTEXTS" -gt 0 ]; then
+  wait_until 240 "${PEER_CONTEXTS} peer Contexts to get their context policies" peer_contexts_converged ||
+    die "peer Contexts did not converge"
+  ok "${PEER_CONTEXTS} peer Contexts converged"
+fi
 
 save_and_accelerate_cadences
 apply_stateless_host "$SUSPENDED_HOST"
