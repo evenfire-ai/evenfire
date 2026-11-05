@@ -9,9 +9,26 @@
 #
 #   C1 no pod outside HCC is replaced or restarted (uid, restartCount);
 #      new pods owned by a ReplicaSet are a rollout and fail too;
-#   C2 no Deployment generation or pod-template hash changes;
-#   C3 no mcp-host runtime-token Secret changes (resourceVersion, data hash;
-#      values are never printed or stored);
+#   C2 no Deployment generation or pod-template hash changes. One exception,
+#      for the suspended stateless fixture only: a suspended Host rewrites its
+#      pod template on every scheduled token rotation (issue #1359). C2 admits
+#      for that Deployment exactly one change: the template annotation
+#      clerum.io/runtime-token-revision, with generation +1, whose new value is
+#      the secret revision of a rotation C3 admitted for that Host. The
+#      admission is logged as a NOTE. Any other template or spec difference
+#      fails, and C2 stays strict for every other Deployment.
+#      REMOVE THIS ADMISSION WHEN #1359 IS FIXED.
+#   C3 a runtime-token Secret either stays unchanged (resourceVersion, data
+#      hash) or is rotated on schedule. HCC rewrites these Secrets on a
+#      schedule, restart or not, and with 1 h tokens no run window can be kept
+#      free of such writes. A write is admitted only when its new issued-at is
+#      at or after that Secret's earliest scheduled write, computed from
+#      snapshot A (token_rules_py), and the HCC log carries the rotation line
+#      for that Secret with the reason and rolloutRequired the schedule
+#      predicts. Any other write fails C3: an early rotation, a second
+#      rotation, an annotation-only write, a GFS-only renewal, a new Secret.
+#      Token values are never printed or stored; only the refresh token's
+#      exp claim is decoded;
 #   C4 no HCC-managed NetworkPolicy is deleted, recreated or changed; an
 #      external-egress policy keeps its uid, ports and protocol and stays
 #      non-empty, and each /32 added or evicted by its DNS window is reported;
@@ -35,10 +52,26 @@
 # restartCount grows by the number of kills; the new process logs a
 # `certified` NetworkPolicy pass; the request lane answers 200.
 #
-# Vacuity: E2E_CONTINUITY_VACUITY=roll-host-fixture rolls the active
-# stateless Host fixture between the snapshots. The lane must then see C1 and
-# C2 fail; it prints E2E_HCC_RESTART_CONTINUITY_VACUITY=DETECTED and exits 0
-# only in that case.
+# Precondition at snapshot A: no runtime-token Secret is overdue or has a
+# pending write. Each Secret's earliest scheduled write must lie more than
+# 30 s (clock skew) after the snapshot; the lane retakes snapshot A for one
+# Host resync period plus 120 s until that holds. The schedule per Secret
+# (class, earliest write, binding term) is written to token-schedule-A.tsv,
+# and every C2/C3 admission decision to token-admissions.tsv.
+#
+# Vacuity:
+#   roll-host-fixture  rolls the active stateless Host fixture between the
+#                      snapshots. The lane must see C1 and C2 fail.
+#   rotate-early       after snapshot A, removes clerum.io/runtime-token-issued-at
+#                      from the active fixture's runtime-token Secret. HCC then
+#                      rotates it (refresh_token_near_expiry) before its
+#                      scheduled time. The lane's own edit is a write C3 does
+#                      not admit either; it is recorded in vacuity-edit.json
+#                      and reported in that Secret's C3 verdict. The lane must
+#                      see exactly one failure: C3 on that Secret, with
+#                      "rotated before its scheduled time".
+# In both modes the lane prints E2E_HCC_RESTART_CONTINUITY_VACUITY=DETECTED
+# and exits 0 only when the expected failure occurred.
 #
 # INPUTS (fail loud when missing or invalid)
 #   KUBECONTEXT / E2E_K8S_CONTEXT  generated branch-owned minikube context
@@ -53,7 +86,7 @@
 # OPTIONAL
 #   E2E_CONTINUITY_SETTLE_SEC      settle window after recovery (default 300,
 #                                  one Host resync period)
-#   E2E_CONTINUITY_VACUITY         empty | roll-host-fixture
+#   E2E_CONTINUITY_VACUITY         empty | roll-host-fixture | rotate-early
 #   E2E_CONTINUITY_MID_PASS_ATTEMPTS  default 3
 #   E2E_CONTINUITY_PEER_CONTEXTS   extra Contexts selecting the McpServer
 #                                  fixture (default 30 in mid-pass, 0 in idle).
@@ -104,7 +137,7 @@ EXPECTED_IMAGE_ID="${EXPECTED_IMAGE_ID#sha256:}"
 SETTLE_SEC="${E2E_CONTINUITY_SETTLE_SEC:-300}"
 [[ "$SETTLE_SEC" =~ ^[0-9]+$ ]] && [ "$SETTLE_SEC" -ge 60 ] || usage "E2E_CONTINUITY_SETTLE_SEC must be an integer >= 60"
 VACUITY="${E2E_CONTINUITY_VACUITY:-}"
-case "$VACUITY" in ''|roll-host-fixture) ;; *) usage "E2E_CONTINUITY_VACUITY must be empty or roll-host-fixture" ;; esac
+case "$VACUITY" in ''|roll-host-fixture|rotate-early) ;; *) usage "E2E_CONTINUITY_VACUITY must be empty, roll-host-fixture or rotate-early" ;; esac
 MID_PASS_ATTEMPTS="${E2E_CONTINUITY_MID_PASS_ATTEMPTS:-3}"
 [[ "$MID_PASS_ATTEMPTS" =~ ^[1-9]$ ]] || usage "E2E_CONTINUITY_MID_PASS_ATTEMPTS must be 1-9"
 if [ "$MODE" = mid-pass ]; then PEER_CONTEXTS_DEFAULT=30; else PEER_CONTEXTS_DEFAULT=0; fi
@@ -142,8 +175,7 @@ AUTHORITY_STALENESS_SEC=""
 # e2e-stateless-suspend-wake.sh); restored before the first snapshot.
 CADENCE_KEYS="CONTEXT_MAPPER_STATELESS_IDLE_MINUTES CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS CONTEXT_MAPPER_HEARTBEAT_POLL_MS"
 CADENCE_TEST_VALUES="1 1 20000 5000"
-# Bounds of the disruption phase. They also size the run window that no
-# token rotation may fall into, so keep them tight: HCC recovers in seconds.
+# Bounds of the disruption phase; HCC recovers in seconds.
 KILL_WATCH_SEC=60
 RESTART_WAIT_SEC=60
 RECOVERY_BETWEEN_SEC=120
@@ -241,6 +273,14 @@ certified_pass_logged() {
   grep -qE '"event":"networkpolicy-pass-result".*"result":"certified"' "$log"
 }
 
+# C3 matches every token Secret write against the HCC rotation log, so the log
+# of each killed container is kept: kubelet retains only the last one.
+save_killed_hcc_log() {
+  local pod=$1
+  kctl logs "pod/$pod" -n "$HCC_NS" -c host-context-controller --previous >"${EVIDENCE_DIR}/hcc-killed-${KILLS}.log" ||
+    die "could not read the log of the HCC container ended by kill ${KILLS}"
+}
+
 selector_of() {
   kctl get deployment "$1" -n "$2" -o json | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")'
 }
@@ -264,40 +304,30 @@ pod_ready_by_selector() {
 
 # ─── Snapshot and comparison ──────────────────────────────────────────
 # Writes ${EVIDENCE_DIR}/snapshot-<label>.json. Secret values are hashed in a
-# pipe and never written; only names, resourceVersions and digests are kept.
+# pipe and never written; only names, resourceVersions, digests and the
+# refresh token's exp claim are kept. Every read is checked here because the
+# snapshot also runs inside wait_until, where `set -e` does not apply.
 snapshot() {
   local label=$1
   local dir="${EVIDENCE_DIR}/raw-${label}"
-  mkdir -p "$dir"
+  mkdir -p "$dir" || die "could not create ${dir}"
   local ns
   for ns in $FLEET_NAMESPACES; do
     kctl get namespace "$ns" >/dev/null || die "fleet namespace ${ns} is missing"
   done
-  kctl get pods,deployments -A -o json >"${dir}/workloads.json"
-  kctl get networkpolicies -A -l 'clerum.io/managed-by=host-context-controller' -o json >"${dir}/netpols.json"
-  kctl get hosts -n "$HOST_NS" -o json >"${dir}/hosts.json"
-  kctl get mcpservers -n "$MCP_NS" -o json >"${dir}/mcpservers.json"
-  kctl get secrets -n "$HOST_NS" -o json | python3 -I -c '
-import hashlib, json, sys
-out = {}
-for item in json.load(sys.stdin)["items"]:
-    name = item["metadata"]["name"]
-    if not name.endswith("-mcp-host-runtime-tokens"):
-        continue
-    data = item.get("data") or {}
-    digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
-    ann = item["metadata"].get("annotations") or {}
-    out[name] = {
-        "resourceVersion": item["metadata"]["resourceVersion"],
-        "dataSha256": digest,
-        "refreshBefore": ann.get("clerum.io/runtime-token-refresh-before", ""),
-        # Controller bookkeeping only (no credential material lives in
-        # annotations); kept so a metadata-only write names the key it moved.
-        "annotations": {k: v for k, v in ann.items() if k.startswith("clerum.io/")},
-    }
-json.dump(out, sys.stdout, sort_keys=True)' >"${dir}/token-digests.json"
+  kctl get pods,deployments -A -o json >"${dir}/workloads.json" ||
+    die "snapshot ${label}: could not read pods and Deployments"
+  kctl get networkpolicies -A -l 'clerum.io/managed-by=host-context-controller' -o json >"${dir}/netpols.json" ||
+    die "snapshot ${label}: could not read the HCC NetworkPolicies"
+  kctl get hosts -n "$HOST_NS" -o json >"${dir}/hosts.json" || die "snapshot ${label}: could not read the Hosts"
+  kctl get mcpservers -n "$MCP_NS" -o json >"${dir}/mcpservers.json" ||
+    die "snapshot ${label}: could not read the McpServers"
+  # The token schedule compares each earliest write with this epoch.
+  date +%s >"${dir}/read-epoch" || die "snapshot ${label}: could not record the read time"
+  kctl get secrets -n "$HOST_NS" -o json | token_rules digests >"${dir}/token-digests.json" ||
+    die "snapshot ${label}: could not read the runtime-token Secrets"
   FLEET_NAMESPACES="$FLEET_NAMESPACES" HCC_NS="$HCC_NS" HCC_DEPLOY="$HCC_DEPLOY" \
-    python3 -I - "$dir" "${EVIDENCE_DIR}/snapshot-${label}.json" <<'PY'
+    python3 -I - "$dir" "${EVIDENCE_DIR}/snapshot-${label}.json" <<'PY' || die "snapshot ${label}: could not summarise the reads"
 import hashlib, json, os, sys
 src, dst = sys.argv[1], sys.argv[2]
 namespaces = set(os.environ["FLEET_NAMESPACES"].split())
@@ -369,9 +399,14 @@ print("snapshot pods=%d deployments=%d netpols=%d hosts=%d mcpservers=%d tokens=
 PY
 }
 
-# Prints one "<check> PASS|FAIL <detail>" line per check; never prints values.
+# Prints "<check> PASS|FAIL|NOTE <detail>" lines; never prints values. C2 and
+# C3 come from token_rules_py, which also writes token-admissions.tsv.
 compare_snapshots() {
-  python3 -I - "${EVIDENCE_DIR}/snapshot-A.json" "${EVIDENCE_DIR}/snapshot-B.json" "$SUSPENDED_HOST" <<'PY'
+  local lane_edit=- hcc_logs
+  [ "$VACUITY" != rotate-early ] || lane_edit="${EVIDENCE_DIR}/vacuity-edit.json"
+  hcc_logs=("${EVIDENCE_DIR}"/hcc-killed-*.log)
+  [ -f "${hcc_logs[0]}" ] || die "no log of a killed HCC container in ${EVIDENCE_DIR}"
+  python3 -I - "${EVIDENCE_DIR}/snapshot-A.json" "${EVIDENCE_DIR}/snapshot-B.json" "$SUSPENDED_HOST" <<'PY' || die "the C1/C4/C5 comparison failed"
 import json, sys
 with open(sys.argv[1]) as fh:
     a = json.load(fh)
@@ -398,32 +433,7 @@ for key, pb in b["pods"].items():
     if key not in a["pods"] and pb["owner"] == "ReplicaSet":
         problems.append("new ReplicaSet pod %s (rollout)" % key)
 report("C1", problems, "%d pods unchanged" % len(a["pods"]))
-# C2 deployments
-problems = []
-for key, da in a["deployments"].items():
-    db = b["deployments"].get(key)
-    if db is None:
-        problems.append("deployment %s disappeared" % key)
-    elif db != da:
-        problems.append("deployment %s generation %s -> %s template %s" % (
-            key, da["generation"], db["generation"],
-            "same" if da["templateSha256"] == db["templateSha256"] else "changed"))
-report("C2", problems, "%d deployments unchanged" % len(a["deployments"]))
-# C3 runtime-token Secrets
-problems = []
-for name, ta in a["tokens"].items():
-    tb = b["tokens"].get(name)
-    if tb is None:
-        problems.append("token Secret %s disappeared" % name)
-    elif tb["resourceVersion"] != ta["resourceVersion"] or tb["dataSha256"] != ta["dataSha256"]:
-        moved = sorted(k for k in set(ta["annotations"]) | set(tb["annotations"])
-                       if ta["annotations"].get(k) != tb["annotations"].get(k))
-        problems.append("token Secret %s changed (resourceVersion %s -> %s, data %s, annotations %s)" % (
-            name, ta["resourceVersion"], tb["resourceVersion"],
-            "same" if ta["dataSha256"] == tb["dataSha256"] else "CHANGED",
-            ", ".join("%s: %r -> %r" % (k, ta["annotations"].get(k), tb["annotations"].get(k))
-                      for k in moved) or "none"))
-report("C3", problems, "%d token Secrets unchanged" % len(a["tokens"]))
+# C2 and C3: token_rules_py compare (called after this program).
 # C4 NetworkPolicies
 problems, notes = [], []
 for key, na in a["netpols"].items():
@@ -462,6 +472,541 @@ if a["hosts"].get(suspended_host, {}).get("state") != "suspended":
     problems.append("suspended fixture %s was not suspended in snapshot A" % suspended_host)
 report("C5", problems, "%d Hosts, %d McpServers unchanged" % (len(a["hosts"]), len(a["mcpservers"])))
 PY
+  token_rules compare "${EVIDENCE_DIR}/raw-A" "${EVIDENCE_DIR}/raw-B" \
+    "${EVIDENCE_DIR}/snapshot-A.json" "${EVIDENCE_DIR}/snapshot-B.json" \
+    "${EVIDENCE_DIR}/token-schedule-A.json" "$SUSPENDED_HOST" \
+    "${EVIDENCE_DIR}/token-admissions.tsv" "$lane_edit" \
+    "${hcc_logs[@]}" "${EVIDENCE_DIR}/hcc-at-B.log" || die "the C2/C3 comparison failed"
+}
+
+# ─── Runtime-token rules (C2 suspended admission, C3, precondition) ──
+# One program, so the precondition at snapshot A, C3 and C2 apply the same
+# schedule. It mirrors host-context-controller/src/hostReconciler.ts
+# (runtimeTokenRefreshDecision, the preserve branch, the full rewrite and
+# bootstrapObservationUpdates) and statelessDeployment.ts
+# (effectiveRotateBeforeMs). Subcommands:
+#   digests     stdin: Secrets list JSON -> per-Secret digests, annotations
+#               and the refresh token's exp claim (no token value is kept)
+#   hcc-env     stdin: HCC Deployment JSON -> "<rotate-before s> <resync s>"
+#   schedule    <raw dir> <epoch> <skew s> <out prefix>: earliest write per
+#               Secret; exit 0 settled, 1 overdue or pending, 2 bad input
+#   compare     <raw A> <raw B> <snapshot A> <snapshot B> <schedule A json>
+#               <suspended Host> <admissions tsv> <lane edit json|-> <HCC
+#               logs...>: prints the C2 and C3 lines
+# Earliest write E per Secret (A = Ready Deployment on the Secret's revision,
+# B = Ready Deployment on an older revision, C = not Ready, 0 replicas or
+# suspended); N is the rotate-before point exp - min(R, (exp - issued-at)/2):
+#   class A, C: E = min(N, refresh-before, gfs-token-refresh-before)
+#   class B:    E = min(gfs-token-refresh-before, refresh-expires-at)
+# A Secret is not settled when an input annotation or the exp claim is
+# missing, the Deployment's restartedAt is after issued-at, or a bootstrap
+# observation write is pending; HCC would then write it at once.
+token_rules() {
+  HCC_NS="$HCC_NS" HCC_DEPLOY="$HCC_DEPLOY" HOST_NS="$HOST_NS" \
+    python3 -I -c "$(token_rules_py)" "$@"
+}
+
+token_rules_py() {
+  cat <<'TOKEN_RULES_PY'
+import base64, datetime, hashlib, json, os, re, sys
+
+ANN = "clerum.io/"
+ISSUED = ANN + "runtime-token-issued-at"
+REFRESH_BEFORE = ANN + "runtime-token-refresh-before"
+REFRESH_EXPIRES = ANN + "runtime-token-refresh-expires-at"
+GFS_REFRESH_BEFORE = ANN + "gfs-token-refresh-before"
+GFS_EXPIRES = ANN + "gfs-token-expires-at"
+SECRET_REVISION = ANN + "runtime-token-secret-revision"
+BOOT_STATE = ANN + "runtime-token-bootstrap-state"
+BOOT_UID = ANN + "runtime-token-bootstrap-deployment-uid"
+BOOT_APPLIED = ANN + "runtime-token-bootstrap-applied-revision"
+BOOT_READY = ANN + "runtime-token-bootstrap-ready-revision"
+ROLLOUT = ANN + "runtime-token-rollout-required"
+TEMPLATE_REVISION = ANN + "runtime-token-revision"
+RESTARTED_AT = "kubectl.kubernetes.io/restartedAt"
+REFRESH_KEY = "mcp-host-runtime-refresh-token"
+PREFIX, SUFFIX = "host-", "-mcp-host-runtime-tokens"
+ROTATED_MSG = "rotated mcp-host-runtime-token Secret"
+ROTATE_BEFORE_ENV = ("CONTEXT_MAPPER_RUNTIME_TOKEN_ROTATE_BEFORE_S", 86400)
+RESYNC_ENV = ("CONTEXT_MAPPER_HOST_RESYNC_SEC", 300)
+# A rotation logs its line right after the Secret write, whose issued-at is
+# the decision time; the line must follow issued-at within this bound.
+LOG_MATCH_MS = 60000
+NEAR, BEFORE, GFS = "refresh_token_near_expiry", "refresh_before_reached", "gfs_refresh_before_reached"
+# Annotations a full rewrite sets or drops; any other moved key is not a rotation.
+ROTATION_KEYS = {ISSUED, REFRESH_BEFORE, REFRESH_EXPIRES, GFS_REFRESH_BEFORE, GFS_EXPIRES,
+                 SECRET_REVISION, BOOT_STATE, ROLLOUT, BOOT_UID, BOOT_APPLIED, BOOT_READY}
+
+def bad_input(message):
+    print("token rules: " + message, file=sys.stderr)
+    sys.exit(2)
+
+def load(path):
+    with open(path) as fh:
+        return json.load(fh)
+
+def ms(value):
+    if not value:
+        return None
+    try:
+        return int(round(datetime.datetime.fromisoformat(
+            value.replace("Z", "+00:00")).timestamp() * 1000))
+    except ValueError:
+        return None
+
+def iso(value):
+    if value is None:
+        return "-"
+    stamp = datetime.datetime.fromtimestamp(value // 1000, datetime.timezone.utc)
+    return stamp.strftime("%Y-%m-%dT%H:%M:%S") + ".%03dZ" % (value % 1000)
+
+def short(revision):
+    return (revision or "-")[:12]
+
+def items(doc):
+    return doc["items"] if "items" in doc else [doc]
+
+def sha(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+def host_of(secret):
+    if secret.startswith(PREFIX) and secret.endswith(SUFFIX):
+        return secret[len(PREFIX):-len(SUFFIX)]
+    return None
+
+def host_deployments(doc):
+    return {d["metadata"]["name"]: d for d in items(doc)
+            if d.get("kind") == "Deployment" and d["metadata"]["namespace"] == os.environ["HOST_NS"]}
+
+def template_annotations(dep):
+    return (((dep.get("spec") or {}).get("template") or {}).get("metadata") or {}).get("annotations") or {}
+
+def refresh_exp(data):
+    # Decodes the exp claim only; the token and its other claims are dropped.
+    raw = data.get(REFRESH_KEY)
+    if not raw:
+        return None
+    try:
+        payload = base64.b64decode(raw).decode("utf-8").split(".")[1]
+        exp = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))).get("exp")
+    except (ValueError, IndexError, AttributeError):
+        return None
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return None
+    return exp
+
+def cmd_digests():
+    out = {}
+    for item in json.load(sys.stdin)["items"]:
+        name = item["metadata"]["name"]
+        if not name.endswith(SUFFIX):
+            continue
+        data = item.get("data") or {}
+        ann = item["metadata"].get("annotations") or {}
+        out[name] = {
+            "resourceVersion": item["metadata"]["resourceVersion"],
+            "dataSha256": sha(data),
+            "keySha256": {k: hashlib.sha256(v.encode()).hexdigest() for k, v in data.items()},
+            "refreshExp": refresh_exp(data),
+            "refreshBefore": ann.get(REFRESH_BEFORE, ""),
+            # Controller bookkeeping only (no credential material lives in
+            # annotations); kept so a metadata-only write names the key it moved.
+            "annotations": {k: v for k, v in ann.items() if k.startswith(ANN)},
+        }
+    json.dump(out, sys.stdout, sort_keys=True)
+
+def hcc_env(doc):
+    ns, name = os.environ["HCC_NS"], os.environ["HCC_DEPLOY"]
+    found = [d for d in items(doc) if d.get("kind") == "Deployment"
+             and d["metadata"]["namespace"] == ns and d["metadata"]["name"] == name]
+    if len(found) != 1:
+        bad_input("expected one %s/%s Deployment, found %d" % (ns, name, len(found)))
+    containers = [c for c in found[0]["spec"]["template"]["spec"]["containers"] if c["name"] == name]
+    if len(containers) != 1:
+        bad_input("expected one %s container in the HCC Deployment" % name)
+    env = {e["name"]: e for e in containers[0].get("env") or []}
+    out = {}
+    # Absent means the HCC default; anything but a plain integer is refused
+    # instead of reproducing getEnvInt's silent fallback.
+    for key, default in (ROTATE_BEFORE_ENV, RESYNC_ENV):
+        entry = env.get(key)
+        if entry is None:
+            out[key] = default
+        elif "valueFrom" in entry or not re.fullmatch(r"[0-9]+", str(entry.get("value", ""))):
+            bad_input("%s on the HCC Deployment is not a plain integer value" % key)
+        else:
+            out[key] = int(entry["value"])
+    return out
+
+def cmd_hcc_env():
+    env = hcc_env(json.load(sys.stdin))
+    print(env[ROTATE_BEFORE_ENV[0]], env[RESYNC_ENV[0]])
+
+def pending_observation(ann, revision, dep, template_revision):
+    # bootstrapObservationUpdates: a fresh, applied bootstrap gets its binding,
+    # rollout-required=false and consumed/ready-revision written once.
+    if ann.get(BOOT_STATE) != "fresh":
+        return []
+    uid = dep["metadata"].get("uid", "")
+    bound = ann.get(BOOT_UID)
+    if bound:
+        applied = bool(uid) and bound == uid and template_revision != "" and \
+            ann.get(BOOT_APPLIED) == template_revision
+    else:
+        applied = revision != "" and template_revision == revision
+    if not applied:
+        return []
+    spec, status = dep.get("spec") or {}, dep.get("status") or {}
+    generation = dep["metadata"].get("generation") or 0
+    observed = status.get("observedGeneration") or 0
+    replicas = spec.get("replicas", 1)
+    desired = {BOOT_UID: uid, BOOT_APPLIED: template_revision, ROLLOUT: "false"}
+    if (generation > 0 and observed >= generation and replicas > 0
+            and status.get("updatedReplicas") == replicas and status.get("readyReplicas") == replicas
+            and status.get("replicas") == replicas):
+        desired[BOOT_STATE] = "consumed"
+    elif (replicas > 0 and generation > 0 and observed >= generation
+            and (status.get("updatedReplicas") or 0) > 0 and (status.get("readyReplicas") or 0) > 0):
+        desired[BOOT_READY] = template_revision
+    return sorted(k for k, v in desired.items() if ann.get(k) != v)
+
+def classify(name, token, dep, state, rotate_before_ms, now_ms, skew_ms):
+    ann = token["annotations"]
+    problems = []
+    issued, rb = ms(ann.get(ISSUED)), ms(ann.get(REFRESH_BEFORE))
+    gfs, re_at = ms(ann.get(GFS_REFRESH_BEFORE)), ms(ann.get(REFRESH_EXPIRES))
+    revision = ann.get(SECRET_REVISION, "")
+    for label, value in (("issued-at", issued), ("refresh-before", rb),
+                         ("gfs-token-refresh-before", gfs), ("refresh-expires-at", re_at)):
+        if value is None:
+            problems.append("%s annotation missing or unparsable" % label)
+    if token.get("refreshExp") is None:
+        problems.append("refresh token exp claim missing or unparsable")
+    if not revision:
+        problems.append("secret-revision annotation missing")
+    cls, template_revision, ready = "-", "", False
+    if dep is None:
+        problems.append("no Deployment for its Host")
+    else:
+        template_revision = template_annotations(dep).get(TEMPLATE_REVISION, "")
+        replicas = (dep.get("spec") or {}).get("replicas", 1)
+        ready = ((dep.get("status") or {}).get("readyReplicas") or 0) > 0
+        if not ready or replicas == 0 or state == "suspended":
+            cls = "C"
+        elif not template_revision:
+            problems.append("Ready Deployment has no runtime-token-revision")
+        elif template_revision == revision:
+            cls = "A"
+        else:
+            cls = "B"
+        restarted = ms(template_annotations(dep).get(RESTARTED_AT))
+        if restarted is not None and issued is not None and restarted > issued:
+            problems.append("Deployment restartedAt %s is after issued-at" % iso(restarted))
+        pending = pending_observation(ann, revision, dep, template_revision)
+        if pending:
+            problems.append("bootstrap observation write pending (%s)" % ", ".join(pending))
+    n = None
+    if token.get("refreshExp") is not None:
+        exp_ms = int(round(token["refreshExp"] * 1000))
+        if issued is None or issued >= exp_ms:
+            n = exp_ms - rotate_before_ms
+        else:
+            n = exp_ms - min(rotate_before_ms, (exp_ms - issued) // 2)
+    earliest, binding = None, "-"
+    if cls in ("A", "C") and None not in (n, rb, gfs):
+        earliest, binding = min((n, "rotate-before point"), (rb, "refresh-before"),
+                                (gfs, "gfs-token-refresh-before"))
+    elif cls == "B" and None not in (gfs, re_at):
+        earliest, binding = min((gfs, "gfs-token-refresh-before"),
+                                (re_at, "refresh-expires-at (template on an older revision)"))
+    if earliest is not None and earliest <= now_ms + skew_ms:
+        problems.append("overdue: earliest write %s is not after the snapshot plus %d s" % (
+            iso(earliest), skew_ms // 1000))
+    return {"host": host_of(name), "class": cls, "earliestMs": earliest, "binding": binding,
+            "settled": earliest is not None and not problems, "problems": problems,
+            "rotateBeforeMs": n, "refreshBeforeMs": rb, "gfsRefreshBeforeMs": gfs,
+            "refreshExpiresMs": re_at, "issuedAtMs": issued, "templateRevision": template_revision,
+            "secretRevision": revision, "ready": ready}
+
+def cmd_schedule(raw, epoch, skew, prefix):
+    if not re.fullmatch(r"[0-9]+", epoch) or not re.fullmatch(r"[0-9]+", skew):
+        bad_input("schedule needs an integer epoch and skew")
+    tokens = load(os.path.join(raw, "token-digests.json"))
+    workloads = load(os.path.join(raw, "workloads.json"))
+    hosts = {h["metadata"]["name"]: ((h.get("status") or {}).get("lifecycle") or {}).get("state", "")
+             for h in load(os.path.join(raw, "hosts.json"))["items"]}
+    env = hcc_env(workloads)
+    deps = host_deployments(workloads)
+    if not tokens:
+        bad_input("no runtime-token Secret in %s" % raw)
+    now_ms, skew_ms = int(epoch) * 1000, int(skew) * 1000
+    rows = {}
+    for name, token in sorted(tokens.items()):
+        host = host_of(name)
+        rows[name] = classify(name, token, deps.get(host), hosts.get(host, ""),
+                              max(0, env[ROTATE_BEFORE_ENV[0]]) * 1000, now_ms, skew_ms)
+    with open(prefix + ".json", "w") as fh:
+        json.dump({"snapshotEpoch": int(epoch), "skewSec": int(skew),
+                   "rotateBeforeSec": env[ROTATE_BEFORE_ENV[0]], "resyncSec": env[RESYNC_ENV[0]],
+                   "secrets": rows}, fh, indent=1, sort_keys=True)
+    with open(prefix + ".tsv", "w") as fh:
+        fh.write("secret\tclass\tearliest_write\treason\tsettled\trotate_before_point"
+                 "\trefresh_before\tgfs_refresh_before\trefresh_expires_at\ttemplate_revision"
+                 "\tsecret_revision\n")
+        for name, row in rows.items():
+            fh.write("\t".join([name, row["class"], iso(row["earliestMs"]),
+                                "; ".join(row["problems"]) or row["binding"],
+                                "yes" if row["settled"] else "no", iso(row["rotateBeforeMs"]),
+                                iso(row["refreshBeforeMs"]), iso(row["gfsRefreshBeforeMs"]),
+                                iso(row["refreshExpiresMs"]), short(row["templateRevision"]),
+                                short(row["secretRevision"])]) + "\n")
+    unsettled = [name for name, row in rows.items() if not row["settled"]]
+    for name in unsettled:
+        print("%s: %s" % (name, "; ".join(rows[name]["problems"]) or "no schedule"), file=sys.stderr)
+    scheduled = [(row["earliestMs"], name) for name, row in rows.items() if row["earliestMs"] is not None]
+    first = min(scheduled) if scheduled else (None, "-")
+    print("token schedule at %s: %d Secret(s), %d not settled, earliest write %s (%s)" % (
+        iso(now_ms), len(rows), len(unsettled), iso(first[0]), first[1]))
+    sys.exit(1 if unsettled else 0)
+
+def rotation_lines(paths):
+    seen, out = set(), {}
+    for path in paths:
+        with open(path) as fh:
+            for raw in fh:
+                if ROTATED_MSG not in raw:
+                    continue
+                try:
+                    row = json.loads(raw[raw.index("{"):])
+                except ValueError:
+                    bad_input("unparsable rotation log line in %s" % path)
+                if row.get("msg") != ROTATED_MSG:
+                    continue
+                stamp, name = ms(row.get("ts")), row.get("resourceName")
+                if stamp is None or not name:
+                    bad_input("rotation log line without ts or resourceName in %s" % path)
+                key = (stamp, name, row.get("reason"), row.get("rolloutRequired"))
+                if key not in seen:
+                    seen.add(key)
+                    out.setdefault(name, []).append(key)
+    return out
+
+def expected_reason(row, at):
+    # runtimeTokenRefreshDecision order for the time-based reasons.
+    if at >= row["rotateBeforeMs"]:
+        return NEAR
+    if at >= row["refreshBeforeMs"]:
+        return BEFORE
+    if at >= row["gfsRefreshBeforeMs"]:
+        return GFS
+    return None
+
+def judge_write(name, ta, tb, row, lines, dep_b):
+    """Returns (problems, admitted detail)."""
+    problems = []
+    t_w, t_a = ms(tb["annotations"].get(ISSUED)), ms(ta["annotations"].get(ISSUED))
+    if t_w is None:
+        return ["changed and its issued-at is missing (not an HCC rotation)"], None
+    if t_a is not None and t_w == t_a:
+        moved = sorted(k for k in set(ta["annotations"]) | set(tb["annotations"])
+                       if ta["annotations"].get(k) != tb["annotations"].get(k))
+        return ["written without a runtime rotation (issued-at unchanged; data %s; annotations moved: %s)" % (
+            "same" if ta["dataSha256"] == tb["dataSha256"] else "CHANGED", ", ".join(moved) or "none")], None
+    if row["earliestMs"] is None:
+        return ["changed but snapshot A has no schedule for it (%s)" % "; ".join(row["problems"])], None
+    cls = row["class"]
+    if t_w < row["earliestMs"]:
+        problems.append("rotated before its scheduled time (issued-at %s < earliest write %s, class %s, %s)" % (
+            iso(t_w), iso(row["earliestMs"]), cls, row["binding"]))
+    reason = expected_reason(row, t_w)
+    if cls == "B" and reason in (NEAR, BEFORE) and t_w < row["refreshExpiresMs"]:
+        problems.append("rotated before its scheduled time (class B keeps the Secret until "
+                        "refresh-expires-at %s; issued-at %s)" % (iso(row["refreshExpiresMs"]), iso(t_w)))
+    rollout = cls == "C"
+    own = [l for l in lines if t_w <= l[0] <= t_w + LOG_MATCH_MS]
+    after_a = [l for l in lines if t_a is None or l[0] >= t_a]
+    if t_a is not None:
+        after_a = [l for l in after_a if l[0] > t_a + LOG_MATCH_MS]
+    extra = [l for l in after_a if l not in own]
+    if extra:
+        problems.append("rotated %d more time(s) between the snapshots (HCC log at %s)" % (
+            len(extra), ", ".join(iso(l[0]) for l in extra)))
+    if not own:
+        problems.append("no HCC log line '%s' within %d s after its issued-at %s" % (
+            ROTATED_MSG, LOG_MATCH_MS // 1000, iso(t_w)))
+    elif not any(l[2] == reason and l[3] is rollout for l in own):
+        problems.append("HCC logged %s, expected reason %s with rolloutRequired %s" % (
+            ", ".join("reason %s rolloutRequired %s" % (l[2], str(l[3]).lower()) for l in own),
+            reason or "none (no scheduled reason at that time)", str(rollout).lower()))
+    ann_a, ann_b = ta["annotations"], tb["annotations"]
+    outside = sorted(k for k in set(ann_a) | set(ann_b)
+                     if ann_a.get(k) != ann_b.get(k) and k not in ROTATION_KEYS)
+    if outside:
+        problems.append("annotations outside a rotation changed: %s" % ", ".join(outside))
+    revision = ann_b.get(SECRET_REVISION, "")
+    if not revision or revision == ann_a.get(SECRET_REVISION):
+        problems.append("secret-revision did not move")
+    if ann_b.get(BOOT_STATE) != "fresh":
+        problems.append("bootstrap-state is %r, a rotation leaves fresh" % ann_b.get(BOOT_STATE))
+    if BOOT_READY in ann_b:
+        problems.append("bootstrap-ready-revision present after a rotation")
+    if rollout:
+        uid = (dep_b or {}).get("metadata", {}).get("uid")
+        if ann_b.get(BOOT_UID) != uid or ann_b.get(BOOT_APPLIED) != revision:
+            problems.append("rollout rotation without a binding to the Deployment and its new revision")
+    else:
+        if BOOT_UID in ann_b or BOOT_APPLIED in ann_b or ann_b.get(ROLLOUT) != "false":
+            problems.append("no-rollout rotation kept a bootstrap binding or rollout-required != false")
+    if problems:
+        return problems, None
+    return [], "on-schedule rotation at %s (earliest write %s, class %s, %s; reason %s, rolloutRequired %s)" % (
+        iso(t_w), iso(row["earliestMs"]), cls, row["binding"], reason, str(rollout).lower())
+
+def spec_without_revision(dep):
+    spec = json.loads(json.dumps(dep.get("spec") or {}))
+    ((spec.get("template") or {}).get("metadata") or {}).get("annotations", {}).pop(TEMPLATE_REVISION, None)
+    return spec
+
+def judge_suspended(host, dep_a, dep_b, admitted):
+    secret = PREFIX + host + SUFFIX
+    revision = admitted.get(secret)
+    if revision is None:
+        return False, "C3 admitted no rotation of %s" % secret
+    if dep_a is None or dep_b is None:
+        return False, "Deployment missing from a raw snapshot"
+    gen_a, gen_b = dep_a["metadata"].get("generation"), dep_b["metadata"].get("generation")
+    if gen_a is None or gen_b != gen_a + 1:
+        return False, "generation %s -> %s, one admitted rotation allows +1" % (gen_a, gen_b)
+    rev_a = template_annotations(dep_a).get(TEMPLATE_REVISION, "")
+    rev_b = template_annotations(dep_b).get(TEMPLATE_REVISION, "")
+    if rev_b != revision:
+        return False, "template runtime-token-revision %s is not the admitted secret revision %s" % (
+            short(rev_b), short(revision))
+    if sha(spec_without_revision(dep_a)) != sha(spec_without_revision(dep_b)):
+        return False, "the template or spec changed beyond runtime-token-revision"
+    return True, ("template runtime-token-revision %s -> %s, generation %s -> %s, matches the rotation "
+                  "C3 admitted; suspended Hosts rewrite their template on each scheduled rotation (#1359)"
+                  % (short(rev_a), short(rev_b), gen_a, gen_b))
+
+def cmd_compare(argv):
+    raw_a, raw_b, snap_a, snap_b, schedule, suspended, admissions, lane_edit = argv[:8]
+    logs = argv[8:]
+    if not logs:
+        bad_input("compare needs at least one HCC log")
+    tokens_a = load(os.path.join(raw_a, "token-digests.json"))
+    tokens_b = load(os.path.join(raw_b, "token-digests.json"))
+    rows = load(schedule)["secrets"]
+    deps_a = host_deployments(load(os.path.join(raw_a, "workloads.json")))
+    deps_b = host_deployments(load(os.path.join(raw_b, "workloads.json")))
+    edit = load(lane_edit) if lane_edit != "-" else None
+    lines = rotation_lines(logs)
+    decisions, out = [], []
+    # C3
+    problems, unchanged, admitted = [], 0, {}
+    if edit is not None:
+        out.append("C3 NOTE lane vacuity edit removed %s on %s (resourceVersion %s); "
+                   "a write C3 does not admit, reported with that Secret" % (
+                       edit["removed"], edit["secret"], edit["resourceVersion"]))
+        decisions.append(("C3", edit["secret"], "LANE-EDIT", "removed %s at resourceVersion %s" % (
+            edit["removed"], edit["resourceVersion"])))
+    if not tokens_a:
+        problems.append("snapshot A holds no runtime-token Secret")
+    for name, ta in sorted(tokens_a.items()):
+        tb, row = tokens_b.get(name), rows.get(name)
+        edited = edit is not None and edit["secret"] == name
+        if tb is None:
+            problems.append("token Secret %s disappeared" % name)
+            decisions.append(("C3", name, "REJECTED", "disappeared"))
+            continue
+        if row is None:
+            problems.append("token Secret %s has no schedule from snapshot A" % name)
+            decisions.append(("C3", name, "REJECTED", "no schedule"))
+            continue
+        if tb["resourceVersion"] == ta["resourceVersion"] and tb["dataSha256"] == ta["dataSha256"]:
+            if edited:
+                problems.append("token Secret %s shows no write although the lane edited it" % name)
+                decisions.append(("C3", name, "REJECTED", "lane edit not visible"))
+            else:
+                unchanged += 1
+                decisions.append(("C3", name, "UNCHANGED", "resourceVersion %s" % ta["resourceVersion"]))
+            continue
+        if edited and tb["resourceVersion"] == edit["resourceVersion"]:
+            reasons = ["changed only by the lane's vacuity edit (no HCC write followed)"]
+        else:
+            reasons, detail = judge_write(name, ta, tb, row, lines.get(name, []), deps_b.get(row["host"]))
+            if edited:
+                reasons.append("the lane's vacuity edit (resourceVersion %s) is part of this change and "
+                               "is not admitted" % edit["resourceVersion"])
+        if reasons:
+            problems.append("token Secret %s: %s" % (name, "; ".join(reasons)))
+            decisions.append(("C3", name, "REJECTED", "; ".join(reasons)))
+        else:
+            admitted[name] = tb["annotations"][SECRET_REVISION]
+            out.append("C3 NOTE token Secret %s admitted: %s" % (name, detail))
+            decisions.append(("C3", name, "ADMITTED", detail))
+    for name in sorted(set(tokens_b) - set(tokens_a)):
+        problems.append("token Secret %s created between the snapshots" % name)
+        decisions.append(("C3", name, "REJECTED", "created between the snapshots"))
+    if problems:
+        out.extend("C3 FAIL %s" % p for p in problems)
+    elif unchanged + len(admitted) != len(tokens_a):
+        out.append("C3 FAIL classified %d of %d token Secrets" % (unchanged + len(admitted), len(tokens_a)))
+    else:
+        out.append("C3 PASS %d token Secrets: %d unchanged, %d admitted on-schedule rotation(s)" % (
+            len(tokens_a), unchanged, len(admitted)))
+    # C2
+    a, b = load(snap_a)["deployments"], load(snap_b)["deployments"]
+    problems, unchanged, admitted_c2 = [], 0, 0
+    suspended_key = "%s/%s" % (os.environ["HOST_NS"], suspended)
+    for key, da in sorted(a.items()):
+        db = b.get(key)
+        if db is None:
+            problems.append("deployment %s disappeared" % key)
+            continue
+        if db == da:
+            unchanged += 1
+            continue
+        change = "deployment %s generation %s -> %s template %s" % (
+            key, da["generation"], db["generation"],
+            "same" if da["templateSha256"] == db["templateSha256"] else "changed")
+        if key != suspended_key:
+            problems.append(change)
+            decisions.append(("C2", key, "REJECTED", change))
+            continue
+        ok, why = judge_suspended(suspended, deps_a.get(suspended), deps_b.get(suspended), admitted)
+        if ok:
+            admitted_c2 += 1
+            out.append("C2 NOTE suspended fixture %s admitted: %s" % (key, why))
+            decisions.append(("C2", key, "ADMITTED", why))
+        else:
+            problems.append("%s; suspended fixture change not admitted: %s" % (change, why))
+            decisions.append(("C2", key, "REJECTED", why))
+    if problems:
+        out.extend("C2 FAIL %s" % p for p in problems)
+    else:
+        out.append("C2 PASS %d deployments unchanged, %d suspended-fixture template change(s) admitted (#1359)" % (
+            unchanged, admitted_c2))
+    with open(admissions, "w") as fh:
+        fh.write("check\tobject\tdecision\tdetail\n")
+        for row in decisions:
+            fh.write("\t".join(row) + "\n")
+    print("\n".join(out))
+
+def main():
+    command, argv = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ("", [])
+    if command == "digests" and not argv:
+        cmd_digests()
+    elif command == "hcc-env" and not argv:
+        cmd_hcc_env()
+    elif command == "schedule" and len(argv) == 4:
+        cmd_schedule(*argv)
+    elif command == "compare" and len(argv) >= 9:
+        cmd_compare(argv)
+    else:
+        bad_input("usage: digests | hcc-env | schedule <raw> <epoch> <skew> <prefix> | compare ...")
+
+main()
+TOKEN_RULES_PY
 }
 
 # ─── Sampler (C8, C9) ─────────────────────────────────────────────────
@@ -791,48 +1336,11 @@ fixture_bootstrap_consumed() {
 wait_until 420 "fixture ${ACTIVE_HOST} runtime-token bootstrap to be consumed" fixture_bootstrap_consumed ||
   die "fixture ${ACTIVE_HOST} bootstrap-state never reached consumed"
 
-# 2. For a healthy Deployment HCC keeps the runtime-token Secret until its
-#    refresh-expires-at, then rotates it on the next reconcile, restart or not
-#    (hasFreshBootstrapSecretNewerThanHealthyDeployment). Wait until no token
-#    (runtime or GFS) expires inside the run window, so a rotation during the
-#    run is a defect and never a scheduled one. The window starts here, so it
-#    also covers the pre-snapshot settle of step 3 (staleness bound + 30 s).
-PRE_SNAPSHOT_SETTLE_SEC=$((AUTHORITY_STALENESS_SEC + 30))
-if [ "$MODE" = idle ]; then
-  RUN_WINDOW_SEC=$((PRE_SNAPSHOT_SETTLE_SEC + RECOVERY_WAIT_SEC + SETTLE_SEC + 60))
-else
-  RUN_WINDOW_SEC=$((PRE_SNAPSHOT_SETTLE_SEC + MID_PASS_ATTEMPTS * (KILL_WATCH_SEC + RESTART_WAIT_SEC + RECOVERY_BETWEEN_SEC) + RECOVERY_WAIT_SEC + SETTLE_SEC + 60))
-fi
-tokens_clear_of_run_window() {
-  kctl get secrets -n "$HOST_NS" -o json | python3 -I -c '
-import datetime, json, sys
-horizon = int(sys.argv[1])
-seen = 0
-for item in json.load(sys.stdin)["items"]:
-    name = item["metadata"]["name"]
-    if not name.endswith("-mcp-host-runtime-tokens"):
-        continue
-    seen += 1
-    ann = item["metadata"].get("annotations") or {}
-    for key in ("clerum.io/runtime-token-refresh-expires-at", "clerum.io/gfs-token-expires-at"):
-        raw = ann.get(key, "")
-        if not raw:
-            print("%s has no %s" % (name, key), file=sys.stderr)
-            sys.exit(1)
-        due = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
-        if due <= horizon:
-            print("%s %s at %s" % (name, key, raw), file=sys.stderr)
-            sys.exit(1)
-sys.exit(0 if seen > 0 else 1)' "$(( $(date +%s) + RUN_WINDOW_SEC ))" 2>"${EVIDENCE_DIR}/token-window.reason"
-}
-wait_until $((RUN_WINDOW_SEC + 420)) "no token expiring inside the ${RUN_WINDOW_SEC} s run window" \
-  tokens_clear_of_run_window ||
-  die "a runtime or GFS token still expires inside the ${RUN_WINDOW_SEC} s run window: $(cat "${EVIDENCE_DIR}/token-window.reason")"
-
-# 3. The cadence change and restore above are ordinary HCC rollouts. Let more
+# 2. The cadence change and restore above are ordinary HCC rollouts. Let more
 #    than mcp-host's staleness bound pass after them; a Host that revokes its
 #    fleet here was disturbed by a rollout, which is reported on its own and
 #    never blamed on the kill.
+PRE_SNAPSHOT_SETTLE_SEC=$((AUTHORITY_STALENESS_SEC + 30))
 settle_until=$((CADENCE_RESTORED_EPOCH + PRE_SNAPSHOT_SETTLE_SEC))
 now="$(date +%s)"
 [ "$now" -ge "$settle_until" ] || sleep $((settle_until - now))
@@ -847,9 +1355,40 @@ for host in "$SOURCE_HOST" "$ACTIVE_HOST"; do
   fi
   ok "precondition: ${host} logged no fleet revocation since the setup's HCC rollout ($(wc -l <"$settle_log") lines read)"
 done
-ok "fleet settled: fixture bootstrap consumed, no token expiring in the run window, no Host revocation after the setup rollouts"
+ok "fleet settled: fixture bootstrap consumed, no Host revocation after the setup rollouts"
 
-snapshot A
+# 3. Runtime-token Secrets (issue #1338, plan Addendum A6). HCC rewrites them
+#    on a schedule, restart or not: from the rotate-before point (half the
+#    token lifetime by default), refresh-before or gfs-token-refresh-before,
+#    and for a Ready Host whose template is on an older revision from
+#    gfs-token-refresh-before or refresh-expires-at. With 1 h tokens no run
+#    window stays free of these writes, so the lane does not wait for one.
+#    Snapshot A must instead hold nothing overdue or pending; C3 then admits
+#    only on-schedule rotations. An overdue Secret is rotated at HCC's next
+#    resync and a pending bootstrap observation is written on the next
+#    reconcile, so snapshot A is retaken for one resync period plus 120 s.
+TOKEN_SKEW_SEC=30
+hcc_token_env="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o json | token_rules hcc-env)" ||
+  die "could not read the HCC runtime-token settings"
+read -r ROTATE_BEFORE_SEC RESYNC_SEC <<<"$hcc_token_env"
+[[ "$ROTATE_BEFORE_SEC" =~ ^[0-9]+$ ]] && [[ "$RESYNC_SEC" =~ ^[0-9]+$ ]] ||
+  die "unexpected HCC runtime-token settings '${hcc_token_env}'"
+snapshot_a_settled() {
+  local epoch rc=0
+  snapshot A
+  read -r epoch <"${EVIDENCE_DIR}/raw-A/read-epoch" || die "could not read the snapshot A read time"
+  token_rules schedule "${EVIDENCE_DIR}/raw-A" "$epoch" "$TOKEN_SKEW_SEC" "${EVIDENCE_DIR}/token-schedule-A" \
+    2>"${EVIDENCE_DIR}/token-schedule-A.reason" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) sleep 10; return 1 ;;
+    *) die "runtime-token schedule failed: $(cat "${EVIDENCE_DIR}/token-schedule-A.reason")" ;;
+  esac
+}
+wait_until $((RESYNC_SEC + 120)) "snapshot A with no runtime-token Secret overdue or pending" snapshot_a_settled ||
+  die "precondition: a runtime-token Secret is overdue or has a pending write at snapshot A: $(cat "${EVIDENCE_DIR}/token-schedule-A.reason")"
+ok "snapshot A: no runtime-token Secret overdue or pending (rotate-before ${ROTATE_BEFORE_SEC} s, resync ${RESYNC_SEC} s; schedule in token-schedule-A.tsv)"
+
 [ "$(jq '.hosts | length' "${EVIDENCE_DIR}/snapshot-A.json")" -ge 3 ] || die "snapshot A has fewer than 3 Hosts"
 [ "$(jq '.mcpservers | length' "${EVIDENCE_DIR}/snapshot-A.json")" -ge 1 ] || die "snapshot A has no McpServer"
 [ "$(jq '[.netpols[] | select(.external)] | length' "${EVIDENCE_DIR}/snapshot-A.json")" -ge 1 ] ||
@@ -858,6 +1397,24 @@ ok "snapshot A taken"
 
 HCC_UID="$(hcc_pod_uid "$HCC_POD")"
 HCC_RESTARTS_BEFORE="$(hcc_restart_count "$HCC_POD")"
+
+if [ "$VACUITY" = rotate-early ]; then
+  # Without issued-at, HCC computes the rotate-before point from the
+  # configured margin alone (effectiveRotateBeforeMs), which lies before now,
+  # so it rotates this Secret with refresh_token_near_expiry ahead of the
+  # schedule taken at snapshot A. The read-back is the object this edit wrote.
+  vacuity_secret="host-${ACTIVE_HOST}-mcp-host-runtime-tokens"
+  warn "vacuity mutation: removing clerum.io/runtime-token-issued-at from ${vacuity_secret}"
+  vacuity_edit="$(kctl annotate secret "$vacuity_secret" -n "$HOST_NS" 'clerum.io/runtime-token-issued-at-' \
+    -o jsonpath='{.metadata.resourceVersion}{"|"}{.metadata.annotations.clerum\.io/runtime-token-issued-at}')" ||
+    die "vacuity: could not remove issued-at from ${vacuity_secret}"
+  [[ "$vacuity_edit" =~ ^[0-9]+\|$ ]] ||
+    die "vacuity: unexpected read-back after the edit of ${vacuity_secret}: '${vacuity_edit}'"
+  jq -n --arg secret "$vacuity_secret" --arg rv "${vacuity_edit%|}" \
+    --arg removed clerum.io/runtime-token-issued-at \
+    '{secret: $secret, resourceVersion: $rv, removed: $removed}' >"${EVIDENCE_DIR}/vacuity-edit.json" ||
+    die "vacuity: could not record the edit"
+fi
 
 # ─── Disruption ───────────────────────────────────────────────────────
 header "Disruption (${MODE})"
@@ -879,6 +1436,7 @@ else
     wait_until "$RESTART_WAIT_SEC" "HCC container restart after attempt ${attempt}" \
       hcc_restarted_past "$HCC_POD" "$((HCC_RESTARTS_BEFORE + KILLS - 1))" ||
       die "HCC did not restart after attempt ${attempt}"
+    save_killed_hcc_log "$HCC_POD"
     previous="$(last_pass_event "$HCC_POD" previous)"
     echo "attempt ${attempt}: last pass event of the killed process: ${previous}" | tee -a "${EVIDENCE_DIR}/mid-pass.log"
     if [[ "$previous" == start* ]]; then
@@ -911,6 +1469,10 @@ if [ "$(hcc_pod_uid "$HCC_POD")" = "$HCC_UID" ] &&
 else
   fail "HCC pod identity/restartCount unexpected (uid $(hcc_pod_uid "$HCC_POD"), restarts $(hcc_restart_count "$HCC_POD"), kills ${KILLS})"
 fi
+# Mid-pass mode saved the killed container's log after each attempt.
+if [ "$MODE" = idle ]; then
+  save_killed_hcc_log "$HCC_POD"
+fi
 if wait_until 60 "a certified NetworkPolicy pass from the restarted HCC" certified_pass_logged "$HCC_POD"; then
   ok "restarted HCC logged a certified NetworkPolicy pass"
 else
@@ -935,10 +1497,16 @@ END_EPOCH="$(date +%s)"
 # ─── Assertions ───────────────────────────────────────────────────────
 header "Assertions"
 snapshot B
+# The current HCC process's log, read after snapshot B, covers every rotation
+# it made since its start; the killed processes' logs were saved earlier.
+kctl logs "pod/$HCC_POD" -n "$HCC_NS" -c host-context-controller >"${EVIDENCE_DIR}/hcc-at-B.log" ||
+  die "could not read the log of HCC pod ${HCC_POD} after snapshot B"
+compare_snapshots >"${EVIDENCE_DIR}/compare.log"
 C1_FAILED=0
 C2_FAILED=0
+C3_FAIL_LINES=0
+C3_EARLY_FIXTURE=0
 while IFS= read -r line; do
-  echo "$line" >>"${EVIDENCE_DIR}/compare.log"
   check="${line%% *}"
   rest="${line#* }"
   verdict="${rest%% *}"
@@ -949,11 +1517,18 @@ while IFS= read -r line; do
       fail "${check} ${detail}"
       [ "$check" = C1 ] && C1_FAILED=1
       [ "$check" = C2 ] && C2_FAILED=1
+      if [ "$check" = C3 ]; then
+        C3_FAIL_LINES=$((C3_FAIL_LINES + 1))
+        case "$detail" in
+          "token Secret host-${ACTIVE_HOST}-mcp-host-runtime-tokens: "*"rotated before its scheduled time"*)
+            C3_EARLY_FIXTURE=1 ;;
+        esac
+      fi
       ;;
     NOTE) warn "${check} ${detail}" ;;
     *) fail "unparsed comparison line: ${line}" ;;
   esac
-done < <(compare_snapshots)
+done <"${EVIDENCE_DIR}/compare.log"
 
 # C7: Host fleets. Hosts with a running pod: the seeded Host and the active fixture.
 since="$(date -u -r "$KILL_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
@@ -1030,6 +1605,16 @@ if [ "$VACUITY" = roll-host-fixture ]; then
     exit 0
   fi
   echo "E2E_HCC_RESTART_CONTINUITY_VACUITY=MISSED (C1 failed=${C1_FAILED}, C2 failed=${C2_FAILED})"
+  exit 1
+fi
+if [ "$VACUITY" = rotate-early ]; then
+  # Exactly one failure in the whole run: C3 on the edited Secret, rotated
+  # before its scheduled time.
+  if [ "$C3_FAIL_LINES" = 1 ] && [ "$C3_EARLY_FIXTURE" = 1 ] && [ "$e2e_fail" = 1 ]; then
+    echo "E2E_HCC_RESTART_CONTINUITY_VACUITY=DETECTED"
+    exit 0
+  fi
+  echo "E2E_HCC_RESTART_CONTINUITY_VACUITY=MISSED (C3 failure lines=${C3_FAIL_LINES}, early rotation of the fixture Secret=${C3_EARLY_FIXTURE}, failures=${e2e_fail})"
   exit 1
 fi
 if print_results; then
