@@ -115,17 +115,6 @@ export async function switchTeam(
   }
 }
 
-/**
- * control-api refused this edge's service credential while answering `/me`. The
- * route answers it as `503 authority_unavailable`; it is never a session end.
- */
-export class ControlApiCredentialRejectedError extends Error {
-  constructor() {
-    super('Control API rejected the edge service credential')
-    this.name = 'ControlApiCredentialRejectedError'
-  }
-}
-
 export async function getMe(userId: string, teamId: string, sessionToken: string) {
   try {
     const result = await controlApiRequest<{
@@ -146,19 +135,17 @@ export async function getMe(userId: string, teamId: string, sessionToken: string
       },
     }
   } catch (error) {
-    // Exceptions to the dev error mapping (everything else reads as "not found"):
+    // Exceptions to the dev error mapping:
     // - control-api's `invalid_session` envelope: the session was revoked (password
     //   change, logout, revocation) and must reach the client as that 401, so it
     //   re-authenticates instead of reading "not found";
-    // - a 503 outage is forwarded as is;
-    // - a bare 401 is control-api rejecting this edge's service credential. It is an
-    //   edge configuration failure, not a session end, so the route answers it as an
-    //   outage instead of telling the client its session is gone.
+    // - a 503 outage is forwarded as is.
+    // Everything else, a bare 401 included, reads as "not found" as on dev. A bare
+    // 401 is dev control-api's answer for an ended session; this edge's control-api
+    // sends a bare 401 only when it refuses the edge's own service credential, and
+    // no header or body tells the two apart, so neither is answered as an outage.
     if (isControlApiInvalidSession(error)) throw error
     if (error instanceof ControlApiError && error.status === 503) throw error
-    if (error instanceof ControlApiError && error.status === 401) {
-      throw new ControlApiCredentialRejectedError()
-    }
     return null
   }
 }

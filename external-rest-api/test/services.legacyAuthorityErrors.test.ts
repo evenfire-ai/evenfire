@@ -3,7 +3,7 @@ import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createDesktopAuthorization } from '../src/services/invitationsService.js'
-import { ControlApiCredentialRejectedError, getMe, switchTeam } from '../src/services/meService.js'
+import { getMe, switchTeam } from '../src/services/meService.js'
 import {
   deleteMember,
   getCurrentTeam,
@@ -57,26 +57,23 @@ describe('legacy authority adapters', () => {
   })
 
   it('maps every other /me and switch-team failure to absence, keeping outages and /me revocation', async () => {
-    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {})
     for (const status of [404, 401, 500]) {
+      // A bare 401 (dev control-api's ended session) reads as absence, as on dev.
       clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
-      if (status === 401) {
-        // A bare 401 is the edge's service credential, never forwarded as a session end.
-        const rejection = getMe(auth.userId, auth.teamId, auth.sessionToken)
-        await expect(rejection).rejects.toBeInstanceOf(ControlApiCredentialRejectedError)
-        await expect(rejection).rejects.not.toBeInstanceOf(ControlApiError)
-      } else {
-        await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).resolves.toBeNull()
-      }
+      await expect(getMe(auth.userId, auth.teamId, auth.sessionToken)).resolves.toBeNull()
 
       clientMock.controlApiRequest.mockRejectedValueOnce(upstream(status))
       await expect(
         switchTeam(auth.userId, auth.email, 'team-2', auth.sessionToken)
       ).resolves.toBeNull()
     }
-    // Service code writes no console output; the typed rejection above is the signal.
-    expect(stderr).not.toHaveBeenCalled()
-    stderr.mockRestore()
+    // Witness: each getMe and switchTeam case reached control-api once.
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(6)
+    expect(
+      clientMock.controlApiRequest.mock.calls.filter(
+        ([method, path]) => method === 'GET' && path === `/external/users/${auth.userId}/me`
+      )
+    ).toHaveLength(3)
 
     clientMock.controlApiRequest.mockRejectedValueOnce(
       new ControlApiError('control api failure', 401, {

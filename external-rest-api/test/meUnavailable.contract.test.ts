@@ -92,8 +92,7 @@ describe('External REST /me unavailable producer contract', () => {
     )
   })
 
-  it('answers a bare upstream 401 (the edge service credential) as an outage, never a session end', async () => {
-    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {})
+  it('answers a bare upstream 401 as dev did (404)', async () => {
     mocks.controlApiRequest.mockRejectedValue(
       new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
     )
@@ -105,15 +104,8 @@ describe('External REST /me unavailable producer contract', () => {
       .get('/me')
       .set('authorization', 'Bearer synthetic-session-token')
 
-    expect(response.status).toBe(503)
-    expect(response.body).toEqual({
-      error: {
-        code: 'authority_unavailable',
-        message: 'Authorization is temporarily unavailable.',
-        correlationId: expect.any(String),
-        retryable: true,
-      },
-    })
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({ error: 'User not found' })
     expect(JSON.stringify(response.body)).not.toMatch(/private upstream detail/)
     expect(mocks.controlApiRequest).toHaveBeenCalledTimes(1)
     expect(mocks.controlApiRequest).toHaveBeenCalledWith(
@@ -121,8 +113,6 @@ describe('External REST /me unavailable producer contract', () => {
       '/external/users/synthetic-member-id/me',
       expect.objectContaining({ userSessionToken: 'synthetic-session-token' })
     )
-    // Service code writes no console output; the 503 with its correlationId above is the signal.
-    expect(stderr).not.toHaveBeenCalled()
   })
 
   it('answers a rejected edge token on /me with the invalid_session envelope', async () => {

@@ -22,6 +22,9 @@ import { config } from '../src/config.js'
  */
 
 const BASE_SESSION_TOKEN = 'synthetic-base-session-token'
+// A session the edge still verifies locally but the base control-api judges ended
+// (revoked or a stale auth generation).
+const ENDED_BASE_SESSION_TOKEN = 'synthetic-ended-base-session-token'
 const MEMBER_ID = 'synthetic-member-id'
 const MEMBER_EMAIL = 'member@example.invalid'
 const CURRENT_TEAM_ID = 'synthetic-team-id'
@@ -32,7 +35,7 @@ const INVITATION_ROW_ID = '00000000-0000-4000-8000-000000000001'
 
 vi.mock('../src/authToken.js', () => ({
   verifyToken: (token: string) =>
-    token === 'synthetic-base-session-token'
+    token === 'synthetic-base-session-token' || token === 'synthetic-ended-base-session-token'
       ? {
           userId: 'synthetic-member-id',
           email: 'member@example.invalid',
@@ -81,6 +84,12 @@ function createBaseControlApiProducer() {
       (path.startsWith('/api/v1/external/users/') || path === '/api/v1/external/teams') &&
       !sessionToken
     ) {
+      respond(401, { error: 'Unauthorized' })
+      return
+    }
+    // Base answer for a session it judges ended: the same bare 401 (base
+    // `externalSessionAuth.ts`, `!current` branch), with no envelope.
+    if (path.startsWith('/api/v1/external/users/') && sessionToken === ENDED_BASE_SESSION_TOKEN) {
       respond(401, { error: 'Unauthorized' })
       return
     }
@@ -258,6 +267,20 @@ describe('head External REST against the base control-api', () => {
     expect(producer.calls.map(call => `${call.method} ${call.path}`)).toEqual([
       'POST /api/v1/external/invitations/accept',
     ])
+  })
+
+  it('answers /me for a session the base judges ended with 404, as the base edge did', async () => {
+    const response = await request(createApp())
+      .get('/api/v1/me')
+      .set('authorization', `Bearer ${ENDED_BASE_SESSION_TOKEN}`)
+
+    expect(response.status).toBe(404)
+    expect(response.body).toStrictEqual({ error: 'User not found' })
+    // Witness: the edge reached the base /me route once with the caller's session.
+    expect(producer.calls.map(call => `${call.method} ${call.path}`)).toEqual([
+      `GET /api/v1/external/users/${MEMBER_ID}/me?teamId=${CURRENT_TEAM_ID}`,
+    ])
+    expect(producer.calls[0].sessionToken).toBe(ENDED_BASE_SESSION_TOKEN)
   })
 
   it('answers a logout against the base 404 with the forwarded body and clears the cookie', async () => {

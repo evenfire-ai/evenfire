@@ -68,17 +68,25 @@ describe('routes/auth password-login', () => {
     expect(res.body).toEqual({ error: 'invalid_credentials' })
   })
 
-  it('keeps retired Google accounts indistinguishable across credential providers', async () => {
+  it('answers a retired Google account with control-api own 401 Unauthorized', async () => {
+    // control-api google-login answers a user with no active membership with
+    // `401 {"error":"Unauthorized"}`; it never sends 403 on this route.
+    authServiceMock.loginWithGoogle.mockReset()
     authServiceMock.loginWithGoogle.mockRejectedValueOnce(
-      new ControlApiError('private upstream detail', 403, { error: 'membership_not_found' })
+      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
     )
 
     const res = await request(buildApp())
       .post('/api/v1/auth/google')
-      .send({ idToken: 'validly-shaped-test-token' })
+      .send({ idToken: 'synthetic-google-id-token' })
 
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith({
+      idToken: 'synthetic-google-id-token',
+    })
     expect(res.status).toBe(401)
     expect(res.body).toEqual({ error: 'Unauthorized' })
+    expect(JSON.stringify(res.body)).not.toContain('private upstream detail')
   })
 
   it('answers a Google identity refused by control-api like a retired account', async () => {

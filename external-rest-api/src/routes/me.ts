@@ -1,7 +1,6 @@
 import { Router } from 'express'
 import { ControlApiError } from '../controlApiClient.js'
 import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
-import { sendPublicApiError } from '../http/publicApiError.js'
 import {
   type AuthedRequest,
   extractAuthToken,
@@ -11,7 +10,6 @@ import {
 } from '../middleware/auth.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
-  ControlApiCredentialRejectedError,
   getMe,
   getMyAgents,
   getMyContexts,
@@ -97,17 +95,6 @@ export function createMeRouter(): Router {
       }
       res.status(200).json(me)
     } catch (error) {
-      if (error instanceof ControlApiCredentialRejectedError) {
-        sendPublicApiError(
-          req,
-          res,
-          503,
-          'authority_unavailable',
-          'Authorization is temporarily unavailable.',
-          true
-        )
-        return
-      }
       next(error)
     }
   })

@@ -21,8 +21,7 @@ export function sendPublicApiError(
   status: number,
   code: string,
   message: string,
-  retryable = false,
-  details?: Record<string, unknown>
+  retryable = false
 ): void {
   res.status(status).json({
     error: {
@@ -30,7 +29,6 @@ export function sendPublicApiError(
       message,
       correlationId: publicCorrelationId(req),
       retryable,
-      ...(details && Object.keys(details).length ? { details } : {}),
     },
   })
 }
