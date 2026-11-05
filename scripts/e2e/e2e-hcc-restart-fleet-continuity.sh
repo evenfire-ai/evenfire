@@ -129,6 +129,12 @@ AUTHORITY_STALENESS_SEC=""
 # e2e-stateless-suspend-wake.sh); restored before the first snapshot.
 CADENCE_KEYS="CONTEXT_MAPPER_STATELESS_IDLE_MINUTES CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS CONTEXT_MAPPER_HEARTBEAT_POLL_MS"
 CADENCE_TEST_VALUES="1 1 20000 5000"
+# Bounds of the disruption phase. They also size the run window that no
+# token rotation may fall into, so keep them tight: HCC recovers in seconds.
+KILL_WATCH_SEC=60
+RESTART_WAIT_SEC=60
+RECOVERY_BETWEEN_SEC=120
+RECOVERY_WAIT_SEC=300
 NODE_KILL_SCRIPT="${SCRIPT_DIR}/_lib/hcc-node-kill.sh"
 NODE_KILL_PATH="/tmp/e2e-hcc-node-kill-${RUN_LABEL}.sh"
 
@@ -644,7 +650,7 @@ copy_node_kill_script() {
 kill_hcc() {
   local kill_mode=$1 out="${EVIDENCE_DIR}/kill-$((KILLS + 1)).log" pid rc
   : >"$out"
-  "$MINIKUBE_BIN" -p "$E2E_KUBECONTEXT" ssh -- sudo sh "$NODE_KILL_PATH" "$kill_mode" 90 >"$out" 2>&1 &
+  "$MINIKUBE_BIN" -p "$E2E_KUBECONTEXT" ssh -- sudo sh "$NODE_KILL_PATH" "$kill_mode" "$KILL_WATCH_SEC" >"$out" 2>&1 &
   pid=$!
   if [ "$kill_mode" = mid-pass ]; then
     wait_until 30 "node watcher to arm" grep -q '^ARMED' "$out" || { kill "$pid"; return 2; }
@@ -730,9 +736,9 @@ wait_until 420 "fixture ${ACTIVE_HOST} runtime-token bootstrap to be consumed" f
 #    (runtime or GFS) expires inside the run window, so a rotation during the
 #    run is a defect and never a scheduled one.
 if [ "$MODE" = idle ]; then
-  RUN_WINDOW_SEC=$((600 + SETTLE_SEC + 60))
+  RUN_WINDOW_SEC=$((RECOVERY_WAIT_SEC + SETTLE_SEC + 60))
 else
-  RUN_WINDOW_SEC=$((MID_PASS_ATTEMPTS * (30 + 90 + 120 + 180) + 600 + SETTLE_SEC + 60))
+  RUN_WINDOW_SEC=$((MID_PASS_ATTEMPTS * (KILL_WATCH_SEC + RESTART_WAIT_SEC + RECOVERY_BETWEEN_SEC) + RECOVERY_WAIT_SEC + SETTLE_SEC + 60))
 fi
 tokens_clear_of_run_window() {
   kctl get secrets -n "$HOST_NS" -o json | python3 -I -c '
@@ -754,11 +760,11 @@ for item in json.load(sys.stdin)["items"]:
         if due <= horizon:
             print("%s %s at %s" % (name, key, raw), file=sys.stderr)
             sys.exit(1)
-sys.exit(0 if seen > 0 else 1)' "$(( $(date +%s) + RUN_WINDOW_SEC ))"
+sys.exit(0 if seen > 0 else 1)' "$(( $(date +%s) + RUN_WINDOW_SEC ))" 2>"${EVIDENCE_DIR}/token-window.reason"
 }
 wait_until $((RUN_WINDOW_SEC + 420)) "no token expiring inside the ${RUN_WINDOW_SEC} s run window" \
   tokens_clear_of_run_window ||
-  die "a runtime or GFS token still expires inside the ${RUN_WINDOW_SEC} s run window"
+  die "a runtime or GFS token still expires inside the ${RUN_WINDOW_SEC} s run window: $(cat "${EVIDENCE_DIR}/token-window.reason")"
 
 # 3. The cadence change and restore above are ordinary HCC rollouts. Let more
 #    than mcp-host's staleness bound pass after them; a Host that revokes its
@@ -803,7 +809,7 @@ else
     rc=0
     kill_hcc mid-pass || rc=$?
     [ "$rc" = 0 ] || die "mid-pass kill attempt ${attempt} failed (rc=${rc})"
-    wait_until 120 "HCC container restart after attempt ${attempt}" \
+    wait_until "$RESTART_WAIT_SEC" "HCC container restart after attempt ${attempt}" \
       hcc_restarted_past "$HCC_POD" "$((HCC_RESTARTS_BEFORE + KILLS - 1))" ||
       die "HCC did not restart after attempt ${attempt}"
     previous="$(last_pass_event "$HCC_POD" previous)"
@@ -812,7 +818,7 @@ else
       achieved=1
       break
     fi
-    wait_until 180 "HCC ready before the next attempt" request_lane_ready_now ||
+    wait_until "$RECOVERY_BETWEEN_SEC" "HCC ready before the next attempt" request_lane_ready_now ||
       die "HCC request lane did not recover between attempts"
   done
   if [ "$achieved" = 1 ]; then
@@ -825,11 +831,11 @@ fi
 # ─── Recovery witnesses ───────────────────────────────────────────────
 header "Recovery witnesses"
 READY_EPOCH=""
-if wait_until 600 "HCC request lane after the kill" request_lane_ready_now; then
+if wait_until "$RECOVERY_WAIT_SEC" "HCC request lane after the kill" request_lane_ready_now; then
   READY_EPOCH="$(date +%s)"
   ok "HCC request lane ready $((READY_EPOCH - KILL_EPOCH)) s after the first kill"
 else
-  fail "HCC request lane not ready within 600 s of the kill"
+  fail "HCC request lane not ready within ${RECOVERY_WAIT_SEC} s of the kill"
 fi
 HCC_POD="$(hcc_pod)" || die "no running HCC pod after recovery"
 if [ "$(hcc_pod_uid "$HCC_POD")" = "$HCC_UID" ] &&
