@@ -811,6 +811,9 @@ jobs:
       - name: Test HCC watch-recovery gate coordination
         run: bash scripts/tests/test-hcc-watch-recovery-gate.sh
 
+      - name: Test the continuity lane's Host log-window coverage helper
+        run: bash scripts/tests/test-hcc-host-log-window.sh
+
       - name: Test autoresearch gate wrappers
         run: bash scripts/tests/test-autoresearch-gates.sh
 

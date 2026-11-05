@@ -365,6 +365,12 @@ in milliseconds. At the default 30000 ms interval the minimum is 101000 ms. The
 poll interval must also be a positive whole number of milliseconds; a
 non-numeric value now stops startup instead of polling every millisecond.
 
+The rule also caps the poll interval. With the default
+`HCC_AUTHORITY_MAX_STALENESS_MS` (180000 ms) the poll interval may be at most
+56333 ms. A larger interval needs a larger bound, up to the 600000 ms cap, which
+allows intervals up to 196333 ms. The general ceiling is
+`floor((bound − 10000 − 1000) / (1 + 2))` for intervals of at least 10000 ms.
+
 The 101000 ms floor is a validity check, not a recommended value. Keep the
 180000 ms default, which absorbs four missed polls: HCC outages longer than two
 polls have been observed. The minikube `mcp-host-config` set `60000` before this

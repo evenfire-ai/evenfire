@@ -785,7 +785,9 @@ In cluster mode `HCC_AUTHORITY_MAX_STALENESS_MS` (default 180 s, operator-tunabl
 up to a 600 s hard ceiling) must absorb two missed HCC polls:
 `staleness >= interval + 2 × max(interval, request timeout) + request timeout + 1 s`,
 with the 10 s inventory request timeout. That is 101 s at the 30 s interval; the
-180 s default absorbs four missed polls. mcp-host rejects a pair that breaks the
+180 s default absorbs four missed polls and allows a poll interval of at most
+56333 ms (see the [upgrade note](../deploy/releases-and-upgrades.md#mcp-host-authority-staleness-floor)).
+mcp-host rejects a pair that breaks the
 rule, or a non-numeric interval, at startup rather than letting a short HCC
 restart revoke a healthy MCP fleet (issue #1350). The staleness window governs only the
 `unavailable` failure class (HCC unreachable / 5xx): it is sized to absorb a
@@ -843,7 +845,7 @@ The HTTP response is held open until the agent finishes processing. The response
 | `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                                                                                                                                       |
 | `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                                                                                                                                             |
 | `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                                                                                                                                                     |
-| `HCC_AUTHORITY_MAX_STALENESS_MS`      | `180000`         | Max retained HCC authority while HCC is unreachable (ms); operator-tunable, hard-capped at 600000; in cluster mode at least interval + 2 × max(interval, 10000) + 10000 + 1000 (101000 at the default interval), or startup fails (issues #425, #1350) |
+| `HCC_AUTHORITY_MAX_STALENESS_MS`      | `180000`         | Max retained HCC authority while HCC is unreachable (ms); operator-tunable, hard-capped at 600000; in cluster mode at least interval + 2 × max(interval, 10000) + 10000 + 1000 (101000 at the default interval; with the 180000 default the interval may be at most 56333), or startup fails (issues #425, #1350) |
 | `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"`                                                                                                                        |
 | `CLERUM_MODEL_NAME`                   | provider default | Specific model name; used only with `CLERUM_MODEL_PROVIDER`                                                                                                            |
 | `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                                                                                                                                                  |

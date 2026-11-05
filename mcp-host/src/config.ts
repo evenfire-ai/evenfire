@@ -649,7 +649,7 @@ export const HCC_AUTHORITY_SCHEDULING_ALLOWANCE_MS = 1_000
 /** Consecutive failed HCC inventory polls a healthy MCP fleet must survive. */
 export const HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS = 2
 /** Hard upper bound applied to HCC_AUTHORITY_MAX_STALENESS_MS before validation. */
-const HCC_AUTHORITY_MAX_STALENESS_CEILING_MS = 600_000 // 10 min
+export const HCC_AUTHORITY_MAX_STALENESS_CEILING_MS = 600_000 // 10 min
 
 function assertPositiveSafeIntegerMs(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -881,7 +881,9 @@ const contextMapperPollInterval = parseInt(
 // sooner" stops at the floor enforced by validateHccAuthorityTiming: the bound must
 // absorb HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS (2) failed polls, which is
 // 101000ms at the 30s poll interval. The floor is a validity check, not a
-// recommended value; the 180s default absorbs 4 missed polls.
+// recommended value; the 180s default absorbs 4 missed polls. With the 180s
+// default the poll interval may be at most 56333ms (196333ms at the 600s cap);
+// see docs/deploy/releases-and-upgrades.md, "mcp-host authority staleness floor".
 const hccAuthorityMaxStalenessMs = Math.min(
   getEnvNumber('HCC_AUTHORITY_MAX_STALENESS_MS', 180_000),
   HCC_AUTHORITY_MAX_STALENESS_CEILING_MS

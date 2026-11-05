@@ -113,6 +113,9 @@ source "${SCRIPT_DIR}/_lib/hcc-ready-series.sh"
 # shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-lock.sh
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
+# shellcheck source=scripts/e2e/_lib/host-log-window.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_lib/host-log-window.sh"
 
 usage() { echo "usage error: $*" >&2; exit 2; }
 die() { echo -e "${RED}FATAL${NC} — $*" >&2; exit 1; }
@@ -1346,10 +1349,11 @@ now="$(date +%s)"
 [ "$now" -ge "$settle_until" ] || sleep $((settle_until - now))
 since_restore="$(date -u -r "$CADENCE_RESTORED_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
 for host in "$SOURCE_HOST" "$ACTIVE_HOST"; do
-  # A failed read must abort, never count as zero revocations (the same rule as C7).
+  # A failed or incomplete read must abort, never count as zero revocations (the
+  # same rule as C7): the read must cover the only Host process of the window.
   settle_log="${EVIDENCE_DIR}/settle-host-${host}.log"
-  kctl logs "deployment/${host}" -n "$HOST_NS" --all-containers=true --since-time="$since_restore" >"$settle_log" ||
-    die "precondition: could not read ${host} logs since the setup's HCC rollout"
+  read_host_log_window "$host" "$CADENCE_RESTORED_EPOCH" "$settle_log" ||
+    die "precondition: could not prove a complete read of ${host} logs since the setup's HCC rollout (${since_restore})"
   if grep -qE 'MCP authority revoked|Removed server' "$settle_log"; then
     die "precondition: ${host} revoked or removed MCP servers after the setup's HCC rollout ($(grep -cE 'MCP authority revoked|Removed server' "$settle_log") line(s)); see ${settle_log}"
   fi
@@ -1534,8 +1538,8 @@ done <"${EVIDENCE_DIR}/compare.log"
 since="$(date -u -r "$KILL_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
 for host in "$SOURCE_HOST" "$ACTIVE_HOST"; do
   host_log="${EVIDENCE_DIR}/host-${host}.log"
-  kctl logs "deployment/${host}" -n "$HOST_NS" --all-containers=true --since-time="$since" >"$host_log" ||
-    { fail "C7 could not read ${host} logs"; continue; }
+  read_host_log_window "$host" "$KILL_EPOCH" "$host_log" ||
+    { fail "C7 could not prove a complete read of ${host} logs since the kill (${since})"; continue; }
   if grep -qE 'MCP authority revoked|Removed server' "$host_log"; then
     fail "C7 ${host} revoked or removed MCP servers after the kill: $(grep -cE 'MCP authority revoked|Removed server' "$host_log") line(s)"
   else

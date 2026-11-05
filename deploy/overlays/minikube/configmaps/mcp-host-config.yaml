@@ -18,7 +18,8 @@ data:
   # must satisfy validateHccAuthorityTiming: staleness >= interval
   # + 2 x max(interval, 10s request timeout) + 10s + 1s, which is 101000 at a 30s
   # interval. Otherwise every Host runtime refuses to start. 180000 absorbs four
-  # missed HCC polls. See issues #425 and #1350.
+  # missed HCC polls and allows a poll interval of at most 56333 (196333 at the
+  # 600000 cap). See issues #425 and #1350.
   HCC_AUTHORITY_MAX_STALENESS_MS: '180000'
   MCP_PROXY_URL: 'http://mcp-proxy.mcp-server.svc.cluster.local:8083'
   CLERUM_AGENT_TASK_DELAY: '3'

@@ -200,6 +200,17 @@ when 'authority-staleness-60s', 'poll-interval-60s'
   data = host_config.fetch('data')
   abort("fixture source mcp-host-config has no #{key}") unless data.key?(key)
   data[key] = '60000'
+when 'authority-staleness-below-rule'
+  host_config = documents.find do |document|
+    document['kind'] == 'ConfigMap' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host-config'
+  end
+  abort('fixture source is missing mcp-host/mcp-host-config') unless host_config
+  data = host_config.fetch('data')
+  abort('fixture source mcp-host-config has no HCC_AUTHORITY_MAX_STALENESS_MS') unless data.key?('HCC_AUTHORITY_MAX_STALENESS_MS')
+  # One millisecond below the two-missed-poll floor at the 30000ms interval.
+  data['HCC_AUTHORITY_MAX_STALENESS_MS'] = '100999'
 else
   abort("unknown fixture mutation: #{mutation}")
 end
@@ -312,3 +323,27 @@ assert_rejected \
   "${poll_interval_60s}" \
   'NP-08 render contract: CLERUM_CONTEXT_MAPPER_POLL_INTERVAL must be "30000"' \
   'mcp-host context mapper poll interval of 60000ms'
+
+# #1338 L6: the rule itself, computed from mcp-host/src/config.ts. 101000 below
+# is produced by the contract's computation, not typed into it.
+authority_staleness_below_rule="${tmpdir}/authority-staleness-below-rule.yaml"
+mutate_render authority-staleness-below-rule "${authority_staleness_below_rule}"
+assert_rejected \
+  "${authority_staleness_below_rule}" \
+  '+ 10000 + 1000 = 101000ms; got HCC_AUTHORITY_MAX_STALENESS_MS=100999 and CLERUM_CONTEXT_MAPPER_POLL_INTERVAL=30000' \
+  'mcp-host authority staleness one millisecond below the rule'
+
+# A source whose request timeout grows to 60000ms makes the shipped
+# 180000/30000 pair break the rule; the contract must follow the source.
+slow_request_source="${tmpdir}/config-request-timeout-60s.ts"
+RUBYOPT=--disable=gems ruby -e '
+  source, destination = ARGV
+  text = File.read(source, encoding: "UTF-8")
+  pattern = /^export const CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = [0-9_]+$/
+  abort("fixture: expected exactly one CONTEXT_MAPPER_REQUEST_TIMEOUT_MS in #{source}") unless text.scan(pattern).length == 1
+  File.write(destination, text.sub(pattern, "export const CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = 60_000"))
+' "${ROOT}/mcp-host/src/config.ts" "${slow_request_source}"
+NP08_MCP_HOST_CONFIG_SOURCE="${slow_request_source}" assert_rejected \
+  "${SOURCE_RENDER}" \
+  '+ 60000 + 1000 = 211000ms; got HCC_AUTHORITY_MAX_STALENESS_MS=180000 and CLERUM_CONTEXT_MAPPER_POLL_INTERVAL=30000' \
+  'the shipped authority pair under a 60000ms request timeout'
