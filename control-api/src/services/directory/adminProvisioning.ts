@@ -241,7 +241,8 @@ export async function provisionMemberFromAdmin(input: {
       `SELECT id, email, name
          FROM users
         WHERE lower(email) = lower($1)
-        LIMIT 1`,
+        LIMIT 1
+        FOR NO KEY UPDATE`,
       [admin.email]
     )
     let created = false

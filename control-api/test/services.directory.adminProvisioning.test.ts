@@ -377,6 +377,20 @@ describe('provisionMemberFromAdmin', () => {
       seedPassword: true,
     })
 
+    // Users before profiles, the order Google login uses: the existing user is
+    // locked before the profile upsert, which precedes the password write.
+    const statements = dbMocks.txQuery.mock.calls.map(([sql]) => String(sql))
+    const userRead = statements.findIndex(
+      sql => sql.includes('FROM users') && sql.includes('lower(email) = lower($1)')
+    )
+    const profileUpsert = statements.findIndex(sql => sql.includes('INSERT INTO profiles'))
+    const passwordWrite = statements.findIndex(
+      sql => sql.includes('UPDATE users') && sql.includes('SET password_hash = $2')
+    )
+    expect(userRead).toBeGreaterThanOrEqual(0)
+    expect(statements[userRead]).toContain('FOR NO KEY UPDATE')
+    expect(profileUpsert).toBeGreaterThan(userRead)
+    expect(passwordWrite).toBeGreaterThan(profileUpsert)
     expect(userSessionMocks.revokeAll).toHaveBeenCalledWith(
       'user-1',
       'password_changed',

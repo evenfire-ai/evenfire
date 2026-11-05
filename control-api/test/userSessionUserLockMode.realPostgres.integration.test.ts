@@ -78,9 +78,9 @@ const CASE_TIMEOUT_MS = 40_000
 
 // Statements the cases wait on, matched against pg_stat_activity.query.
 const SESSION_USER_LOCK = /SELECT id FROM users WHERE id = \$1 FOR NO KEY UPDATE/
-// Single-line on purpose: the multi-line password-setup lock never matches it.
-const ACCEPTANCE_USER_LOCK =
-  /SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version FROM users WHERE id = \$1 FOR NO KEY UPDATE/
+// ensureInvitationUser's locked lookup by email: an acceptance takes its first
+// user lock here, before the profile insert.
+const USER_EMAIL_LOCK = /FROM users\s+WHERE email = \$1\s+LIMIT 1\s+FOR NO KEY UPDATE/
 const CREDENTIAL_USER_LOCK = /FROM users[\s\S]*password_hash = \$3[\s\S]*FOR NO KEY UPDATE/
 const LIFECYCLE_UPDATE = /UPDATE users SET lifecycle_version = lifecycle_version \+ 1/
 const USER_DELETE = /DELETE FROM users WHERE id = \$1/
@@ -544,7 +544,7 @@ describeRealPostgres('session user-row lock mode on real PostgreSQL', () => {
         // Witness: the acceptance reached its user lock. With the old order it
         // would hold the team_members row here, before waiting on the user.
         const acceptance = track(pending, accept(flowToken, user.email))
-        await waitForWaitingStatement(ACCEPTANCE_USER_LOCK)
+        await waitForWaitingStatement(USER_EMAIL_LOCK)
         await gate.query('COMMIT')
 
         const exchanged = await exchange
@@ -636,7 +636,7 @@ describeRealPostgres('session user-row lock mode on real PostgreSQL', () => {
         await beginRetirement(gate, user.userId)
         const gatePid = await backendPid(gate)
         const acceptance = track(pending, accept(flowToken, user.email))
-        await waitForWaitingStatement(ACCEPTANCE_USER_LOCK, gatePid)
+        await waitForWaitingStatement(USER_EMAIL_LOCK, gatePid)
         await gate.query('COMMIT')
 
         const settled = await acceptance
@@ -667,8 +667,12 @@ describeRealPostgres('session user-row lock mode on real PostgreSQL', () => {
   // Users before invitations: a replay waits on the user row without holding
   // the accepted invitation that a user delete (ON DELETE SET NULL) or a
   // Google login (accepted_user_id backfill) writes after locking the user.
+  // After the delete commits, the replay's locked email read finds no row, so
+  // ensureInvitationUser creates a new user with the same email and the replay
+  // backfills accepted_user_id with it: the same result as a delete followed by
+  // a replay, now reached concurrently as well.
   it(
-    'a replayed acceptance and a user delete do not deadlock',
+    'a replayed acceptance waiting on a user delete recreates the user and backfills the invitation without deadlock',
     async () => {
       const user = await seedUser('replay-delete')
       const { flowToken, invitationId } = await seedAcceptedInvitation(user, 'replay-delete')
@@ -680,20 +684,32 @@ describeRealPostgres('session user-row lock mode on real PostgreSQL', () => {
         await gate.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [user.userId])
         const gatePid = await backendPid(gate)
         const acceptance = track(pending, accept(flowToken, user.email))
-        await waitForWaitingStatement(ACCEPTANCE_USER_LOCK, gatePid)
+        await waitForWaitingStatement(USER_EMAIL_LOCK, gatePid)
         const deleted = await gate.query(`DELETE FROM users WHERE id = $1`, [user.userId])
         expect(deleted.rowCount).toBe(1)
         await gate.query('COMMIT')
 
         const settled = await acceptance
         if (!('value' in settled)) throw settled.error
-        expect(settled.value.status, JSON.stringify(settled.value.body)).toBe(404)
-        expect(settled.value.body).toEqual({ error: 'not_found' })
+        expect(settled.value.status, JSON.stringify(settled.value.body)).toBe(200)
+        expect(settled.value.body).toMatchObject({
+          accepted: true,
+          userId: expect.any(String),
+          replay: true,
+        })
+        expect(settled.value.body).not.toHaveProperty('token')
+        const newUserId = (settled.value.body as { userId: string }).userId
+        expect(newUserId).not.toBe(user.userId)
         const state = await databasePool.query<{ accepted_user_id: string | null }>(
           `SELECT accepted_user_id FROM invitations WHERE id = $1`,
           [invitationId]
         )
-        expect(state.rows).toEqual([{ accepted_user_id: null }])
+        expect(state.rows).toEqual([{ accepted_user_id: newUserId }])
+        const users = await databasePool.query<{ id: string }>(
+          `SELECT id::text AS id FROM users WHERE email = $1`,
+          [user.email]
+        )
+        expect(users.rows).toEqual([{ id: newUserId }])
       } finally {
         await settle([gate], pending)
       }
@@ -724,7 +740,7 @@ describeRealPostgres('session user-row lock mode on real PostgreSQL', () => {
         )
         const gatePid = await backendPid(gate)
         const acceptance = track(pending, accept(flowToken, user.email))
-        await waitForWaitingStatement(ACCEPTANCE_USER_LOCK, gatePid)
+        await waitForWaitingStatement(USER_EMAIL_LOCK, gatePid)
         await gate.query(
           `UPDATE invitations
               SET accepted_user_id = COALESCE(accepted_user_id, $2)
@@ -748,6 +764,73 @@ describeRealPostgres('session user-row lock mode on real PostgreSQL', () => {
           [invitationId]
         )
         expect(state.rows).toEqual([{ accepted_user_id: user.userId }])
+      } finally {
+        await settle([gate], pending)
+      }
+    },
+    CASE_TIMEOUT_MS
+  )
+
+  // Users before profiles: an existing user may have no profile row. Google
+  // login locks the user (UPDATE users) and then inserts the profile; an
+  // acceptance that inserted the profile before locking the user would hold
+  // the uncommitted profiles(user_id) key that login waits on while it waits
+  // on the user row login holds.
+  it(
+    'an acceptance for an existing user without a profile and a Google login do not deadlock',
+    async () => {
+      const user = await seedUser('profile-login')
+      const teamId = randomUUID()
+      await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'profile-login')`, [teamId])
+      const { flowToken, invitationId } = await seedInvitation(user.email, teamId, 'member')
+      const profilesBefore = await databasePool.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM profiles WHERE user_id = $1`,
+        [user.userId]
+      )
+      expect(profilesBefore.rows).toEqual([{ count: 0 }])
+
+      const gate = await databasePool.connect()
+      const pending: Promise<unknown>[] = []
+      try {
+        await gate.query('BEGIN')
+        // The literal statements of googleLoginData (login.ts), in their order.
+        await gate.query(
+          `UPDATE users
+              SET name = COALESCE($2, name),
+                  picture = COALESCE($3, picture),
+                  updated_at = NOW()
+            WHERE email = $1
+          RETURNING id, email, name, picture, lifecycle_version`,
+          [user.email, 'profile-login', null]
+        )
+        const gatePid = await backendPid(gate)
+        const acceptance = track(pending, accept(flowToken, user.email))
+        // Witness: the acceptance waits on the user lock before it inserts the
+        // profile. With the old order it inserts the profile and waits on the
+        // by-id user lock instead, and this wait times out.
+        await waitForWaitingStatement(USER_EMAIL_LOCK, gatePid)
+        await gate.query(
+          `INSERT INTO profiles(user_id, display_name)
+           VALUES($1, $2)
+           ON CONFLICT (user_id) DO NOTHING`,
+          [user.userId, 'profile-login']
+        )
+        await gate.query('COMMIT')
+
+        const settled = await acceptance
+        if (!('value' in settled)) throw settled.error
+        expect(settled.value.status, JSON.stringify(settled.value.body)).toBe(200)
+        expect(settled.value.body).toMatchObject({ accepted: true, userId: user.userId })
+        const state = await databasePool.query<{
+          status: string
+          accepted_user_id: string | null
+        }>(`SELECT status, accepted_user_id FROM invitations WHERE id = $1`, [invitationId])
+        expect(state.rows).toEqual([{ status: 'accepted', accepted_user_id: user.userId }])
+        const profiles = await databasePool.query<{ count: number }>(
+          `SELECT count(*)::int AS count FROM profiles WHERE user_id = $1`,
+          [user.userId]
+        )
+        expect(profiles.rows).toEqual([{ count: 1 }])
       } finally {
         await settle([gate], pending)
       }

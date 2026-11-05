@@ -539,10 +539,11 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     expect(await invitationState(pending.id)).toMatchObject({ status: 'revoked' })
   })
 
-  // INV-6: the consuming UPDATE's own predicates refuse a revoked or expired
-  // row even when no caller refusal ran first; both callers refuse those
-  // states earlier, so only a direct call observes the predicates.
-  it('consumes only a pending, unexpired invitation in the single-use transition', async () => {
+  // INV-6: the consuming UPDATE's own predicates refuse a revoked, expired or
+  // password-reset row even when no caller refusal ran first; both callers
+  // refuse those rows earlier, so only a direct call observes the predicates
+  // (status = 'pending', purpose <> 'password_reset', expires_at > NOW()).
+  it('consumes only a pending, unexpired member invitation in the single-use transition', async () => {
     const consume = async (label: string, options: Parameters<typeof createInvitation>[0]) => {
       const invitation = await createInvitation(options)
       const user = await holder.pool.query<{ id: string }>(
@@ -587,6 +588,12 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     expect(expired.after).toEqual(expired.before)
     expect(expired.after).toEqual({ status: 'pending', accepted_user_id: null, accepted_at: null })
     await expect(memberships(expired.userId)).resolves.toEqual([])
+
+    const reset = await consume('inv6-reset', { label: 'inv6-reset', purpose: 'password_reset' })
+    expect(reset.consumed).toBe(false)
+    expect(reset.after).toEqual(reset.before)
+    expect(reset.after).toEqual({ status: 'pending', accepted_user_id: null, accepted_at: null })
+    await expect(memberships(reset.userId)).resolves.toEqual([])
   })
 
   it('writes one membership when two acceptances overlap behind a held invitation row', async () => {

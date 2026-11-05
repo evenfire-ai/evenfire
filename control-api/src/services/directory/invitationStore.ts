@@ -169,6 +169,20 @@ export async function lockInvitationUserForPasswordSetup(
   return (result.rows[0] as InvitationUserRow | undefined) ?? null
 }
 
+/**
+ * Returns the invitation user for `email`, locked for the rest of the
+ * caller's transaction, and makes sure it has a profile row.
+ *
+ * The existing user is read `FOR NO KEY UPDATE`; a user this call inserts is
+ * already held by the inserting transaction. The profile insert therefore runs
+ * with the user lock held, in the same users -> profiles order as Google login
+ * (`login.ts`). The reverse order deadlocks: login holds the user row lock and
+ * its `INSERT INTO profiles ... ON CONFLICT (user_id)` waits on this
+ * transaction's uncommitted `profiles(user_id)` key, while this transaction
+ * waits on the user row lock that login holds. The profile insert's foreign-key
+ * KEY SHARE lock on the user is not the conflict: it does not conflict with
+ * the NO KEY UPDATE lock that login's `UPDATE users` takes.
+ */
 export async function ensureInvitationUser(
   db: Pick<DbClient, 'query'>,
   email: string,
@@ -180,7 +194,8 @@ export async function ensureInvitationUser(
     `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
        FROM users
       WHERE email = $1
-      LIMIT 1`,
+      LIMIT 1
+      FOR NO KEY UPDATE`,
     [normalizedEmail]
   )
 
@@ -199,7 +214,8 @@ export async function ensureInvitationUser(
         `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
            FROM users
           WHERE email = $1
-          LIMIT 1`,
+          LIMIT 1
+          FOR NO KEY UPDATE`,
         [normalizedEmail]
       )
       user = (racedExisting.rows[0] as InvitationUserRow | undefined) || null

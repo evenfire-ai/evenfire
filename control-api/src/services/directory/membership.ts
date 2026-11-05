@@ -847,9 +847,9 @@ async function acceptInvitationInTransaction(
   const candidateRefusal = invitationAcceptanceRefusal(candidate, email)
   if (candidateRefusal) return { error: candidateRefusal }
 
-  // ensureInvitationUser may insert the user and its profile; a user it
-  // inserted is invisible to other transactions until commit. Only its id is
-  // used here.
+  // ensureInvitationUser locks the user before the profile insert (users ->
+  // profiles, the order Google login uses). This by-id read re-locks the row
+  // this transaction already holds and stays the authoritative lifecycle read.
   const ensured = await ensureInvitationUser(db, candidate.email, candidate.invitee_name)
   const locked = await db.query(
     `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version FROM users WHERE id = $1 FOR NO KEY UPDATE`,
