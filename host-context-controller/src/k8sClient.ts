@@ -39,8 +39,8 @@ import {
   createInfrastructureTelemetryReporter,
 } from './infrastructureTelemetryReporter'
 import { K8sGfsApi } from './k8s/gfsK8sApi'
-import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
+import { createWatcherK8sClients } from './k8s/watcherK8sClients'
 import { LlmHookReconciler, computePodKey, referencedHookIds } from './llmHookReconciler'
 import { hccLogger } from './logger'
 import type {
@@ -111,19 +111,7 @@ let kc: k8s.KubeConfig | null = null
 if (!config.devMode) {
   kc = new k8s.KubeConfig()
   kc.loadFromDefault()
-  // These clients serve McpServer/Context inventory reads, including reads on
-  // the keyed effect queues the NetworkPolicy pass waits on (#1338).
-  customObjectsApi = makeK8sApiClientWithDeadline(
-    kc,
-    k8s.CustomObjectsApi,
-    config.k8sRequestTimeoutMs
-  )
-  hostCustomObjectsApi = makeK8sApiClientWithDeadline(
-    kc,
-    k8s.CustomObjectsApi,
-    config.hostK8sRequestTimeoutMs
-  )
-  coreApi = makeK8sApiClientWithDeadline(kc, k8s.CoreV1Api, config.k8sRequestTimeoutMs)
+  ;({ customObjectsApi, hostCustomObjectsApi, coreApi } = createWatcherK8sClients(kc))
 }
 
 /**
@@ -319,7 +307,9 @@ type ActiveInitialConvergenceRun = {
 /** The keyed effect a NetworkPolicy pass is waiting on: queued behind other work, or running. */
 type NetworkPolicyPassEffect = {
   kind: 'context' | 'server'
-  key: string
+  // The Context id or McpServer name the effect is keyed on. Not called `key`:
+  // HostContextLogger redacts every field whose name contains "key".
+  name: string
   state: 'queued' | 'running'
   sinceMs: number
 }
@@ -3513,7 +3503,7 @@ export class McpServerWatcher implements McpServerProvider {
           ? null
           : {
               kind: effect.kind,
-              key: effect.key,
+              name: effect.name,
               state: effect.state,
               seconds: Math.round((now - effect.sinceMs) / 1000),
             },
@@ -3537,10 +3527,10 @@ export class McpServerWatcher implements McpServerProvider {
   private trackNetworkPolicyPassEffect(
     progress: NetworkPolicyPassProgress,
     kind: NetworkPolicyPassEffect['kind'],
-    key: string,
+    name: string,
     enqueue: (markRunning: () => void) => Promise<void>
   ): Promise<void> {
-    const effect: NetworkPolicyPassEffect = { kind, key, state: 'queued', sinceMs: Date.now() }
+    const effect: NetworkPolicyPassEffect = { kind, name, state: 'queued', sinceMs: Date.now() }
     progress.pendingEffect = effect
     return enqueue(() => {
       effect.state = 'running'

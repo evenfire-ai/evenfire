@@ -314,12 +314,13 @@ describe('NetworkPolicy orphan sweep cap (#478)', () => {
     })
 
     expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
-    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+    expect(
+      mockApi.deleteNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+    ).not.toContainEqual(
       expect.objectContaining({
         name: 'ext-egress-orphan-server-old-example-com-443',
         namespace: 'mcp-server',
-      }),
-      expect.anything()
+      })
     )
     expect(netPolOrphanSweepCappedTotal.inc).toHaveBeenCalledWith({ reason: 'absolute' })
     expect(netPolOrphansDeletedTotal.inc).not.toHaveBeenCalled()

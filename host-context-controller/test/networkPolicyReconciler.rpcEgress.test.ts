@@ -203,12 +203,13 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
       },
       expect.objectContaining({ middlewareMergeStrategy: 'append' })
     )
-    expect(mockNetApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+    expect(
+      mockNetApi.deleteNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+    ).not.toContainEqual(
       expect.objectContaining({
         name: 'rpc-egress-ctx-delta-mongodb-mcp',
         namespace: 'rpc-proxy',
-      }),
-      expect.anything()
+      })
     )
   })
 

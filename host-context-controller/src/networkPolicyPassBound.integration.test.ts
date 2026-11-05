@@ -17,7 +17,6 @@ import * as http from 'http'
 import { NETPOL_PASS_OVERRUN_WARN_MS } from './constants'
 import { K8sRequestTimeoutError } from './k8s/k8sRequestDeadline'
 import { McpServerWatcher } from './k8sClient'
-import { hccLogger } from './logger'
 import { registry } from './metrics'
 import {
   resolveHostAuthoritativeFn,
@@ -52,7 +51,9 @@ vi.mock('./config', () => ({
     port: 0,
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
     hostK8sRequestTimeoutMs: 30_000,
-    k8sRequestTimeoutMs: 30_000,
+    // Longer than the hard limit, so a held request in the fake-clock tests
+    // below stays pending instead of ending at its own deadline.
+    k8sRequestTimeoutMs: 2 * 60 * 60_000,
     netPolPassHardLimitMs: 30 * 60_000,
     hostResyncIntervalSec: 0,
     externalEgressResyncIntervalSec: 0,
@@ -116,13 +117,20 @@ const alphaContext = {
   spec: { contextId: 'alpha', mcpServers: [] },
 }
 
-type LogEntry = { level: 'info' | 'warn' | 'error'; message: string; fields: any }
+type LogEntry = { level: string; message: string; fields: any }
 
+/**
+ * Capture the lines HostContextLogger actually prints. Its `sanitize` step
+ * redacts field names such as `key`, so assertions must read the serialized
+ * output, not the arguments passed to `hccLogger.*`.
+ */
 function captureLogs(): LogEntry[] {
   const entries: LogEntry[] = []
-  for (const level of ['info', 'warn', 'error'] as const) {
-    vi.spyOn(hccLogger, level).mockImplementation((message: string, fields?: any) => {
-      entries.push({ level, message, fields })
+  for (const method of ['log', 'warn', 'error'] as const) {
+    vi.spyOn(console, method).mockImplementation((line?: unknown) => {
+      if (typeof line !== 'string' || !line.startsWith('{')) return
+      const fields = JSON.parse(line)
+      entries.push({ level: fields.level, message: fields.msg, fields })
     })
   }
   return entries
@@ -310,7 +318,7 @@ describe('#1338: a NetworkPolicy pass that outlives its bound', () => {
         phase: 'context-revocation',
         pendingEffect: {
           kind: 'context',
-          key: 'alpha',
+          name: 'alpha',
           state: 'queued',
           seconds: NETPOL_PASS_OVERRUN_WARN_MS / 1000,
         },
@@ -330,7 +338,7 @@ describe('#1338: a NetworkPolicy pass that outlives its bound', () => {
         passId: 1,
         elapsedSeconds: HARD_LIMIT_MS / 1000,
         phase: 'context-revocation',
-        pendingEffect: expect.objectContaining({ kind: 'context', key: 'alpha', state: 'queued' }),
+        pendingEffect: expect.objectContaining({ kind: 'context', name: 'alpha', state: 'queued' }),
       }),
     ])
     expect(
@@ -356,5 +364,88 @@ describe('#1338: a NetworkPolicy pass that outlives its bound', () => {
     expect(events(logs, 'networkpolicy-pass-overrun')).toEqual([])
     expect(events(logs, 'networkpolicy-pass-hard-limit')).toEqual([])
     expect(exitProcess).not.toHaveBeenCalled()
+  })
+
+  it('reports a pending effect as running when the effect itself is the wait', async () => {
+    const logs = captureLogs()
+    // One stale context-allow for `alpha` (it allows a server the Context no
+    // longer lists), so the pass must revoke it; that delete never answers.
+    const staleAllow = {
+      metadata: {
+        name: 'ctx-alpha-ghost',
+        namespace: 'mcp-server',
+        uid: 'ghost-uid',
+        resourceVersion: '7',
+        labels: {
+          'clerum.io/managed-by': 'host-context-controller',
+          'clerum.io/policy-type': 'context-allow',
+          'clerum.io/context': 'alpha',
+          'clerum.io/mcpserver': 'ghost',
+        },
+      },
+      spec: { podSelector: {}, policyTypes: ['Ingress'] },
+    }
+    mocks.listNamespacedNetworkPolicy.mockImplementation(
+      async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => ({
+        items:
+          namespace === 'mcp-server' && !(labelSelector ?? '').includes('external-egress')
+            ? [staleAllow]
+            : [],
+      })
+    )
+    mocks.deleteNamespacedNetworkPolicy.mockImplementation(() => new Promise(() => {}))
+    void watcher.runInitialNetworkPolicyConvergence({ cause: 'periodic-resync' })
+    await vi.waitFor(() => expect(mocks.deleteNamespacedNetworkPolicy).toHaveBeenCalled())
+    const startedAtMs: number = watcher.networkPolicyPassProgress.startedAtMs
+
+    await vi.advanceTimersByTimeAsync(startedAtMs + NETPOL_PASS_OVERRUN_WARN_MS - Date.now())
+    expect(events(logs, 'networkpolicy-pass-overrun')).toEqual([
+      expect.objectContaining({
+        passId: 1,
+        phase: 'context-revocation',
+        pendingEffect: expect.objectContaining({
+          kind: 'context',
+          name: 'alpha',
+          state: 'running',
+        }),
+      }),
+    ])
+    expect(exitProcess).not.toHaveBeenCalled()
+  })
+
+  it('disarms the bound when the watcher stops during a pass', async () => {
+    const logs = captureLogs()
+    holdAlphaContextQueue()
+    void watcher.runInitialNetworkPolicyConvergence({ cause: 'periodic-resync' })
+    await vi.waitFor(() => expect(mocks.listNamespacedNetworkPolicy).toHaveBeenCalled())
+    // Witness: the bound is armed for the running pass.
+    expect(watcher.networkPolicyPassWatchdog).not.toBeNull()
+
+    await watcher.stop()
+    expect(watcher.networkPolicyPassWatchdog).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(HARD_LIMIT_MS + NETPOL_PASS_OVERRUN_WARN_MS)
+    expect(events(logs, 'networkpolicy-pass-overrun')).toEqual([])
+    expect(events(logs, 'networkpolicy-pass-hard-limit')).toEqual([])
+    expect(exitProcess).not.toHaveBeenCalled()
+  })
+
+  it('reports every stage of an authoritative pass, in order', async () => {
+    const phases: string[] = []
+    await watcher.netPolReconciler.fullReconcile([alphaContext], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: () => {},
+      onPhase: (phase: string) => phases.push(phase),
+    })
+    expect(phases).toEqual([
+      'inventory-list',
+      'context-orphan-cleanup',
+      'context-revocation',
+      'server-orphan-cleanup',
+      'server-revocation',
+      'additive',
+    ])
   })
 })

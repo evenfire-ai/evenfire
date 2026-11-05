@@ -563,10 +563,9 @@ describe('NetworkPolicyReconciler', () => {
         expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalledWith(
           expect.objectContaining({ name: targetName })
         )
-        expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-          expect.objectContaining({ name: targetName }),
-          expect.anything()
-        )
+        expect(
+          mockApi.replaceNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+        ).not.toContainEqual(expect.objectContaining({ name: targetName }))
       }
     )
 
@@ -810,9 +809,10 @@ describe('NetworkPolicyReconciler', () => {
       })
 
       await expect(reconciler.ensureDefaultPolicies()).rejects.toThrow(/ownership/i)
-      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-        expect.objectContaining({ namespace: targetNamespace, name: targetName }),
-        expect.anything()
+      expect(
+        mockApi.deleteNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+      ).not.toContainEqual(
+        expect.objectContaining({ namespace: targetNamespace, name: targetName })
       )
     })
 
@@ -4180,10 +4180,9 @@ describe('NetworkPolicyReconciler', () => {
           })
         ).rejects.toThrow(/ownership/i)
 
-        expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-          expect.objectContaining({ namespace: targetNamespace }),
-          expect.anything()
-        )
+        expect(
+          mockApi.replaceNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+        ).not.toContainEqual(expect.objectContaining({ namespace: targetNamespace }))
         expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
       }
     )
@@ -5335,12 +5334,13 @@ describe('NetworkPolicyReconciler', () => {
 
       await reconciler.fullReconcile([], [], { serverInventoryComplete: false })
 
-      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect(
+        mockApi.deleteNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+      ).not.toContainEqual(
         expect.objectContaining({
           name: 'ext-egress-old-server-api-example-com-443',
           namespace: 'mcp-server',
-        }),
-        expect.anything()
+        })
       )
     })
 
@@ -5385,19 +5385,21 @@ describe('NetworkPolicyReconciler', () => {
         isCurrent: expect.any(Function),
       })
       expect(contextInventoryAuthoritative).toHaveBeenCalled()
-      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect(
+        mockApi.deleteNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+      ).not.toContainEqual(
         expect.objectContaining({
           name: 'ctx-deleted-context-old-server',
           namespace: 'mcp-server',
-        }),
-        expect.anything()
+        })
       )
-      expect(mockApi.listNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect(
+        mockApi.listNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+      ).not.toContainEqual(
         expect.objectContaining({
           namespace: 'rpc-proxy',
           labelSelector: expect.stringContaining('policy-type=rpc-proxy-egress'),
-        }),
-        expect.anything()
+        })
       )
     })
 
@@ -5441,12 +5443,13 @@ describe('NetworkPolicyReconciler', () => {
       })
 
       expect(serverInventoryAuthoritative).toHaveBeenCalled()
-      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect(
+        mockApi.deleteNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+      ).not.toContainEqual(
         expect.objectContaining({
           name: 'ext-egress-deleted-server-api-example-com-443',
           namespace: 'mcp-server',
-        }),
-        expect.anything()
+        })
       )
     })
 

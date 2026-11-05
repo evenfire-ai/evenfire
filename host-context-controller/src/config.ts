@@ -377,20 +377,20 @@ export function parseHeartbeatPollMs(raw: string | undefined): number {
   return parsed
 }
 
+// Node clamps a larger setTimeout delay to 1 ms, which would fire a deadline
+// or a hard limit immediately instead of never.
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
 export function parseHostK8sRequestTimeoutMs(raw: string | undefined): number {
   if (raw === undefined) return 30_000
   const parsed = Number(raw)
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
     throw new Error(
-      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer (milliseconds), got '${raw}'`
+      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds, got '${raw}'`
     )
   }
   return parsed
 }
-
-// Node clamps a larger setTimeout delay to 1 ms, which would fire a deadline
-// or a hard limit immediately instead of never.
-const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 export function parseK8sRequestTimeoutMs(raw: string | undefined): number {
   if (raw === undefined) return 30_000

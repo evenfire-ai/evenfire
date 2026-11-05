@@ -9,7 +9,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import * as http from 'node:http'
+import { BindingPolicyReconciler } from './bindingPolicyReconciler'
 import { K8S_REQUEST_TIMEOUT_CODE } from './k8s/k8sRequestDeadline'
+import { createWatcherK8sClients } from './k8s/watcherK8sClients'
 import { NetworkPolicyReconciler } from './networkPolicyReconciler'
 import { McpServerReconciler } from './reconciler'
 
@@ -135,5 +137,59 @@ describe('#1338 request deadlines on the NetworkPolicy pass path', () => {
       operation,
     })
     expect(seenPaths.some(seen => seen.includes(path))).toBe(true)
+  })
+
+  it.each([
+    [
+      'CustomObjectsApi.getNamespacedCustomObject',
+      (clients: any) =>
+        clients.customObjectsApi.getNamespacedCustomObject({
+          group: 'clerum.io',
+          version: 'v1alpha1',
+          namespace: 'mcp-server',
+          plural: 'mcpservers',
+          name: 'x',
+        }),
+      '/mcpservers/x',
+    ],
+    [
+      'CoreV1Api.readNamespacedSecret',
+      (clients: any) =>
+        clients.coreApi.readNamespacedSecret({ name: 'x', namespace: 'mcp-server' }),
+      '/secrets/x',
+    ],
+  ])('bounds the watcher shared client call %s', async (operation, call, path) => {
+    const clients = createWatcherK8sClients(await silentApiServer())
+    await expect(settleWithin(call(clients), DEADLINE_MS * 10)).rejects.toMatchObject({
+      code: K8S_REQUEST_TIMEOUT_CODE,
+      operation,
+      timeoutMs: DEADLINE_MS,
+    })
+    expect(seenPaths.some(seen => seen.includes(path))).toBe(true)
+  })
+
+  it('bounds the binding NetworkPolicy calls that run on the McpServer keyed queue', async () => {
+    const reconciler = new BindingPolicyReconciler(await silentApiServer(), 'mcp-server')
+    const cleanup = reconciler.cleanupBindings('recipe-x')
+
+    const failure = await settleWithin(cleanup, DEADLINE_MS * 10).then(
+      () => {
+        throw new Error('cleanupBindings resolved against an API server that never answers')
+      },
+      (error: unknown) => error
+    )
+    // cleanupBindings aggregates the per-namespace LIST failures.
+    expect(failure).toBeInstanceOf(AggregateError)
+    const causes = (failure as AggregateError).errors
+    expect(causes).toHaveLength(2)
+    for (const cause of causes) {
+      expect(cause).toMatchObject({
+        code: K8S_REQUEST_TIMEOUT_CODE,
+        operation: 'NetworkingV1Api.listNamespacedNetworkPolicy',
+        timeoutMs: DEADLINE_MS,
+      })
+    }
+    // Witness: both LISTs reached the API server.
+    expect(seenPaths.filter(path => path.includes('/networkpolicies'))).toHaveLength(2)
   })
 })

@@ -446,9 +446,10 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'ext-egress-classify-mcp-a.example.com-443' })
     )
-    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'ext-egress-classify-mcp-b.example.com-443' }),
-      expect.anything()
+    expect(
+      mockApi.deleteNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+    ).not.toContainEqual(
+      expect.objectContaining({ name: 'ext-egress-classify-mcp-b.example.com-443' })
     )
   })
 

@@ -18,6 +18,26 @@ afterEach(() => {
   vi.resetModules()
 })
 
+describe('HCC_HOST_K8S_REQUEST_TIMEOUT_MS', () => {
+  it('defaults to 30000 when unset', async () => {
+    const { config } = await loadConfig('HCC_HOST_K8S_REQUEST_TIMEOUT_MS', undefined)
+    expect(config.hostK8sRequestTimeoutMs).toBe(30_000)
+  })
+
+  it('accepts the timer maximum', async () => {
+    const { config } = await loadConfig('HCC_HOST_K8S_REQUEST_TIMEOUT_MS', '2147483647')
+    expect(config.hostK8sRequestTimeoutMs).toBe(2_147_483_647)
+  })
+
+  // Node clamps a larger timer delay to 1 ms, so every Host request would
+  // time out at once.
+  it.each(['2147483648', '0', ''])("fails configuration validation for '%s'", async raw => {
+    await expect(loadConfig('HCC_HOST_K8S_REQUEST_TIMEOUT_MS', raw)).rejects.toThrow(
+      'HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer'
+    )
+  })
+})
+
 describe('HCC_K8S_REQUEST_TIMEOUT_MS', () => {
   it('defaults to 30000 when unset', async () => {
     const { config } = await loadConfig('HCC_K8S_REQUEST_TIMEOUT_MS', undefined)
