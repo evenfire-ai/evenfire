@@ -1033,27 +1033,16 @@ export class AppService {
   }
 
   /**
-   * True only when `/me` declared the session ended: a 401 carrying the edge's
-   * `invalid_session` envelope. Any other answer (a bare 401, which is the edge's
-   * own service credential being refused, a 403, a 410, an outage) is no verdict
-   * on the session, so the session is kept.
+   * True when `/me` answered 401, 403 or 410: the session has ended. The current
+   * edge answers `/me` 401 only with its `invalid_session` envelope; an earlier
+   * edge answers an invalid or expired session token with a bare
+   * `401 {"error":"Unauthorized"}`. Both mean the session ended, so the body is
+   * not read. Any other failure (an outage, a 5xx) is no verdict on the session.
    */
   private static isSessionEndedByMe(error: unknown): boolean {
-    if (!(error instanceof ApiError) || error.status !== 401) return false
-    let body: unknown
-    try {
-      body = JSON.parse(error.bodyText)
-    } catch {
-      // A body that is not JSON is not the envelope: no verdict on the session.
-      return false
-    }
-    if (body === null || typeof body !== 'object' || !('error' in body)) return false
-    const envelope = body.error
     return (
-      typeof envelope === 'object' &&
-      envelope !== null &&
-      'code' in envelope &&
-      envelope.code === 'invalid_session'
+      error instanceof ApiError &&
+      (error.status === 401 || error.status === 403 || error.status === 410)
     )
   }
 
@@ -1633,7 +1622,7 @@ export class AppService {
   }
 
   /**
-   * Ends a session that `/me` declared ended with the `invalid_session` envelope.
+   * Ends a session that `/me` declared ended (`isSessionEndedByMe`).
    * A token that is no longer the committed one belongs to a session that was
    * already replaced, so it is left alone.
    */
@@ -1670,8 +1659,9 @@ export class AppService {
 
   /**
    * Asks `/me` whether the committed session is still valid after another call
-   * answered 401. Only `/me`'s `invalid_session` envelope ends the session; any
-   * other failure, a bare 401 included, gives no verdict and leaves it in place.
+   * answered 401. A 401, 403 or 410 from `/me` ends the session (any 401 body:
+   * see `isSessionEndedByMe`); any other failure gives no verdict and leaves it
+   * in place.
    */
   private async confirmCommittedSessionWithMe(): Promise<void> {
     const token = this.sessionToken
@@ -1957,8 +1947,9 @@ export class AppService {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
-        // Only `/me`'s session-ended envelope removes the saved token; any other
-        // restore failure signs this process out and keeps the token for the next start.
+        // A 401, 403 or 410 from `/me` ended the session and removes the saved token;
+        // any other restore failure signs this process out and keeps the token for
+        // the next start.
         if (AppService.isSessionEndedByMe(error)) {
           await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
             legacyEnvKeys: getActiveLegacyEnvKeys(),

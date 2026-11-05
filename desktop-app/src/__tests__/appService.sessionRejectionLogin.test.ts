@@ -23,7 +23,7 @@ vi.mock('../chatStoreBinding.js', () => ({
   unbindChatStore: vi.fn(),
 }))
 
-// The only /me answer that ends a session: the edge's invalid_session envelope.
+// The current edge's /me answer for an ended session: the invalid_session envelope.
 const sessionEnded = () =>
   new ApiError(
     '401 Unauthorized: invalid_session',

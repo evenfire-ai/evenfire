@@ -302,7 +302,12 @@ describe('GfsClient.grant', () => {
       throw new ApiError(
         '400 Bad Request: subjects_invalid',
         400,
-        JSON.stringify({ error: 'subjects_invalid', invalidIndexes: [0, 2] })
+        // control-api's sendGfsGrantError shape, relayed unchanged by the edge.
+        JSON.stringify({
+          error: 'subjects_invalid',
+          message: 'subjects_invalid',
+          invalidIndexes: [0, 2],
+        })
       )
     }) as GfsTransport['requestJson']
     await expect(
@@ -319,35 +324,6 @@ describe('GfsClient.grant', () => {
         'tok'
       )
     ).rejects.toThrow(/subjects_invalid invalidIndexes=\[0,2\]/)
-  })
-
-  it('surfaces typed public-envelope GFS details across the IPC error boundary', async () => {
-    const requestJson = vi.fn(async () => {
-      throw new ApiError(
-        '400 Bad Request: invalid_request - subjects_invalid - The request is not valid.',
-        400,
-        JSON.stringify({
-          error: {
-            code: 'invalid_request',
-            message: 'The request is not valid.',
-            correlationId: 'correlation-1',
-            retryable: false,
-            details: { reason: 'subjects_invalid', invalidIndexes: [0, 2] },
-          },
-        })
-      )
-    }) as GfsTransport['requestJson']
-
-    await expect(
-      new GfsClient(transport({ requestJson })).grant(
-        {
-          resourceId: RID,
-          subjects: [{ type: 'user', id: 'u2' }],
-          permissions: ['read'],
-        },
-        'tok'
-      )
-    ).rejects.toThrow(/subjects_invalid.*invalidIndexes=\[0,2\]/)
   })
 
   it('keeps a typed session-authority verdict classifiable after the real transport composes the IPC message', async () => {
@@ -477,27 +453,6 @@ describe('GfsClient.listGrants', () => {
         '429 Too Many Requests: Too Many Requests',
         429,
         JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 45 })
-      )
-    }) as GfsTransport['requestJson']
-    await expect(
-      new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
-    ).rejects.toThrow(/429 .*retryAfterSeconds=45/)
-  })
-
-  it('embeds retry guidance from the typed public envelope', async () => {
-    const requestJson = vi.fn(async () => {
-      throw new ApiError(
-        '429 Too Many Requests: rate_limited',
-        429,
-        JSON.stringify({
-          error: {
-            code: 'rate_limited',
-            message: 'Too many requests; retry later.',
-            correlationId: 'correlation-2',
-            retryable: true,
-            details: { retryAfterSeconds: 45 },
-          },
-        })
       )
     }) as GfsTransport['requestJson']
     await expect(

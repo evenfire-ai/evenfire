@@ -630,8 +630,11 @@ describe('AppService invitation configuration lookup', () => {
     )
   })
 
-  it('keeps a saved token when /me gives startup session restore no verdict', async () => {
-    const configPath = await createTempConfigPath('clerum-desktop-restore-forbidden')
+  async function restoreWithMeAnswer(
+    configPrefix: string,
+    answer: (apiError: { new (message: string, status: number, bodyText: string): Error }) => Error
+  ) {
+    const configPath = await createTempConfigPath(configPrefix)
     await fs.writeFile(
       configPath,
       JSON.stringify({
@@ -650,44 +653,63 @@ describe('AppService invitation configuration lookup', () => {
       import('../appService.js'),
       import('../httpClient.js'),
     ])
-    // A bare 401 (the edge's service credential), a 403 and a 410 are not the
-    // session-ended envelope: this start signs out but keeps the saved token.
-    for (const answer of [
-      new ApiError('401 Unauthorized', 401, '{"error":"Unauthorized"}'),
-      new ApiError('403 Forbidden', 403, ''),
-      new ApiError('410 Gone', 410, ''),
-    ]) {
-      const clearSessionToken = vi.fn().mockResolvedValue(undefined)
-      const getMe = vi.fn().mockRejectedValue(answer)
-      const service = new AppService() as unknown as {
-        authClient: { getMe: ReturnType<typeof vi.fn> }
-        tokenStore: {
-          getSessionToken: ReturnType<typeof vi.fn>
-          clearSessionToken: ReturnType<typeof vi.fn>
-        }
-        rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
-        initialize: () => Promise<unknown>
+    const clearSessionToken = vi.fn().mockResolvedValue(undefined)
+    const getMe = vi.fn().mockRejectedValue(answer(ApiError))
+    const service = new AppService() as unknown as {
+      authClient: { getMe: ReturnType<typeof vi.fn> }
+      tokenStore: {
+        getSessionToken: ReturnType<typeof vi.fn>
+        clearSessionToken: ReturnType<typeof vi.fn>
       }
-
-      service.authClient = { getMe } as never
-      service.tokenStore = {
-        getSessionToken: vi.fn().mockResolvedValue('stored-token'),
-        clearSessionToken,
-      } as never
-      service.rpcTokenManager = {
-        clear: vi.fn(),
-      } as never
-
-      await expect(service.initialize()).resolves.toEqual({
-        authenticated: false,
-        me: null,
-        sessionGeneration: 0,
-      })
-
-      // The restore asked /me with the saved token, and the answer gave no verdict.
-      expect(getMe).toHaveBeenCalledWith('stored-token')
-      expect(clearSessionToken).not.toHaveBeenCalled()
+      rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
+      initialize: () => Promise<unknown>
     }
+
+    service.authClient = { getMe } as never
+    service.tokenStore = {
+      getSessionToken: vi.fn().mockResolvedValue('stored-token'),
+      clearSessionToken,
+    } as never
+    service.rpcTokenManager = {
+      clear: vi.fn(),
+    } as never
+
+    await expect(service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: 0,
+    })
+    // The restore asked /me with the saved token.
+    expect(getMe).toHaveBeenCalledTimes(1)
+    expect(getMe).toHaveBeenCalledWith('stored-token')
+    return { clearSessionToken }
+  }
+
+  it.each([
+    ['a bare 401 (an earlier edge)', 401, '{"error":"Unauthorized"}'],
+    ['a 403', 403, ''],
+    ['a 410', 410, ''],
+  ])(
+    'clears a saved token when /me ends startup session restore with %s',
+    async (_name, status, bodyText) => {
+      const { clearSessionToken } = await restoreWithMeAnswer(
+        'clerum-desktop-restore-ended',
+        ApiError => new ApiError(`${status} ended`, status, bodyText)
+      )
+
+      expect(clearSessionToken).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('keeps a saved token when /me gives startup session restore no verdict', async () => {
+    // A 503 is an outage, not a verdict on the session: this start signs out but
+    // keeps the saved token for the next one.
+    const { clearSessionToken } = await restoreWithMeAnswer(
+      'clerum-desktop-restore-unavailable',
+      ApiError => new ApiError('503 Service Unavailable', 503, '')
+    )
+
+    expect(clearSessionToken).not.toHaveBeenCalled()
   })
 
   it('persists a manually saved runtime environment', async () => {

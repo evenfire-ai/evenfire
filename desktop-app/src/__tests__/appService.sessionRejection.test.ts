@@ -39,13 +39,13 @@ function sessionMe(overrides: Partial<SessionMe> = {}): SessionMe {
   }
 }
 
-// A bare 401: what a non-/me call answers, and what /me answers when the edge's own
-// service credential is refused. It is never a verdict on the session.
+// A bare 401: what a non-/me call answers, and what an earlier edge's /me answers
+// for an invalid or expired session token (a session end when /me sends it).
 function unauthorized(): ApiError {
   return new ApiError('401 Unauthorized', 401, '{"error":"Unauthorized"}')
 }
 
-// The only /me answer that ends a session: the edge's invalid_session envelope.
+// The current edge's /me answer for an ended session: the invalid_session envelope.
 function sessionEnded(): ApiError {
   return new ApiError(
     '401 Unauthorized: invalid_session',
@@ -129,25 +129,22 @@ describe('AppService session rejected by /me', () => {
   })
 
   it.each([
-    ['a bare 401 (the edge service credential)', unauthorized()],
+    ['a bare 401 (an earlier edge)', unauthorized()],
     ['a 401 that is not JSON', new ApiError('401 Unauthorized', 401, 'Unauthorized')],
     ['a 403', new ApiError('403 Forbidden', 403, '{"error":"Forbidden"}')],
     ['a 410', new ApiError('410 Gone', 410, '')],
-  ])('keeps the session when /me answers %s during a team-context lookup', async (_name, error) => {
+  ])('ends the session when /me answers %s during a team-context lookup', async (_name, error) => {
     const { service, tokenStore, onSessionCleared } = createService(sessionMe({ teamId: null }))
     service.authClient = { getMe: vi.fn().mockRejectedValue(error) }
     const operation = vi.fn()
 
     await expect(service.runWithTeamContext('team-b', operation)).rejects.toBe(error)
 
-    // /me was asked, and its answer was not the session-ended envelope.
     expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
     expect(service.authClient.getMe).toHaveBeenCalledWith('synthetic-session-token')
     expect(operation).not.toHaveBeenCalled()
-    expect(service.sessionToken).toBe('synthetic-session-token')
-    expect(service.suspendDesktopGfsUploadsForAuthBoundary).not.toHaveBeenCalled()
-    expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
-    expect(onSessionCleared).not.toHaveBeenCalled()
+    expect(service.suspendDesktopGfsUploadsForAuthBoundary).toHaveBeenCalledTimes(1)
+    expectSessionEnded(service, tokenStore, onSessionCleared)
   })
 
   it('leaves a newer committed session alone when /me rejects the old token', async () => {
@@ -255,7 +252,7 @@ describe('AppService session rejected by /me', () => {
     expectSessionEnded(service, tokenStore, onSessionCleared)
   })
 
-  it('keeps the session when a team call answers 401 and /me answers a bare 401', async () => {
+  it('ends the session when a team call answers 401 and /me answers a bare 401', async () => {
     const { service, tokenStore, onSessionCleared } = createService(sessionMe())
     const rejection = unauthorized()
     const meAnswer = unauthorized()
@@ -272,15 +269,17 @@ describe('AppService session rejected by /me', () => {
 
     try {
       await expect(service.listWorkflows()).rejects.toBe(rejection)
-      // /me was asked and gave no verdict, so the session stays.
+      // An earlier edge answers an ended session on /me with a bare 401: a verdict.
       expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
-      expect(warn).toHaveBeenCalledWith('[AppService] Session check returned no verdict:', meAnswer)
+      expect(service.authClient.getMe).toHaveBeenCalledWith('synthetic-session-token')
+      expect(warn).not.toHaveBeenCalledWith(
+        '[AppService] Session check returned no verdict:',
+        meAnswer
+      )
     } finally {
       warn.mockRestore()
     }
-    expect(service.sessionToken).toBe('synthetic-session-token')
-    expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
-    expect(onSessionCleared).not.toHaveBeenCalled()
+    expectSessionEnded(service, tokenStore, onSessionCleared)
   })
 
   describe('listing without a team list (F9)', () => {
