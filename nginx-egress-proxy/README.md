@@ -33,16 +33,25 @@ For each remote McpServer, host-context-controller:
    The hostname must stay within `[a-z0-9._-]` after parsing (the CRD schema
    enforces the same class at admission); it is rendered unquoted, where `;`
    would end a directive and `$name` would be an NGINX variable. Trailing dots
-   are canonicalized away before any check: `svc.cluster.local.` is the DNS root
-   form of the same name and resolves like `svc.cluster.local`, so it is rejected
-   by the same internal-service checks and rendered without the dot.
+   are canonicalized or rejected before any check: `svc.cluster.local.` is the
+   DNS root form of the same name and resolves like `svc.cluster.local`, so it
+   is rejected by the same internal-service checks and an external name is
+   rendered without the dot; a name the URL parser cannot canonicalize (it
+   still ends in a dot after re-reading) is rejected instead, so no rendered
+   `server` name ends in a dot.
    Query placeholders must be complete `${NAME}` values where `NAME` matches
    `[A-Za-z_][A-Za-z0-9_]*` (exact case) and is declared by `spec.env` or
    `spec.envSecret`. A `spec.env` name HCC strips as forbidden
-   (`KUBERNETES_SERVICE_HOST`, `PATH`, ...) does not count as declared, and the
-   proxy env the platform sets (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS`,
-   `NGINX_ENVSUBST_FILTER`, `NGINX_LOCAL_RESOLVERS`) cannot be used: envsubst
-   would otherwise fill them from the container's own environment. The
+   (`KUBERNETES_SERVICE_HOST`, `PATH`, ...) does not count as declared; neither
+   does an `envSecret` mapping whose name is exactly one the platform owns (the
+   same forbidden names in exact case, plus the proxy env below) — HCC filters
+   those declarations when checking placeholders even though the Deployment
+   currently still carries their `secretKeyRef`. The proxy env the platform
+   sets (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS`, `NGINX_ENVSUBST_FILTER`,
+   `NGINX_LOCAL_RESOLVERS`, `LC_ALL`) cannot be used: envsubst would otherwise
+   fill them from the container's own environment. Matching is exact, so a
+   distinct-case spelling (`Path`, `kubernetes_service_host`) is a different
+   variable and a Secret-backed declaration of it does count. The
    URL parser runs first: it strips TAB/CR/LF and percent-encodes spaces and
    other control characters, which are then accepted in encoded form. The query
    check then rejects any `$`, brace, backslash or semicolon outside a complete
@@ -63,11 +72,12 @@ For each remote McpServer, host-context-controller:
    defense), backslashes and quotes escaped for nginx's quoted-string context.
    A value that references a platform-owned proxy variable
    (`NGINX_LOCAL_RESOLVERS`, `NGINX_ENTRYPOINT_LOCAL_RESOLVERS`,
-   `NGINX_ENVSUBST_FILTER`) or a container env name the platform strips (`PATH`,
-   `KUBERNETES_SERVICE_HOST`, ...) is rejected in both `${NAME}` and `$NAME`
-   form: either would be read from the proxy container's own environment, not
-   from `spec.envSecret`. A rejected entry renders no header and adds no env
-   entry.
+   `NGINX_ENVSUBST_FILTER`, `LC_ALL`) or a container env name the platform
+   reserves (`PATH`, `KUBERNETES_SERVICE_HOST`, ...) is rejected in both
+   `${NAME}` and `$NAME` form: either would be read from the proxy container's
+   own environment, not from `spec.envSecret`. Matching is exact: a
+   distinct-case reference names a different variable and is allowed. A
+   rejected entry renders no header and adds no env entry.
 4. **Deploys this image as the only container** (`egress-proxy`) of the
    per-server Deployment. The ConfigMap mounts at `/etc/nginx/templates`, so
    `envsubst` resolves `${VAR}` placeholders in auth headers and in the baseUrl
@@ -147,11 +157,13 @@ floor in [scripts/nginx-image-policy.sh](../scripts/nginx-image-policy.sh) is
 already above 1.27.3, so a platform-accepted official `nginx` release does not
 lack either piece.
 
-The ConfigMap and the Deployment image do not update atomically. During an
-upgrade, a pod that restarts after the new ConfigMap lands but before the
-rollout completes can still be running a previous image that predates the
-requirement and fail on the resolver until the Deployment finishes. The upgrade
-window is not empty.
+The ConfigMap and the Deployment do not update atomically. During an upgrade,
+a pod from the previous ReplicaSet that restarts after the new ConfigMap lands
+but before the rollout completes runs the same image without the env the new
+Deployment adds (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS`, `NGINX_ENVSUBST_FILTER`),
+so its entrypoint never exports the local resolvers and the new template fails
+on the resolver until the Deployment finishes. The upgrade window is not
+empty.
 
 ## Ports
 
@@ -183,8 +195,8 @@ builds this image, renders the template through the HCC reconciler, and runs it
 against a local TLS upstream: a trusted chain (direct and with two
 intermediates) is accepted; an untrusted CA, an expired certificate, a hostname
 mismatch, and the test CA without the mounted trust store are rejected.
-The harness also covers the DNS switch (`H7 dns-switch`) and query placeholder
-resolution (`H8 query-accept`).
+The harness also covers the DNS switch (`dns-switch`) and query placeholder
+resolution (`query-accept`).
 
 The CDN answer-set rotation is proven end to end on a branch-owned minikube
 profile by [scripts/e2e/e2e-egress-cdn-rotation.sh](../scripts/e2e/e2e-egress-cdn-rotation.sh);

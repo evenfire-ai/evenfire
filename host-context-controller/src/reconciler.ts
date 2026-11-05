@@ -155,12 +155,16 @@ const FORBIDDEN_CONTAINER_ENV = new Set([
   'KUBERNETES_SERVICE_PORT',
 ])
 // Egress proxy env whose container value the platform sets after every CRD env
-// source (buildDeployment) or the image entrypoint exports itself
-// (15-local-resolvers.envsh). A CRD declaration does not control their value.
+// source (buildDeployment) or the image entrypoint sets itself before envsubst
+// runs (15-local-resolvers.envsh is sourced ahead of
+// 20-envsubst-on-templates.sh). A CRD declaration does not control their value.
+// LC_ALL belongs here: the pinned image's envsh assigns LC_ALL=C, which
+// overwrites any exported CRD value before envsubst substitutes the template.
 const PLATFORM_OWNED_PROXY_ENV = new Set([
   'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
   'NGINX_ENVSUBST_FILTER',
   'NGINX_LOCAL_RESOLVERS',
+  'LC_ALL',
 ])
 // An authHeaders valueTemplate reference to an environment name, in either form
 // the container reads: envsubst resolves `${NAME}` and NGINX reads bare `$NAME`.
@@ -188,13 +192,15 @@ function isRetiredStatusConditionType(type: string): boolean {
 }
 
 /**
- * True when NAME is a container env name the platform owns: either one
- * sanitizeCrdSpec strips (compared in uppercase, like that strip) or one of the
- * egress proxy variables the platform sets (exact, like the baseUrl query check,
- * because envsubst names are case-sensitive).
+ * True when NAME is a container env name the platform owns, compared exactly.
+ * envsubst, Kubernetes env names and Linux all treat case as significant, so a
+ * distinct-case spelling (`Path`, `kubernetes_service_host`) names a different
+ * variable and is not platform-owned. The `spec.env` strip in sanitizeCrdSpec
+ * keeps its own uppercase comparison; callers that mirror that strip compare
+ * in uppercase separately and do not go through this helper.
  */
 function isPlatformOwnedTemplateName(name: string): boolean {
-  return FORBIDDEN_CONTAINER_ENV.has(name.toUpperCase()) || PLATFORM_OWNED_PROXY_ENV.has(name)
+  return FORBIDDEN_CONTAINER_ENV.has(name) || PLATFORM_OWNED_PROXY_ENV.has(name)
 }
 
 type StatusWriteDecline = 'record-obligation' | 'silent'
@@ -1031,6 +1037,18 @@ export class McpServerReconciler {
     if (host === '') {
       throw new Error('remote.baseUrl must include a hostname')
     }
+    // The setter is ignored when the dot-stripped name has a numeric last label
+    // that is not a valid IPv4 address (`foo.0x10`, `example.123`): the re-read
+    // hostname then still ends in a dot and would render a `server` name NGINX
+    // cannot resolve (a 502 at runtime, not a bypass — this class cannot spell
+    // `.svc`, `.local` or `kubernetes.default`). Reject it rather than render
+    // it. Comparing against the stripped string instead would also fire on the
+    // legitimate canonicalization (`0x7f.0.0.1..` reads back as `127.0.0.1`),
+    // so the guard is the surviving dot itself. The error does not echo the
+    // hostname.
+    if (host.endsWith('.')) {
+      throw new Error('remote.baseUrl hostname must not end with a trailing dot')
+    }
     // Block IP-literal URLs entirely (IPv4 and IPv6) — require DNS hostnames only
     // This prevents IPv6 SSRF bypasses (::1, ::ffff:7f00:1, fd00::, etc.)
     const bareHost = host.replace(/^\[|\]$/g, '')
@@ -1172,11 +1190,15 @@ export class McpServerReconciler {
     // query. The comparison is exact and case-sensitive, like envsubst's.
     //
     // Only names whose container value the CRD controls count as declared. A
-    // spec.env entry sanitizeCrdSpec strips (KUBERNETES_SERVICE_HOST, PATH, ...)
-    // or an envSecret mapping with the same platform-owned name would otherwise
-    // pass this check and be filled by envsubst from the container's own
-    // environment, sending that value (for example the cluster API address) to
-    // the external upstream.
+    // spec.env entry sanitizeCrdSpec strips (compared in uppercase, like that
+    // strip) would otherwise pass this check and be filled by envsubst from the
+    // container's own environment, sending that value (for example the cluster
+    // API address) to the external upstream. buildDeployment does not filter
+    // envSecret today — it emits every key as a secretKeyRef, and the producer
+    // filter is tracked separately (#1281, subset of #1246) — so this consumer
+    // check cannot rely on a producer strip: it excludes exact platform-owned
+    // envSecret names here instead. Matching is exact, like envsubst's: a
+    // distinct-case envSecret name is a different variable and does count.
     const declaredEnvNames = new Set([
       ...(server.spec.env ?? [])
         .map(entry => entry.name)
@@ -1194,7 +1216,7 @@ export class McpServerReconciler {
       if (!declaredEnvNames.has(match[1])) {
         throw new Error(
           `remote.baseUrl query placeholder \${${match[1]}} is not declared in spec.env or spec.envSecret` +
-            ' (spec.env names HCC strips as forbidden do not count)'
+            ' (spec.env names HCC strips as forbidden and envSecret names the platform owns do not count)'
         )
       }
     }
