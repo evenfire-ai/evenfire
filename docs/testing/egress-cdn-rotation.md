@@ -119,7 +119,7 @@ with a specific REASON (see below):
 | 4 | CoreDNS = A; HCC sees A (<= 150 s); `t_dns` = first A `lastObservedAt`; policy exactly A (<= `t_dns` + 90 s); create the control, which must answer through CloudFront (<= 120 s from Ready); then the branch must have 0 failures with the policy exactly A, and at most 1 failure in the transition | 3 for A/DNS/policy/control; 1 for the branch |
 | 5 | CoreDNS = B; same DNS/policy deadlines; the branch must have 0 failures with the policy exactly B (at most 1 in the transition); the control must reach 3 consecutive failures within 120 s of the prune | 3 for B/DNS/policy; 1 for the branch or the control |
 | 6 | CoreDNS = A; same deadlines; the control must answer again within 60 s of policy = A; the branch must have 0 failures with the policy exactly A | 3 for A/DNS/policy; 1 for the branch or the control |
-| 7 | Delete the McpServer and the control, wait for the McpServer, its HCC-owned Deployment, Service, ConfigMap and `ext-egress` policy to disappear, restore the Corefile, wait (<= 150 s) until HCC's resolver no longer sees the test rows, restore HCC, verify both | exit 4 |
+| 7 | Delete the McpServer and the control, wait for the McpServer, its HCC-owned Deployment, Service, ConfigMap and `ext-egress` policy to disappear, restore the Corefile, wait (<= 150 s) until the served-DNS witness is `GONE` (see the cleanup contract below), restore HCC, verify both | exit 4 |
 
 Timings are deliberately conservative because of HCC's re-resolution cadence.
 With `ttl 5` the effective cadence is 5 s (`externalEgressResyncDelayMs` clamps to
@@ -233,13 +233,36 @@ HCC's 5 s sampling), and phases 2, 4, 5 and 6 wait up to 150 s
 
 Cleanup waits for that same propagation in the other direction. After restoring
 the Corefile it re-resolves `CDN_HOST` inside the HCC pod, using the same
-`resolve4`-with-TTL witness as phases 2-6, and keeps waiting while the answer is
-still "every TTL <= 5 and the sorted set is A or B" — that is, while CoreDNS
-still serves the test rows. Up to 150 s (`DNS_VISIBLE_TIMEOUT`) are allowed. A
-failed exec or an unparseable answer counts as "not proven" and keeps waiting,
-never as success.
+`resolve4`-with-TTL witness as phases 2-6. HCC is restored **if and only if**
+the Corefile restore proved its readback and the witness is `GONE`. Each
+witness answer is one structured line (`{ok,records}` or `{ok:false,code}`; the
+pod-side snippet exits 0 whenever Node ran, so a non-zero `kubectl exec` means
+transport, never a DNS answer) and is classified into three states:
 
-If the witness cannot be proven within that window, or the CoreDNS restore
+| Observation | State | Action |
+| ----------- | ----- | ------ |
+| Non-empty answer that is not "address set ⊆ test sets A/B and every `ttl <= 5`" — including real A/B answers with some `ttl > 5` | `GONE` | Restore HCC |
+| `ENOTFOUND`, `ENODATA` or `ESERVFAIL` | `GONE` | Restore HCC |
+| `ok` answer with `records: []` (belt row; Node normally reports NODATA by code) | `GONE` | Restore HCC |
+| Test A/B address set with every `ttl <= 5` | `PRESENT` | Keep waiting; do not restore |
+| Exec ≠ 0, `ETIMEOUT`, any other DNS code, malformed or sentinel-less answer, non-numeric TTL | `UNKNOWN` | Do not restore; warn "could not ask" |
+
+`SERVFAIL` counts as `GONE` because of CoreDNS plugin order, not Corefile text
+order: the authoritative `hosts` plugin answers before `forward`, and the
+positive witnesses of phases 2/4 prove that when the hosts block is loaded it
+does answer. Once the restored Corefile has been read back, a `SERVFAIL` can
+only come from the forwarded upstream — the test rows are no longer what
+CoreDNS serves. A real upstream that happened to serve exactly the A/B
+addresses with `ttl <= 5` would read as `PRESENT` and merely delay the HCC
+restore until the bounded wait ends: a declared fail-safe residual, not a
+guaranteed self-heal. Restoring HCC on `UNKNOWN` is forbidden. The last
+classification is recorded in `dns-override-witness.txt` in the evidence
+directory, and the timeout warning distinguishes `PRESENT` ("still served")
+from `UNKNOWN` ("could not ask"). Up to 150 s (`DNS_VISIBLE_TIMEOUT`) are
+allowed. This contract is covered hermetically, without a cluster, by
+`scripts/tests/test-egress-cdn-rotation-cleanup.sh` in CI.
+
+If the witness does not reach `GONE` within that window, or the CoreDNS restore
 itself fails, cleanup does **not** restart HCC. A restored, production-cadence
 HCC that started reconciling while the override was still served would persist
 the test answer set and `ttl 5` into the profile's egress bindings, so the run

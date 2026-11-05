@@ -87,17 +87,51 @@
 #   2 PRECONDITION — inputs, ownership, lease, cluster prerequisites, leftovers
 #            or a harness witness were wrong; nothing was measured.
 #   3 INCONCLUSIVE — B or A could not be validated (DNS/HCC/policy timing,
-#            upstream 403/429, probe unavailable). Not a product verdict.
+#            upstream 403/429, probe unavailable, `interrupted`,
+#            `unexpected-error`). Not a product verdict. The complete REASON
+#            list lives in docs/testing/egress-cdn-rotation.md; this header
+#            only names the exit classes so the two cannot drift apart.
 #   4 RESTORE_FAILED — the profile was not restored; takes precedence over any
 #            other code and prints the manual repair commands.
 #   The last stdout line is always:
 #     E2E_CDN_ROTATION_VERDICT=<PASS|FAIL|PRECONDITION|INCONCLUSIVE|RESTORE_FAILED> EXIT=<n> REASON=<id>
 #   Read the verdict from that line, not from the wrapper's exit status.
 #
-# PHASES (A5.7 + A5.8)
+# CLEANUP RESTORE CONTRACT (written before the code that implements it)
+#   HCC is restored if and only if `restore_corefile` proved its readback
+#   AND the served-DNS witness is GONE. The witness classifies one
+#   `resolve4`-with-TTL answer from inside the HCC pod into three states:
+#
+#     Observation                                            State   Action
+#     -----------------------------------------------------  ------  ------------
+#     Non-empty answer that is NOT "address set ⊆ test     GONE    Restore HCC
+#       sets A/B and every ttl <= 5" — including real A/B
+#       answers with some ttl > 5
+#     ENOTFOUND, ENODATA or ESERVFAIL                      GONE    Restore HCC
+#     ok answer with records: []                           GONE    Restore HCC
+#       (belt row: Node normally reports NODATA by code)
+#     Test A/B address set with every ttl <= 5             PRESENT Wait; do not
+#                                                                    restore
+#     exec ≠ 0, ETIMEOUT, any other DNS code, malformed    UNKNOWN Do not restore;
+#       or sentinel-less answer, non-numeric ttl                   warn "could
+#                                                                    not ask"
+#
+#   SERVFAIL counts as GONE because of CoreDNS plugin order, not Corefile
+#   text order: the authoritative `hosts` plugin answers before `forward`,
+#   and the positive `dns_is` witnesses of phases 2/4 prove that when the
+#   hosts block is loaded it does answer. So once the restored Corefile is
+#   read back, a SERVFAIL can only come from the forwarded upstream — the
+#   test rows are no longer what CoreDNS serves. A real upstream that
+#   happened to serve exactly the A/B addresses with ttl <= 5 would read as
+#   PRESENT and merely delay the HCC restore until the bounded wait ends:
+#   a declared fail-safe residual, not a guaranteed self-heal. Restoring
+#   HCC on UNKNOWN is forbidden. The last classification is recorded in
+#   `dns-override-witness.txt` in the evidence directory.
+#
+# PHASES
 #   0 preconditions + lease. 1 HCC env. 2 CoreDNS = B. 3 McpServer, policy = B.
 #   4 CoreDNS = A, policy = A, control starts on A. 5 A→B. 6 B→A.
-#   7 cleanup and restoration (L1 order).
+#   7 cleanup and restoration (CoreDNS first, then HCC).
 # ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -179,6 +213,10 @@ CONTROL_SAMPLES=""
 POLICY_SAMPLES=""
 BRANCH_REDIRECT_FILE=""
 ORIGINAL_COREFILE=""
+# Last tri-state classification of the served-DNS cleanup witness
+# (GONE | PRESENT | UNKNOWN) and its detail (DNS code or answer summary).
+DNS_WITNESS_STATE=UNKNOWN
+DNS_WITNESS_DETAIL="never-asked"
 
 usage() {
   cat <<'EOF'
@@ -325,16 +363,30 @@ policy_state_json() {
 
 hcc_pod() { ready_pod "$HCC_NS" "app=${HCC_DEPLOY}"; }
 
-# Raw resolver answer from inside the HCC pod: a JSON array of {address, ttl}.
-# Fails when the exec fails or the answer is not a non-empty array, so no caller
-# can mistake an executor/RBAC error for a DNS answer.
+# The pod-side resolver snippet always exits 0 when Node itself ran and
+# prints exactly one structured JSON line: {ok:true,records:[{address,ttl}]}
+# or {ok:false,code:"<dns error code>"}. That keeps `kubectl exec` ≠ 0
+# meaning transport (RBAC, API, pod gone) and preserves the DNS error code,
+# which is the only evidence that separates "authoritatively gone" from
+# "could not ask" in the cleanup contract in the header.
+DNS_RESOLVER_SNIPPET='require("dns").promises.resolve4(process.argv[1],{ttl:true}).then(r=>console.log(JSON.stringify({ok:true,records:r}))).catch(e=>console.log(JSON.stringify({ok:false,code:(e&&e.code)||"ERR"})))'
+
+# One raw structured answer from inside the HCC pod. Fails only on transport:
+# a DNS-level answer (including an error code) is data, not a failure.
+dns_exec_raw() {
+  kctl exec "deployment/${HCC_DEPLOY}" -n "$HCC_NS" -c "$HCC_CONTAINER" --request-timeout=40s -- \
+    node -e "$DNS_RESOLVER_SNIPPET" "$CDN_HOST"
+}
+
+# Positive witness for phases 2/4/5/6: a non-empty records array of
+# {address, ttl}. Fails on transport, on any DNS error code and on a
+# malformed or empty answer, so no caller can mistake an executor/RBAC
+# error — or a resolver that stopped answering — for the expected set.
 dns_ttl_records() {
   local raw
-  raw="$(kctl exec "deployment/${HCC_DEPLOY}" -n "$HCC_NS" -c "$HCC_CONTAINER" --request-timeout=40s -- \
-    node -e 'require("dns").promises.resolve4(process.argv[1],{ttl:true}).then(r=>console.log(JSON.stringify(r))).catch(e=>{console.error(e.code||"ERR");process.exit(3)})' \
-    "$CDN_HOST")" || return 1
-  printf '%s' "$raw" | jq -e 'type == "array" and length > 0' >/dev/null || return 1
-  printf '%s' "$raw"
+  raw="$(dns_exec_raw)" || return 1
+  printf '%s' "$raw" | jq -e '.ok == true and (.records | type) == "array" and (.records | length) > 0' >/dev/null || return 1
+  printf '%s' "$raw" | jq -c '.records'
 }
 
 dns_actual_set() { # prints the sorted address CSV, or fails
@@ -343,23 +395,70 @@ dns_actual_set() { # prints the sorted address CSV, or fails
     | map(.address) | sort | join(",")'
 }
 
-# The restore witness: CoreDNS must stop serving the test rows. Success requires
-# a non-empty answer that is NOT "every ttl <= 5 and the sorted set is A or B",
-# i.e. the resolver no longer answers with a short TTL and a test answer set. A
-# failed exec, an unparseable answer or an empty answer is "not proven" and
-# returns 1, so the caller keeps waiting: a transient API or DNS failure is
-# never read as a completed restore.
-dns_override_gone() {
-  local raw all_short csv
-  raw="$(dns_ttl_records)" || return 1
-  all_short="$(printf '%s' "$raw" | jq -r 'all(.[]; (.ttl | type) == "number" and .ttl <= 5)')" || return 1
-  csv="$(printf '%s' "$raw" | jq -r 'map(.address) | sort | join(",")')" || return 1
-  [ -n "$csv" ] || return 1
-  [ "$all_short" = true ] || return 0
-  case "$csv" in
-    "$CSV_A"|"$CSV_B") return 1 ;;
-  esac
+# The cleanup witness, implementing the header contract literally. One query
+# is classified as GONE (CoreDNS authoritatively no longer serves the test
+# rows), PRESENT (it still serves a test A/B set with every ttl <= 5) or
+# UNKNOWN (the question could not be asked or the answer cannot be trusted).
+# The classification always succeeds — UNKNOWN is a result, not an error —
+# and the last state/detail are kept in DNS_WITNESS_* and in
+# `dns-override-witness.txt` so cleanup can warn truthfully after a timeout.
+dns_refresh_witness() {
+  local raw classified test_json
+  DNS_WITNESS_STATE=UNKNOWN
+  if ! raw="$(dns_exec_raw)"; then
+    DNS_WITNESS_DETAIL="transport: kubectl exec failed"
+  else
+    test_json="$(jq -cn '$ARGS.positional' --args "${SET_A[@]}" "${SET_B[@]}")"
+    # jq's own parse noise stays off stderr: this runs once a second inside
+    # the bounded wait, and the failure is already recorded as the detail.
+    classified="$(printf '%s' "$raw" | jq -r --argjson testset "$test_json" 2>/dev/null '
+      if (type != "object") or ((.ok | type) != "boolean") then
+        ["UNKNOWN", "malformed answer (no structured ok sentinel)"]
+      elif .ok == false then
+        if (.code | type) != "string" then
+          ["UNKNOWN", "DNS error without a code"]
+        elif .code == "ENOTFOUND" or .code == "ENODATA" or .code == "ESERVFAIL" then
+          ["GONE", ("code=" + .code)]
+        else
+          ["UNKNOWN", ("code=" + .code)]
+        end
+      elif (.records | type) != "array" then
+        ["UNKNOWN", "records is not an array"]
+      elif (.records | length) == 0 then
+        ["GONE", "code=EMPTY records=[]"]
+      elif any(.records[]; ((.address | type) != "string") or ((.ttl | type) != "number")) then
+        ["UNKNOWN", "record without a string address or with a non-numeric ttl"]
+      elif all(.records[]; .ttl <= 5 and (.address as $a | ($testset | index($a)) != null)) then
+        ["PRESENT", ("addresses=" + ([.records[].address] | sort | join(",")))]
+      else
+        ["GONE", ("addresses=" + ([.records[].address] | sort | join(",")))]
+      end | @tsv')" || classified=""
+    if [ -z "$classified" ]; then
+      DNS_WITNESS_DETAIL="malformed answer (not structured JSON)"
+    else
+      DNS_WITNESS_STATE="${classified%%$'\t'*}"
+      DNS_WITNESS_DETAIL="${classified#*$'\t'}"
+    fi
+  fi
+  if [ -n "$EVIDENCE_DIR" ] && [ -d "$EVIDENCE_DIR" ]; then
+    printf 'state=%s detail=%s host=%s\n' \
+      "$DNS_WITNESS_STATE" "$DNS_WITNESS_DETAIL" "$CDN_HOST" \
+      >"${EVIDENCE_DIR}/dns-override-witness.txt" 2>/dev/null || :
+  fi
   return 0
+}
+
+dns_override_state() { # prints GONE | PRESENT | UNKNOWN
+  dns_refresh_witness
+  printf '%s\n' "$DNS_WITNESS_STATE"
+}
+
+# wait_until predicate for cleanup: true only on GONE. PRESENT keeps waiting
+# because the override is still served; UNKNOWN keeps waiting because
+# restoring HCC on "could not ask" is forbidden by the contract.
+dns_override_gone() {
+  dns_refresh_witness
+  [ "$DNS_WITNESS_STATE" = GONE ]
 }
 
 dns_is() { # <expected-csv>
@@ -549,8 +648,19 @@ count_failures() { # <file> <from-ms> <to-ms>
   samples_between "$1" "$2" "$3" | awk -F'\t' '$3 == "fail" { n++ } END { print n + 0 }'
 }
 
+# Pipe rule for every helper below: under `set -o pipefail`, no consumer may
+# stop reading early (`grep -q`, `awk '{print; exit}'`, `head`) while a
+# producer is still writing into the same pipe. The consumer's early exit
+# SIGPIPEs the producer (141), pipefail surfaces 141 as the pipeline status,
+# and `set -e` then aborts with a raw status that on_exit can only report as
+# `unexpected-error`. Consumers that need "the first match" therefore read
+# to EOF, remember the first hit and print it from END. Masking the pipeline
+# with `|| :` is not an alternative: it would also hide a missing sample
+# file or a broken awk and turn either into a silent false negative.
 first_failure() { # <file> <from-ms> <to-ms>
-  samples_between "$1" "$2" "$3" | awk -F'\t' '$3 == "fail" { print; exit }'
+  samples_between "$1" "$2" "$3" | awk -F'\t' '
+    $3 == "fail" && !seen { line = $0; seen = 1 }
+    END { if (seen) print line }'
 }
 
 has_upstream_since() { # <file> <from-ms>
@@ -579,11 +689,17 @@ identity_mismatch() { # <file> <uid> <started-at> <restart-count>
 
 assert_no_rate_limit() { # <from-ms> <to-ms>
   local hit
+  # Consume-all consumer (see the pipe rule above): both producers must be
+  # drained even when the first sample already carries the 403/429, or the
+  # second one dies with SIGPIPE and the run reports `unexpected-error`
+  # instead of `upstream-rate-limited`.
   hit="$(
     {
       samples_between "$BRANCH_SAMPLES" "$1" "$2"
       samples_between "$CONTROL_SAMPLES" "$1" "$2"
-    } | awk -F'\t' '$3 == "upstream" && ($4 == "403" || $4 == "429") { print; exit }'
+    } | awk -F'\t' '
+      $3 == "upstream" && ($4 == "403" || $4 == "429") && !seen { line = $0; seen = 1 }
+      END { if (seen) print line }'
   )"
   [ -z "$hit" ] && return 0
   printf '%s\n' "$hit" >>"${EVIDENCE_DIR}/upstream-rate-limit.txt"
@@ -595,7 +711,7 @@ sample_time_for_set() { # <file> <expected-csv> <from-ms>
   awk -F'\t' -v want="$2" -v from="$3" '($1 + 0) >= from && $2 == want { print $1; exit }' "$1"
 }
 
-# ── Cleanup and restoration (L1 order) ─────────────────────────────────
+# ── Cleanup and restoration (CoreDNS first, then HCC) ──────────────────
 print_manual_repair() {
   [ -n "$EVIDENCE_DIR" ] && [ -d "$EVIDENCE_DIR" ] || return 0
   local ctx=${KUBECONTEXT:-}
@@ -738,7 +854,16 @@ cleanup() {
       dns_restored=0
     elif ! wait_until "$DNS_VISIBLE_TIMEOUT" \
       "CoreDNS to stop serving the ${CDN_HOST} test rows" dns_override_gone; then
-      warn "CoreDNS still served the ${CDN_HOST} test rows after ${DNS_VISIBLE_TIMEOUT}s; HCC was not restarted on purpose"
+      # Truthful warning: PRESENT means the override was still being served
+      # when the wait ended; UNKNOWN means the last query never got a
+      # trustworthy answer ("could not ask"), which says nothing about what
+      # CoreDNS serves. Either way HCC is deliberately not restored: GONE is
+      # the only state that may restart it (see the header contract).
+      if [ "$DNS_WITNESS_STATE" = PRESENT ]; then
+        warn "CoreDNS still served the ${CDN_HOST} test rows after ${DNS_VISIBLE_TIMEOUT}s; HCC was not restarted on purpose"
+      else
+        warn "could not ask CoreDNS whether it stopped serving the ${CDN_HOST} test rows after ${DNS_VISIBLE_TIMEOUT}s (${DNS_WITNESS_DETAIL}); HCC was not restarted on purpose"
+      fi
       status=1
       dns_restored=0
     fi
@@ -771,8 +896,13 @@ on_exit() {
   # rollout goes through the Node deadline runner, which installs its own signal
   # handlers: a retried signal stops that one command, and cleanup then reports
   # RESTORE_FAILED instead of claiming a restore it did not verify.
+  # PIPE is ignored for the same reason: if the caller closed the stdout pipe
+  # (a wrapper that stopped reading, a `| head`), a progress write must not
+  # kill the restore either. Ignoring the signal alone is not enough — the
+  # final verdict printf below still has to be guarded, or its EPIPE failure
+  # status would replace the exit code this run actually earned.
   trap - EXIT
-  trap '' INT TERM HUP
+  trap '' INT TERM HUP PIPE
   if [ "$status" -ne "$EXIT_CODE" ]; then
     # Only `finish` may hand a verdict to the exit trap. A raw exit status
     # (set -e abort, a failed child command, a stray exit) is not a product
@@ -805,7 +935,11 @@ on_exit() {
   if [ -n "$EVIDENCE_DIR" ] && [ -d "$EVIDENCE_DIR" ]; then
     printf '%s\n' "$line" >"${EVIDENCE_DIR}/verdict.txt" 2>/dev/null || :
   fi
-  printf '%s\n' "$line"
+  # Guarded on purpose (see the PIPE note above): with stdout already closed,
+  # an unguarded printf fails and — under `set -e` in the EXIT trap — its
+  # status would replace EXIT_CODE. The verdict file above already recorded
+  # the line; losing the stdout copy must not rewrite the verdict.
+  printf '%s\n' "$line" || :
   exit "$EXIT_CODE"
 }
 
@@ -1050,7 +1184,7 @@ phase0() {
   fi
   ok "the worktree under test matches the deployed pre-gate marker ${marker_head:0:12} (no uncommitted or untracked source)"
 
-  # L6 evidence: every exact-host binding of the profile uses the short window.
+  # Side-effect evidence: every exact-host binding of the profile uses the short window.
   kctl get networkpolicy -n "$RECIPE_NS" -l clerum.io/policy-type=external-egress \
     --request-timeout=20s -o json 2>/dev/null |
     jq -r '.items[].metadata.name' >"${EVIDENCE_DIR}/existing-exact-host-bindings.txt" || :
@@ -1288,7 +1422,7 @@ wait_policy_until() { # <expected-cidrs> <deadline-ms>
 
 # The policy loop samples every 5 s. Its first sample that already holds the
 # target set is an upper bound of the transition, so every sample that starts
-# at or after it is unambiguously post-transition (L-r3-1 windows).
+# at or after it is unambiguously post-transition.
 wait_policy_sample() { # <expected-cidrs> <from-ms>
   local elapsed=0
   while [ "$elapsed" -lt 20 ]; do
@@ -1558,7 +1692,7 @@ phase4() {
   local post_failures transition_failures
   post_failures="$(count_failures "$BRANCH_SAMPLES" "$T_POLICY_MS" -1)"
   if [ "$post_failures" -gt 0 ]; then
-    first_failure "$BRANCH_SAMPLES" "$T_POLICY_MS" -1 >"${EVIDENCE_DIR}/branch-failure-phase4.txt" || :
+    first_failure "$BRANCH_SAMPLES" "$T_POLICY_MS" -1 >"${EVIDENCE_DIR}/branch-failure-phase4.txt"
     fail "the branch proxy failed ${post_failures} time(s) with the policy exactly set A: it is pinned to B"
     finish 1 branch-pinned-old-set
   fi
@@ -1614,7 +1748,7 @@ phase5() {
   assert_no_rate_limit "$patch_ms" -1
 
   # Both probes are observed over the same policy = B window, which lasts until the control has failed three
-  # times in a row or CONTROL_FAIL_TIMEOUT has passed. The branch verdict is still reported first (A5.7).
+  # times in a row or CONTROL_FAIL_TIMEOUT has passed. The branch verdict is still reported first.
   local control_failed=0
   if wait_until "$CONTROL_FAIL_TIMEOUT" "the control to fail three times in a row" \
     streak_of_failures "$CONTROL_SAMPLES" "$T_POLICY_MS" "$((CONTROL_FAIL_TIMEOUT * 1000))" 3; then
@@ -1629,7 +1763,7 @@ phase5() {
   fi
   post_failures="$(count_failures "$BRANCH_SAMPLES" "$T_POLICY_MS" -1)"
   if [ "$post_failures" -gt 0 ]; then
-    first_failure "$BRANCH_SAMPLES" "$T_POLICY_MS" -1 >"${EVIDENCE_DIR}/branch-failure-phase5.txt" || :
+    first_failure "$BRANCH_SAMPLES" "$T_POLICY_MS" -1 >"${EVIDENCE_DIR}/branch-failure-phase5.txt"
     fail "the branch proxy failed ${post_failures} time(s) with the policy exactly set B"
     finish 1 branch-failed-after-prune
   fi
@@ -1714,7 +1848,7 @@ phase6() {
   local post_failures transition_failures
   post_failures="$(count_failures "$BRANCH_SAMPLES" "$T_POLICY_MS" -1)"
   if [ "$post_failures" -gt 0 ]; then
-    first_failure "$BRANCH_SAMPLES" "$T_POLICY_MS" -1 >"${EVIDENCE_DIR}/branch-failure-phase6.txt" || :
+    first_failure "$BRANCH_SAMPLES" "$T_POLICY_MS" -1 >"${EVIDENCE_DIR}/branch-failure-phase6.txt"
     fail "the branch proxy failed ${post_failures} time(s) with the policy exactly set A after recovery"
     finish 1 branch-failed-after-recovery
   fi
@@ -1739,18 +1873,24 @@ capture_proxy_logs() {
 }
 
 # ── Main ───────────────────────────────────────────────────────────────
-trap on_exit EXIT
-trap 'finish 3 interrupted' INT
-trap 'finish 3 interrupted' TERM
-trap 'finish 3 interrupted' HUP
+# Execution guard: the hermetic cleanup harness
+# (scripts/tests/test-egress-cdn-rotation-cleanup.sh) sources this file to
+# reach the helpers above. Sourcing must define functions and state only —
+# never install the traps or start a phase.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  trap on_exit EXIT
+  trap 'finish 3 interrupted' INT
+  trap 'finish 3 interrupted' TERM
+  trap 'finish 3 interrupted' HUP
 
-phase0 "$@"
-phase1
-phase2
-phase3
-phase4
-phase5
-phase6
-header "Phase 7 — Cleanup and restore"
-capture_proxy_logs
-finish 0 none
+  phase0 "$@"
+  phase1
+  phase2
+  phase3
+  phase4
+  phase5
+  phase6
+  header "Phase 7 — Cleanup and restore"
+  capture_proxy_logs
+  finish 0 none
+fi
