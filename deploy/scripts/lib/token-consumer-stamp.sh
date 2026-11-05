@@ -1,35 +1,44 @@
 #!/usr/bin/env bash
 # Restart decision for Deployments that read deploy-managed tokens as env vars
 # (sourced by apply-inter-service-tokens.sh and
-# apply-workflow-approval-bot-secret.sh).
+# apply-workflow-approval-bot-secret.sh; lib/restart-jwt-key-consumers.sh
+# sources it for TOKEN_STAMP_ANNOTATION and TOKEN_STAMP_PENDING_VALUE).
 #
 # Pods read these tokens only at startup, so a Deployment must restart after a
 # value it reads changes. Kubernetes does not record which token values a pod
 # loaded (image digests and deployment.kubernetes.io/revision change only with
 # the image or spec), so each consumer Deployment carries a stamp: a metadata
-# annotation holding the sha256 of the values its pods were last restarted
-# onto. The stamp is written only after a successful `rollout restart`.
+# annotation holding the sha256 of the values its pods run. A sha256 stamp is
+# written after a successful `rollout restart`, or, without a restart, on a
+# consumer that has no stamp and whose values did not change in this run.
+# "Changed in this run" means the Secret held another value (or none) before
+# this run wrote it.
 #
-#   stamp present and equal to the values this run writes  -> no restart
-#   stamp present and different (or restart-pending)        -> restart, then stamp
-#   stamp missing (first run, or the Deployment was recreated):
-#     a value it reads changed in this run                  -> restart, then stamp
-#     nothing it reads changed in this run                  -> stamp only; the pods
-#       already run these values (an unstamped consumer whose value changes is
-#       marked restart-pending before the Secret write, and a Deployment created
-#       since reads the current Secret at creation)
-#   FORCE_CONSUMER_RESTART=true                             -> restart, then stamp
+#   a value it reads changed in this run         -> marked restart-pending before
+#                                                   any Secret write, then restart
+#                                                   and stamp
+#   stamp equal to the values this run writes    -> no restart
+#   stamp different, or restart-pending          -> restart, then stamp
+#   no stamp, nothing it reads changed           -> stamp only; its pods already
+#                                                   run these values (a Deployment
+#                                                   created since read the current
+#                                                   Secret at creation)
+#   FORCE_CONSUMER_RESTART=true                  -> restart, then stamp
 #
-# Before any Secret write, the caller marks every existing unstamped consumer
-# whose values change with the restart-pending stamp (token_stamp_mark_pending),
-# so the obligation survives a failed restart or a run that dies half-way. A
-# failed read, restart or stamp write is retried, then recorded as pending and
-# the walk continues. A pending consumer keeps a stamp that differs from the
-# written values (its old stamp or restart-pending), so the next run restarts it
-# without any manual step; the calling script exits non-zero so the failure is
+# The pre-write mark makes the obligation durable whatever the consumer's stamp:
+# a failed restart, a run that dies half-way, or an out-of-band edit that this
+# run reverts (a pod started since may run the edited value; the stamp records
+# what this script restarted, not what a pod loaded) leaves a stamp that differs
+# from the written values, so the next run restarts the consumer without any
+# manual step. If the run stops after some marks and before writing any Secret
+# (a later mark, read or list fails), the marked consumers restart once on the
+# next run although no value changed: an extra restart, never a missed one.
+#
+# A failed read, restart or stamp write is retried, then recorded as pending and
+# the walk continues; the calling script exits non-zero so the failure is
 # visible in the job. A stamp write never rolls pods (it is metadata, not the
 # pod template). Not covered: a Deployment created between the caller's
-# pre-write listing and the Secret patch whose restart then also fails (it may
+# pre-write read and the Secret patch whose restart then also fails (it may
 # start on the old value and has no mark); closing it needs the creator to
 # stamp what it creates.
 #
@@ -42,6 +51,11 @@ TOKEN_STAMP_RETRY_SECONDS="${TOKEN_STAMP_RETRY_SECONDS:-2}"
 # the consumer restarts on the run that writes it or, if that fails or the run
 # dies, on the next one.
 TOKEN_STAMP_PENDING_VALUE="restart-pending"
+# Annotation of apply-inter-service-tokens.sh's stamp on each of its consumers.
+# lib/restart-jwt-key-consumers.sh writes TOKEN_STAMP_PENDING_VALUE under it to
+# hand a key-consumer restart that stayed pending to that script.
+# shellcheck disable=SC2034 # read by apply-inter-service-tokens.sh and restart-jwt-key-consumers.sh
+TOKEN_STAMP_ANNOTATION="clerum.io/inter-service-tokens-sha256"
 
 # Prints the sha256 (hex) of the given "KEY=value" lines. Values reach openssl
 # through a pipe from the printf builtin, never through argv.
@@ -88,9 +102,12 @@ token_stamp_read() {
 
 # token_stamp_mark_pending <annotation> <namespace> <deployment> <changed-in-run>
 # Call before any Secret write. When a value the consumer reads changes in this
-# run and the Deployment exists without a stamp, writes the restart-pending
-# stamp. A missing Deployment reads the new value when it is created; a stamped
-# one already keeps its old stamp until it restarts. Returns 1 when the
+# run (the Secret before the run differs from what it writes) and the
+# Deployment exists, writes the restart-pending stamp, whatever stamp it had:
+# its pods may run a value other than the one written (a reverted out-of-band
+# edit loaded by a pod started since, or a half-applied earlier run), and a stamp
+# records what this script restarted, not what a pod loaded. A missing
+# Deployment reads the new value when it is created. Returns 1 when the
 # obligation cannot be recorded; the caller then exits before writing.
 token_stamp_mark_pending() {
   local annotation="$1" ns="$2" dep="$3" changed="$4" current
@@ -99,13 +116,15 @@ token_stamp_mark_pending() {
     log "ERROR: cannot read deployment $ns/$dep before writing Secrets; no Secret was written"
     return 1
   fi
-  [ "$current" = "none" ] || return 0
+  case "$current" in
+    absent|"$TOKEN_STAMP_PENDING_VALUE") return 0 ;;
+  esac
   if ! token_stamp_retry kctl -n "$ns" annotate deploy "$dep" --overwrite \
        "$annotation=$TOKEN_STAMP_PENDING_VALUE" >/dev/null; then
     log "ERROR: cannot record the pending restart of $ns/$dep; no Secret was written"
     return 1
   fi
-  log "Recorded pending restart on $ns/$dep before writing Secrets (no stamp yet)"
+  log "Recorded pending restart on $ns/$dep before writing Secrets (a value it reads changes)"
 }
 
 # reconcile_token_consumer <annotation> <namespace> <deployment> <changed-in-run> <desired-stamp>
@@ -134,7 +153,7 @@ reconcile_token_consumer() {
     fi
     reason="no stamp and tokens changed"
   elif [ "$current" = "$TOKEN_STAMP_PENDING_VALUE" ]; then
-    reason="restart pending from an earlier run"
+    reason="restart pending (recorded before a Secret write)"
   elif [ "$current" != "$desired" ]; then
     reason="tokens differ from the stamp"
   else

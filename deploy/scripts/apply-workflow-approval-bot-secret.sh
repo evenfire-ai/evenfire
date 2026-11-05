@@ -122,10 +122,10 @@ fi
 # (deploy/base/channels/workflow-approval-request-reader/deployment.yaml), so it
 # restarts when that value differs from its token stamp
 # (lib/token-consumer-stamp.sh). A missed or failed restart keeps a stamp that
-# differs from the written value and is retried by the next run. READER_CHANGED
-# (stored value before this run versus the value it writes) is used only when
-# the reader has no stamp yet: it is then marked restart-pending before the
-# Secret is patched. Values stay in shell locals and are never logged.
+# differs from the written value and is retried by the next run. When
+# READER_CHANGED (stored value before this run versus the value it writes) is
+# true, the reader is marked restart-pending before the Secret is patched.
+# Values stay in shell locals and are never logged.
 WEBHOOK_SECRET_BEFORE="$(read_secret_key "$READER_NS" "$READER_SECRET" telegram-webhook-secret)"
 if [ -z "$WEBHOOK_SECRET_BEFORE" ] || [ "$WEBHOOK_SECRET_BEFORE" != "$WEBHOOK_SECRET" ]; then
   READER_CHANGED=true

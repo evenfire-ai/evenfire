@@ -23,6 +23,7 @@ assert_generate_keys_creates_output_dir() {
   mkdir -p "$project/scripts/minikube" "$project/deploy/scripts/lib" "$stubbin"
   cp scripts/minikube/generate-keys.sh "$project/scripts/minikube/generate-keys.sh"
   cp deploy/scripts/lib/restart-jwt-key-consumers.sh "$project/deploy/scripts/lib/"
+  cp deploy/scripts/lib/token-consumer-stamp.sh "$project/deploy/scripts/lib/"
   chmod +x "$project/scripts/minikube/generate-keys.sh"
 
   cat > "$stubbin/kubectl" <<'STUB'
@@ -82,6 +83,7 @@ assert_existing_secret_is_patched_once() {
   mkdir -p "$project/scripts/minikube" "$project/deploy/scripts/lib" "$stubbin"
   cp scripts/minikube/generate-keys.sh "$project/scripts/minikube/generate-keys.sh"
   cp deploy/scripts/lib/restart-jwt-key-consumers.sh "$project/deploy/scripts/lib/"
+  cp deploy/scripts/lib/token-consumer-stamp.sh "$project/deploy/scripts/lib/"
   chmod +x "$project/scripts/minikube/generate-keys.sh"
 
   cat > "$stubbin/kubectl" <<'STUB'

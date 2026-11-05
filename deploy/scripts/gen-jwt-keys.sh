@@ -238,7 +238,8 @@ fi
 # write gfs-config; every deploy's sync-auth-key.sh step syncs it, or run the
 # sync-auth-key target after a rotation), control-postgres (constant values,
 # read by the server only when it initialises its data directory) and
-# inter-service-tokens (no Deployment reads it).
+# inter-service-tokens (no Deployment reads it). The script prints the gfsc
+# notice at the end of every run.
 # A pending restart does not skip the validation below; the script exits 1
 # after it. The literal kubectl argv is passed so the printed recovery commands
 # can be run as they are.
@@ -262,12 +263,6 @@ for ns in control-plane sandbox-recipes; do
     echo "  OK: clerum-wrc-public-key in $ns has valid PEM key"
   fi
 done
-if [[ "$VALIDATION_FAILED" -eq 1 ]]; then
-  echo ""
-  echo "VALIDATION FAILED: One or more ConfigMaps still have placeholder values."
-  echo "This will cause model-config-failed errors in workflow pods."
-  exit 1
-fi
 if [[ "$MCP_SYNC_PENDING" -eq 1 ]]; then
   echo ""
   echo "MCP-HOST SYNC PENDING: mcp-host-config was not updated, so mcp-host was not restarted."
@@ -278,11 +273,21 @@ if [[ "$RESTARTS_PENDING" -eq 1 ]]; then
   echo ""
   echo "RESTARTS PENDING: the keys are rotated but some consumers were not restarted (see the commands above)."
 fi
-if [[ "$MCP_SYNC_PENDING" -eq 1 || "$RESTARTS_PENDING" -eq 1 ]]; then
+echo ""
+echo "GFSC KEY SYNC REQUIRED: control-api signs gfs tokens with the new RPC key once it restarts, but this"
+echo "script does not write gfs-config, so gfsc keeps verifying them with the previous key until"
+echo "scripts/minikube/sync-auth-key.sh runs. The next deploy runs it; to converge now, run the"
+echo "sync-auth-key target for this environment."
+if [[ "$VALIDATION_FAILED" -eq 1 ]]; then
+  echo ""
+  echo "VALIDATION FAILED: One or more ConfigMaps still have placeholder values."
+  echo "This will cause model-config-failed errors in workflow pods."
+fi
+if [[ "$VALIDATION_FAILED" -eq 1 || "$MCP_SYNC_PENDING" -eq 1 || "$RESTARTS_PENDING" -eq 1 ]]; then
   exit 1
 fi
 
 echo ""
 echo "=== Done ==="
 echo ""
-echo "All secrets created, JWT public key synced, and validation passed."
+echo "All secrets created and validation passed."

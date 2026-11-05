@@ -52,8 +52,8 @@ source "${SCRIPT_DIR}/lib/clerum-minikube-context.sh"
 # shellcheck source=lib/token-consumer-stamp.sh
 source "${SCRIPT_DIR}/lib/token-consumer-stamp.sh"
 MEMBER_REGISTRATION_HMAC_KEY="CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET"
-# Token stamp annotation on each consumer Deployment written by this script.
-TOKEN_STAMP_ANNOTATION="clerum.io/inter-service-tokens-sha256"
+# TOKEN_STAMP_ANNOTATION (the stamp on each consumer Deployment) comes from
+# lib/token-consumer-stamp.sh.
 
 kctl() {
   if [ -n "${CONTEXT:-}" ]; then
@@ -225,22 +225,19 @@ INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TO
 # Each consumer's restart is decided by its token stamp
 # (lib/token-consumer-stamp.sh): the sha256 of the values its pods were last
 # restarted onto, kept as an annotation on the Deployment. A consumer restarts
-# when its stamp differs from the values this run writes, so a restart that was
-# missed or failed, a run that died half-way, or an out-of-band `kubectl patch`
-# of a key is picked up by the next run without any manual step.
+# when its stamp differs from the values this run writes.
 #
-# The "changed in this run" flags below (Secret value before this run versus
-# the value it writes, computed before any Secret is patched) are used only
-# when a Deployment has no stamp yet (first run with stamps, or a recreated
-# Deployment): before any Secret is written, such a Deployment is marked
-# restart-pending when a value it reads changes, so a failed restart or a run
-# that dies half-way is still restarted by the next run. Values stay in shell
-# locals and are never logged.
+# The "changed in this run" flags below compare each Secret value before this
+# run with the value it writes, before any Secret is patched. Every existing
+# consumer with a changed value is marked restart-pending before the first
+# write, so a failed restart, a run that dies half-way, or an out-of-band edit
+# that this run reverts (control-api's map and list are rebuilt from the
+# callers on every run) is restarted by this run or the next one without any
+# manual step. Values stay in shell locals and are never logged.
 #
 # Each control-api service token has two ends: the caller reads it from its own
 # Secret, and control-api verifies it from CONTROL_API_INTERNAL_SERVICE_TOKENS.
-# For the no-stamp case, a token that changed at either end counts as changed
-# for both ends.
+# A token that changed at either end counts as changed for both ends.
 #
 # Prints "true" or "false". Arguments are repeated
 # (namespace, secret, key, value-this-run-writes) groups.
@@ -368,9 +365,9 @@ TOKEN_CONSUMERS=(
 )
 
 # --- 0. Record restart obligations before any Secret is written ---
-# An existing consumer without a stamp whose values change is marked
-# restart-pending here (see "Consumer restart decision"). If a mark cannot be
-# written, the run stops before changing any Secret.
+# Every existing consumer whose values change is marked restart-pending here
+# (see "Consumer restart decision"). If a mark cannot be written, the run stops
+# before changing any Secret.
 for entry in "${TOKEN_CONSUMERS[@]}"; do
   IFS=':' read -r ns dep changed _stamp <<<"$entry"
   token_stamp_mark_pending "$TOKEN_STAMP_ANNOTATION" "$ns" "$dep" "$changed" || exit 1

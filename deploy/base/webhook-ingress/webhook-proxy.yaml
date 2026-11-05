@@ -31,7 +31,7 @@ data:
 # client-side), overwriting the patched token with a placeholder. On GCP that
 # apply runs after the token step, so webhook-proxy pods created later in the
 # deploy start with the placeholder, and the next token step treats it as
-# absent and rotates the token (#1138).
+# absent and rotates the token.
 apiVersion: v1
 kind: Secret
 metadata:

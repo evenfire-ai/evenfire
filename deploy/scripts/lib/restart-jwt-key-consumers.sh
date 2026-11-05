@@ -5,8 +5,8 @@
 # Each of these Deployments reads the rotated values once, at startup, so it
 # keeps the old ones in memory until it restarts. A key rotation therefore
 # restarts them itself instead of relying on a later deploy:
-# apply-inter-service-tokens.sh restarts only consumers whose own tokens
-# changed (#1138).
+# apply-inter-service-tokens.sh restarts only the consumers whose own tokens
+# changed.
 #   control-plane/control-api              control-api-secrets
 #   control-plane/control-ui               control-ui-secrets
 #   rpc-proxy/rpc-proxy                    rpc-proxy-secrets (envFrom)
@@ -38,16 +38,22 @@
 # A pending consumer that apply-inter-service-tokens.sh also reconciles is
 # marked with that script's restart-pending token stamp
 # (lib/token-consumer-stamp.sh), so the next deploy's token step restarts it
-# without a manual step. control-ui is not one of its consumers; its command
-# must be run. A pending mcp-host restart is healed by the next deploy's
+# without a manual step. The mark is written when the walk ends with that
+# restart still pending, not before the keys are written: a job cancelled
+# between the key writes and this report leaves no mark, and its consumers keep
+# the old keys until restarted with the commands this function prints (or the
+# token step with FORCE_CONSUMER_RESTART=true, which covers every consumer here
+# except control-ui). control-ui is not one of the token step's consumers; its
+# command must be run. A pending mcp-host restart is healed by the next deploy's
 # sync-auth-key.sh step, which restarts every mcp-host pod still on the old key.
 
 JWT_KEY_RESTART_ATTEMPTS="${JWT_KEY_RESTART_ATTEMPTS:-3}"
 JWT_KEY_RESTART_RETRY_SECONDS="${JWT_KEY_RESTART_RETRY_SECONDS:-2}"
-# apply-inter-service-tokens.sh's stamp annotation and its restart obligation
-# value (TOKEN_STAMP_ANNOTATION and TOKEN_STAMP_PENDING_VALUE there).
-JWT_KEY_TOKEN_STAMP_ANNOTATION="clerum.io/inter-service-tokens-sha256"
-JWT_KEY_TOKEN_STAMP_PENDING_VALUE="restart-pending"
+# The token stamp annotation and its restart-pending value (TOKEN_STAMP_ANNOTATION,
+# TOKEN_STAMP_PENDING_VALUE) come from token-consumer-stamp.sh, the one place
+# apply-inter-service-tokens.sh reads them from.
+# shellcheck source=token-consumer-stamp.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token-consumer-stamp.sh"
 
 jwt_key_retry() {
   local attempt out
@@ -110,7 +116,7 @@ jwt_key_report_pending() {
       mcp-host/*) continue ;;
     esac
     if jwt_key_retry "$@" -n "$ns" annotate deploy "$dep" --overwrite \
-         "$JWT_KEY_TOKEN_STAMP_ANNOTATION=$JWT_KEY_TOKEN_STAMP_PENDING_VALUE" >/dev/null; then
+         "$TOKEN_STAMP_ANNOTATION=$TOKEN_STAMP_PENDING_VALUE" >/dev/null; then
       echo "  $ns/$dep marked restart-pending: the next apply-inter-service-tokens.sh run restarts it." >&2
     else
       echo "  ERROR: cannot mark $ns/$dep restart-pending; run its command above." >&2
