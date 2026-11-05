@@ -198,7 +198,7 @@ export const reconstructionReadiness: DeploymentReadiness = Object.freeze({
   legacySwitchAuthorization: 'ready',
   legacyDrainAccepted: false,
   sessionV2Acceptance: 'ready',
-  sessionV2Issuance: 'ready',
+  sessionV2Issuance: 'unavailable',
   minimumClientEnforcement: 'unavailable',
 })
 

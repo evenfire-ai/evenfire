@@ -204,7 +204,13 @@ describe('central user-access rollout compiler', () => {
       acceptV2: true,
       issueV2: false,
     })
-    // Minimum-client enforcement is not deployed in PR 1, so configuring it stops startup.
+    // V2 issuance is not deployed in PR 1 (#1222), so configuring it stops startup.
+    await expect(
+      resolveEffectiveUserAccessPolicy({ intent: intent({ sessionV2Issuance: true }) })
+    ).rejects.toThrowError(
+      new UserAccessPolicyConfigurationError('session_v2_issuance_unavailable')
+    )
+    // Minimum-client enforcement needs V2 issuance, so it stops startup at that gate first.
     await expect(
       resolveEffectiveUserAccessPolicy({
         intent: intent({
@@ -214,7 +220,7 @@ describe('central user-access rollout compiler', () => {
         }),
       })
     ).rejects.toThrowError(
-      new UserAccessPolicyConfigurationError('minimum_client_enforcement_unavailable')
+      new UserAccessPolicyConfigurationError('session_v2_issuance_unavailable')
     )
   })
 

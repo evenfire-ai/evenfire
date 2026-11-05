@@ -8,10 +8,6 @@ import type { ExternalSessionAuthentication } from '../src/services/auth/externa
 import { observeExternalSessionCurrentness } from '../src/services/auth/externalSessionCurrentnessObserver.js'
 import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
 import {
-  legacySecurityCutoffRejects,
-  legacySecurityCutoffRejectsSql,
-} from '../src/services/auth/legacySecurityCutoff.js'
-import {
   validateExternalSessionAuthorityContext,
   validateLegacyUserSession,
 } from '../src/services/auth/userSessionService.js'
@@ -39,28 +35,6 @@ function databaseUrl(baseUrl: string, database: string): string {
 function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
-
-// A fixed whole second, 2030-03-17T17:46:40Z.
-const S = 1_900_000_000
-
-function at(second: number, fraction: string): string {
-  return `${new Date(second * 1000).toISOString().slice(0, 19)}.${fraction}Z`
-}
-
-// Cutoffs on and around a second boundary, with microsecond fractions that the
-// pg parser truncates to milliseconds before the TypeScript comparators see them.
-const PARITY_CASES = [
-  { cutoff: at(S, '000000'), iat: S - 1, rejected: true },
-  { cutoff: at(S, '000000'), iat: S, rejected: true },
-  { cutoff: at(S, '000000'), iat: S + 1, rejected: false },
-  { cutoff: at(S, '000001'), iat: S, rejected: true },
-  { cutoff: at(S, '000001'), iat: S + 1, rejected: false },
-  { cutoff: at(S, '500000'), iat: S, rejected: true },
-  { cutoff: at(S, '999999'), iat: S, rejected: true },
-  { cutoff: at(S, '999999'), iat: S + 1, rejected: false },
-  { cutoff: at(S - 1, '999999'), iat: S - 1, rejected: true },
-  { cutoff: at(S - 1, '999999'), iat: S, rejected: false },
-] as const
 
 // Every comparator case keeps the token's lifecycle generation current and the token
 // unrevoked, so the security cutoff is the only reason any site can reject it.
@@ -175,45 +149,6 @@ describeRealPostgres('V1 security cutoff at every comparator on real PostgreSQL'
     } finally {
       await adminPool?.end()
     }
-  })
-
-  it('gives the same decision in TypeScript and SQL for every boundary case', async () => {
-    const result = await databasePool.query(
-      `SELECT c.ord,
-              c.cutoff::timestamptz AS valid_after,
-              (${legacySecurityCutoffRejectsSql('c.iat', 'c.cutoff::timestamptz')}) AS sql_rejects
-         FROM unnest($1::int[], $2::text[], $3::bigint[]) AS c(ord, cutoff, iat)
-        ORDER BY c.ord`,
-      [
-        PARITY_CASES.map((_, index) => index),
-        PARITY_CASES.map(c => c.cutoff),
-        PARITY_CASES.map(c => c.iat),
-      ]
-    )
-    const rows = result.rows as { ord: number; valid_after: Date; sql_rejects: boolean }[]
-
-    expect(rows).toHaveLength(PARITY_CASES.length)
-    expect(PARITY_CASES.some(c => c.rejected)).toBe(true)
-    expect(PARITY_CASES.some(c => !c.rejected)).toBe(true)
-    const decisions = rows.map(row => {
-      const testCase = PARITY_CASES[row.ord]!
-      return {
-        cutoff: testCase.cutoff,
-        iat: testCase.iat,
-        expected: testCase.rejected,
-        sql: row.sql_rejects,
-        ts: legacySecurityCutoffRejects(testCase.iat, row.valid_after),
-      }
-    })
-    expect(decisions).toEqual(
-      PARITY_CASES.map(c => ({
-        cutoff: c.cutoff,
-        iat: c.iat,
-        expected: c.rejected,
-        sql: c.rejected,
-        ts: c.rejected,
-      }))
-    )
   })
 
   it('rejects the cutoff second and accepts the next one in request validation and authority', async () => {

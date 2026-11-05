@@ -191,7 +191,7 @@ describe('signCurrentExternalGfsUserToken', () => {
     tokenClaims,
     policy,
   }
-  const input = { subject: DESKTOP_USER_ID, drive: 'user', scopes: ['read' as const] }
+  const input = { subject: DESKTOP_USER_ID, drive: 'user', scopes: ['gfs.read' as const] }
 
   function mockSingleRowQuery(rows: Record<string, unknown>[]) {
     const query = vi.fn().mockResolvedValue({ rows, rowCount: rows.length })
@@ -203,9 +203,21 @@ describe('signCurrentExternalGfsUserToken', () => {
     return query
   }
 
-  it('signs the authenticated V1 generation with a single unlocked users read', async () => {
+  // Only token_revoked === false (the EXISTS found no live revocation of this
+  // token) lets a V1 mint proceed; any other value refuses.
+  function expectV1RevocationRead(query: ReturnType<typeof vi.fn>) {
+    expect(query).toHaveBeenCalledOnce()
+    const sql = String(query.mock.calls[0]?.[0])
+    expect(sql).toContain('FROM users')
+    expect(sql).toContain('external_v1_session_revocations')
+    expect(sql).toContain('AS token_revoked')
+    expect(sql).not.toContain('FOR UPDATE')
+    expect(query.mock.calls[0]?.[1]).toEqual([DESKTOP_USER_ID, 'token-hash'])
+  }
+
+  it('signs the authenticated V1 generation with a single unlocked users and revocation read', async () => {
     const query = mockSingleRowQuery([
-      { lifecycle_state: 'active', lifecycle_version: 1, db_now: new Date() },
+      { lifecycle_state: 'active', lifecycle_version: 1, db_now: new Date(), token_revoked: false },
     ])
 
     await expect(signCurrentExternalGfsUserToken(authentication, input)).resolves.toEqual({
@@ -213,9 +225,7 @@ describe('signCurrentExternalGfsUserToken', () => {
       expiresInSeconds: 600,
     })
 
-    expect(query).toHaveBeenCalledOnce()
-    expect(String(query.mock.calls[0]?.[0])).toContain('FROM users')
-    expect(String(query.mock.calls[0]?.[0])).not.toContain('FOR UPDATE')
+    expectV1RevocationRead(query)
     expect(
       query.mock.calls.some(call =>
         String(call[0]).includes('external_user_session_security_epochs')
@@ -231,9 +241,21 @@ describe('signCurrentExternalGfsUserToken', () => {
     )
   })
 
+  it('refuses a V1 token revoked after authentication', async () => {
+    const query = mockSingleRowQuery([
+      { lifecycle_state: 'active', lifecycle_version: 1, db_now: new Date(), token_revoked: true },
+    ])
+
+    await expect(signCurrentExternalGfsUserToken(authentication, input)).resolves.toBeNull()
+
+    // Witness: the one read carrying the revocation lookup ran before the refusal.
+    expectV1RevocationRead(query)
+    expect(gfsTokenMock.signGfsToken).not.toHaveBeenCalled()
+  })
+
   it('refuses a V1 session whose generation was bumped after authentication', async () => {
     const query = mockSingleRowQuery([
-      { lifecycle_state: 'active', lifecycle_version: 3, db_now: new Date() },
+      { lifecycle_state: 'active', lifecycle_version: 3, db_now: new Date(), token_revoked: false },
     ])
 
     await expect(signCurrentExternalGfsUserToken(authentication, input)).resolves.toBeNull()
@@ -378,7 +400,14 @@ describe('signCurrentExternalGfsUserToken', () => {
 
   it('returns null for a retired user instead of signing', async () => {
     const query = vi.fn().mockResolvedValue({
-      rows: [{ lifecycle_state: 'retired', lifecycle_version: 4, db_now: new Date() }],
+      rows: [
+        {
+          lifecycle_state: 'retired',
+          lifecycle_version: 4,
+          db_now: new Date(),
+          token_revoked: false,
+        },
+      ],
       rowCount: 1,
     })
     dbMock.withTransaction.mockImplementation(async work => work({ query }))

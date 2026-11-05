@@ -54,11 +54,11 @@ export type ExternalGfsUserTokenInput = Readonly<{
  * re-reads users.lifecycle_version on every request, so a change after signing
  * fails closed there.
  *
- * The V1 comparison covers the user generation only. A single-token V1 logout
- * is recorded as a token revocation, not as a lifecycle_version bump, so one
- * that commits between the session middleware and this read is not detected
- * here (same as before V2). The V2 read joins the authenticated session row and
- * does detect a per-session revocation.
+ * The V1 read also checks external_v1_session_revocations for the
+ * authenticated token hash (same predicate as the V1 session validator), so a
+ * single-token V1 logout that commits between the session middleware and this
+ * read refuses the mint. The V2 read joins the authenticated session row and
+ * detects a per-session revocation the same way.
  *
  * The signed bytes remain private to this function until COMMIT succeeds, so a
  * lost/uncertain commit cannot be reported as a usable GFS credential.
@@ -88,15 +88,23 @@ export async function signCurrentExternalGfsUserToken(
   try {
     return await withTransaction(
       async transaction => {
-        // One unlocked statement per mint (M-30). V2 reads the authenticated
-        // session row in the same snapshot as the user row.
+        // One unlocked statement per mint (M-30). V1 reads the token's
+        // revocation and V2 the authenticated session row in the same snapshot
+        // as the user row.
         const result =
           context.contract === 'v1'
             ? await transaction.query(
-                `SELECT lifecycle_state, lifecycle_version, clock_timestamp() AS db_now
+                `SELECT lifecycle_state, lifecycle_version, clock_timestamp() AS db_now,
+                        EXISTS (
+                          SELECT 1
+                            FROM external_v1_session_revocations r
+                           WHERE r.token_hash = $2
+                             AND r.user_id = $1
+                             AND r.expires_at > clock_timestamp()
+                        ) AS token_revoked
                    FROM users
                   WHERE id = $1`,
-                [context.userId]
+                [context.userId, context.tokenHash]
               )
             : await transaction.query(
                 `SELECT u.lifecycle_state, u.lifecycle_version, clock_timestamp() AS db_now,
@@ -112,6 +120,7 @@ export async function signCurrentExternalGfsUserToken(
               lifecycle_state?: unknown
               lifecycle_version?: unknown
               db_now?: Date | string
+              token_revoked?: unknown
               revoked_at?: unknown
               session_version?: unknown
               absolute_expires_at?: unknown
@@ -131,7 +140,8 @@ export async function signCurrentExternalGfsUserToken(
           return null
         }
         if (context.contract === 'v1') {
-          if (generation !== context.authGeneration) return null
+          // Only an explicit false from the EXISTS proves the token is not revoked.
+          if (row.token_revoked !== false || generation !== context.authGeneration) return null
         } else {
           // Same expiry rules as the V2 session validator
           // (userSessionService.ts validateLoadedSession), judged against the

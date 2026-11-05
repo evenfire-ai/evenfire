@@ -114,15 +114,6 @@ function auditRunMatchesUserScope(row: Record<string, unknown>, scope: UserRunSc
   return false
 }
 
-export function canCallerReadWorkflowRun(
-  caller: WorkflowRouteCaller,
-  row: WorkflowRunRow
-): boolean {
-  const scope = userRunScope(caller)
-  if (!scope) return true
-  return runMatchesUserScope(row, scope)
-}
-
 export async function canCallerReadWorkflowRunWithApprovalTarget(
   caller: WorkflowRouteCaller,
   row: WorkflowRunRow,
