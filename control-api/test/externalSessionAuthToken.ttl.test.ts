@@ -46,17 +46,16 @@ describe('V1 external session lifetime', () => {
     expect(verifyExternalSessionToken(token)).toBeNull()
   })
 
-  it('preserves explicitly issued expirations when the default is longer', () => {
+  it('honors an explicit 43,200-second signer TTL through expiration', () => {
     vi.spyOn(Date, 'now').mockReturnValue(issuedAt * 1000)
     const token = signExternalSessionToken(claims, 43_200)
-    const original = jwt.decode(token) as jwt.JwtPayload
+    const signed = jwt.decode(token) as jwt.JwtPayload
 
-    expect(original.exp! - original.iat!).toBe(43_200)
+    expect(signed.exp! - signed.iat!).toBe(43_200)
     expect(verifyExternalSessionToken(token)).not.toBeNull()
 
     vi.spyOn(Date, 'now').mockReturnValue((issuedAt + 43_200) * 1000)
     expect(verifyExternalSessionToken(token)).toBeNull()
-    expect(jwt.decode(token)).toEqual(original)
   })
 
   it('keeps an explicit signer TTL authoritative', () => {
