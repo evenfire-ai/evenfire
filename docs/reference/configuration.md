@@ -14,6 +14,9 @@ Full per-service variable lists live in each service's README (see
 > you create it. Only the minikube overlay ships one
 > (`deploy/overlays/minikube/configmaps/mcp-host-config.yaml`); copy it and
 > review each value (see [Production deployment](../deploy/production.md)).
+> `HCC_AUTHORITY_MAX_STALENESS_MS` must satisfy the
+> [mcp-host authority staleness floor](../deploy/releases-and-upgrades.md#mcp-host-authority-staleness-floor),
+> or every agent pod refuses to start.
 > Variables you leave out take mcp-host's code defaults: the mcp-host rows in
 > the two "Off" tables below stay off unless your ConfigMap sets them, and the
 > mcp-host rows under [On by default](#on-by-default) stay on.

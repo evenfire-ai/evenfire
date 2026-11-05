@@ -235,6 +235,7 @@ Read the notes for every release you skip over, not only the target release.
 | [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                               |
 | [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.x; Node 25+ blocks its network. |
 | [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap.          |
+| [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor) | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`. |
 
 #### Snippet runner Node permissions
 
@@ -344,3 +345,31 @@ only, for example
 `kubectl -n rpc-proxy get secret rpc-proxy-secrets -o go-template='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}'`;
 do not print its values. rpc-proxy reads these values at startup, so the new
 default and the cap check apply when the new pods start.
+
+### mcp-host authority staleness floor
+
+mcp-host keeps its MCP fleet while host-context-controller (HCC) is unreachable
+for at most `HCC_AUTHORITY_MAX_STALENESS_MS` after the last successful HCC poll.
+Before this release mcp-host only required that bound to be above
+`CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`. A bound that small tolerates no missed
+poll, so a short HCC restart could revoke every healthy Host fleet (#1350). In
+cluster mode mcp-host now refuses to start unless the bound, after the 600000 ms
+cap, absorbs two missed polls:
+
+```
+HCC_AUTHORITY_MAX_STALENESS_MS >= interval + 2 × max(interval, 10000) + 10000 + 1000
+```
+
+`10000` is the inventory request timeout and `1000` a scheduling allowance, both
+in milliseconds. At the default 30000 ms interval the minimum is 101000 ms. The
+poll interval must also be a positive whole number of milliseconds; a
+non-numeric value now stops startup instead of polling every millisecond.
+
+The 101000 ms floor is a validity check, not a recommended value. Keep the
+180000 ms default, which absorbs four missed polls: HCC outages longer than two
+polls have been observed. The minikube `mcp-host-config` set `60000` before this
+release. If your `mcp-host-config` started as a copy of it, raise
+`HCC_AUTHORITY_MAX_STALENESS_MS` or remove the key before you roll out the new
+mcp-host image; otherwise every Host refuses to start. mcp-host reads both
+values at startup through `envFrom`, so a ConfigMap change applies when each
+Host pod starts again.

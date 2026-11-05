@@ -185,6 +185,21 @@ when 'host-secret-authenticated-group-grant'
     },
     'subjects' => [{ 'kind' => 'Group', 'name' => 'system:authenticated' }],
   }
+when 'authority-staleness-60s', 'poll-interval-60s'
+  host_config = documents.find do |document|
+    document['kind'] == 'ConfigMap' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host-config'
+  end
+  abort('fixture source is missing mcp-host/mcp-host-config') unless host_config
+  key = if mutation == 'authority-staleness-60s'
+    'HCC_AUTHORITY_MAX_STALENESS_MS'
+  else
+    'CLERUM_CONTEXT_MAPPER_POLL_INTERVAL'
+  end
+  data = host_config.fetch('data')
+  abort("fixture source mcp-host-config has no #{key}") unless data.key?(key)
+  data[key] = '60000'
 else
   abort("unknown fixture mutation: #{mutation}")
 end
@@ -282,3 +297,18 @@ assert_rejected \
   "${host_secret_authenticated_group}" \
   'mcp-host identities must not receive MCP Secret read grants' \
   'mcp-host MCP Secret system:authenticated grant'
+
+# Issue #1350: 60000 tolerates no missed HCC poll at a 30000ms interval.
+authority_staleness_60s="${tmpdir}/authority-staleness-60s.yaml"
+mutate_render authority-staleness-60s "${authority_staleness_60s}"
+assert_rejected \
+  "${authority_staleness_60s}" \
+  'NP-08 render contract: HCC_AUTHORITY_MAX_STALENESS_MS must be "180000"' \
+  'mcp-host authority staleness of 60000ms'
+
+poll_interval_60s="${tmpdir}/poll-interval-60s.yaml"
+mutate_render poll-interval-60s "${poll_interval_60s}"
+assert_rejected \
+  "${poll_interval_60s}" \
+  'NP-08 render contract: CLERUM_CONTEXT_MAPPER_POLL_INTERVAL must be "30000"' \
+  'mcp-host context mapper poll interval of 60000ms'

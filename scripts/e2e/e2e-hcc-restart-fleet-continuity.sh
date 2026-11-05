@@ -19,7 +19,11 @@
 #      the suspended stateless Host stays suspended;
 #   C6 HCC's request lane is ready again before mcp-host's authority
 #      staleness bound (HCC_AUTHORITY_MAX_STALENESS_MS, read from the live
-#      mcp-host ConfigMap: 60 s on the minikube overlay, 180 s default);
+#      mcp-host ConfigMap: 180 s on the minikube overlay and by default). This
+#      is a necessary check only: successes are phase-locked to poll ticks, so
+#      the recovery budget guaranteed from the disruption start is
+#      floor((S - I - T - 1 s) / max(I, T)) * max(I, T), which is 120 s at
+#      S = 180 s, I = 30 s and T = 10 s. C7 is the verdict;
 #   C7 no Host pod logs a fleet revocation or a removed server; witness: the
 #      HCC gateway serves Host inventory with 200 after the restart;
 #   C8 the McpServer fixture's Ready condition, sampled every 2 s from the kill
@@ -648,14 +652,18 @@ restore_cadences() {
 }
 
 fixture_objects_absent() {
-  local leftovers
-  leftovers="$(
-    kctl get hosts -n "$HOST_NS" -l "e2e.clerum.io/run=${RUN_LABEL}" -o name
-    kctl get mcpservers,contexts -n "$MCP_NS" -l "e2e.clerum.io/run=${RUN_LABEL}" -o name
-    kctl get deployments -n "$HOST_NS" -o name | grep -E "/(${SUSPENDED_HOST}|${ACTIVE_HOST})$" || true
-    kctl get deployments -n "$MCP_NS" -o name | grep -E "/${MCP_FIXTURE}$" || true
-  )" || return 1
-  [ -z "$leftovers" ]
+  # Each read is checked on its own: an empty result means "none left" only
+  # after a read that succeeded, so a failed read never verifies the cleanup.
+  local labelled_hosts labelled_mcp host_deployments mcp_deployments
+  labelled_hosts="$(kctl get hosts -n "$HOST_NS" -l "e2e.clerum.io/run=${RUN_LABEL}" -o name)" || return 1
+  labelled_mcp="$(kctl get mcpservers,contexts -n "$MCP_NS" -l "e2e.clerum.io/run=${RUN_LABEL}" -o name)" || return 1
+  host_deployments="$(kctl get deployments -n "$HOST_NS" -o name)" || return 1
+  mcp_deployments="$(kctl get deployments -n "$MCP_NS" -o name)" || return 1
+  [ -z "$labelled_hosts" ] || return 1
+  [ -z "$labelled_mcp" ] || return 1
+  if grep -qE "/(${SUSPENDED_HOST}|${ACTIVE_HOST})$" <<<"$host_deployments"; then return 1; fi
+  if grep -qE "/${MCP_FIXTURE}$" <<<"$mcp_deployments"; then return 1; fi
+  return 0
 }
 
 teardown() {
@@ -781,11 +789,13 @@ wait_until 420 "fixture ${ACTIVE_HOST} runtime-token bootstrap to be consumed" f
 #    refresh-expires-at, then rotates it on the next reconcile, restart or not
 #    (hasFreshBootstrapSecretNewerThanHealthyDeployment). Wait until no token
 #    (runtime or GFS) expires inside the run window, so a rotation during the
-#    run is a defect and never a scheduled one.
+#    run is a defect and never a scheduled one. The window starts here, so it
+#    also covers the pre-snapshot settle of step 3 (staleness bound + 30 s).
+PRE_SNAPSHOT_SETTLE_SEC=$((AUTHORITY_STALENESS_SEC + 30))
 if [ "$MODE" = idle ]; then
-  RUN_WINDOW_SEC=$((RECOVERY_WAIT_SEC + SETTLE_SEC + 60))
+  RUN_WINDOW_SEC=$((PRE_SNAPSHOT_SETTLE_SEC + RECOVERY_WAIT_SEC + SETTLE_SEC + 60))
 else
-  RUN_WINDOW_SEC=$((MID_PASS_ATTEMPTS * (KILL_WATCH_SEC + RESTART_WAIT_SEC + RECOVERY_BETWEEN_SEC) + RECOVERY_WAIT_SEC + SETTLE_SEC + 60))
+  RUN_WINDOW_SEC=$((PRE_SNAPSHOT_SETTLE_SEC + MID_PASS_ATTEMPTS * (KILL_WATCH_SEC + RESTART_WAIT_SEC + RECOVERY_BETWEEN_SEC) + RECOVERY_WAIT_SEC + SETTLE_SEC + 60))
 fi
 tokens_clear_of_run_window() {
   kctl get secrets -n "$HOST_NS" -o json | python3 -I -c '
@@ -817,15 +827,19 @@ wait_until $((RUN_WINDOW_SEC + 420)) "no token expiring inside the ${RUN_WINDOW_
 #    than mcp-host's staleness bound pass after them; a Host that revokes its
 #    fleet here was disturbed by a rollout, which is reported on its own and
 #    never blamed on the kill.
-settle_until=$((CADENCE_RESTORED_EPOCH + AUTHORITY_STALENESS_SEC + 30))
+settle_until=$((CADENCE_RESTORED_EPOCH + PRE_SNAPSHOT_SETTLE_SEC))
 now="$(date +%s)"
 [ "$now" -ge "$settle_until" ] || sleep $((settle_until - now))
 since_restore="$(date -u -r "$CADENCE_RESTORED_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
 for host in "$SOURCE_HOST" "$ACTIVE_HOST"; do
-  revoked="$(kctl logs "deployment/${host}" -n "$HOST_NS" --all-containers=true --since-time="$since_restore" |
-    grep -cE 'MCP authority revoked|Removed server' || true)"
-  [ "$revoked" = 0 ] ||
-    die "precondition: ${host} revoked or removed MCP servers after the setup's HCC rollout (${revoked} line(s)); see ${EVIDENCE_DIR}"
+  # A failed read must abort, never count as zero revocations (the same rule as C7).
+  settle_log="${EVIDENCE_DIR}/settle-host-${host}.log"
+  kctl logs "deployment/${host}" -n "$HOST_NS" --all-containers=true --since-time="$since_restore" >"$settle_log" ||
+    die "precondition: could not read ${host} logs since the setup's HCC rollout"
+  if grep -qE 'MCP authority revoked|Removed server' "$settle_log"; then
+    die "precondition: ${host} revoked or removed MCP servers after the setup's HCC rollout ($(grep -cE 'MCP authority revoked|Removed server' "$settle_log") line(s)); see ${settle_log}"
+  fi
+  ok "precondition: ${host} logged no fleet revocation since the setup's HCC rollout ($(wc -l <"$settle_log") lines read)"
 done
 ok "fleet settled: fixture bootstrap consumed, no token expiring in the run window, no Host revocation after the setup rollouts"
 

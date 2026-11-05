@@ -30,11 +30,13 @@ for rendered in "$@"; do
 
     host_config = require_resource.call("ConfigMap", "mcp-host-config", "mcp-host")
     abort("mcp-host must keep direct MCP transport") unless host_config.dig("data", "MCP_PROXY_ENABLED") == "false"
-    # The minikube e2e lane pins staleness to 60s so the revoke-on-staleness
-    # scenario is fast and deterministic. Production defaults to 180s (bounded at
-    # 600s) in mcp-host/src/config.ts so a normal HCC rollout does not tear down
-    # the MCP fleet — see issue #425. This assertion guards the e2e-lane pin.
-    abort("HCC authority staleness must stay pinned to 60s on the minikube e2e lane") unless host_config.dig("data", "HCC_AUTHORITY_MAX_STALENESS_MS") == "60000"
+    # The pair is constrained by validateHccAuthorityTiming (mcp-host/src/config.ts):
+    # staleness >= poll interval + 2 x max(poll interval, request timeout)
+    # + request timeout + 1000ms, or every Host runtime refuses to start
+    # (issue #1350). The overlay pins the 180s production default against the 30s
+    # interval, which absorbs four missed HCC polls (issue #425).
+    abort("NP-08 render contract: HCC_AUTHORITY_MAX_STALENESS_MS must be \"180000\" (the mcp-host authority staleness rule requires at least 101000 at a 30000ms poll interval)") unless host_config.dig("data", "HCC_AUTHORITY_MAX_STALENESS_MS") == "180000"
+    abort("NP-08 render contract: CLERUM_CONTEXT_MAPPER_POLL_INTERVAL must be \"30000\" (the mcp-host authority staleness rule ties it to HCC_AUTHORITY_MAX_STALENESS_MS)") unless host_config.dig("data", "CLERUM_CONTEXT_MAPPER_POLL_INTERVAL") == "30000"
 
     hcc = require_resource.call("Deployment", "host-context-controller", "control-plane")
     hcc_container = Array(hcc.dig("spec", "template", "spec", "containers")).find do |container|
