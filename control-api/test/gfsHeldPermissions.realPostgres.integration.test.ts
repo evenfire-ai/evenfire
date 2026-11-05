@@ -9,7 +9,7 @@ vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
 }))
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
-const suite = describe.skipIf(!adminUrl)('R1-M1 isolated user-session membership authority', () => {
+describe.skipIf(!adminUrl)('R1-M1 isolated user-session membership authority', () => {
   const userId = '11111111-1111-4111-8111-111111111111'
   const primaryTeamId = '22222222-2222-4222-8222-222222222222'
   const secondaryTeamId = '33333333-3333-4333-8333-333333333333'

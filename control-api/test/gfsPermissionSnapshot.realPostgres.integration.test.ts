@@ -9,7 +9,7 @@ vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
 }))
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
-const suite = describe.skipIf(!adminUrl)('R1-M1 snapshot classification on real PostgreSQL', () => {
+describe.skipIf(!adminUrl)('R1-M1 snapshot classification on real PostgreSQL', () => {
   const database = `r1m1_r6snap_${randomUUID().replaceAll('-', '')}`
   let adminPool: Pool
   let pool: Pool
