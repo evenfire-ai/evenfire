@@ -34,6 +34,7 @@ import {
   HostReconciler,
   type ResolvedSfsMount,
 } from './hostReconciler'
+import type { SecretEventType } from './informers/secretInformer'
 import {
   type InfrastructureTelemetryReporter,
   createInfrastructureTelemetryReporter,
@@ -242,7 +243,9 @@ type NetworkPolicyConvergenceCause =
   | 'context-reconcile-failure'
 type CompletedInventoryRevision = { contextRevision: number; serverRevision: number }
 // A scoped McpServer pass retries only names left incomplete by a pass whose
-// effects all ran under this inventory revision. 'full' covers the fleet.
+// effects all ran under this inventory revision, or names an out-of-pass
+// reconcile left incomplete while that same revision was already certified
+// (#1338 H3, D2). 'full' covers the fleet.
 type McpServerConvergenceRequest =
   | 'full'
   | (CompletedInventoryRevision & { names: ReadonlySet<string> })
@@ -1021,6 +1024,9 @@ export class McpServerWatcher implements McpServerProvider {
       generation: this.mcpWatchGeneration,
     }))
     this.reconciler.setResolveCurrentServer(name => this.servers.get(name))
+    this.reconciler.setIncompleteReconciliationListener(name =>
+      this.scheduleOutOfPassMcpServerRetry(name)
+    )
     const infrastructureTelemetryReporter = config.controlApiBaseUrl
       ? createInfrastructureTelemetryReporter(config.governedTracingEnabled, {
           baseUrl: config.controlApiBaseUrl,
@@ -2676,8 +2682,17 @@ export class McpServerWatcher implements McpServerProvider {
    * matches the given Secret. Used by SecretInformer to react to Secret
    * lifecycle changes (create/update/delete) without waiting for a CRD
    * event.
+   *
+   * `eventType` decides whether the reconcile carries Secret-change evidence:
+   * MODIFIED and DELETED do, ADDED does not, because an informer reconnect
+   * replays ADDED for every Secret (#1338 H3, user decision Q1 (a)).
    */
-  async reconcileByEnvSecret(secretName: string, secretNamespace: string): Promise<void> {
+  async reconcileByEnvSecret(
+    secretName: string,
+    secretNamespace: string,
+    eventType: SecretEventType
+  ): Promise<void> {
+    const secretChangeObserved = eventType !== 'ADDED'
     const inventoryGeneration = this.mcpWatchGeneration
     if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) return
     const selected = [...this.servers.values()].filter(
@@ -2696,10 +2711,12 @@ export class McpServerWatcher implements McpServerProvider {
             return
           }
           try {
-            console.log(
-              `[K8s] Re-reconciling McpServer "${current.name}" after Secret "${secretName}" change`
+            hccLogger.info(
+              `[K8s] Re-reconciling McpServer ${current.name} after Secret ${secretName} ${eventType}`,
+              { serverName: current.name }
             )
             await this.reconciler.reconcile(current, {
+              secretChangeObserved,
               isCurrent: () => {
                 if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) return false
                 const latest = this.servers.get(current.name)
@@ -2712,7 +2729,10 @@ export class McpServerWatcher implements McpServerProvider {
               },
             })
           } catch (err) {
-            console.error(`[K8s] Secret-triggered reconcile failed for "${current.name}":`, err)
+            hccLogger.error('[K8s] Secret-triggered reconcile failed', {
+              serverName: current.name,
+              err,
+            })
           }
         })
       )
@@ -3747,6 +3767,22 @@ export class McpServerWatcher implements McpServerProvider {
     }
     this.initialConvergenceRetryAttempts.delete(lane)
     if (lane === 'McpServer') this.mcpServerRetryRequest = undefined
+  }
+
+  /**
+   * #1338 H3 (D2): the owner of an obligation a reconcile left outside a fleet
+   * pass (watch, SecretInformer, readiness poll). The retry is scoped to the
+   * name only while the current inventory revision is already certified, so
+   * a scoped success re-asserts that certificate and never certifies an
+   * unverified fleet. Otherwise the whole fleet is retried.
+   */
+  private scheduleOutOfPassMcpServerRetry(name: string): void {
+    const request: McpServerConvergenceRequest = this.matchesCurrentInventory(
+      this.completedRuntimeRevision
+    )
+      ? { ...this.currentDesiredInventoryRevision(), names: new Set([name]) }
+      : 'full'
+    this.scheduleInitialConvergenceRetry('McpServer', request)
   }
 
   private scheduleInitialConvergenceRetry(

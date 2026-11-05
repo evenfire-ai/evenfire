@@ -220,6 +220,7 @@ vi.mock('./reconciler', () => ({
     }
     setInventoryAuthority() {}
     setResolveCurrentServer() {}
+    setIncompleteReconciliationListener() {}
     reconcile() {
       return Promise.resolve()
     }

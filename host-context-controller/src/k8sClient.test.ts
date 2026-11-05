@@ -384,6 +384,7 @@ vi.mock('./reconciler', () => ({
     getStatus = vi.fn()
     setInventoryAuthority = vi.fn()
     setResolveCurrentServer = vi.fn()
+    setIncompleteReconciliationListener = vi.fn()
   },
 }))
 
@@ -3194,7 +3195,7 @@ describe('McpServerWatcher startup', () => {
     })
     await blockerStarted.promise
 
-    const convergence = watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+    const convergence = watcher.reconcileByEnvSecret('shared-env', 'mcp-server', 'MODIFIED')
     ;(watcher as any).servers.set(staleServer.name, {
       ...staleServer,
       spec: { ...staleServer.spec, envSecret: { name: 'replacement-env' } },
@@ -3202,7 +3203,7 @@ describe('McpServerWatcher startup', () => {
     await vi.waitFor(() =>
       expect(reconciler.reconcile).toHaveBeenCalledWith(
         expect.objectContaining({ name: currentServer.name }),
-        { isCurrent: expect.any(Function) }
+        { isCurrent: expect.any(Function), secretChangeObserved: true }
       )
     )
     releaseBlocker.resolve(undefined)
@@ -3237,17 +3238,17 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).servers.set(selected.name, selected)
     ;(watcher as any).mcpServerCacheSynced = false
 
-    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server', 'MODIFIED')
 
     expect(reconciler.reconcile).not.toHaveBeenCalled()
 
     markMcpServerInventoryAuthoritative(watcher)
-    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server', 'MODIFIED')
 
     expect(reconciler.reconcile).toHaveBeenCalledOnce()
     expect(reconciler.reconcile).toHaveBeenCalledWith(
       expect.objectContaining({ name: selected.name }),
-      { isCurrent: expect.any(Function) }
+      { isCurrent: expect.any(Function), secretChangeObserved: true }
     )
     await watcher.stop()
   })
@@ -3333,7 +3334,7 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).servers.set(selected.name, selected)
 
     await watcher.stop()
-    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server', 'MODIFIED')
 
     expect(reconciler.reconcile).not.toHaveBeenCalled()
   })

@@ -21,14 +21,18 @@ import {
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from './constants'
-import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
+import { K8S_REQUEST_TIMEOUT_CODE, makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import { hccLogger } from './logger'
 import {
   confirmAuthoritativeMcpServerAbsence,
   sameMcpServerDesiredRevision,
   shouldFailClosedForSecretFailure,
 } from './mcpServerSafety'
-import { createsTotal, mcpserverMissingSecret } from './metrics'
+import {
+  createsTotal,
+  mcpserverMissingSecret,
+  mcpserverReconcileCallFailuresTotal,
+} from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
   canonicalStringify,
@@ -113,6 +117,35 @@ export type McpServerFullReconcileOptions = {
 
 export type McpServerMutationOptions = {
   isCurrent?: () => boolean
+  /**
+   * The caller observed a change to this server's envSecret (a SecretInformer
+   * MODIFIED or DELETED event). A failed Secret read then withdraws a ready
+   * verdict instead of keeping it, because the runtime may no longer match
+   * the Secret it was rolled out with.
+   */
+  secretChangeObserved?: boolean
+}
+
+/**
+ * The reconcile steps whose failed Kubernetes call can decide the published
+ * readiness verdict. Used as the `site` label of
+ * `clerum_hcc_mcpserver_reconcile_call_failures_total`.
+ */
+type VerdictCallSite = 'secret_read' | 'resource_sync' | 'pre_deploy_handshake' | 'rollout_read'
+
+/**
+ * A failure that says nothing about the object that was asked for: the
+ * request hit HCC's deadline, the connection failed (a Node system error code
+ * such as ECONNRESET or ETIMEDOUT), or the apiserver answered 429 or 5xx.
+ * Every other status (404, 403, 409, 422, ...) is an answer about the object
+ * and keeps its meaning.
+ */
+function isTransientKubernetesFailure(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null | undefined)?.code
+  if (code === K8S_REQUEST_TIMEOUT_CODE) return true
+  if (typeof code === 'string') return /^E[A-Z0-9_]+$/.test(code)
+  const status = getErrorCode(error)
+  return status === 429 || (typeof status === 'number' && status >= 500 && status <= 599)
 }
 
 // G2: Pre-deploy handshake constants — imported from @clerum/network-policy-core
@@ -374,6 +407,18 @@ export class McpServerReconciler {
   // independently of discovery readiness and the per-name promise queue.
   private readonly pendingReconciliations = new Map<string, { namespace: string }>()
 
+  // #1338 H3 (D2): only the fleet lane reads pendingReconciliations, and only
+  // at the end of its own pass. Work that runs outside a pass (watch events,
+  // SecretInformer events, readiness-poll ticks) reports an obligation it
+  // leaves through this listener, so the watcher can arm the lane's retry.
+  private incompleteReconciliationListener: ((name: string) => void) | undefined
+
+  // Mutation fences created by fullReconcile. A reconcile or orphan delete
+  // that a fleet pass issued reports through the pass end
+  // (runInitialMcpServerConvergenceCore), never through the listener, so a
+  // mid-pass obligation does not arm a second, trailing run.
+  private readonly fleetPassFences = new WeakSet<() => boolean>()
+
   hasIncompleteReconciliation(): boolean {
     return this.pendingReconciliations.size > 0
   }
@@ -403,7 +448,22 @@ export class McpServerReconciler {
   private retainRetiredReadinessPoll(poll: ReadinessPollState): void {
     if (this.readinessPollStillDesired(poll)) {
       this.pendingReconciliations.set(poll.server.name, { namespace: poll.server.namespace })
+      this.notifyIncompleteReconciliation(poll.server.name)
     }
+  }
+
+  /**
+   * Wire the owner of obligations left outside a fleet pass (#1338 H3, D2).
+   * Called once per incomplete out-of-pass reconcile, per incomplete
+   * out-of-pass delete, and per readiness-poll tick that records an
+   * obligation.
+   */
+  setIncompleteReconciliationListener(fn: (name: string) => void): void {
+    this.incompleteReconciliationListener = fn
+  }
+
+  private notifyIncompleteReconciliation(name: string): void {
+    this.incompleteReconciliationListener?.(name)
   }
 
   /**
@@ -603,11 +663,19 @@ export class McpServerReconciler {
    * readiness poll can tell "same rollout, keep counting" apart from "NEW
    * rollout, fresh window" (issue #223, E2). It plays no part in the
    * readiness verdict above. null when the Deployment could not be read.
+   *
+   * `readFailure` carries the error of a failed read, so a reconcile can tell
+   * "the read failed" apart from "the rollout is not ready" (#1338 H3).
    */
   private async readDeploymentRollout(
     name: string,
     namespace: string
-  ): Promise<{ ready: boolean; detail: string; generation: number | null }> {
+  ): Promise<{
+    ready: boolean
+    detail: string
+    generation: number | null
+    readFailure?: unknown
+  }> {
     try {
       const deployment = await this.appsApi.readNamespacedDeployment({ name, namespace })
       const desired = deployment.spec?.replicas ?? 1
@@ -635,7 +703,12 @@ export class McpServerReconciler {
       }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
-      return { ready: false, generation: null, detail: `Deployment read failed: ${message}` }
+      return {
+        ready: false,
+        generation: null,
+        detail: `Deployment read failed: ${message}`,
+        readFailure: error,
+      }
     }
   }
 
@@ -716,8 +789,13 @@ export class McpServerReconciler {
       const retiredNow = (): boolean =>
         (this.readinessRetirements.get(name) ?? 0) !== state.retirementEpoch
       const publishIfCurrent = (): boolean => state.isCurrent() && !retiredNow()
-      const pollWriteDecline = (): StatusWriteDecline =>
-        retiredNow() ? 'silent' : 'record-obligation'
+      const pollWriteDecline = (): StatusWriteDecline => {
+        if (retiredNow()) return 'silent'
+        // The write fence records the obligation right after this returns;
+        // the listener only arms a later retry, so the order is not observable.
+        this.notifyIncompleteReconciliation(name)
+        return 'record-obligation'
+      }
       // Mutation fencing: a superseded reconcile (desired-revision or
       // inventory-authority change) must not keep observing — or writing
       // status — on behalf of a stale desired state. End the window quietly;
@@ -775,8 +853,9 @@ export class McpServerReconciler {
         state.ticking = false
         this.setStatus(name, { deployed: true, ready: true, message: 'Running' })
         this.readinessPolls.delete(name)
-        console.log(
-          `[Reconciler] McpServer "${name}" is now ready (after ${state.attempts} poll(s))`
+        hccLogger.info(
+          `[Reconciler] McpServer ${name} is now ready (after ${state.attempts} poll(s))`,
+          { serverName: name }
         )
         // The poll MUST write the CRD, not just in-memory status (issue #223).
         // With generation-aware readiness the check right after a replace is
@@ -819,8 +898,9 @@ export class McpServerReconciler {
         state.ticking = false
         state.exhausted = true
         state.detail = rollout.detail
-        console.warn(
-          `[Reconciler] McpServer "${name}" not ready after ${maxAttempts} polls — giving up (${rollout.detail})`
+        hccLogger.warn(
+          `[Reconciler] McpServer ${name} not ready after ${maxAttempts} polls — giving up (${rollout.detail})`,
+          { serverName: name }
         )
         // Give up loudly, on the CRD: a stuck rollout must be visible to the
         // operator with the numbers that prove it, never left as a stale
@@ -856,35 +936,22 @@ export class McpServerReconciler {
 
     const secretName = server.spec.envSecret.name
 
+    // L4 (#1338 H3): the try covers the read call only. A failure while
+    // hashing or checking the data is a defect in HCC, not a transient read
+    // error, so it rejects reconcile() instead of becoming `ReadError`.
+    let secret: k8s.V1Secret
     try {
-      const secret = await this.coreApi.readNamespacedSecret({
+      secret = await this.coreApi.readNamespacedSecret({
         name: secretName,
         namespace: server.namespace,
       })
-
-      const data = secret.data || {}
-      const revision = createHash('sha256')
-        .update(canonicalStringify(data as Record<string, unknown>))
-        .digest('hex')
-
-      for (const keyMapping of server.spec.envSecret.keys) {
-        if (!(keyMapping.secretKey in data)) {
-          const message =
-            `Secret "${secretName}" is missing required key "${keyMapping.secretKey}" ` +
-            `(needed for env var ${keyMapping.envVar})`
-          console.error(`[Reconciler] ${message} in McpServer ${server.name}`)
-          return { ok: false, reason: 'SecretMissingKey', message }
-        }
-      }
-
-      console.log(`[Reconciler] Secret "${secretName}" validated for McpServer ${server.name}`)
-      return { ok: true, revision }
     } catch (error: unknown) {
       const code = getErrorCode(error)
       if (code === 404) {
         const message = `Secret "${secretName}" not found in namespace "${server.namespace}"`
-        console.error(
-          `[Reconciler] ${message}. McpServer ${server.name} will NOT be deployed. Create the secret first.`
+        hccLogger.error(
+          `[Reconciler] ${message}. McpServer ${server.name} will NOT be deployed. Create the secret first.`,
+          { serverName: server.name }
         )
         return { ok: false, reason: 'SecretNotFound', message }
       }
@@ -892,17 +959,47 @@ export class McpServerReconciler {
         const message =
           `Access denied reading Secret "${secretName}" in namespace "${server.namespace}" ` +
           `(K8s API ${code})`
-        console.error(`[Reconciler] ${message}. McpServer ${server.name} will be failed closed.`)
+        hccLogger.error(
+          `[Reconciler] ${message}. McpServer ${server.name} will be failed closed.`,
+          {
+            serverName: server.name,
+          }
+        )
         return { ok: false, reason: 'SecretAccessDenied', message }
       }
       const errMsg = error instanceof Error ? error.message : String(error)
-      console.error(`[Reconciler] Failed to read secret "${secretName}":`, error)
+      hccLogger.error(`[Reconciler] Failed to read Secret "${secretName}"`, {
+        serverName: server.name,
+        err: error,
+      })
       return {
         ok: false,
         reason: 'ReadError',
         message: `Failed to read Secret "${secretName}": ${errMsg}`,
       }
     }
+
+    const data = secret.data || {}
+    const revision = createHash('sha256')
+      .update(canonicalStringify(data as Record<string, unknown>))
+      .digest('hex')
+
+    for (const keyMapping of server.spec.envSecret.keys) {
+      if (!(keyMapping.secretKey in data)) {
+        const message =
+          `Secret "${secretName}" is missing required key "${keyMapping.secretKey}" ` +
+          `(needed for env var ${keyMapping.envVar})`
+        hccLogger.error(`[Reconciler] ${message} in McpServer ${server.name}`, {
+          serverName: server.name,
+        })
+        return { ok: false, reason: 'SecretMissingKey', message }
+      }
+    }
+
+    hccLogger.info(`[Reconciler] Secret "${secretName}" validated for McpServer ${server.name}`, {
+      serverName: server.name,
+    })
+    return { ok: true, revision }
   }
 
   // ─── Resource Builders ──────────────────────────────────────────────
@@ -1155,7 +1252,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    */
   private async ensureConfigMap(
     server: McpServerCRD,
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    onWriteAttempt?: () => void
   ): Promise<void> {
     const cm = this.buildNginxConfigMap(server)
     const name = `${server.name}-nginx-conf`
@@ -1167,6 +1265,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           this.coreApi.readNamespacedConfigMap({ name, namespace })
         ),
       create: async () => {
+        onWriteAttempt?.()
         await observeCreate('ConfigMap', () =>
           this.coreApi.createNamespacedConfigMap({ namespace, body: cm })
         )
@@ -1185,7 +1284,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           isUpToDate: configMapMatchesDesired,
           mutationAllowed: isCurrent,
           read,
-          replace: body => this.coreApi.replaceNamespacedConfigMap({ name, namespace, body }),
+          replace: body => {
+            onWriteAttempt?.()
+            return this.coreApi.replaceNamespacedConfigMap({ name, namespace, body })
+          },
         }),
       onSkipped: () => createsTotal.inc({ kind: 'ConfigMap', outcome: 'skipped' }),
     })
@@ -1690,7 +1792,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   private async ensureDeployment(
     server: McpServerCRD,
     credentialsRevision = '',
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    onWriteAttempt?: () => void
   ): Promise<void> {
     const deployment = this.buildDeployment(server, credentialsRevision)
 
@@ -1704,6 +1807,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           })
         ),
       create: async () => {
+        onWriteAttempt?.()
         await observeCreate('Deployment', () =>
           this.appsApi.createNamespacedDeployment({
             namespace: server.namespace,
@@ -1724,12 +1828,14 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           mergeExisting: preserveDeploymentAnnotations,
           isUpToDate: deploymentMatchesDesired,
           read,
-          replace: body =>
-            this.appsApi.replaceNamespacedDeployment({
+          replace: body => {
+            onWriteAttempt?.()
+            return this.appsApi.replaceNamespacedDeployment({
               name: server.name,
               namespace: server.namespace,
               body,
-            }),
+            })
+          },
           mutationAllowed: isCurrent,
         }),
       onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
@@ -1741,7 +1847,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    */
   private async ensureService(
     server: McpServerCRD,
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    onWriteAttempt?: () => void
   ): Promise<void> {
     const service = this.buildService(server)
 
@@ -1754,13 +1861,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
             namespace: server.namespace,
           })
         ),
-      create: () =>
-        observeCreate('Service', () =>
+      create: () => {
+        onWriteAttempt?.()
+        return observeCreate('Service', () =>
           this.coreApi.createNamespacedService({
             namespace: server.namespace,
             body: service,
           })
-        ),
+        )
+      },
       converge: read =>
         replaceWithConflictRetry({
           description: `Service "${server.name}"`,
@@ -1769,12 +1878,14 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           mergeExisting: preserveServiceAssignedFields,
           isUpToDate: serviceMatchesDesired,
           read,
-          replace: body =>
-            this.coreApi.replaceNamespacedService({
+          replace: body => {
+            onWriteAttempt?.()
+            return this.coreApi.replaceNamespacedService({
               name: server.name,
               namespace: server.namespace,
               body,
-            }),
+            })
+          },
           mutationAllowed: isCurrent,
         }),
       onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
@@ -2403,6 +2514,77 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     return 'declined'
   }
 
+  /**
+   * #1338 H3 (D1.a). A failed Secret read observed nothing about the runtime,
+   * which the ReadError branch leaves running. Over an authoritative verdict
+   * (same uid and generation in memory, or a generation-matched persisted
+   * Ready) it therefore publishes nothing: no in-memory change and no
+   * condition write, so consumers keep the verdict they had and
+   * credentialRevision does not move. A ready verdict is withdrawn only when
+   * the caller saw the Secret change. A not-ready verdict, fail-closed
+   * included, is kept even then, so a ReadError never overwrites
+   * SecretNotFound. The obligation stays pending; the McpServer lane retries.
+   */
+  private keepVerdictOverSecretReadError(
+    server: McpServerCRD,
+    secretChangeObserved: boolean,
+    detail: string
+  ): boolean {
+    const published = this.getStatus(server)
+    if (published.authoritative !== true || (secretChangeObserved && published.ready)) {
+      mcpserverReconcileCallFailuresTotal.inc({
+        site: 'secret_read',
+        outcome: 'not_ready_published',
+      })
+      return false
+    }
+    this.reportVerdictKept(server, 'secret_read', detail)
+    return true
+  }
+
+  /**
+   * #1338 H3 (N1). The same rule for the other Kubernetes calls of a managed
+   * reconcile (resource sync, pre-deploy handshake, rollout read): a call that
+   * failed for a transport or server reason observed nothing about the
+   * runtime, so an authoritative ready verdict is kept. The verdict is
+   * published as today whenever the runtime is known to differ from it: this
+   * reconcile attempted a ConfigMap, Service or Deployment write (the live
+   * object differed from desired, or was absent), or the caller saw the
+   * envSecret change. Not-ready verdicts, first deploys and new generations
+   * are published as today.
+   */
+  private keepReadyVerdictOverTransientFailure(
+    server: McpServerCRD,
+    site: Exclude<VerdictCallSite, 'secret_read'>,
+    error: unknown,
+    runtime: { writeAttempted: boolean; secretChangeObserved: boolean }
+  ): boolean {
+    const published = this.getStatus(server)
+    const keep =
+      isTransientKubernetesFailure(error) &&
+      !runtime.writeAttempted &&
+      !runtime.secretChangeObserved &&
+      published.authoritative === true &&
+      published.ready
+    if (!keep) {
+      mcpserverReconcileCallFailuresTotal.inc({ site, outcome: 'not_ready_published' })
+      return false
+    }
+    this.reportVerdictKept(server, site, error instanceof Error ? error.message : String(error))
+    return true
+  }
+
+  private reportVerdictKept(server: McpServerCRD, site: VerdictCallSite, detail: string): void {
+    mcpserverReconcileCallFailuresTotal.inc({ site, outcome: 'verdict_kept' })
+    hccLogger.warn('[Reconciler] Kubernetes call failed; published McpServer verdict kept', {
+      event: 'mcpserver-call-failed',
+      serverName: server.name,
+      site,
+      outcome: 'verdict_kept',
+      detail,
+    })
+  }
+
   // ─── Public API ─────────────────────────────────────────────────────
 
   /**
@@ -2416,6 +2598,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   async reconcile(server: McpServerCRD, options: McpServerMutationOptions = {}): Promise<void> {
     const capturedAuthority = this.inventoryAuthority()
     const callerIsCurrent = options.isCurrent ?? (() => true)
+    const fleetPassOwned =
+      options.isCurrent !== undefined && this.fleetPassFences.has(options.isCurrent)
+    const secretChangeObserved = options.secretChangeObserved === true
     const isCurrent = () => {
       if (!callerIsCurrent()) return false
       if (!this.inventoryAuthorityConfigured) return this.currentWhenUnconfigured()
@@ -2431,7 +2616,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       .catch(() => undefined)
       .then(async () => {
         if (!isCurrent()) return
-        const completed = await this.performReconcile(server, isCurrent)
+        const completed = await this.performReconcile(server, isCurrent, secretChangeObserved)
         if (completed && this.pendingReconciliations.get(key) === obligation) {
           this.pendingReconciliations.delete(key)
         }
@@ -2440,13 +2625,25 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     try {
       await next
     } finally {
-      if (this.inFlight.get(key) === next) {
+      const latest = this.inFlight.get(key) === next
+      if (latest) {
         this.inFlight.delete(key)
+      }
+      // #1338 H3 (D2): fulfilled or rejected, an obligation this call leaves
+      // has no timer unless a fleet pass issued the call. A queued successor
+      // reports for itself, and superseded work belongs to the event that
+      // superseded it.
+      if (!fleetPassOwned && latest && this.pendingReconciliations.has(key) && isCurrent()) {
+        this.notifyIncompleteReconciliation(key)
       }
     }
   }
 
-  private async performReconcile(server: McpServerCRD, isCurrent: () => boolean): Promise<boolean> {
+  private async performReconcile(
+    server: McpServerCRD,
+    isCurrent: () => boolean,
+    secretChangeObserved: boolean
+  ): Promise<boolean> {
     if (!isCurrent()) return false
     this.beginStatusTracking(server)
 
@@ -2455,9 +2652,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const currentManaged = server.spec.managed ?? true
     const previousManaged = this.managedSnapshot.get(server.name)
     if (previousManaged !== undefined && previousManaged !== currentManaged) {
-      console.error(
-        `[Reconciler] McpServer "${server.name}": managed field changed from ${previousManaged} to ${currentManaged}. ` +
-          `This is not allowed — delete and recreate the McpServer to change ownership.`
+      hccLogger.error(
+        `[Reconciler] McpServer ${server.name}: managed field changed from ${previousManaged} to ${currentManaged}. ` +
+          `This is not allowed — delete and recreate the McpServer to change ownership.`,
+        { serverName: server.name }
       )
       if (!isCurrent()) return false
       this.setStatus(server.name, {
@@ -2476,15 +2674,16 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       let cleanupComplete = true
       let retract: RetractManagedRuntimeResult | undefined
       if (currentManaged) {
-        console.log(
-          `[Reconciler] McpServer "${server.name}" is disabled — removing HCC-owned resources`
-        )
+        hccLogger.info('[Reconciler] McpServer is disabled — removing HCC-owned resources', {
+          serverName: server.name,
+        })
         retract = await this.retractManagedRuntime(server, 'disabled', isCurrent)
         if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
         cleanupComplete = retract.cleanupComplete
       } else {
-        console.log(
-          `[Reconciler] McpServer "${server.name}" is disabled but WRC-owned; skipping runtime cleanup`
+        hccLogger.info(
+          '[Reconciler] McpServer is disabled but WRC-owned; skipping runtime cleanup',
+          { serverName: server.name }
         )
       }
       if (!isCurrent()) return false
@@ -2504,26 +2703,44 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     if (!currentManaged) {
-      return this.reconcileWrcOwnedServer(server, isCurrent)
+      return this.reconcileWrcOwnedServer(server, isCurrent, secretChangeObserved)
     }
 
     // Validate secret before creating/updating
     const secretResult = await this.validateSecret(server)
     if (!isCurrent()) return false
     if (!secretResult.ok) {
-      console.error(
-        `[Reconciler] Skipping deployment of "${server.name}" — secret validation failed`
-      )
+      if (
+        secretResult.reason === 'ReadError' &&
+        this.keepVerdictOverSecretReadError(server, secretChangeObserved, secretResult.message)
+      ) {
+        return false
+      }
+      hccLogger.error('[Reconciler] Skipping deployment — secret validation failed', {
+        serverName: server.name,
+      })
       const withdrawRuntime = shouldFailClosedForSecretFailure(secretResult.reason)
       let cleanupComplete = true
       let retract: RetractManagedRuntimeResult | undefined
       if (withdrawRuntime) {
+        // #1338 H3 (D1.b): the Secret verdict is known here, whatever the
+        // retract does. Withdraw readiness before its first await: the retract
+        // can throw, be denied, or end with a declined write, and each of those
+        // returns below before the status write. Retiring the poll first stops
+        // an in-flight tick from republishing ready:true.
+        this.retireReadinessWindow(server.name)
+        this.setStatus(server.name, {
+          deployed: false,
+          ready: false,
+          message: secretResult.message,
+        })
         retract = await this.retractManagedRuntime(server, 'fail-closed', isCurrent)
         if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
         cleanupComplete = retract.cleanupComplete
       } else {
-        console.warn(
-          `[Reconciler] Preserving existing runtime for "${server.name}" after transient Secret read failure`
+        hccLogger.warn(
+          '[Reconciler] Preserving existing runtime after transient Secret read failure',
+          { serverName: server.name }
         )
       }
       if (!isCurrent()) return false
@@ -2556,7 +2773,14 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       return withdrawRuntime && cleanupComplete && isCurrent()
     }
 
-    // Ensure resources exist and are up to date
+    // Ensure resources exist and are up to date. A create or replace attempt
+    // means the live runtime differed from desired (or was absent), so a
+    // later transient failure in this reconcile must not keep the published
+    // verdict (#1338 H3, N1).
+    let runtimeWriteAttempted = false
+    const noteRuntimeWrite = (): void => {
+      runtimeWriteAttempted = true
+    }
     try {
       // Remote egress proxy: create nginx ConfigMap before Deployment
       if (this.isRemote(server)) {
@@ -2564,7 +2788,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         // workloads use the platform-owned proxy image selected in
         // buildDeployment(); rewriting spec.image here would bump generation
         // and retire this reconcile before it can create the runtime resources.
-        await this.ensureConfigMap(server, isCurrent)
+        await this.ensureConfigMap(server, isCurrent, noteRuntimeWrite)
       } else {
         // Phase 2.3: plugin image-host allowlist. Audit mode (default) logs a
         // would-be denial and still builds; enforce mode blocks the workload.
@@ -2575,7 +2799,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (!decision.ok) {
           const message = `Image "${server.spec.image}" is not permitted by the plugin image allowlist (${decision.reason})`
           if (config.enforcePluginImageAllowlist) {
-            console.warn(`[Reconciler] ${message} — blocking "${server.name}" (enforce mode)`)
+            hccLogger.warn(`[Reconciler] ${message} — blocking (enforce mode)`, {
+              serverName: server.name,
+            })
             await this.writeStatusCondition(
               server,
               {
@@ -2590,17 +2816,26 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
             this.setStatus(server.name, { deployed: false, ready: false, message })
             return isCurrent()
           }
-          console.warn(
-            `[Reconciler] ${message} for "${server.name}" — audit mode, allowing (set CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true to block)`
+          hccLogger.warn(
+            `[Reconciler] ${message} — audit mode, allowing (set CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true to block)`,
+            { serverName: server.name }
           )
         }
       }
       if (!isCurrent()) return false
-      await this.ensureService(server, isCurrent)
+      await this.ensureService(server, isCurrent, noteRuntimeWrite)
       if (!isCurrent()) return false
-      await this.ensureDeployment(server, secretResult.revision, isCurrent)
+      await this.ensureDeployment(server, secretResult.revision, isCurrent, noteRuntimeWrite)
     } catch (err) {
       if (!isCurrent()) return false
+      if (
+        this.keepReadyVerdictOverTransientFailure(server, 'resource_sync', err, {
+          writeAttempted: runtimeWriteAttempted,
+          secretChangeObserved,
+        })
+      ) {
+        return false
+      }
       this.setStatus(server.name, {
         deployed: false,
         ready: false,
@@ -2624,6 +2859,14 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         await this.setNetworkReadyAnnotation(server, isCurrent)
       } catch (err) {
         if (!isCurrent()) return false
+        if (
+          this.keepReadyVerdictOverTransientFailure(server, 'pre_deploy_handshake', err, {
+            writeAttempted: runtimeWriteAttempted,
+            secretChangeObserved,
+          })
+        ) {
+          return false
+        }
         this.setStatus(server.name, {
           deployed: false,
           ready: false,
@@ -2636,6 +2879,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // Check readiness after reconciliation
     const rollout = await this.readDeploymentRollout(server.name, server.namespace)
     if (!isCurrent()) return false
+    if (
+      'readFailure' in rollout &&
+      this.keepReadyVerdictOverTransientFailure(server, 'rollout_read', rollout.readFailure, {
+        writeAttempted: runtimeWriteAttempted,
+        secretChangeObserved,
+      })
+    ) {
+      return false
+    }
     const ready = rollout.ready
     this.setStatus(server.name, {
       deployed: true,
@@ -2714,17 +2966,25 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
 
   private async reconcileWrcOwnedServer(
     server: McpServerCRD,
-    isCurrent: () => boolean
+    isCurrent: () => boolean,
+    secretChangeObserved: boolean
   ): Promise<boolean> {
     if (!isCurrent()) return false
-    console.log(
-      `[Reconciler] McpServer "${server.name}" is WRC-owned (managed:false); ` +
-        'skipping HCC runtime creation/deletion and updating discovery status.'
+    hccLogger.info(
+      `[Reconciler] McpServer ${server.name} is WRC-owned (managed:false); ` +
+        'skipping HCC runtime creation/deletion and updating discovery status.',
+      { serverName: server.name }
     )
 
     const secretResult = await this.validateSecret(server)
     if (!isCurrent()) return false
     if (!secretResult.ok) {
+      if (
+        secretResult.reason === 'ReadError' &&
+        this.keepVerdictOverSecretReadError(server, secretChangeObserved, secretResult.message)
+      ) {
+        return false
+      }
       this.setStatus(server.name, {
         deployed: true,
         ready: false,
@@ -2790,16 +3050,32 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * Reconcile a deleted McpServer.
    */
   async reconcileDelete(name: string, namespace: string): Promise<void> {
-    console.log(`[Reconciler] McpServer "${name}" deleted — cleaning up resources`)
+    await this.deleteMcpServerRuntime(name, namespace, { fleetPassOwned: false })
+  }
+
+  private async deleteMcpServerRuntime(
+    name: string,
+    namespace: string,
+    owner: { fleetPassOwned: boolean }
+  ): Promise<void> {
+    hccLogger.info('[Reconciler] McpServer deleted — cleaning up resources', { serverName: name })
     const capturedAuthority = this.inventoryAuthority()
     const obligation = { namespace }
     this.pendingReconciliations.set(name, obligation)
-    const complete = await this.deleteRuntimeResources(name, namespace, () =>
-      this.orphanDeleteAllowed(name, namespace, capturedAuthority)
-    )
-    if (complete && this.pendingReconciliations.get(name) === obligation) {
-      this.pendingReconciliations.delete(name)
-      this.clearStatus(name)
+    try {
+      const complete = await this.deleteRuntimeResources(name, namespace, () =>
+        this.orphanDeleteAllowed(name, namespace, capturedAuthority)
+      )
+      if (complete && this.pendingReconciliations.get(name) === obligation) {
+        this.pendingReconciliations.delete(name)
+        this.clearStatus(name)
+      }
+    } finally {
+      // #1338 H3 (D2, N5): an orphan delete issued by fullReconcile reports
+      // through the pass end; any other delete owns its obligation here.
+      if (!owner.fleetPassOwned && this.pendingReconciliations.has(name)) {
+        this.notifyIncompleteReconciliation(name)
+      }
     }
   }
 
@@ -2841,9 +3117,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     desiredServers: McpServerCRD[],
     options: McpServerFullReconcileOptions = {}
   ): Promise<void> {
-    console.log(
-      `[Reconciler] Running full reconciliation for ${desiredServers.length} McpServer(s)`
-    )
+    hccLogger.info('[Reconciler] Running full reconciliation', {
+      servers: desiredServers.length,
+    })
     const capturedAuthority = this.inventoryAuthority()
 
     // Get all deployments managed by skill-mapper
@@ -2885,6 +3161,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
             ? sameMcpServerDesiredRevision(current, latest)
             : this.resolveCurrentServer === undefined && this.currentWhenUnconfigured()
         }
+        this.fleetPassFences.add(isCurrent)
         await this.reconcile(current, { isCurrent })
       })
     )
@@ -2911,18 +3188,19 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (!presentNames.has(name)) this.pendingReconciliations.set(name, { namespace })
         await runEffect(name, async () => {
           if (!(await this.orphanDeleteAllowed(name, namespace, capturedAuthority))) {
-            console.warn(
-              `[Reconciler] Deferring orphan cleanup for "${name}": McpServer exists or inventory authority is unknown or changed`
+            hccLogger.warn(
+              '[Reconciler] Deferring orphan cleanup: McpServer exists or inventory authority is unknown or changed',
+              { serverName: name }
             )
             return
           }
-          console.log(`[Reconciler] Removing orphaned resources for "${name}"`)
-          await this.reconcileDelete(name, namespace)
+          hccLogger.info('[Reconciler] Removing orphaned resources', { serverName: name })
+          await this.deleteMcpServerRuntime(name, namespace, { fleetPassOwned: true })
         })
       }
     }
 
-    console.log('[Reconciler] Full reconciliation complete')
+    hccLogger.info('[Reconciler] Full reconciliation complete')
   }
 
   /**

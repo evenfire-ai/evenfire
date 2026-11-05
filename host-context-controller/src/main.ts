@@ -19,6 +19,7 @@ import {
   createMcpServerProvider,
   getKubeConfig,
 } from './k8sClient'
+import { hccLogger } from './logger'
 import { McpApiAuthenticator } from './mcpApiAuthentication'
 import { McpAuthorizationService } from './mcpAuthorization'
 import {
@@ -228,8 +229,8 @@ async function main(): Promise<void> {
     if (kc) {
       const watcher = provider
       secretInformer = new SecretInformer(kc, config.namespace, evt => {
-        watcher.reconcileByEnvSecret(evt.name, evt.namespace).catch(err => {
-          console.error('[Main] reconcileByEnvSecret failed:', err)
+        watcher.reconcileByEnvSecret(evt.name, evt.namespace, evt.type).catch(err => {
+          hccLogger.error('[Main] reconcileByEnvSecret failed', { err })
         })
       })
       try {
