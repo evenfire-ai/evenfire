@@ -46,23 +46,15 @@ describe('V1 external session lifetime', () => {
     expect(verifyExternalSessionToken(token)).toBeNull()
   })
 
-  it('honors an explicit 43,200-second signer TTL through expiration', () => {
+  it.each([43_200, 7_200])('honors an explicit %i-second signer TTL through expiration', ttl => {
     vi.spyOn(Date, 'now').mockReturnValue(issuedAt * 1000)
-    const token = signExternalSessionToken(claims, 43_200)
+    const token = signExternalSessionToken(claims, ttl)
     const signed = jwt.decode(token) as jwt.JwtPayload
 
-    expect(signed.exp! - signed.iat!).toBe(43_200)
+    expect(signed.exp! - signed.iat!).toBe(ttl)
+    vi.spyOn(Date, 'now').mockReturnValue((issuedAt + ttl - 1) * 1000)
     expect(verifyExternalSessionToken(token)).not.toBeNull()
-
-    vi.spyOn(Date, 'now').mockReturnValue((issuedAt + 43_200) * 1000)
+    vi.spyOn(Date, 'now').mockReturnValue((issuedAt + ttl) * 1000)
     expect(verifyExternalSessionToken(token)).toBeNull()
-  })
-
-  it('keeps an explicit signer TTL authoritative', () => {
-    vi.spyOn(Date, 'now').mockReturnValue(issuedAt * 1000)
-    const token = signExternalSessionToken(claims, 7_200)
-    const signed = jwt.decode(token) as jwt.JwtPayload
-
-    expect(signed.exp! - signed.iat!).toBe(7_200)
   })
 })
