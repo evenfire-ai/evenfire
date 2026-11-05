@@ -227,13 +227,47 @@ Read the notes for every release you skip over, not only the target release.
 
 ### Feature-specific notes
 
-| Note                                                                               | Read it when                                                                                                                     |
-| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.                       |
-| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                             |
-| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                |
-| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                      |
-| [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap. |
+| Note                                                                               | Read it when                                                                                                                              |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.                                |
+| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                                      |
+| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                         |
+| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                               |
+| [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.x; Node 25+ blocks its network. |
+| [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap.          |
+
+#### Snippet runner Node permissions
+
+The workflow snippet runner starts each snippet worker under the Node permission
+model with the `--permission` flag. Node 24 accepts only this flag name and
+rejects the earlier `--experimental-permission`. Each path has its own grant: a
+worker can read the runner's `dist/` and `node_modules/` directories, and can
+write to the workflow output directory but not read it. Other workloads share
+the output volume, and Node follows a symlink inside a granted directory, so a
+read grant would let a snippet read the target of a link placed there.
+
+On earlier releases the snippet worker ran without the Node permission model
+(the old `--experimental-permission` flag was rejected and the runner continued
+without it), so an `ERR_ACCESS_DENIED` after this release comes from the
+sandbox now being enforced.
+
+At startup the runner checks that its Node runtime provides the permission
+model. If it does not, the runner exits with an error and its Pod does not
+become Ready.
+
+`CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS` is removed. The workflow-recipes
+controller never passed it to snippet-runner Pods: it passes them only an
+allowlisted set of environment variables, and this variable is not in that set.
+
+No action is needed when you use the runner image built from this repository:
+the repository images use Node 24. If `CLERUM_SNIPPET_RUNNER_IMAGE` points at
+your own image, run Node 24.x: `workflow-recipes` declares Node `>=24.22.1` and
+is tested only on Node 24. On Node 25 and later the runner starts, but snippet
+workers cannot open network connections, because those releases also restrict
+network access under `--permission`, and the runner does not pass `--allow-net`
+(Node 24 rejects that flag). On a runtime that rejects `--permission` (Node older
+than 22.13.0, or a 23.x release older than 23.5.0) the startup check fails and
+the runner exits.
 
 ### Changed code defaults (first release after v0.12.0)
 
