@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
+import { buildAuthorizeUrl } from '../src/oauth/authorizeUrlHelper.js'
 import { signOAuthState } from '../src/oauth/state.js'
 import {
   buildOAuthCallbackDeps,
@@ -214,10 +215,24 @@ describe('mcp OAuth state bound to the McpServer installation (crUid)', () => {
     expectRefusedUntouched(await callback(preDeployState))
   })
 
-  it('the mint refuses to sign a state for a CR without a uid', async () => {
+  it('the mint refuses to sign a state for a CR without a uid → server_not_found, no URL', async () => {
     const cr = await installServer(gateway, 'user')
     delete cr.metadata.uid
 
-    await expect(mint()).rejects.toThrow(/has no metadata\.uid/)
+    // The whole result is asserted: `server_not_found` carries no authorize URL,
+    // so no state leaves the mint.
+    await expect(
+      buildAuthorizeUrl(
+        {
+          subjectKind: 'mcp',
+          mcpServerName: SERVER,
+          userId: MEMBER,
+          oauthClientId: CLIENT,
+          grantKind: 'user',
+          redirectUri: 'https://cb.example.com/oauth-callback',
+        },
+        { ...buildOAuthCallbackDeps(gateway as never), stateSecret: config.oauthStateHmacSecret }
+      )
+    ).resolves.toEqual({ kind: 'server_not_found' })
   })
 })

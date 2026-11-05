@@ -165,6 +165,27 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     expect(res.body.error).toBe('server_not_found')
   })
 
+  // The McpServer read carries no uid (only a partial apiserver omits it): the
+  // mint cannot sign a state that names an installation, so the request is the
+  // same 404 as a missing server, never a 500.
+  it('404 server_not_found, NO authorizeUrl, for a CR without metadata.uid', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    await seedAllowlistedContext(gateway, 'ctx-9', ['gdrive'])
+    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-9'] } })
+    const cr = (await gateway.getResource('mcpservers', 'gdrive', MCP_NS)) as {
+      metadata: { uid?: string }
+    }
+    delete cr.metadata.uid
+
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'server_not_found' })
+  })
+
   it('400 not_oauth_server for a non-oauth server', async () => {
     void gateway.createResource(
       'mcpservers',
