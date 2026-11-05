@@ -250,6 +250,29 @@ function combinedAuthorityRow(
   }
 }
 
+function coherentAuthorityRow(
+  grants: Record<string, unknown>[],
+  values?: unknown[],
+  secondaryTeamIds: string[] = []
+) {
+  const wanted = new Set([
+    `user:${String(values?.[2] ?? '')}`,
+    ...(values?.[3] ? [`team:${String(values[3])}`] : []),
+    ...secondaryTeamIds.map(teamId => `team:${teamId}`),
+  ])
+  return {
+    rows: [
+      {
+        ancestor_ids: [String(values?.[1])],
+        grants: grants.filter(grant =>
+          wanted.has(`${String(grant.subject_type)}:${String(grant.subject_id ?? '')}`)
+        ),
+        shares: [],
+      },
+    ],
+  }
+}
+
 /** Route the grant engine's queries by SQL shape. */
 function dbReturning(
   grants: Record<string, unknown>[],
@@ -279,6 +302,12 @@ function dbReturning(
     }
     if (text.includes('ORDER BY created_at ASC, id ASC')) {
       return { rows: opts.grantListRows ?? [] }
+    }
+    if (
+      text.includes('caller_subjects(subject_type, subject_id)') &&
+      text.includes('ancestor_ids')
+    ) {
+      return coherentAuthorityRow(grants, values)
     }
     if (text.includes('authority_grants AS') && text.includes('authority_shares AS')) {
       return combinedAuthorityRow(grants, values)
@@ -2215,7 +2244,27 @@ describe('GET /external/gfs/resources/:id/affordances', () => {
       const limiter = limiterRow(text)
       if (limiter) return limiter
       if (lifecycle) return lifecycle
-      if (text.includes('FROM team_members')) return { rows: [{ team_id: T2 }] }
+      if (text.includes('FROM team_members') && text.includes('SELECT team_id')) {
+        return { rows: [{ team_id: T2 }] }
+      }
+      if (
+        text.includes('caller_subjects(subject_type, subject_id)') &&
+        text.includes('ancestor_ids')
+      ) {
+        return coherentAuthorityRow(
+          [
+            {
+              subject_type: 'team',
+              subject_id: T2,
+              resource_id: R,
+              permissions: ['read', 'manage_acl'],
+              inherit: false,
+            },
+          ],
+          values,
+          [T2]
+        )
+      }
       if (text.includes('WITH RECURSIVE chain'))
         return { rows: [{ resource_id: String(values?.[1]) }] }
       if (text.includes('FROM gfs_grants')) {

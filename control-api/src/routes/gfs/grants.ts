@@ -76,6 +76,8 @@ export interface GfsCaller {
   effectiveControlAdminId?: string
   /** Authenticated Desktop actor for brokered external requests. */
   desktopUserId?: string
+  /** Primary team claim carried by the authenticated user session. */
+  primaryTeamId?: string | null
   /** Broker authority attribution; independent of authorization_source evidence. */
   authoritySource?: 'user-session' | 'linked-admin'
   /** Persisted legacy/effective actor_on_behalf_of value. */
@@ -140,6 +142,7 @@ export function resolveCaller(req: Request): GfsCaller {
       subjects,
       actorKey: key,
       desktopUserId: external.userId,
+      primaryTeamId: external.teamId ?? null,
       authoritySource: 'user-session',
       actorOnBehalfOf: null,
     }
@@ -517,6 +520,101 @@ export async function heldPermissions(
   resourceId: string
 ): Promise<GfsPermission[]> {
   if (caller.isOperator) return [...PERMISSIONS]
+  if (caller.authoritySource === 'user-session' && caller.desktopUserId) {
+    // Authorization for a user session is one PostgreSQL statement so the
+    // resource chain, active secondary membership, grants, and shares all
+    // observe the same READ COMMITTED statement snapshot. `subjects` may have
+    // been resolved by middleware before a membership change, so only the
+    // authenticated user and the primary-team claim are taken from the caller;
+    // active secondary teams are derived here from the live membership table.
+    const result = await db.query(
+      `WITH RECURSIVE
+       caller_subjects(subject_type, subject_id) AS (
+         SELECT 'user'::text, $3::text
+         UNION
+         SELECT 'team'::text, $4::text WHERE $4::text IS NOT NULL
+         UNION
+         SELECT 'team'::text, tm.team_id::text
+           FROM team_members tm
+          WHERE tm.user_id = $3::uuid AND tm.status = 'active'
+       ),
+       chain(resource_id, parent_resource_id, depth) AS (
+         SELECT r.resource_id, r.parent_resource_id, 0
+           FROM gfs_resources r
+          WHERE r.drive = $1 AND r.resource_id = $2::uuid AND r.deleted_at IS NULL
+         UNION ALL
+         SELECT r.resource_id, r.parent_resource_id, c.depth + 1
+           FROM gfs_resources r
+           JOIN chain c ON r.resource_id = c.parent_resource_id
+          WHERE r.drive = $1 AND r.deleted_at IS NULL
+       )
+       SELECT
+         COALESCE((SELECT array_agg(c.resource_id ORDER BY c.depth)
+                     FROM chain c), ARRAY[]::uuid[]) AS ancestor_ids,
+         COALESCE((
+           SELECT jsonb_agg(jsonb_build_object(
+             'subject_type', g.subject_type,
+             'subject_id', g.subject_id,
+             'resource_id', g.resource_id,
+             'permissions', g.permissions,
+             'inherit', g.inherit
+           ))
+             FROM gfs_grants g
+             JOIN caller_subjects s
+               ON s.subject_type = g.subject_type AND s.subject_id = g.subject_id
+            WHERE g.drive = $1
+         ), '[]'::jsonb) AS grants,
+         COALESCE((
+           SELECT jsonb_agg(jsonb_build_object(
+             'subject_type', sh.subject_type,
+             'subject_id', sh.subject_id,
+             'resource_id', sh.resource_id,
+             'permissions', sh.permissions,
+             'include_descendants', sh.include_descendants
+           ))
+             FROM gfs_shares sh
+             JOIN caller_subjects s
+               ON s.subject_type = sh.subject_type AND s.subject_id = sh.subject_id
+            WHERE sh.drive = $1
+         ), '[]'::jsonb) AS shares`,
+      [drive, resourceId, caller.desktopUserId, caller.primaryTeamId ?? null]
+    )
+    const row = result.rows[0] as
+      | {
+          ancestor_ids?: unknown
+          grants?: unknown
+          shares?: unknown
+        }
+      | undefined
+    const ancestorIds = Array.isArray(row?.ancestor_ids) ? row.ancestor_ids.map(String) : []
+    if (ancestorIds.length === 0) return []
+    const parseRows = (value: unknown): Record<string, unknown>[] => {
+      if (Array.isArray(value)) return value as Record<string, unknown>[]
+      if (typeof value === 'string') {
+        try {
+          const parsed: unknown = JSON.parse(value)
+          return Array.isArray(parsed) ? (parsed as Record<string, unknown>[]) : []
+        } catch {
+          return []
+        }
+      }
+      return []
+    }
+    const grants = parseRows(row?.grants).map(r => ({
+      subjectKey: `${String(r.subject_type)}:${String(r.subject_id ?? '')}`,
+      resourceId: String(r.resource_id),
+      permissions: (r.permissions as string[]) ?? [],
+      inherit: Boolean(r.inherit),
+    }))
+    const shares = parseRows(row?.shares).map(r => ({
+      subjectKey: `${String(r.subject_type)}:${String(r.subject_id ?? '')}`,
+      resourceId: String(r.resource_id),
+      permissions: (r.permissions as string[]) ?? [],
+      includeDescendants: Boolean(r.include_descendants),
+    }))
+    const ancestors = new Set(ancestorIds)
+    return PERMISSIONS.filter(op => holds(op, resourceId, ancestors, grants, shares))
+  }
   const ancestorList = await ancestorsOf(db, drive, resourceId)
   if (ancestorList.length === 0) return []
   const ancestors = new Set(ancestorList)
