@@ -30,13 +30,8 @@ describe('config', () => {
   it('preserves an explicit profile session cookie TTL override', async () => {
     vi.stubEnv('EXTERNAL_REST_API_PROFILE_SESSION_COOKIE_TTL_SECONDS', '7200')
     vi.resetModules()
-    try {
-      const overridden = await import('../src/config.js')
-      expect(overridden.config.profileSessionCookieTtlSeconds).toBe(7_200)
-    } finally {
-      vi.unstubAllEnvs()
-      vi.resetModules()
-    }
+    const overridden = await import('../src/config.js')
+    expect(overridden.config.profileSessionCookieTtlSeconds).toBe(7_200)
   })
 
   it('uses the approved independent GFS edge backstop defaults', () => {
