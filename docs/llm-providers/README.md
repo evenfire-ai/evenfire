@@ -284,6 +284,7 @@ models.dev, and it handles the Host model in three steps:
    catalog is still undecided it creates them anyway and warns
    `LLM_MODEL_ENSURE_BEFORE_CATALOG`: such rows stay manual, with no catalog
    price or lifecycle status, even for models models.dev lists.
+
 3. **After step 10 the pair must be an enabled row**, or setup exits 1 with
    `HOST_MODEL_UNKNOWN` (no row), `HOST_MODEL_DISABLED` (row disabled) or
    `HOST_MODEL_CHECK_FAILED` (the query could not run).
@@ -487,7 +488,7 @@ failing over on those would just mask bugs.
 | `502 mcp_host configure failed/unreachable`              | WRC resolved the credential but couldn't configure mcp-host.                                                                                                                                                                           |
 | Model dropdown empty in the wizard                       | No enabled allowlist rows for that provider.                                                                                                                                                                                           |
 | Context-window indicator looks wrong                     | `context_window_tokens` unset on the allowlist row → falls back to `CLERUM_CONTEXT_MAX_TOKENS`.                                                                                                                                        |
-| Cost report shows a model as unpriced                    | No row in `llm_model_prices`. The catalog sync prices a model only when it inserts it and models.dev has a cost; nothing is seeded. Add one under **Cost → LLM prices**.                                                                  |
+| Cost report shows a model as unpriced                    | No row in `llm_model_prices`. The catalog sync prices a model only when it inserts it and models.dev has a cost; nothing is seeded. Add one under **Cost → LLM prices**.                                                               |
 
 ### Known sharp edge: workflow steps and the secret mapping
 
