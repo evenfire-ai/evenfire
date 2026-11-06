@@ -789,7 +789,8 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
   })
 
   it('does not revive a queued request released during cooldown', async () => {
-    const { service, parentWindow, runtime, mainWindow } = await setupWithLiveFirstApp()
+    const { service, parentWindow, runtime, mainWindow, setWindowReady } =
+      await setupWithLiveFirstApp()
     const pluginId = 'sandbox-recipes/first-app'
     const mount = initialMount()
     vi.spyOn(runtime.store, 'get').mockResolvedValue(null)
@@ -820,10 +821,21 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
     )
 
     const sendStart = mainWindow.webContents.send.mock.calls.length
+    setWindowReady(false)
     await service.openSandboxUi(openArgs('first-app', parentWindow))
     const replacementView = electronMocks.views[1]!
     const replacementCallStart = replacementView.setVisible.mock.calls.length
+    let secondSettled = false
+    void second.then(
+      () => {
+        secondSettled = true
+      },
+      () => {
+        secondSettled = true
+      }
+    )
     await vi.advanceTimersByTimeAsync(CONSENT_PROMPT_COOLDOWN_MS)
+    await flushUntil(() => secondSettled)
     await Promise.all([first, second])
 
     const stalePending = runtime.gate.hasPendingPrompt()
