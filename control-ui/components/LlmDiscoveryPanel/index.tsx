@@ -334,7 +334,7 @@ export function LlmDiscoveryPanel({
               LLM Models
             </>
           }
-          subtitle="Newly synced models land here disabled unless they qualify for their provider's auto-enable setting. Enable only the models you want available to agents and runtime."
+          subtitle="The catalog sync adds new models here. A new model starts enabled only if its provider's auto-enable setting is on and the model qualifies; the rest start disabled. Enable only the models you want available to agents and runtime."
           secondaryActions={
             <>
               <button

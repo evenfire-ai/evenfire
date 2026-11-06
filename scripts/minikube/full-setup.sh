@@ -535,6 +535,7 @@ validate_setup_deadline MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS "${MINIKUBE_SETUP_
 # status/start/delete operation can touch Minikube.
 SETUP_LOCK_CLEANUP_DONE=false
 K8S_API_POLICY_TMP_DIR=""
+SEED_OUTPUT_FILE=""
 cleanup_setup_lock() {
   local status="${1:-$?}" cleanup_status=0
   if [ "$SETUP_LOCK_CLEANUP_DONE" = true ]; then
@@ -545,6 +546,9 @@ cleanup_setup_lock() {
   trap '' INT TERM
   if [ -n "${K8S_API_POLICY_TMP_DIR:-}" ] && [ -d "${K8S_API_POLICY_TMP_DIR}" ]; then
     rm -rf -- "${K8S_API_POLICY_TMP_DIR}" || cleanup_status=1
+  fi
+  if [ -n "${SEED_OUTPUT_FILE:-}" ] && [ -f "${SEED_OUTPUT_FILE}" ]; then
+    rm -f -- "${SEED_OUTPUT_FILE}" || cleanup_status=1
   fi
   t2_lock_release "$status" || cleanup_status=$?
   if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
@@ -2338,6 +2342,7 @@ else
     grep 'LLM_MODEL_ENSURE' "$SEED_OUTPUT_FILE" || true
   fi
   rm -f "$SEED_OUTPUT_FILE"
+  SEED_OUTPUT_FILE=""
   if [ "$SEED_RC" -eq 0 ]; then
     ok "Test user seeded"
   else

@@ -14,7 +14,7 @@
 llm_catalog_sync_source() {
   # $KC is a command plus its --context flag and must split into words.
   # shellcheck disable=SC2086
-  $KC exec -i -n control-plane deployment/control-postgres -- \
+  $KC exec -i -n "${CONTROL_API_NS:-control-plane}" deployment/control-postgres -- \
     psql -U postgres -d profiles -v ON_ERROR_STOP=1 -Atq -f - <<'SQL'
 SELECT source FROM llm_catalog_sync_runs
  ORDER BY (source = 'live') DESC, ran_at DESC

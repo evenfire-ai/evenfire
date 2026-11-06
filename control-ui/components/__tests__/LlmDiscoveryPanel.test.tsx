@@ -95,7 +95,7 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     expect(screen.getByText('LLM Models')).toBeInTheDocument()
     expect(
       screen.getByText(
-        /Newly synced models land here disabled unless they qualify for their provider's auto-enable setting\./
+        /A new model starts enabled only if its provider's auto-enable setting is on and the model qualifies; the rest start disabled\./
       )
     ).toBeInTheDocument()
 
