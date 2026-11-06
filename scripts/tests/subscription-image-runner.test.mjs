@@ -8,15 +8,20 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
+  verifyPressureMetadata,
+  verifyPressureObservation,
+} from '../e2e/fixtures/subscription-image-admission-pressure.mjs'
+import { runtimeFromInspect } from './lib/subscription-image-main-admission.mjs'
+import {
   admitVendorFrame,
   digest,
   expectedJourneyNames,
   isEncryptedKeyringHeader,
   parseMountInfo,
   privateBusPath,
-  readPrivateJson,
   readMainRecord,
-  verifyRuntimeReceipts,
+  readPrivateJson,
+  sfwFreeAsset,
   unixSocketInode,
   verifyAccount,
   verifyJourneyReport,
@@ -24,17 +29,12 @@ import {
   verifyMountIsolation,
   verifyPrivateIsolation,
   verifyRunnerEnvironment,
+  verifyRuntimeReceipts,
   verifySocketBinding,
-  sfwFreeAsset,
   verifySourceManifest,
   verifyThirdPartyArtifact,
 } from './lib/subscription-image-runner-contract.mjs'
-import { runtimeFromInspect } from './lib/subscription-image-main-admission.mjs'
 import { allowedSourcePath } from './lib/subscription-image-source-context.mjs'
-import {
-  verifyPressureMetadata,
-  verifyPressureObservation,
-} from '../e2e/fixtures/subscription-image-admission-pressure.mjs'
 
 const home = '/home/evenfire-e2e',
   base = '/run/evenfire-e2e',
@@ -216,7 +216,10 @@ test('private isolation metadata refuses changed PID lifetime, UID, namespace, s
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const pinnedBase = JSON.parse(
-  fs.readFileSync(path.join(repoRoot, 'scripts/e2e/fixtures/subscription-image-runner.base-image'), 'utf8')
+  fs.readFileSync(
+    path.join(repoRoot, 'scripts/e2e/fixtures/subscription-image-runner.base-image'),
+    'utf8'
+  )
 )
 const forwardRecord = (service, namespace, localPort, remotePort) =>
   `1000\nPORT_FORWARD_OWNER_VERSION=1\nPID=1000\nPROCESS_START=Thu Oct  2 00:00:00 2026\n` +
@@ -276,7 +279,10 @@ function mainMetadata() {
       Created: createdAt,
       Config: {
         User: '10001:10001',
-        Env: ['HOME=/home/evenfire-e2e', 'SUBSCRIPTION_IMAGE_RUN_ID=subscription-image-123456abcdef'],
+        Env: [
+          'HOME=/home/evenfire-e2e',
+          'SUBSCRIPTION_IMAGE_RUN_ID=subscription-image-123456abcdef',
+        ],
       },
       State: { Running: true },
       HostConfig: {
@@ -289,7 +295,13 @@ function mainMetadata() {
         SecurityOpt: [],
       },
       Mounts: [
-        { Type: 'volume', Name: 'evenfire-sir-123456abcdef-admission', Source: '/var/lib/docker/volumes/evenfire-sir-123456abcdef-admission/_data', Destination: '/runner-admission', RW: false },
+        {
+          Type: 'volume',
+          Name: 'evenfire-sir-123456abcdef-admission',
+          Source: '/var/lib/docker/volumes/evenfire-sir-123456abcdef-admission/_data',
+          Destination: '/runner-admission',
+          RW: false,
+        },
         { Type: 'tmpfs', Source: 'tmpfs', Destination: home, RW: true },
         { Type: 'tmpfs', Source: 'tmpfs', Destination: '/run/evenfire-e2e', RW: true },
         { Type: 'tmpfs', Source: 'tmpfs', Destination: '/tmp', RW: true },
@@ -380,7 +392,10 @@ function mainMetadata() {
   const receipts = {
     inspect: { value: inspectReceipt, sha256: digest(JSON.stringify(inspectReceipt)) },
     stack: { value: stackReceipt, sha256: digest(JSON.stringify(stackReceipt)) },
-    portForwards: { value: portForwardsReceipt, sha256: digest(JSON.stringify(portForwardsReceipt)) },
+    portForwards: {
+      value: portForwardsReceipt,
+      sha256: digest(JSON.stringify(portForwardsReceipt)),
+    },
   }
   return { source, admission, physical, receipts }
 }
@@ -550,7 +565,6 @@ test('vendor frames require the sealed physical proxy identity and an unchanged 
   assert.throws(() => admitVendorFrame(changed, 'unit-run', binding, source, [row]))
 })
 
-
 test('v2 named admission volume is the only permitted main-side inspect mount', () => {
   const { admission, receipts } = mainMetadata()
   const inspect = structuredClone(receipts.inspect.value.container)
@@ -564,11 +578,21 @@ test('v2 named admission volume is the only permitted main-side inspect mount', 
   const options = { runId: admission.runId, suiteId: admission.suiteId, home }
   assert.doesNotThrow(() => runtimeFromInspect(inspect, options))
   for (const change of [
-    value => { value.Mounts[0].Type = 'bind' },
-    value => { value.Mounts[0].Name = 'evenfire-sir-ffffffffffff-admission' },
-    value => { value.Mounts[0].RW = true },
-    value => { value.Mounts.push({ Type: 'volume', Name: 'extra', Destination: '/extra', RW: false }) },
-    value => { value.Mounts[0].Source = '/Users/operator/private' },
+    value => {
+      value.Mounts[0].Type = 'bind'
+    },
+    value => {
+      value.Mounts[0].Name = 'evenfire-sir-ffffffffffff-admission'
+    },
+    value => {
+      value.Mounts[0].RW = true
+    },
+    value => {
+      value.Mounts.push({ Type: 'volume', Name: 'extra', Destination: '/extra', RW: false })
+    },
+    value => {
+      value.Mounts[0].Source = '/Users/operator/private'
+    },
   ]) {
     const changed = structuredClone(inspect)
     change(changed)
@@ -587,10 +611,18 @@ test('v2 runtime receipt verifies the exact named read-only admission volume', (
   }
   assert.doesNotThrow(() => verifyRuntimeReceipts(admission, receipts))
   for (const change of [
-    value => { value.inspect.value.container.Mounts[0].Type = 'bind' },
-    value => { value.inspect.value.container.Mounts[0].Name = 'foreign-volume' },
-    value => { value.inspect.value.container.Mounts[0].RW = true },
-    value => { value.inspect.value.container.Mounts.push({ Type: 'tmpfs', Destination: '/extra', RW: true }) },
+    value => {
+      value.inspect.value.container.Mounts[0].Type = 'bind'
+    },
+    value => {
+      value.inspect.value.container.Mounts[0].Name = 'foreign-volume'
+    },
+    value => {
+      value.inspect.value.container.Mounts[0].RW = true
+    },
+    value => {
+      value.inspect.value.container.Mounts.push({ Type: 'tmpfs', Destination: '/extra', RW: true })
+    },
   ]) {
     const changed = structuredClone(receipts)
     change(changed)
@@ -599,7 +631,9 @@ test('v2 runtime receipt verifies the exact named read-only admission volume', (
 })
 
 test('v2 main records accept the runner UID with strict private file provenance', () => {
-  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subscription-main-record-'))
+  const directory = fs.mkdtempSync(
+    path.join(fs.realpathSync(os.tmpdir()), 'subscription-main-record-')
+  )
   try {
     const filename = path.join(directory, 'unit.json')
     fs.writeFileSync(filename, JSON.stringify({ kind: 'unit-only-json' }), { mode: 0o600 })
@@ -619,36 +653,89 @@ test('v2 main records accept the runner UID with strict private file provenance'
 })
 
 test('tool vendor metadata stays closed, bounded and immutable without raw content', () => {
-  const binding = { provider: 'grok-subscription', modelId: 'unit-vision', unsupportedModelId: 'unit-text' }
+  const binding = {
+    provider: 'grok-subscription',
+    modelId: 'unit-vision',
+    unsupportedModelId: 'unit-text',
+  }
   const source = { profile: 'unit-owned', podUid: 'unit-pod', imageId: `sha256:${'a'.repeat(64)}` }
-  const resource = { kind: 'gfs', drive: 'unit-drive', resourceId: 'a'.repeat(32), version: 1, gfsUri: `gfs://unit-drive/${'a'.repeat(32)}` }
+  const resource = {
+    kind: 'gfs',
+    drive: 'unit-drive',
+    resourceId: 'a'.repeat(32),
+    version: 1,
+    gfsUri: `gfs://unit-drive/${'a'.repeat(32)}`,
+  }
   const row = {
-    sequence: 1, provider: binding.provider, model: binding.modelId,
+    sequence: 1,
+    provider: binding.provider,
+    model: binding.modelId,
     receiptId: '11111111-1111-4111-8111-111111111111',
-    imageSha256: [], mimeTypes: [], receivedImageDigests: [], receivedImageOrder: [], decodedPixels: [],
-    requestSha256: 'b'.repeat(64), responseKind: 'tool_calls', outputSha256: 'c'.repeat(64),
-    journey: 'gfs-image', stage: 'read',
+    imageSha256: [],
+    mimeTypes: [],
+    receivedImageDigests: [],
+    receivedImageOrder: [],
+    decodedPixels: [],
+    requestSha256: 'b'.repeat(64),
+    responseKind: 'tool_calls',
+    outputSha256: 'c'.repeat(64),
+    journey: 'gfs-image',
+    stage: 'read',
     toolCalls: [{ id: 'call_unit', name: 'clerum__gfs_read', argumentsSha256: 'd'.repeat(64) }],
     toolOutputs: [{ id: 'call_previous', outputSha256: 'e'.repeat(64), resource }],
-    referencedFiles: [{ referenceId: `gfs:unit-drive:${'a'.repeat(32)}@v1`, drive: 'unit-drive', resourceId: 'a'.repeat(32), version: 1, availability: 'available', byteLength: 1024 }],
+    referencedFiles: [
+      {
+        referenceId: `gfs:unit-drive:${'a'.repeat(32)}@v1`,
+        drive: 'unit-drive',
+        resourceId: 'a'.repeat(32),
+        version: 1,
+        availability: 'available',
+        byteLength: 1024,
+      },
+    ],
   }
-  const frame = { kind: 'evenfire-subscription-image-vendor-frame-v1', runId: 'unit-run', provider: binding.provider, source,
-    ledger: { kind: 'evenfire-subscription-image-vendor-v1', runId: 'unit-run', attempts: [row] } }
+  const frame = {
+    kind: 'evenfire-subscription-image-vendor-frame-v1',
+    runId: 'unit-run',
+    provider: binding.provider,
+    source,
+    ledger: { kind: 'evenfire-subscription-image-vendor-v1', runId: 'unit-run', attempts: [row] },
+  }
   assert.equal(admitVendorFrame(frame, 'unit-run', binding, source, []).attempts.length, 1)
   assert.equal(admitVendorFrame(frame, 'unit-run', binding, source).attempts.length, 1)
   assert.throws(() => admitVendorFrame(frame, 'unit-run', binding, source, null))
   assert.equal(admitVendorFrame(frame, 'unit-run', binding, source, [row]).attempts.length, 1)
   for (const change of [
-    value => { value.extraHeader = 'unknown' },
-    value => { value.ledger.extraHeader = 'unknown' },
-    value => { value.ledger.attempts[0].toolCalls[0].arguments = 'forbidden raw arguments' },
-    value => { value.ledger.attempts[0].toolOutputs[0].output = 'forbidden raw output' },
-    value => { value.ledger.attempts[0].toolCalls[0].argumentsSha256 = 'not-a-hash' },
-    value => { value.ledger.attempts[0].toolCalls = Array.from({ length: 33 }, () => row.toolCalls[0]) },
-    value => { value.ledger.attempts[0].toolOutputs[0].resource.gfsUri = 'https://example.invalid' },
-    value => { value.ledger.attempts[0].referencedFiles[0].byteLength = Number.MAX_SAFE_INTEGER },
-    value => { value.ledger.attempts[0].stage = 'capture' },
-    value => { value.ledger.attempts[0].decodedPixels = [{ width: 512, height: 512, answer: 'forbidden' }] },
+    value => {
+      value.extraHeader = 'unknown'
+    },
+    value => {
+      value.ledger.extraHeader = 'unknown'
+    },
+    value => {
+      value.ledger.attempts[0].toolCalls[0].arguments = 'forbidden raw arguments'
+    },
+    value => {
+      value.ledger.attempts[0].toolOutputs[0].output = 'forbidden raw output'
+    },
+    value => {
+      value.ledger.attempts[0].toolCalls[0].argumentsSha256 = 'not-a-hash'
+    },
+    value => {
+      value.ledger.attempts[0].toolCalls = Array.from({ length: 33 }, () => row.toolCalls[0])
+    },
+    value => {
+      value.ledger.attempts[0].toolOutputs[0].resource.gfsUri = 'https://example.invalid'
+    },
+    value => {
+      value.ledger.attempts[0].referencedFiles[0].byteLength = Number.MAX_SAFE_INTEGER
+    },
+    value => {
+      value.ledger.attempts[0].stage = 'capture'
+    },
+    value => {
+      value.ledger.attempts[0].decodedPixels = [{ width: 512, height: 512, answer: 'forbidden' }]
+    },
   ]) {
     const changed = structuredClone(frame)
     change(changed)
@@ -774,7 +861,10 @@ test('third-party sfw-free assets stay pinned and artifact drift is refused', ()
   assert.throws(() => verifyThirdPartyArtifact({ bytes: body, asset: { ...asset, machine: 0x3e } }))
   const text = Buffer.from('not-an-elf')
   assert.throws(() =>
-    verifyThirdPartyArtifact({ bytes: text, asset: { ...asset, bytes: text.length, sha256: digest(text) } })
+    verifyThirdPartyArtifact({
+      bytes: text,
+      asset: { ...asset, bytes: text.length, sha256: digest(text) },
+    })
   )
 })
 
@@ -798,7 +888,10 @@ test('pressure metadata and native owner observations refuse drift', () => {
     socketPath: '/run/evenfire-e2e/pressure.sock',
   }
   assert.doesNotThrow(() => verifyPressureMetadata(metadata))
-  assert.throws(() => verifyPressureMetadata({ ...metadata, commandDeadlineMs: 40251 }), /METADATA_INVALID/)
+  assert.throws(
+    () => verifyPressureMetadata({ ...metadata, commandDeadlineMs: 40251 }),
+    /METADATA_INVALID/
+  )
   assert.throws(() => verifyPressureMetadata({ ...metadata, hostRefs: ['unit-grok', 'unit-grok'] }))
   assert.throws(() => verifyPressureMetadata({ ...metadata, socketPath: 'relative.sock' }))
   const value = {
@@ -813,7 +906,11 @@ test('pressure metadata and native owner observations refuse drift', () => {
   assert.equal(verifyPressureObservation(value, { held: 2, drained: 0 }, metadata).owners.held, 2)
   assert.throws(() => verifyPressureObservation({ ...value, pids: [43] }, {}, metadata))
   assert.throws(() =>
-    verifyPressureObservation({ ...value, counts: { ...value.counts, reservations: 1 } }, {}, metadata)
+    verifyPressureObservation(
+      { ...value, counts: { ...value.counts, reservations: 1 } },
+      {},
+      metadata
+    )
   )
   assert.throws(() =>
     verifyPressureObservation(
@@ -823,7 +920,6 @@ test('pressure metadata and native owner observations refuse drift', () => {
     )
   )
 })
-
 
 test('host command wrapper transmits the complete admission input to a native child', async () => {
   const { run } = await import('../e2e/prepare-subscription-image-admission.mjs')

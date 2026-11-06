@@ -34,7 +34,7 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    input and output token counts for the thread.
 
    ![Evenfire Desktop App chat with the chatllm agent: the agent's answer sits above a collapsed "More details · 1 tool" summary, with thread token counts in the header](../assets/desktop-app-chat.webp)
-   *Dev cluster, demo tenant.*
+   _Dev cluster, demo tenant._
 
 5. **Watch it work.** `ProgressStepper` renders the tool calls as they run —
    each step's tool name, how long it took, and the payload it returned.
@@ -46,7 +46,7 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    never used to submit messages, only to observe what is already running.
 
    ![ProgressStepper in the Desktop App: a completed sqlite-mcp list_tables step showing its 21 ms duration, the tool-call row collapsed beneath the agent's answer](../assets/desktop-app-progress-stepper.webp)
-   *Dev cluster, demo tenant.*
+   _Dev cluster, demo tenant._
 
 6. **Approve the gated call.** When a tool call needs a human decision, the
    `ProgressStepper` suspends the step in place and shows an in-chat
@@ -56,7 +56,7 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    Required / Skip / Default policy behind that prompt is set.
 
    ![In-chat approval gate in the Desktop App: an MCP tool call is held with the message "requires approval" and Approve / Deny buttons](../assets/desktop-app-approval.webp)
-   *Dev cluster, demo tenant.*
+   _Dev cluster, demo tenant._
 
 7. **Collect the artifact.** Completed work surfaces through the
    `ArtifactsBadge`, alongside two related file surfaces: shared files
@@ -122,8 +122,8 @@ Two screens worth calling out specifically:
   a real interface; it does not get a second client to install.
 
   ![The LeadForge plugin's dashboard rendered inside the Evenfire Desktop App: the app's own icon rail surrounds a recipe-supplied prospecting UI showing contact, company, and outreach-funnel counters](../assets/desktop-app-sandbox-ui.webp)
-  *Dev cluster, demo tenant. Captured before the "Back to apps" bar was
-  removed; the sidebar now returns you to the app picker.*
+  _Dev cluster, demo tenant. Captured before the "Back to apps" bar was
+  removed; the sidebar now returns you to the app picker._
 
 ## How it is wired
 
@@ -209,14 +209,14 @@ Six `npm` scripts in `desktop-app/package.json` drive the makers, each running
 has no packaging targets — only install, build, dev, start, clean,
 reinstall, and port-forward helpers — so use the scripts directly:
 
-| Script               | Platform | Arch  | Makers                |
-| -------------------- | -------- | ----- | --------------------- |
-| `make:mac:x64`       | darwin   | x64   | zip, dmg              |
-| `make:mac:arm64`     | darwin   | arm64 | zip, dmg              |
-| `make:windows:x64`   | win32    | x64   | zip, squirrel         |
-| `make:windows:arm64` | win32    | arm64 | zip, squirrel         |
-| `make:linux:x64`     | linux    | x64   | zip, deb, rpm         |
-| `make:linux:arm64`   | linux    | arm64 | zip, deb, rpm         |
+| Script               | Platform | Arch  | Makers        |
+| -------------------- | -------- | ----- | ------------- |
+| `make:mac:x64`       | darwin   | x64   | zip, dmg      |
+| `make:mac:arm64`     | darwin   | arm64 | zip, dmg      |
+| `make:windows:x64`   | win32    | x64   | zip, squirrel |
+| `make:windows:arm64` | win32    | arm64 | zip, squirrel |
+| `make:linux:x64`     | linux    | x64   | zip, deb, rpm |
+| `make:linux:arm64`   | linux    | arm64 | zip, deb, rpm |
 
 Output lands in `desktop-app/out/` (git-ignored). Run the macOS scripts on a
 macOS host. Signing and notarization run only when the **build host** is macOS
@@ -230,22 +230,22 @@ the `RunAsNode`, `NODE_OPTIONS`, and inspector-argument fuses turned off.
 
 ### Signing and notarization
 
-| Platform | What the config supports                                                                                                    |
-| -------- | --------------------------------------------------------------------------------------------------------------------------- |
-| macOS    | Opt-in code signing and notarization, enabled only when `ENABLE_APPLE_CODESIGN=1` on a macOS build host. Off by default.    |
-| Windows  | No signing configuration. Squirrel and zip output is unsigned.                                                              |
-| Linux    | No signing configuration for deb, rpm, or zip.                                                                              |
+| Platform | What the config supports                                                                                                 |
+| -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| macOS    | Opt-in code signing and notarization, enabled only when `ENABLE_APPLE_CODESIGN=1` on a macOS build host. Off by default. |
+| Windows  | No signing configuration. Squirrel and zip output is unsigned.                                                           |
+| Linux    | No signing configuration for deb, rpm, or zip.                                                                           |
 
 macOS variables (names only — keep the values in your keychain or CI secrets):
 
-| Variable                                                  | Effect                                                                                       |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `ENABLE_APPLE_CODESIGN`                                   | `1` turns on `osxSign` and `osxNotarize`. Any other value leaves the build unsigned.          |
-| `APPLE_CODESIGN_IDENTITY`                                 | Optional signing identity passed to `osxSign`.                                               |
-| `APPLE_KEYCHAIN`                                          | Optional keychain for signing and for keychain-profile notarization.                         |
-| `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`   | Notarize with an App Store Connect API key. All three are needed together.                   |
-| `APPLE_KEYCHAIN_PROFILE`                                  | Notarize with a stored `notarytool` keychain profile instead of the API key.                 |
-| `APPLE_BUNDLE_ID`                                         | Bundle identifier. Default `ai.evenfire.desktop`.                                            |
+| Variable                                                | Effect                                                                               |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `ENABLE_APPLE_CODESIGN`                                 | `1` turns on `osxSign` and `osxNotarize`. Any other value leaves the build unsigned. |
+| `APPLE_CODESIGN_IDENTITY`                               | Optional signing identity passed to `osxSign`.                                       |
+| `APPLE_KEYCHAIN`                                        | Optional keychain for signing and for keychain-profile notarization.                 |
+| `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | Notarize with an App Store Connect API key. All three are needed together.           |
+| `APPLE_KEYCHAIN_PROFILE`                                | Notarize with a stored `notarytool` keychain profile instead of the API key.         |
+| `APPLE_BUNDLE_ID`                                       | Bundle identifier. Default `ai.evenfire.desktop`.                                    |
 
 With `ENABLE_APPLE_CODESIGN=1`, the build fails at config load unless one of the
 two notarization credential sets is present.
