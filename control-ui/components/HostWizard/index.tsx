@@ -321,14 +321,20 @@ export function HostWizard({
   const [selectedTeamIds, setSelectedTeamIds] = useState<string[]>([])
   const [accessTab, setAccessTab] = useState<'members' | 'teams'>('members')
 
-  // Connectors control-api reported as gone since the list was handed in.
-  const [vanishedMcp, setVanishedMcp] = useState<string[]>([])
+  // Connectors control-api reported as gone, tied to the list they were picked from:
+  // the list is a snapshot that still shows them, but a newly loaded list is current
+  // again and may hold a connector recreated under the same name.
+  const [vanishedMcp, setVanishedMcp] = useState<{
+    list: HostWizardProps['mcpServers']
+    names: string[]
+  }>({ list: mcpServers, names: [] })
   const availableMcp = useMemo(
     () =>
       mcpServers
         .map(m => {
           const name = m.metadata?.name
-          if (!name || vanishedMcp.includes(name)) return null
+          if (!name || (vanishedMcp.list === mcpServers && vanishedMcp.names.includes(name)))
+            return null
           return { name, meta: mcpConnectorMeta(m.spec) }
         })
         .filter((v): v is { name: string; meta: string } => Boolean(v))
@@ -920,7 +926,13 @@ export function HostWizard({
         if (unknownConnectors && unknownConnectors.length > 0) {
           // Drop the vanished connectors so a retry does not hit the same refusal.
           setSelectedMcp(current => current.filter(name => !unknownConnectors.includes(name)))
-          setVanishedMcp(current => [...new Set([...current, ...unknownConnectors])])
+          setVanishedMcp(current => ({
+            list: mcpServers,
+            names:
+              current.list === mcpServers
+                ? [...new Set([...current.names, ...unknownConnectors])]
+                : unknownConnectors,
+          }))
         }
         setError(
           contextMcpServerRejection(e) ??

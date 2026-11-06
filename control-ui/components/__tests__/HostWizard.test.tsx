@@ -1557,4 +1557,41 @@ describe('HostWizard — a selected connector vanished before create', () => {
         .mock.calls.some(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
     ).toBe(false)
   }, 15_000)
+
+  it('offers a connector recreated under the same name once a new list is loaded', async () => {
+    const actualApi = await vi.importActual<typeof import('../../lib/api')>('../../lib/api')
+    const refusal = await contextRejectionError(actualApi, unknownMcpServerBody(['mcp-a']))
+    vi.mocked(api.apiSend).mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/api/v1/admin/contexts') throw refusal
+      return {}
+    })
+    const snapshot = [{ metadata: { name: 'mcp-a' } }, { metadata: { name: 'mcp-b' } }]
+    const { rerender, onCreated, onClose } = await renderWizard({ mcpServers: snapshot })
+    const renderWith = (mcpServers: typeof snapshot) =>
+      rerender(
+        <ToastProvider>
+          <HostWizard
+            mcpServers={mcpServers}
+            existingSecrets={[buildSecretSummary({ name: 'secret-a' })]}
+            onCreated={onCreated}
+            onClose={onClose}
+          />
+        </ToastProvider>
+      )
+    await walkToAccessStep({ agentName: 'recreated-connector-agent' })
+    continueToConnectorsStep()
+    fireEvent.click(screen.getByRole('checkbox', { name: /mcp-a/i }))
+    submitFromConnectorsStep()
+    await screen.findByText('The connector mcp-a no longer exists; reload the page and try again.')
+    expect(screen.queryByRole('checkbox', { name: /mcp-a/i })).toBeNull()
+
+    // The same snapshot still lists the vanished connector: it stays hidden.
+    renderWith(snapshot)
+    expect(screen.queryByRole('checkbox', { name: /mcp-a/i })).toBeNull()
+
+    // A freshly loaded list that holds mcp-a again offers it.
+    renderWith([{ metadata: { name: 'mcp-a' } }, { metadata: { name: 'mcp-b' } }])
+    expect(screen.getByRole('checkbox', { name: /mcp-a/i })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: /mcp-b/i })).toBeInTheDocument()
+  }, 15_000)
 })
