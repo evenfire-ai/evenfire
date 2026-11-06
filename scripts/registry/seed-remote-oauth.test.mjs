@@ -151,10 +151,37 @@ describe('committed catalog', () => {
       byName('hubspot-remote').scopes?.length > 0,
       'HubSpot publishes no scopes; the entry suggests them'
     )
-    assert.equal(byName('notion-remote').expectedRegistration, 'cimd')
     assert.equal(byName('monday-remote').expectedRegistration, 'cimd')
     assert.equal(byName('vercel-remote').url, 'https://mcp.vercel.com/')
     assert.equal(byName('hubspot-remote').url, 'https://mcp.hubspot.com/')
+  })
+
+  // Derived from control-api's discovery over the captured provider answers, not
+  // written by hand: a mode the real discovery would not detect makes the seed
+  // reject the entry as drift, and only surfaces when someone runs it.
+  test('registration modes match what discovery detects on the captured provider answers', async () => {
+    const { PILOTS, makeDiscoveryTransport } = await loadControlApiModule(
+      'test/fixtures/remoteOAuthDiscovery.ts'
+    )
+    const { discoverRemoteOAuth } = await loadControlApiModule('src/oauth/discovery.ts')
+    const checked = []
+    for (const pilot of Object.values(PILOTS)) {
+      const item = catalog.find(i => i.url === pilot.mcpUrl)
+      assert.ok(item, `no catalog entry for the captured ${pilot.name} fixture`)
+      const outcome = await discoverRemoteOAuth(pilot.mcpUrl, {
+        transport: makeDiscoveryTransport(pilot),
+        resolveDns: async () => ['93.184.216.34'],
+      })
+      assert.ok(outcome.ok, `${pilot.name}: ${JSON.stringify(outcome)}`)
+      const detected = outcome.result.registrationMode
+      assert.equal(
+        rules.catalogRegistrationDrifts(item.expectedRegistration, detected),
+        false,
+        `${item.name}: catalog says ${item.expectedRegistration}, discovery detects ${detected}`
+      )
+      checked.push(item.name)
+    }
+    assert.equal(checked.length, 4)
   })
 
   test('setup guides refer to the redirect URI below, carry no placeholders and ask for one app per slot', () => {

@@ -33,7 +33,7 @@
     "category": "productivity",
     "url": "https://mcp.notion.com/mcp",
     "allowedGrantScopes": ["user", "context"],
-    "expectedRegistration": "cimd",
+    "expectedRegistration": "dcr",
     "verification": {
       "status": "untested"
     }
