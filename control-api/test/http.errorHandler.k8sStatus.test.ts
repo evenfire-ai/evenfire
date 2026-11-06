@@ -5,6 +5,7 @@ import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { K8sNotFoundError } from '../src/services/resourceService.js'
+import { handlerRefused403, statusForbidden } from './helpers/apiserverErrors.js'
 
 /**
  * UT-2a (FIX-B): the global error handler must forward a K8s error's real 4xx
@@ -222,5 +223,154 @@ describe('clerumErrorHandler — K8s status forwarding (UT-2a)', () => {
     expect(logged).not.toContain('audit-id')
     expect(logged).not.toContain('x-kubernetes-pf')
     expect(logged).not.toContain(err.message)
+  })
+})
+
+/**
+ * control-api calls Kubernetes with its OWN ServiceAccount, so a raw
+ * ApiException 401, or a 403 no policy author wrote, is the apiserver refusing
+ * control-api, never the caller's session. Forwarded as-is, a 401 logs the
+ * Control UI operator out and a 403 shows apiserver text that can name the
+ * ServiceAccount.
+ */
+describe('clerumErrorHandler — K8s ApiException 401/403', () => {
+  const headers = { 'audit-id': 'a1b2c3-secret-audit-uuid' }
+  const SA = 'system:serviceaccount:control-plane:control-api'
+
+  it.each([
+    [
+      'ResourceQuota',
+      'secrets "s1" is forbidden: exceeded quota: q1, requested: secrets=1, used: secrets=5, limited: secrets=5',
+    ],
+    [
+      'NamespaceLifecycle',
+      'secrets "s1" is forbidden: unable to create new content in namespace mcp-server because it is being terminated',
+    ],
+    [
+      'RBAC on a named object',
+      `secrets "s1" is forbidden: User "${SA}" cannot create resource "secrets" in API group "" in the namespace "mcp-server"`,
+    ],
+    [
+      'RBAC on a list',
+      `secrets is forbidden: User "${SA}" cannot list resource "secrets" in API group "" in the namespace "mcp-server"`,
+    ],
+    [
+      'a policy message naming a ServiceAccount',
+      `workflowrecipes.clerum.io "r1" is forbidden: ValidatingAdmissionPolicy 'p' with binding 'b' denied request: ${SA} may not do this`,
+    ],
+    [
+      'a webhook denial without explanation',
+      'admission webhook "w" denied the request without explanation',
+    ],
+    // The apiserver never emits this (extractResourceName falls back to "Unknown");
+    // pins the fail-closed default.
+    [
+      'a policy-shaped message with no name',
+      "workflowrecipes.clerum.io is forbidden: ValidatingAdmissionPolicy 'p' with binding 'b' denied request: m",
+    ],
+  ])(
+    'answers %s with the fail-closed 502 and keeps the reason in the log',
+    async (_label, text) => {
+      const { app, warn } = appThrowingWithLogSpy(statusForbidden(text))
+      const res = await request(app).get('/boom')
+
+      expect(res.status).toBe(502)
+      expect(res.body.error).toBe('kubernetes_access_denied')
+      expect(res.body.correlationId).toEqual(expect.any(String))
+      expect(res.body.message).toBe(handlerRefused403(res.body.correlationId))
+      // Liveness witness: the branch ran, parsed the Status body, and logged it
+      // under the id the message names. The negative assertions below rest on it.
+      expect(warn).toHaveBeenCalledOnce()
+      expect(warn.mock.calls[0][0]).toMatchObject({
+        event: 'kubernetes_access_denied',
+        upstreamStatus: 403,
+        correlationId: res.body.correlationId,
+        err: text,
+      })
+      const serialized = JSON.stringify(res.body)
+      expect(serialized).not.toContain(text)
+      expect(serialized).not.toContain('system:serviceaccount')
+      expect(serialized).not.toContain('audit-id')
+    }
+  )
+
+  it('answers a 403 whose body is not a Status with a 502 and never echoes the body', async () => {
+    const marker = 'non-status-body-marker-6a1e'
+    const err = new ApiException(403, 'Unknown API Status Code!', `<html>${marker}</html>`, headers)
+    const { app, warn } = appThrowingWithLogSpy(err)
+    const res = await request(app).get('/boom')
+
+    expect(res.status).toBe(502)
+    expect(res.body.error).toBe('kubernetes_access_denied')
+    // Witness: the branch ran; clientErrorMessage fell back to the status text.
+    expect(warn.mock.calls[0][0]).toMatchObject({
+      event: 'kubernetes_access_denied',
+      upstreamStatus: 403,
+      err: 'Forbidden',
+    })
+    expect(JSON.stringify(res.body)).not.toContain(marker)
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(marker)
+  })
+
+  it.each([
+    ['no name', 'Unknown'],
+    ['a generateName prefix', 'r1-'],
+  ])('keeps forwarding a policy denial on an object with %s', async (_label, name) => {
+    const message = `workflowrecipes.clerum.io "${name}" is forbidden: ValidatingAdmissionPolicy 'p' with binding 'b' denied request: not allowed`
+    const { app, warn } = appThrowingWithLogSpy(statusForbidden(message))
+    const res = await request(app).get('/boom')
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe(message)
+    expect(warn.mock.calls[0][0]).toMatchObject({ event: 'forwarded_client_error', status: 403 })
+    expect(JSON.stringify(res.body)).not.toContain('audit-id')
+  })
+
+  it('answers a 401 with an undefined body, as the client raises it, with a credentials 502', async () => {
+    const err = new ApiException(401, 'Unauthorized', undefined, headers)
+    const { app, warn } = appThrowingWithLogSpy(err)
+    const res = await request(app).get('/boom')
+
+    expect(res.status).toBe(502)
+    expect(res.body.error).toBe('kubernetes_access_denied')
+    expect(res.body.message).toBe(
+      "The Kubernetes API server refused control-api's own credentials (HTTP 401). " +
+        'Your session is not the cause; check the control-api ServiceAccount token.'
+    )
+    expect(JSON.stringify(res.body)).not.toContain('audit-id')
+    // Witness: the branch ran and recorded the upstream status.
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0][0]).toMatchObject({
+      event: 'kubernetes_access_denied',
+      upstreamStatus: 401,
+    })
+  })
+
+  it('keeps forwarding a policy 403 as 403 with the policy message', async () => {
+    const message =
+      "workflowrecipes.clerum.io \"r1\" is forbidden: ValidatingAdmissionPolicy 'workflowrecipe-namespace-allowlist' with binding 'workflowrecipe-namespace-allowlist' denied request: Only the workflow-recipes controller may set WorkflowRecipe ownerReferences."
+    const err = new ApiException(
+      403,
+      'Forbidden',
+      { kind: 'Status', status: 'Failure', message, reason: 'Forbidden', code: 403 },
+      headers
+    )
+    const res = await request(appThrowing(err)).get('/boom')
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe(message)
+    expect(JSON.stringify(res.body)).not.toContain('audit-id')
+  })
+
+  it('keeps forwarding a service-layer 403 that is not an ApiException', async () => {
+    const res = await request(appThrowing({ code: 403 })).get('/boom')
+    expect(res.status).toBe(403)
+  })
+
+  it.each([404, 409])('keeps forwarding a real ApiException %i', async status => {
+    const err = new ApiException(status, 'x', { kind: 'Status', message: 'm', code: status }, {})
+    const res = await request(appThrowing(err)).get('/boom')
+    expect(res.status).toBe(status)
+    expect(res.body.error).toBe('m')
   })
 })

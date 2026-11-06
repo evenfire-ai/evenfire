@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { createAdminHostArtifactsRouter } from '../src/routes/admin/hostArtifacts.js'
+import { controlApiForbiddenRead, expectRejectedSecretRead } from './helpers/secretReadFailure.js'
 
 // Spy on console.warn to capture namespace audit logs
 const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -12,14 +15,22 @@ const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
  * - listFilesInDirectory (list files in /tmp/clerum-output)
  * - readFileFromPod   (download a specific artifact)
  */
+const notFound = () => new ApiException(404, 'Not Found', '{"code":404}', {})
+
 function createGateway(
   overrides: {
     findPodByLabel?: ReturnType<typeof vi.fn>
     listFilesInDirectory?: ReturnType<typeof vi.fn>
     readFileFromPod?: ReturnType<typeof vi.fn>
+    getSecret?: ReturnType<typeof vi.fn>
+    getResource?: ReturnType<typeof vi.fn>
   } = {}
 ) {
   return {
+    // Redaction sources for text artifacts: absent by default (404), so
+    // there is nothing to redact.
+    getSecret: overrides.getSecret ?? vi.fn(async () => Promise.reject(notFound())),
+    getResource: overrides.getResource ?? vi.fn(async () => Promise.reject(notFound())),
     findPodByLabel:
       overrides.findPodByLabel ??
       vi.fn(async (_namespace: string, selector: string) => selector.split('=')[1] ?? null),
@@ -293,6 +304,64 @@ describe('GET /admin/hosts/:hostRef/artifacts/:artifactName/download', () => {
 
     expect(res.headers['content-type']).toContain('text/markdown')
     expect(res.headers['x-clerum-redaction']).toBe('scanned')
+  })
+
+  it('never serves a text artifact unredacted when the env Secret read is refused', async () => {
+    const readFn = vi.fn(async () => Buffer.from('notes fixture-host-env-value'))
+    const getSecret = vi.fn(async (name: string, ns: string) =>
+      Promise.reject(controlApiForbiddenRead(name, ns))
+    )
+    const getResource = vi.fn()
+    const gateway = createGateway({ readFileFromPod: readFn, getSecret, getResource })
+    const app = express()
+    app.use(createAdminHostArtifactsRouter(gateway as never))
+    app.use(clerumErrorHandler)
+
+    const res = await request(app).get('/admin/hosts/chatllm/artifacts/notes.md/download')
+
+    expectRejectedSecretRead(res, 'host-chatllm-env-secret', 'mcp-host')
+    expect(JSON.stringify(res.body)).not.toContain('fixture-host-env-value')
+    expect(res.headers['content-disposition']).toBeUndefined()
+    // Witnesses: the artifact was read and the redaction read was attempted.
+    expect(readFn).toHaveBeenCalledOnce()
+    expect(getSecret).toHaveBeenCalledWith('host-chatllm-env-secret', 'mcp-host')
+    expect(getResource).not.toHaveBeenCalled()
+  })
+
+  it('never echoes the apiserver text when the host pod lookup fails', async () => {
+    const findPodByLabel = vi.fn(async () =>
+      Promise.reject(controlApiForbiddenRead('chatllm', 'mcp-host'))
+    )
+    const gateway = createGateway({ findPodByLabel })
+    const app = makeApp(gateway)
+
+    const res = await request(app).get('/admin/hosts/chatllm/artifacts/notes.md/download')
+
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({ error: 'Failed to read artifact' })
+    const serialized = JSON.stringify(res.body)
+    expect(serialized).not.toContain('system:serviceaccount')
+    expect(serialized).not.toContain('5f0c7a4e-secret-read')
+    // Witness: the failing lookup is what produced the 500.
+    expect(findPodByLabel).toHaveBeenCalledOnce()
+  })
+
+  it('answers 502 resource_read_failed when the Host read for redaction is refused', async () => {
+    const readFn = vi.fn(async () => Buffer.from('plain text'))
+    const getResource = vi.fn(async (_plural: string, name: string, ns: string) =>
+      Promise.reject(controlApiForbiddenRead(name, ns))
+    )
+    const gateway = createGateway({ readFileFromPod: readFn, getResource })
+    const app = express()
+    app.use(createAdminHostArtifactsRouter(gateway as never))
+    app.use(clerumErrorHandler)
+
+    const res = await request(app).get('/admin/hosts/chatllm/artifacts/notes.md/download')
+
+    expect(res.status).toBe(502)
+    expect(res.body.error).toBe('resource_read_failed')
+    expect(JSON.stringify(res.body)).not.toContain('system:serviceaccount')
+    expect(getResource).toHaveBeenCalledWith('hosts', 'chatllm', 'mcp-host')
   })
 
   it('falls back to application/octet-stream for unknown extensions', async () => {

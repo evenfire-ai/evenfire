@@ -1,6 +1,80 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { ApiException } from '@kubernetes/client-node'
 import type { K8sGateway } from '../src/k8s.js'
 import { loadHostSecretEntries, redactArtifactBuffer } from '../src/services/artifactRedactor.js'
+import { ResourceReadError, SecretReadError } from '../src/services/secretRead.js'
+import { controlApiForbiddenRead } from './helpers/secretReadFailure.js'
+
+const notFound = () => new ApiException(404, 'Not Found', '{"code":404}', {})
+const b64 = (s: string) => Buffer.from(s).toString('base64')
+
+describe('loadHostSecretEntries read failures', () => {
+  it('treats a missing env Secret (404) as empty and still reads the LLM Secret', async () => {
+    const getSecret = vi.fn(async (name: string) => {
+      if (name === 'chatllm-api-keys') return { data: { LLM_SECRET: b64('llm-secret-value') } }
+      throw notFound()
+    })
+    const getResource = vi.fn(async () => ({ spec: { secretRef: 'chatllm-api-keys' } }))
+    const gateway = { getSecret, getResource } as unknown as K8sGateway
+
+    const entries = await loadHostSecretEntries(gateway, 'chatllm', 'mcp-host')
+
+    expect(entries).toEqual([{ name: 'LLM_SECRET', value: 'llm-secret-value' }])
+    expect(getSecret).toHaveBeenCalledTimes(2)
+  })
+
+  it('throws a SecretReadError when the env Secret read is refused, before any other read', async () => {
+    const getSecret = vi.fn(async (name: string, ns: string) =>
+      Promise.reject(controlApiForbiddenRead(name, ns))
+    )
+    const getResource = vi.fn()
+    const gateway = { getSecret, getResource } as unknown as K8sGateway
+
+    const err = await loadHostSecretEntries(gateway, 'chatllm', 'mcp-host').catch(e => e)
+
+    expect(err).toBeInstanceOf(SecretReadError)
+    expect((err as SecretReadError).status).toBe(502)
+    expect(getSecret).toHaveBeenCalledWith('host-chatllm-env-secret', 'mcp-host')
+    expect(getResource).not.toHaveBeenCalled()
+  })
+
+  it('throws a ResourceReadError when the Host read is refused', async () => {
+    const getSecret = vi.fn(async () => Promise.reject(notFound()))
+    const getResource = vi.fn(async (_p: string, name: string, ns: string) =>
+      Promise.reject(controlApiForbiddenRead(name, ns))
+    )
+    const gateway = { getSecret, getResource } as unknown as K8sGateway
+
+    const err = await loadHostSecretEntries(gateway, 'chatllm', 'mcp-host').catch(e => e)
+
+    expect(err).toBeInstanceOf(ResourceReadError)
+    expect(getResource).toHaveBeenCalledWith('hosts', 'chatllm', 'mcp-host')
+  })
+
+  it('throws a SecretReadError when the LLM Secret read is refused', async () => {
+    const getSecret = vi.fn(async (name: string, ns: string) => {
+      if (name === 'chatllm-api-keys') throw controlApiForbiddenRead(name, ns)
+      throw notFound()
+    })
+    const getResource = vi.fn(async () => ({ spec: { secretRef: 'chatllm-api-keys' } }))
+    const gateway = { getSecret, getResource } as unknown as K8sGateway
+
+    const err = await loadHostSecretEntries(gateway, 'chatllm', 'mcp-host').catch(e => e)
+
+    expect(err).toBeInstanceOf(SecretReadError)
+    expect(getSecret).toHaveBeenCalledWith('chatllm-api-keys', 'mcp-host')
+  })
+
+  it('returns no entries when neither the env Secret nor the Host exists', async () => {
+    const getSecret = vi.fn(async () => Promise.reject(notFound()))
+    const getResource = vi.fn(async () => Promise.reject(notFound()))
+    const gateway = { getSecret, getResource } as unknown as K8sGateway
+
+    await expect(loadHostSecretEntries(gateway, 'chatllm', 'mcp-host')).resolves.toEqual([])
+    expect(getSecret).toHaveBeenCalledOnce()
+    expect(getResource).toHaveBeenCalledOnce()
+  })
+})
 
 describe('redactArtifactBuffer', () => {
   it('loads the host-prefixed per-Host env Secret and the Host LLM Secret', async () => {

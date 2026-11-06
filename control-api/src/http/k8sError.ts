@@ -35,15 +35,20 @@ export function extractK8sError(err: unknown): { status: number; message: string
 
 /**
  * Client-safe reason for a failed K8s call, for text that leaves the process (response
- * bodies, warnings). Unlike `extractK8sError` it never falls back to `err.message`: a
- * client-node `ApiException` builds that message from the full apiserver response,
- * response headers included. Only the metav1.Status `message` is used, then a fixed
- * status text; an error without a K8s status gets the caller's fixed fallback.
+ * bodies, warnings): the fixed `K8s error <status>`, or the caller's fixed fallback for
+ * an error without a K8s status. Neither `err.message` (a client-node `ApiException`
+ * builds it from the full apiserver response, headers included) nor the metav1.Status
+ * message (a 401/403 names control-api's own ServiceAccount, and other statuses can
+ * carry apiserver internals) is ever returned; the server log keeps the Status message.
  */
 export function k8sSafeFailureMessage(err: unknown, fallback: string): string {
   const status = extractK8sError(err)?.status
-  if (status === undefined) return fallback
-  const body = (err as { body?: unknown }).body
+  return status === undefined ? fallback : `K8s error ${status}`
+}
+
+/** The metav1.Status `message` of a K8s client error, or null. Never the raw body. */
+export function statusMessageOf(err: unknown): string | null {
+  const body = (err as { body?: unknown } | null)?.body
   let statusMessage: unknown
   if (body && typeof body === 'object') {
     statusMessage = (body as { message?: unknown }).message
@@ -54,7 +59,65 @@ export function k8sSafeFailureMessage(err: unknown, fallback: string): string {
       // Not a metav1.Status: never forward the raw body.
     }
   }
-  return typeof statusMessage === 'string' && statusMessage.length > 0
-    ? statusMessage
-    : `K8s error ${status}`
+  return typeof statusMessage === 'string' && statusMessage.length > 0 ? statusMessage : null
+}
+
+// The apiserver's wording for a request denied by a policy author's rule,
+// anchored at the start of the Status message: a ValidatingAdmissionPolicy
+// (`<resource> "<name>" is forbidden: ValidatingAdmissionPolicy '<p>' with
+// binding '<b>' denied request: <message>`) or a validating webhook
+// (`admission webhook "<w>" denied the request: <message>`, optionally after the
+// same `is forbidden:` prefix). Both answer 403 when the policy sets reason
+// Forbidden (deploy/base/cluster-wide/workflowrecipe-admission.yaml). The RBAC
+// authorizer ("<resource> is forbidden: User \"…\" cannot <verb> …") and other
+// admission plugins (ResourceQuota, NamespaceLifecycle) do not match.
+const POLICY_DENIAL =
+  /^(?:[^"]+ "[^"]*" is forbidden: )?(?:ValidatingAdmissionPolicy '[^']*' with binding '[^']*' denied request|admission webhook "[^"]*" denied the request): /
+const SERVICE_ACCOUNT_SUBJECT = 'system:serviceaccount:'
+
+/**
+ * The Status message of a 403 denial written by a policy author (a
+ * ValidatingAdmissionPolicy or webhook), or null for any other error. That
+ * message is the policy's own explanation of why the object was rejected, so it
+ * is the caller's to read. Every other 403 returns null: RBAC, other admission
+ * plugins, a webhook denial without explanation, and a policy message that names
+ * a ServiceAccount (e.g. through a messageExpression on request.userInfo). The
+ * callers fail closed on null, with no single known cause.
+ */
+export function policyDenialMessage(err: unknown): string | null {
+  if (extractK8sError(err)?.status !== 403) return null
+  const message = statusMessageOf(err)
+  if (message === null || message.includes(SERVICE_ACCOUNT_SUBJECT)) return null
+  return POLICY_DENIAL.test(message) ? message : null
+}
+
+/**
+ * HTTP status of a Kubernetes client or service-layer error, or null.
+ *
+ * Kept in this dependency-free module so that pure classifiers such as
+ * services/secretRead.ts do not load @kubernetes/client-node; control-ui tests
+ * import modules that depend on them without control-api's node_modules.
+ */
+export function extractHttpStatus(err: unknown): number | null {
+  if (!err || typeof err !== 'object') return null
+  const maybe = err as {
+    statusCode?: number
+    code?: number | string
+    httpStatus?: number
+    response?: { statusCode?: number; status?: number }
+  }
+  if (typeof maybe.statusCode === 'number') return maybe.statusCode
+  if (typeof maybe.code === 'number') return maybe.code
+  if (typeof maybe.code === 'string' && /^\d+$/.test(maybe.code)) return Number(maybe.code)
+  if (typeof (maybe as { status?: unknown }).status === 'number') {
+    return (maybe as { status: number }).status
+  }
+  // `.httpStatus` mirrors extractK8sError's chain above: the service-layer
+  // K8sNotFoundError/K8sConflictError expose their status only there, so read
+  // it after code/statusCode or their 404/409 collapses to null.
+  if (typeof maybe.httpStatus === 'number') return maybe.httpStatus
+  if (maybe.response && typeof maybe.response.statusCode === 'number')
+    return maybe.response.statusCode
+  if (maybe.response && typeof maybe.response.status === 'number') return maybe.response.status
+  return null
 }

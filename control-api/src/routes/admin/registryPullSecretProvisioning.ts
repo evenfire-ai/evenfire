@@ -70,13 +70,19 @@ export function pullSecretErrorResponse(err: unknown): {
       },
     }
   }
-  const k8sErr = extractK8sError(err)
+  // A Kubernetes failure contributes its HTTP status only: the metav1.Status
+  // message of a 403 names control-api's ServiceAccount, and a raw
+  // ApiException `.message` embeds every apiserver response header.
+  const status = extractK8sError(err)?.status
   return {
     status: 500,
     body: {
       error: 'registry_pull_secret_provision_failed',
       reason: 'unexpected_error',
-      detail: k8sErr?.message || (err instanceof Error ? err.message : 'unknown error'),
+      detail:
+        status !== undefined
+          ? `the Kubernetes API server returned HTTP ${status} while provisioning the image-pull Secret`
+          : `unexpected error while provisioning the image-pull Secret (${err instanceof Error ? err.name : typeof err})`,
     },
   }
 }

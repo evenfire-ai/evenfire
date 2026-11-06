@@ -1,5 +1,6 @@
 import { config } from '../../config.js'
 import { K8sGateway } from '../../k8s.js'
+import { readSecretOrNull } from '../../services/secretRead.js'
 import { isLlmHostSecret } from './llmSecretIdentity.js'
 
 type SecretMetadata = {
@@ -39,7 +40,8 @@ export function listHostSecrets(
 }
 
 /**
- * Soft anti-spoofing guard for `spec.secretRef` on Host create/edit.
+ * Anti-spoofing guard for `spec.secretRef` on Host create/edit (soft only on a
+ * missing Secret).
  *
  * A Host resolves its LLM credentials from the Secret named in
  * `spec.secretRef`, in `config.secretsNamespace`. Without a check, a Host could
@@ -48,12 +50,14 @@ export function listHostSecrets(
  * holds. This guard requires the referenced Secret — WHEN IT ALREADY EXISTS —
  * to be an LLM host Secret (host-secret label OR a name in LLM_SECRET_NAMES).
  *
- * Deliberately NON-REGRESSING / soft:
+ * Deliberately soft on 404 (missing Secret); fail-loud on every other read error:
  *   - secretRef absent or non-string → null (nothing to check).
- *   - referenced Secret does not exist yet → null. `secretMode:'new'` may create
- *     the Secret out of band, and a transient apiserver read failure must not
- *     block a legitimate create; HCC's per-Host Role only ever grants the
+ *   - referenced Secret does not exist yet (404) → null. `secretMode:'new'` may
+ *     create the Secret out of band; HCC's per-Host Role only ever grants the
  *     referenced name, so a dangling ref simply fails closed at runtime.
+ *   - any other read failure propagates: an apiserver or transport failure as a
+ *     SecretReadError (502/503 via the global handler). A swallowed 403 would
+ *     turn this check off for as long as an RBAC drift lasts.
  *   - referenced Secret exists AND is an LLM host Secret → null. This keeps
  *     `secretMode:'existing'` working for BOTH the shared `chatllm-api-keys`
  *     Secret (matched by name) and any other per-host labeled Secret (by label).
@@ -72,7 +76,7 @@ export async function validateHostSecretRef(
   if (typeof raw !== 'string' || !raw.trim()) return null
   const name = raw.trim()
 
-  const existing = (await gateway.getSecret(name, config.secretsNamespace).catch(() => null)) as {
+  const existing = (await readSecretOrNull(gateway, name, config.secretsNamespace)) as {
     metadata?: { labels?: Record<string, string> }
   } | null
   if (!existing) return null

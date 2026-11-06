@@ -1,5 +1,6 @@
 import * as k8s from '@kubernetes/client-node'
 import { config } from './config.js'
+import { extractHttpStatus } from './http/k8sError.js'
 import { rootLogger } from './observability/logger.js'
 import { HostEnvService } from './services/hostEnvService.js'
 import { HostOverviewService } from './services/hostOverviewService.js'
@@ -715,29 +716,10 @@ export type RecipePodInfo = {
   }>
 }
 
-export function extractHttpStatus(err: unknown): number | null {
-  if (!err || typeof err !== 'object') return null
-  const maybe = err as {
-    statusCode?: number
-    code?: number | string
-    httpStatus?: number
-    response?: { statusCode?: number; status?: number }
-  }
-  if (typeof maybe.statusCode === 'number') return maybe.statusCode
-  if (typeof maybe.code === 'number') return maybe.code
-  if (typeof maybe.code === 'string' && /^\d+$/.test(maybe.code)) return Number(maybe.code)
-  if (typeof (maybe as { status?: unknown }).status === 'number') {
-    return (maybe as { status: number }).status
-  }
-  // `.httpStatus` mirrors extractK8sError's chain (http/k8sError.ts): the
-  // service-layer K8sNotFoundError/K8sConflictError expose their status only
-  // there, so read it after code/statusCode or their 404/409 collapses to null.
-  if (typeof maybe.httpStatus === 'number') return maybe.httpStatus
-  if (maybe.response && typeof maybe.response.statusCode === 'number')
-    return maybe.response.statusCode
-  if (maybe.response && typeof maybe.response.status === 'number') return maybe.response.status
-  return null
-}
+// extractHttpStatus lives in http/k8sError.ts, which imports nothing, so pure
+// error classifiers (services/secretRead.ts) can use it without loading
+// @kubernetes/client-node. Re-exported here for existing callers.
+export { extractHttpStatus }
 
 /**
  * List a recipe's pods in each given namespace and merge the results.

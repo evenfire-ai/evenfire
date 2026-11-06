@@ -14,6 +14,11 @@ import {
   getEntryVersion,
   reportInstall,
 } from '../src/services/registryClient.js'
+import {
+  TEST_CORRELATION_ID,
+  apiserverError,
+  expectNoApiserverText,
+} from './helpers/apiserverErrors.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
@@ -60,6 +65,10 @@ const emptyUninstallDb = { query: async () => ({ rows: [], rowCount: 0 }) }
 function makeApp(gateway: MockGateway) {
   const app = express()
   app.use(express.json())
+  app.use((req, _res, next) => {
+    req.correlationId = TEST_CORRELATION_ID
+    next()
+  })
   app.use(
     createAdminRegistryRouter(gateway as unknown as import('../src/k8s.js').K8sGateway, {
       uninstallDb: emptyUninstallDb,
@@ -218,6 +227,49 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
   })
 
   // Fam. B(2) / GAP-6: three google servers, distinct per-server scopes
+  it('answers 502 without apiserver text when the managed client Secret create is rejected', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(oauthEntry({ provider: 'google', scopes: [] }))
+    const { app, gw } = makeInstallApp()
+    const original = gw.createSecret.bind(gw)
+    const createSecret = vi.spyOn(gw, 'createSecret').mockImplementation(async (req, options) => {
+      if ((req as { name?: string }).name === 'my-gmail-oauth-client') throw apiserverError(403)
+      return original(req, options)
+    })
+    const createResource = vi.spyOn(gw, 'createResource')
+
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-gmail',
+        registryEntryName: 'gmail-mcp',
+        registryEntryVersion: '1.0.0',
+        oauth: {
+          scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+          grantScope: 'user',
+          secret: { mode: 'managed', clientId: 'cid-value', clientSecret: 'csec-value' },
+        },
+      })
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'registry_upstream_failed',
+      message:
+        'control-api could not create Secret "my-gmail-oauth-client" in namespace "mcp-server": ' +
+        "the Kubernetes API server rejected the request from control-api's own ServiceAccount " +
+        '(HTTP 403): RBAC or admission control denied it. Your session is not the cause; see ' +
+        `correlation id ${TEST_CORRELATION_ID} in the control-api log.`,
+      resourceType: 'secret',
+      resourceName: 'my-gmail-oauth-client',
+      namespace: 'mcp-server',
+    })
+    expectNoApiserverText(res.body)
+    // Witness: the failing create ran; the CR that would reference it did not.
+    expect(createSecret.mock.calls.map(([req]) => (req as { name?: string }).name)).toEqual([
+      'my-gmail-oauth-client',
+    ])
+    expect(createResource.mock.calls.filter(([plural]) => plural === 'mcpservers')).toHaveLength(0)
+  })
+
   it('carries distinct per-server scopes for three google installs', async () => {
     const scopeSets = [['gmail.readonly'], ['drive.readonly'], ['calendar.readonly']]
     const names = ['gmail-a', 'drive-b', 'cal-c']
