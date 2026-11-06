@@ -3656,6 +3656,74 @@ describe('#1338 H3 D1.a — a Secret read error keeps an authoritative verdict',
   })
 })
 
+describe('validateSecret structured logs', () => {
+  let logs: ReturnType<typeof captureH3Logs>
+  beforeEach(() => {
+    logs = captureH3Logs()
+  })
+  afterEach(() => {
+    logs.restore()
+  })
+
+  const fieldsOf = (message: string) =>
+    logs.entries.filter(entry => entry.message === message).map(entry => entry.fields)
+
+  it('logs a validated Secret with its resource and server names', async () => {
+    const f = h3Cluster()
+
+    await expect(f.reconciler.validateSecret(h3Server())).resolves.toMatchObject({ ok: true })
+
+    expect(fieldsOf('Secret validated for McpServer')).toEqual([
+      expect.objectContaining({
+        scope: '[Reconciler]',
+        resourceName: 'h3-input',
+        name: 'h3-server',
+      }),
+    ])
+  })
+
+  it('logs a missing key with the entry, the env var and the server name', async () => {
+    const f = h3Cluster()
+    f.coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { name: 'h3-input' },
+      data: {},
+    })
+
+    await expect(f.reconciler.validateSecret(h3Server())).resolves.toMatchObject({
+      ok: false,
+      reason: 'SecretMissingKey',
+    })
+
+    expect(fieldsOf('Secret is missing required key (needed for env var) in McpServer')).toEqual([
+      expect.objectContaining({
+        scope: '[Reconciler]',
+        resourceName: 'h3-input',
+        entryName: 'password',
+        envVar: 'INPUT_VALUE',
+        name: 'h3-server',
+      }),
+    ])
+  })
+
+  it('logs a failed read with the server name', async () => {
+    const f = h3Cluster()
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Timeout())
+
+    await expect(f.reconciler.validateSecret(h3Server())).resolves.toMatchObject({
+      ok: false,
+      reason: 'ReadError',
+    })
+
+    expect(fieldsOf('Failed to read secret')).toEqual([
+      expect.objectContaining({
+        scope: '[Reconciler]',
+        resourceName: 'h3-input',
+        name: 'h3-server',
+      }),
+    ])
+  })
+})
+
 describe('#1338 F3 — only listed transport codes are transient', () => {
   let logs: ReturnType<typeof captureH3Logs>
   beforeEach(() => {

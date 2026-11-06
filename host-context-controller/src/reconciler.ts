@@ -1148,6 +1148,7 @@ export class McpServerReconciler {
       hccLogger.error('Failed to read secret', {
         scope: '[Reconciler]',
         resourceName: secretName,
+        name: server.name,
         err: error,
       })
       return {
@@ -1168,15 +1169,21 @@ export class McpServerReconciler {
         const message =
           `Secret "${secretName}" is missing required key "${keyMapping.secretKey}" ` +
           `(needed for env var ${keyMapping.envVar})`
-        hccLogger.error(`[Reconciler] ${message} in McpServer ${server.name}`, {
-          serverName: server.name,
+        hccLogger.error('Secret is missing required key (needed for env var) in McpServer', {
+          scope: '[Reconciler]',
+          resourceName: secretName,
+          entryName: keyMapping.secretKey,
+          envVar: keyMapping.envVar,
+          name: server.name,
         })
         return { ok: false, reason: 'SecretMissingKey', message }
       }
     }
 
-    hccLogger.info(`[Reconciler] Secret "${secretName}" validated for McpServer ${server.name}`, {
-      serverName: server.name,
+    hccLogger.info('Secret validated for McpServer', {
+      scope: '[Reconciler]',
+      resourceName: secretName,
+      name: server.name,
     })
     return { ok: true, revision }
   }
