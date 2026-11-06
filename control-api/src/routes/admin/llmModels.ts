@@ -8,6 +8,7 @@ import {
   withTransaction,
 } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import { safeErrorLogMessage } from '../../http/errorHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rootLogger } from '../../observability/logger.js'
@@ -114,7 +115,7 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
         {
           event: 'llm_allowlist_configmap_write_failed',
           phase: 'mutation',
-          err: err instanceof Error ? err.message : String(err),
+          err: safeErrorLogMessage(err),
         },
         'llm allowed-models ConfigMap write failed after mutation'
       )

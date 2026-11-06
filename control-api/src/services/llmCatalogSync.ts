@@ -80,6 +80,7 @@ import {
 } from '@clerum/llm-providers'
 import { config } from '../config.js'
 import { pool } from '../db.js'
+import { safeErrorLogMessage } from '../http/errorHandler.js'
 import { rootLogger } from '../observability/logger.js'
 import { llmAllowlistConfigMapWriteFailuresTotal } from '../observability/metrics.js'
 import { MAX_CONTEXT_WINDOW_TOKENS } from './llmAllowedModels.js'
@@ -863,7 +864,7 @@ export async function syncDiscoveredModels(
       {
         event: 'llm_catalog_sync_configmap_write_failed',
         enabledImageInputChanged: counters.enabledImageInputChanged,
-        err: err instanceof Error ? err.message : String(err),
+        err: safeErrorLogMessage(err),
       },
       'llm allowed-models ConfigMap write failed after catalog sync commit; publish retry scheduled'
     )

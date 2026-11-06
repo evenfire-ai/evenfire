@@ -44,6 +44,7 @@
  * is syncing.
  */
 import { pool } from '../db.js'
+import { safeErrorLogMessage } from '../http/errorHandler.js'
 import { rootLogger } from '../observability/logger.js'
 import { stopLlmAllowlistPublishRetry } from './llmAllowlistPublishRetry.js'
 import {
@@ -157,7 +158,7 @@ export async function runLlmCatalogSyncTick(
     log.error(
       {
         event: 'llm_catalog_sync_cron_error',
-        err: err instanceof Error ? err.message : String(err),
+        err: safeErrorLogMessage(err),
       },
       'llm catalog sync tick failed'
     )
@@ -232,7 +233,7 @@ function logUnhandled(err: unknown): void {
   log.error(
     {
       event: 'llm_catalog_sync_cron_unhandled',
-      err: err instanceof Error ? err.message : String(err),
+      err: safeErrorLogMessage(err),
     },
     'unhandled error in llm catalog sync cron'
   )
@@ -305,7 +306,7 @@ async function probeAndSync(deps: LlmCatalogSyncCronDeps, gen: number): Promise<
     log.warn(
       {
         event: 'llm_catalog_boot_sync_probe_failed',
-        err: err instanceof Error ? err.message : String(err),
+        err: safeErrorLogMessage(err),
       },
       'llm catalog boot sync probe failed'
     )

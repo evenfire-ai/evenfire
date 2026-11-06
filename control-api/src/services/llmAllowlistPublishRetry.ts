@@ -12,6 +12,7 @@
  * The state is per process and in memory: a replica that dies with a retry
  * pending loses it, and the next sync, boot or mutation converges instead.
  */
+import { safeErrorLogMessage } from '../http/errorHandler.js'
 import { rootLogger } from '../observability/logger.js'
 import { llmAllowlistConfigMapWriteFailuresTotal } from '../observability/metrics.js'
 import type { AllowedModelsConfigMapPublisher } from './llmAllowedModelsConfigMap.js'
@@ -132,7 +133,11 @@ export class AllowlistPublishRetry {
       if (ticket >= this.maxSucceeded) this.failures += 1
       this.markOwed(ticket)
       log.error(
-        { event: 'llm_allowlist_publish_retry_failed', failures: this.failures, err },
+        {
+          event: 'llm_allowlist_publish_retry_failed',
+          failures: this.failures,
+          err: safeErrorLogMessage(err),
+        },
         'llm allowed-models ConfigMap publish retry failed'
       )
     } finally {
