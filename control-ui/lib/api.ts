@@ -1235,6 +1235,11 @@ export type ContextSharedFileSystemRef = {
   name: string
   mountPath: string
 }
+export type ContextGfsMount = {
+  drive: string
+  target: string
+  scopes: string[]
+}
 export type ContextSharedFileSystemStatus = {
   name: string
   mountPath: string
@@ -1250,6 +1255,7 @@ export type ContextSpec = {
   description?: string
   mcpServers: string[]
   sharedFileSystems?: ContextSharedFileSystemRef[]
+  gfs?: { mounts?: ContextGfsMount[] }
 }
 export type ContextResource = {
   metadata?: Metadata

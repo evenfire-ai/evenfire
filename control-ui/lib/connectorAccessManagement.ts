@@ -54,11 +54,13 @@ function contextNamed(
   return name ? contexts.find(context => contextName(context) === name) : undefined
 }
 
+// The PUT replaces the whole spec, so every field this module does not edit (displayName,
+// gfs, and whatever the CRD gains later) must travel back as read or it is erased.
 function contextSpec(context: ContextResource): ContextSpec {
   const name = contextName(context)
   return {
+    ...context.spec,
     contextId: context.spec?.contextId || name,
-    description: context.spec?.description,
     mcpServers: Array.isArray(context.spec?.mcpServers) ? context.spec.mcpServers : [],
     sharedFileSystems: context.spec?.sharedFileSystems ?? [],
   }

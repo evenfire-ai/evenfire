@@ -8,6 +8,7 @@ import {
   loadConnectorAccessState,
   removeConnectorFromAgentContext,
 } from '@lib/connectorAccessManagement'
+import { buildContextResource } from '../../test/fixtures/contextResource'
 
 vi.mock('@lib/api', async importOriginal => ({
   ...(await importOriginal<typeof import('@lib/api')>()),
@@ -182,6 +183,45 @@ describe('connector access management', () => {
         mcpServers: ['other-connector', 'search'],
         sharedFileSystems: [],
       },
+    })
+  })
+
+  describe('a Context carrying fields this module does not edit', () => {
+    const stored = buildContextResource({
+      metadata: { name: 'research', resourceVersion: 'rv-research' },
+      spec: {
+        displayName: 'Research Team',
+        description: 'Research tools',
+        mcpServers: ['search', 'other-connector'],
+        sharedFileSystems: [{ name: 'docs', mountPath: '/docs' }],
+        gfs: { mounts: [{ drive: 'main', target: '/team/docs', scopes: ['gfs.read'] }] },
+      },
+    })
+
+    it('sends displayName and gfs back unchanged when a connector is added', async () => {
+      await addConnectorToAgentContexts(
+        { name: 'new-connector', namespace: 'mcp-server' },
+        [{ name: 'agent-a', contextRef: 'research' }],
+        [stored]
+      )
+
+      expect(api.updateContext).toHaveBeenCalledWith('research', {
+        metadata: { resourceVersion: 'rv-research' },
+        spec: { ...stored.spec, mcpServers: ['search', 'other-connector', 'new-connector'] },
+      })
+    })
+
+    it('sends displayName and gfs back unchanged when a connector is removed', async () => {
+      await removeConnectorFromAgentContext(
+        'search',
+        { contextRef: 'research', agents: [{ id: 'agent-a', label: 'Alpha' }] },
+        [stored]
+      )
+
+      expect(api.updateContext).toHaveBeenCalledWith('research', {
+        metadata: { resourceVersion: 'rv-research' },
+        spec: { ...stored.spec, mcpServers: ['other-connector'] },
+      })
     })
   })
 
