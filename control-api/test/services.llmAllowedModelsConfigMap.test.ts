@@ -351,6 +351,30 @@ describe('LlmAllowedModelsConfigMapWriter', () => {
     expect(cluster.writes).toBe(0)
   })
 
+  it.each(['create', 'replace'] as const)(
+    'a %s that never answers after the GET is bounded, and the publication releases',
+    async phase => {
+      const cluster = new FakeConfigMapApi()
+      if (phase === 'replace') await writerOver(cluster, fakeDb([])).materialize()
+      cluster.hooks.before = p => (p === phase ? new Promise<void>(() => undefined) : undefined)
+      const db = fakeDb(rows)
+      const writer = new LlmAllowedModelsConfigMapWriter(
+        cluster,
+        'mcp-host',
+        2,
+        poolFromQuery(db.query),
+        50
+      )
+      const started = Date.now()
+      await expect(writer.materialize()).rejects.toThrow(
+        new RegExp(`${phase} timed out after 50 ms`)
+      )
+      expect(Date.now() - started).toBeLessThan(1_000)
+      const statements = vi.mocked(db.query).mock.calls.map(([sql]) => String(sql).trim())
+      expect(statements.at(-1)).toBe('ROLLBACK')
+    }
+  )
+
   it('materializeIfChanged skips the write when the CM hash already matches the database', async () => {
     const cluster = new FakeConfigMapApi()
     const writer = writerOver(cluster, fakeDb(rows))
