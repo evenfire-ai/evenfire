@@ -2834,46 +2834,50 @@ describe('Host workspace PVC StorageClass from config', () => {
     expect(spec).toHaveProperty('storageClassName', '')
   })
 
-  it('keeps the class the cluster assigned when it replaces an unbound PVC and no class is configured', async () => {
-    const original = config.hostWorkspaceStorageClassName
-    onTestFinished(() => {
-      config.hostWorkspaceStorageClassName = original
-    })
-    config.hostWorkspaceStorageClassName = undefined
-    const { reconciler, coreApi } = createReconciler()
-    // A claim created without a class, as the apiserver returns it: the
-    // DefaultStorageClass admission plugin set the class, and it is still
-    // Pending (WaitForFirstConsumer, or a suspended Host), so it has no volumeName.
-    const live: k8s.V1PersistentVolumeClaim = {
-      metadata: {
-        name: 'alpha-host-workspace',
-        namespace: 'mcp-host',
-        uid: 'pvc-uid',
-        labels: {
-          'clerum.io/host': 'alpha-host',
-          'clerum.io/managed-by': 'host-context-controller',
+  // 'standard-rwo' is the class the DefaultStorageClass admission plugin set on a claim created
+  // without one. "" is a claim an earlier CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS="" left
+  // behind: the apiserver refuses "" -> nil as it refuses any other class change.
+  it.each(['standard-rwo', ''])(
+    'keeps the live class %j when it replaces an unbound PVC and no class is configured',
+    async liveClass => {
+      const original = config.hostWorkspaceStorageClassName
+      onTestFinished(() => {
+        config.hostWorkspaceStorageClassName = original
+      })
+      config.hostWorkspaceStorageClassName = undefined
+      const { reconciler, coreApi } = createReconciler()
+      // Pending (WaitForFirstConsumer, or a suspended Host), so it has no volumeName.
+      const live: k8s.V1PersistentVolumeClaim = {
+        metadata: {
+          name: 'alpha-host-workspace',
+          namespace: 'mcp-host',
+          uid: 'pvc-uid',
+          labels: {
+            'clerum.io/host': 'alpha-host',
+            'clerum.io/managed-by': 'host-context-controller',
+          },
+          resourceVersion: '7',
         },
-        resourceVersion: '7',
-      },
-      spec: {
-        storageClassName: 'standard-rwo',
-        volumeMode: 'Filesystem',
-        accessModes: ['ReadWriteOnce'],
-        resources: { requests: { storage: '10Gi' } },
-      },
-      status: { phase: 'Pending' },
-    }
-    coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
-    coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(apiserverPvcReplace(live))
+        spec: {
+          storageClassName: liveClass,
+          volumeMode: 'Filesystem',
+          accessModes: ['ReadWriteOnce'],
+          resources: { requests: { storage: '10Gi' } },
+        },
+        status: { phase: 'Pending' },
+      }
+      coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
+      coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(apiserverPvcReplace(live))
 
-    await expect(
-      (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
-    ).resolves.toBe(true)
-    expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
-    const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
-    expect(body.spec.storageClassName).toBe('standard-rwo')
-    expect(body.metadata.resourceVersion).toBe('7')
-  })
+      await expect(
+        (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
+      ).resolves.toBe(true)
+      expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+      const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
+      expect(body.spec.storageClassName).toBe(liveClass)
+      expect(body.metadata.resourceVersion).toBe('7')
+    }
+  )
 
   it.each([undefined, 'standard-rwo'])(
     'keeps the live annotations and finalizers when it replaces an unbound PVC (configured class %s)',
