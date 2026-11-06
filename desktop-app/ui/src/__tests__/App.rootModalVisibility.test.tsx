@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { DESKTOP_ROUTES } from '@constants/navigation'
 import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { uninstallMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
 import { App } from '@/App'
@@ -15,7 +14,6 @@ import {
 const frames: Array<{ callback: FrameRequestCallback; stack: string }> = []
 let shortcutCommand: ((commandId: string, source: string) => void) | null = null
 let mediaMatches = true
-let mediaChangeListeners: Array<(event: MediaQueryListEvent) => void> = []
 let resolveHistory: ((value: { agent: string; chatId: string; turns: unknown[] }) => void) | null =
   null
 let emitEnvironmentSetup:
@@ -152,7 +150,6 @@ async function flushFrames() {
 
 function compactMedia(matches: boolean) {
   mediaMatches = matches
-  mediaChangeListeners = []
   vi.stubGlobal(
     'matchMedia',
     vi.fn(
@@ -165,28 +162,12 @@ function compactMedia(matches: boolean) {
           onchange: null,
           addListener: vi.fn(),
           removeListener: vi.fn(),
-          addEventListener: vi.fn(
-            (_type: string, listener: (event: MediaQueryListEvent) => void) => {
-              mediaChangeListeners.push(listener)
-            }
-          ),
-          removeEventListener: vi.fn(
-            (_type: string, listener: (event: MediaQueryListEvent) => void) => {
-              mediaChangeListeners = mediaChangeListeners.filter(
-                candidate => candidate !== listener
-              )
-            }
-          ),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
           dispatchEvent: vi.fn(),
         }) as MediaQueryList
     )
   )
-}
-
-function changeCompactMode(matches: boolean) {
-  mediaMatches = matches
-  const event = { matches, media: '(max-width: 759px)' } as MediaQueryListEvent
-  mediaChangeListeners.forEach(listener => listener(event))
 }
 
 describe('PR1087 App-root native visibility owners', () => {
