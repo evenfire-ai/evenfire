@@ -6,6 +6,7 @@
  * request/response mapping in the profile's `WireProtocol`, and the accepted
  * parameters per model in the profile's `ModelParamPolicy`.
  */
+import { randomUUID } from 'node:crypto'
 import OpenAI from 'openai'
 import type {
   CompletionResponse,
@@ -19,19 +20,20 @@ import type { ImageTransportOperation } from './imageInput'
 import type { EndpointProfile } from './openaiFamily/endpointProfile'
 import { applyOptionPolicy, officialOpenAIProfile } from './openaiFamily/endpointProfiles'
 import { chatCompletionsProtocol } from './openaiFamily/protocols/chatCompletions'
-import type { WireProtocol, WireProtocolId } from './openaiFamily/protocols/types'
+import { responsesProtocol } from './openaiFamily/protocols/responses'
+import type {
+  DriverIdentity,
+  EncodeContext,
+  WireProtocol,
+  WireProtocolId,
+} from './openaiFamily/protocols/types'
 import { classifyFamilyError } from './openaiFamily/shared'
 import type { LlmProvider } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
-const PROTOCOLS: Partial<Record<WireProtocolId, WireProtocol>> = {
+const PROTOCOLS: Record<WireProtocolId, WireProtocol> = {
   'openai-chat': chatCompletionsProtocol,
-}
-
-function protocolFor(id: WireProtocolId): WireProtocol {
-  const protocol = PROTOCOLS[id]
-  if (!protocol) throw new Error(`[LLM] OpenAI family: wire protocol '${id}' is not available`)
-  return protocol
+  'openai-responses': responsesProtocol as WireProtocol,
 }
 
 export class OpenAIProvider implements SingleTurnProvider {
@@ -41,6 +43,12 @@ export class OpenAIProvider implements SingleTurnProvider {
   private defaultModel: string
   private readonly profile: EndpointProfile
   private readonly protocol: WireProtocol
+  /**
+   * A new instance is a new owner of provider continuity: `{provider, model}`
+   * cannot tell another credential or a cold resume apart, and replaying a blob
+   * minted under a different account is never valid.
+   */
+  private readonly epoch = randomUUID()
 
   constructor(
     apiKeyOrClient: string | OpenAI,
@@ -48,7 +56,7 @@ export class OpenAIProvider implements SingleTurnProvider {
     profile: EndpointProfile = officialOpenAIProfile()
   ) {
     this.profile = profile
-    this.protocol = protocolFor(profile.protocol)
+    this.protocol = PROTOCOLS[profile.protocol]
     this.client = profile.createClient(apiKeyOrClient)
     this.defaultModel = defaultModel
     logger.info({ model: defaultModel }, 'OpenAI transport initialized')
@@ -66,16 +74,25 @@ export class OpenAIProvider implements SingleTurnProvider {
     return classifyFamilyError(err, this.profile.classify)
   }
 
-  private encodeContext() {
+  private identity(): DriverIdentity {
     return {
+      provider: this.profile.id,
+      protocol: this.protocol.id,
       model: this.defaultModel,
+      epoch: this.epoch,
+    }
+  }
+
+  private encodeContext(): EncodeContext {
+    return {
+      ...this.identity(),
       params: this.profile.params.resolve(this.defaultModel, this.protocol.id),
       reasoningContent: this.profile.reasoningContent,
     }
   }
 
-  private decodeContext() {
-    return { provider: this.profile.id, model: this.defaultModel }
+  private decodeContext(): DriverIdentity {
+    return this.identity()
   }
 
   // ─── Single-Turn Methods ──────────────────────────────────

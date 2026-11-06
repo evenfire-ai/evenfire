@@ -5,7 +5,7 @@
  */
 import type { WireProtocolId } from './protocols/types'
 
-export type TokenField = 'max_tokens' | 'max_completion_tokens'
+export type TokenField = 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'
 
 export interface ResolvedModelParams {
   readonly tokenField: TokenField
@@ -51,7 +51,37 @@ const OFFICIAL_CHAT_ROWS: readonly ParamRow[] = [
   { protocol: 'openai-chat', family: null, tokenField: 'max_tokens', temperature: 'pass' },
 ]
 
-export const officialParamPolicy: ModelParamPolicy = tablePolicy('official', OFFICIAL_CHAT_ROWS)
+/**
+ * Separate from the Chat family so Chat requests stay byte-identical to what
+ * they were; Responses adds `gpt-6*`.
+ *
+ * On Responses the reasoning families answer 400 `Unsupported parameter:
+ * 'temperature'`, so it is omitted rather than forwarded. Unknown models fall
+ * through to the permissive row: a reasoning model still applies its own
+ * defaults there, it only loses the omission.
+ */
+export const OPENAI_RESPONSES_REASONING_FAMILY =
+  /^(?:gpt-5(?:[.-]|$)|gpt-6(?:[.-]|$)|o[1-9](?:[.-]|$))/i
+
+const OFFICIAL_RESPONSES_ROWS: readonly ParamRow[] = [
+  {
+    protocol: 'openai-responses',
+    family: OPENAI_RESPONSES_REASONING_FAMILY,
+    tokenField: 'max_output_tokens',
+    temperature: 'omit',
+  },
+  {
+    protocol: 'openai-responses',
+    family: null,
+    tokenField: 'max_output_tokens',
+    temperature: 'pass',
+  },
+]
+
+export const officialParamPolicy: ModelParamPolicy = tablePolicy('official', [
+  ...OFFICIAL_CHAT_ROWS,
+  ...OFFICIAL_RESPONSES_ROWS,
+])
 
 /** Azure serves OpenAI's own model families, so it follows the official token field. */
 export const azureParamPolicy: ModelParamPolicy = tablePolicy('azure', OFFICIAL_CHAT_ROWS)

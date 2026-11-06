@@ -7,6 +7,7 @@
  * Phase 1: Pure type definitions — no runtime behavior changes.
  */
 import type { FileReferenceDigest, FileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import type { LlmProviderId } from '@clerum/llm-providers'
 import type { IncomingMessage as HostIncomingMessage } from '../server/types'
 import type { GfsImageSource } from '../visualInput/policy'
 import type { AttachmentReadLedgerSnapshot } from './attachments/attachmentReadBudget'
@@ -74,6 +75,8 @@ export interface ChatMessage {
    * not return reasoning.
    */
   reasoning_content?: string | null
+  /** Opaque provider state that must travel with this assistant tool-call message. */
+  provider_continuation?: ProviderContinuation
   /**
    * IronClaw invariant #2 (P.3, Opción D): lateral field that points at a
    * spillover blob written by T1.5. `content` always stays a string (a rich
@@ -110,6 +113,41 @@ export function prependTextToParts(
   return parts.map((part, i) =>
     i === index && part.type === 'text' ? { ...part, text: prefix + part.text } : part
   )
+}
+
+/**
+ * Opaque reasoning state a provider returned with a tool-call turn, replayed on
+ * the next request of the same tool loop so the model does not re-derive it.
+ */
+export interface ProviderContinuation {
+  /**
+   * Replayed only to a driver with the same four fields. `epoch` identifies the
+   * driver instance: `{provider, model}` alone cannot tell two credentials, or a
+   * cold resume, apart, and a blob is only valid for the account that made it.
+   */
+  owner: {
+    provider: LlmProviderId
+    protocol: 'openai-responses'
+    model: string
+    epoch: string
+  }
+  /**
+   * Original output order. Reasoning items are opaque and never interpreted or
+   * shown. Function calls and the message are markers only: their content comes
+   * from the same ChatMessage's `tool_calls` and `content` at encode time, so
+   * the message stays the single source of truth for what is replayed.
+   */
+  layout: readonly (
+    | { kind: 'reasoning'; item: unknown }
+    | { kind: 'function_call'; call_id: string; id: string }
+    | { kind: 'message'; id: string }
+  )[]
+  /**
+   * Digest of the decoded `{tool_calls, hasContent}`. A message whose calls or
+   * text-presence changed after decode no longer matches, and its layout is not
+   * replayed.
+   */
+  digest: string
 }
 
 export interface ToolCall {
@@ -276,6 +314,7 @@ export interface ToolCompletionResponse {
   content: string | null
   tool_calls: ToolCall[] | null
   reasoning_content?: string | null
+  provider_continuation?: ProviderContinuation
   usage: TokenUsage
   /** True only when the provider response carried authoritative token counters. */
   usage_reported?: boolean

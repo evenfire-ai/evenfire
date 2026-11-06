@@ -16,8 +16,19 @@ import type { ResolvedModelParams } from '../modelParamPolicy'
 
 export type WireProtocolId = 'openai-chat' | 'openai-responses'
 
-export interface EncodeContext {
+/**
+ * Who is encoding or decoding. A protocol that carries provider continuity
+ * stamps it on decode and replays it on encode only to an identical identity.
+ */
+export interface DriverIdentity {
+  readonly provider: LlmProvider
+  readonly protocol: WireProtocolId
   readonly model: string
+  /** Distinct per driver instance. */
+  readonly epoch: string
+}
+
+export interface EncodeContext extends DriverIdentity {
   readonly params: ResolvedModelParams
   /** Whether the endpoint requires `reasoning_content` on assistant tool-call messages. */
   readonly reasoningContent: boolean
@@ -34,10 +45,7 @@ export interface EncodeToolsInput extends EncodeTextInput {
   readonly tool_choice?: string
 }
 
-export interface DecodeContext {
-  readonly provider: LlmProvider
-  readonly model: string
-}
+export type DecodeContext = DriverIdentity
 
 export interface WireProtocol<Payload = unknown, Raw = unknown> {
   readonly id: WireProtocolId
