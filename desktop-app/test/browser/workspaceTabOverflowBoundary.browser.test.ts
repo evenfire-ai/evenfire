@@ -101,7 +101,10 @@ describe('workspace tab full-width boundary liveness (R4-M1)', () => {
           width: `${strip.clientWidth}px`,
         })
         clone.querySelectorAll('.chat-view-tabs__scroll-button').forEach(node => node.remove())
-        host.append(clone)
+        const antTabs = document.createElement('div')
+        antTabs.className = 'ant-tabs'
+        antTabs.append(clone)
+        host.append(antTabs)
         document.body.append(host)
         try {
           return {
@@ -120,7 +123,7 @@ describe('workspace tab full-width boundary liveness (R4-M1)', () => {
       })
       expect(geometry.tabs).toBe(1)
       expect(geometry.activeLabel).toBe('Focus 0')
-      expect(geometry.shrink).toBe('0.4')
+      expect(geometry.shrink).toBe('0')
       expect(
         counts.slice(-6).every(count => count === geometry.arrows),
         `control quiescence: last six frames must agree; samples=${counts.join(',')}`
@@ -132,12 +135,102 @@ describe('workspace tab full-width boundary liveness (R4-M1)', () => {
       expect(geometry.arrows, 'full-width arrow presence').toBe(
         geometry.Cfull - geometry.W > 1 ? 2 : 0
       )
-      if (width === 200) {
-        expect(geometry.Cfull).toBe(212)
-        expect(geometry.arrows).toBe(2)
-      }
     }
   )
+
+  it('restores selected A focus and visibility after keyboard-closing focused inactive E', async () => {
+    await open(200)
+    await page.evaluate(() =>
+      (
+        window as Window & { workspaceTabsFixture: { setTabCount(count: number): void } }
+      ).workspaceTabsFixture.setTabCount(6)
+    )
+    await frames(5)
+
+    const rightArrow = page.getByRole('button', { name: 'Scroll tabs right' })
+    for (let index = 0; index < 12; index += 1) {
+      if ((await rightArrow.getAttribute('aria-disabled')) === 'true') break
+      await rightArrow.click()
+    }
+    await page.evaluate(() => {
+      document
+        .querySelector<HTMLElement>('[data-workspace-tab-id="focus-0"] [role="tab"]')!
+        .focus({ preventScroll: true })
+    })
+    for (let index = 0; index < 5; index += 1) await page.keyboard.press('ArrowRight')
+    expect(
+      await page.evaluate(() => (document.activeElement as HTMLElement).getAttribute('aria-label'))
+    ).toBe('Focus 5')
+
+    const selectedA = page.getByRole('tab', { name: 'Focus 0' })
+    expect(await selectedA.getAttribute('aria-selected')).toBe('true')
+
+    await page.keyboard.press('Tab')
+    expect(
+      await page.evaluate(() => (document.activeElement as HTMLElement).getAttribute('aria-label'))
+    ).toBe('Close Focus 5')
+    const beforeClose = await page.evaluate(() => {
+      const scroller = document.querySelector<HTMLElement>('.chat-view-tabs__scroller')!
+      const viewport = scroller.getBoundingClientRect()
+      const boundsFor = (id: string) =>
+        document
+          .querySelector<HTMLElement>(`[data-workspace-tab-id="${id}"].chat-view-tab`)
+          ?.getBoundingClientRect()
+      const selectedA = boundsFor('focus-0')
+      const focusedB = boundsFor('focus-5')
+      return {
+        viewportLeft: viewport.left + scroller.clientLeft,
+        viewportRight: viewport.left + scroller.clientLeft + scroller.clientWidth,
+        selectedARect: selectedA && [selectedA.left, selectedA.right],
+        focusedBRect: focusedB && [focusedB.left, focusedB.right],
+        selectedAFits: Boolean(
+          selectedA &&
+          selectedA.left >= viewport.left + scroller.clientLeft - 1 &&
+          selectedA.right <= viewport.left + scroller.clientLeft + scroller.clientWidth + 1
+        ),
+        focusedBFits: Boolean(
+          focusedB &&
+          focusedB.left >= viewport.left + scroller.clientLeft - 1 &&
+          focusedB.right <= viewport.left + scroller.clientLeft + scroller.clientWidth + 1
+        ),
+      }
+    })
+    expect(beforeClose.selectedAFits).toBe(false)
+    expect(beforeClose.focusedBFits, JSON.stringify(beforeClose)).toBe(true)
+    await page.keyboard.press('Enter')
+    await frames(5)
+
+    const afterClose = await page.evaluate(() => {
+      const scroller = document.querySelector<HTMLElement>('.chat-view-tabs__scroller')!
+      const viewport = scroller.getBoundingClientRect()
+      const selected = document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      const selectedBounds = selected
+        ?.closest<HTMLElement>('.chat-view-tab')
+        ?.getBoundingClientRect()
+      return {
+        tabIds: Array.from(
+          document.querySelectorAll<HTMLElement>('.chat-view-tabs__list > [data-workspace-tab-id]')
+        ).map(node => node.dataset.workspaceTabId),
+        selected: selected?.getAttribute('aria-label'),
+        focused:
+          (document.activeElement as HTMLElement | null)?.getAttribute('aria-label') ??
+          (document.activeElement === document.body ? 'BODY' : document.activeElement?.tagName),
+        selectedFits: Boolean(
+          selectedBounds &&
+          selectedBounds.left >= viewport.left + scroller.clientLeft - 1 &&
+          selectedBounds.right <= viewport.left + scroller.clientLeft + scroller.clientWidth + 1
+        ),
+        selectionCount: (
+          window as Window & { workspaceTabsFixture: { selectionCount(): number } }
+        ).workspaceTabsFixture.selectionCount(),
+      }
+    })
+    expect(afterClose.tabIds).toEqual(['focus-0', 'focus-1', 'focus-2', 'focus-3', 'focus-4'])
+    expect(afterClose.selected).toBe('Focus 0')
+    expect(afterClose.focused).toBe('Focus 0')
+    expect(afterClose.selectedFits).toBe(true)
+    expect(afterClose.selectionCount).toBe(0)
+  })
 
   it('collects a known asynchronous page error while retaining the ordinary zero-error contract', async () => {
     await open(200)

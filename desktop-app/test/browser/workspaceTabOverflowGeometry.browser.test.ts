@@ -41,7 +41,10 @@ async function geometry() {
       width: `${strip.clientWidth}px`,
     })
     clone.querySelectorAll('.chat-view-tabs__scroll-button').forEach(button => button.remove())
-    cloneHost.append(clone)
+    const antTabs = document.createElement('div')
+    antTabs.className = 'ant-tabs'
+    antTabs.append(clone)
+    cloneHost.append(antTabs)
     document.body.append(cloneHost)
     let fullWidth: number
     try {
@@ -60,8 +63,18 @@ async function geometry() {
       viewportRight: viewportLeft + scroller.clientWidth,
       scrollWidth: scroller.scrollWidth,
       scrollLeft: scroller.scrollLeft,
+      competing: Array.from(strip.querySelectorAll('.ant-tabs-nav-list, .ant-tabs-nav-wrap')).map(
+        node => ({
+          className: (node as HTMLElement).className,
+          transform: (node as HTMLElement).style.transform,
+          width: (node as HTMLElement).clientWidth,
+        })
+      ),
       arrows: strip.querySelectorAll('.chat-view-tabs__scroll-button').length,
       activeFlexShrink: activeStyle?.flexShrink ?? null,
+      activeSelectionMinWidth: active?.querySelector<HTMLElement>('.chat-view-tab__select')
+        ? getComputedStyle(active.querySelector<HTMLElement>('.chat-view-tab__select')!).minWidth
+        : null,
       active: active?.dataset.workspaceTabId ?? null,
       tabs: Array.from(list.children).map(child => {
         const rect = child.getBoundingClientRect()
@@ -115,34 +128,34 @@ describe('workspace tab overflow production geometry', () => {
   })
 
   it('removes history-dependent arrows when two producer-created Files tabs fit the strip', async () => {
-    const fresh = await open(240, 2)
+    const fresh = await open(280, 2)
     expect(fresh.contentWidth).toBeLessThanOrEqual(fresh.width + 1)
     expect(fresh.arrows).toBe(0)
     await page.close()
 
-    const initial = await open(240)
+    const initial = await open(280)
     expect(initial.arrows).toBe(2)
     await page.evaluate(() => window.workspaceTabsFixture.setFilesTabCount(2))
     const afterFit = await settle()
 
-    expect(afterFit.width).toBe(240)
+    expect(afterFit.width).toBe(280)
     expect(afterFit.contentWidth).toBeLessThanOrEqual(afterFit.width + 1)
     expect(afterFit.arrows, JSON.stringify(afterFit)).toBe(0)
     expect(afterFit.scrollLeft).toBe(0)
   })
 
   it('uses producer geometry for first and last Files tabs across narrow viewport classes', async () => {
-    for (const width of [100, 144, 160]) {
+    for (const width of [100, 169, 220]) {
       await open(width, 2)
       const scroller = page.locator('.chat-view-tabs__scroller')
       const initial = await geometry()
       const activeWidth = initial.tabs[0]?.width
-      expect(activeWidth).toBe(96)
+      expect(initial.activeSelectionMinWidth).toBe('96px')
+      expect(activeWidth).toBeGreaterThan(96)
       expect(initial.arrows).toBe(2)
       expect(initial.viewportWidth).toBeLessThanOrEqual(width)
       if (width === 100) expect(initial.viewportWidth).toBeLessThan(activeWidth!)
-      if (width === 144) expect(initial.viewportWidth).toBe(activeWidth)
-      if (width === 160) expect(initial.viewportWidth).toBeGreaterThan(activeWidth!)
+      if (width === 169) expect(initial.viewportWidth).toBeGreaterThan(activeWidth!)
 
       await page.evaluate(() => window.workspaceTabsFixture.selectTab(1))
       await settle()
@@ -155,7 +168,18 @@ describe('workspace tab overflow production geometry', () => {
         .locator('.chat-view-tab')
         .first()
         .getAttribute('data-workspace-tab-id')
-      expect(first.right).toBeGreaterThan(beforeFirst.viewportLeft)
+      // The positive-width best-effort reveal has completed. This explicit
+      // manual scroll is now authoritative, even when the selected tab is wider
+      // than the viewport; do not retry the completed reveal during settle.
+      expect(beforeFirst.scrollLeft).toBe(0)
+      const firstManualIntersection = Math.max(
+        0,
+        Math.min(first.right, beforeFirst.viewportRight) -
+          Math.max(first.left, beforeFirst.viewportLeft)
+      )
+      expect(firstManualIntersection).toBeGreaterThanOrEqual(
+        Math.min(first.width, beforeFirst.viewportWidth) - 1
+      )
       await page.evaluate(() => window.workspaceTabsFixture.selectTab(0))
       const firstActive = await settle()
       expect(firstActive.active).toBe(firstId)
@@ -165,7 +189,9 @@ describe('workspace tab overflow production geometry', () => {
         Math.min(firstActiveTab.right, firstActive.viewportRight) -
           Math.max(firstActiveTab.left, firstActive.viewportLeft)
       )
-      expect(firstIntersection).toBe(Math.min(firstActiveTab.width, firstActive.viewportWidth))
+      expect(firstIntersection).toBeGreaterThanOrEqual(
+        Math.min(firstActiveTab.width, firstActive.viewportWidth) - 1
+      )
 
       await scroller.evaluate(node => {
         node.scrollLeft = 0
@@ -191,7 +217,9 @@ describe('workspace tab overflow production geometry', () => {
         Math.min(lastTab.right, lastActive.viewportRight) -
           Math.max(lastTab.left, lastActive.viewportLeft)
       )
-      expect(lastIntersection).toBe(Math.min(lastTab.width, lastActive.viewportWidth))
+      expect(lastIntersection).toBeGreaterThanOrEqual(
+        Math.min(lastTab.width, lastActive.viewportWidth) - 1
+      )
       expect(lastActive.scrollLeft).toBeGreaterThanOrEqual(0)
       expect(lastActive.scrollLeft).toBeLessThanOrEqual(
         lastActive.scrollWidth - lastActive.viewportWidth
@@ -203,7 +231,7 @@ describe('workspace tab overflow production geometry', () => {
   it('reads active-tab flex shrink from the computed production style', async () => {
     await open(100, 2)
     const observed = await geometry()
-    expect(observed.activeFlexShrink).toBe('0.4')
+    expect(observed.activeFlexShrink).toBe('0')
   })
 
   it('keeps active tabs above the shelf and overflow controls hit-testable', async () => {

@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListProvider } from '@contexts/ChatListContext'
-import { cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -42,7 +42,7 @@ const twoChatTabs = newChatTab(
 
 describe('WorkspaceTabStrip', () => {
   it.each([1, 3])(
-    'synthetic defensive omitted-ID stress: retains reveal until mount (%i initial tabs)',
+    'cancels a reveal when its target is absent from committed tabs (%i initial tabs)',
     initialCount => {
       let state = createEmptyWorkspaceTabsState()
       for (let index = 0; index < 4; index += 1) {
@@ -79,7 +79,9 @@ describe('WorkspaceTabStrip', () => {
         expect(layout.scrollLeft()).toBe(0)
         layout.setWidths([96, 96, 96, 96])
         view.rerender(<WorkspaceTabStrip {...props} activeTabId="delayed-3" tabs={state.tabs} />)
-        expect(layout.scrollLeft()).toBe(layout.maximumScrollLeft())
+        // The missing target was absent from a committed producer collection.
+        // Restoring that stable ID later must not revive the canceled operation.
+        expect(layout.scrollLeft()).toBe(0)
         expect(onSelect).not.toHaveBeenCalled()
 
         layout.setScrollLeft(10)
@@ -132,7 +134,7 @@ describe('WorkspaceTabStrip', () => {
     }
   )
 
-  it('synthetic defensive omitted-ID stress: retains only the latest missing target', () => {
+  it('does not revive the latest target after committed absence', () => {
     let state = createEmptyWorkspaceTabsState()
     for (let index = 0; index < 5; index += 1) {
       state = openAppTab(state, {
@@ -162,7 +164,7 @@ describe('WorkspaceTabStrip', () => {
       expect(layout.scrollLeft()).toBe(0)
       layout.setWidths([96, 96, 96, 96, 96])
       view.rerender(<WorkspaceTabStrip {...props} activeTabId="latest-4" tabs={state.tabs} />)
-      expect(layout.scrollLeft()).toBe(layout.maximumScrollLeft())
+      expect(layout.scrollLeft()).toBe(0)
     } finally {
       restoreRects()
     }
@@ -241,10 +243,10 @@ describe('WorkspaceTabStrip', () => {
     )
 
     expect(screen.getByRole('toolbar', { name: 'Workspace tabs' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'First chat' }).getAttribute('aria-pressed')).toBe(
+    expect(screen.getByRole('tab', { name: 'First chat' }).getAttribute('aria-selected')).toBe(
       'true'
     )
-    fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'New chat' }))
     fireEvent.click(screen.getByRole('button', { name: 'Close First chat' }))
     expect(onSelect).toHaveBeenCalledWith('two')
     expect(onClose).toHaveBeenCalledWith('one')
@@ -268,31 +270,24 @@ describe('WorkspaceTabStrip', () => {
       />
     )
 
-    const select = screen.getByRole('button', { name: longTitle })
+    const select = screen.getByRole('tab', { name: longTitle })
     const scroller = container.querySelector('.chat-view-tabs__scroller')
     const list = container.querySelector('.chat-view-tabs__list')
     const label = container.querySelector('.chat-view-tab__label')
     const close = screen.getByRole('button', { name: `Close ${longTitle}` })
-    expect(select.classList.contains('ui-button--align-start')).toBe(true)
+    expect(select.classList.contains('ant-btn')).toBe(true)
     expect(label?.textContent).toBe(longTitle)
     expect(select.nextElementSibling).toBe(close)
     expect(scroller?.firstElementChild).toBe(list)
 
     const styles = readFileSync(path.join(process.cwd(), 'ui', 'src', 'styles.css'), 'utf8')
-    expect(styles).toMatch(/\.chat-view-tabs\s*\{[^}]*padding:\s*var\(--space-2\) 0 0;/s)
-    expect(styles).toMatch(/\.chat-view-tabs__scroller\s*\{[^}]*overflow-x:\s*auto;/s)
-    expect(styles).toMatch(/\.chat-view-tabs__scroller\s*\{[^}]*scrollbar-width:\s*none;/s)
+    expect(styles).toMatch(/\.ant-tabs \.chat-view-tabs__scroller\s*\{[^}]*overflow-x:\s*auto;/s)
     expect(styles).toMatch(
-      /\.chat-view-tabs__scroller::\-webkit-scrollbar\s*\{[^}]*display:\s*none;/s
+      /\.ant-tabs \.chat-view-tabs__scroller\s*\{[^}]*scrollbar-width:\s*none;/s
     )
     expect(styles).toMatch(/\.chat-view-tabs__scroll-button\s*\{[^}]*flex:\s*0 0 auto;/s)
-    expect(styles).toMatch(/\.chat-view-tabs__list\s*\{[^}]*width:\s*100%;/s)
-    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*flex:\s*1 1 var\(--chat-tab-max\);/s)
-    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*max-width:\s*var\(--chat-tab-max\);/s)
-    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*min-width:\s*var\(--chat-tab-min\);/s)
-    expect(styles).toMatch(
-      /\.chat-view-tab\.is-active\s*\{[^}]*box-shadow:\s*inset 0 2px 0 0 var\(--accent\);/s
-    )
+    expect(styles).toMatch(/\.ant-tabs \.chat-view-tabs__list\s*\{[^}]*width:\s*max-content;/s)
+    expect(document.querySelector('.ant-tabs-nav-list')).toBeNull()
     expect(styles).toMatch(/\.ui-button:focus-visible,[\s\S]*outline:\s*1px solid var\(--accent\);/)
     expect(styles).toMatch(
       /\.ui-icon-button:focus-visible,[^{}]*\{[^}]*outline:\s*1px solid var\(--accent\);/
@@ -741,12 +736,12 @@ describe('WorkspaceTabStrip', () => {
       />
     )
 
-    expect(screen.getByRole('button', { name: 'First chat' }).getAttribute('aria-controls')).toBe(
+    expect(screen.getByRole('tab', { name: 'First chat' }).getAttribute('aria-controls')).toBe(
       'chat-view-panel'
     )
     expect(
       screen
-        .getByRole('button', {
+        .getByRole('tab', {
           name: 'A second conversation with a long title that must remain usable',
         })
         .getAttribute('aria-controls')
@@ -811,10 +806,8 @@ describe('WorkspaceTabStrip', () => {
     const runningLabel = screen.getByText('Running chat')
     const approvalLabel = screen.getByText('Approval chat')
 
-    expect(screen.getByRole('button', { name: 'Running chat' }).contains(running)).toBe(true)
-    expect(screen.getByRole('button', { name: 'Approval chat' }).contains(awaitingApproval)).toBe(
-      true
-    )
+    expect(screen.getByRole('tab', { name: 'Running chat' }).contains(running)).toBe(true)
+    expect(screen.getByRole('tab', { name: 'Approval chat' }).contains(awaitingApproval)).toBe(true)
     expect(running.nextElementSibling).toBe(runningLabel)
     expect(awaitingApproval.nextElementSibling).toBe(approvalLabel)
     // The blank chat tab carries no live badge — only the two running/approval do.
@@ -866,10 +859,10 @@ describe('WorkspaceTabStrip', () => {
       </ChatListProvider>
     )
 
-    expect(screen.getByRole('button', { name: 'Running chat' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'My App' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Settings' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'My App' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('tab', { name: 'Running chat' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'My App' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Settings' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'My App' }).getAttribute('aria-selected')).toBe('true')
     // Only the chat tab carries a live session badge — app/settings do not.
     expect(screen.getAllByRole('status')).toHaveLength(1)
   })
@@ -1008,7 +1001,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
   }
 
   const containerFor = (root: HTMLElement, name: string): HTMLElement =>
-    screen.getByRole('button', { name }).closest('.chat-view-tab') as HTMLElement
+    screen.getByRole('tab', { name }).closest('.chat-view-tab') as HTMLElement
 
   // jsdom has no DragEvent, so `fireEvent.drop(..., { clientX })` drops clientX on
   // the floor. Build the event explicitly and pin clientX so the side is real.
@@ -1094,7 +1087,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
         onReorder={onReorder}
       />
     )
-    const bravo = screen.getByRole('button', { name: 'Bravo' })
+    const bravo = screen.getByRole('tab', { name: 'Bravo' })
     fireEvent.keyDown(bravo, { key: 'ArrowRight', altKey: true })
     expect(onReorder).toHaveBeenLastCalledWith('b', 2) // index 1 -> 2
     fireEvent.keyDown(bravo, { key: 'ArrowLeft', altKey: true })
@@ -1112,7 +1105,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
         onReorder={onReorder}
       />
     )
-    const bravo = screen.getByRole('button', { name: 'Bravo' })
+    const bravo = screen.getByRole('tab', { name: 'Bravo' })
     fireEvent.keyDown(bravo, { key: 'ArrowRight' })
     fireEvent.keyDown(bravo, { key: 'ArrowLeft' })
     expect(onReorder).not.toHaveBeenCalled()
@@ -1134,8 +1127,8 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
         onReorder={onReorder}
       />
     )
-    const bravo = screen.getByRole('button', { name: 'Bravo' })
-    bravo.focus()
+    const bravo = screen.getByRole('tab', { name: 'Bravo' })
+    act(() => bravo.focus())
     expect(document.activeElement).toBe(bravo)
     fireEvent.keyDown(bravo, { key: 'ArrowRight', altKey: true })
     rerender(
@@ -1149,7 +1142,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     )
     expect(state.tabs.map(t => t.id)).toEqual(['a', 'c', 'b'])
     // Same DOM node, now last, still focused.
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Bravo' }))
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Bravo' }))
     expect(document.activeElement).toBe(bravo)
   })
 
@@ -1189,7 +1182,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     expect(state.tabs.map(t => t.id)).toEqual(['a', 'c'])
     expect(state.activeTabId).toBe('c')
     // Observable result: focus landed on the now-active tab's control, not <body>.
-    const nowActive = screen.getByRole('button', { name: 'Charlie' })
+    const nowActive = screen.getByRole('tab', { name: 'Charlie' })
     expect(document.activeElement).toBe(nowActive)
   })
 

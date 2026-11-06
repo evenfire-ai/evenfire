@@ -2113,9 +2113,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     // jsdom lays nothing out (getBoundingClientRect is all-zero), so give the
     // global tab strip a measurable bottom edge. The rail must anchor to THIS,
     // below the strip, never the static 64px fallback.
-    const strip = container.querySelector(
-      '[role="toolbar"][aria-label="Workspace tabs"] .ant-tabs'
-    ) as HTMLElement
+    const strip = container.querySelector('.chat-view-tabs') as HTMLElement
     expect(strip).not.toBeNull()
     strip.getBoundingClientRect = () =>
       ({

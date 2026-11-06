@@ -297,6 +297,7 @@ function makeController(writes: StoreWrite[]): AppController {
     handleOpenNotification: vi.fn(async () => undefined),
     handleNavSelect: vi.fn((item: string) => {
       if (item === DESKTOP_ROUTES.apps) showAppsPicker()
+      if (item === DESKTOP_ROUTES.chat) clearAppsPicker()
     }),
     handleLogout: vi.fn(),
     pushToast: vi.fn(),
@@ -495,6 +496,29 @@ describe('App activates app tabs only through its activation seam', () => {
     expect(activeTab()?.app?.appRef).toBe(BETA!.appRef)
 
     expectActivationsOnlyThroughSeam(2)
+  })
+
+  it('projects Apps Picker as unselected tabs and restores the same Chat selection', async () => {
+    await renderApp()
+    const storeSelectedId = controller.workspaceTabs.activeTabId
+    expect(storeSelectedId).toBeTruthy()
+    expect(screen.getByRole('tab', { selected: true }).getAttribute('data-workspace-tab-id')).toBe(
+      storeSelectedId
+    )
+    const appLaunchCount = sandboxUi.open.mock.calls.length
+
+    act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.apps))
+    await waitFor(() => expect(controller.appsPickerActive).toBe(true))
+    expect(controller.workspaceTabs.activeTabId).toBe(storeSelectedId)
+    expect(screen.queryAllByRole('tab', { selected: true })).toHaveLength(0)
+
+    act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.chat))
+    await waitFor(() => expect(controller.appsPickerActive).toBe(false))
+    expect(controller.workspaceTabs.activeTabId).toBe(storeSelectedId)
+    expect(screen.getByRole('tab', { selected: true }).getAttribute('data-workspace-tab-id')).toBe(
+      storeSelectedId
+    )
+    expect(sandboxUi.open).toHaveBeenCalledTimes(appLaunchCount)
   })
 
   it('activates app tabs from the strip (select and close-to-neighbor) through the seam', async () => {

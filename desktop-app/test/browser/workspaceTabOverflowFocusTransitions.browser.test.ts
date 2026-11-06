@@ -19,8 +19,8 @@ const frames = (count = 6) =>
 const focused = () =>
   page.evaluate(
     () =>
-      document.activeElement?.id ||
       document.activeElement?.getAttribute('aria-label') ||
+      document.activeElement?.id ||
       document.activeElement?.tagName
   )
 const leftArrow = () => page.getByRole('button', { name: 'Scroll tabs left', exact: true })
@@ -71,7 +71,8 @@ describe('workspace overflow genuine focus transitions (R4-L3)', () => {
     page.on('pageerror', error => pageErrors.push(error.message))
     await page.setContent(
       '<html data-files-count="4"><body><button id="outside">Outside</button>' +
-        '<div id="workspace-fixture" style="width:280px"></div></body></html>'
+        '<div id="workspace-fixture" style="width:280px"></div>' +
+        '<button id="after">After</button></body></html>'
     )
     for (const file of ['styles/tokens.css', 'styles.css']) {
       await page.addStyleTag({ path: path.join(UI_ROOT, file) })
@@ -152,7 +153,9 @@ describe('workspace overflow genuine focus transitions (R4-L3)', () => {
     expect(await focused()).toBe('Scroll tabs right')
     expect(await rightArrow.evaluate(node => node.matches(':focus-visible'))).toBe(true)
     expect(await page.locator('.chat-view-tabs__scroll-button').count()).toBe(2)
-    expect(await page.locator('#scroll-ancestor').evaluate(node => node.scrollLeft)).toBe(320)
+    const ancestorBefore = await page
+      .locator('#scroll-ancestor')
+      .evaluate(node => (node as HTMLElement).scrollLeft)
 
     const before = await page.evaluate(() => ({ scrollX, scrollY, innerWidth, innerHeight }))
     const innerScrollBefore = await page
@@ -160,7 +163,7 @@ describe('workspace overflow genuine focus transitions (R4-L3)', () => {
       .evaluate(node => node.scrollLeft)
 
     await page.locator('#workspace-fixture').evaluate(node => {
-      ;(node as HTMLElement).style.width = '900px'
+      ;(node as HTMLElement).style.width = '1600px'
     })
     await page.waitForFunction(
       () => document.querySelectorAll('.chat-view-tabs__scroll-button').length === 0
@@ -173,7 +176,9 @@ describe('workspace overflow genuine focus transitions (R4-L3)', () => {
       0
     )
     expect(innerScrollBefore).toBe(0)
-    expect(await page.locator('#scroll-ancestor').evaluate(node => node.scrollLeft)).toBe(320)
+    expect(
+      await page.locator('#scroll-ancestor').evaluate(node => (node as HTMLElement).scrollLeft)
+    ).toBe(ancestorBefore)
     expect(await page.evaluate(() => ({ scrollX, scrollY, innerWidth, innerHeight }))).toEqual(
       before
     )
@@ -219,6 +224,88 @@ describe('workspace overflow genuine focus transitions (R4-L3)', () => {
     expect(
       await page.locator('.chat-view-tab.is-active button').first().getAttribute('aria-label')
     ).toBe('Files')
+  })
+
+  it('uses natural Tab order and keeps null-selection focus separate from activation', async () => {
+    await page.evaluate(() => {
+      ;(
+        window as unknown as Window & {
+          workspaceTabsFixture: { setAppsPickerProjection: (active: boolean) => void }
+        }
+      ).workspaceTabsFixture.setAppsPickerProjection(true)
+    })
+    await frames()
+
+    const tabs = page.locator('.chat-view-tabs__list [role="tab"]')
+    const tabIds = await tabs.evaluateAll(nodes =>
+      nodes.map(node => (node as HTMLElement).dataset.workspaceTabId)
+    )
+    expect(tabIds.length).toBeGreaterThan(1)
+    expect(
+      await tabs.evaluateAll(nodes => nodes.filter(node => (node as HTMLElement).tabIndex === 0))
+    ).toHaveLength(1)
+    expect(
+      await tabs.evaluateAll(nodes =>
+        nodes.filter(node => node.getAttribute('aria-selected') === 'true')
+      )
+    ).toHaveLength(0)
+
+    await page.locator('#outside').click()
+    await page.keyboard.press('Tab')
+    expect(await focused()).toBe('Scroll tabs left')
+    await page.keyboard.press('Tab')
+    expect(await focused()).toBe(await tabs.nth(0).getAttribute('aria-label'))
+    expect(
+      await page.evaluate(() => document.activeElement?.getAttribute('data-workspace-tab-id'))
+    ).toBe(tabIds[0])
+
+    await page.keyboard.press('Shift+Tab')
+    expect(await focused()).toBe('Scroll tabs left')
+    await page.keyboard.press('Shift+Tab')
+    expect(await focused()).toBe('outside')
+    await page.keyboard.press('Tab')
+    await page.keyboard.press('Tab')
+
+    await page.keyboard.press('ArrowRight')
+    expect(
+      await page.evaluate(() => document.activeElement?.getAttribute('data-workspace-tab-id'))
+    ).toBe(tabIds[1])
+    await page.keyboard.press('Home')
+    expect(
+      await page.evaluate(() => document.activeElement?.getAttribute('data-workspace-tab-id'))
+    ).toBe(tabIds[0])
+    await page.keyboard.press('End')
+    expect(
+      await page.evaluate(() => document.activeElement?.getAttribute('data-workspace-tab-id'))
+    ).toBe(tabIds.at(-1))
+    expect(await page.evaluate('window.workspaceTabsFixture.storeActiveTabId()')).toBe('files-0')
+    expect(await page.evaluate('window.workspaceTabsFixture.selectionCount()')).toBe(0)
+    expect(
+      await tabs.evaluateAll(nodes =>
+        nodes.filter(node => node.getAttribute('aria-selected') === 'true')
+      )
+    ).toHaveLength(0)
+
+    await page.keyboard.press('Space')
+    expect(await page.evaluate('window.workspaceTabsFixture.selectionCount()')).toBe(1)
+    expect(await page.evaluate('window.workspaceTabsFixture.storeActiveTabId()')).toBe(
+      tabIds.at(-1)
+    )
+    expect(await tabs.nth(tabIds.length - 1).getAttribute('aria-selected')).toBe('true')
+
+    await page.keyboard.press('Enter')
+    expect(await page.evaluate('window.workspaceTabsFixture.selectionCount()')).toBe(2)
+    expect(await page.evaluate('window.workspaceTabsFixture.storeActiveTabId()')).toBe(
+      tabIds.at(-1)
+    )
+
+    await page.keyboard.press('Tab')
+    expect(await focused()).toBe('Close Files')
+    await page.keyboard.press('Tab')
+    expect(await focused()).toBe('Scroll tabs right')
+    await page.keyboard.press('Tab')
+    expect(await focused()).toBe('after')
+    expect(pageErrors).toEqual([])
   })
 
   it('F5 preserves outside focus between native RO measurement and React control removal', async () => {

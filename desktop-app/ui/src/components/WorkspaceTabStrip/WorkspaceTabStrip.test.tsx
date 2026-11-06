@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListProvider } from '@contexts/ChatListContext'
 import { act, cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { MAX_TAB_TITLE_LEN } from '@constants/workspaceTabs'
@@ -54,27 +55,28 @@ const twoChatTabs = newChatTab(
 ).tabs
 
 describe('WorkspaceTabStrip', () => {
-  it('uses the Settings line-tab highlight while retaining editable close controls', () => {
+  it('uses Ant Design tab actions while retaining separate editable close controls', () => {
+    const onSelect = vi.fn()
     render(
       <WorkspaceTabStrip
         tabs={twoChatTabs}
         activeTabId="one"
-        onSelect={vi.fn()}
+        onSelect={onSelect}
         onClose={vi.fn()}
         onReorder={vi.fn()}
       />
     )
 
     const selectedTab = screen.getByRole('tab', { name: 'First chat' })
-    const tabItem = selectedTab.parentElement
-    const indicator = document.querySelector<HTMLElement>('.ant-tabs-ink-bar')
-
     expect(selectedTab.getAttribute('aria-selected')).toBe('true')
-    expect(tabItem?.style.backgroundColor).toBe('transparent')
-    expect(tabItem?.style.border).toBe('0px')
-    expect(tabItem?.style.borderRadius).toBe('0px')
-    expect(indicator?.style.visibility).toBe('visible')
+    expect(selectedTab.classList.contains('ant-btn-primary')).toBe(true)
+    expect(document.querySelector('.ant-tabs-nav-wrap')).toBeNull()
+    expect(document.querySelector('.ant-tabs-nav-more')).toBeNull()
+    expect(document.querySelector('.ant-tabs-nav-list')).toBeNull()
     expect(screen.getByRole('button', { name: 'Close First chat' })).toBeTruthy()
+    fireEvent.click(selectedTab)
+    expect(onSelect).toHaveBeenCalledTimes(1)
+    expect(onSelect).toHaveBeenCalledWith('one')
   })
 
   it('renders the tab order and exposes non-destructive view actions', () => {
@@ -91,6 +93,10 @@ describe('WorkspaceTabStrip', () => {
     )
 
     expect(screen.getByRole('toolbar', { name: 'Workspace tabs' })).toBeTruthy()
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent?.trim())).toEqual([
+      'First chat',
+      'New chat',
+    ])
     expect(screen.getByRole('tab', { name: 'First chat' }).getAttribute('aria-selected')).toBe(
       'true'
     )
@@ -98,6 +104,54 @@ describe('WorkspaceTabStrip', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close First chat' }))
     expect(onSelect).toHaveBeenCalledWith('two')
     expect(onClose).toHaveBeenCalledWith('one')
+  })
+
+  it('keeps null selection keyboard reachable and separates focus from activation', async () => {
+    const user = userEvent.setup()
+    const onSelect = vi.fn()
+    render(
+      <>
+        <button type="button">Apps sidebar</button>
+        <WorkspaceTabStrip
+          tabs={twoChatTabs}
+          activeTabId={null}
+          onSelect={onSelect}
+          onClose={vi.fn()}
+          onReorder={vi.fn()}
+        />
+      </>
+    )
+
+    const first = screen.getByRole('tab', { name: 'First chat' })
+    const second = screen.getByRole('tab', { name: 'New chat' })
+    expect(first.getAttribute('aria-selected')).toBe('false')
+    expect(second.getAttribute('aria-selected')).toBe('false')
+    expect([first.tabIndex, second.tabIndex]).toEqual([0, -1])
+
+    await user.tab()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Apps sidebar' }))
+    await user.tab()
+    expect(document.activeElement).toBe(first)
+    expect(onSelect).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(first, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(second)
+    expect(onSelect).not.toHaveBeenCalled()
+    fireEvent.keyDown(second, { key: 'Home' })
+    expect(document.activeElement).toBe(first)
+    fireEvent.keyDown(first, { key: 'End' })
+    expect(document.activeElement).toBe(second)
+    expect([first.tabIndex, second.tabIndex]).toEqual([-1, 0])
+    expect(first.getAttribute('aria-selected')).toBe('false')
+    expect(second.getAttribute('aria-selected')).toBe('false')
+    expect(onSelect).not.toHaveBeenCalled()
+
+    await user.keyboard('{Enter}')
+    expect(onSelect).toHaveBeenCalledTimes(1)
+    expect(onSelect).toHaveBeenLastCalledWith('two')
+    await user.keyboard(' ')
+    expect(onSelect).toHaveBeenCalledTimes(2)
+    expect(onSelect).toHaveBeenLastCalledWith('two')
   })
 
   it('keeps a long Ant Design tab label accessible and its close action separate', () => {
@@ -453,7 +507,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
   }
 
   const containerFor = (_root: HTMLElement, name: string): HTMLElement =>
-    screen.getByRole('tab', { name })
+    screen.getByRole('tab', { name }).closest('.chat-view-tab') as HTMLElement
 
   // jsdom has no DragEvent, so `fireEvent.drop(..., { clientX })` drops clientX on
   // the floor. Build the event explicitly and pin clientX so the side is real.
@@ -491,6 +545,54 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     expect(onReorder).toHaveBeenCalledWith('a', 2)
     expect(source.querySelector('[data-workspace-dragging]')).toBeNull()
     expect(target.querySelector('[data-workspace-drop-side]')).toBeNull()
+  })
+
+  it('uses the full tab wrapper for drops over the nested select button', () => {
+    const onReorder = vi.fn()
+    const { container } = render(
+      <WorkspaceTabStrip
+        tabs={threeTabs}
+        activeTabId="a"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={onReorder}
+      />
+    )
+    const source = containerFor(container, 'Alpha')
+    const target = containerFor(container, 'Charlie')
+    const select = target.querySelector('[role="tab"]') as HTMLElement
+    const rect = (left: number, width: number) =>
+      ({
+        left,
+        width,
+        right: left + width,
+        top: 0,
+        bottom: 40,
+        height: 40,
+        x: left,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect
+
+    // x=50 is before the 120px wrapper midpoint (60), but after the narrower
+    // 80px select-button midpoint (40). The visible tab's bounds own drop side.
+    Object.defineProperty(target, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => rect(0, 120),
+    })
+    Object.defineProperty(select, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => rect(0, 80),
+    })
+    expect(target.getBoundingClientRect().width).toBe(120)
+    expect(select.getBoundingClientRect().width).toBe(80)
+    const dataTransfer = makeDataTransfer()
+    fireEvent.dragStart(source, { dataTransfer })
+    fireDrag('dragOver', select, dataTransfer, 50)
+    expect(target.querySelector('[data-workspace-drop-side="before"]')).toBeTruthy()
+    fireDrag('drop', select, dataTransfer, 50)
+
+    expect(onReorder).toHaveBeenCalledWith('a', 1)
   })
 
   it('drags a right tab to the left of an earlier tab (no shift adjustment)', () => {
@@ -585,7 +687,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
       />
     )
     const bravo = screen.getByRole('tab', { name: /Bravo/ })
-    bravo.focus()
+    act(() => bravo.focus())
     expect(document.activeElement).toBe(bravo)
     fireEvent.keyDown(bravo, { key: 'ArrowRight', altKey: true })
     rerender(
@@ -641,6 +743,31 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     // Observable result: focus landed on the now-active tab's control, not <body>.
     const nowActive = screen.getByRole('tab', { name: /Charlie/ })
     expect(document.activeElement).toBe(nowActive)
+  })
+
+  it('does not force focus or selection when pointer-closing an inactive tab', () => {
+    let state: WorkspaceTabsState = { tabs: twoChatTabs, activeTabId: 'one' }
+    const onSelect = vi.fn()
+    const onClose = (id: string) => {
+      state = closeWorkspaceTab(state, id)
+    }
+    const props = { onSelect, onClose, onReorder: vi.fn() }
+    const view = render(<WorkspaceTabStrip tabs={state.tabs} activeTabId="one" {...props} />)
+    const closeInactive = screen.getByRole('button', { name: 'Close New chat' })
+    fireEvent.pointerDown(closeInactive)
+    closeInactive.focus()
+    fireEvent.click(closeInactive, { detail: 1 })
+    view.rerender(
+      <WorkspaceTabStrip tabs={state.tabs} activeTabId={state.activeTabId} {...props} />
+    )
+
+    expect(state.tabs.map(tab => tab.id)).toEqual(['one'])
+    expect(state.activeTabId).toBe('one')
+    expect(screen.getByRole('tab', { name: 'First chat' }).getAttribute('aria-selected')).toBe(
+      'true'
+    )
+    expect(document.activeElement).not.toBe(screen.getByRole('tab', { name: 'First chat' }))
+    expect(onSelect).not.toHaveBeenCalled()
   })
 
   it('keeps keyboard focus in the strip when the last tab is closed (R3-H2)', () => {

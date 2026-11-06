@@ -13,13 +13,14 @@ import {
 let state = createEmptyWorkspaceTabsState()
 let selectionCount = 0
 let fileSequence = 0
+let appsPickerProjection = false
 const root = createRoot(document.getElementById('workspace-fixture')!)
 
 function render() {
   flushSync(() => {
     root.render(
       <WorkspaceTabStrip
-        activeTabId={state.activeTabId}
+        activeTabId={appsPickerProjection ? null : state.activeTabId}
         tabs={state.tabs}
         onClose={id => {
           state = closeWorkspaceTab(state, id)
@@ -32,6 +33,7 @@ function render() {
         onSelect={id => {
           selectionCount += 1
           state = selectWorkspaceTab(state, id)
+          appsPickerProjection = false
           render()
         }}
       />
@@ -77,11 +79,18 @@ function selectTab(index: number) {
   render()
 }
 
+function setAppsPickerProjection(active: boolean) {
+  appsPickerProjection = active
+  render()
+}
+
 Object.assign(window, {
   workspaceTabsFixture: {
     setTabCount,
     setFilesTabCount,
     selectTab,
+    setAppsPickerProjection,
+    storeActiveTabId: () => state.activeTabId,
     selectionCount: () => selectionCount,
   },
 })

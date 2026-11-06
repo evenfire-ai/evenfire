@@ -24,7 +24,10 @@ async function geometry() {
     })
     const clone = strip.cloneNode(true) as HTMLElement
     clone.querySelectorAll('.chat-view-tabs__scroll-button').forEach(node => node.remove())
-    host.append(clone)
+    const antTabs = document.createElement('div')
+    antTabs.className = 'ant-tabs'
+    antTabs.append(clone)
+    host.append(antTabs)
     document.body.append(host)
     let fullContentWidth: number
     try {
@@ -53,6 +56,8 @@ async function geometry() {
       tabs: Array.from(list.children).map(node => {
         const element = node as HTMLElement
         const style = getComputedStyle(element)
+        const select = element.querySelector<HTMLElement>('.chat-view-tab__select')!
+        const selectStyle = getComputedStyle(select)
         const rect = element.getBoundingClientRect()
         return {
           id: element.dataset.workspaceTabId,
@@ -60,9 +65,14 @@ async function geometry() {
           left: rect.left,
           right: rect.right,
           width: rect.width,
+          backgroundColor: style.backgroundColor,
+          borderBottomWidth: style.borderBottomWidth,
           minWidth: style.minWidth,
           maxWidth: style.maxWidth,
           flexShrink: style.flexShrink,
+          selectWidth: select.getBoundingClientRect().width,
+          selectMinWidth: selectStyle.minWidth,
+          selectMaxWidth: selectStyle.maxWidth,
         }
       }),
     }
@@ -129,11 +139,16 @@ function assertLiveContract(observed: Awaited<ReturnType<typeof geometry>>) {
     expect(observed.controls[1]!.unavailable).toBe(observed.scrollLeft >= observed.maximum - 1)
   }
   for (const [index, tab] of observed.tabs.entries()) {
-    expect(tab.minWidth).toBe('96px')
-    expect(tab.maxWidth).toBe('220px')
-    expect(tab.width).toBeGreaterThanOrEqual(96)
-    expect(tab.width).toBeLessThanOrEqual(220)
-    expect(tab.flexShrink).toBe(tab.active ? '0.4' : '1')
+    expect(tab.selectMinWidth).toBe('96px')
+    expect(tab.selectMaxWidth).toBe('220px')
+    expect(tab.selectWidth).toBeGreaterThanOrEqual(96)
+    expect(tab.selectWidth).toBeLessThanOrEqual(220)
+    expect(tab.width).toBeGreaterThanOrEqual(tab.selectWidth)
+    expect(tab.flexShrink).toBe('0')
+    if (!tab.active) {
+      expect(tab.backgroundColor).toBe('rgba(0, 0, 0, 0)')
+      expect(tab.borderBottomWidth).toBe('0px')
+    }
     if (index > 0) expect(tab.left - observed.tabs[index - 1]!.right).toBeCloseTo(6, 5)
   }
 }
@@ -185,6 +200,7 @@ describe('synthetic fixture token agreement and separate real CSS acceptance', (
     { count: 1, width: 240 },
     { count: 2, width: 100 },
     { count: 2, width: 240 },
+    { count: 2, width: 280 },
     { count: 3, width: 430 },
     { count: 3, width: 900 },
     { count: 4, width: 280 },
@@ -196,12 +212,18 @@ describe('synthetic fixture token agreement and separate real CSS acceptance', (
       const initial = await open(width, count)
       expect(initial.tabs).toHaveLength(count)
       assertLiveContract(initial)
-      // Actual unequal shrink is observed, never assigned as a fixture width.
-      if ((count === 3 && width === 430) || (count === 5 && width === 900)) {
-        expect(initial.tabs[0]!.width).toBeGreaterThan(initial.tabs[1]!.width)
+      if (count === 2 && width === 240) {
+        // Two 96px AntD tab controls plus the 6px gap exceed the viewport left
+        // after directional controls are mounted; this is real overflow, not a
+        // fit boundary inherited from the old flex-shrinking tab labels.
+        expect(initial.controls).toHaveLength(2)
+        expect(initial.fullContentWidth).toBeGreaterThan(initial.viewportWidth)
       }
-      if (count === 3 && width === 900) {
-        expect(initial.tabs.every(tab => tab.width === 220)).toBe(true)
+      // These producer titles fit AntD's minimum tab width; the legacy fixture's
+      // unequal flex-shrink and full-width assumptions do not apply to this bar.
+      if ((count === 3 && width === 430) || (count === 3 && width === 900)) {
+        expect(initial.tabs.map(tab => tab.selectWidth)).toEqual([96, 96, 96])
+        expect(initial.tabs.every(tab => tab.width >= tab.selectWidth)).toBe(true)
       }
       if (initial.controls.length) {
         const nearestRight = initial.tabs.find(tab => tab.right > initial.viewportRight + 1)!
@@ -253,12 +275,38 @@ describe('synthetic fixture token agreement and separate real CSS acceptance', (
     }
   )
 
+  it('keeps arrow input after a successful positive-width clamped reveal attempt', async () => {
+    const initial = await open(100, 2)
+    const active = initial.tabs.find(tab => tab.active)!
+    expect(active.width).toBeGreaterThan(initial.viewportWidth)
+    const beforeArrow = initial.scrollLeft
+    expect(initial.controls[1]?.unavailable).toBe(false)
+
+    await page.getByRole('button', { name: 'Scroll tabs right' }).click()
+    const afterArrow = await settle()
+
+    expect(afterArrow.scrollLeft).toBeGreaterThan(beforeArrow)
+    expect(await page.evaluate(() => (window as any).workspaceTabsFixture.selectionCount())).toBe(0)
+  })
+
+  it('keeps native wheel input after a successful positive-width clamped reveal attempt', async () => {
+    const initial = await open(100, 2)
+    const box = await page.locator('.chat-view-tabs__scroller').boundingBox()
+    if (!box) throw new Error('native scroller missing')
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.wheel(0, 20)
+    const afterWheel = await settle()
+
+    expect(afterWheel.scrollLeft).not.toBe(initial.scrollLeft)
+    expect(await page.evaluate(() => (window as any).workspaceTabsFixture.selectionCount())).toBe(0)
+  })
+
   it('converges to the same real fitting geometry after reducing an overflowing producer list', async () => {
-    const fresh = await open(240, 2)
+    const fresh = await open(280, 2)
     assertLiveContract(fresh)
     await page.close()
     expect(pageErrors).toEqual([])
-    const overflowing = await open(240, 8)
+    const overflowing = await open(280, 8)
     expect(overflowing.controls).toHaveLength(2)
     await page.evaluate(() =>
       (

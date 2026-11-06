@@ -108,7 +108,11 @@ function activeWorkspaceTabElement(): HTMLElement | null {
 }
 
 function workspaceTabLabel(element: Element | null): string | null {
-  return element?.querySelector<HTMLElement>('[aria-label]')?.getAttribute('aria-label') ?? null
+  return (
+    element?.getAttribute('aria-label') ??
+    element?.querySelector<HTMLElement>('[aria-label]')?.getAttribute('aria-label') ??
+    null
+  )
 }
 
 function closeWorkspaceTab(title: string) {
@@ -1675,11 +1679,11 @@ describe('App deep-link orchestration', () => {
       })
 
       expect(
-        screen
-          .getByRole('toolbar', { name: 'Workspace tabs' })
-          .querySelector('[role="tab"][aria-selected="true"]')
-          ?.querySelector('[aria-label]')
-          ?.getAttribute('aria-label')
+        workspaceTabLabel(
+          screen
+            .getByRole('toolbar', { name: 'Workspace tabs' })
+            .querySelector('[role="tab"][aria-selected="true"]')
+        )
       ).toBe('Files B')
       expect(
         currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-b')?.files?.path
@@ -1744,11 +1748,11 @@ describe('App deep-link orchestration', () => {
       }
       await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1))
       expect(
-        screen
-          .getByRole('toolbar', { name: 'Workspace tabs' })
-          .querySelector('[role="tab"][aria-selected="true"]')
-          ?.querySelector('[aria-label]')
-          ?.getAttribute('aria-label')
+        workspaceTabLabel(
+          screen
+            .getByRole('toolbar', { name: 'Workspace tabs' })
+            .querySelector('[role="tab"][aria-selected="true"]')
+        )
       ).toBe(expectedLabel)
 
       await act(async () => {
@@ -1758,11 +1762,11 @@ describe('App deep-link orchestration', () => {
       })
 
       expect(
-        screen
-          .getByRole('toolbar', { name: 'Workspace tabs' })
-          .querySelector('[role="tab"][aria-selected="true"]')
-          ?.querySelector('[aria-label]')
-          ?.getAttribute('aria-label')
+        workspaceTabLabel(
+          screen
+            .getByRole('toolbar', { name: 'Workspace tabs' })
+            .querySelector('[role="tab"][aria-selected="true"]')
+        )
       ).toBe(expectedLabel)
       expect(currentController.workspaceTabs.activeTabId).toBe(expectedTabId)
       expect(document.activeElement).toBe(finalButton)
@@ -1815,11 +1819,11 @@ describe('App deep-link orchestration', () => {
 
     expect(screen.queryByRole('tab', { name: 'Files A' })).toBeNull()
     expect(
-      screen
-        .getByRole('toolbar', { name: 'Workspace tabs' })
-        .querySelector('[role="tab"][aria-selected="true"]')
-        ?.querySelector('[aria-label]')
-        ?.getAttribute('aria-label')
+      workspaceTabLabel(
+        screen
+          .getByRole('toolbar', { name: 'Workspace tabs' })
+          .querySelector('[role="tab"][aria-selected="true"]')
+      )
     ).toBe(activeLabelAfterClose)
     expect(filesPageHarness.resolveRequests).toHaveLength(1)
     expect(currentController.workspaceTabs.tabs.some(tab => tab.id === 'files-a')).toBe(false)
