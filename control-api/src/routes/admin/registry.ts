@@ -81,6 +81,7 @@ import type { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
 import {
   getCatalogEntry,
   getCatalogEntryVersion,
+  resolveCatalogEntry,
   searchCatalogEntries,
 } from './catalogEntryReads.js'
 import {
@@ -1900,7 +1901,7 @@ export function createAdminRegistryRouter(
 
       const body = { ...req.body, name: scopedName }
       const result = await publishEntry(body)
-      res.status(201).json(result)
+      res.status(201).json(resolveCatalogEntry(result))
     } catch (err) {
       next(err)
     }
@@ -2067,7 +2068,7 @@ export function createAdminRegistryRouter(
         visibility,
         mcpServer,
       })
-      res.json(result)
+      res.json(resolveCatalogEntry(result))
     } catch (err) {
       next(err)
     }

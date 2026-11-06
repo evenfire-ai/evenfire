@@ -7,12 +7,15 @@ import {
   getInstalledRegistryState,
 } from '../src/routes/admin/registry.js'
 import {
+  applyPublishScope,
   getCategories,
   getCredentialSchema,
   getDigest,
   getEntry,
   getEntryVersion,
+  publishEntry,
   reportInstall,
+  resolvePublishScope,
   searchEntries,
   updateVersionMetadata,
 } from '../src/services/registryClient.js'
@@ -247,6 +250,40 @@ describe('catalog reads resolve remote-OAuth entries', () => {
       const res = await request(makeApp()).get(
         `/admin/registry/entries/${encodeURIComponent(entry.name)}/versions/1.0.0`
       )
+      expect(res.status).toBe(200)
+      expectation(res.body)
+    }
+  )
+})
+
+describe('catalog write echoes resolve remote-OAuth entries like the reads', () => {
+  const cases = [
+    ['curator', curatorRow, expectCuratorIntact],
+    ['org', orgRow, expectOrgStripped],
+    ['invalid curator', invalidCuratorRow, expectInvalidStripped],
+    ['unscoped curator-class', unscopedCuratorRow, expectUnscopedStripped],
+  ] as const
+
+  it.each(cases)('POST /admin/registry/entries — %s', async (_label, row, expectation) => {
+    const entry = row()
+    vi.mocked(resolvePublishScope).mockResolvedValue(null as never)
+    vi.mocked(applyPublishScope).mockImplementation((name: string | undefined) => name as never)
+    vi.mocked(publishEntry).mockResolvedValue(entry as never)
+    const res = await request(makeApp())
+      .post('/admin/registry/entries')
+      .send({ name: entry.name, version: '1.0.0', entryType: 'mcp-server' })
+    expect(res.status).toBe(201)
+    expectation(res.body)
+  })
+
+  it.each(cases)(
+    'PUT /admin/registry/entries/:name/versions/:version — %s',
+    async (_label, row, expectation) => {
+      const entry = row()
+      vi.mocked(updateVersionMetadata).mockResolvedValue(entry as never)
+      const res = await request(makeApp())
+        .put(`/admin/registry/entries/${encodeURIComponent(entry.name)}/versions/1.0.0`)
+        .send({ description: 'd' })
       expect(res.status).toBe(200)
       expectation(res.body)
     }

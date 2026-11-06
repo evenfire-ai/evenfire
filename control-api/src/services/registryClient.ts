@@ -591,8 +591,8 @@ export async function deleteVersion(name: string, version: string): Promise<{ de
   return result
 }
 
-export async function publishEntry(body: Record<string, unknown>): Promise<unknown> {
-  const result = await registrySend('/entries', 'POST', body)
+export async function publishEntry(body: Record<string, unknown>): Promise<RegistryEntry> {
+  const result = await registrySend<RegistryEntry>('/entries', 'POST', body)
   invalidateCatalogCaches()
   return result
 }
