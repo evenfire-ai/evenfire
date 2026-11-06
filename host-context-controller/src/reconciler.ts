@@ -996,8 +996,14 @@ export class McpServerReconciler {
 
       if (rollout.ready) {
         state.ticking = false
-        this.setStatus(name, { deployed: true, ready: true, message: 'Running' })
         this.readinessPolls.delete(name)
+        // A Secret change is pending, so this rollout may run the old content.
+        // The reconcile that owns the verdict reads the rollout itself.
+        if (this.secretChangeObserved(name)) {
+          this.retainRetiredReadinessPoll(state)
+          return
+        }
+        this.setStatus(name, { deployed: true, ready: true, message: 'Running' })
         hccLogger.info('McpServer is now ready after poll(s)', {
           scope: '[Reconciler]',
           name,

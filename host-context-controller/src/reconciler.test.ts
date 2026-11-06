@@ -4327,6 +4327,34 @@ describe('#1338 H3 D2 — out-of-pass obligations reach the incomplete-reconcili
     expect(await secretAccessProbes('no-target')).toBe(countBefore + 1)
   })
 
+  it('U38 a readiness tick does not publish ready while a Secret change is pending', async () => {
+    vi.useFakeTimers()
+    const f = h3Cluster({ rolloutReady: false })
+    const server = h3Server()
+    await f.reconciler.reconcile(server)
+    expect(pollOf(f).timer).toBeDefined()
+    f.reconciler.recordSecretChangeEvidence('h3-server')
+    f.setRolloutReady(true)
+    const readsBefore = deploymentReads(f)
+    const patchesBefore = f.patches()
+
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(deploymentReads(f)).toBe(readsBefore + 1)
+    expect(f.patches()).toBe(patchesBefore)
+    expect(f.condition('Ready')).not.toMatchObject({ status: 'True' })
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
+    expect(pollOf(f)).toBeUndefined()
+    expect(f.reconciler.incompleteReconciliationNames()).toEqual(['h3-server'])
+    expect(f.listener).toHaveBeenCalledExactlyOnceWith('h3-server')
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+    expect(f.condition('Ready')).toMatchObject({ status: 'True' })
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+  })
+
   it('U9h a successful reconcile does not fire the listener', async () => {
     const f = h3Cluster()
     const server = h3Server()
