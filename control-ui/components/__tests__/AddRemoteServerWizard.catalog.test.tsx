@@ -490,6 +490,31 @@ describe('AddRemoteServerWizard — Marketplace catalog mode', () => {
     expect(mockPush).not.toHaveBeenCalled()
   })
 
+  it('a dead entry URL without a reported status names no HTTP code', async () => {
+    // control-api always sends detail.httpStatus; the body without it is the golden
+    // minus that one field, so the copy must not fill in a status nobody reported.
+    const { httpStatus: _status, ...detailWithoutStatus } = (
+      CATALOG_TRANSPORT_UNREACHABLE_FAILURE.body as { detail: Record<string, unknown> }
+    ).detail
+    const withoutStatus = {
+      ...CATALOG_TRANSPORT_UNREACHABLE_FAILURE,
+      body: {
+        ...(CATALOG_TRANSPORT_UNREACHABLE_FAILURE.body as Record<string, unknown>),
+        detail: detailWithoutStatus,
+      },
+    }
+    serveApi({
+      discover: [{ resolve: CATALOG_CIMD_DISCOVER }],
+      install: [{ reject: apiErrorFrom(withoutStatus) }],
+    })
+    await reachCimdInstall()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      "This Marketplace entry's URL does not respond with MCP, so it cannot be installed. Report it to the Marketplace curator."
+    )
+    expect(alert).not.toHaveTextContent('HTTP')
+  })
+
   it('the unverified-scope confirmation works in catalog mode and resends the catalog body', async () => {
     serveApi({
       discover: [

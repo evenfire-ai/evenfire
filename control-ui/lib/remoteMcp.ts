@@ -432,8 +432,18 @@ export function resolveRemoteCatalogTarget(
  * Banner copy for a dead transport probe on a catalog entry. There is no "use the
  * suggested URL" here: the URL belongs to the entry, and control-api refuses any other.
  */
-export function describeCatalogTransportDead(httpStatus: number): string {
-  return `This Marketplace entry's URL does not respond with MCP (HTTP ${httpStatus}), so it cannot be installed. Report it to the Marketplace curator.`
+export function describeCatalogTransportDead(httpStatus?: number): string {
+  return `This Marketplace entry's URL does not respond with MCP${
+    httpStatus === undefined ? '' : ` (HTTP ${httpStatus})`
+  }, so it cannot be installed. Report it to the Marketplace curator.`
+}
+
+/** `detail.httpStatus` of a `transport_unreachable` body, only when the server reported one. */
+function transportUnreachableStatus(body: Record<string, unknown> | undefined): number | undefined {
+  const detail = body?.detail
+  if (!detail || typeof detail !== 'object') return undefined
+  const status = (detail as { httpStatus?: unknown }).httpStatus
+  return typeof status === 'number' ? status : undefined
 }
 
 /** The slot is taken or being taken by another install: the wizard returns to the Marketplace. */
@@ -652,14 +662,8 @@ export function mapRemoteInstallError(
           secretName ? ` (${secretName})` : ''
         } blocks this slot, and nothing was installed. Freeing it is a manual repair: a cluster operator must delete that Secret before this slot can be installed.`
       }
-      case 'transport_unreachable': {
-        const detail = body?.detail && typeof body.detail === 'object' ? body.detail : undefined
-        const httpStatus =
-          detail && typeof (detail as { httpStatus?: unknown }).httpStatus === 'number'
-            ? (detail as { httpStatus: number }).httpStatus
-            : 404
-        return describeCatalogTransportDead(httpStatus)
-      }
+      case 'transport_unreachable':
+        return describeCatalogTransportDead(transportUnreachableStatus(body))
       default: {
         const catalogMessage = describeCatalogRequestError(code, body)
         if (catalogMessage) return catalogMessage
@@ -726,10 +730,13 @@ export function mapRemoteInstallError(
           : undefined
       const suggested =
         detail && typeof detail.suggestedBaseUrl === 'string' ? detail.suggestedBaseUrl : ''
-      const httpStatus = detail && typeof detail.httpStatus === 'number' ? detail.httpStatus : 404
+      const httpStatus = transportUnreachableStatus(body)
+      const unreachable = `This server's MCP endpoint isn't reachable at that URL${
+        httpStatus === undefined ? '' : ` (HTTP ${httpStatus})`
+      }.`
       return suggested
-        ? `This server's MCP endpoint isn't reachable at that URL (HTTP ${httpStatus}). Its MCP endpoint looks like ${suggested} — go back and detect that URL instead.`
-        : `This server's MCP endpoint isn't reachable at that URL (HTTP ${httpStatus}). Go back and check the URL.`
+        ? `${unreachable} Its MCP endpoint looks like ${suggested} — go back and detect that URL instead.`
+        : `${unreachable} Go back and check the URL.`
     }
     default:
       break
