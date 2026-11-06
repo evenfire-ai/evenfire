@@ -377,9 +377,12 @@ HCC_AUTHORITY_MAX_STALENESS_MS >= interval + 2 × max(interval, 10000) + 10000 +
 ```
 
 `10000` is the inventory request timeout and `1000` a scheduling allowance, both
-in milliseconds. At the default 30000 ms interval the minimum is 101000 ms. The
-poll interval must also be a positive whole number of milliseconds; a
-non-numeric value now stops startup instead of polling every millisecond.
+in milliseconds. At the default 30000 ms interval the minimum is 101000 ms.
+
+The poll interval must be a positive whole number of milliseconds in plain
+digits, at most 2147483647, in every mode, including dev mode. `30s`, `3e4` and
+`30_000` used to be read as 30 ms, 3 ms and 30 ms, and now stop startup. So do
+`030000`, ` 30000`, `+30000` and `30000.5`, which work today as 30 s.
 
 The rule also caps the poll interval. With the default
 `HCC_AUTHORITY_MAX_STALENESS_MS` (180000 ms) the poll interval may be at most

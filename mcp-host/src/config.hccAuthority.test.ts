@@ -114,8 +114,64 @@ describe('module-load authority timing check (issue #1350)', () => {
 
   it('refuses to start with a non-numeric poll interval', async () => {
     await expect(loadAuthorityMaxStaleness('180000', 'not-a-number')).rejects.toThrow(
-      'CLERUM_CONTEXT_MAPPER_POLL_INTERVAL (NaNms) must be a positive safe integer number of milliseconds; refusing to start'
+      'CLERUM_CONTEXT_MAPPER_POLL_INTERVAL ("not-a-number") must be a positive whole number of milliseconds in plain digits; refusing to start'
     )
+  })
+
+  it('applies the bound after its cap when checking the largest allowed interval', async () => {
+    await expect(loadAuthorityMaxStaleness('700000', '196334')).rejects.toThrow('= 600002ms')
+    await expect(loadAuthorityMaxStaleness('700000', '196333')).resolves.toBe(600_000)
+  })
+})
+
+describe('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL parsing (issue #1353)', () => {
+  const plainDigits = 'must be a positive whole number of milliseconds in plain digits'
+
+  it.each([
+    '30s',
+    '3e4',
+    '30_000',
+    'thirty',
+    '0',
+    '-5',
+    '030000',
+    ' 30000',
+    '30000 ',
+    '+30000',
+    '30000.5',
+    '',
+  ])('refuses to start with %j, naming the key and the value', async raw => {
+    await expect(loadAuthorityMaxStaleness('180000', raw)).rejects.toThrow(
+      `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL ("${raw}") ${plainDigits}`
+    )
+  })
+
+  it('resolves plain digits on the same call shape', async () => {
+    await expect(loadAuthorityMaxStaleness('180000', '30000')).resolves.toBe(180_000)
+  })
+
+  describe('in dev mode, where the staleness rule does not run', () => {
+    async function loadPollIntervalInDevMode(raw: string): Promise<number> {
+      vi.resetModules()
+      process.env = { ...originalEnv }
+      process.env.CLERUM_DEV_MODE = 'true'
+      process.env.CLERUM_CONTEXT_MAPPER_POLL_INTERVAL = raw
+      return (await import('./config')).config.contextMapperPollInterval
+    }
+
+    it('applies the same rejection', async () => {
+      await expect(loadPollIntervalInDevMode('30s')).rejects.toThrow(
+        `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL ("30s") ${plainDigits}`
+      )
+      await expect(loadPollIntervalInDevMode('30000')).resolves.toBe(30_000)
+    })
+
+    it('rejects a value above the Node timer range, and accepts the largest in range', async () => {
+      await expect(loadPollIntervalInDevMode('2147483648')).rejects.toThrow(
+        'CLERUM_CONTEXT_MAPPER_POLL_INTERVAL ("2147483648") must be at most 2147483647 milliseconds'
+      )
+      await expect(loadPollIntervalInDevMode('2147483647')).resolves.toBe(2_147_483_647)
+    })
   })
 })
 

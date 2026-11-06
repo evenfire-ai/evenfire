@@ -857,9 +857,24 @@ function parseApprovalPromptHistoryMaxBytes(raw: string): number {
   return Number.isSafeInteger(value) && value >= 1_024 && value <= 32_768 ? value : Number.NaN
 }
 
-const contextMapperPollInterval = parseInt(
-  getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!,
-  10
+function parseContextMapperPollIntervalMs(raw: string): number {
+  if (!/^[1-9][0-9]*$/.test(raw)) {
+    throw new Error(
+      `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL ("${raw}") must be a positive whole number of milliseconds in plain digits; refusing to start`
+    )
+  }
+  const value = Number(raw)
+  // A larger timer delay overflows and fires after about 1 ms.
+  if (value > MAX_TIMER_DELAY_MS) {
+    throw new Error(
+      `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL ("${raw}") must be at most ${MAX_TIMER_DELAY_MS} milliseconds; refusing to start`
+    )
+  }
+  return value
+}
+
+const contextMapperPollInterval = parseContextMapperPollIntervalMs(
+  getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!
 )
 // Fail-closed window for an UNREACHABLE HCC (5xx / transport failures only).
 // It is bounded so a revoked-but-unconfirmable authority cannot linger forever,
