@@ -390,4 +390,29 @@ describe('ChangeConnectorSecret — assignment save', () => {
     expect(alert.textContent).not.toContain('could not be verified')
     expect(onFinished).not.toHaveBeenCalled()
   })
+
+  it('reports a changed connector during verification as unverified, not as refused', async () => {
+    const { onFinished } = await renderPanel()
+    await chooseReplacement()
+    await submitThroughConfirm()
+    expect(screen.getByRole('status').textContent).toContain('Assignment saved')
+
+    // The connector was replaced mid-verification: a diagnosed failure with
+    // no refusal behind it, reached through the poll itself.
+    const replaced = savedServer()
+    mockGetMcpServer.mockResolvedValue({
+      ...replaced,
+      metadata: { ...replaced.metadata, uid: 'replacement-uid' },
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toContain('Assignment saved, but readiness could not be verified')
+    expect(alert.textContent).toContain('The connector changed during verification')
+    expect(alert.textContent).not.toContain('refused')
+    expect(alert.textContent).not.toContain('Correct the value')
+    expect(onFinished).not.toHaveBeenCalled()
+  })
 })

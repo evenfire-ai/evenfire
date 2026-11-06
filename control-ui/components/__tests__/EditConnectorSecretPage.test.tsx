@@ -277,6 +277,50 @@ describe('EditConnectorSecretPage', () => {
     expect(alert.textContent).not.toContain('refused')
   })
 
+  it('keeps the unverified notice with the rollout diagnostic when RolloutIncomplete never clears', async () => {
+    await renderPage()
+    await submitRotation('api-key', 'slow-value')
+    expect(screen.getByText(/Value saved. Waiting for linear-conn/)).toBeInTheDocument()
+
+    // A rotate carries no rollout identity, so the diagnosed-failure path
+    // here is the controller's own RolloutIncomplete verdict outliving the
+    // poll budget — with no egress condition on the CRD at all.
+    mockGetMcpServer.mockResolvedValue({
+      ...server({ name: 'linear-conn' }),
+      status: {
+        conditions: [
+          {
+            type: 'DeploymentReady',
+            status: 'False',
+            reason: 'RolloutIncomplete',
+            message: 'updated 0/1',
+            lastTransitionTime: '2026-01-01T00:00:05.000Z',
+            observedGeneration: 1,
+          },
+        ],
+      },
+    })
+    // First sighting: the diagnostic is not latched — still verifying.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+    expect(screen.getByText(/Value saved. Waiting for linear-conn/)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS)
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveClass('cu-banner--warning')
+    expect(alert.textContent).toContain('connector restart could not be verified')
+    expect(alert.textContent).toContain('updated 0/1')
+    expect(alert.textContent).not.toContain('refused')
+    // The pair that separates this diagnosed failure from the inconclusive
+    // timeout sharing the same banner: no timeout wording.
+    expect(alert.textContent).not.toContain('did not finish within')
+  })
+
   it('refuses a non-canonical stored Secret name without rotating its trimmed alias', async () => {
     mockGetMcpServers.mockResolvedValue({
       items: [server({ name: 'linear-conn', secretName: '  linear-credentials  ' })],

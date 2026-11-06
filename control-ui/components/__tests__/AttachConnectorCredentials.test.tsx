@@ -307,6 +307,29 @@ describe('attach form', () => {
     expect(onFinished).not.toHaveBeenCalled()
     expect(api.deleteMcpSecret).not.toHaveBeenCalled()
   })
+  it('reports a changed connector during verification as unverified, not as refused', async () => {
+    panel()
+    fill()
+    await confirm()
+    expect(screen.getByText(/Waiting for search to become ready/)).toBeInTheDocument()
+    const pollsBefore = vi.mocked(api.getMcpServer).mock.calls.length
+    // The connector was replaced mid-verification: a diagnosed failure with
+    // no refusal behind it, reached through the poll itself.
+    vi.mocked(api.getMcpServer).mockResolvedValue({
+      ...saved,
+      metadata: { ...saved.metadata, uid: 'replacement-uid' },
+    })
+    await tick()
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent(
+      'Credentials were attached, but readiness could not be verified'
+    )
+    expect(alert).toHaveTextContent('The connector changed during verification')
+    expect(alert).not.toHaveTextContent('refused')
+    // Witness the verdict came from a fresh poll read, not a stale render.
+    expect(vi.mocked(api.getMcpServer).mock.calls.length).toBeGreaterThan(pollsBefore)
+    expect(onFinished).not.toHaveBeenCalled()
+  })
   it('allows leaving verification after a saved attachment', async () => {
     panel()
     fill()
