@@ -243,6 +243,59 @@ describe('PR1087 App-root native visibility owners', () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger))
   })
 
+  it('keeps ordinary dismissal focus through delayed real Chat history hydration', async () => {
+    const chatId = 'hydrating-chat'
+    ;(window.clerum as any).chat.getIndex.mockResolvedValue({
+      version: 1,
+      lastActiveChatId: chatId,
+      onboardingDismissed: false,
+      chats: [
+        {
+          id: chatId,
+          title: 'Hydrating chat',
+          createdAt: '2026-11-05T00:00:00Z',
+          updatedAt: '2026-11-05T00:00:00Z',
+          messageCount: 1,
+        },
+      ],
+    })
+    renderApp()
+    expect(await screen.findByTestId('nav-files')).toBeTruthy()
+    const composer = await screen.findByTestId('chat-input')
+    const loadSessionMessages = (window.clerum as any).rpc.loadSessionMessages
+    await waitFor(() => expect(loadSessionMessages).toHaveBeenCalled())
+    const [, agent, requestedChatId] = loadSessionMessages.mock.calls.at(-1) as [
+      string,
+      string,
+      string,
+    ]
+    expect(requestedChatId).toBe(chatId)
+
+    const trigger = screen.getByTestId('compact-navigation-toggle')
+    fireEvent.click(trigger)
+    fireEvent.click(document.querySelector('.sidebar-mobile-backdrop')!)
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+
+    await act(async () => {
+      resolveHistory?.({
+        agent,
+        chatId,
+        turns: [
+          {
+            number: 1,
+            user_input: 'Hydrated after dismissal',
+            response: 'Hydrated response',
+            started_at: '2026-11-05T00:00:00Z',
+          },
+        ],
+      })
+      await Promise.resolve()
+    })
+    await flushFrames()
+    expect(composer.isConnected).toBe(true)
+    expect(document.activeElement).toBe(trigger)
+  })
+
   it('joins the real release-status producer and App-root dialog with a mounted SandboxUiPage', async () => {
     compactMedia(false)
     let resolveReleaseStatus!: (status: {
