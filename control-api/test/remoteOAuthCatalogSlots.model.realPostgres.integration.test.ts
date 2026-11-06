@@ -130,16 +130,20 @@ vi.mock('../src/http/pinnedFetch.js', async importActual => {
 const registryDouble = vi.hoisted(() => ({
   rows: new Map<string, Record<string, unknown>>(),
   latest: [] as Record<string, unknown>[],
+  /** Requested name → stored entry this double answers it with, breaking the exact lookup. */
+  answersOtherEntry: new Map<string, string>(),
 }))
 
 vi.mock('../src/services/registryClient.js', async importActual => {
   const actual = await importActual<typeof import('../src/services/registryClient.js')>()
   return {
     ...actual,
-    // The registry resolves an unscoped name to its curated scope, as an alias.
+    // The registry looks an entry up by exact name and version (`findEntryByNameVersion`)
+    // and answers 404 for anything else. `answersOtherEntry` is the one deliberate
+    // break of that contract, for the tamper that exercises the route's defense.
     getEntryVersion: async (name: string, version: string) => {
-      const resolved = name.startsWith('@') ? name : `@evenfire/${name}`
-      const row = registryDouble.rows.get(`${resolved}@${version}`)
+      const answered = registryDouble.answersOtherEntry.get(name) ?? name
+      const row = registryDouble.rows.get(`${answered}@${version}`)
       if (!row) throw Object.assign(new Error('entry not found'), { status: 404 })
       return structuredClone(row)
     },
@@ -224,6 +228,8 @@ const ENTRIES: EntryDef[] = [
   },
 ]
 const ENTRY = Object.fromEntries(ENTRIES.map(e => [e.key, e])) as Record<EntryDef['key'], EntryDef>
+/** A name the registry stores no entry under, which the tampering double answers with `entry`. */
+const otherEntryName = (entry: EntryDef) => entry.name.replace(/^@evenfire\//, '')
 
 interface Slot {
   entry: EntryDef
@@ -876,7 +882,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
     toString(): string
   }
 
-  type Tamper = 'none' | 'trailingSlash' | 'evilUrl' | 'serverName' | 'alias'
+  type Tamper = 'none' | 'trailingSlash' | 'evilUrl' | 'serverName' | 'registryAnswersOtherEntry'
 
   class Install implements Step {
     constructor(
@@ -897,7 +903,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       })
       const body: Record<string, unknown> = {
         catalogEntry: {
-          name: this.tamper === 'alias' ? entry.name.replace(/^@evenfire\//, '') : entry.name,
+          name: this.tamper === 'registryAnswersOtherEntry' ? otherEntryName(entry) : entry.name,
           version: this.version,
         },
         grantScope: scope,
@@ -939,7 +945,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
       // The order the route checks a catalog body in.
       if (this.tamper === 'serverName') {
         expectOutcome(rec, [[400, 'catalog_server_name_not_allowed']])
-      } else if (this.tamper === 'alias') {
+      } else if (this.tamper === 'registryAnswersOtherEntry') {
         expectOutcome(rec, [[400, 'catalog_entry_name_mismatch']])
       } else if (!entry.scopes.includes(scope)) {
         expectOutcome(rec, [[400, 'catalog_grant_scope_not_allowed']])
@@ -1356,7 +1362,7 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
         'trailingSlash',
         'evilUrl',
         'serverName',
-        'alias'
+        'registryAnswersOtherEntry'
       ),
       fc.constantFrom('client-a', 'client-b'),
       installPar
@@ -1453,7 +1459,9 @@ describeRealPostgres('remote-OAuth catalog slots against a reference model (real
 
     registryDouble.rows.clear()
     registryDouble.latest = []
+    registryDouble.answersOtherEntry.clear()
     for (const entry of ENTRIES) {
+      registryDouble.answersOtherEntry.set(otherEntryName(entry), entry.name)
       for (const version of entry.versions) {
         const row = registryEntryRow(
           {

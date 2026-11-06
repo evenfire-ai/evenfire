@@ -20,6 +20,7 @@ import {
   createAdminRemoteMcpRouter,
 } from '../src/routes/admin/remoteMcp.js'
 import { type RegistryEntry, getEntryVersion } from '../src/services/registryClient.js'
+import { exactRegistryFetch } from './fixtures/exactRegistry.js'
 import { WORKIQ_GUID_SCOPE, discoverPilot, withRfc9207 } from './fixtures/perServerInstall.js'
 import { malformedRow, registryEntryRow } from './fixtures/registryEntryRow.js'
 import {
@@ -321,19 +322,49 @@ describe('catalog mode: URL, name and provenance come from the entry', () => {
     expect(await gw.listResource('mcpservers', NS)).toEqual([])
   })
 
-  it.each([
-    ['an alias the registry resolves', { name: 'notion-remote', version: VERSION }],
-    ['`latest` instead of the version', { name: ENTRY, version: 'latest' }],
-  ])('%s → 400 catalog_entry_name_mismatch, nothing written', async (_label, catalogEntry) => {
+  it('registry answers a different entry than requested → 400 catalog_entry_name_mismatch, nothing written', async () => {
+    // A registry breaking its exact lookup: asked for another entry, it answers ENTRY.
     serveEntry(remoteOAuthRow())
     const gw = new MockGateway(NS)
-    const res = await request(makeApp(gw, cimdResult))
+    const spy: AppSpy = { discoveredUrls: [], probedUrls: [] }
+    const res = await request(makeApp(gw, cimdResult, {}, spy))
       .post(ROUTE)
-      .send(catalogBody({ catalogEntry }))
+      .send(catalogBody({ catalogEntry: { name: '@evenfire/other-remote', version: VERSION } }))
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('catalog_entry_name_mismatch')
     expect(res.body.entry).toEqual({ name: ENTRY, version: VERSION })
+    expect(spy.discoveredUrls).toEqual([])
     expect(await gw.listResource('mcpservers', NS)).toEqual([])
+    expect(await gw.listSecrets(NS)).toEqual([])
+    expect(reportInstallDouble.calls).not.toHaveBeenCalled()
+  })
+
+  it('a name the registry does not store → its 404, nothing written', async () => {
+    // The real client over an exact registry that stores only ENTRY@VERSION; the
+    // unscoped spelling of ENTRY is just another name to it.
+    const realGetEntryVersion = (
+      await vi.importActual<typeof import('../src/services/registryClient.js')>(
+        '../src/services/registryClient.js'
+      )
+    ).getEntryVersion
+    vi.stubGlobal('fetch', vi.fn(exactRegistryFetch([remoteOAuthRow()])))
+    vi.mocked(getEntryVersion).mockImplementation(realGetEntryVersion)
+    try {
+      const gw = new MockGateway(NS)
+      const spy: AppSpy = { discoveredUrls: [], probedUrls: [] }
+      const res = await request(makeApp(gw, cimdResult, {}, spy))
+        .post(ROUTE)
+        .send(catalogBody({ catalogEntry: { name: 'notion-remote', version: VERSION } }))
+      expect(res.status).toBe(404)
+      expect(res.body).toEqual({ error: 'Registry 404', correlationId: expect.any(String) })
+      expect(getEntryVersion).toHaveBeenCalledWith('notion-remote', VERSION)
+      expect(spy.discoveredUrls).toEqual([])
+      expect(await gw.listResource('mcpservers', NS)).toEqual([])
+      expect(await gw.listSecrets(NS)).toEqual([])
+      expect(reportInstallDouble.calls).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('a manual install still carries no catalog annotations and is never reported', async () => {

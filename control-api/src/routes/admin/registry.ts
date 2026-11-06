@@ -105,12 +105,7 @@ import {
   shouldAttachEvenfirePullSecret,
 } from './registryImagePullSecret.js'
 import { checkEvenfireImageRefMatchesEntry } from './registryImageRefIdentity.js'
-import {
-  OFFICIAL_EVENFIRE_SCOPES,
-  entryNameScope,
-  mayResolveToInstalledEntry,
-  registryNameSlug,
-} from './registryNaming.js'
+import { OFFICIAL_EVENFIRE_SCOPES, entryNameScope, registryNameSlug } from './registryNaming.js'
 import {
   pullSecretErrorResponse,
   recipeReferencesPlatformImage,
@@ -4181,10 +4176,9 @@ export function createAdminRegistryRouter(
             reason: `McpServer "${body.serverName}" was installed from "${installedCatalogId}", not "${requested}" — uninstall and install to change entry`,
           })
         }
-        if (
-          installedCatalogId &&
-          !mayResolveToInstalledEntry(installedCatalogId, body.registryEntryName)
-        ) {
+        // The registry looks an entry up by its exact name, so any other name is a
+        // different entry: refused before fetching a target that may not exist.
+        if (installedCatalogId && installedCatalogId !== body.registryEntryName) {
           identityMismatch(body.registryEntryName)
           return
         }
@@ -4192,15 +4186,11 @@ export function createAdminRegistryRouter(
         // 2. Fetch new version metadata
         const entry = await getEntryVersion(body.registryEntryName, body.registryEntryVersion)
 
-        // Install stamps the name the registry resolved (an unscoped curator alias
-        // resolves to its @clerum name), so comparing only the requested name would
-        // refuse upgrading through the same alias it was installed with. CRs written
-        // before that carry the requested name, which still has to match them.
-        if (
-          installedCatalogId &&
-          installedCatalogId !== entry.name &&
-          installedCatalogId !== body.registryEntryName
-        ) {
+        // Install stamps the name the registry returned, older installs the requested
+        // one; an exact lookup makes those the same string, so one comparison covers
+        // both. It trips only on a registry answering another entry, which would
+        // otherwise move this CR to that entry.
+        if (installedCatalogId && entry.name !== body.registryEntryName) {
           identityMismatch(entry.name)
           return
         }

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import type { K8sGateway } from '../src/k8s.js'
@@ -19,6 +19,7 @@ import {
   searchEntries,
   updateVersionMetadata,
 } from '../src/services/registryClient.js'
+import { exactRegistryFetch } from './fixtures/exactRegistry.js'
 import { malformedRow, registryEntryRow } from './fixtures/registryEntryRow.js'
 import { remoteOAuthMcpServer } from './fixtures/remoteOAuthMcpServer.js'
 import { MockGateway } from './mockGateway.js'
@@ -442,197 +443,172 @@ describe('registry install/upgrade stamp the catalog identity the registry retur
     keys: [{ name: 'API_KEY' }],
   }
 
-  it('install: alias `x-mcp` resolved to `@clerum/x-mcp` ⇒ annotation and catalogKeys use it', async () => {
-    const gw = new MockGateway(NS)
-    vi.mocked(getEntryVersion).mockResolvedValue(plainRemoteRow('@clerum/x-mcp') as never)
-    vi.mocked(getCredentialSchema).mockResolvedValue(CREDENTIAL_SCHEMA as never)
-
-    const res = await request(makeApp(gw))
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'x-srv',
-        registryEntryName: 'x-mcp',
-        registryEntryVersion: '1.0.0',
-        credentials: { API_KEY: 'k1' },
-      })
-
-    expect(res.status).toBe(201)
-    expect(await annotationsOf(gw, 'x-srv')).toMatchObject({
-      'clerum.io/catalog-id': '@clerum/x-mcp',
-      'clerum.io/catalog-version': '1.0.0',
-    })
-    expect(await secretAnnotationsOf(gw, 'x-srv-credentials')).toMatchObject({
-      'clerum.io/catalog-id': '@clerum/x-mcp',
-      'clerum.io/catalog-version': '1.0.0',
-    })
-    const installed = await getInstalledRegistryState(gw as unknown as K8sGateway)
-    expect(installed.catalogKeys).toContain('@clerum/x-mcp@1.0.0')
-    expect(installed.catalogKeys).not.toContain('x-mcp@1.0.0')
-  })
-
-  it('upgrade: alias `x-mcp` resolved to `@clerum/x-mcp` ⇒ annotation and catalogKeys use it', async () => {
-    const gw = new MockGateway(NS)
-    const app = makeApp(gw)
-    // v1 installed while the registry still answered under the unscoped name.
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(plainRemoteRow('x-mcp') as never)
-    expect(
-      (
-        await request(app).post('/admin/registry/install').send({
-          serverName: 'x-srv',
-          registryEntryName: 'x-mcp',
-          registryEntryVersion: '1.0.0',
-        })
-      ).status
-    ).toBe(201)
-
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(
-      plainRemoteRow('@clerum/x-mcp', '2.0.0') as never
-    )
-    vi.mocked(getCredentialSchema).mockResolvedValue(CREDENTIAL_SCHEMA as never)
-    const res = await request(app)
-      .post('/admin/registry/upgrade')
-      .send({
-        serverName: 'x-srv',
-        registryEntryName: 'x-mcp',
-        registryEntryVersion: '2.0.0',
-        credentials: { API_KEY: 'k2' },
-      })
-
-    expect(res.status).toBe(200)
-    expect(await annotationsOf(gw, 'x-srv')).toMatchObject({
-      'clerum.io/catalog-id': '@clerum/x-mcp',
-      'clerum.io/catalog-version': '2.0.0',
-    })
-    expect(await secretAnnotationsOf(gw, 'x-srv-credentials')).toMatchObject({
-      'clerum.io/catalog-id': '@clerum/x-mcp',
-      'clerum.io/catalog-version': '2.0.0',
-    })
-    const installed = await getInstalledRegistryState(gw as unknown as K8sGateway)
-    expect(installed.catalogKeys).toEqual(['@clerum/x-mcp@2.0.0'])
-  })
-
-  /** Installs `x-srv` through the real install route, the registry answering with `v1Row`. */
-  async function installVia(app: express.Express, registryEntryName: string, v1Row: unknown) {
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(v1Row as never)
-    vi.mocked(getCredentialSchema).mockResolvedValue(CREDENTIAL_SCHEMA as never)
-    const install = await request(app)
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'x-srv',
-        registryEntryName,
-        registryEntryVersion: '1.0.0',
-        credentials: { API_KEY: 'k1' },
-      })
-    expect(install.status).toBe(201)
-  }
-
-  const upgradeVia = (app: express.Express, registryEntryName: string, v2Row: unknown) => {
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(v2Row as never)
-    return request(app)
-      .post('/admin/registry/upgrade')
-      .send({
-        serverName: 'x-srv',
-        registryEntryName,
-        registryEntryVersion: '2.0.0',
-        credentials: { API_KEY: 'k2' },
-      })
-  }
-
-  it('install by alias then upgrade by the same alias ⇒ 200, identity follows the resolved entry', async () => {
-    const gw = new MockGateway(NS)
-    const app = makeApp(gw)
-    await installVia(app, 'x-mcp', plainRemoteRow('@clerum/x-mcp'))
-
-    const res = await upgradeVia(app, 'x-mcp', plainRemoteRow('@clerum/x-mcp', '2.0.0'))
-
-    expect(res.status).toBe(200)
-    expect(await annotationsOf(gw, 'x-srv')).toMatchObject({
-      'clerum.io/catalog-id': '@clerum/x-mcp',
-      'clerum.io/catalog-version': '2.0.0',
-    })
-    expect(await secretAnnotationsOf(gw, 'x-srv-credentials')).toMatchObject({
-      'clerum.io/catalog-id': '@clerum/x-mcp',
-      'clerum.io/catalog-version': '2.0.0',
-    })
-    const installed = await getInstalledRegistryState(gw as unknown as K8sGateway)
-    expect(installed.catalogKeys).toEqual(['@clerum/x-mcp@2.0.0'])
-  })
-
-  it('install by alias then upgrade by the scoped name ⇒ 200', async () => {
-    const gw = new MockGateway(NS)
-    const app = makeApp(gw)
-    await installVia(app, 'x-mcp', plainRemoteRow('@clerum/x-mcp'))
-
-    const res = await upgradeVia(app, '@clerum/x-mcp', plainRemoteRow('@clerum/x-mcp', '2.0.0'))
-
-    expect(res.status).toBe(200)
-    const installed = await getInstalledRegistryState(gw as unknown as K8sGateway)
-    expect(installed.catalogKeys).toEqual(['@clerum/x-mcp@2.0.0'])
-  })
-
-  it.each([
-    // [installed via, v1 resolved as, upgrade requested, v2 resolved as]
-    ['alias install, other alias', 'x-mcp', '@clerum/x-mcp', 'y-mcp', '@clerum/y-mcp'],
-    ['alias install, other scoped entry', 'x-mcp', '@clerum/x-mcp', '@acme/y-mcp', '@acme/y-mcp'],
-    ['legacy alias annotation, other entry', 'x-mcp', 'x-mcp', '@acme/y-mcp', '@acme/y-mcp'],
-    ['scoped install, other entry', '@clerum/x-mcp', '@clerum/x-mcp', 'y-mcp', '@clerum/y-mcp'],
-  ])(
-    '%s ⇒ 409 mcp_server_entry_identity_mismatch, nothing written',
-    async (_label, installName, v1Name, upgradeName, v2Name) => {
-      const gw = new MockGateway(NS)
-      const app = makeApp(gw)
-      await installVia(app, installName, plainRemoteRow(v1Name))
-      const before = await gw.getResource('mcpservers', 'x-srv', NS)
-      const beforeSecret = await gw.getSecret('x-srv-credentials', NS)
-      const writes = spyWrites(gw)
-
-      const res = await upgradeVia(app, upgradeName, plainRemoteRow(v2Name, '2.0.0'))
-
-      expect(res.status).toBe(409)
-      expect(res.body.error).toBe('mcp_server_entry_identity_mismatch')
-      for (const write of writes) expect(write).not.toHaveBeenCalled()
-      expect(await gw.getResource('mcpservers', 'x-srv', NS)).toEqual(before)
-      expect(await gw.getSecret('x-srv-credentials', NS)).toEqual(beforeSecret)
-    }
-  )
-
-  it.each([
-    // [installed via, v1 resolved as, upgrade requested]
-    ['scoped install, other scoped entry', '@clerum/x-mcp', '@clerum/x-mcp', '@acme/gone-mcp'],
-    [
-      'scoped install, same name under another scope',
-      '@clerum/x-mcp',
-      '@clerum/x-mcp',
-      '@acme/x-mcp',
-    ],
-    ['alias install, other alias', 'x-mcp', '@clerum/x-mcp', 'gone-mcp'],
-    ['legacy alias annotation, its scoped form', 'x-mcp', 'x-mcp', '@clerum/x-mcp'],
-  ])(
-    '%s that the registry does not have ⇒ 409 mcp_server_entry_identity_mismatch, not the registry 404',
-    async (_label, installName, v1Name, upgradeName) => {
-      const gw = new MockGateway(NS)
-      const app = makeApp(gw)
-      await installVia(app, installName, plainRemoteRow(v1Name))
-      const writes = spyWrites(gw)
-      vi.mocked(getEntryVersion).mockRejectedValueOnce(
-        Object.assign(new Error('Registry 404'), { status: 404 })
+  // The real registry client over an exact (name, version) registry: what a lookup
+  // returns, and the 404 it throws for anything else, come from the code the app runs.
+  let realGetEntryVersion: typeof getEntryVersion
+  beforeAll(async () => {
+    realGetEntryVersion = (
+      await vi.importActual<typeof import('../src/services/registryClient.js')>(
+        '../src/services/registryClient.js'
       )
+    ).getEntryVersion
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
 
-      const res = await request(app)
-        .post('/admin/registry/upgrade')
-        .send({
-          serverName: 'x-srv',
-          registryEntryName: upgradeName,
-          registryEntryVersion: '2.0.0',
-          credentials: { API_KEY: 'k2' },
-        })
+  function serveRegistry(...rows: Array<{ name: string; version: string }>) {
+    vi.stubGlobal('fetch', vi.fn(exactRegistryFetch(rows)))
+    vi.mocked(getEntryVersion).mockImplementation(realGetEntryVersion)
+    vi.mocked(getCredentialSchema).mockResolvedValue(CREDENTIAL_SCHEMA as never)
+  }
+
+  /** Installs `x-srv` v1.0.0 of `registryEntryName` through the real install route. */
+  async function install(app: express.Express, registryEntryName: string) {
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'x-srv',
+        registryEntryName,
+        registryEntryVersion: '1.0.0',
+        credentials: { API_KEY: 'k1' },
+      })
+    expect(res.status).toBe(201)
+  }
+
+  const upgrade = (app: express.Express, registryEntryName: string) =>
+    request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'x-srv',
+        registryEntryName,
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: 'k2' },
+      })
+
+  /** The installed CR and its credential Secret, to assert an upgrade left them as they were. */
+  const snapshot = async (gw: MockGateway) => ({
+    cr: await gw.getResource('mcpservers', 'x-srv', NS),
+    secret: await gw.getSecret('x-srv-credentials', NS),
+  })
+
+  it('install then upgrade by the scoped name ⇒ annotation and catalogKeys follow the entry', async () => {
+    serveRegistry(plainRemoteRow('@clerum/x-mcp'), plainRemoteRow('@clerum/x-mcp', '2.0.0'))
+    const gw = new MockGateway(NS)
+    const app = makeApp(gw)
+
+    await install(app, '@clerum/x-mcp')
+
+    expect(await annotationsOf(gw, 'x-srv')).toMatchObject({
+      'clerum.io/catalog-id': '@clerum/x-mcp',
+      'clerum.io/catalog-version': '1.0.0',
+    })
+    expect(await secretAnnotationsOf(gw, 'x-srv-credentials')).toMatchObject({
+      'clerum.io/catalog-id': '@clerum/x-mcp',
+      'clerum.io/catalog-version': '1.0.0',
+    })
+    expect((await getInstalledRegistryState(gw as unknown as K8sGateway)).catalogKeys).toEqual([
+      '@clerum/x-mcp@1.0.0',
+    ])
+
+    const res = await upgrade(app, '@clerum/x-mcp')
+
+    expect(res.status).toBe(200)
+    expect(await annotationsOf(gw, 'x-srv')).toMatchObject({
+      'clerum.io/catalog-id': '@clerum/x-mcp',
+      'clerum.io/catalog-version': '2.0.0',
+    })
+    expect(await secretAnnotationsOf(gw, 'x-srv-credentials')).toMatchObject({
+      'clerum.io/catalog-id': '@clerum/x-mcp',
+      'clerum.io/catalog-version': '2.0.0',
+    })
+    expect((await getInstalledRegistryState(gw as unknown as K8sGateway)).catalogKeys).toEqual([
+      '@clerum/x-mcp@2.0.0',
+    ])
+  })
+
+  it('installed from `@clerum/x-mcp`, upgrade requested as `x-mcp` ⇒ 409 without reading the registry', async () => {
+    serveRegistry(plainRemoteRow('@clerum/x-mcp'), plainRemoteRow('@clerum/x-mcp', '2.0.0'))
+    const gw = new MockGateway(NS)
+    const app = makeApp(gw)
+    await install(app, '@clerum/x-mcp')
+    const before = await snapshot(gw)
+    vi.mocked(getEntryVersion).mockClear()
+    const writes = spyWrites(gw)
+
+    const res = await upgrade(app, 'x-mcp')
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({
+      error: 'mcp_server_entry_identity_mismatch',
+      reason:
+        'McpServer "x-srv" was installed from "@clerum/x-mcp", not "x-mcp" — uninstall and install to change entry',
+    })
+    expect(getEntryVersion).not.toHaveBeenCalled()
+    for (const write of writes) expect(write).not.toHaveBeenCalled()
+    expect(await snapshot(gw)).toEqual(before)
+  })
+
+  it.each([
+    // [installed from, upgrade requested]
+    ['scoped install, its unscoped name', '@clerum/x-mcp', 'x-mcp'],
+    ['scoped install, another unscoped entry', '@clerum/x-mcp', 'y-mcp'],
+    ['scoped install, same name under another scope', '@clerum/x-mcp', '@acme/x-mcp'],
+    ['scoped install, an entry the registry does not have', '@clerum/x-mcp', '@acme/gone-mcp'],
+    ['unscoped install, its scoped name', 'x-mcp', '@clerum/x-mcp'],
+    ['unscoped install, another unscoped entry', 'x-mcp', 'y-mcp'],
+  ])(
+    '%s ⇒ 409 mcp_server_entry_identity_mismatch without reading the registry, nothing written',
+    async (_label, installedFrom, requested) => {
+      // Every v2 the case names is in the registry except `@acme/gone-mcp`, so a fetch
+      // would find the target: only the identity check can refuse it.
+      serveRegistry(
+        plainRemoteRow(installedFrom),
+        ...['x-mcp', 'y-mcp', '@clerum/x-mcp', '@acme/x-mcp'].map(name =>
+          plainRemoteRow(name, '2.0.0')
+        )
+      )
+      const gw = new MockGateway(NS)
+      const app = makeApp(gw)
+      await install(app, installedFrom)
+      const before = await snapshot(gw)
+      vi.mocked(getEntryVersion).mockClear()
+      const writes = spyWrites(gw)
+
+      const res = await upgrade(app, requested)
 
       expect(res.status).toBe(409)
       expect(res.body).toEqual({
         error: 'mcp_server_entry_identity_mismatch',
-        reason: `McpServer "x-srv" was installed from "${v1Name}", not "${upgradeName}" — uninstall and install to change entry`,
+        reason: `McpServer "x-srv" was installed from "${installedFrom}", not "${requested}" — uninstall and install to change entry`,
       })
+      expect(getEntryVersion).not.toHaveBeenCalled()
       for (const write of writes) expect(write).not.toHaveBeenCalled()
+      expect(await snapshot(gw)).toEqual(before)
     }
   )
+
+  it('registry answers a different entry than requested ⇒ 409 mcp_server_entry_identity_mismatch, nothing written', async () => {
+    serveRegistry(plainRemoteRow('@clerum/x-mcp'))
+    const gw = new MockGateway(NS)
+    const app = makeApp(gw)
+    await install(app, '@clerum/x-mcp')
+    const before = await snapshot(gw)
+    // A registry breaking its exact lookup: asked for `@clerum/x-mcp@2.0.0`, it
+    // answers another entry.
+    vi.mocked(getEntryVersion).mockResolvedValue(plainRemoteRow('@acme/y-mcp', '2.0.0') as never)
+    const writes = spyWrites(gw)
+
+    const res = await upgrade(app, '@clerum/x-mcp')
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({
+      error: 'mcp_server_entry_identity_mismatch',
+      reason:
+        'McpServer "x-srv" was installed from "@clerum/x-mcp", not "@acme/y-mcp" — uninstall and install to change entry',
+    })
+    expect(getEntryVersion).toHaveBeenCalledWith('@clerum/x-mcp', '2.0.0')
+    for (const write of writes) expect(write).not.toHaveBeenCalled()
+    expect(await snapshot(gw)).toEqual(before)
+  })
 })

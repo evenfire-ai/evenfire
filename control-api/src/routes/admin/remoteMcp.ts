@@ -248,9 +248,9 @@ async function resolveCatalogInstallTarget(input: {
     return { ok: false, body: { error: 'catalog_entry_invalid', reason: verdict.reason } }
   }
 
-  // The registry may resolve an alias (`x` → `@clerum/x`), a different case or
-  // `latest`. The slot name is hashed from the raw string, so accepting a request
-  // spelled differently from the entry would give one item two names per slot.
+  // The registry looks the entry up by exact name and version, so this only trips on
+  // a registry answering another entry. The slot name is hashed from the requested
+  // string, so accepting a different entry would give one slot two names.
   if (entry.name !== input.catalogEntry.name || entry.version !== input.catalogEntry.version) {
     return {
       ok: false,
