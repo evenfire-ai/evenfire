@@ -58,10 +58,10 @@ For each remote McpServer, host-context-controller:
    and an absent name is rejected as undeclared, because it would otherwise
    survive into the rendered config, where NGINX resolves it as one of its
    own variables. HCC does not filter an `envSecret` declaration out of the
-   effective env to make it undeclared. Except for the six pinned names,
-   which are stripped from every source, the Deployment still carries the
-   `secretKeyRef` of an `envSecret` entry named, for example, `PATH`,
-   `LC_ALL`, a resolver-pair name or a `KUBERNETES_*` name, and that name is
+   effective env to make it undeclared. Except for the six pinned names and
+   the resolver pair, which are stripped from every source, the Deployment
+   still carries the `secretKeyRef` of an `envSecret` entry named, for
+   example, `PATH`, `LC_ALL` or a `KUBERNETES_*` name, and that name is
    in the effective env; its placeholder is refused by an earlier step
    above, not for being undeclared. A `spec.env` entry is different: a
    forbidden name there is stripped before the env is built (compared in
@@ -80,8 +80,10 @@ For each remote McpServer, host-context-controller:
    `15-local-resolvers.envsh` exports `NGINX_LOCAL_RESOLVERS` after the
    template check when `NGINX_ENTRYPOINT_LOCAL_RESOLVERS` is set, so a
    placeholder of either name would be filled with a value the check never
-   saw. HCC rejects both names as placeholders and does not strip them. A CRD
-   may still set them; the only reference to either name in a template HCC
+   saw. HCC rejects both names as placeholders and strips them from every
+   remote-server env source, then appends its own
+   `NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1`, so a CRD-supplied value of either
+   name is never effective. The only reference to either name in a template HCC
    renders is the template's own `resolver` line, and the check runs before
    the envsh exports the value. The proxy env the platform sets
    (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS`, `NGINX_ENVSUBST_FILTER`,
