@@ -745,6 +745,7 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
     const { service, parentWindow, runtime, mainWindow } = await setupWithLiveFirstApp()
     const pluginId = 'sandbox-recipes/first-app'
     const mount = initialMount()
+    const scheduled = vi.spyOn(globalThis, 'setTimeout')
     let reads = 0
     let releaseRecheck!: () => void
     let recheckStarted!: () => void
@@ -799,7 +800,24 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
     await service.openSandboxUi(openArgs('first-app', parentWindow))
     const replacementView = electronMocks.views[1]!
     const replacementCallStart = replacementView.setVisible.mock.calls.length
+    const timerCallStart = scheduled.mock.calls.length
     releaseRecheck()
+    await flushUntil(
+      () =>
+        secondSettled ||
+        scheduled.mock.calls
+          .slice(timerCallStart)
+          .some(
+            ([, delay]) =>
+              typeof delay === 'number' && delay > 0 && delay <= CONSENT_PROMPT_COOLDOWN_MS
+          )
+    )
+    const staleCooldownStarted = scheduled.mock.calls
+      .slice(timerCallStart)
+      .some(
+        ([, delay]) => typeof delay === 'number' && delay > 0 && delay <= CONSENT_PROMPT_COOLDOWN_MS
+      )
+    if (staleCooldownStarted) await vi.advanceTimersByTimeAsync(CONSENT_PROMPT_COOLDOWN_MS)
     await flushUntil(() => secondSettled)
     await Promise.all([first, second])
 
@@ -819,6 +837,7 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
       stalePromptPresented: false,
       staleHide: false,
     })
+    expect(staleCooldownStarted).toBe(false)
   })
 
   it('does not recheck a queued request after its mount is replaced before dequeue', async () => {
