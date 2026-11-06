@@ -58,14 +58,14 @@ Set boolean switches to the lowercase string `true`. Some services also accept
 
 ## On by default
 
-| Switch                                            | Service                  | Note                                                                             |
-| ------------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------- |
-| `CLERUM_ENABLE_APPROVAL`                          | mcp-host                 | Human approval gate ([Configure approvals](../how-to/configure-approvals.md))    |
-| `LLM_CATALOG_SYNC_CRON_ENABLED`                   | control-api              | models.dev catalog sync; enables eligible new models, capped per run (below)     |
-| `LLM_CATALOG_BOOT_SYNC_ENABLED`                   | control-api              | One catalog sync at start when the cron is off, retried until models.dev answers |
-| `CLERUM_ENABLE_RESPONSE_ATTACHMENTS`              | channel-reader, mcp-host | Send generated files back to channels                                            |
-| `WRC_ENABLE_DETERMINISTIC`                        | workflow-recipes         | Deterministic workflow steps                                                     |
-| `WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED` | control-api              | Deliver workflow approval notifications                                          |
+| Switch                                            | Service                  | Note                                                                          |
+| ------------------------------------------------- | ------------------------ | ----------------------------------------------------------------------------- |
+| `CLERUM_ENABLE_APPROVAL`                          | mcp-host                 | Human approval gate ([Configure approvals](../how-to/configure-approvals.md)) |
+| `LLM_CATALOG_SYNC_CRON_ENABLED`                   | control-api              | models.dev catalog sync; enables eligible new models, capped per run (below)  |
+| `LLM_CATALOG_BOOT_SYNC_ENABLED`                   | control-api              | One sync at start when the cron is off, retried until a live, plausible run   |
+| `CLERUM_ENABLE_RESPONSE_ATTACHMENTS`              | channel-reader, mcp-host | Send generated files back to channels                                         |
+| `WRC_ENABLE_DETERMINISTIC`                        | workflow-recipes         | Deterministic workflow steps                                                  |
+| `WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED` | control-api              | Deliver workflow approval notifications                                       |
 
 The catalog sync enables a new model only when its provider's catalog policy is
 ON and the model is eligible. One run enables at most

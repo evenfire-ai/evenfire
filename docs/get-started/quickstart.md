@@ -74,8 +74,8 @@ CLERUM_MODEL_PROVIDER=openai     # optional with one key: openai | claude | zai 
 > `CLERUM_CATALOG_WAIT_SECONDS`). When the catalog did not enable the agent's
 > model, setup adds or enables it through the admin API. That is the case for
 > the zai default `glm-5.1`, which models.dev does not list, and for Bailian,
-> whose models are never auto-enabled. Setup then stops if the model is still
-> not enabled. A model added this way has no price, so cost budgets do not
+> whose models are not auto-enabled with the default policy. Setup then stops
+> if the model is still not enabled. A model added this way has no price, so cost budgets do not
 > limit it until you price it under **Cost → LLM prices**. Details, warning
 > codes, and the reused-DB and no-egress cases:
 > [LLM providers § 4.7](../llm-providers/README.md#47-local-minikube-make-minikube-setup).

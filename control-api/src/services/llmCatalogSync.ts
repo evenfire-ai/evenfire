@@ -32,10 +32,14 @@
  * lock) is on, the model passes the eligibility rules (`autoEnableRejection`),
  * and no operator removed the pair before (a row in `llm_catalog_dismissed`).
  * The tombstone is read INSIDE the INSERT statement, never from an earlier
- * read: a DELETE that commits after this run started must still be seen. A
- * tombstoned pair is still inserted, only disabled. Rows that already exist
- * never change `enabled` — whatever an operator decided stands, and so does a
- * model inserted disabled that models.dev later fixes.
+ * read: a DELETE that commits after this run started must still be seen. One
+ * window is accepted: if an operator creates the pair and then deletes it while
+ * this INSERT is waiting on the `(provider, model)` conflict arbiter, the
+ * tombstone was evaluated before that DELETE committed and the row can land
+ * enabled. It takes two admin operations on the same pair within the same
+ * milliseconds. A tombstoned pair is still inserted, only disabled. Rows that
+ * already exist never change `enabled` — whatever an operator decided stands,
+ * and so does a model inserted disabled that models.dev later fixes.
  *
  * A run that cannot decide (vendored, or a live catalog that fails the
  * plausibility floor) does NOT insert models of providers whose policy is on.

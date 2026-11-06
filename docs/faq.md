@@ -65,8 +65,8 @@ Details (category-level, no product rankings):
   or `MODELS_DEV_API_URL` unreachable). Nothing is auto-enabled then.
 - On minikube, setup adds or enables the Host's model through the admin API in
   Step 10 when the catalog did not (the zai default `glm-5.1` is not on
-  models.dev; Bailian models are never auto-enabled). It then stops if the
-  model is still not enabled (`HOST_MODEL_UNKNOWN`, `HOST_MODEL_DISABLED`,
+  models.dev; with the default policy, Bailian models are not auto-enabled).
+  It then stops if the model is still not enabled (`HOST_MODEL_UNKNOWN`, `HOST_MODEL_DISABLED`,
   `HOST_MODEL_CHECK_FAILED`), or if the admin API refused
   (`LLM_MODEL_ENSURE_FAILED`). On a reused DB (`REUSE_DB=true`) it does not
   re-enable a model that was already disabled, or re-create one an operator
