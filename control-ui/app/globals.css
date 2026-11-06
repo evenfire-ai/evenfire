@@ -2909,8 +2909,8 @@ textarea.cu-input {
   width: 9rem;
 }
 
-.cu-marketplace-table th:nth-child(4),
-.cu-marketplace-table td:nth-child(4) {
+.cu-marketplace-table th:nth-child(5),
+.cu-marketplace-table td:nth-child(5) {
   width: 3.5rem;
   text-align: right;
 }
