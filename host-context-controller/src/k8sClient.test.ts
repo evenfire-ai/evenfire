@@ -387,6 +387,7 @@ vi.mock('./reconciler', () => ({
     rolloutObservationRequiresReconcile() {
       return false
     }
+    probeSecretAccess = vi.fn()
     recordSecretChangeEvidence = vi.fn()
     fullReconcile = mocks.serverFullReconcile
     reconcile = vi.fn()

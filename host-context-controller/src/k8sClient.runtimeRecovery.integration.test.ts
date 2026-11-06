@@ -32,7 +32,7 @@ const fixture = vi.hoisted(() => ({
   failPublication: undefined as undefined | ((body: any[]) => boolean),
   server: undefined as any,
   peers: [] as any[],
-  readService: undefined as undefined | (() => Promise<void>),
+  readService: undefined as undefined | ((name: string) => Promise<void>),
 }))
 
 vi.mock('./config', () => ({
@@ -104,7 +104,7 @@ vi.mock('@kubernetes/client-node', async importOriginal => {
       fixture.services.delete(name)
     },
     readNamespacedService: async ({ name }: any) => {
-      await fixture.readService?.()
+      await fixture.readService?.(name)
       return read(fixture.services, name)
     },
     createNamespacedService: async ({ namespace, body }: any) =>
@@ -1205,27 +1205,306 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       }
     })
 
-    it('I14 a denied Secret read fails closed and D2 restores the server once access returns (#1338 H1)', async () => {
+    async function secretAccessProbes(outcome: string): Promise<number> {
+      return informerCounter('clerum_hcc_secret_access_probes_total', { outcome })
+    }
+
+    async function denyWitness(state: any) {
+      failNext('witness-input', forbidden)
+      await state.reconciler.reconcile(state.servers.get(witness))
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([witness])
+    }
+
+    it('I14 a denied Secret read fails closed, uses no retry, and the probe restores the server once access returns', async () => {
       const state = await startCertified()
       const retriesBefore = await retryCount()
       const readsBefore = reads('witness-input')
       failNext('witness-input', forbidden)
+      const reconciled = recordReconciledNames(state)
 
       await state.reconciler.reconcile(state.servers.get(witness))
+      reconciled.length = 0
 
       expect(reads('witness-input')).toBe(readsBefore + 1)
       expect(fixture.deployments.has(witness)).toBe(false)
       expect(state.reconciler.getStatus(witness).ready).toBe(false)
-      expect(state.reconciler.hasIncompleteReconciliation()).toBe(true)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(await retryCount()).toBe(retriesBefore)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(false)
 
-      await vi.advanceTimersByTimeAsync(5000)
+      const deniedBefore = await secretAccessProbes('denied')
+      failNext('witness-input', forbidden)
+      await vi.advanceTimersByTimeAsync(60_000)
       await drain(state)
 
-      expect(await retryCount()).toBe(retriesBefore + 1)
       expect(reads('witness-input')).toBe(readsBefore + 2)
+      expect(reconciled).toEqual([])
+      expect(fixture.deployments.has(witness)).toBe(false)
+      expect(await secretAccessProbes('denied')).toBe(deniedBefore + 1)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(readsBefore + 4)
+      expect(reconciled).toEqual([witness])
       expect(fixture.deployments.has(witness)).toBe(true)
       expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([])
+      expect(await retryCount()).toBe(retriesBefore)
+    })
+
+    it('I22b stop ends the probe ticks', async () => {
+      const state = await startCertified()
+      await denyWitness(state)
+      failNext('witness-input', forbidden)
+      const probe = vi.spyOn(state, 'probeMcpServerSecretAccess')
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+      expect(probe).toHaveBeenCalledTimes(1)
+      const readsAtStop = reads('witness-input')
+
+      await watcher!.stop()
+      expect(state.secretAccessProbeTimer).toBeNull()
+      await vi.advanceTimersByTimeAsync(180_000)
+
+      expect(probe).toHaveBeenCalledTimes(1)
+      expect(reads('witness-input')).toBe(readsAtStop)
+    })
+
+    it('I22c with nothing denied a tick issues no read and no probe', async () => {
+      const state = await startCertified()
+      const readsBefore = reads('witness-input')
+      const accessor = vi.spyOn(state.reconciler, 'namesAwaitingExternalChange')
+      const probe = vi.spyOn(state.reconciler, 'probeSecretAccess')
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(accessor).toHaveBeenCalledTimes(1)
+      expect(probe).not.toHaveBeenCalled()
+      expect(reads('witness-input')).toBe(readsBefore)
+    })
+
+    it('I23 the probe in-flight guard holds through the fan-out', async () => {
+      config.netPolResyncIntervalSec = 0
+      const state = await startCertified({ withPeer: true })
+      await denyWitness(state)
+      failNext('peer-input', forbidden)
+      await state.reconciler.reconcile(state.servers.get(peer))
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([
+        witness,
+        peer,
+      ])
+      const reconciled = recordReconciledNames(state)
+      const entered = deferred()
+      const release = deferred()
+      fixture.readService = async name => {
+        if (name !== witness) return
+        entered.resolve()
+        await release.promise
+      }
+      failNext('peer-input', forbidden)
+      const witnessBefore = reads('witness-input')
+      const peerBefore = reads('peer-input')
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await entered.promise
+      await until(
+        () => state.reconciler.namesAwaitingExternalChange('SecretAccessDenied').length === 1
+      )
+
+      // Probe read and the reconcile's read for the witness; the peer returned to the set.
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+      expect(reads('peer-input')).toBe(peerBefore + 1)
+      expect([...reconciled].sort()).toEqual([peer, witness])
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([peer])
+
+      await vi.advanceTimersByTimeAsync(60_000)
+
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+      expect(reads('peer-input')).toBe(peerBefore + 1)
+
+      release.resolve()
+      fixture.readService = undefined
+      failNext('peer-input', forbidden)
+      await drain(state)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('peer-input')).toBe(peerBefore + 2)
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+      expect(reconciled).toHaveLength(2)
+    })
+
+    it('I24 the probe does not act without inventory authority', async () => {
+      config.netPolResyncIntervalSec = 3600
+      const state = await startCertified()
+      await denyWitness(state)
+      // Fold the fail-closed status through a real LIST; that pass is still denied.
+      failNext('witness-input', forbidden)
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([witness])
+      const probe = vi.spyOn(state.reconciler, 'probeSecretAccess')
+      const readsBefore = reads('witness-input')
+      state.retireMcpServerWatch()
+
+      await vi.advanceTimersByTimeAsync(60_000)
+
+      expect(reads('witness-input')).toBe(readsBefore)
+      expect(probe).not.toHaveBeenCalled()
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([witness])
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      failNext('witness-input', forbidden)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(probe).toHaveBeenCalledTimes(1)
+
+      // Part two: the queued wake finds its authority gone.
+      const reconciled = recordReconciledNames(state)
+      const info = vi.spyOn(hccLogger, 'info')
+      const { blocker, started, release } = holdQueue(state)
+      await started.promise
+      await vi.advanceTimersByTimeAsync(60_000)
+      state.retireMcpServerWatch()
+      release.resolve()
+      await blocker
+      await drain(state)
+
+      expect(reconciled).toEqual([])
       expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(
+        info.mock.calls.filter(call => call[1]?.event === 'mcpserver-verdict-reobservation')
+      ).toHaveLength(1)
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([witness])
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(reconciled).toContain(witness)
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(fixture.deployments.has(witness)).toBe(true)
+    })
+
+    it.each([
+      ['a timeout', timeout],
+      ['a 500', () => Object.assign(new Error('fixture failure'), { code: 500 })],
+    ] as const)(
+      'I29 a probe answered by %s changes nothing and reads again next tick',
+      async (_label, failure) => {
+        const { state } = await startStuckCertified({ withPeer: true })
+        failNext('peer-input', forbidden)
+        await state.reconciler.reconcile(state.servers.get(peer))
+        const reconciled = recordReconciledNames(state)
+        const patchesBefore = fixture.statusPatches
+        const readsBefore = reads('peer-input')
+        const failedBefore = await secretAccessProbes('failed')
+        failNext('peer-input', failure, forbidden)
+
+        await vi.advanceTimersByTimeAsync(60_000)
+        await drain(state)
+
+        expect(reads('peer-input')).toBe(readsBefore + 1)
+        expect(reconciled).toEqual([])
+        expect(fixture.statusPatches).toBe(patchesBefore)
+        expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([peer])
+        expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+        expect(await secretAccessProbes('failed')).toBe(failedBefore + 1)
+
+        await vi.advanceTimersByTimeAsync(60_000)
+        await drain(state)
+        expect(reads('peer-input')).toBe(readsBefore + 2)
+      }
+    )
+
+    it('I30 a successful probe wakes every denied server, and one still denied returns to the set', async () => {
+      const state = await startCertified({ withPeer: true })
+      await denyWitness(state)
+      failNext('peer-input', forbidden)
+      await state.reconciler.reconcile(state.servers.get(peer))
+      const witnessBefore = reads('witness-input')
+      const peerBefore = reads('peer-input')
+      failNext('peer-input', forbidden)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+      expect(reads('peer-input')).toBe(peerBefore + 1)
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([peer])
+
+      failNext('peer-input', forbidden)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('peer-input')).toBe(peerBefore + 2)
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+    })
+
+    it('I31 a Secret that is gone answers the probe 404, and the reconcile publishes SecretNotFound', async () => {
+      const state = await startCertified()
+      await denyWitness(state)
+      const readsBefore = reads('witness-input')
+      failNext('witness-input', absentInput, absentInput)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(readsBefore + 2)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'SecretResolved', reason: 'SecretNotFound' }),
+        ])
+      )
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([])
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+      expect(reads('witness-input')).toBe(readsBefore + 2)
+    })
+
+    it('I32 a recovered access wakes denied servers at most 10 at a time', async () => {
+      const names = Array.from({ length: 12 }, (_value, index) => `denied-${index}`)
+      fixture.peers = names.map(name => {
+        const sibling = structuredClone(fixture.server)
+        sibling.metadata = { ...sibling.metadata, name, uid: `${name}-uid` }
+        sibling.spec.envSecret = { name: `${name}-input`, keys: [] }
+        return sibling
+      })
+      const state = await startCertified()
+      for (const name of names) {
+        failNext(`${name}-input`, forbidden)
+        await state.reconciler.reconcile(state.servers.get(name))
+      }
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual(names)
+      const release = deferred()
+      let serviceReads = 0
+      fixture.readService = async () => {
+        serviceReads++
+        await release.promise
+      }
+      const reconciled = recordReconciledNames(state)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+
+      expect(reconciled).toHaveLength(10)
+      expect(serviceReads).toBe(10)
+
+      release.resolve()
+      fixture.readService = undefined
+      await drain(state)
+      await until(() => reconciled.length === 12)
+      await drain(state)
+
+      expect([...reconciled].sort()).toEqual([...names].sort())
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([])
+      for (const name of names) expect(fixture.deployments.has(name)).toBe(true)
     })
 
     it('I15 evidence for a server that left the inventory no longer requests recovery passes (#1338 M1)', async () => {

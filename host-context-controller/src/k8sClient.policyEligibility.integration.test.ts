@@ -227,6 +227,9 @@ vi.mock('./reconciler', () => ({
     rolloutObservationRequiresReconcile() {
       return false
     }
+    probeSecretAccess() {
+      return Promise.resolve('no-target')
+    }
     recordSecretChangeEvidence() {}
     setInventoryAuthority() {}
     setResolveCurrentServer() {}

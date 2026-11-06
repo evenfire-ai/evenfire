@@ -34,6 +34,7 @@ import {
   createsTotal,
   mcpserverMissingSecret,
   mcpserverReconcileCallFailuresTotal,
+  secretAccessProbesTotal,
 } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
@@ -43,6 +44,7 @@ import {
   deploymentMatchesDesired,
   ensureResource,
   getErrorCode,
+  mapSettledWithConcurrency,
   observeCreate,
   observeExistenceRead,
   preserveDeploymentAnnotations,
@@ -136,6 +138,8 @@ type VerdictCallSite = 'secret_read' | 'resource_sync' | 'pre_deploy_handshake' 
 
 /** A published verdict only a change outside HCC can move. See verdictsAwaitingExternalChange. */
 export type VerdictAwaitingExternalChange = 'RolloutIncomplete' | 'SecretAccessDenied'
+
+export type SecretAccessProbeOutcome = 'allowed' | 'denied' | 'failed' | 'no-target'
 
 /**
  * Transport error codes that mean the request got no answer from the
@@ -319,37 +323,6 @@ function throwCleanupFailures(failures: unknown[], message: string): void {
   if (failures.length > 0) {
     throw new AggregateError(failures, message)
   }
-}
-
-async function mapSettledWithConcurrency<T, TResult>(
-  items: readonly T[],
-  maxConcurrency: number,
-  work: (item: T, index: number) => Promise<TResult>
-): Promise<Array<PromiseSettledResult<TResult>>> {
-  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
-    throw new RangeError('maxConcurrency must be a positive integer')
-  }
-
-  const results = new Array<PromiseSettledResult<TResult>>(items.length)
-  let nextIndex = 0
-  const worker = async (): Promise<void> => {
-    while (nextIndex < items.length) {
-      const index = nextIndex
-      nextIndex += 1
-      try {
-        results[index] = {
-          status: 'fulfilled',
-          value: await work(items[index], index),
-        }
-      } catch (reason) {
-        results[index] = { status: 'rejected', reason }
-      }
-    }
-  }
-
-  const workerCount = Math.min(maxConcurrency, items.length)
-  await Promise.all(Array.from({ length: workerCount }, () => worker()))
-  return results
 }
 
 /**
@@ -614,6 +587,44 @@ export class McpServerReconciler {
         poll => (poll.timer !== undefined || poll.ticking) && this.readinessPollStillDesired(poll)
       )
     )
+  }
+
+  /**
+   * Test HCC's Secret access with one read for the first name that has an
+   * envSecret. Authorization runs before lookup, so a 404 means access works;
+   * the reconcile that follows publishes SecretNotFound. The response is
+   * discarded, and this writes no status.
+   */
+  async probeSecretAccess(names: string[]): Promise<SecretAccessProbeOutcome> {
+    const outcome = await this.runSecretAccessProbe(names)
+    secretAccessProbesTotal.inc({ outcome })
+    return outcome
+  }
+
+  private async runSecretAccessProbe(names: string[]): Promise<SecretAccessProbeOutcome> {
+    const target = names
+      .map(name => this.resolveCurrentServer?.(name))
+      .find(server => server?.spec.envSecret !== undefined)
+    const secretName = target?.spec.envSecret?.name
+    if (target === undefined || secretName === undefined) return 'no-target'
+    try {
+      await this.coreApi.readNamespacedSecret({
+        name: secretName,
+        namespace: target.namespace,
+      })
+      return 'allowed'
+    } catch (error: unknown) {
+      const code = getErrorCode(error)
+      if (code === 404) return 'allowed'
+      if (code === 401 || code === 403) return 'denied'
+      hccLogger.warn('Secret access probe failed', {
+        scope: '[Reconciler]',
+        resourceName: secretName,
+        name: target.name,
+        err: error,
+      })
+      return 'failed'
+    }
   }
 
   private readinessPollStillDesired(poll: ReadinessPollState): boolean {
@@ -3155,11 +3166,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         isCurrent
       )
       if (retract && !retract.retracted && !retract.foreignRuntime) return false
-      // #1338 H1: a 401/403 is an answer about HCC's identity or
-      // authorization, not about the Secret, so no Secret event follows when
-      // it recovers. The fail-closed verdict stands, and the obligation stays
-      // pending so D2's bounded retry re-reads the Secret.
-      if (secretResult.reason === 'SecretAccessDenied') return false
+      // A 401/403 is an answer about HCC's identity or authorization, not about
+      // the Secret, so no Secret event follows when it recovers. The fail-closed
+      // verdict stands, and the watcher's access probe re-enqueues the server.
+      if (secretResult.reason === 'SecretAccessDenied') {
+        this.verdictsAwaitingExternalChange.set(server.name, 'SecretAccessDenied')
+      }
       return withdrawRuntime && cleanupComplete && isCurrent()
     }
 
@@ -3445,9 +3457,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
-      // #1338 H1: as in the managed branch, a denied read leaves the
-      // obligation pending for D2's retry.
-      if (secretResult.reason === 'SecretAccessDenied') return false
+      // As in the managed branch, the access probe re-enqueues a denied server.
+      if (secretResult.reason === 'SecretAccessDenied') {
+        this.verdictsAwaitingExternalChange.set(server.name, 'SecretAccessDenied')
+      }
       return shouldFailClosedForSecretFailure(secretResult.reason) && isCurrent()
     }
 

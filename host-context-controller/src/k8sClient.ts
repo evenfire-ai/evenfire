@@ -102,7 +102,7 @@ import {
   SharedFileSystemCRD,
   SharedFileSystemSpec,
 } from './types'
-import { getErrorCode } from './utils'
+import { getErrorCode, mapSettledWithConcurrency } from './utils'
 
 // Only initialize K8s client if not in dev mode
 let customObjectsApi: k8s.CustomObjectsApi | null = null
@@ -137,6 +137,11 @@ const PLURAL_LLMHOOKS = 'llmhooks'
 // sweep made provider.start() fail and Kubernetes restarted HCC. These retries
 // retain that convergence guarantee now that the sweeps run in the background.
 const INITIAL_CONVERGENCE_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
+// While a McpServer is denied, one Secret read per minute tests HCC's access.
+const MCP_SERVER_SECRET_ACCESS_PROBE_INTERVAL_MS = 60_000
+// A recovered access wakes every denied server at once, and each one recreates
+// its runtime. Same bound as the fleet pass.
+const MCP_SERVER_SECRET_ACCESS_WAKE_CONCURRENCY = 10
 
 const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
 // Retry-after-failure pacing for the three hardened inventory lanes
@@ -233,7 +238,7 @@ type HostSnapshot = {
 type HostInventoryRecoveryCause = 'cold-start' | 'watch-recovery'
 type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
 type InitialConvergenceLane = 'McpServer' | 'NetworkPolicy'
-type VerdictReobservationTrigger = 'deployment-change' | 'inventory-recovery'
+type VerdictReobservationTrigger = 'deployment-change' | 'inventory-recovery' | 'secret-access'
 type NetworkPolicyConvergenceCause =
   | 'mcp-recovery'
   | 'context-recovery'
@@ -1006,6 +1011,8 @@ export class McpServerWatcher implements McpServerProvider {
   // (interval <= 0). Never shares the full-pass in-flight skip; write sets
   // are disjoint from the typed sweep.
   private netPolDefaultsResyncTimer: ReturnType<typeof setInterval> | null = null
+  private secretAccessProbeTimer: ReturnType<typeof setInterval> | null = null
+  private secretAccessProbeRun: Promise<void> | null = null
   // Serializes overlapping defaults-only ticks. Distinct from
   // initialConvergenceRuns.get('NetworkPolicy').
   private netPolDefaultsOnlyRun: Promise<void> | null = null
@@ -2781,6 +2788,40 @@ export class McpServerWatcher implements McpServerProvider {
     })
   }
 
+  /** The guard holds through the fan-out: a queued reconcile can outlast a tick. */
+  private probeMcpServerSecretAccess(): void {
+    if (this.secretAccessProbeRun !== null) return
+    const run = this.runSecretAccessProbe()
+      .catch(err => {
+        hccLogger.error('[K8s] Secret access probe failed', { err })
+      })
+      .finally(() => {
+        if (this.secretAccessProbeRun === run) this.secretAccessProbeRun = null
+      })
+    this.secretAccessProbeRun = run
+  }
+
+  private async runSecretAccessProbe(): Promise<void> {
+    if (!this.hasMcpServerInventoryAuthority(this.mcpWatchGeneration)) return
+    const denied = this.reconciler.namesAwaitingExternalChange('SecretAccessDenied')
+    if (denied.length === 0) return
+    const outcome = await this.reconciler.probeSecretAccess(denied)
+    if (outcome !== 'allowed') return
+    const results = await mapSettledWithConcurrency(
+      this.reconciler.namesAwaitingExternalChange('SecretAccessDenied'),
+      MCP_SERVER_SECRET_ACCESS_WAKE_CONCURRENCY,
+      name => this.reobserveMcpServerVerdict(name, 'secret-access')
+    )
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        hccLogger.error('[K8s] McpServer verdict re-observation failed', {
+          trigger: 'secret-access',
+          err: result.reason,
+        })
+      }
+    }
+  }
+
   private replayDeferredVerdictReobservations(): void {
     if (this.deferredVerdictReobservations.size === 0) return
     const deferred = [...this.deferredVerdictReobservations]
@@ -3198,6 +3239,11 @@ export class McpServerWatcher implements McpServerProvider {
         '[K8s] NetworkPolicy periodic resync disabled; dropped watch events will not self-heal stale NetworkPolicy allows through controller-driven convergence until another Context or McpServer event triggers reconciliation.'
       )
     }
+
+    this.secretAccessProbeTimer = setInterval(
+      () => this.probeMcpServerSecretAccess(),
+      MCP_SERVER_SECRET_ACCESS_PROBE_INTERVAL_MS
+    )
 
     // Class-D cheap path (#488). Interval > 0 is an ops enable, not a merge
     // default. This timer never consults initialConvergenceRuns and never
@@ -5361,6 +5407,10 @@ export class McpServerWatcher implements McpServerProvider {
     if (this.netPolDefaultsResyncTimer) {
       clearInterval(this.netPolDefaultsResyncTimer)
       this.netPolDefaultsResyncTimer = null
+    }
+    if (this.secretAccessProbeTimer) {
+      clearInterval(this.secretAccessProbeTimer)
+      this.secretAccessProbeTimer = null
     }
     this.netPolDefaultsOnlyRun = null
     this.netPolConvergenceEnsureDefaults = false

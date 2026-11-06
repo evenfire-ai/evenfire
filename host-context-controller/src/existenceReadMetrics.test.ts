@@ -140,6 +140,10 @@ const readExclusions: Record<string, readonly [number, string]> = {
     'Ownership before deletion',
   ],
   'reconciler.ts::readDeploymentRollout::readNamespacedDeployment': [1, 'Readiness observation'],
+  'reconciler.ts::runSecretAccessProbe::readNamespacedSecret': [
+    1,
+    'Access test, response discarded',
+  ],
   'reconciler.ts::validateSecret::readNamespacedSecret': [1, 'Input validation'],
   'reconciler.ts::deleteDeploymentIfHccOwned::readNamespacedDeployment': [
     1,
@@ -255,7 +259,7 @@ function assertReadInventory(sources: Record<string, string>): void {
     expect(excluded[id], `Stale or changed read exclusion: ${id}`).toBe(count)
   }
   expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(26)
-  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(44)
+  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(45)
 }
 
 it('classifies every direct dot-property production SDK read as observed or explicitly excluded', () => {

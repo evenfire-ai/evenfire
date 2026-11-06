@@ -4255,6 +4255,78 @@ describe('#1338 H3 D2 — out-of-pass obligations reach the incomplete-reconcili
     expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
   })
 
+  it('U34 a denied read on a WRC-owned server publishes not-ready and waits for the access probe', async () => {
+    const f = h3Cluster()
+    const server = h3Server({ spec: { ...h3Server().spec, managed: false } })
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(
+      Object.assign(new Error('forbidden'), { code: 403 })
+    )
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(1)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
+    expect(f.condition('SecretResolved')).toMatchObject({ reason: 'SecretAccessDenied' })
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+    expect(f.listener).not.toHaveBeenCalled()
+    expect(f.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual(['h3-server'])
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(2)
+    expect(f.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([])
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+  })
+
+  async function secretAccessProbes(outcome: string): Promise<number> {
+    const metric = registry.getSingleMetric('clerum_hcc_secret_access_probes_total')
+    if (!metric) throw new Error('clerum_hcc_secret_access_probes_total is not registered')
+    const snapshot = await metric.get()
+    return snapshot.values.find(entry => entry.labels.outcome === outcome)?.value ?? 0
+  }
+
+  it.each([
+    ['a 200', () => undefined, 'allowed'],
+    ['a 404', () => h3Absent(), 'allowed'],
+    ['a 401', () => Object.assign(new Error('unauthorized'), { code: 401 }), 'denied'],
+    ['a 403', () => Object.assign(new Error('forbidden'), { code: 403 }), 'denied'],
+    ['a timeout', () => h3Timeout(), 'failed'],
+    ['a 500', () => Object.assign(new Error('internal error'), { code: 500 }), 'failed'],
+  ] as const)(
+    'U35 a Secret access probe answered by %s is %s',
+    async (_label, failure, outcome) => {
+      const f = h3Cluster()
+      const server = h3Server()
+      f.reconciler.setResolveCurrentServer(() => server)
+      ;(f.reconciler as any).verdictsAwaitingExternalChange.set('h3-server', 'SecretAccessDenied')
+      const error = failure()
+      if (error) f.coreApi.readNamespacedSecret.mockRejectedValueOnce(error)
+      const countBefore = await secretAccessProbes(outcome)
+
+      await expect(f.reconciler.probeSecretAccess(['h3-server'])).resolves.toBe(outcome)
+
+      expect(f.secretReads()).toBe(1)
+      expect(f.patches()).toBe(0)
+      expect(await secretAccessProbes(outcome)).toBe(countBefore + 1)
+      expect(f.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual(['h3-server'])
+      expect(JSON.stringify(logs.entries)).not.toContain(storedSecret('fixture-input-value'))
+      expect(JSON.stringify(logs.entries)).not.toContain('fixture-input-value')
+    }
+  )
+
+  it('U35b a Secret access probe with no envSecret target issues no read', async () => {
+    const f = h3Cluster()
+    const server = { ...h3Server(), spec: { ...h3Server().spec, envSecret: undefined } }
+    f.reconciler.setResolveCurrentServer(() => server)
+    const countBefore = await secretAccessProbes('no-target')
+
+    await expect(f.reconciler.probeSecretAccess(['h3-server'])).resolves.toBe('no-target')
+
+    expect(f.secretReads()).toBe(0)
+    expect(await secretAccessProbes('no-target')).toBe(countBefore + 1)
+  })
+
   it('U9h a successful reconcile does not fire the listener', async () => {
     const f = h3Cluster()
     const server = h3Server()

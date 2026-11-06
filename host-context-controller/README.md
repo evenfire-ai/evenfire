@@ -59,6 +59,8 @@ Before deploying an MCP server, the reconciler checks that:
 
 If the secret is missing or incomplete, the MCP server will **not** be deployed. Creating the secrets an `McpServer` references is not the host-context-controller's responsibility — for those it only validates their existence. (It does create its own Secrets elsewhere, e.g. the per-Host runtime-token Secret in `mcp-host`.)
 
+A 401 or 403 on the Secret read fails the server closed with `SecretAccessDenied`. That is an answer about HCC's own access, so no Secret event follows when it recovers. While any server is denied, HCC issues one Secret read per minute (`clerum_hcc_secret_access_probes_total`), and on success it reconciles every denied server, at most 10 at a time. Each NetworkPolicy pass also reconciles denied servers. The probe reads one Secret, so a denial limited to that one Secret delays the other denied servers until the next pass.
+
 ### Credential rollout
 
 Container env vars that come from `secretKeyRef` are read only when the container starts, so editing the Secret alone does not reach a running pod. HCC closes that gap with a pod-template annotation: secret validation returns a sha256 of the Secret it just read, and the reconciler stamps it as `clerum.io/credentials-revision` on the Deployment's pod template (`src/reconciler.ts`). A `SecretInformer` on the McpServer namespace re-enqueues the servers that reference a changed Secret, the hash changes, and Kubernetes rolls the pod.
@@ -442,6 +444,7 @@ For the create and existence-read counters, including PromQL examples, see [CREA
 | `clerum_hcc_secret_informer_lists_total`             | counter | `namespace`, `outcome`        | Paginated Secret lists of the resume-mode informer (`initial`, `relist` after a 410, `failed`).                       |
 | `clerum_hcc_secret_informer_resumes_total`           | counter | `namespace`                   | Secret watches the resume-mode informer reopened from the last resourceVersion it saw.                                |
 | `clerum_hcc_deployment_informer_running`             | gauge   | `namespace`                   | `1` while the watch of HCC-managed Deployments is established; `0` while stopped, reconnecting or waiting for a list. |
+| `clerum_hcc_secret_access_probes_total`              | counter | `outcome`                     | Secret access probes run while an McpServer is denied (`allowed`, `denied`, `failed`, `no-target`).                   |
 | `clerum_hcc_mcp_host_api_requests_total`             | counter | `action`, `outcome`, `reason` | Host-scoped MCP API requests (inventory, credential).                                                                 |
 | `clerum_hcc_infrastructure_telemetry_enqueued_total` | counter | `telemetry_type`              | Telemetry items accepted by the bounded reporter.                                                                     |
 | `clerum_hcc_infrastructure_telemetry_dropped_total`  | counter | `telemetry_type`, `reason`    | Telemetry items dropped.                                                                                              |
