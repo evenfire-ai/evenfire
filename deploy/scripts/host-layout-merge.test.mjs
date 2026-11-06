@@ -466,6 +466,25 @@ test('an orphan check Pod takes the HCC pull Secret: empty means none, a name is
   }
 })
 
+test('a duplicated HCC env entry resolves to the last one, as Kubernetes does', () => {
+  const secret = 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET'
+  for (const first of [
+    { name: secret, value: 'first' },
+    { name: secret, valueFrom: { secretKeyRef: { name: 's', key: 'k' } } },
+  ]) {
+    const f = fleet()
+    f.hcc = hcc([first, { name: secret, value: 'regcred' }])
+    f.pvcs.push(pvc('delta'))
+    f.checks['delta-workspace'] = { output: 'WILL_MERGE\n' }
+    const r = verify(f)
+    assert.equal(r.status, 0, `${JSON.stringify(first)}: ${r.stdout}${r.stderr}`)
+    const orphanPod = creates(r.calls).find(m => m.spec.volumes[0].persistentVolumeClaim.claimName === 'delta-workspace')
+    assert.deepEqual(orphanPod.spec.imagePullSecrets, [{ name: 'regcred' }])
+    // Witness: the check Pod carries the HCC image, so the settings resolved.
+    assert.equal(orphanPod.spec.containers[0].image, 'registry.test/mcp-host:head')
+  }
+})
+
 test('an unresolvable HCC pull Secret stops the run before the orphan check Pod', () => {
   const f = fleet()
   f.hcc = hcc([

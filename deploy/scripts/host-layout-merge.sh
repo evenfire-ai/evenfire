@@ -244,13 +244,14 @@ jq -e '(.spec.replicas // 1) as $r | $r > 0 and (.status.readyReplicas // 0) == 
 
 # hcc_env <name>: <unset>, <valueFrom> or the literal value. A variable not
 # set in env but possibly set through envFrom is <valueFrom>: its value is
-# not in the Deployment, so its default must not be assumed.
+# not in the Deployment, so its default must not be assumed. A duplicated entry
+# resolves to the last one, as Kubernetes does.
 hcc_env() {
   jq -r --arg n "$1" '.spec.template.spec.containers[] | select(.name == "host-context-controller")
     | ((.envFrom // []) | length > 0) as $from
     | [.env[]? | select(.name == $n)]
     | if length == 0 then (if $from then "<valueFrom>" else "<unset>" end)
-      elif .[0].valueFrom then "<valueFrom>" else (.[0].value // "") end' "$WORK/hcc.json"
+      elif .[-1].valueFrom then "<valueFrom>" else (.[-1].value // "") end' "$WORK/hcc.json"
 }
 
 FLAG_RAW="$(hcc_env CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE)"
