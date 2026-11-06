@@ -12,7 +12,7 @@
       "variant": "per-server",
       "redirectUriTemplate": "https://control.example.com/api/v1/oauth-callback/remote/{serverName}"
     },
-    "serverName": "mcp-evenfire-workiq-remote-u-3ecee28e8dfa",
+    "serverName": "mcp-evenfire-workiq-remote-u-3ecee28e",
     "detected": {
       "registrationMode": "manual",
       "endpoints": {

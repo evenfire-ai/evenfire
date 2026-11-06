@@ -2,7 +2,7 @@
   "status": 409,
   "body": {
     "error": "catalog_slot_residue",
-    "secretName": "mcp-acme-linear-pre-u-64164363945f-oauth-client",
+    "secretName": "mcp-acme-linear-pre-u-64164363-oauth-client",
     "message": "a client Secret left by an earlier install blocks this slot; delete it to free the slot"
   }
 }

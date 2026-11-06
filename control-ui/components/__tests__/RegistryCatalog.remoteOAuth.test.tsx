@@ -41,7 +41,7 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: navigation.push }),
 }))
 
-const LINEAR_USER_SERVER = 'mcp-evenfire-linear-remote-u-4ef7a4af403c'
+const LINEAR_USER_SERVER = 'mcp-evenfire-linear-remote-u-4ef7a4af'
 
 let fetchMock: ReturnType<typeof vi.fn>
 
@@ -91,10 +91,10 @@ describe('Marketplace remote-OAuth slots', () => {
 
     const linearPre = await rowFor('@acme/linear-pre')
     expect(
-      within(linearPre).getByText('Uninstalling mcp-acme-linear-pre-u-64164363945f…')
+      within(linearPre).getByText('Uninstalling mcp-acme-linear-pre-u-64164363…')
     ).toBeInTheDocument()
     expect(
-      within(linearPre).getByText('Occupied by mcp-acme-linear-pre-c-610fdec359b9')
+      within(linearPre).getByText('Occupied by mcp-acme-linear-pre-c-610fdec3')
     ).toBeInTheDocument()
 
     const handNamed = await rowFor('@evenfire/linear-user')

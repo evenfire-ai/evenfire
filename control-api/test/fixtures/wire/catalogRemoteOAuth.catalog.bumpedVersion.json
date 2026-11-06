@@ -68,14 +68,14 @@
     "categories": [],
     "installed": {
       "catalogKeys": [],
-      "serverNames": ["mcp-evenfire-linear-remote-u-4ef7a4af403c"],
+      "serverNames": ["mcp-evenfire-linear-remote-u-4ef7a4af"],
       "recipeKeys": [],
       "hookKeys": [],
       "remoteOAuthSlots": {
         "@evenfire/linear-remote": {
           "user": {
             "kind": "instance",
-            "serverName": "mcp-evenfire-linear-remote-u-4ef7a4af403c",
+            "serverName": "mcp-evenfire-linear-remote-u-4ef7a4af",
             "version": "1.0.0",
             "canonical": true,
             "terminating": false
