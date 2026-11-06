@@ -183,7 +183,10 @@ cannot decide (see "Offline installations"). Whether an inserted row starts
 
 A model inserted by the sync also gets its catalog price (input, output and
 cache rates) when models.dev lists one and the pair has no price row yet. An
-existing price, even a disabled one, is never overwritten.
+existing price, even a disabled one, is never overwritten. Catalog prices are
+a starting point for the operator to review, not a reviewed price: they are
+stored as listed, so a model the catalog lists at $0 counts as priced at $0
+(`cost` budgets treat its usage as free) rather than as unpriced.
 
 **Boot sync.** Every replica runs one sync a few seconds after it starts. With
 `LLM_CATALOG_SYNC_CRON_ENABLED=true` that sync is the cron's first tick; with the
