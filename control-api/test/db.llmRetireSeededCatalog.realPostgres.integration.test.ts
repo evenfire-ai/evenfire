@@ -354,8 +354,8 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
         key(UNLISTED_SEED.provider, UNLISTED_SEED.model)
       )
 
-      // T-H9 · the sync never re-prices an existing pair, so each placeholder
-      // is still the only price of its pair and still the one 0135 kept.
+      // The sync never writes a price over an existing price row, so each
+      // placeholder is still the only price of its pair and the one 0135 kept.
       const placeholdersAfterSync = (await listLlmPrices(pool)).filter(p =>
         PLACEHOLDER_KEYS.has(key(p.provider, p.model))
       )

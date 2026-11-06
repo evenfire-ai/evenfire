@@ -3469,8 +3469,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       // The placeholder prices this migration used to seed are retired: a new
       // installation prices models from the catalog sync, which loads `cost`
       // when it inserts a model. Installations that already applied the seed
-      // keep those rows: the sync never prices a pair that already exists, so
-      // removing them would leave those pairs at $0 in cost budgets. What the
+      // keep those rows: the sync never writes a price for a pair that already
+      // has a price row, and never prices an allowlist row it did not insert,
+      // so removing them would leave the seeded allowlist pairs at $0 in cost
+      // budgets. What the
       // seed wrote is kept as data in LEGACY_SEEDED_MODEL_PRICES
       // (src/data/llmCatalogLegacySeeds.ts).
     },
@@ -6394,11 +6396,13 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
  *   window are not written here. The sync never changes `enabled` on an
  *   existing row, and never the display name or context window of an enabled
  *   one; on a disabled one it only fills them while they are NULL.
- * - 0044's placeholder prices are left in place. The sync prices a pair only
- *   when it inserts the model, and these pairs already exist, so a deleted
- *   placeholder would stay unpriced and cost budgets would count its usage as
- *   $0, opening the spend control. An approximate price keeps it counting
- *   until an admin reviews it under Cost -> LLM prices.
+ * - 0044's placeholder prices are left in place. The sync loads a catalog
+ *   price only when it inserts the model, and never over an existing price
+ *   row. Half of these pairs are seeded allowlist rows the sync will never
+ *   insert, so a deleted placeholder would leave them unpriced and cost
+ *   budgets would count their usage as $0, opening the spend control. An
+ *   approximate price keeps it counting until an admin reviews it under
+ *   Cost -> LLM prices.
  *
  * Retiring the seeds is the one place where shipped migrations were edited
  * (0044's price seed, the allowlist seeds of 0056, 0057, 0058 and 0100) instead
