@@ -209,8 +209,8 @@ npm test -- test/browser/workspaceTabOverflow
 npm test -- ui/src/components/WorkspaceTabStrip test/browser/workspaceTabOverflow
 ```
 
-Install dependencies with lifecycle scripts enabled; do not use `--ignore-scripts`
-or `ELECTRON_SKIP_BINARY_DOWNLOAD`. Electron verification must pass before test
+Install dependencies with lifecycle scripts enabled; do not use `--ignore-scripts`.
+Electron verification must pass before test
 results count. Playwright installs a separate Chromium binary for the browser
 suites; these tests do not launch the packaged Electron application. Linux hosts
 may need Playwright's system dependencies (`npx playwright install --with-deps chromium`).
