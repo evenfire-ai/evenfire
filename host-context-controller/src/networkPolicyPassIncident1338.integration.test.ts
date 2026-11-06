@@ -1,30 +1,33 @@
 /**
- * #1338, replayed end to end.
+ * #1338: a request that never answers must not stop the NetworkPolicy pass.
  *
- * What happened on the dev cluster:
- *   1. an hourly NetworkPolicy pass started while connections to the API server
- *      were being dropped (an automated deploy was running);
- *   2. one LIST of that pass never got an answer: the client had no deadline,
- *      so the pass never settled, and the single-flight pass blocked every later
- *      pass;
- *   3. the deploy then patched a Context, so the request lane needed a newly
- *      certified pass and answered 503 on every protected route;
+ * The outage had this order:
+ *   1. a LIST of the periodic external egress resync never got an answer. The
+ *      client had no deadline, so that server's FIFO queue stopped, silently,
+ *      and the resync never ran again;
+ *   2. about 27 minutes later an hourly NetworkPolicy pass needed that queue, so
+ *      the pass never settled, and the single-flight pass blocked every later pass;
+ *   3. a Context then changed, so the request lane needed a newly certified pass
+ *      and answered 503 on every protected route;
  *   4. mcp-host revokes its whole MCP fleet after 180 s without a successful
  *      inventory poll, so every agent lost its MCP tools for 14.5 hours.
+ * The LIST is inferred from code position: reads are not audited.
  *
- * This test runs the same sequence through the production watcher, server and
- * NetworkPolicy reconciler. Only the Kubernetes transport is replaced: a fake
- * that runs the real request middleware (so the production deadline wrapper
- * sets the request's AbortSignal) and, for the one lost LIST, never answers
- * unless that signal aborts, which is how node-fetch behaves on a connection
- * that stops answering. The Context change arrives through the production
- * Context watch callback, as the deploy's patch did.
+ * The first test below runs that order. The second loses the LIST inside the
+ * pass instead, which needs the same deadline and also reaches steps 3 and 4.
  *
- * The test fails unless the Host inventory route is back to 200 before the
+ * Both run through the production watcher, server and NetworkPolicy reconciler.
+ * Only the Kubernetes transport is replaced: a fake that runs the real request
+ * middleware (so the production deadline wrapper sets the request's AbortSignal)
+ * and, for the one lost LIST, never answers unless that signal aborts, which is
+ * how node-fetch behaves on a connection that stops answering.
+ *
+ * The second test fails unless the Host inventory route is back to 200 before the
  * mcp-host staleness bound, i.e. before any Host would revoke its fleet.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Readable } from 'node:stream'
+import { K8S_REQUEST_TIMEOUT_CODE } from './k8s/k8sRequestDeadline'
 import { McpServerWatcher } from './k8sClient'
 import type { McpApiAuthenticator, VerifiedMcpHostPrincipal } from './mcpApiAuthentication'
 import {
@@ -284,7 +287,7 @@ function resetMocks(): void {
   mocks.watch.mockResolvedValue({ abort: vi.fn() })
 }
 
-describe('#1338 replay: a lost request during a pass, then a deploy that changes a Context', () => {
+describe('#1338: a lost request, then a Context change', () => {
   let watcher: Record<string, any>
   let server: ContextMapperServer
   const exitProcess = vi.fn()
@@ -327,6 +330,78 @@ describe('#1338 replay: a lost request during a pass, then a deploy that changes
     vi.restoreAllMocks()
   })
 
+  it('a LIST lost in the external egress resync is released at its deadline, and the resync and a later pass continue', async () => {
+    const logs = captureLogs()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    // Disabled, so the reconcile needs no DNS: it lists, then cleans up.
+    const egressServer = {
+      name: 'egress-witness',
+      namespace: 'mcp-server',
+      uid: 'egress-witness-uid',
+      generation: 1,
+      spec: { enabled: false, egressBindings: [{ name: 'fixture-binding' }] },
+    }
+    watcher.servers.set(egressServer.name, egressServer)
+    mocks.getNamespacedCustomObjectStatus.mockResolvedValue({
+      metadata: { uid: egressServer.uid, generation: 1, resourceVersion: 'rv-1' },
+      status: {},
+    })
+    await watcher.runInitialNetworkPolicyConvergence({ cause: 'startup' })
+    expect(passResults(logs)).toEqual([{ passId: 1, result: 'certified' }])
+    const queueOf = () =>
+      watcher.mcpServerReconciliationQueues.get(`mcp-server/${egressServer.name}`)
+    const listsForServer = () =>
+      mocks.listNamespacedNetworkPolicy.mock.calls.filter(([request]) =>
+        String(request?.labelSelector).includes(egressServer.name)
+      ).length
+
+    // 1. The resync's LIST for this server is lost. It holds the server's queue.
+    const listsBefore = listsForServer()
+    mocks.listNamespacedNetworkPolicy.mockImplementationOnce(requestThatNeverAnswers)
+    let resyncSettled = false
+    const resync = watcher.externalEgressCoordinator.runResync().finally(() => {
+      resyncSettled = true
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(listsForServer()).toBe(listsBefore + 1)
+    expect(queueOf()).toBeDefined()
+    expect(resyncSettled).toBe(false)
+
+    // 2. Later, an hourly pass needs that queue.
+    await vi.advanceTimersByTimeAsync(K8S_REQUEST_TIMEOUT_MS - 1_000)
+    expect(resyncSettled).toBe(false)
+    const hourlyPass = watcher.runInitialNetworkPolicyConvergence({ cause: 'periodic-resync' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(watcher.activeNetworkPolicyPass?.passId).toBe(2)
+
+    // The deadline fails the LIST: the queue is released and the pass completes.
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(resyncSettled).toBe(true)
+    await resync
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining(`periodic resync failed for mcp-server/${egressServer.name}`),
+      expect.objectContaining({ code: K8S_REQUEST_TIMEOUT_CODE })
+    )
+    expect(
+      watcher.externalEgressCoordinator.retryIntents.has(`mcp-server/${egressServer.name}`)
+    ).toBe(true)
+
+    // Asserted before awaiting the pass: without a deadline it never settles.
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(passResults(logs)).toEqual([
+      { passId: 1, result: 'certified' },
+      { passId: 2, result: 'certified' },
+    ])
+    await hourlyPass
+    expect(exitProcess).not.toHaveBeenCalled()
+
+    // The resync runs again and reaches the same server.
+    const listsAfterRelease = listsForServer()
+    await watcher.externalEgressCoordinator.runResync()
+    expect(listsForServer()).toBeGreaterThan(listsAfterRelease)
+  })
+
   it('certifies again and reopens the Host inventory before any Host would revoke its fleet', async () => {
     const logs = captureLogs()
 
@@ -335,7 +410,7 @@ describe('#1338 replay: a lost request during a pass, then a deploy that changes
     expect(passResults(logs)).toEqual([{ passId: 1, result: 'certified' }])
     expect(await status(server, '/api/v2/hosts/self/mcpservers')).toBe(200)
 
-    // The Context watch is live, as in production; the deploy's patch arrives through it.
+    // The Context watch is live, as in production; the Context change arrives through it.
     await watcher.startContextWatch('rv-ctx-1')
     const contextWatchCall = mocks.watch.mock.calls.find(([path]) =>
       String(path).endsWith('/namespaces/mcp-server/contexts')
@@ -343,7 +418,7 @@ describe('#1338 replay: a lost request during a pass, then a deploy that changes
     expect(contextWatchCall).toBeDefined()
     const onContextEvent = contextWatchCall![2] as (type: string, obj: unknown) => Promise<void>
 
-    // 1-2. The hourly pass starts and its first LIST is lost.
+    // The hourly pass starts and its first LIST is lost inside the pass.
     mocks.listNamespacedNetworkPolicy.mockImplementationOnce(requestThatNeverAnswers)
     const listsBefore = mocks.listNamespacedNetworkPolicy.mock.calls.length
     const hourlyPassStartMs = Date.now()
@@ -353,9 +428,9 @@ describe('#1338 replay: a lost request during a pass, then a deploy that changes
     expect(mocks.listNamespacedNetworkPolicy.mock.calls.length).toBe(listsBefore + 1)
     expect(watcher.activeNetworkPolicyPass?.passId).toBe(2)
 
-    // 3. The deploy patches the Context three times in quick succession while the
-    //    pass is stuck (the incident: three modifications in 10 s, desired
-    //    revision 14 -> 17). Each later event arrives before the earlier one's
+    // The Context changes three times in quick succession while the pass is stuck
+    //    (the incident: three modifications in 10 s, desired revision 14 -> 17).
+    //    Each later event arrives before the earlier one's
     //    scoped revocation has recorded its certificate, so no scoped delta can
     //    realign the revocation revision: only a newly certified full pass can.
     const deployPatchAtMs = Date.now()
@@ -367,7 +442,7 @@ describe('#1338 replay: a lost request during a pass, then a deploy that changes
           spec: {
             contextId: 'alpha',
             mcpServers: [],
-            description: `patched by a deploy (generation ${generation})`,
+            description: `changed (generation ${generation})`,
           },
         })
       )
@@ -379,7 +454,7 @@ describe('#1338 replay: a lost request during a pass, then a deploy that changes
     expect(await status(server, '/api/v2/hosts/self/mcpservers')).toBe(503)
     expect(await status(server, '/ready')).toBe(200)
 
-    // 4. Time runs; Hosts poll every 30 s. Record when their inventory is served again.
+    // Time runs; Hosts poll every 30 s. Record when their inventory is served again.
     let reopenedAtMs: number | undefined
     while (Date.now() - deployPatchAtMs < MCP_HOST_AUTHORITY_STALENESS_MS) {
       await vi.advanceTimersByTimeAsync(1_000)
