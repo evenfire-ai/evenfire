@@ -65,6 +65,8 @@ Container env vars that come from `secretKeyRef` are read only when the containe
 
 The same annotation drives rollouts for per-Host channel-reader pods (a second informer on `channels`) and for LlmHook pods (a third informer on `llm-hooks`) (`src/main.ts`).
 
+A rollout that does not converge within its readiness budget (24 polls, 120 s) gets a terminal `DeploymentReady=False`, reason `RolloutIncomplete`. That condition is a published verdict, not unfinished work, so it does not hold certification or use the McpServer lane's retry. A Deployment informer re-enqueues the server when its rollout converges, its generation changes or its Deployment is deleted, and with periodic resync on, each NetworkPolicy pass also reconciles it. While that informer is down, a rollout that converged stays `False` until the next pass, and Control UI reports a failure for a credential rotation that converges between 120 s and 180 s.
+
 For setting and rotating connector credentials from the operator side, see [Connect an OAuth connector](../docs/how-to/connect-oauth-connector.md).
 
 ## NetworkPolicy Operator

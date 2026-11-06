@@ -12,6 +12,7 @@ import {
   createMockNetworkingApi,
 } from '../test/__fixtures__/testMocks'
 import { MANAGED_BY_LABEL, MCPSERVER_LABEL, WRC_MANAGED_BY_VALUE } from './constants'
+import type { DeploymentObservation } from './informers/deploymentInformer'
 import { K8sRequestTimeoutError } from './k8s/k8sRequestDeadline'
 import { hccLogger } from './logger'
 import { registry } from './metrics'
@@ -3974,7 +3975,27 @@ describe('#1338 H3 D2 — out-of-pass obligations reach the incomplete-reconcili
     expect(f.listener).not.toHaveBeenCalled()
   })
 
-  it('U25 a terminal RolloutIncomplete leaves the obligation pending until a reconcile observes the converged rollout (#1338 H1)', async () => {
+  /** A stuck rollout whose readiness poll spent its budget: the idle terminal state. */
+  async function stuckCluster() {
+    vi.useFakeTimers()
+    const f = h3Cluster({ rolloutReady: false })
+    const server = h3Server()
+    await f.reconciler.reconcile(server)
+    await vi.advanceTimersByTimeAsync(24 * 5000)
+    expect(f.condition('DeploymentReady')).toMatchObject({
+      status: 'False',
+      reason: 'RolloutIncomplete',
+    })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual(['h3-server'])
+    return { f, server }
+  }
+
+  const deploymentReads = (f: ReturnType<typeof h3Cluster>) =>
+    f.appsApi.readNamespacedDeployment.mock.calls.length
+  const pollOf = (f: ReturnType<typeof h3Cluster>) =>
+    (f.reconciler as any).readinessPolls.get('h3-server')
+
+  it('U25 a terminal RolloutIncomplete is a published verdict, not an obligation, until a reconcile observes the converged rollout', async () => {
     vi.useFakeTimers()
     const f = h3Cluster({ rolloutReady: false })
     const server = h3Server()
@@ -3989,21 +4010,249 @@ describe('#1338 H3 D2 — out-of-pass obligations reach the incomplete-reconcili
       status: 'False',
       reason: 'RolloutIncomplete',
     })
-    expect(f.reconciler.incompleteReconciliationNames()).toEqual(['h3-server'])
-    expect(f.listener).toHaveBeenCalledExactlyOnceWith('h3-server')
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+    expect(f.listener).not.toHaveBeenCalled()
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual(['h3-server'])
 
-    // A retry while the rollout is still stuck keeps the obligation.
-    const rolloutReadsBefore = f.appsApi.readNamespacedDeployment.mock.calls.length
+    // A reconcile while still stuck opens no window and keeps the verdict.
+    const readsBefore = deploymentReads(f)
     await f.reconciler.reconcile(server)
-    expect(f.appsApi.readNamespacedDeployment.mock.calls.length).toBeGreaterThan(rolloutReadsBefore)
-    expect(f.reconciler.incompleteReconciliationNames()).toEqual(['h3-server'])
-    expect(f.listener).toHaveBeenCalledTimes(2)
+    expect(deploymentReads(f)).toBeGreaterThan(readsBefore)
+    expect(pollOf(f).timer).toBeUndefined()
+    expect(pollOf(f).ticking).toBe(false)
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual(['h3-server'])
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
 
-    // The rollout converges; the next retry observes it and discharges.
+    // The rollout converges; the next reconcile observes it.
     f.setRolloutReady(true)
     await f.reconciler.reconcile(server)
     expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
     expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+  })
+
+  it('U26 a Deployment observation requires a reconcile only when it can move the verdict', async () => {
+    const { f } = await stuckCluster()
+    const requires = (observation: Partial<DeploymentObservation>) =>
+      f.reconciler.rolloutObservationRequiresReconcile({
+        name: 'h3-server',
+        deleted: false,
+        ready: false,
+        generation: 1,
+        ...observation,
+      })
+
+    expect(requires({})).toBe(false)
+    expect(requires({ ready: true })).toBe(true)
+    expect(requires({ generation: 2 })).toBe(true)
+    expect(requires({ deleted: true })).toBe(true)
+    expect(requires({ name: 'other-server', ready: true })).toBe(false)
+    ;(f.reconciler as any).verdictsAwaitingExternalChange.set('denied-server', 'SecretAccessDenied')
+    expect(requires({ name: 'denied-server', ready: true })).toBe(false)
+  })
+
+  it('U27 a sticky reconcile registers the name before its status writes', async () => {
+    const { f, server } = await stuckCluster()
+    const entered = deferred()
+    const release = deferred()
+    const readStatus = f.customApi.getNamespacedCustomObjectStatus.getMockImplementation()!
+    f.customApi.getNamespacedCustomObjectStatus.mockImplementationOnce(async (request: any) => {
+      entered.resolve()
+      await release.promise
+      return readStatus(request)
+    })
+
+    const reconcile = f.reconciler.reconcile(server)
+    await entered.promise
+
+    expect(
+      f.reconciler.rolloutObservationRequiresReconcile({
+        name: 'h3-server',
+        deleted: false,
+        ready: true,
+        generation: 1,
+      })
+    ).toBe(true)
+    release.resolve()
+    await reconcile
+  })
+
+  it('U28 a declined terminal write stays an obligation, the listener fires, and the name is also registered', async () => {
+    vi.useFakeTimers()
+    const f = h3Cluster({ rolloutReady: false })
+    await f.reconciler.reconcile(h3Server())
+    await vi.advanceTimersByTimeAsync(23 * 5000)
+    const patchesBefore = f.patches()
+    f.customApi.patchNamespacedCustomObjectStatus.mockRejectedValueOnce(
+      Object.assign(new Error('status unavailable'), { code: 500 })
+    )
+
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(f.patches()).toBe(patchesBefore + 1)
+    expect(f.reconciler.incompleteReconciliationNames()).toEqual(['h3-server'])
+    expect(f.listener).toHaveBeenCalledExactlyOnceWith('h3-server')
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual(['h3-server'])
+  })
+
+  it('U29 a new Deployment generation clears the name and opens a window', async () => {
+    const { f, server } = await stuckCluster()
+    f.deployments.get('h3-server').metadata.generation = 2
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+    expect(pollOf(f).timer).toBeDefined()
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+  })
+
+  it('U30 a same-generation failure after an observed ready opens a window and is not sticky', async () => {
+    const { f, server } = await stuckCluster()
+    f.setRolloutReady(true)
+    await f.reconciler.reconcile(server)
+    expect(pollOf(f)).toBeUndefined()
+    f.setRolloutReady(false)
+    const readsBefore = deploymentReads(f)
+
+    await f.reconciler.reconcile(server)
+
+    expect(deploymentReads(f)).toBeGreaterThan(readsBefore)
+    expect(pollOf(f).timer).toBeDefined()
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+  })
+
+  it('U31 a 403 on the rollout read opens a window that a later sticky reconcile rebinds', async () => {
+    const { f, server } = await stuckCluster()
+    f.appsApi.readNamespacedDeployment
+      .mockImplementationOnce(f.readDeployment)
+      .mockRejectedValueOnce(Object.assign(new Error('forbidden'), { code: 403 }))
+
+    await f.reconciler.reconcile(server)
+
+    expect(pollOf(f).timer).toBeDefined()
+    expect(pollOf(f).exhausted).toBe(true)
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+
+    const fenceBefore = pollOf(f).isCurrent
+    await f.reconciler.reconcile(server)
+
+    expect(pollOf(f).isCurrent).not.toBe(fenceBefore)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'RolloutIncomplete' })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(24 * 5000)
+
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual(['h3-server'])
+  })
+
+  it('U32 a transient rollout read failure over an idle terminal verdict keeps that verdict', async () => {
+    const { f, server } = await stuckCluster()
+    const patchesBefore = f.patches()
+    const keptBefore = await reconcileCallFailures('rollout_read', 'verdict_kept')
+    const publishedBefore = await reconcileCallFailures('rollout_read', 'not_ready_published')
+    const readsBefore = deploymentReads(f)
+    f.appsApi.readNamespacedDeployment
+      .mockImplementationOnce(f.readDeployment)
+      .mockRejectedValueOnce(h3Timeout('readNamespacedDeployment'))
+
+    await f.reconciler.reconcile(server)
+
+    expect(deploymentReads(f)).toBe(readsBefore + 2)
+    expect(f.patches()).toBe(patchesBefore)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'RolloutIncomplete' })
+    expect(await reconcileCallFailures('rollout_read', 'verdict_kept')).toBe(keptBefore + 1)
+    expect(await reconcileCallFailures('rollout_read', 'not_ready_published')).toBe(publishedBefore)
+    expect(f.listener).toHaveBeenCalledExactlyOnceWith('h3-server')
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual(['h3-server'])
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+  })
+
+  it('U33 a recreated Deployment reports WaitingForReplicas with a live window until its own terminal tick', async () => {
+    const { f, server } = await stuckCluster()
+    f.deployments.delete('h3-server')
+    f.appsApi.createNamespacedDeployment.mockClear()
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+    expect(pollOf(f).timer).toBeDefined()
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(24 * 5000)
+
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'RolloutIncomplete' })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual(['h3-server'])
+
+    f.reconciler.setResolveCurrentServer(() => undefined)
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+    expect((f.reconciler as any).verdictsAwaitingExternalChange.size).toBe(0)
+  })
+
+  it('U36 a failed read on the last tick is left to the lane, and the next reconcile reads the truth', async () => {
+    vi.useFakeTimers()
+    const f = h3Cluster({ rolloutReady: false })
+    const server = h3Server()
+    await f.reconciler.reconcile(server)
+    await vi.advanceTimersByTimeAsync(23 * 5000)
+    const readsBefore = deploymentReads(f)
+    f.appsApi.readNamespacedDeployment.mockRejectedValueOnce(h3Timeout('readNamespacedDeployment'))
+
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(deploymentReads(f)).toBe(readsBefore + 1)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'RolloutIncomplete' })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+    expect(f.reconciler.incompleteReconciliationNames()).toEqual(['h3-server'])
+    expect(f.listener).toHaveBeenCalledExactlyOnceWith('h3-server')
+
+    f.setRolloutReady(true)
+    await f.reconciler.reconcile(server)
+
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+    expect(f.condition('DeploymentReady')).toMatchObject({ status: 'True' })
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+  })
+
+  it('U37 a reconcile whose write overwrote a ready tick opens a window that corrects it', async () => {
+    const { f, server } = await stuckCluster()
+    f.appsApi.readNamespacedDeployment
+      .mockImplementationOnce(f.readDeployment)
+      .mockRejectedValueOnce(Object.assign(new Error('forbidden'), { code: 403 }))
+    await f.reconciler.reconcile(server)
+    expect(pollOf(f).exhausted).toBe(true)
+
+    const entered = deferred()
+    const release = deferred()
+    const readStatus = f.customApi.getNamespacedCustomObjectStatus.getMockImplementation()!
+    f.customApi.getNamespacedCustomObjectStatus.mockImplementationOnce(async (request: any) => {
+      entered.resolve()
+      await release.promise
+      return readStatus(request)
+    })
+    const reconcile = f.reconciler.reconcile(server)
+    await entered.promise
+
+    f.setRolloutReady(true)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(pollOf(f)).toBeUndefined()
+    expect(f.condition('DeploymentReady')).toMatchObject({ status: 'True' })
+
+    release.resolve()
+    await reconcile
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'RolloutIncomplete' })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+    expect(pollOf(f).timer).toBeDefined()
+
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(f.condition('DeploymentReady')).toMatchObject({ status: 'True' })
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
   })
 
   it('U9h a successful reconcile does not fire the listener', async () => {

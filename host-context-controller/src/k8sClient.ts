@@ -34,6 +34,7 @@ import {
   HostReconciler,
   type ResolvedSfsMount,
 } from './hostReconciler'
+import type { DeploymentObservation } from './informers/deploymentInformer'
 import type { SecretEvent, SecretEventType } from './informers/secretInformer'
 import {
   type InfrastructureTelemetryReporter,
@@ -232,6 +233,7 @@ type HostSnapshot = {
 type HostInventoryRecoveryCause = 'cold-start' | 'watch-recovery'
 type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
 type InitialConvergenceLane = 'McpServer' | 'NetworkPolicy'
+type VerdictReobservationTrigger = 'deployment-change' | 'inventory-recovery'
 type NetworkPolicyConvergenceCause =
   | 'mcp-recovery'
   | 'context-recovery'
@@ -963,6 +965,10 @@ export class McpServerWatcher implements McpServerProvider {
   // McpServer inventory was not authoritative. Bounded by the Secrets in the
   // namespace and emptied at every authority gain (restartMcpServerWatch).
   private readonly unroutedSecretChanges = new Set<string>()
+  // McpServers whose re-observation found no inventory authority. Replayed at
+  // the next authority gain, so an event inside a recovery window is not left
+  // to wait for the next pass.
+  private readonly deferredVerdictReobservations = new Set<string>()
   private readonly contextReconciliationQueues = new Map<string, KeyedReconciliationQueue>()
   private readonly sharedFileSystemReconciliationQueues = new Map<
     string,
@@ -1633,6 +1639,8 @@ export class McpServerWatcher implements McpServerProvider {
         if (this.shouldRequestNetworkPolicyRecovery('McpServer', before)) {
           void this.runInitialNetworkPolicyConvergence({ cause: 'mcp-recovery' })
         }
+        // After the decision above, so a replay cannot change it.
+        this.replayDeferredVerdictReobservations()
         return true
       } catch (error) {
         this.mcpServerCacheSynced = false
@@ -2715,6 +2723,85 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
+   * The managed Deployment informer's consumer. Only an observation that can
+   * move a terminal verdict costs a reconcile.
+   */
+  readonly handleDeploymentObservation = (observation: DeploymentObservation): void => {
+    if (!this.reconciler.rolloutObservationRequiresReconcile(observation)) return
+    this.reobserveMcpServerVerdict(observation.name, 'deployment-change').catch(err => {
+      hccLogger.error('[K8s] McpServer verdict re-observation failed', {
+        name: observation.name,
+        trigger: 'deployment-change',
+        err,
+      })
+    })
+  }
+
+  /**
+   * Reconcile one server whose published verdict waits for an outside change.
+   * The job is runtime-only: a scoped lane request would certify the revision
+   * on a clean end, and the watch path adds egress, binding and Context work.
+   */
+  private async reobserveMcpServerVerdict(
+    name: string,
+    trigger: VerdictReobservationTrigger
+  ): Promise<void> {
+    const generation = this.mcpWatchGeneration
+    if (!this.hasMcpServerInventoryAuthority(generation)) {
+      this.deferredVerdictReobservations.add(name)
+      return
+    }
+    const server = this.servers.get(name)
+    if (!server) return
+    hccLogger.info('[K8s] Re-observing a terminal McpServer verdict', {
+      event: 'mcpserver-verdict-reobservation',
+      name,
+      trigger,
+    })
+    await this.enqueueMcpServerReconciliation(server, async () => {
+      if (!this.hasMcpServerInventoryAuthority(generation)) {
+        // Not awaited: this job holds the key. It defers if authority is still
+        // missing, and runs under the new generation if not.
+        void this.reobserveMcpServerVerdict(name, trigger).catch(err => {
+          hccLogger.error('[K8s] McpServer verdict re-observation failed', { name, trigger, err })
+        })
+        return
+      }
+      const current = this.servers.get(name)
+      // A spec superseded while this job waited has its own queued watch job,
+      // which runs external egress before the runtime.
+      if (!current || !sameMcpServerDesiredRevision(server, current)) return
+      try {
+        await this.reconciler.reconcile(current, {
+          isCurrent: () => this.mcpServerWatchEffectIsCurrent(current, generation),
+        })
+      } catch (err) {
+        hccLogger.error('[K8s] McpServer verdict re-observation failed', { name, trigger, err })
+      }
+    })
+  }
+
+  private replayDeferredVerdictReobservations(): void {
+    if (this.deferredVerdictReobservations.size === 0) return
+    const deferred = [...this.deferredVerdictReobservations]
+    this.deferredVerdictReobservations.clear()
+    const awaiting = new Set([
+      ...this.reconciler.namesAwaitingExternalChange('RolloutIncomplete'),
+      ...this.reconciler.namesAwaitingExternalChange('SecretAccessDenied'),
+    ])
+    for (const name of deferred) {
+      if (!awaiting.has(name)) continue
+      this.reobserveMcpServerVerdict(name, 'inventory-recovery').catch(err => {
+        hccLogger.error('[K8s] McpServer verdict re-observation failed', {
+          name,
+          trigger: 'inventory-recovery',
+          err,
+        })
+      })
+    }
+  }
+
+  /**
    * Trigger a reconcile for any cached McpServer whose `envSecret.name`
    * matches the given Secret. Used by SecretInformer to react to Secret
    * lifecycle changes (create/update/delete) without waiting for a CRD
@@ -3382,9 +3469,10 @@ export class McpServerWatcher implements McpServerProvider {
       }
       if (this.reconciler.hasIncompleteReconciliation()) {
         // Every offered effect ran under this certificate, so only individual
-        // servers are unfinished (for example a Deployment write rejected by
-        // admission). Retry just those names: one persistently failing server
-        // must not re-reconcile the whole fleet at the retry cap.
+        // servers are unfinished: for example a remote spec HCC refuses to render,
+        // or a Kubernetes answer that is not transient. Retry just those names: one
+        // persistently failing server must not re-reconcile the whole fleet at the
+        // retry cap.
         this.scheduleInitialConvergenceRetry('McpServer', {
           contextRevision: safetyCertificate.contextRevision,
           serverRevision: safetyCertificate.serverRevision,

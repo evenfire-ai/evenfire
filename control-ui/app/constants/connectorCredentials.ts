@@ -11,11 +11,13 @@
 //    "timed out" instead of the diagnosis that was about to arrive.
 //  - When a rollout is merely SLOW (a loaded cluster, a long image pull), the
 //    HCC exhausts its 120s budget and writes RolloutIncomplete before the pod
-//    goes Ready — and then its post-terminal re-poll (reconciler.ts,
-//    performReconcile) arms one more window and CORRECTS the condition to
-//    True/ReplicasAvailable once the Deployment converges. The ~60s this
-//    timeout outlives the HCC budget is precisely the observation slack in
-//    which that correction lands. Latching failure the moment RolloutIncomplete
+//    goes Ready — and then its Deployment informer re-enqueues the server when
+//    the rollout converges, and the reconcile CORRECTS the condition to
+//    True/ReplicasAvailable. The ~60s this timeout outlives the HCC budget is
+//    precisely the observation slack in which that correction lands. While that
+//    informer is down, the condition stays False until the next NetworkPolicy
+//    pass, so this timeout reports a failure for a rotation that succeeded.
+//    Latching failure the moment RolloutIncomplete
 //    appears would throw that slack away and report a deterministic false
 //    negative for any rotation converging between 120s and 180s (issue #223).
 //

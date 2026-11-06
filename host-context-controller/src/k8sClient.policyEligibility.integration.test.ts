@@ -221,6 +221,12 @@ vi.mock('./reconciler', () => ({
     hasSecretChangeEvidence() {
       return false
     }
+    namesAwaitingExternalChange() {
+      return []
+    }
+    rolloutObservationRequiresReconcile() {
+      return false
+    }
     recordSecretChangeEvidence() {}
     setInventoryAuthority() {}
     setResolveCurrentServer() {}

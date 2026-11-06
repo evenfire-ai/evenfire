@@ -12,6 +12,10 @@
 import * as k8s from '@kubernetes/client-node'
 import { config } from './config'
 import { HeartbeatPoller } from './heartbeatPoller'
+import {
+  ManagedDeploymentInformer,
+  managedDeploymentListFromAppsApi,
+} from './informers/deploymentInformer'
 import { SecretInformer } from './informers/secretInformer'
 import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import {
@@ -39,6 +43,7 @@ import {
 
 let provider: McpServerProvider | null = null
 let server: ContextMapperServer | null = null
+let deploymentInformer: ManagedDeploymentInformer | null = null
 let secretInformer: SecretInformer | null = null
 let channelSecretInformer: SecretInformer | null = null
 let llmHooksSecretInformer: SecretInformer | null = null
@@ -58,6 +63,7 @@ async function shutdown(signal: string): Promise<void> {
 
   console.log(`[Main] Received ${signal}, shutting down`)
 
+  deploymentInformer?.stop()
   secretInformer?.stop()
   channelSecretInformer?.stop()
   llmHooksSecretInformer?.stop()
@@ -222,6 +228,29 @@ async function main(): Promise<void> {
   await provider.start()
   console.log(`[Main] Provider started, loaded ${provider.getAllServers().length} McpServer(s)`)
   server.setReady(true)
+
+  // Re-enqueues a server with a terminal RolloutIncomplete when its Deployment
+  // moves. Not awaited: the watch request has no transport deadline, and an await
+  // that hangs here would keep the SIGTERM handler below from ever registering.
+  if (!config.devMode && provider instanceof McpServerWatcher) {
+    const kc = getKubeConfig()
+    if (kc) {
+      const deploymentListApi = makeK8sApiClientWithDeadline(
+        kc,
+        k8s.AppsV1Api,
+        config.k8sRequestTimeoutMs
+      )
+      deploymentInformer = new ManagedDeploymentInformer(
+        kc,
+        config.namespace,
+        provider.handleDeploymentObservation,
+        managedDeploymentListFromAppsApi(deploymentListApi, config.namespace)
+      )
+      void deploymentInformer.start().catch(err => {
+        hccLogger.error('[Main] Deployment informer failed to start', { err })
+      })
+    }
+  }
 
   // Start SecretInformer (production only) — reacts to Secret lifecycle events
   // so McpServers referencing a missing Secret reconcile once the Secret

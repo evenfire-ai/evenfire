@@ -98,9 +98,10 @@ export function useRolloutWait({
       //    would abort almost every successful rotation on the first poll.
       //  - `RolloutIncomplete` means the HCC exhausted ITS 120s readiness budget
       //    (host-context-controller reconciler.ts, pollReadiness 24×5s) — but the
-      //    HCC keeps observing past that verdict (post-terminal re-poll) and
-      //    corrects the condition to True when a slow pod converges. Latching
-      //    failure here would discard the ~60s of budget this poll still holds
+      //    HCC keeps observing past that verdict (its Deployment informer
+      //    re-enqueues the server) and corrects the condition to True when a slow
+      //    pod converges. While that informer is down, the condition stays False
+      //    until the next NetworkPolicy pass. Latching failure here would discard the ~60s of budget this poll still holds
       //    and report a deterministic false negative for any rollout converging
       //    between 120s and 180s — the exact bug of issue #223.
       //
