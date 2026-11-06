@@ -96,9 +96,10 @@ once after an in-run sync, before Health/Playwright (`PortForwards=` evidence).
  `settle-gfs-reader-rollout.sh` clears
  Ready-reader leftovers (claim, stale ReplicaSets, CrashLoopBackOff pods)
  first, and the `gfs-rollout-shim` PATH prefix replaces the reader
- `rollout status` wait with a readiness poll because HCC's gfsReconciler
- now preserves `restartedAt`; leftover ReplicaSets can still poison a
- generation-based wait, so the harness still judges reader readiness.
+ `rollout status` wait with a revision-aware readiness poll because HCC's
+ gfsReconciler now preserves `restartedAt`; leftover ReplicaSets can still
+ poison `kubectl rollout status`, so the harness judges the reader rollout
+ and pod readiness itself.
 - Evidence lives under ignored `.local-notes/infra/runs/`; never commit it.
 
 ## Host npm vs cluster Ready

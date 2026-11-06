@@ -46,7 +46,7 @@ and `GFS_RECOVER_ABANDONED_STATE=true` only in the `minikube-t2` transition;
 other security gates refresh MCP auth without mutating GFS. Do not insert
 manual repair scripts between runs. Harness GFS reconciles settle Ready-reader
 leftovers first (`settle-gfs-reader-rollout.sh`) and judge reader rollout
-completion by readiness via the `gfs-rollout-shim` PATH prefix, because
+completion by revision and readiness via the `gfs-rollout-shim` PATH prefix, because
 HCC's gfsReconciler now preserves the `restartedAt` annotation, and the
 harness still judges reader readiness via the shim so leftover ReplicaSets
 cannot turn a generation-based `kubectl rollout status` into a timeout.

@@ -5,8 +5,8 @@
 # now preserves the restartedAt annotation `kubectl rollout restart` adds;
 # leftover reader ReplicaSets can still make a generation-based wait chase
 # the wrong revision until timeout. Intercept exactly that wait and judge
-# readiness instead (wait-gfs-reader-ready.sh); every other kubectl
-# invocation is passed through to the real binary unchanged.
+# the rollout and pod readiness instead (wait-gfs-reader-ready.sh); every
+# other kubectl invocation is passed through to the real binary unchanged.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -108,7 +108,7 @@ if [ -z "$context" ]; then
   exit 1
 fi
 
-printf '[gfs-rollout-shim] waiting on %s/%s readiness instead of a generation-based rollout status (HCC owns the template)\n' \
+printf '[gfs-rollout-shim] waiting on the %s/%s rollout and pod readiness instead of kubectl rollout status\n' \
   "$namespace" "$DEPLOY" >&2
 CONTEXT="$context" GFS_NS="$namespace" GFS_READER_DEPLOYMENT="$DEPLOY" \
   GFS_READER_WAIT_TIMEOUT_SECONDS="$timeout_seconds" \

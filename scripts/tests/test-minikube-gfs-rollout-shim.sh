@@ -2,8 +2,9 @@
 # Stubbed contract for scripts/minikube/gfs-rollout-shim/kubectl and
 # scripts/minikube/wait-gfs-reader-ready.sh: the shim passes every ordinary
 # kubectl invocation through unchanged and replaces only the gfsc-reader
-# `rollout status` wait with a readiness poll that ignores the template
-# generation HCC's gfsReconciler keeps rewriting.
+# `rollout status` wait with a poll that proves the current revision is fully
+# rolled out: the controller observed the restart, every replica belongs to the
+# newest ReplicaSet, and no live reader pod is unready.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -24,13 +25,32 @@ cat >"$tmp/realbin/kubectl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_KUBECTL_LOG:?}"
+# Snapshot fields: generation|observedGeneration|spec.replicas|status.replicas|
+# updatedReplicas|readyReplicas. Status fields are omitempty on the API server,
+# so tests pass an explicitly empty value for the real "field absent" case.
+desired="${FAKE_DESIRED:-1}"
+snapshot="${FAKE_GENERATION-5}|${FAKE_OBSERVED-5}|${desired}|${FAKE_REPLICAS-$desired}|${FAKE_UPDATED-$desired}|${FAKE_READY:-1}"
+pod_rows="${FAKE_POD_ROWS:-True|\n}"
+# FAKE_SEQUENCE names a file with one `snapshot;pod rows` line per poll. Every
+# read of the Deployment advances one line; the last line repeats.
+if [ -n "${FAKE_SEQUENCE:-}" ]; then
+  poll="$(cat "${FAKE_SEQUENCE}.polls" 2>/dev/null || printf 0)"
+  case " $* " in
+    *' get deployment gfsc-reader '*'.spec.replicas'*)
+      poll=$((poll + 1))
+      printf '%s' "$poll" >"${FAKE_SEQUENCE}.polls"
+      ;;
+  esac
+  line="$(sed -n "${poll}p" "$FAKE_SEQUENCE")"
+  [ -n "$line" ] || line="$(tail -n 1 "$FAKE_SEQUENCE")"
+  snapshot="${line%%;*}"
+  pod_rows="${line#*;}"
+fi
 case " $* " in
-  *' get deployment gfsc-reader '*'-o jsonpath={.spec.replicas}'*)
-    printf '%s' "${FAKE_DESIRED:-1}"; exit 0 ;;
-  *' get deployment gfsc-reader '*'-o jsonpath={.status.readyReplicas}'*)
-    printf '%s' "${FAKE_READY:-1}"; exit 0 ;;
+  *' get deployment gfsc-reader '*'.status.updatedReplicas'*)
+    printf '%s' "$snapshot"; exit 0 ;;
   *' get pods -l '*)
-    printf '%b' "${FAKE_POD_ROWS:-True|\n}"; exit 0 ;;
+    printf '%b' "$pod_rows"; exit 0 ;;
 esac
 exit 0
 STUB
@@ -86,11 +106,12 @@ done
 # The explicit 1s caller timeout is honored; the shim must not silently floor
 # it to an unrelated minimum.
 : >"$FAKE_KUBECTL_LOG"
-if PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 FAKE_POD_ROWS='True|\nFalse|\n' \
+if out="$(PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 FAKE_POD_ROWS='True|\nFalse|\n' \
   GFS_READER_WAIT_POLL_SECONDS=0 \
-  kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=1s 2>/dev/null; then
+  kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=1s 2>&1)"; then
   fail 'shim readiness wait went green with a live unready reader pod'
 fi
+grep -q 'timed out after' <<<"$out" || fail "live unready pod blocked for the wrong reason: $out"
 
 # Timeout input is untrusted process input; it must be parsed as data rather
 # than reaching Bash arithmetic evaluation.
@@ -116,11 +137,66 @@ PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 \
 
 # A terminating Ready pod must not satisfy the desired live-reader count. It
 # is already leaving the service and cannot be used as readiness evidence.
-if PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 \
+if out="$(PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 \
   FAKE_POD_ROWS='True|2026-01-01T00:00:00Z\n' \
   GFS_READER_WAIT_POLL_SECONDS=0 \
-  kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=1s >/dev/null 2>&1; then
+  kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=1s 2>&1)"; then
   fail 'shim readiness wait went green with only a terminating Ready reader pod'
 fi
+grep -q 'timed out after' <<<"$out" || fail "terminating pod blocked for the wrong reason: $out"
+
+# 6. A rollout passes only when it has finished. These states follow a restart
+# of a two-replica reader whose old pods stay Ready throughout:
+#   poll 1: restart written, controller has not observed it
+#   poll 2: controller observed it, newest ReplicaSet has no pod yet, so the API
+#           omits updatedReplicas (the state behind the clerum-dev failure)
+#   poll 3: first new pod exists and is unready
+#   poll 4: both new pods Ready, one old pod not scaled down yet
+#   poll 5: rollout finished
+sequence="$tmp/rollout.sequence"
+cat >"$sequence" <<'SEQ'
+6|5|2|2|2|2;True|\nTrue|\n
+6|6|2|2||2;True|\nTrue|\n
+6|6|2|3|1|2;True|\nTrue|\nFalse|\n
+6|6|2|3|2|3;True|\nTrue|\nTrue|\n
+6|6|2|2|2|2;True|\nTrue|\n
+SEQ
+: >"$FAKE_KUBECTL_LOG"
+out="$(PATH="$shim_path" FAKE_SEQUENCE="$sequence" GFS_READER_WAIT_POLL_SECONDS=0 \
+  kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=30s 2>&1)" \
+  || fail "wait did not pass on the finished rollout: $out"
+polls="$(cat "${sequence}.polls")"
+[ "$polls" -eq 5 ] || fail "wait passed at poll ${polls} of 5, before the rollout finished"
+grep -q 'is Ready' <<<"$out" || fail "wait exited 0 without its Ready verdict: $out"
+
+# 7. Each unfinished state alone blocks until the deadline. The timeout message
+# is the witness that the poll loop ran and judged the state.
+assert_blocks() {
+  local label="$1" generation="$2" observed="$3" replicas="$4" updated="$5" ready="$6" rows="$7" state_out
+  if state_out="$(PATH="$shim_path" FAKE_DESIRED=2 FAKE_GENERATION="$generation" \
+    FAKE_OBSERVED="$observed" FAKE_REPLICAS="$replicas" FAKE_UPDATED="$updated" FAKE_READY="$ready" \
+    FAKE_POD_ROWS="$rows" GFS_READER_WAIT_POLL_SECONDS=0 \
+    kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=1s 2>&1)"; then
+    fail "wait went green on ${label}"
+  fi
+  grep -q 'timed out after' <<<"$state_out" || fail "${label} blocked for the wrong reason: ${state_out}"
+}
+assert_blocks 'an unobserved restart' 6 5 2 2 2 'True|\nTrue|\n'
+assert_blocks 'an unobserved restart with no observedGeneration' 6 '' 2 2 2 'True|\nTrue|\n'
+assert_blocks 'a rollout whose new pod does not exist yet' 6 6 2 '' 2 'True|\nTrue|\n'
+assert_blocks 'a partial rollout' 6 6 2 1 2 'True|\nTrue|\n'
+assert_blocks 'a live old replica' 6 6 3 2 3 'True|\nTrue|\nTrue|\n'
+
+# 8. A malformed snapshot fails at once instead of being read as "not ready".
+malformed_seq="$tmp/malformed.sequence"
+for malformed in 'x|6|2|2|2|2' '|6|2|2|2|2' '6|x|2|2|2|2' '6|6||2|2|2' '6|6|2|x|2|2' '6|6|2|2|x|2' '6|6|2|2|2|x'; do
+  printf '0' >"${malformed_seq}.polls"
+  printf '%s;True|\\nTrue|\\n\n' "$malformed" >"$malformed_seq"
+  if out="$(PATH="$shim_path" FAKE_SEQUENCE="$malformed_seq" GFS_READER_WAIT_POLL_SECONDS=0 \
+    kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=30s 2>&1)"; then
+    fail "wait accepted the malformed snapshot ${malformed}"
+  fi
+  grep -q 'not numeric' <<<"$out" || fail "malformed snapshot ${malformed} failed for the wrong reason: $out"
+done
 
 printf 'PASS: gfs-rollout-shim readiness interception contract\n'

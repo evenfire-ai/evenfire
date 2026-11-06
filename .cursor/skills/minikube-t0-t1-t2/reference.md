@@ -217,9 +217,9 @@ reader ReplicaSets to 0, and deletes CrashLoopBackOff reader pods so they
 re-read the restored Secret without waiting out kubelet backoff. HCC's
 gfsReconciler now preserves the `restartedAt` annotation. Every harness GFS
 reconcile still runs with the `scripts/minikube/gfs-rollout-shim` PATH prefix:
-the reader `rollout status` wait is replaced by the readiness poll in
-`scripts/minikube/wait-gfs-reader-ready.sh` so leftover ReplicaSets cannot
-turn a generation wait into a timeout. `full-setup.sh` and `pre-gate-sync` also
+the reader `rollout status` wait is replaced by the revision-aware readiness
+poll in `scripts/minikube/wait-gfs-reader-ready.sh` so leftover ReplicaSets
+cannot turn `kubectl rollout status` into a timeout. `full-setup.sh` and `pre-gate-sync` also
 re-run `sync-auth-key.sh` before each GFS reconcile because the overlay
 re-applies `gfs-config.jwt-public-key` empty and a reader pod fails closed
 without it. Do not run

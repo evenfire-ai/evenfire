@@ -184,9 +184,9 @@ make minikube-t2-real-postgres`.
   (`settle-gfs-reader-rollout.sh`: leftover claim, stale non-current
   ReplicaSets, CrashLoopBackOff pods) and runs with the `gfs-rollout-shim`
   PATH prefix, which replaces the reader `rollout status` wait with the
-  readiness poll in `wait-gfs-reader-ready.sh` — HCC's gfsReconciler now
-  preserves `restartedAt`, so leftover ReplicaSets still require a readiness
-  wait instead of a generation-based one.
+  revision-aware readiness poll in `wait-gfs-reader-ready.sh` — HCC's
+  gfsReconciler now preserves `restartedAt`, so leftover ReplicaSets still
+  require this poll instead of `kubectl rollout status`.
 
 ## Step 4 — Verdict and evidence reporting
 

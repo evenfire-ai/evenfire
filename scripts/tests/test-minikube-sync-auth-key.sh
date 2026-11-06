@@ -79,6 +79,27 @@ done
 
 printf '%s\n' "$*" >>"${TEST_KUBECTL_LOG}"
 
+# The reader readiness wait, reached through the gfs-rollout-shim after
+# `rollout restart deployment/gfsc-reader`. The first poll sees the restart
+# observed, no updated replica yet and only the old pods Ready, which is the
+# clerum-dev state behind the failure. The next poll sees it finished.
+if [[ "${1:-} ${2:-} ${3:-}" == "-n gfs get" ]]; then
+  polls_file="${TEST_STATE_DIR}/reader-wait.polls"
+  polls=0
+  [[ -f "${polls_file}" ]] && polls="$(cat "${polls_file}")"
+  case "$*" in
+    *'get deployment gfsc-reader '*'.spec.replicas'*)
+      polls="$((polls + 1))"
+      printf '%s' "${polls}" >"${polls_file}"
+      if [[ "${polls}" -eq 1 ]]; then snapshot='6|6|2|2||2'; else snapshot='6|6|2|2|2|2'; fi
+      printf '%s' "${snapshot}"
+      ;;
+    *'get pods -l '*) printf 'True|\nTrue|\n' ;;
+    *) echo "unexpected reader wait call: $*" >&2; exit 99 ;;
+  esac
+  exit 0
+fi
+
 has_output_flag() {
   local arg
   for arg in "$@"; do
@@ -190,7 +211,17 @@ if [[ "${1:-}" == "get" && "${2:-}" == "pods" ]]; then
     *app=mcp-host*) printf 'mcp-host-pod|True|\n' ;;
     *app=custom-host*) printf 'custom-host-pod|True|\n' ;;
     *gfsc-role=writer*) printf 'gfsc-writer-pod|True|\n' ;;
-    *gfsc-role=reader*) printf 'gfsc-reader-pod|True|\n' ;;
+    *gfsc-role=reader*)
+      # Once the wait is in play, the proof lists the new pod. It is Ready only
+      # after the rollout finished, so a wait that returns early fails the proof.
+      reader_wait_polls=0
+      [[ -f "${TEST_STATE_DIR}/reader-wait.polls" ]] && reader_wait_polls="$(cat "${TEST_STATE_DIR}/reader-wait.polls")"
+      if [[ "${TEST_READER_RACE:-0}" == "1" && "${reader_wait_polls}" -lt 2 ]]; then
+        printf 'gfsc-reader-new|False|\n'
+      else
+        printf 'gfsc-reader-pod|True|\n'
+      fi
+      ;;
     *) exit 99 ;;
   esac
   exit 0
@@ -432,5 +463,29 @@ grep -q 'gfsc deployment deployment/gfsc-writer did not become Ready after auth 
   echo "FAIL: GFS rollout failure did not produce a stable diagnostic" >&2
   exit 1
 }
+
+: >"${LOG_FILE}"
+printf 'old-gfs-key' >"${STATE_DIR}/gfs.key"
+printf '0' >"${STATE_DIR}/reader-wait.polls"
+if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
+  TEST_GFS_CONFIG_PRESENT=1 TEST_GFS_DSN_PRESENT=1 TEST_GFS_DEPLOYMENTS=1 TEST_READER_RACE=1 \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake --require-gfs >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  echo "FAIL: reader wait returned before the rollout finished, so the auth-key proof ran on an unready pod" >&2
+  exit 1
+fi
+if [[ "$(cat "${STATE_DIR}/reader-wait.polls")" != "2" ]]; then
+  echo "FAIL: reader wait did not poll until the rollout finished" >&2
+  exit 1
+fi
+restart_line="$(grep -n 'rollout restart deployment/gfsc-reader' "${LOG_FILE}" | head -n 1 | cut -d: -f1)"
+first_poll_line="$(grep -n 'get deployment gfsc-reader' "${LOG_FILE}" | head -n 1 | cut -d: -f1)"
+if [[ -z "${restart_line}" || -z "${first_poll_line}" || "${first_poll_line}" -le "${restart_line}" ]]; then
+  echo "FAIL: reader wait did not run after the reader restart" >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
+grep -q 'Auth key synced' "${OUT_FILE}"
 
 echo "PASS: auth-key sync retries transient rollout restart race and handles absent gfsc consumers safely"

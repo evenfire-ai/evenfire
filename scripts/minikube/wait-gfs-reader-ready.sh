@@ -3,10 +3,16 @@
 # annotation that `kubectl rollout restart` adds. Leftover reader ReplicaSets
 # can still make a generation-based `kubectl rollout status
 # deployment/gfsc-reader` wait on the wrong revision until timeout.
-# Judge readiness directly instead: the desired replica count is Ready and no
-# live, non-terminating reader pod is unready. A CrashLoopBackOff pod whose
+# Judge the rollout directly instead. The wait passes only when:
+# - the Deployment controller observed the latest generation;
+# - every desired replica belongs to the newest ReplicaSet and no other live
+#   replica remains, so old pods cannot satisfy the wait right after a restart;
+# - the desired replica count is Ready and no live, non-terminating reader pod
+#   is unready.
+# Unlike `kubectl rollout status`, this also blocks on any live unready pod and
+# does not stop at the progress deadline. A CrashLoopBackOff pod whose
 # credential was just restored converges through kubelet retries; this wait
-# observes that recovery instead of a leftover template generation.
+# observes that recovery.
 set -euo pipefail
 
 CONTEXT="${CONTEXT:?set CONTEXT to the target kube-context}"
@@ -44,26 +50,30 @@ fi
 
 deadline=$((SECONDS + TIMEOUT_SECONDS))
 while :; do
-  if ! desired="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
-    -o jsonpath='{.spec.replicas}' 2>&1)"; then
-    log "unable to read desired replicas for ${GFS_NS}/${DEPLOY}: ${desired}"
+  # One read, so every field describes the same Deployment state.
+  if ! snapshot="$(kc -n "$GFS_NS" get deployment "$DEPLOY" -o \
+    'jsonpath={.metadata.generation}{"|"}{.status.observedGeneration}{"|"}{.spec.replicas}{"|"}{.status.replicas}{"|"}{.status.updatedReplicas}{"|"}{.status.readyReplicas}' \
+    2>&1)"; then
+    log "unable to read rollout status for ${GFS_NS}/${DEPLOY}: ${snapshot}"
     exit 1
   fi
-  if [ -z "$desired" ] || ! [[ "$desired" =~ ^[0-9]+$ ]]; then
-    log "desired replicas for ${GFS_NS}/${DEPLOY} is not numeric"
+  IFS='|' read -r generation observed desired replicas updated ready <<<"$snapshot"
+  if ! [[ "$generation" =~ ^[0-9]+$ && "$desired" =~ ^[0-9]+$ ]]; then
+    log "generation or desired replicas for ${GFS_NS}/${DEPLOY} is not numeric"
     exit 1
   fi
-  if ! ready="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
-    -o jsonpath='{.status.readyReplicas}' 2>&1)"; then
-    log "unable to read Ready replicas for ${GFS_NS}/${DEPLOY}: ${ready}"
-    exit 1
-  fi
+  # The API server omits these status fields while their value is zero.
+  observed="${observed:-0}"
+  replicas="${replicas:-0}"
+  updated="${updated:-0}"
   ready="${ready:-0}"
-  if ! [[ "$ready" =~ ^[0-9]+$ ]]; then
-    log "Ready replicas for ${GFS_NS}/${DEPLOY} is not numeric"
+  if ! [[ "$observed" =~ ^[0-9]+$ && "$replicas" =~ ^[0-9]+$ && "$updated" =~ ^[0-9]+$ && "$ready" =~ ^[0-9]+$ ]]; then
+    log "rollout status for ${GFS_NS}/${DEPLOY} is not numeric"
     exit 1
   fi
-  if [ "$desired" -gt 0 ] && [ "$ready" -ge "$desired" ]; then
+  if [ "$desired" -gt 0 ] && [ "$observed" -ge "$generation" ] \
+    && [ "$updated" -eq "$desired" ] && [ "$replicas" -eq "$desired" ] \
+    && [ "$ready" -ge "$desired" ]; then
     pod_rows=""
     unready=""
     if ! pod_rows="$(kc -n "$GFS_NS" get pods -l "$SELECTOR" -o \
@@ -80,7 +90,7 @@ while :; do
     fi
   fi
   if [ "$SECONDS" -ge "$deadline" ]; then
-    log "timed out after ${TIMEOUT_SECONDS}s waiting for ${GFS_NS}/${DEPLOY} readiness (ready=${ready:-0}/${desired:-unknown})"
+    log "timed out after ${TIMEOUT_SECONDS}s waiting for ${GFS_NS}/${DEPLOY} rollout (generation=${generation} observed=${observed} desired=${desired} replicas=${replicas} updated=${updated} ready=${ready})"
     exit 1
   fi
   sleep "$POLL_SECONDS"
