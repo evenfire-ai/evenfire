@@ -11,6 +11,7 @@ vi.mock('../src/db.js', async importActual => {
 
 const { config } = await import('../src/config.js')
 const { createAdminResourcesRouter } = await import('../src/routes/admin/resources.js')
+const { clerumErrorHandler } = await import('../src/http/errorHandler.js')
 
 /**
  * A Context write may not ADD to `spec.mcpServers` a name with no live McpServer.
@@ -39,6 +40,9 @@ function setup() {
   const app = express()
   app.use(express.json())
   app.use(createAdminResourcesRouter(api.gateway as never))
+  // The production handler, so a thrown read error reaches the client with the
+  // status and body it would get in the real app.
+  app.use(clerumErrorHandler)
   return { ...api, app }
 }
 
@@ -185,7 +189,9 @@ describe('Context writes refuse an added server with no live McpServer', () => {
           ? await put(api, 'ctx', ['live'], ctx!.metadata.resourceVersion)
           : await post(api, 'ctx-new', ['live'])
 
-      expect(res.status).toBeGreaterThanOrEqual(500)
+      expect(res.status).toBe(500)
+      expect(res.body).toMatchObject({ error: 'Internal Server Error' })
+      expect(res.body).not.toHaveProperty('mcpServers')
       expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
       expect(api.customApi.createNamespacedCustomObject).not.toHaveBeenCalled()
     }
@@ -236,7 +242,8 @@ describe('Context writes refuse an added server with no live McpServer', () => {
     // Let any worker still running after the response finish before counting.
     await new Promise(resolve => setTimeout(resolve, 20))
 
-    expect(res.status).toBeGreaterThanOrEqual(500)
+    expect(res.status).toBe(500)
+    expect(res.body).toMatchObject({ error: 'Internal Server Error' })
     const serverReads = api.customApi.getNamespacedCustomObject.mock.calls.filter(
       ([args]) => args.plural === 'mcpservers'
     )
