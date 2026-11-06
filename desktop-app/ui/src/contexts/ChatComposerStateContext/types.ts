@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import type { PersistedConversationPrefillReceipt } from '../../lib/gfsConversationPrefill'
 import type {
   ComposerFileAttachment,
   ComposerFileRefusal,
@@ -17,6 +18,11 @@ export interface ChatComposerStateContextValue {
   activeChatId: string | null
   /** Exact workspace chat-tab identity that owns the mounted composer. */
   workspaceChatTabId?: string | null
+  /** Current App-owned persisted-chat activation; Composer is only its consumer. */
+  persistedConversationPrefillReceipt?: PersistedConversationPrefillReceipt | null
+  /** The renderer authority binding currently used to fence that receipt. */
+  authorityScope?: string
+  onPersistedConversationPrefillAttempt?: (receiptId: number) => void
   composerImageAttachments: ComposerImageAttachment[]
   composerFileAttachments: ComposerFileAttachment[]
   /** Why the documents of the last attach were not attached (#678). */

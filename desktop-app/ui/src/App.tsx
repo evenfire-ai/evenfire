@@ -54,7 +54,10 @@ import { createEmbedOwnershipMachine } from '@lib/embedOwnershipMachine'
 import type { EmbedRefreshErrorEvent } from '@lib/embedOwnershipMachine.types'
 import { embedFailureMessage, embedViewState } from '@lib/embedOwnershipView'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
-import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
+import {
+  type PersistedConversationActivationOrigin,
+  prefillNewConversationWithGfsResource,
+} from '@lib/gfsConversationPrefill'
 import {
   authoritativeGfsStatus,
   expireGfsPreviewTabs,
@@ -734,7 +737,8 @@ export function App() {
     (
       tab: WorkspaceTab | undefined,
       inDrawer = chatDrawerVisibleRef.current,
-      navigationIntentAlreadyStarted = false
+      navigationIntentAlreadyStarted = false,
+      activationOrigin?: PersistedConversationActivationOrigin
     ) => {
       if (!tab || tab.kind === 'files' || tab.kind === 'settings' || tab.kind === 'preview') {
         if (!inDrawer) leaveSandboxForChat()
@@ -759,6 +763,7 @@ export function App() {
                   title: tab.title,
                   selectLatest: false,
                   keepNavItem: true,
+                  ...(activationOrigin ? { activationOrigin } : {}),
                   ...navigationIntentOption,
                 }
               : { selectLatest: false, keepNavItem: true, ...navigationIntentOption }
@@ -778,7 +783,13 @@ export function App() {
         vm.handleSelectChatAgent(
           agentRef,
           chatId
-            ? { chatId, title: tab.title, selectLatest: false, ...navigationIntentOption }
+            ? {
+                chatId,
+                title: tab.title,
+                selectLatest: false,
+                ...(activationOrigin ? { activationOrigin } : {}),
+                ...navigationIntentOption,
+              }
             : { selectLatest: false, ...navigationIntentOption }
         )
       } else {
@@ -799,7 +810,13 @@ export function App() {
       // a live view is left as it is (Refresh is the explicit reload).
       activateAndLaunch(
         state => selectWorkspaceTab(state, id),
-        () => revealWorkspaceTab(tab, false, true),
+        () =>
+          revealWorkspaceTab(
+            tab,
+            false,
+            true,
+            tab.kind === 'chat' && tab.chat?.chatId ? 'workspace-chat-tab' : undefined
+          ),
         ACTIVE_TAB_LAUNCH
       )
     },
@@ -815,7 +832,7 @@ export function App() {
       )
       if (tab) {
         vm.beginUserNavigationIntent()
-        revealWorkspaceTab(tab, true, true)
+        revealWorkspaceTab(tab, true, true, tab.chat?.chatId ? 'drawer-chat-switcher' : undefined)
       }
     },
     [revealWorkspaceTab, vm.beginUserNavigationIntent]
@@ -1061,10 +1078,7 @@ export function App() {
   )
 
   const handleSelectChatAgentWithTabs = React.useCallback(
-    (
-      agentName: string,
-      options: { selectLatest?: boolean; chatId?: string; isRemote?: boolean; title?: string } = {}
-    ) => {
+    (agentName: string, options: Parameters<typeof vm.handleSelectChatAgent>[1] = {}) => {
       // The controller's handleSelectChatAgent owns the tab store now (it
       // activates the matching chat tab so `navItem` derives to `chat` in the
       // same commit). This wrapper only adds drawer-awareness: while the drawer
@@ -1077,6 +1091,24 @@ export function App() {
       )
     },
     [vm.clearAppsPicker, vm.handleSelectChatAgent]
+  )
+
+  const handleSelectChatFromThread = React.useCallback(
+    (
+      chatId: string,
+      options: { activationOrigin?: PersistedConversationActivationOrigin } = {}
+    ) => {
+      if (options.activationOrigin && vm.selectedAgent) {
+        handleSelectChatAgentWithTabs(vm.selectedAgent, {
+          chatId,
+          selectLatest: false,
+          activationOrigin: options.activationOrigin,
+        })
+        return Promise.resolve()
+      }
+      return vm.handleSelectChat(chatId)
+    },
+    [handleSelectChatAgentWithTabs, vm.handleSelectChat, vm.selectedAgent]
   )
   const bootSplashLoading = vm.booting || vm.initialExperienceLoading
   const isAgentChatView =
@@ -3250,7 +3282,21 @@ export function App() {
   // reference when already aligned), so this never ping-pongs with the reveal
   // paths and never drives a chat switch itself.
   React.useEffect(() => {
-    if ((vm.navItem !== DESKTOP_ROUTES.chat && !chatDrawerVisible) || !vm.selectedAgent) return
+    const receipt = vm.persistedConversationPrefillReceipt
+    const receiptKeepsReconciliationLive = Boolean(
+      receipt &&
+      receipt.agentRef === vm.selectedAgent &&
+      receipt.chatId === vm.activeChatId &&
+      ['pending-ready', 'bound-eligible', 'suspended-resource'].includes(receipt.status)
+    )
+    if (
+      (vm.navItem !== DESKTOP_ROUTES.chat &&
+        !chatDrawerVisible &&
+        !receiptKeepsReconciliationLive) ||
+      !vm.selectedAgent
+    ) {
+      return
+    }
     const conversation = vm.activeChatId
       ? (vm.chatList.find(chat => chat.id === vm.activeChatId) ??
         vm.latestChatSessions.find(
@@ -3290,7 +3336,33 @@ export function App() {
     vm.chatList,
     vm.latestChatSessions,
     vm.navItem,
+    vm.persistedConversationPrefillReceipt,
     vm.selectedAgent,
+  ])
+
+  React.useEffect(() => {
+    const receipt = vm.persistedConversationPrefillReceipt
+    if (
+      !receipt ||
+      !['awaiting-authorization', 'pending-ready', 'bound-eligible', 'suspended-resource'].includes(
+        receipt.status
+      )
+    ) {
+      return
+    }
+    const exactDestination = workspaceTabs.tabs.find(
+      tab =>
+        tab.kind === 'chat' &&
+        tab.chat?.agentRef === receipt.agentRef &&
+        tab.chat?.chatId === receipt.chatId
+    )
+    if (exactDestination) {
+      vm.bindPersistedConversationPrefillDestination(receipt.id, exactDestination.id)
+    }
+  }, [
+    vm.bindPersistedConversationPrefillDestination,
+    vm.persistedConversationPrefillReceipt,
+    workspaceTabs,
   ])
 
   // Reset ephemeral UI + the workspace store when the authenticated principal
@@ -3897,7 +3969,7 @@ export function App() {
   // composer/sidebar/workspace/fleet board. The actions value wraps every handler
   // in a stable callback, so it never changes identity — action-only consumers
   // (FleetBoard) stay inert even when a handler's closure deps change.
-  const agentChatActionsValue = useAgentChatActionsValue(vm)
+  const agentChatActionsValue = useAgentChatActionsValue(vm, handleSelectChatFromThread)
 
   const chatListValue = React.useMemo(
     () => ({
@@ -3947,6 +4019,9 @@ export function App() {
     () => ({
       activeChatId: vm.activeChatId,
       workspaceChatTabId: composerWorkspaceChatTabId,
+      persistedConversationPrefillReceipt: vm.persistedConversationPrefillReceipt,
+      authorityScope: vm.authorityScope,
+      onPersistedConversationPrefillAttempt: vm.consumePersistedConversationPrefillReceipt,
       composerImageAttachments: vm.composerImageAttachments,
       composerFileAttachments: vm.composerFileAttachments,
       composerFileRefusals: vm.composerFileRefusals,
@@ -3961,6 +4036,9 @@ export function App() {
     [
       vm.activeChatId,
       composerWorkspaceChatTabId,
+      vm.persistedConversationPrefillReceipt,
+      vm.authorityScope,
+      vm.consumePersistedConversationPrefillReceipt,
       vm.composerImageAttachments,
       vm.composerFileAttachments,
       vm.composerFileRefusals,

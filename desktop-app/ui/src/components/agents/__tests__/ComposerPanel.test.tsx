@@ -14,7 +14,17 @@ import {
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
 import type { ComposerDraftWriteResult } from '@hooks/useComposerDraft'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import { readComposerFile } from '@lib/composerFileAdmission'
+import type { PersistedConversationPrefillReceipt } from '@lib/gfsConversationPrefill'
+import {
+  clearLatestGfsConversationContext,
+  recordLatestGfsConversationContext,
+} from '@lib/gfsConversationPrefill'
 import {
   type ImageInputDecision,
   imageInputBlockMessage,
@@ -52,6 +62,36 @@ const composerState: ChatComposerStateContextValue = {
 const draftState = {
   value: '',
   set: vi.fn<(value: string) => ComposerDraftWriteResult>(() => ({ accepted: true })),
+}
+const PREFILL_SCOPE = 'desktop:true:user-1:team-1:1'
+
+function installComposerPrefillReceipt(uri: string, sourceTabId: string) {
+  const receipt: PersistedConversationPrefillReceipt = {
+    id: 1,
+    intentSequence: 1,
+    authorityScope: PREFILL_SCOPE,
+    origin: 'sidebar-session',
+    agentRef: 'agent-1',
+    chatId: 'chat-persisted',
+    resource: { uri, sourceTabId },
+    status: 'bound-eligible',
+    destinationWorkspaceTabId: 'chat-tab',
+  }
+  const attempt = vi.fn((receiptId: number) => {
+    if (composerState.persistedConversationPrefillReceipt?.id === receiptId) {
+      composerState.persistedConversationPrefillReceipt = {
+        ...receipt,
+        status: 'consumed',
+      }
+    }
+  })
+  Object.assign(composerState, {
+    workspaceChatTabId: 'chat-tab',
+    authorityScope: PREFILL_SCOPE,
+    persistedConversationPrefillReceipt: receipt,
+    onPersistedConversationPrefillAttempt: attempt,
+  })
+  return attempt
 }
 
 /** Stable action spies so guard tests can assert what did (not) reach the controller. */
@@ -201,6 +241,8 @@ afterEach(() => {
   globalFilesMock.showComposerItem = false
   globalFilesMock.modalProps = undefined
   draftState.value = ''
+  clearLatestGfsConversationContext()
+  resetComposerDraftStore()
   draftState.set.mockReset()
   Object.assign(composerState, {
     composerImageAttachments: [],
@@ -212,6 +254,9 @@ afterEach(() => {
     failedAgentSend: null,
     activeChatId: null,
     workspaceChatTabId: null,
+    authorityScope: undefined,
+    persistedConversationPrefillReceipt: null,
+    onPersistedConversationPrefillAttempt: undefined,
     activeMessageCount: 0,
     composerFocusRequestId: 0,
   })
@@ -324,6 +369,89 @@ describe.each([
     expect(textarea.selectionStart).toBe(4)
     expect(textarea.selectionEnd).toBe(8)
     otherInput.remove()
+  })
+
+  it('attempts the owner-held empty-chat receipt once from the exact visible GFS route', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    composerState.activeChatId = 'chat-persisted'
+    const attempt = installComposerPrefillReceipt(uri, 'files-context')
+    recordLatestGfsConversationContext({
+      id: 'files-context',
+      kind: 'files',
+      title: 'Reports',
+      files: { path: uri },
+    })
+
+    const { rerender } = render(<ComposerPanel inline={inline} />)
+    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe(uri)
+
+    rerender(<ComposerPanel inline={inline} />)
+    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe(uri)
+    expect(attempt).toHaveBeenCalledTimes(1)
+    expect(draftState.set).not.toHaveBeenCalled()
+  })
+
+  it('does not overwrite a persisted chat draft with contextual GFS prefill', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    composerState.activeChatId = 'chat-persisted'
+    setComposerDraft('chat-persisted', 'existing draft', 'agent-1')
+    draftState.value = 'existing draft'
+    const attempt = installComposerPrefillReceipt(uri, 'preview-context')
+    recordLatestGfsConversationContext({
+      id: 'preview-context',
+      kind: 'preview',
+      title: 'report.md',
+      preview: {
+        gfsUri: uri,
+        fileKind: 'markdown',
+        byteLength: 1,
+      },
+    })
+
+    render(<ComposerPanel inline={inline} />)
+    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe('existing draft')
+    expect(attempt).toHaveBeenCalledOnce()
+  })
+
+  it('preserves whitespace bytes and the textarea selection during a receipt attempt', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    composerState.activeChatId = 'chat-persisted'
+    draftState.value = '  \n '
+    setComposerDraft('chat-persisted', draftState.value, 'agent-1')
+    const attempt = installComposerPrefillReceipt(uri, 'files-context')
+    recordLatestGfsConversationContext({
+      id: 'files-context',
+      kind: 'files',
+      title: 'Reports',
+      files: { path: uri },
+    })
+
+    const { rerender } = render(<ComposerPanel inline={inline} />)
+    const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    textarea.setSelectionRange(1, 3)
+    rerender(<ComposerPanel inline={inline} />)
+
+    expect(textarea.value).toBe('  \n ')
+    expect([textarea.selectionStart, textarea.selectionEnd]).toEqual([1, 3])
+    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe('  \n ')
+    expect(attempt).toHaveBeenCalledOnce()
+  })
+
+  it('does not accept the same URI when its published source owner differs', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    composerState.activeChatId = 'chat-persisted'
+    const attempt = installComposerPrefillReceipt(uri, 'captured-files-owner')
+    recordLatestGfsConversationContext({
+      id: 'replacement-files-owner',
+      kind: 'files',
+      title: 'Reports',
+      files: { path: uri },
+    })
+
+    render(<ComposerPanel inline={inline} />)
+
+    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe('')
+    expect(attempt).not.toHaveBeenCalled()
   })
 })
 

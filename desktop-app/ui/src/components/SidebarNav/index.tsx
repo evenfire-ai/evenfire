@@ -477,6 +477,7 @@ export function SidebarNav({
                                         chatId: session.id,
                                         isRemote: session.remote === true,
                                         title: session.title,
+                                        activationOrigin: 'sidebar-session',
                                       })
                                       setMobileMenuOpen(false)
                                       setSessionMenuId(null)

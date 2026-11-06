@@ -1078,7 +1078,9 @@ export function ChatThread({
                           block
                           className="agent-dedicated-session-title-btn"
                           color="transparent"
-                          onClick={() => onSelectChat(chat.id)}
+                          onClick={() =>
+                            onSelectChat(chat.id, { activationOrigin: 'chat-thread-session' })
+                          }
                           size="sm"
                           title={chat.title}
                           variant="text"

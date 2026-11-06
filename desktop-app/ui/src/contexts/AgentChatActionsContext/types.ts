@@ -1,5 +1,6 @@
 import type { ReactNode, RefObject } from 'react'
 import type { ChatDeleteFence } from '../../../../src/types'
+import type { PersistedConversationActivationOrigin } from '../../lib/gfsConversationPrefill'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
 
 export interface QueuedChatDelete {
@@ -26,7 +27,10 @@ export interface AgentChatActionsContextValue {
     chatId: string,
     deletion: QueuedChatDelete
   ) => Promise<void>
-  handleSelectChat: (chatId: string) => Promise<void>
+  handleSelectChat: (
+    chatId: string,
+    options?: { activationOrigin?: PersistedConversationActivationOrigin }
+  ) => Promise<void>
   clearComposerSendError: () => void
   handleAddComposerImageAttachments: (attachments: ComposerImageAttachment[]) => void
   handleUpdateComposerImageAttachment: (attachment: ComposerImageAttachment) => void

@@ -39,6 +39,7 @@ import {
   mapComposerAttachmentsToHostRequest,
 } from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import { clearLatestGfsConversationContext } from '@lib/gfsConversationPrefill'
 import {
   confirmHostModelSelectionFromSend,
   dropIgnoredHostModelIntent,
@@ -681,6 +682,7 @@ export function useAgentChatController({
     const scope = `${isAuthenticated}:${authenticatedScope}`
     if (lastRetentionScope.current === scope) return
     lastRetentionScope.current = scope
+    clearLatestGfsConversationContext()
     // The memo key already carries the scope; this frees the previous scope's entries.
     transcriptMemoRef.current?.clear()
     sendScopeGeneration.current += 1
@@ -1196,6 +1198,7 @@ export function useAgentChatController({
   const resetChat = useCallback(() => {
     beginSelectionIntent()
     clearAllComposerDrafts()
+    clearLatestGfsConversationContext()
     setActivityByAgentMessage({})
     setProgressByAgentMessage({})
     resetComposerAttachments()
