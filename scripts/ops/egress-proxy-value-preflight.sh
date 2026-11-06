@@ -186,6 +186,11 @@ epvp_unsafe_name() {
     epvp_*)
       return 0
       ;;
+    # bash rewrites these at startup or per prompt/command, so the exported
+    # value the child sees is bash's, not the tenant's.
+    SECONDS | RANDOM | SRANDOM | LINENO | EPOCHSECONDS | EPOCHREALTIME | FUNCNAME | GROUPS | BASH_LINENO | BASH_SOURCE | BASH_ARGC | BASH_ARGV)
+      return 0
+      ;;
   esac
   return 1
 }

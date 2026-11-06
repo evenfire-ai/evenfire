@@ -79,8 +79,8 @@ while [ "$#" -gt 0 ]; do
     --context=*) context=${1#*=}; shift ;;
     -n|--namespace) namespace=${2:-}; shift 2 ;;
     --namespace=*) namespace=${1#*=}; shift ;;
-    -o|--output) shift 2 ;;
-    -o=*|--output=*) shift ;;
+    -o|--output) [ "${2:-}" = json ] || exit 2; shift 2 ;;
+    -o=*|--output=*) [ "${1#*=}" = json ] || exit 2; shift ;;
     --ignore-not-found|--ignore-not-found=true) shift ;;
     get)
       kind=${2:-}; shift 2
@@ -546,20 +546,30 @@ add_server unsafe 'https://example.com/mcp' 'proxy_set_header X-Key "${LD_PRELOA
   "$(literal LD_PRELOAD 'TESTKEY-LOADER')"
 add_server internal 'https://example.com/mcp' 'proxy_set_header X-Key "${epvp_i}";' \
   "$(literal epvp_i 'TESTKEY-INTERNAL')"
+add_server seconds 'https://example.com/mcp' 'proxy_set_header X-Key "${SECONDS}";' \
+  "$(literal SECONDS 'TESTKEY-SECONDS')"
+add_server funcname 'https://example.com/mcp' 'proxy_set_header X-Key "${FUNCNAME}";' \
+  "$(literal FUNCNAME 'TESTKEY-FUNCNAME')"
 add_server witness 'https://example.com/mcp' 'proxy_set_header X-Key "${API_KEY}";' \
   "$(literal API_KEY 'TESTKEY-CLEAN-9482')"
 run_case unsafe-env-name 3 \
   'server=fixture-namespace/unsafe verdict=INCONCLUSIVE reason=unsafe-env-name name=LD_PRELOAD'
 expect_output unsafe-internal-name \
   'server=fixture-namespace/internal verdict=INCONCLUSIVE reason=unsafe-env-name name=epvp_i'
+expect_output unsafe-seconds-name \
+  'server=fixture-namespace/seconds verdict=INCONCLUSIVE reason=unsafe-env-name name=SECONDS'
+expect_output unsafe-funcname-name \
+  'server=fixture-namespace/funcname verdict=INCONCLUSIVE reason=unsafe-env-name name=FUNCNAME'
 expect_output unsafe-witness 'server=fixture-namespace/witness verdict=OK'
 # The child that runs the check is `env -i`, so its record line has no CONTEXT;
 # the preflight's own awk runs inherit CONTEXT. Exactly one such invocation
-# exists: the witness server. The two unsafe servers never reach the check.
+# exists: the witness server. The four unsafe servers never reach the check.
 if [ "$(grep -Fvc ' CONTEXT ' "$TEST_DIR/awk-names" || true)" -eq 1 ] &&
   [ "$(count_lines "$TEST_DIR/awk-names" ' API_KEY ')" -eq 1 ] &&
   ! grep -Fq ' LD_PRELOAD ' "$TEST_DIR/awk-names" &&
-  ! grep -Fq ' epvp_i ' "$TEST_DIR/awk-names"; then
+  ! grep -Fq ' epvp_i ' "$TEST_DIR/awk-names" &&
+  ! grep -Fq ' SECONDS ' "$TEST_DIR/awk-names" &&
+  ! grep -Fq ' FUNCNAME ' "$TEST_DIR/awk-names"; then
   pass unsafe-not-exported
 else
   fail 'unsafe-not-exported (check ran for an unsafe name or a reserved name was exported)'
