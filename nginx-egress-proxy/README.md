@@ -342,19 +342,17 @@ and envsubst would otherwise leave it for NGINX to read as one of its own
 variables (`${HTTP_X}` is the client's `X` request header). That happens when a
 running pod restarts onto a template whose new placeholder its older env lacks.
 
-HCC strips CRD-supplied values of the six `NGINX_ENVSUBST_*` names from every
-remote-server env source (`spec.env`, `spec.envSecret`, and `envMapping`), then
-appends one empty `NGINX_ENVSUBST_FILTER` last. The resolver pair is not
-stripped. Kubernetes uses the last duplicate, so that empty entry is the
-Deployment's value for the name even while an older image is still running. On
-this image the entrypoint also assigns the same empty filter before envsubst.
-
-HCC appends `NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1` and an empty
-`NGINX_ENVSUBST_FILTER` after CRD-provided env and `spec.envSecret` entries.
-Kubernetes uses the last duplicate, so a CRD cannot disable the platform
-resolver setting or restrict which declared names `envsubst` substitutes. The
-image exports the pod's local nameservers into `NGINX_LOCAL_RESOLVERS`, which
-the generated `resolver` directive uses.
+HCC strips CRD-supplied values of the six `NGINX_ENVSUBST_*` names and of the
+resolver pair (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS` and `NGINX_LOCAL_RESOLVERS`)
+from every remote-server env source (`spec.env`, `spec.envSecret`, and
+`envMapping`), then appends its own `NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1` and
+one empty `NGINX_ENVSUBST_FILTER` last. Kubernetes uses the last duplicate,
+so that empty entry is the Deployment's value for the name even while an older
+image is still running, and a CRD cannot disable the platform resolver setting
+or restrict which declared names `envsubst` substitutes. On this image the
+entrypoint also assigns the same empty filter before envsubst. The image
+exports the pod's local nameservers into `NGINX_LOCAL_RESOLVERS`, which the
+generated `resolver` directive uses.
 
 ### Readiness and an unresolvable upstream
 

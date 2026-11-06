@@ -270,15 +270,18 @@ env source (`spec.env`, `spec.envSecret`, and `envMapping`):
 `NGINX_ENVSUBST_OUTPUT_DIR`, `NGINX_ENVSUBST_STREAM_TEMPLATE_SUFFIX`,
 `NGINX_ENVSUBST_STREAM_OUTPUT_DIR`, `NGINX_ENVSUBST_FILTER`.
 
-The resolver pair is reserved, not stripped: `NGINX_ENTRYPOINT_LOCAL_RESOLVERS`
-and `NGINX_LOCAL_RESOLVERS`. The image exports `NGINX_LOCAL_RESOLVERS` after the
-template check when `NGINX_ENTRYPOINT_LOCAL_RESOLVERS` is set, so a placeholder
-of either name would be filled with a value the check never saw. A CRD may
-still set the pair, and no template HCC renders references them. A query
-placeholder that names a reserved or forbidden name fails the reconcile
-(`Resource sync failed`). An authHeader reference to one is dropped, so the
-upstream stops receiving that header. HCC then appends one empty
-`NGINX_ENVSUBST_FILTER` last.
+The resolver pair is reserved and stripped: `NGINX_ENTRYPOINT_LOCAL_RESOLVERS`
+and `NGINX_LOCAL_RESOLVERS`. HCC strips a CRD-supplied value of either name
+from every remote-server env source (`spec.env`, `spec.envSecret`, and
+`envMapping`). The image exports `NGINX_LOCAL_RESOLVERS` after the template
+check when `NGINX_ENTRYPOINT_LOCAL_RESOLVERS` is set, so a placeholder of
+either name would be filled with a value the check never saw. HCC appends its
+own `NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1`, so a CRD value of the pair is never
+effective. The only reference to the pair in a template HCC renders is its own
+`resolver` line. A query placeholder that names a reserved or forbidden name
+fails the reconcile (`Resource sync failed`). An authHeader reference to one
+is dropped, so the upstream stops receiving that header. HCC then appends one
+empty `NGINX_ENVSUBST_FILTER` last.
 
 #### Migration
 
