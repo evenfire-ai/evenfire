@@ -2,11 +2,13 @@
  * Pure rules for remote-OAuth connectors offered by the registry catalog: which
  * entries belong to the subtype, how their `mcp_server_meta.oauth` block is
  * validated, whose presentation metadata is trusted, the canonical McpServer
- * name of each install slot, and which fields make up the identity of an
+ * name of each install slot, and what a generic edit may still change on an
  * installed catalog instance. No I/O: every route that touches the subtype
  * resolves it through these functions, so there is a single implementation.
  */
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
+import { stripLegacyMcpServerSpecFields } from '../../http/validateMcpServerSpec.js'
 import type { RegistrationMode } from '../../oauth/discovery.js'
 import { mergeAnnotationsForReplace } from '../../services/annotationMerge.js'
 import type { RegistryEntry } from '../../services/registryClient.js'
@@ -517,38 +519,56 @@ export function isCatalogRemoteOAuthInstance(cr: McpServerLike): boolean {
   return typeof catalogId === 'string' && catalogId !== '' && specOAuth(cr)?.source === 'remote'
 }
 
-export type CatalogInstanceIdentityField =
-  | 'spec.remote.baseUrl'
-  | 'spec.transport.url'
-  | 'spec.oauth.source'
-  | 'spec.oauth.grantScope'
-  | 'spec.oauth.id'
-  | 'spec.oauth.authorizationEndpoint'
-  | 'spec.oauth.tokenEndpoint'
-  | 'spec.oauth.registrationEndpoint'
-  | 'spec.oauth.resource'
-  | `metadata.annotations.${typeof CATALOG_ID_ANNOTATION}`
-  | `metadata.annotations.${typeof CATALOG_VERSION_ANNOTATION}`
-
 function nested(cr: McpServerLike, key: 'remote' | 'transport', field: string): unknown {
   const block = cr.spec?.[key]
   return isPlainObject(block) ? block[field] : undefined
 }
 
-const OAUTH_IDENTITY_FIELDS = [
-  'source',
-  'grantScope',
-  'id',
-  'authorizationEndpoint',
-  'tokenEndpoint',
-  'registrationEndpoint',
-  'resource',
-] as const
+/**
+ * The only spec paths a generic replace may change on a catalog instance. Everything
+ * else belongs to the catalog entry. It is an allowlist so that a field added to the
+ * CRD later is immutable here until someone decides otherwise: a denylist missed
+ * `image` and `remote.authHeaders`, each enough to send users' tokens elsewhere.
+ * `oauth.backgroundAccess` stays out on purpose: no catalog entry declares it, and
+ * turning it on would open background grants on a connector shown as verified.
+ */
+export const CATALOG_INSTANCE_MUTABLE_PATHS: readonly string[] = [
+  'spec.enabled',
+  'spec.description',
+  'spec.egressBindings',
+  'spec.resources',
+  'spec.healthCheck',
+  'spec.oauth.scopes',
+]
+
+const MUTABLE_PATHS = new Set(CATALOG_INSTANCE_MUTABLE_PATHS)
+// `spec.oauth` is reported per field because one field inside it is editable; every
+// other block is reported whole.
+const PATHS_COMPARED_PER_KEY = new Set(['spec', 'spec.oauth'])
+
+function collectSpecChanges(path: string, current: unknown, next: unknown, out: string[]): void {
+  if (MUTABLE_PATHS.has(path)) return
+  if (PATHS_COMPARED_PER_KEY.has(path) && isPlainObject(current) && isPlainObject(next)) {
+    for (const key of new Set([...Object.keys(current), ...Object.keys(next)])) {
+      collectSpecChanges(`${path}.${key}`, current[key], next[key], out)
+    }
+    return
+  }
+  if (!isDeepStrictEqual(current, next)) out.push(path)
+}
+
+function comparableSpec(cr: McpServerLike): unknown {
+  const spec = cr.spec ?? undefined
+  // The replace drops legacy fields from the body, so an older CR that still carries
+  // them would otherwise differ from a faithful resend of itself.
+  return isPlainObject(spec) ? stripLegacyMcpServerSpecFields(spec) : spec
+}
 
 /**
- * Identity fields of a catalog instance that a full replace from `currentCr` to
- * `nextCr` would change. Scopes and egress bindings are deliberately absent: they
- * stay editable, as they are on a manually installed connector.
+ * What a full replace from `currentCr` to `nextCr` would change on a catalog
+ * instance outside {@link CATALOG_INSTANCE_MUTABLE_PATHS}: dotted paths at the
+ * highest level that differs, sorted. Defaults are not filled in, so a caller must
+ * resend the spec it read; a minimal spec is a change.
  *
  * Annotations are compared after the same merge the replace applies, because a
  * replace never drops a platform `clerum.io/*` key the caller did not name: a
@@ -558,19 +578,9 @@ const OAUTH_IDENTITY_FIELDS = [
 export function catalogInstanceIdentityChanges(
   currentCr: McpServerLike,
   nextCr: McpServerLike
-): CatalogInstanceIdentityField[] {
-  const changes: CatalogInstanceIdentityField[] = []
-  if (nested(currentCr, 'remote', 'baseUrl') !== nested(nextCr, 'remote', 'baseUrl')) {
-    changes.push('spec.remote.baseUrl')
-  }
-  if (nested(currentCr, 'transport', 'url') !== nested(nextCr, 'transport', 'url')) {
-    changes.push('spec.transport.url')
-  }
-  const currentOAuth = specOAuth(currentCr)
-  const nextOAuth = specOAuth(nextCr)
-  for (const field of OAUTH_IDENTITY_FIELDS) {
-    if (currentOAuth?.[field] !== nextOAuth?.[field]) changes.push(`spec.oauth.${field}`)
-  }
+): string[] {
+  const changes: string[] = []
+  collectSpecChanges('spec', comparableSpec(currentCr), comparableSpec(nextCr), changes)
 
   const currentAnnotations = currentCr.metadata?.annotations ?? undefined
   const effectiveNext = mergeAnnotationsForReplace(
@@ -581,7 +591,7 @@ export function catalogInstanceIdentityChanges(
     if (currentAnnotations?.[key] !== effectiveNext?.[key])
       changes.push(`metadata.annotations.${key}`)
   }
-  return changes
+  return changes.sort()
 }
 
 /**

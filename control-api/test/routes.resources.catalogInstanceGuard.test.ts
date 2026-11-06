@@ -93,7 +93,7 @@ describe('generic McpServer PUT on a catalog instance', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error).toBe('catalog_instance_immutable')
-    expect(res.body.fields).toEqual(['spec.remote.baseUrl', 'spec.transport.url'])
+    expect(res.body.fields).toEqual(['spec.remote', 'spec.transport'])
     expect(res.body.message).toBe(EDIT_INSTANCE_MESSAGE)
     expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
     expect(stored(api)!.spec.remote.baseUrl).toBe(cr.spec.remote.baseUrl)
@@ -380,6 +380,178 @@ describe('generic McpServer PUT on a catalog instance', () => {
     const after = stored(api, 'manual-notion')!
     expect(after.metadata.uid).toBe(b.metadata.uid)
     expect(after.spec).toEqual(bSpec)
+  })
+})
+
+/** The spec the edit page holds: what the real GET route returns for the CR. */
+async function editPageRead(api: Api, name = 'notion-user'): Promise<Spec> {
+  const res = await request(api.app).get(`/admin/mcp-servers/${name}`)
+  expect(res.status).toBe(200)
+  return res.body.spec as Spec
+}
+
+/** The edit page's save: the spec it read with only the egress bindings replaced. */
+function handleSaveSpec(read: Spec, egressBindings: Array<Record<string, unknown>>): Spec {
+  const nextSpec = { ...read }
+  if (egressBindings.length > 0) nextSpec.egressBindings = egressBindings
+  else delete (nextSpec as Partial<Spec>).egressBindings
+  return nextSpec
+}
+
+describe('generic McpServer PUT on a catalog instance: only an allowlist is editable', () => {
+  it.each([
+    [
+      'spec.image',
+      (spec: Spec): Spec => ({ ...spec, image: 'ghcr.io/attacker/token-sink:latest' }),
+    ],
+    [
+      'spec.remote',
+      (spec: Spec): Spec => ({
+        ...spec,
+        remote: {
+          ...spec.remote,
+          authHeaders: [{ header: 'X-Leak', valueTemplate: '${LEAKED}' }],
+        },
+      }),
+    ],
+    [
+      'spec.envSecret',
+      (spec: Spec): Spec => ({ ...spec, envSecret: { name: 'any-secret', keys: ['LEAKED'] } }),
+    ],
+  ])('refuses a change to %s (409), writing nothing', async (field, edit) => {
+    const api = setup()
+    await installCatalogInstance(api)
+    const before = structuredClone(stored(api)!)
+    api.customApi.replaceNamespacedCustomObject.mockClear()
+
+    const res = await editPagePut(api, edit(await editPageRead(api)))
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('catalog_instance_immutable')
+    expect(res.body.fields).toEqual([field])
+    expect(res.body.message).toBe(EDIT_INSTANCE_MESSAGE)
+    expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(stored(api)).toEqual(before)
+  })
+
+  it('saves the edit page with an extra egress binding (200)', async () => {
+    const api = setup()
+    await installCatalogInstance(api)
+    const read = await editPageRead(api)
+    const extra = { egressClass: 'exact-host', dns: 'files.notion.com', port: 443, protocol: 'TCP' }
+
+    const res = await editPagePut(api, handleSaveSpec(read, [...read.egressBindings, extra]))
+
+    expect(res.status).toBe(200)
+    expect(stored(api)!.spec.egressBindings).toEqual([...read.egressBindings, extra])
+  })
+
+  it('saves changed oauth scopes (200)', async () => {
+    const api = setup()
+    await installCatalogInstance(api)
+    const read = await editPageRead(api)
+
+    const res = await editPagePut(api, { ...read, oauth: { ...read.oauth, scopes: ['read'] } })
+
+    expect(res.status).toBe(200)
+    expect(stored(api)!.spec.oauth.scopes).toEqual(['read'])
+  })
+
+  it('refuses turning on oauth.backgroundAccess (409)', async () => {
+    const api = setup()
+    await installCatalogInstance(api)
+    const before = structuredClone(stored(api)!)
+    const read = await editPageRead(api)
+
+    const res = await editPagePut(api, {
+      ...read,
+      oauth: { ...read.oauth, backgroundAccess: true },
+    })
+
+    expect(res.status).toBe(409)
+    expect(res.body.fields).toEqual(['spec.oauth.backgroundAccess'])
+    expect(stored(api)).toEqual(before)
+  })
+
+  it('accepts resending exactly what was read (200)', async () => {
+    const api = setup()
+    await installCatalogInstance(api)
+    const read = await editPageRead(api)
+
+    const res = await editPagePut(api, handleSaveSpec(read, read.egressBindings))
+
+    expect(res.status).toBe(200)
+    expect(stored(api)!.spec).toEqual(read)
+  })
+
+  it('accepts a resend when the stored CR still carries a legacy contextRef (200)', async () => {
+    const api = setup()
+    const cr = await remoteOAuthMcpServer({
+      serverName: 'notion-user',
+      namespace: MCP_NS,
+      grantScope: 'user',
+      catalog: CATALOG,
+    })
+    await api.gateway.createResource(
+      'mcpservers',
+      { ...cr, spec: { ...cr.spec, contextRef: { name: 'legacy-context' } } },
+      MCP_NS
+    )
+    const read = await editPageRead(api)
+    expect(read.contextRef).toEqual({ name: 'legacy-context' })
+
+    const res = await editPagePut(api, handleSaveSpec(read, read.egressBindings))
+
+    expect(res.status).toBe(200)
+    expect(stored(api)!.spec.contextRef).toBeUndefined()
+  })
+
+  it('names every field that differs, sorted, at the reported level', async () => {
+    const api = setup()
+    await installCatalogInstance(api)
+    const read = await editPageRead(api)
+
+    const res = await request(api.app)
+      .put('/admin/mcp-servers/notion-user')
+      .send({
+        metadata: { annotations: { 'clerum.io/catalog-version': '9.9.9' } },
+        spec: {
+          ...read,
+          image: 'ghcr.io/attacker/token-sink:latest',
+          oauth: { ...read.oauth, issuer: 'https://evil.example.com', scopes: ['read'] },
+          remote: { ...read.remote, baseUrl: 'https://evil.example.com/mcp' },
+        },
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.fields).toEqual([
+      'metadata.annotations.clerum.io/catalog-version',
+      'spec.image',
+      'spec.oauth.issuer',
+      'spec.remote',
+    ])
+    expect(res.body.message).toBe(EDIT_INSTANCE_MESSAGE)
+  })
+
+  it('a manual connector acquiring a catalog identity gets the install message, fields sorted', async () => {
+    const api = setup()
+    await installCatalogInstance(api, 'manual-notion', null)
+    const read = await editPageRead(api, 'manual-notion')
+
+    const res = await request(api.app)
+      .put('/admin/mcp-servers/manual-notion')
+      .send({
+        metadata: { annotations: catalogAnnotations(CATALOG.id, CATALOG.version) },
+        spec: { ...read, image: 'ghcr.io/attacker/token-sink:latest' },
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.fields).toEqual([
+      'metadata.annotations.clerum.io/catalog-id',
+      'metadata.annotations.clerum.io/catalog-version',
+      'spec.image',
+    ])
+    expect(res.body.message).toBe(ACQUIRE_IDENTITY_MESSAGE)
   })
 })
 

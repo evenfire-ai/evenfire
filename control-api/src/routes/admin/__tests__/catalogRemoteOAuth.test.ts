@@ -10,6 +10,11 @@
  */
 import { beforeAll, describe, expect, it } from 'vitest'
 import fc from 'fast-check'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
+import { parse } from 'yaml'
 import {
   type PushRemoteOAuthMeta,
   type RegistryPublisher,
@@ -17,6 +22,7 @@ import {
   registryEntryRow,
 } from '../../../../test/fixtures/registryEntryRow.js'
 import { PILOTS, makeDiscoveryTransport } from '../../../../test/fixtures/remoteOAuthDiscovery.js'
+import { buildCimdDocument } from '../../../oauth/cimd.js'
 import { type DiscoveryResult, discoverRemoteOAuth } from '../../../oauth/discovery.js'
 import {
   type CatalogEntryInput,
@@ -32,7 +38,7 @@ import {
   resolveRemoteOAuthEntry,
 } from '../catalogRemoteOAuth.js'
 import { catalogAnnotations, resolveHookTrustLevel } from '../registry.js'
-import { buildRemoteOAuthSpec } from '../remoteMcp.js'
+import { buildRemoteMcpServerResource, buildRemoteOAuthSpec } from '../remoteMcp.js'
 
 const CURATOR: RegistryPublisher = { kind: 'curator-machine' }
 const ACME: RegistryPublisher = { kind: 'org-machine', org: 'acme' }
@@ -821,10 +827,12 @@ describe('catalog instance identity', () => {
     expect(catalogInstanceIdentityChanges(cr, structuredClone(cr))).toEqual([])
   })
 
+  // A change inside `remote` or `transport` names the whole block; only `oauth` is
+  // reported per field.
   it.each([
-    ['spec.remote.baseUrl', (s: any) => (s.remote.baseUrl = 'https://evil.example.com/mcp')],
+    ['spec.remote', (s: any) => (s.remote.baseUrl = 'https://evil.example.com/mcp')],
     [
-      'spec.transport.url',
+      'spec.transport',
       (s: any) => (s.transport.url = 'http://other.mcp.svc.cluster.local:8080/mcp'),
     ],
     ['spec.oauth.source', (s: any) => (s.oauth.source = 'generic')],
@@ -845,15 +853,14 @@ describe('catalog instance identity', () => {
     expect(catalogInstanceIdentityChanges(cr, withSpec(cr, patch))).toEqual([field])
   })
 
-  it('dropping spec.oauth counts as changing every oauth identity field it had', () => {
+  it('dropping spec.oauth is a change to spec.oauth itself', () => {
     const cr = catalogCr()
-    const changes = catalogInstanceIdentityChanges(
-      cr,
-      withSpec(cr, s => delete s.oauth)
-    )
-    expect(changes).toEqual(
-      expect.arrayContaining(['spec.oauth.source', 'spec.oauth.grantScope', 'spec.oauth.resource'])
-    )
+    expect(
+      catalogInstanceIdentityChanges(
+        cr,
+        withSpec(cr, s => delete s.oauth)
+      )
+    ).toEqual(['spec.oauth'])
   })
 
   it('scopes and egressBindings are not identity', () => {
@@ -893,6 +900,231 @@ describe('catalog instance identity', () => {
     expect(catalogInstanceIdentityChanges(cr, bump)).toEqual([
       'metadata.annotations.clerum.io/catalog-version',
     ])
+  })
+})
+
+/**
+ * Every `spec` path the McpServer CRD declares, two levels deep. Read from the CRD
+ * itself so a field added there later is covered without touching this test.
+ */
+function crdSpecPaths(): string[] {
+  type Schema = { properties?: Record<string, Schema> }
+  const crdPath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../../../../charts/clerum-crds/crds/mcpserver.yaml'
+  )
+  const crd = parse(readFileSync(crdPath, 'utf8')) as {
+    spec: { versions: Array<{ schema: { openAPIV3Schema: Schema } }> }
+  }
+  const paths = new Set<string>()
+  for (const version of crd.spec.versions) {
+    const spec = version.schema.openAPIV3Schema.properties?.spec?.properties ?? {}
+    for (const [key, child] of Object.entries(spec)) {
+      paths.add(`spec.${key}`)
+      for (const sub of Object.keys(child.properties ?? {})) paths.add(`spec.${key}.${sub}`)
+    }
+  }
+  return [...paths].sort()
+}
+
+describe('catalog instance identity: everything outside the allowlist is immutable', () => {
+  let discovery: DiscoveryResult
+  const CRD_PATHS = crdSpecPaths()
+  // Written out here rather than imported, so the test is an oracle for the module's
+  // list instead of a copy of it.
+  const EDITABLE = [
+    'spec.enabled',
+    'spec.description',
+    'spec.egressBindings',
+    'spec.resources',
+    'spec.healthCheck',
+    'spec.oauth.scopes',
+  ]
+  const isMutable = (path: string) => EDITABLE.some(m => path === m || path.startsWith(`${m}.`))
+  const MUTABLE_CRD_PATHS = CRD_PATHS.filter(isMutable)
+  const IMMUTABLE_CRD_PATHS = CRD_PATHS.filter(p => !isMutable(p))
+  const DELETE = Symbol('delete')
+
+  beforeAll(async () => {
+    const pilot = PILOTS.notion
+    const outcome = await discoverRemoteOAuth(pilot.mcpUrl, {
+      transport: makeDiscoveryTransport(pilot),
+      resolveDns: async () => ['93.184.216.34'],
+    })
+    if (!outcome.ok) throw new Error(`fixture discovery failed: ${outcome.error.kind}`)
+    discovery = outcome.result
+  })
+
+  type ClientMode = 'dcr' | 'cimd' | 'pre-registered'
+
+  /** A catalog instance exactly as the remote install saga builds it, per client mode. */
+  function installedInstance(mode: ClientMode): McpServerLike {
+    const serverName = deriveCatalogRemoteServerName('@evenfire/notion-remote', 'user')
+    const oauth =
+      mode === 'dcr'
+        ? buildRemoteOAuthSpec(discovery, {
+            clientMode: 'confidential',
+            grantScope: 'user',
+            dynamicClientId: 'as-assigned-client',
+          })
+        : mode === 'cimd'
+          ? buildRemoteOAuthSpec(discovery, {
+              clientMode: 'public',
+              grantScope: 'user',
+              cimdClientId: buildCimdDocument('https://control.example.com').client_id,
+            })
+          : buildRemoteOAuthSpec(discovery, {
+              clientMode: 'confidential',
+              grantScope: 'user',
+              clientSecretName: `${serverName}-oauth`,
+              preRegisteredClientId: 'operator-client',
+            })
+    return buildRemoteMcpServerResource({
+      serverName,
+      namespace: 'mcp',
+      baseUrl: PILOTS.notion.mcpUrl,
+      oauth,
+      annotations: catalogAnnotations('@evenfire/notion-remote', '1.0.0'),
+    })
+  }
+
+  type Mutation = { path: string; value: unknown }
+
+  const valueArb = fc.oneof(
+    fc.constant(DELETE),
+    fc.string({ maxLength: 8 }),
+    fc.integer(),
+    fc.boolean(),
+    fc.constant(null),
+    fc.array(fc.string({ maxLength: 4 }), { maxLength: 3 }),
+    fc.dictionary(fc.stringMatching(/^[a-z]{1,6}$/), fc.string({ maxLength: 4 }), { maxKeys: 3 })
+  )
+  const mutationArb = (paths: string[]) =>
+    fc.record({ path: fc.constantFrom(...paths), value: valueArb })
+
+  function getPath(root: Record<string, any>, path: string): unknown {
+    return path.split('.').reduce<any>((node, key) => (node == null ? undefined : node[key]), root)
+  }
+
+  function applyMutations(cr: McpServerLike, mutations: Mutation[]): McpServerLike {
+    const next = structuredClone(cr) as Record<string, any>
+    for (const { path, value } of mutations) {
+      const keys = path.split('.')
+      let node = next
+      for (const key of keys.slice(0, -1)) {
+        if (typeof node[key] !== 'object' || node[key] === null || Array.isArray(node[key])) {
+          node[key] = {}
+        }
+        node = node[key]
+      }
+      const last = keys[keys.length - 1]!
+      if (value === DELETE) delete node[last]
+      else node[last] = structuredClone(value)
+    }
+    return next as McpServerLike
+  }
+
+  function reorderKeys(value: unknown, seed: number): unknown {
+    if (Array.isArray(value)) return value.map(v => reorderKeys(v, seed))
+    if (typeof value !== 'object' || value === null) return value
+    const entries = Object.entries(value).reverse()
+    const shift = entries.length === 0 ? 0 : seed % entries.length
+    const rotated = [...entries.slice(shift), ...entries.slice(0, shift)]
+    return Object.fromEntries(rotated.map(([k, v]) => [k, reorderKeys(v, seed)]))
+  }
+
+  const modeArb = fc.constantFrom<ClientMode>('dcr', 'cimd', 'pre-registered')
+
+  it('reads both mutable and immutable paths from the CRD', () => {
+    expect(MUTABLE_CRD_PATHS).toEqual(expect.arrayContaining(['spec.oauth.scopes']))
+    expect(IMMUTABLE_CRD_PATHS).toEqual(
+      expect.arrayContaining([
+        'spec.image',
+        'spec.envSecret',
+        'spec.remote.authHeaders',
+        'spec.oauth.backgroundAccess',
+      ])
+    )
+  })
+
+  it('P1: changing any path outside the allowlist is reported, covering that path', () => {
+    fc.assert(
+      fc.property(
+        modeArb,
+        fc.array(mutationArb(MUTABLE_CRD_PATHS), { maxLength: 3 }),
+        mutationArb(IMMUTABLE_CRD_PATHS),
+        (mode, editable, forbidden) => {
+          const base = installedInstance(mode)
+          const next = applyMutations(base, [...editable, forbidden])
+          fc.pre(!isDeepStrictEqual(getPath(base, forbidden.path), getPath(next, forbidden.path)))
+          const fields = catalogInstanceIdentityChanges(base, next)
+          expect(
+            fields.some(
+              f =>
+                f === forbidden.path ||
+                forbidden.path.startsWith(`${f}.`) ||
+                f.startsWith(`${forbidden.path}.`)
+            )
+          ).toBe(true)
+        }
+      ),
+      { numRuns: 2000 }
+    )
+  })
+
+  it('P2: changes only inside the allowlist are never reported', () => {
+    fc.assert(
+      fc.property(
+        modeArb,
+        fc.array(mutationArb(MUTABLE_CRD_PATHS), { minLength: 1, maxLength: 4 }),
+        (mode, editable) => {
+          const base = installedInstance(mode)
+          expect(catalogInstanceIdentityChanges(base, applyMutations(base, editable))).toEqual([])
+        }
+      ),
+      { numRuns: 1000 }
+    )
+  })
+
+  it('P3: the order of object keys does not change the result', () => {
+    fc.assert(
+      fc.property(
+        modeArb,
+        fc.array(mutationArb(CRD_PATHS), { maxLength: 4 }),
+        fc.nat(),
+        (mode, mutations, seed) => {
+          const base = installedInstance(mode)
+          const next = applyMutations(base, mutations)
+          const expected = catalogInstanceIdentityChanges(base, next)
+          expect(
+            catalogInstanceIdentityChanges(
+              reorderKeys(base, seed) as McpServerLike,
+              reorderKeys(next, seed + 1) as McpServerLike
+            )
+          ).toEqual(expected)
+          expect(
+            catalogInstanceIdentityChanges(base, reorderKeys(base, seed) as McpServerLike)
+          ).toEqual([])
+        }
+      ),
+      { numRuns: 1000 }
+    )
+  })
+
+  it('reordering an array is a change', () => {
+    const base = installedInstance('cimd')
+    const args = structuredClone(base) as Record<string, any>
+    args.spec.args = ['a', 'b']
+    const argsReversed = structuredClone(args)
+    argsReversed.spec.args = ['b', 'a']
+    expect(catalogInstanceIdentityChanges(args, argsReversed)).toEqual(['spec.args'])
+  })
+
+  it('a legacy field on the stored CR does not count against a resend without it', () => {
+    const base = installedInstance('dcr')
+    const legacy = structuredClone(base) as Record<string, any>
+    legacy.spec.contextRef = { name: 'old-context' }
+    expect(catalogInstanceIdentityChanges(legacy, base)).toEqual([])
   })
 })
 
