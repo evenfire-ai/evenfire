@@ -1746,7 +1746,13 @@ export function App() {
       )) {
         if (owner !== target) owner.removeAttribute('data-compact-navigation-focus-owner')
       }
-      if (target.matches('.sidebar-compact-close, .compact-navigation-toggle')) {
+      const compactSettingsItem =
+        compactNavigationRef.current &&
+        target.closest('#desktop-sidebar-navigation .sidebar-settings-menu') !== null
+      if (
+        target.matches('.sidebar-compact-close, .compact-navigation-toggle') ||
+        compactSettingsItem
+      ) {
         compactNavigationControlOwnedFocusRef.current = true
       } else if (target !== document.body) {
         compactNavigationControlOwnedFocusRef.current = false

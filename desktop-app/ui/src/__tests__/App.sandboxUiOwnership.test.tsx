@@ -1342,6 +1342,13 @@ describe('App wires gestures and main events to the embed ownership machine', ()
       'matchMedia',
       vi.fn(() => media)
     )
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({
+      length: 1,
+      item: () => null,
+      [Symbol.iterator]: function* () {
+        yield {} as DOMRect
+      },
+    } as DOMRectList)
     sidebarHarness.renderActual = true
 
     await renderApp()
@@ -1355,6 +1362,11 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     const settings = screen.getByTestId('nav-settings-menu')
     fireEvent.click(settings)
     expect(settings.getAttribute('aria-expanded')).toBe('true')
+    const focusedSettingsItem = document.querySelector(
+      '.sidebar-settings-menu [role="menuitem"]'
+    ) as HTMLElement
+    focusedSettingsItem.focus()
+    expect(document.activeElement).toBe(focusedSettingsItem)
     await waitFor(() => expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(true))
     expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false)
 
@@ -1369,6 +1381,10 @@ describe('App wires gestures and main events to the embed ownership machine', ()
       expect(settings.getAttribute('aria-expanded')).toBe('false')
       expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(false)
     })
+    const routeItem = screen.getByTestId('nav-sandbox-ui')
+    await waitFor(() => expect(document.activeElement).toBe(routeItem))
+    expect(routeItem.isConnected).toBe(true)
+    expect(routeItem.closest('[inert], [aria-hidden="true"]')).toBeNull()
     await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
     const finalVisibleCall = sandboxUi.setVisible.mock.invocationCallOrder.at(-1)
     const finalBoundsCall = sandboxUi.setBounds.mock.invocationCallOrder.at(-1)
