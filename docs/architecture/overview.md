@@ -573,7 +573,7 @@ mcp-host/
 │   │   ├── registry.ts           # Provider factory dispatch
 │   │   ├── openai.ts             # OpenAI provider (gpt-5.4-mini default)
 │   │   ├── claude.ts             # Claude provider (claude-sonnet-4-6 default)
-│   │   └── openaiCompatible.ts   # OpenAI-compatible providers (zai, bailian) via baseURL
+│   │   └── openaiFamily/         # OpenAI wire family: endpoint profiles (compatibleProfile: zai, bailian, … via baseURL), wire protocols, model param policy
 │   └── mcp/
 │       ├── manager.ts            # MCP server manager (multi-client)
 │       ├── client.ts             # Single MCP server client
@@ -730,14 +730,14 @@ interface LLMProvider {
 - Tool format: OpenAI function calling schema (identical to OpenAI provider)
 - Tool responses: `role: "tool"` messages (identical to OpenAI provider)
 - System message: included in messages array (identical to OpenAI provider)
-- Implementation: data-driven `openaiCompatible.ts` provider, configured from the `PROVIDERS` descriptor in `registryCore.ts` (only the client `baseURL` differs)
+- Implementation: data-driven `compatibleProfile` (`openaiFamily/endpointProfiles.ts`) composed into `OpenAIProvider`, configured from the `PROVIDERS` descriptor in `registryCore.ts` (only the client `baseURL` differs)
 
 #### Bailian Provider (Alibaba DashScope)
 
 - SDK: `openai` v4.70.0 (OpenAI-compatible, `baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"`)
 - Default model: `qwen3-coder-plus`
 - API key: `BAILIAN_API_KEY` / Secret key `bailian-api-key`
-- Implementation: same data-driven `openaiCompatible.ts` provider as ZAI
+- Implementation: same data-driven `compatibleProfile` (`openaiFamily/endpointProfiles.ts`) as ZAI
 
 **Provider selection**: Auto-detected from available API key (priority order: openai, claude, zai, bailian), or set explicitly via `CLERUM_MODEL_PROVIDER`. `CLERUM_MODEL_NAME` applies only together with `CLERUM_MODEL_PROVIDER`; minikube setup refuses it alone, defaults to `openai/gpt-5.4-mini` when no key is set, and checks the pair against `llm_allowed_models` before applying the Host (see [LLM providers §4.7](../llm-providers/README.md#47-local-minikube-make-minikube-setup)).
 

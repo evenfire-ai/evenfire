@@ -63,8 +63,9 @@ wrong):
 ### Group A — OpenAI-compatible, pure data (17)
 
 These speak an OpenAI-compatible `/chat/completions` API. Integrating them is a
-`baseURL` + one API key, **no driver code**. They are all handled by one shared
-class, `OpenAICompatibleProvider`.
+`baseURL` + one API key, **no driver code**. They are all handled by the shared
+OpenAI-family driver (`OpenAIProvider`) composed with the compatible endpoint
+profile (`compatibleProfile`).
 
 | Provider      | id           | Credential slot      | Default model                                       |
 | ------------- | ------------ | -------------------- | --------------------------------------------------- |

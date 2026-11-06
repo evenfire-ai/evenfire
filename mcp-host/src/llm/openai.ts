@@ -1,126 +1,104 @@
 /**
- * OpenAI LLM provider with tool/function calling support.
+ * OpenAI wire-family driver with tool/function calling support.
+ *
+ * One driver serves official OpenAI, Azure OpenAI and every OpenAI-compatible
+ * third party. What differs per endpoint lives in its `EndpointProfile`, the
+ * request/response mapping in the profile's `WireProtocol`, and the accepted
+ * parameters per model in the profile's `ModelParamPolicy`.
  */
 import OpenAI from 'openai'
-import {
+import type {
   CompletionResponse,
   ChatMessage as CoreChatMessage,
-  FinishReason,
   ToolCompletionResponse,
   ToolDefinition,
 } from '../core/types'
 import { logger } from '../logger'
-import { resolveOfficialVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import { assertVisualRequestFits } from '../visualInput/requestPolicy'
-import { classifyByHttpStatus, classifyUnknown } from './errorClassification'
 import type { ImageTransportOperation } from './imageInput'
+import type { EndpointProfile } from './openaiFamily/endpointProfile'
+import { applyOptionPolicy, officialOpenAIProfile } from './openaiFamily/endpointProfiles'
+import { chatCompletionsProtocol } from './openaiFamily/protocols/chatCompletions'
+import type { WireProtocol, WireProtocolId } from './openaiFamily/protocols/types'
+import { classifyFamilyError } from './openaiFamily/shared'
 import type { LlmProvider } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
+const PROTOCOLS: Partial<Record<WireProtocolId, WireProtocol>> = {
+  'openai-chat': chatCompletionsProtocol,
+}
+
+function protocolFor(id: WireProtocolId): WireProtocol {
+  const protocol = PROTOCOLS[id]
+  if (!protocol) throw new Error(`[LLM] OpenAI family: wire protocol '${id}' is not available`)
+  return protocol
+}
+
 export class OpenAIProvider implements SingleTurnProvider {
+  // Read on every call, never cached by the profile or protocol: callers may
+  // swap the client after construction and must hit the new one.
   private client: OpenAI
   private defaultModel: string
+  private readonly profile: EndpointProfile
+  private readonly protocol: WireProtocol
 
-  getVisualDeliveryLimits(operation: ImageTransportOperation) {
-    return resolveOfficialVisualDeliveryLimits('openai', this.client.baseURL, operation)
-  }
-
-  constructor(apiKeyOrClient: string | OpenAI, defaultModel: string = 'gpt-5.4-mini') {
-    if (typeof apiKeyOrClient === 'string') {
-      this.client = new OpenAI({ apiKey: apiKeyOrClient })
-    } else {
-      this.client = apiKeyOrClient
-    }
+  constructor(
+    apiKeyOrClient: string | OpenAI,
+    defaultModel: string = 'gpt-5.4-mini',
+    profile: EndpointProfile = officialOpenAIProfile()
+  ) {
+    this.profile = profile
+    this.protocol = protocolFor(profile.protocol)
+    this.client = profile.createClient(apiKeyOrClient)
     this.defaultModel = defaultModel
     logger.info({ model: defaultModel }, 'OpenAI transport initialized')
   }
 
-  /**
-   * Get the provider type.
-   */
+  getVisualDeliveryLimits(operation: ImageTransportOperation) {
+    return this.profile.visualLimits(this.client.baseURL, operation)
+  }
+
   getProviderType(): LlmProvider {
-    return 'openai'
-  }
-
-  /**
-   * OpenAI's reasoning/latest model families reject the legacy `max_tokens`
-   * request field and require `max_completion_tokens`. Keep the internal
-   * provider contract stable (`max_tokens`) while translating only those
-   * native models at the wire boundary. OpenAI-compatible providers override
-   * this hook because their portability contract still uses `max_tokens`.
-   */
-  protected usesMaxCompletionTokens(): boolean {
-    return /^(?:gpt-5(?:[.-]|$)|o[1-9](?:[.-]|$))/i.test(this.defaultModel)
-  }
-
-  /**
-   * ZAI requires reasoning to remain on assistant tool-call messages across a
-   * tool turn. Native OpenAI and Azure keep the standard message shape, so a
-   * provider-specific field from prior ZAI history must not leak during failover.
-   */
-  protected supportsReasoningContent(): boolean {
-    return false
-  }
-
-  private tokenLimitOptions(maxTokens: number | undefined): {
-    max_tokens?: number
-    max_completion_tokens?: number
-  } {
-    if (maxTokens === undefined) return {}
-    return this.usesMaxCompletionTokens()
-      ? { max_completion_tokens: maxTokens }
-      : { max_tokens: maxTokens }
+    return this.profile.id
   }
 
   classifyError(err: unknown): ClassifiedError {
-    return classifyByHttpStatus(err) ?? classifyUnknown(err)
+    return classifyFamilyError(err, this.profile.classify)
+  }
+
+  private encodeContext() {
+    return {
+      model: this.defaultModel,
+      params: this.profile.params.resolve(this.defaultModel, this.protocol.id),
+      reasoningContent: this.profile.reasoningContent,
+    }
+  }
+
+  private decodeContext() {
+    return { provider: this.profile.id, model: this.defaultModel }
   }
 
   // ─── Single-Turn Methods ──────────────────────────────────
 
   async completeSingleTurn(
     messages: CoreChatMessage[],
-    options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
+    rawOptions?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
   ): Promise<CompletionResponse> {
-    assertVisualRequestFits(messages, messages, false, this.getVisualDeliveryLimits('complete'))
-    const openaiMessages = messages.map(m => ({
-      role: m.role as 'system' | 'user' | 'assistant',
-      content: m.content,
-    }))
-
-    const response = await this.client.chat.completions.create(
-      {
-        model: this.defaultModel,
-        messages: openaiMessages,
-        ...this.tokenLimitOptions(options?.max_tokens),
-        temperature: options?.temperature,
-      },
-      { signal: options?.signal }
+    const options = applyOptionPolicy(rawOptions, this.profile.options)
+    const ctx = this.encodeContext()
+    const payload = this.protocol.encodeText(
+      { messages, max_tokens: options?.max_tokens, temperature: options?.temperature },
+      ctx
     )
-
-    const choice = response.choices[0]
-    const usageReported =
-      response.usage != null &&
-      Number.isInteger(response.usage.prompt_tokens) &&
-      response.usage.prompt_tokens >= 0 &&
-      Number.isInteger(response.usage.completion_tokens) &&
-      response.usage.completion_tokens >= 0
-    return {
-      content: choice.message.content ?? '',
-      usage: {
-        input_tokens: response.usage?.prompt_tokens ?? 0,
-        output_tokens: response.usage?.completion_tokens ?? 0,
-        total_tokens: response.usage?.total_tokens ?? 0,
-      },
-      usage_reported: usageReported,
-      finish_reason: this.mapFinishReason(choice.finish_reason),
-    }
+    assertVisualRequestFits(messages, messages, false, this.getVisualDeliveryLimits('complete'))
+    const response = await this.protocol.send(this.client, payload, options?.signal)
+    return this.protocol.decodeText(response, this.decodeContext())
   }
 
   async completeSingleTurnWithTools(
     messages: CoreChatMessage[],
     tools: ToolDefinition[],
-    options?: {
+    rawOptions?: {
       max_tokens?: number
       temperature?: number
       tool_choice?: string
@@ -128,147 +106,25 @@ export class OpenAIProvider implements SingleTurnProvider {
       verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse> {
-    const openaiMessages = this.convertToOpenAIMessages(messages)
-
-    // OpenAI rejects tools: [] with 400 error — must be undefined when empty
-    const openaiTools =
-      tools.length > 0
-        ? tools.map(t => ({
-            type: 'function' as const,
-            function: {
-              name: t.name,
-              description: t.description,
-              parameters: t.parameters,
-            },
-          }))
-        : undefined
-
-    const request = {
-      model: this.defaultModel,
-      messages: openaiMessages,
-      tools: openaiTools,
-      tool_choice: openaiTools
-        ? ((options?.tool_choice ?? 'auto') as OpenAI.ChatCompletionToolChoiceOption)
-        : undefined,
-      ...this.tokenLimitOptions(options?.max_tokens),
-      temperature: options?.temperature,
-    }
+    const options = applyOptionPolicy(rawOptions, this.profile.options)
+    const ctx = this.encodeContext()
+    const payload = this.protocol.encodeTools(
+      {
+        messages,
+        tools,
+        tool_choice: options?.tool_choice,
+        max_tokens: options?.max_tokens,
+        temperature: options?.temperature,
+      },
+      ctx
+    )
     assertVisualRequestFits(
       messages,
-      request,
+      payload,
       options?.verifyImageInput === true,
       this.getVisualDeliveryLimits('completeWithTools')
     )
-    const response = await this.client.chat.completions.create(request, { signal: options?.signal })
-
-    const choice = response.choices[0]
-    const message = choice.message
-
-    const toolCalls =
-      message.tool_calls?.map(tc => ({
-        id: tc.id,
-        name: tc.function.name,
-        arguments: this.parseArguments(tc.function.arguments),
-      })) ?? null
-    const reasoningContent = (message as { reasoning_content?: unknown }).reasoning_content
-
-    const usageReported =
-      response.usage != null &&
-      Number.isInteger(response.usage.prompt_tokens) &&
-      response.usage.prompt_tokens >= 0 &&
-      Number.isInteger(response.usage.completion_tokens) &&
-      response.usage.completion_tokens >= 0
-    return {
-      content: message.content,
-      tool_calls: toolCalls && toolCalls.length > 0 ? toolCalls : null,
-      reasoning_content: typeof reasoningContent === 'string' ? reasoningContent : null,
-      usage: {
-        input_tokens: response.usage?.prompt_tokens ?? 0,
-        output_tokens: response.usage?.completion_tokens ?? 0,
-        total_tokens: response.usage?.total_tokens ?? 0,
-      },
-      usage_reported: usageReported,
-      finish_reason: this.mapFinishReason(choice.finish_reason),
-    }
-  }
-
-  private convertToOpenAIMessages(
-    messages: CoreChatMessage[]
-  ): OpenAI.ChatCompletionMessageParam[] {
-    return messages.map(m => {
-      if (m.role === 'tool') {
-        // Tool messages must be text-only (OpenAI rejects images in tool role).
-        // Images from tool results are sent in a subsequent user message.
-        return {
-          role: 'tool' as const,
-          tool_call_id: m.tool_call_id!,
-          content: m.content,
-        }
-      }
-      if (m.role === 'user' && m.contentParts?.length) {
-        // User messages with images (e.g., screenshots from desktop tools)
-        const content = m.contentParts.map(part => {
-          if (part.type === 'text') {
-            return { type: 'text' as const, text: part.text }
-          }
-          return {
-            type: 'image_url' as const,
-            image_url: { url: `data:${part.mimeType};base64,${part.data}` },
-          }
-        })
-        return { role: 'user' as const, content }
-      }
-      if (m.role === 'assistant') {
-        if (m.tool_calls) {
-          const assistantMessage = {
-            role: 'assistant' as const,
-            content: m.content || null,
-            tool_calls: m.tool_calls.map(tc => ({
-              id: tc.id,
-              type: 'function' as const,
-              function: {
-                name: tc.name,
-                arguments: JSON.stringify(tc.arguments),
-              },
-            })),
-          } as Record<string, unknown>
-          if (m.reasoning_content && this.supportsReasoningContent()) {
-            assistantMessage.reasoning_content = m.reasoning_content
-          }
-          return assistantMessage as unknown as OpenAI.ChatCompletionAssistantMessageParam
-        }
-        return { role: 'assistant' as const, content: m.content }
-      }
-      if (m.role === 'user') {
-        return { role: 'user' as const, content: m.content }
-      }
-      // Operator/soul instruction channel. This API is WRC-JWT gated; the
-      // host must forward system text to the model. Do not fold user/tool
-      // content into this branch — that union was js/system-prompt-injection.
-      return { role: 'system' as const, content: m.content }
-    })
-  }
-
-  private parseArguments(argsString: string): Record<string, unknown> {
-    try {
-      return JSON.parse(argsString)
-    } catch {
-      return { _raw: argsString }
-    }
-  }
-
-  private mapFinishReason(reason: string | null | undefined): FinishReason {
-    switch (reason) {
-      case 'stop':
-        return FinishReason.Stop
-      case 'length':
-        return FinishReason.Length
-      case 'tool_calls':
-        return FinishReason.ToolUse
-      case 'content_filter':
-        return FinishReason.ContentFilter
-      default:
-        return FinishReason.Unknown
-    }
+    const response = await this.protocol.send(this.client, payload, options?.signal)
+    return this.protocol.decodeTools(response, this.decodeContext())
   }
 }
