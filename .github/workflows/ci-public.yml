@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The merge commit and its parents: the version step below reads HEAD^1.
+          fetch-depth: 2
       - name: No superpowers docs may be tracked
         # docs/superpowers/ holds per-developer working artifacts (brainstorm
         # specs, implementation plans) that are gitignored by convention. The
@@ -35,6 +38,17 @@ jobs:
             echo "$bad"
             exit 1
           fi
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+        with:
+          node-version-file: .nvmrc
+      # In this job because dev's ruleset requires it, and it runs on every pull request with no
+      # path filter. dev also requires branches to be up to date, so HEAD, the pull request's
+      # merge result, contains dev's tip. HEAD^1 is that tip, so this also sees a version line
+      # that merged cleanly into the same number on both sides.
+      - name: Validate service versions against the merge base (pull requests into dev)
+        if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+        run: node scripts/release/validate-release-version-bumps.mjs --previous HEAD^1 --all-services
 
   node-runtime-images:
     name: Node image runtime (${{ matrix.variant.name }}, ${{ matrix.arch }})
@@ -910,12 +924,6 @@ jobs:
 
       - name: Validate service version bumps
         run: node scripts/release/validate-release-version-bumps.mjs --previous "${{ github.event.pull_request.base.sha || github.event.before }}"
-
-      # HEAD is the pull request's merge result and HEAD^1 the base it merged with, so this
-      # also sees a version line that merged cleanly into the same number on both sides.
-      - name: Validate every service's version against its base (pull requests into dev)
-        if: github.event_name == 'pull_request' && github.base_ref == 'dev'
-        run: node scripts/release/validate-release-version-bumps.mjs --previous HEAD^1 --all-services
 
       - name: Test the service version bump validator
         run: bash scripts/tests/test-validate-release-version-bumps.sh

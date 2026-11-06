@@ -34,10 +34,26 @@ every pull request:
 - `update-desktop-release-manifest.mjs --validate-only` fails if the manifest
   disagrees with the package versions.
 - `validate-release-version-bumps.mjs` fails if code under `external-rest-api/`
-  or `rpc-proxy/` changed but that package's version did not. On pull requests into
-  `dev`, its `--all-services` mode checks the shipped code of the other services the
-  same way against the merge result, so a version line that merged cleanly into the
-  same number on both sides fails. Bump that package's version to fix it.
+  or `rpc-proxy/`, or the `packages/jwt-key-policy/` they both ship, changed but
+  that package's version did not. Bump that package's version to fix it.
+
+On pull requests into `dev`, the required check `Repo hygiene (no internal working
+artifacts)` runs the same script with `--all-services` against the merge result.
+`dev` requires branches to be up to date, so that result contains `dev`'s tip. A
+version line that merged cleanly into the same number on both sides fails, and so
+does a version below the base; the hook bumps only a version equal to `HEAD`, so
+set a lower one above the base by hand. The check covers the two packages above and
+these directories, without test files: `channel-reader/src`, `control-api/src`,
+`control-ui/{app,components,lib}`, `host-context-controller/src`, `mcp-host/src`,
+`mcp-proxy/src`, `mcp-servers/doc-generator/src`, `mcp-servers/web-search/src`,
+`profile-ui/{app,lib}`, `stdio-bridge/src` and `workflow-recipes/src`.
+
+It covers nothing else, so a change elsewhere can still leave one version on two
+trees: services the hook does not bump (`workflow-approval-request-reader`,
+`gfs-controller`, `workspace-files-controller`, `webhook-gateway`, `webhook-proxy`,
+`codex-llm-proxy`, `grok-llm-proxy`), `packages/**` other than
+`packages/jwt-key-policy/`, `mcp-servers/` outside the two services above, and
+lockfiles, `tsconfig` files and `public/` directories.
 
 `desktop-app` is not a hook package root, so the hook never bumps it. See
 [CONTRIBUTING.md](../../CONTRIBUTING.md#the-pre-commit-hook-may-edit-your-commit)
