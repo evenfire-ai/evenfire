@@ -11,13 +11,11 @@ installations that applied it.
 
 ## Upgrading an existing installation
 
-### Placeholder prices are removed
+### Placeholder prices are kept
 
-A placeholder price is deleted only if nobody touched it since the seed wrote
-it: it still has the four values and the `USD` currency the seed wrote, it is
-still enabled, and it was never saved again. A price an admin edited, re-saved
-(even with the same values) or disabled is kept. A kept disabled price also
-stops the catalog sync from pricing that pair. The pairs concerned are:
+The 8 placeholder prices stay as they are: the migration does not change,
+disable or delete them, whether or not an admin edited them. The pairs
+concerned are:
 
 | Provider  | Model               |
 | --------- | ------------------- |
@@ -30,25 +28,12 @@ stops the catalog sync from pricing that pair. The pairs concerned are:
 | `zai`     | `glm-5.1`           |
 | `bailian` | `qwen3-coder-plus`  |
 
-The catalog sync does not price them again: it loads a price only when it
-inserts a model, and these rows already exist. Until an admin prices them
-under **Cost → LLM prices**:
-
-- `cost` budgets count their usage as $0, **retroactively for the current
-  period**. Spend is recomputed with the current price on every read, so a
-  budget that was blocked by usage of these pairs is released.
-- The per-task cost brake is inactive for them.
-- A new `cost` budget that pins one of these models is refused.
-
-Those with recorded usage are listed as unpriced in the Control UI. If you use
-`cost` budgets, re-price every pair in the table that you serve, before the
-upgrade or right after it. Pay attention to the ones the seed enabled
-(`claude/claude-sonnet-4-6`, `openai/gpt-5.4-mini`, `zai/glm-5.1`,
-`bailian/qwen3-coder-plus`), and to `openai/gpt-4o` and `openai/gpt-4o-mini`
-if a catalog sync already added them: their placeholder may match the real
-price, but it is still removed unless someone saved it. Saving a price under
-**Cost → LLM prices** before the upgrade, even unchanged, is enough for the
-migration to keep it.
+They are approximations, not reviewed prices. The catalog sync does not
+replace them: it loads a price only when it inserts a model, and these pairs
+already exist. If you use `cost` budgets or the per-task cost brake, review
+them under **Cost → LLM prices** after the upgrade and correct the ones you
+serve. Until then, `cost` budgets keep counting their usage at the placeholder
+rate.
 
 ### 28 seeded pairs become catalog-managed
 

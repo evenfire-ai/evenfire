@@ -1,8 +1,10 @@
 /**
  * What the retired catalog-seed migrations wrote, kept as data. FROZEN HISTORY,
  * never edit: installations that applied those migrations before they became
- * no-ops hold these rows (unless an operator changed or deleted them), and
- * migration `0135_llm_retire_seeded_catalog` matches them by these exact values.
+ * no-ops hold these rows (unless an operator changed or deleted them).
+ * Migration `0135_llm_retire_seeded_catalog` reclassifies the allowlist pairs
+ * (via SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG) and leaves the prices in place;
+ * the tests rebuild an upgraded installation from this data.
  *
  * - `LEGACY_SEEDED_ALLOWED_MODELS`: the `(provider, model, vendor)` tuples that
  *   0056, 0057, 0058 and 0100 inserted into `llm_allowed_models`, every other

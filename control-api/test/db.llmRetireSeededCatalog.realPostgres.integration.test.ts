@@ -54,6 +54,7 @@ const UNLISTED_SEEDS = LEGACY_SEEDED_ALLOWED_MODELS.filter(
   s => !LISTED.has(key(s.provider, s.model))
 )
 const SEED_KEYS = new Set(LEGACY_SEEDED_ALLOWED_MODELS.map(s => key(s.provider, s.model)))
+const PLACEHOLDER_KEYS = new Set(LEGACY_SEEDED_MODEL_PRICES.map(p => key(p.provider, p.model)))
 
 function catalogEntry(provider: string, model: string) {
   const entry = (CATALOG_IDS[provider as LlmProviderId] ?? []).find(m => m.model_id === model)
@@ -178,6 +179,7 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
     let pool: Pool
     let before: Map<string, AllowedRow>
     let afterMigration: Map<string, AllowedRow>
+    let pricesBeforeMigration: Awaited<ReturnType<typeof listLlmPrices>>
     let pricesAfterMigration: Awaited<ReturnType<typeof listLlmPrices>>
 
     beforeAll(async () => {
@@ -232,6 +234,7 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
       expect([...before.values()].every(r => r.source === 'manual')).toBe(true)
       const evidenced = [...LISTED].filter(k => before.get(k)!.image_input !== null)
       expect(evidenced).toHaveLength(LISTED.size)
+      pricesBeforeMigration = await listLlmPrices(pool)
 
       await initDb({ connect: () => pool.connect() })
       afterMigration = await allowed(pool)
@@ -269,24 +272,32 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
       }
     })
 
-    it('deletes the placeholder prices still identical to 0044 and keeps the edited ones', () => {
-      const placeholderKeys = new Set(LEGACY_SEEDED_MODEL_PRICES.map(p => key(p.provider, p.model)))
-      const left = new Map(
-        pricesAfterMigration
-          .filter(p => placeholderKeys.has(key(p.provider, p.model)))
-          .map(p => [key(p.provider, p.model), p])
-      )
-      expect([...left.keys()].sort()).toEqual(
-        [
-          key(EDITED_PRICE.provider, EDITED_PRICE.model),
-          key(RECURRENCIED_PRICE.provider, RECURRENCIED_PRICE.model),
-        ].sort()
-      )
-      expect(left.get(key(EDITED_PRICE.provider, EDITED_PRICE.model))!.output_token_price).toBe(16)
-      expect(left.get(key(RECURRENCIED_PRICE.provider, RECURRENCIED_PRICE.model))!.currency).toBe(
+    it('keeps every placeholder price as it was, untouched and edited alike', () => {
+      const placeholders = (prices: typeof pricesAfterMigration) =>
+        prices
+          .filter(p => PLACEHOLDER_KEYS.has(key(p.provider, p.model)))
+          .sort((a, b) => key(a.provider, a.model).localeCompare(key(b.provider, b.model)))
+      expect(placeholders(pricesBeforeMigration)).toHaveLength(LEGACY_SEEDED_MODEL_PRICES.length)
+      expect(placeholders(pricesAfterMigration)).toEqual(placeholders(pricesBeforeMigration))
+
+      const byKey = new Map(pricesAfterMigration.map(p => [key(p.provider, p.model), p]))
+      for (const seed of LEGACY_SEEDED_MODEL_PRICES) {
+        const k = key(seed.provider, seed.model)
+        if (k === key(EDITED_PRICE.provider, EDITED_PRICE.model)) continue
+        if (k === key(RECURRENCIED_PRICE.provider, RECURRENCIED_PRICE.model)) continue
+        expect(byKey.get(k), k).toMatchObject({
+          input_token_price: Number(seed.input_token_price),
+          output_token_price: Number(seed.output_token_price),
+          cache_read_token_price: Number(seed.cache_read_token_price),
+          cache_write_token_price: Number(seed.cache_write_token_price),
+          currency: 'USD',
+          enabled: true,
+        })
+      }
+      expect(byKey.get(key(EDITED_PRICE.provider, EDITED_PRICE.model))!.output_token_price).toBe(16)
+      expect(byKey.get(key(RECURRENCIED_PRICE.provider, RECURRENCIED_PRICE.model))!.currency).toBe(
         'EUR'
       )
-      expect(LEGACY_SEEDED_MODEL_PRICES.length - left.size).toBe(6)
     })
 
     it('is idempotent: running it again changes nothing', async () => {
@@ -343,17 +354,15 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
         key(UNLISTED_SEED.provider, UNLISTED_SEED.model)
       )
 
-      // T-H9 · the existing row gets no price from the sync: the deleted
-      // placeholder stays unpriced until an admin prices it.
-      const priced = new Set((await listLlmPrices(pool)).map(p => key(p.provider, p.model)))
-      const deletedOnExistingRows = LEGACY_SEEDED_MODEL_PRICES.map(p =>
-        key(p.provider, p.model)
-      ).filter(
-        k =>
-          afterMigration.has(k) && !pricesAfterMigration.some(p => key(p.provider, p.model) === k)
+      // T-H9 · the sync never re-prices an existing pair, so each placeholder
+      // is still the only price of its pair and still the one 0135 kept.
+      const placeholdersAfterSync = (await listLlmPrices(pool)).filter(p =>
+        PLACEHOLDER_KEYS.has(key(p.provider, p.model))
       )
-      expect(deletedOnExistingRows.length).toBeGreaterThan(0)
-      for (const k of deletedOnExistingRows) expect(priced.has(k), k).toBe(false)
+      expect(placeholdersAfterSync).toHaveLength(LEGACY_SEEDED_MODEL_PRICES.length)
+      for (const p of placeholdersAfterSync) {
+        expect(p, key(p.provider, p.model)).toEqual(pricesAfterMigration.find(q => q.id === p.id))
+      }
     })
 
     it('T-C11 · a listed seed absent from a later live catalog is marked stale and stays enabled', async () => {
@@ -426,40 +435,12 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
     })
   })
 
-  describe('placeholder prices: only the ones nobody touched are deleted', () => {
+  describe('placeholder prices outside the admin API survive 0135', () => {
     const pk = (p: { provider: string; model: string }) => key(p.provider, p.model)
-    const seedPrice = (provider: string, model: string) => {
-      const seed = LEGACY_SEEDED_MODEL_PRICES.find(
-        p => p.provider === provider && p.model === model
-      )
-      expect(seed, `${provider}/${model} is a 0044 placeholder`).toBeDefined()
-      return seed!
-    }
-    // An edit made outside the API (psql) changes the value without bumping
-    // `updated_at`; only the value comparison can keep these.
-    const SQL_EDITS = [
-      { provider: 'openai', model: 'gpt-4o-mini', column: 'input_token_price', value: '0.2' },
-      { provider: 'claude', model: 'claude-sonnet-4-6', column: 'output_token_price', value: '16' },
-      {
-        provider: 'claude',
-        model: 'claude-3-5-sonnet',
-        column: 'cache_read_token_price',
-        value: '0.31',
-      },
-      {
-        provider: 'claude',
-        model: 'claude-3-5-haiku',
-        column: 'cache_write_token_price',
-        value: '1.5',
-      },
-      { provider: 'openai', model: 'gpt-4o', column: 'currency', value: 'EUR' },
-    ] as const
-    // Re-saved through the admin service with the same values: only
-    // `updated_at` tells it apart from the seed.
-    const RESAVED = { provider: 'zai', model: 'glm-5.1' } as const
-    // Disabled outside the API, so `updated_at` does not move: only `enabled`
-    // tells it apart. A disable through the API also bumps `updated_at`.
+    // Disabled outside the API: `updated_at` does not move, only `enabled`.
     const DISABLED = { provider: 'bailian', model: 'qwen3-coder-plus' } as const
+    // A default pair of the old seed, still enabled: a missing price would make
+    // its usage free in cost budgets.
     const UNTOUCHED = { provider: 'openai', model: 'gpt-5.4-mini' } as const
 
     let pool: Pool
@@ -469,55 +450,29 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
       pool = await freshDatabase('control_api_retire_seed_prices')
       await pool.query('DELETE FROM schema_migrations WHERE version = $1', [MIGRATION])
       await applyLegacyCatalogSeeds(pool)
-      for (const e of SQL_EDITS) {
-        seedPrice(e.provider, e.model)
-        await pool.query(
-          `UPDATE llm_model_prices SET ${e.column} = $3 WHERE provider = $1 AND model = $2`,
-          [e.provider, e.model, e.value]
-        )
-      }
-      const prices = await listLlmPrices(pool)
-      const idOf = (p: { provider: string; model: string }) =>
-        prices.find(r => r.provider === p.provider && r.model === p.model)!.id
-      const resavedSeed = seedPrice(RESAVED.provider, RESAVED.model)
-      await updateLlmPrice(
-        idOf(RESAVED),
-        {
-          input_token_price: Number(resavedSeed.input_token_price),
-          output_token_price: Number(resavedSeed.output_token_price),
-          cache_read_token_price: Number(resavedSeed.cache_read_token_price),
-          cache_write_token_price: Number(resavedSeed.cache_write_token_price),
-          currency: 'USD',
-        },
-        pool
-      )
-      seedPrice(DISABLED.provider, DISABLED.model)
       await pool.query(
         'UPDATE llm_model_prices SET enabled = false WHERE provider = $1 AND model = $2',
         [DISABLED.provider, DISABLED.model]
       )
-      seedPrice(UNTOUCHED.provider, UNTOUCHED.model)
 
       await initDb({ connect: () => pool.connect() })
       after = new Map((await listLlmPrices(pool)).map(p => [pk(p), p]))
     })
 
-    it.each(SQL_EDITS.map(e => [e.column, e] as const))(
-      'keeps a placeholder whose %s was edited',
-      (_column, e) => {
-        const row = after.get(pk(e))
-        expect(row, pk(e)).toBeDefined()
-        expect(String(row![e.column]), pk(e)).toBe(
-          e.column === 'currency' ? e.value : String(Number(e.value))
-        )
-      }
-    )
-
-    it('keeps a placeholder an admin re-saved with the same values', () => {
-      expect(after.has(pk(RESAVED))).toBe(true)
+    it('keeps the placeholder nobody touched, with the values the seed wrote', () => {
+      const seed = LEGACY_SEEDED_MODEL_PRICES.find(p => pk(p) === pk(UNTOUCHED))!
+      expect(after.get(pk(UNTOUCHED))).toMatchObject({
+        input_token_price: Number(seed.input_token_price),
+        output_token_price: Number(seed.output_token_price),
+        cache_read_token_price: Number(seed.cache_read_token_price),
+        cache_write_token_price: Number(seed.cache_write_token_price),
+        currency: 'USD',
+        enabled: true,
+      })
+      expect([...PLACEHOLDER_KEYS].filter(k => !after.has(k))).toEqual([])
     })
 
-    it('keeps a placeholder an admin disabled, and a later sync does not price the pair', async () => {
+    it('keeps a placeholder disabled outside the API, and a later sync does not price the pair', async () => {
       expect(after.get(pk(DISABLED))?.enabled).toBe(false)
       await syncDiscoveredModels(
         {
@@ -534,12 +489,6 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
       const rows = (await listLlmPrices(pool)).filter(p => pk(p) === pk(DISABLED))
       expect(rows).toHaveLength(1)
       expect(rows[0].enabled).toBe(false)
-    })
-
-    it('deletes the placeholder nobody touched, and only that one', () => {
-      expect(after.has(pk(UNTOUCHED))).toBe(false)
-      const placeholderKeys = LEGACY_SEEDED_MODEL_PRICES.map(pk)
-      expect(placeholderKeys.filter(k => !after.has(k))).toEqual([pk(UNTOUCHED)])
     })
   })
 
