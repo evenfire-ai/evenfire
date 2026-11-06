@@ -167,6 +167,24 @@ describe('shared rollout observation', () => {
     expect(hook.result.current.phase).toBe('failed')
     expect(hook.result.current.failureKind).toBe('egress-refused')
     expect(hook.result.current.phaseMessage).toBe(EGRESS_REFUSAL_MESSAGE)
+    // The poll reads this connector's own CRD: the exact serverName start()
+    // passes (the target fixture's), not some other connector's resource.
+    expect(vi.mocked(getMcpServer)).toHaveBeenCalledWith('connector')
+  })
+  it('fails with egress-refused on the first tick when a fresh DeploymentReady=True and a fresh refusal arrive together, never succeeding', async () => {
+    // Fresh + fresh in the FIRST response: the DeploymentReady=True here is
+    // strictly after the cutoff for the exact generation/UID, so it would
+    // pass the success gate on its own — but the fresh egress-proxy refusal
+    // is this write's terminal verdict and is checked first, so the poll
+    // must resolve failed/egress-refused at the first tick, never success.
+    vi.mocked(getMcpServer).mockResolvedValue(
+      response('True', { timestamp: FRESH, extraConditions: [refusal] })
+    )
+    const hook = start()
+    await tick()
+    expect(hook.result.current.phase).toBe('failed')
+    expect(hook.result.current.failureKind).toBe('egress-refused')
+    expect(hook.result.current.phaseMessage).toBe(EGRESS_REFUSAL_MESSAGE)
   })
   it.each([
     {

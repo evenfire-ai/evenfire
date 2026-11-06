@@ -62,7 +62,7 @@ function serverWithCondition(condition?: {
               status: condition.status,
               reason:
                 condition.reason ??
-                (condition.status === 'True' ? 'RolloutComplete' : 'RolloutIncomplete'),
+                (condition.status === 'True' ? 'ReplicasAvailable' : 'RolloutIncomplete'),
               message: condition.message,
               lastTransitionTime: condition.lastTransitionTime,
             },
@@ -908,7 +908,7 @@ describe('UpdateConnectorCredentials — egress-proxy refusal', () => {
           {
             type: 'DeploymentReady',
             status: 'True',
-            reason: 'RolloutComplete',
+            reason: 'ReplicasAvailable',
             message: 'ready',
             lastTransitionTime: '2025-12-31T23:59:00.000Z',
             observedGeneration: 1,
