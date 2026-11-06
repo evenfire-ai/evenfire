@@ -136,10 +136,6 @@ type Config = {
   // on, its first tick is that boot sync whatever this says. Always validated
   // at boot: only 'true' or 'false' are accepted.
   llmCatalogBootSyncEnabled: boolean
-  // The models.dev catalog URL (MODELS_DEV_API_URL, default the public one).
-  // Refused at boot when it is not https or points at an internal host: a boot
-  // sync would otherwise keep retrying a URL that can never be fetched.
-  modelsDevApiUrl: string
   // How many models one catalog sync run may insert enabled, per provider and
   // in total. They bound what a single run adds to the allowlist ConfigMap,
   // whose 1 MiB limit makes every later publication fail once crossed. Models
@@ -622,11 +618,10 @@ const externalRateLimitConfig = (() => {
   }
 })()
 
-function modelsDevApiUrlFromEnv(): string {
-  const url = resolveModelsDevApiUrl()
-  assertSafeCatalogUrl(url)
-  return url
-}
+// Only validated here, not stored: modelsDevClient resolves the URL itself.
+// Refusing a non-https or internal MODELS_DEV_API_URL at boot keeps a boot sync
+// from retrying forever against a URL the loader will never fetch.
+assertSafeCatalogUrl(resolveModelsDevApiUrl())
 
 function defaultOnBooleanFromEnv(name: string): boolean {
   const raw = process.env[name]
@@ -940,7 +935,6 @@ export const config: Config = {
   // it on deliberately.
   llmCatalogSyncCronEnabled: process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
   llmCatalogBootSyncEnabled: defaultOnBooleanFromEnv('LLM_CATALOG_BOOT_SYNC_ENABLED'),
-  modelsDevApiUrl: modelsDevApiUrlFromEnv(),
   // Default OFF. Absent or any value other than the exact token `true` keeps
   // Codex subscription management and admission dark.
   codexSubscriptionEnabled: process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true',
