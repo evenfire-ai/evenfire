@@ -131,7 +131,8 @@ Desktop builds need Node 24.22.1 or later in the Node 24 line, an `npm ci` with 
 `--ignore-scripts`), and a passing `npm run verify:electron` before any build or
 test result counts. Electron 42 and later download the runtime on first use
 instead of in `postinstall`; `verify:electron` triggers that download and checks
-the result.
+the result. Packaged macOS builds require macOS 13 or later; Electron 44 dropped
+macOS 12 support.
 
 ```bash
 npm ci

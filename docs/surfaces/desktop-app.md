@@ -197,6 +197,8 @@ resolved, not in `postinstall`, so `npm ci` alone leaves it absent.
 `verify:electron` downloads it and fails if the download or the executable is
 missing. If it reports `Electron failed to install correctly`, switch to Node 24,
 delete `node_modules/electron`, and rerun `npm ci` and the check.
+Packaged macOS builds and local Desktop runs require macOS 13 or later;
+Electron 44 dropped macOS 12 support.
 
 ### Build installers
 
