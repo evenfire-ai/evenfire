@@ -235,7 +235,9 @@ wait_for_catalog_decision() {
   fi
   attempts=$((timeout / interval + 1))
   while :; do
-    if ! answer="$(llm_catalog_sync_source)"; then
+    # The rest of the setup targets control-plane; an exported CONTROL_API_NS
+    # (honoured by the seed) must not move this one query elsewhere.
+    if ! answer="$(CONTROL_API_NS=control-plane llm_catalog_sync_source)"; then
       err "CATALOG_WAIT_CHECK_FAILED: the llm_catalog_sync_runs query failed in control-postgres (see the kubectl/psql error above)."
       return 1
     fi

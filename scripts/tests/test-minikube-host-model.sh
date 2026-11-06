@@ -414,6 +414,21 @@ assert_h15_no_run_by_the_deadline_warns_and_continues() {
   fi
 }
 
+assert_h20_catalog_wait_ignores_an_exported_control_api_ns() {
+  local out argv
+  # The seed honours CONTROL_API_NS; the setup's wait must keep querying the
+  # namespace the rest of full-setup uses.
+  out="$(wait_case h20 live -- CONTROL_API_NS=elsewhere CLERUM_CATALOG_WAIT_SECONDS=0)"
+  argv="$(stub_argv "$WORK/h20.log")"
+  if printf '%s\n' "$out" | grep -q 'decision=live rc=0' &&
+     printf '%s' "$argv" | grep -Fq 'exec -i -n control-plane deployment/control-postgres' &&
+     ! printf '%s' "$argv" | grep -Fq elsewhere; then
+    pass "H20 the catalog wait queries control-plane even with CONTROL_API_NS exported"
+  else
+    fail "H20 out=$(one_line "$out") argv='$argv'"
+  fi
+}
+
 assert_h16_catalog_wait_fails_on_a_broken_channel_or_bad_input() {
   local out
   out="$(wait_case h16 EXIT1 -- CLERUM_CATALOG_WAIT_SECONDS=30)"
@@ -596,6 +611,7 @@ assert_h16_catalog_wait_fails_on_a_broken_channel_or_bad_input
 assert_h17_host_model_dismissed_reads_the_tombstone
 assert_h18_step_6f_decides_before_the_host_is_applied
 assert_h19_seed_output_keeps_every_model_line_visible
+assert_h20_catalog_wait_ignores_an_exported_control_api_ns
 assert_every_defined_case_is_invoked
 
 echo "SUMMARY: ${PASSED} passed, ${FAILED} failed"
