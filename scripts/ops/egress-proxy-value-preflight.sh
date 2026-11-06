@@ -81,11 +81,14 @@
 # Scope: the live template is the one the deployed HCC rendered, and this
 # script judges the values that template references. That the renderer in
 # this checkout renders no fixed env reference beyond $remote_addr,
-# $proxy_add_x_forwarded_for and $scheme (plus $http_authorization for an
-# oauth server) is pinned by the golden template test in
+# $proxy_add_x_forwarded_for, $scheme and the bare $NGINX_LOCAL_RESOLVERS
+# of the resolver directive (plus $http_authorization for an oauth
+# server) is pinned by the golden template test in
 # host-context-controller (egressProxyTemplateGolden.test.ts and its
 # fixtures) and by the golden-fixed-refs section of the test suite for
-# this script.
+# this script. The image entrypoint exports NGINX_LOCAL_RESOLVERS, never
+# the container env, so this script leaves it undefined like the fixed
+# NGINX variables.
 #
 # shellcheck shell=bash
 # shellcheck disable=SC2016 # awk and env -i child programs are literal: $0, $1

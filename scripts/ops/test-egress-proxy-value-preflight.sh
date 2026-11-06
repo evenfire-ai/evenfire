@@ -124,6 +124,22 @@ add_server() {
     >"$FIXTURE_ROOT/deployment-$name.json"
 }
 
+# add_server_template_file NAME URL TEMPLATE_FILE ENV_JSON [HEADERS_JSON]
+# Like add_server, but the ConfigMap template bytes come from a versioned
+# fixture file via jq --rawfile, never from text copied into this suite.
+add_server_template_file() {
+  local name=$1 url=$2 template_file=$3 env_json=$4 headers=${5:-[]}
+  jq --arg n "$name" --arg u "$url" --argjson h "$headers" \
+    '.items += [{metadata:{name:$n},spec:{remote:{baseUrl:$u,authHeaders:$h}}}]' \
+    "$FIXTURE_ROOT/servers.json" >"$TEST_DIR/servers-next"
+  mv "$TEST_DIR/servers-next" "$FIXTURE_ROOT/servers.json"
+  jq -n --rawfile t "$template_file" '{data:{"default.conf.template":$t}}' \
+    >"$FIXTURE_ROOT/configmap-$name-nginx-conf.json"
+  jq -n --argjson e "$env_json" \
+    '{spec:{template:{spec:{containers:[{name:"egress-proxy",env:$e}]}}}}' \
+    >"$FIXTURE_ROOT/deployment-$name.json"
+}
+
 set_server_flag() { # NAME KEY VALUE(json: true|false)
   jq --arg n "$1" --arg k "$2" --argjson v "$3" \
     '(.items[] | select(.metadata.name == $n) | .spec[$k]) = $v' \
@@ -728,8 +744,10 @@ fi
 # --- golden-fixed-refs: the golden templates carry no other fixed refs ---
 # The golden files are the renderer's own output for three deterministic
 # remote shapes (see egressProxyTemplateGolden.test.ts). Subtracting the
-# two dynamic names must leave exactly the four fixed NGINX variables,
-# and the real template check must accept each golden with a clean value.
+# two dynamic names must leave exactly the five fixed references (four
+# NGINX variables plus the bare $NGINX_LOCAL_RESOLVERS of the resolver
+# directive), and the real template check must accept each golden with a
+# clean value.
 # A missing golden is a hard failure, never a skip.
 golden_dir="$ROOT/host-context-controller/src/__tests__/fixtures/egress-proxy-template"
 # Both dynamic names carry the suite's one clean marker value, supplied
@@ -777,17 +795,60 @@ if [ "$golden_total_refs" -gt 0 ]; then
 else
   fail 'golden-fixed-refs-total-nonempty (no reference was extracted)'
 fi
-if [ "$golden_plain_fixed" -eq 3 ]; then
-  pass golden-fixed-refs-plain-three
+if [ "$golden_plain_fixed" -eq 4 ]; then
+  pass golden-fixed-refs-plain-four
 else
-  fail "golden-fixed-refs-plain-three (plain contributed $golden_plain_fixed fixed refs, expected 3)"
+  fail "golden-fixed-refs-plain-four (plain contributed $golden_plain_fixed fixed refs, expected 4)"
 fi
 if [ "$(sorted_words "$golden_union")" = \
-  "$(sorted_words 'http_authorization proxy_add_x_forwarded_for remote_addr scheme')" ]; then
+  "$(sorted_words 'NGINX_LOCAL_RESOLVERS http_authorization proxy_add_x_forwarded_for remote_addr scheme')" ]; then
   pass golden-fixed-refs-union
 else
-  fail 'golden-fixed-refs-union (the fixed references differ from the expected four)'
+  fail 'golden-fixed-refs-union (the fixed references differ from the expected five)'
 fi
+
+# --- golden template through the full preflight ---------------------------
+# The section above runs the checker directly on the fixture files. These
+# cases run the versioned query-header golden through the whole preflight
+# (kubectl fixtures, Secret resolution, the env -i check child), so the
+# transport is pinned against the renderer's real output. The env JSON is
+# hand-written but reproduces the names and order the golden TS test pins
+# for the egress-proxy container (egressProxyTemplateGolden.test.ts):
+# API_KEY and UPSTREAM_TOKEN by secretKeyRef, then
+# NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 and NGINX_ENVSUBST_FILTER empty last.
+# Both secretKeyRef entries share the stub Secret, so one secret_bytes
+# value drives the query and quoted contexts together. Neither of the
+# two NGINX_* env entries is referenced by the template, so the
+# preflight never resolves them; their entries pin only the Deployment
+# shape.
+golden_envs=$(jq -cn '[{name:"API_KEY",valueFrom:{secretKeyRef:{name:"fixture-secret",key:"credential"}}},
+  {name:"UPSTREAM_TOKEN",valueFrom:{secretKeyRef:{name:"fixture-secret",key:"credential"}}},
+  {name:"NGINX_ENTRYPOINT_LOCAL_RESOLVERS",value:"1"},
+  {name:"NGINX_ENVSUBST_FILTER",value:""}]')
+golden_headers='[{"header":"Authorization","valueTemplate":"Bearer ${UPSTREAM_TOKEN}"}]'
+reset_fixture
+add_server_template_file goldenqh 'https://upstream.example/mcp?apikey=${API_KEY}' \
+  "$golden_dir/query-header.default.conf.template" "$golden_envs" "$golden_headers"
+secret_bytes 'TESTKEY-CLEAN-9482'
+run_case golden-query-header-clean 0 'server=fixture-namespace/goldenqh verdict=OK'
+expect_output golden-query-header-clean-summary \
+  'VERDICT=CLEAN checked=1 ok=1 rejected=0 inconclusive=0'
+if [ "$(check_ran_with API_KEY)" = yes ] &&
+  [ "$(check_ran_with UPSTREAM_TOKEN)" = yes ]; then
+  pass golden-query-header-clean-resolution
+else
+  fail 'golden-query-header-clean-resolution (the check child did not see both names)'
+fi
+# '+' is outside the unquoted query class but inside the quoted class, so
+# the shared Secret value rejects only API_KEY.
+secret_bytes 'TESTKEY-B64/def+gh=='
+run_case golden-query-header-reject 1 'server=fixture-namespace/goldenqh verdict=REJECT'
+expect_output golden-query-header-reject-witness \
+  'the value of API_KEY is not allowed in an unquoted query value'
+expect_output golden-query-header-reject-summary \
+  'VERDICT=VALUES_REJECTED checked=1 ok=0 rejected=1'
+expect_absent golden-query-header-reject-quoted-clean \
+  'the value of UPSTREAM_TOKEN is not allowed'
 
 # --- every case's output, with a life witness ----------------------------
 if [ "$(count_lines "$all_output" 'verdict=')" -gt 0 ] &&
