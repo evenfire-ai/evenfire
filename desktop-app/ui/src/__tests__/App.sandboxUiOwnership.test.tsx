@@ -1441,6 +1441,55 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     sidebarHarness.renderActual = false
   })
 
+  it('preserves a later desktop control focus after settled compact dismissal', async () => {
+    let modeChange: ((event: MediaQueryListEvent) => void) | null = null
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => {
+        modeChange = listener as (event: MediaQueryListEvent) => void
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({
+      length: 1,
+      item: () => null,
+      [Symbol.iterator]: function* () {
+        yield {} as DOMRect
+      },
+    } as DOMRectList)
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    const trigger = screen.getByTestId('compact-navigation-toggle')
+    fireEvent.click(trigger)
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+    const close = document.querySelector('.sidebar-compact-close') as HTMLElement
+    close.focus()
+    fireEvent.click(close)
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+
+    const windowControl = screen.getByRole('button', { name: 'Minimize window' })
+    windowControl.focus()
+    expect(document.activeElement).toBe(windowControl)
+    act(() => {
+      media.matches = false
+      modeChange?.({ matches: false } as MediaQueryListEvent)
+    })
+
+    await waitFor(() => expect(document.querySelector('.left-nav.compact-open')).toBeNull())
+    expect(document.activeElement).toBe(windowControl)
+    sidebarHarness.renderActual = false
+  })
+
   it('clears compact Settings before revealing native content on desktop entry', async () => {
     let modeChange: ((event: MediaQueryListEvent) => void) | null = null
     const media = {
