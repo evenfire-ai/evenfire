@@ -118,10 +118,10 @@ auth-related secrets (WRC / HCC). §5 assesses that proposal; the conclusion is 
 
 - Changing MCC's managed-cluster behavior (that is a separate, sequenced retirement
   of MCC's `install_registry_pull_secret` step — §9).
-- Self-provisioning the **infra** pull secret (`clerum`, named by the overlays
-  through HCC's `CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET` and
-  `CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET`, whose code default is none). That is a distinct, out-of-band
-  concern (GCP node SA in prod, disabled in minikube) and is out of scope.
+- Self-provisioning the **infra** pull secret (historically `clerum`; set through HCC's
+  `CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET` and `CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET`, whose
+  code default is none). That is a distinct, out-of-band concern (GCP node SA in prod,
+  disabled in minikube) and is out of scope.
 - Multi-org-per-cluster placement. Self-hosted is single-tenant by design
   (`docs/concepts/open-core-and-hosted.md:38`); see the §8 guardrail.
 - The voucher-identity substrate (`registry-voucher` Secret / voucher kid). This
