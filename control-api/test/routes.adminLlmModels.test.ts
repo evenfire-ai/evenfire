@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
+import { AllowlistPublishRetry } from '../src/services/llmAllowlistPublishRetry.js'
+import { makeFakeDb } from './helpers/llmCatalogSyncFakeDb.js'
+import { loadStub, trimSnapshot } from './helpers/modelsDevFixtures.js'
 import { MockGateway } from './mockGateway.js'
 
 const mockPoolQuery = vi.fn()
@@ -35,7 +39,10 @@ vi.mock('../src/services/adminAuthService.js', () => ({
 const mockSyncDiscoveredModels = vi.fn()
 const mockGetLastCatalogSyncRun = vi.fn()
 
-vi.mock('../src/services/llmCatalogSync.js', () => ({
+vi.mock('../src/services/llmCatalogSync.js', async importOriginal => ({
+  CatalogPublishAfterCommitError: (
+    await importOriginal<typeof import('../src/services/llmCatalogSync.js')>()
+  ).CatalogPublishAfterCommitError,
   syncDiscoveredModels: (...args: unknown[]) => mockSyncDiscoveredModels(...args),
   getLastCatalogSyncRun: (...args: unknown[]) => mockGetLastCatalogSyncRun(...args),
 }))
@@ -138,6 +145,70 @@ describe('admin llm-models routes', () => {
     expect(materialize).not.toHaveBeenCalled()
     await passed.materializer!.materialize()
     expect(materialize).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    [409, 409],
+    [503, 500],
+  ])(
+    'POST /admin/llm-models/discovery/sync answers a committed run whose publish failed with %i like the publish error itself (%i)',
+    async (causeStatus, expected) => {
+      const { CatalogPublishAfterCommitError } = await import('../src/services/llmCatalogSync.js')
+      const cause = Object.assign(new Error('publish failed'), { statusCode: causeStatus })
+      mockSyncDiscoveredModels.mockRejectedValueOnce(
+        new CatalogPublishAfterCommitError(cause, true)
+      )
+      const res = await authed(
+        'post',
+        '/api/v1/admin/llm-models/discovery/sync',
+        new MockGateway('mcp-server')
+      )
+      expect(res.status).toBe(expected)
+    }
+  )
+
+  it('POST /admin/llm-models/discovery/sync forwards a K8s 4xx from the post-commit publish as the apiserver status', async () => {
+    // What the real sync throws when the real writer's replace is refused by
+    // the apiserver: the error the route receives, not a hand-built one.
+    const statusMessage = 'configmaps "clerum-llm-allowed-models" is forbidden'
+    const headerSecret = 'audit-id-5e1f-secret'
+    const actual = await vi.importActual<typeof import('../src/services/llmCatalogSync.js')>(
+      '../src/services/llmCatalogSync.js'
+    )
+    const db = makeFakeDb()
+    db.cluster.failNextWrites(
+      3,
+      new ApiException(
+        403,
+        'Forbidden',
+        JSON.stringify({ kind: 'Status', status: 'Failure', message: statusMessage, code: 403 }),
+        { 'audit-id': headerSecret }
+      )
+    )
+    const retry = new AllowlistPublishRetry()
+    const thrown = await actual
+      .syncDiscoveredModels(
+        {
+          materializer: db.materializer,
+          publishRetry: retry,
+          loadCatalog: loadStub(trimSnapshot({ anthropic: 1 }), 'live'),
+          minPlausibleLiveTotal: 1,
+        },
+        db.connector
+      )
+      .catch(err => err)
+    retry.stop()
+    expect(thrown).toBeInstanceOf(actual.CatalogPublishAfterCommitError)
+    mockSyncDiscoveredModels.mockRejectedValueOnce(thrown)
+
+    const res = await authed(
+      'post',
+      '/api/v1/admin/llm-models/discovery/sync',
+      new MockGateway('mcp-server')
+    )
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe(statusMessage)
+    expect(JSON.stringify(res.body)).not.toContain(headerSecret)
   })
 
   it('POST /admin/llm-models/discovery/sync requires admin auth (401 unauthenticated)', async () => {
@@ -296,7 +367,7 @@ describe('admin llm-models routes', () => {
 
   it('PUT /admin/llm-models/:id clears evidence on an explicit null (#654)', async () => {
     // A metadata edit that keeps the pair enabled takes no gate/lock: route read,
-    // service read, UPDATE, audit.
+    // service locked read, UPDATE, audit.
     mockPoolQuery
       .mockResolvedValueOnce({
         rows: [{ ...MODEL_ROW, image_input: { state: 'unknown' } }],
@@ -349,7 +420,7 @@ describe('admin llm-models routes', () => {
     mockPoolQuery
       .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // gate getAllowedModel
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // grant-impact query → none
-      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // updateAllowedModel read
+      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // updateAllowedModel locked read
       .mockResolvedValueOnce({ rows: [{ ...MODEL_ROW, enabled: false }], rowCount: 1 }) // UPDATE
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
     const res = await authed('put', `/api/v1/admin/llm-models/${MODEL_ROW.id}`)
@@ -376,14 +447,20 @@ describe('admin llm-models routes', () => {
 
   it('DELETE /admin/llm-models/:id returns 204 on success', async () => {
     // A DELETE always runs the impact gate first: gate read + grant-impact query,
-    // then the delete's own read/DELETE/audit. Empty MockGateway → no impact.
+    // then DELETE … RETURNING, the catalog tombstone and the audit. Empty
+    // MockGateway → no impact.
+    const removed = { provider: MODEL_ROW.provider, model: MODEL_ROW.model }
     mockPoolQuery
       .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // gate getAllowedModel
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // grant-impact query → none
-      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // deleteAllowedModel read
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // DELETE
+      .mockResolvedValueOnce({ rows: [removed], rowCount: 1 }) // DELETE … RETURNING
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // tombstone
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
     await authed('delete', `/api/v1/admin/llm-models/${MODEL_ROW.id}`).expect(204)
+    const tombstone = mockPoolQuery.mock.calls.find(c =>
+      /INSERT INTO llm_catalog_dismissed/.test(String(c[0]))
+    )
+    expect(tombstone![1]).toEqual([removed.provider, removed.model])
   })
 
   it('DELETE /admin/llm-models/:id returns 404 when the row is missing', async () => {

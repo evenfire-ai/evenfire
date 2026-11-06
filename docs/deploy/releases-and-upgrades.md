@@ -255,6 +255,7 @@ Read the notes for every release you skip over, not only the target release.
 | [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.x; Node 25+ blocks its network.  |
 | [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap.           |
 | [Changed code defaults](#changed-code-defaults-first-release-after-v0120)          | You run HCC, WRC, control-api or the approval reader with a variable unset. The pull Secret change restarts Host pods once; plan a window. |
+| [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.  |
 
 #### Snippet runner Node permissions
 
