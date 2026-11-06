@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { uninstallMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { App } from '@/App'
 import {
   cleanupNativeCommitTestHarness,
@@ -14,12 +15,14 @@ import {
 const frames: Array<{ callback: FrameRequestCallback; stack: string }> = []
 let shortcutCommand: ((commandId: string, source: string) => void) | null = null
 let mediaMatches = true
-let resolveHistory: ((value: { agent: string; chatId: string; turns: unknown[] }) => void) | null =
-  null
+const historyResolvers: Array<
+  (value: { agent: string; chatId: string; turns: unknown[] }) => void
+> = []
 let emitEnvironmentSetup:
   | ((payload: { appName: string; externalRestApiBaseUrl: string }) => Promise<void>)
   | null = null
 const visibilityLifecycleEvents: string[] = []
+let appQueryClient: QueryClient | null = null
 
 const MEASURED_SLOT = {
   x: 0,
@@ -77,7 +80,7 @@ function installPlatformBoundary(updateRequired = true, desktopEnvironmentHandof
   bridge.rpc.loadSessionMessages = vi.fn(
     () =>
       new Promise(resolve => {
-        resolveHistory = resolve
+        historyResolvers.push(resolve)
       })
   )
   bridge.app = { rendererReady: vi.fn().mockResolvedValue(undefined) }
@@ -129,6 +132,7 @@ function installPlatformBoundary(updateRequired = true, desktopEnvironmentHandof
 
 function renderApp() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  appQueryClient = queryClient
   return render(
     <QueryClientProvider client={queryClient}>
       <AgentTaskTrackerProvider>
@@ -174,7 +178,8 @@ describe('PR1087 App-root native visibility owners', () => {
   beforeEach(() => {
     frames.length = 0
     visibilityLifecycleEvents.length = 0
-    resolveHistory = null
+    historyResolvers.length = 0
+    appQueryClient = null
     window.localStorage.clear()
     vi.stubGlobal('PointerEvent', TestPointerEvent)
     Object.defineProperty(window, 'PointerEvent', {
@@ -210,6 +215,7 @@ describe('PR1087 App-root native visibility owners', () => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     uninstallMockClerum()
+    appQueryClient = null
     await cleanupNativeCommitTestHarness()
   })
 
@@ -243,7 +249,7 @@ describe('PR1087 App-root native visibility owners', () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger))
   })
 
-  it('keeps ordinary dismissal focus through delayed real Chat history hydration', async () => {
+  it('keeps ordinary dismissal focus when real Composer mounts after delayed Chat hydration', async () => {
     const chatId = 'hydrating-chat'
     ;(window.clerum as any).chat.getIndex.mockResolvedValue({
       version: 1,
@@ -261,7 +267,7 @@ describe('PR1087 App-root native visibility owners', () => {
     })
     renderApp()
     expect(await screen.findByTestId('nav-files')).toBeTruthy()
-    const composer = await screen.findByTestId('chat-input')
+    const firstComposer = await screen.findByTestId('chat-input')
     const loadSessionMessages = (window.clerum as any).rpc.loadSessionMessages
     await waitFor(() => expect(loadSessionMessages).toHaveBeenCalled())
     const [, agent, requestedChatId] = loadSessionMessages.mock.calls.at(-1) as [
@@ -271,24 +277,62 @@ describe('PR1087 App-root native visibility owners', () => {
     ]
     expect(requestedChatId).toBe(chatId)
 
+    await act(async () => {
+      appQueryClient!.setQueryData(desktopQueryKeys.accessCatalog, {
+        userId: 'user-1',
+        teamId: 'team-1',
+        agentNames: [],
+        userAgentNames: [],
+        teamAgentNames: [],
+        mcpServersByAgent: {},
+        agentContextByName: {},
+        agentProviderByName: {},
+        contextIds: [],
+        userContextIds: [],
+        teamContextIds: [],
+      })
+    })
+    await waitFor(() => expect(screen.queryByTestId('chat-input')).toBeNull())
+
     const trigger = screen.getByTestId('compact-navigation-toggle')
     fireEvent.click(trigger)
     fireEvent.click(document.querySelector('.sidebar-mobile-backdrop')!)
     await waitFor(() => expect(document.activeElement).toBe(trigger))
 
     await act(async () => {
-      resolveHistory?.({
-        agent,
-        chatId,
-        turns: [
-          {
-            number: 1,
-            user_input: 'Hydrated after dismissal',
-            response: 'Hydrated response',
-            started_at: '2026-11-05T00:00:00Z',
-          },
-        ],
+      appQueryClient!.setQueryData(desktopQueryKeys.accessCatalog, {
+        userId: 'user-1',
+        teamId: 'team-1',
+        agentNames: ['agent-x'],
+        userAgentNames: ['agent-x'],
+        teamAgentNames: [],
+        mcpServersByAgent: {},
+        agentContextByName: {},
+        agentProviderByName: {},
+        contextIds: [],
+        userContextIds: [],
+        teamContextIds: [],
       })
+    })
+    const composer = await screen.findByTestId('chat-input')
+    expect(firstComposer.isConnected).toBe(false)
+    expect(composer).not.toBe(firstComposer)
+
+    await act(async () => {
+      for (const resolve of historyResolvers) {
+        resolve({
+          agent,
+          chatId,
+          turns: [
+            {
+              number: 1,
+              user_input: 'Hydrated after dismissal',
+              response: 'Hydrated response',
+              started_at: '2026-11-05T00:00:00Z',
+            },
+          ],
+        })
+      }
       await Promise.resolve()
     })
     await flushFrames()
