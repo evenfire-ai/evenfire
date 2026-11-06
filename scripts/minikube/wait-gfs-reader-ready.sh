@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Development harness only. HCC's gfsReconciler now preserves the restartedAt
-# annotation that `kubectl rollout restart` adds. Leftover reader ReplicaSets
-# can still make a generation-based `kubectl rollout status
-# deployment/gfsc-reader` wait on the wrong revision until timeout.
-# Judge the rollout directly instead. The wait passes only when:
+# Reader rollout wait for the development harness and for the deploy's auth-key
+# sync, reached through gfs-rollout-shim. The wait passes only when:
 # - the Deployment controller observed the latest generation;
 # - every desired replica belongs to the newest ReplicaSet and no other live
 #   replica remains, so old pods cannot satisfy the wait right after a restart;

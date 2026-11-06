@@ -238,9 +238,9 @@ security gates do not mutate GFS and no manual repair script belongs between
 plan and verdict. Harness GFS reconciles settle
 Ready-reader leftovers first (`settle-gfs-reader-rollout.sh`) and wait on
 the reader rollout and pod readiness through the `gfs-rollout-shim` PATH prefix
-instead of `kubectl rollout status`, because HCC's gfsReconciler now preserves
-the `restartedAt` annotation and leftover ReplicaSets can still poison that
-wait. The standalone preflight and
+instead of `kubectl rollout status`. That wait also blocks on any live unready
+pod and does not stop at the progress deadline, and the deploy's auth-key sync
+uses it too. The standalone preflight and
 the final exact-head T2 check stay fail-loud on an unready deployment.
 When REUSE_DB recovery is needed, the fence covers all four database writers:
 HCC, workflow-recipes, trace-maintenance-worker, and control-api. The durable

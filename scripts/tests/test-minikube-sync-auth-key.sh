@@ -81,8 +81,8 @@ printf '%s\n' "$*" >>"${TEST_KUBECTL_LOG}"
 
 # The reader readiness wait, reached through the gfs-rollout-shim after
 # `rollout restart deployment/gfsc-reader`. The first poll sees the restart
-# observed, no updated replica yet and only the old pods Ready, which is the
-# clerum-dev state behind the failure. The next poll sees it finished.
+# observed, no updated replica yet and only the old pod Ready, which is the
+# state behind the dev deploy failure. The next poll sees it finished.
 if [[ "${1:-} ${2:-} ${3:-}" == "-n gfs get" ]]; then
   polls_file="${TEST_STATE_DIR}/reader-wait.polls"
   polls=0
@@ -91,10 +91,10 @@ if [[ "${1:-} ${2:-} ${3:-}" == "-n gfs get" ]]; then
     *'get deployment gfsc-reader '*'.spec.replicas'*)
       polls="$((polls + 1))"
       printf '%s' "${polls}" >"${polls_file}"
-      if [[ "${polls}" -eq 1 ]]; then snapshot='6|6|2|2||2'; else snapshot='6|6|2|2|2|2'; fi
+      if [[ "${polls}" -eq 1 ]]; then snapshot='6|6|1|1||1'; else snapshot='6|6|1|1|1|1'; fi
       printf '%s' "${snapshot}"
       ;;
-    *'get pods -l '*) printf 'True|\nTrue|\n' ;;
+    *'get pods -l '*) printf 'True|\n' ;;
     *) echo "unexpected reader wait call: $*" >&2; exit 99 ;;
   esac
   exit 0

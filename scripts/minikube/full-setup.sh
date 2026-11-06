@@ -1675,8 +1675,7 @@ reconcile_existing_gfs_credentials() {
     bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
   # If gfsc-reader is already Ready, settle the leftover claim first so
   # reconcile does not rollout restart and race HCC's gfsReconciler. The
-  # gfs-rollout-shim makes the wait judge readiness rather than a leftover
-  # template generation.
+  # gfs-rollout-shim makes the wait judge the rollout and pod readiness itself.
   GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
     T2_SKIP_LOCK=true \
     bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"

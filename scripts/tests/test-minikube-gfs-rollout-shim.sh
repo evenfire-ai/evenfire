@@ -29,8 +29,8 @@ printf '%s\n' "$*" >>"${FAKE_KUBECTL_LOG:?}"
 # updatedReplicas|readyReplicas. Status fields are omitempty on the API server,
 # so tests pass an explicitly empty value for the real "field absent" case.
 desired="${FAKE_DESIRED:-1}"
-snapshot="${FAKE_GENERATION-5}|${FAKE_OBSERVED-5}|${desired}|${FAKE_REPLICAS-$desired}|${FAKE_UPDATED-$desired}|${FAKE_READY:-1}"
-pod_rows="${FAKE_POD_ROWS:-True|\n}"
+snapshot="${FAKE_GENERATION-5}|${FAKE_OBSERVED-5}|${desired}|${FAKE_REPLICAS-$desired}|${FAKE_UPDATED-$desired}|${FAKE_READY-1}"
+pod_rows="${FAKE_POD_ROWS-True|\n}"
 # FAKE_SEQUENCE names a file with one `snapshot;pod rows` line per poll. Every
 # read of the Deployment advances one line; the last line repeats.
 if [ -n "${FAKE_SEQUENCE:-}" ]; then
@@ -46,10 +46,50 @@ if [ -n "${FAKE_SEQUENCE:-}" ]; then
   snapshot="${line%%;*}"
   pod_rows="${line#*;}"
 fi
+# Render the requested jsonpath from named fields, as the API server would, so
+# a wrong field or field order in the wait returns wrong values here too.
+render_deployment_jsonpath() {
+  local rest="$1" token generation observed spec_replicas replicas updated ready
+  IFS='|' read -r generation observed spec_replicas replicas updated ready <<<"$snapshot"
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      '{'*) ;;
+      *) printf 'unexpected jsonpath literal: %s\n' "$rest" >&2; exit 98 ;;
+    esac
+    token="${rest%%\}*}"
+    token="${token#\{}"
+    rest="${rest#*\}}"
+    case "$token" in
+      '"|"') printf '|' ;;
+      .metadata.generation) printf '%s' "$generation" ;;
+      .status.observedGeneration) printf '%s' "$observed" ;;
+      .spec.replicas) printf '%s' "$spec_replicas" ;;
+      .status.replicas) printf '%s' "$replicas" ;;
+      .status.updatedReplicas) printf '%s' "$updated" ;;
+      .status.readyReplicas) printf '%s' "$ready" ;;
+      *) printf 'unexpected jsonpath field: %s\n' "$token" >&2; exit 98 ;;
+    esac
+  done
+}
 case " $* " in
-  *' get deployment gfsc-reader '*'.status.updatedReplicas'*)
-    printf '%s' "$snapshot"; exit 0 ;;
+  *' get deployment gfsc-reader '*)
+    if [ "${FAKE_FAIL_READ:-}" = deployment ]; then
+      printf 'simulated API error\n' >&2
+      exit 1
+    fi
+    for arg in "$@"; do
+      case "$arg" in
+        jsonpath=*) render_deployment_jsonpath "${arg#jsonpath=}"; exit 0 ;;
+      esac
+    done
+    printf 'wait read the Deployment without a jsonpath: %s\n' "$*" >&2
+    exit 98
+    ;;
   *' get pods -l '*)
+    if [ "${FAKE_FAIL_READ:-}" = pods ]; then
+      printf 'simulated API error\n' >&2
+      exit 1
+    fi
     printf '%b' "$pod_rows"; exit 0 ;;
 esac
 exit 0
@@ -149,7 +189,7 @@ grep -q 'timed out after' <<<"$out" || fail "terminating pod blocked for the wro
 # of a two-replica reader whose old pods stay Ready throughout:
 #   poll 1: restart written, controller has not observed it
 #   poll 2: controller observed it, newest ReplicaSet has no pod yet, so the API
-#           omits updatedReplicas (the state behind the clerum-dev failure)
+#           omits updatedReplicas (the state behind the dev deploy failure)
 #   poll 3: first new pod exists and is unready
 #   poll 4: both new pods Ready, one old pod not scaled down yet
 #   poll 5: rollout finished
@@ -186,6 +226,27 @@ assert_blocks 'an unobserved restart with no observedGeneration' 6 '' 2 2 2 'Tru
 assert_blocks 'a rollout whose new pod does not exist yet' 6 6 2 '' 2 'True|\nTrue|\n'
 assert_blocks 'a partial rollout' 6 6 2 1 2 'True|\nTrue|\n'
 assert_blocks 'a live old replica' 6 6 3 2 3 'True|\nTrue|\nTrue|\n'
+assert_blocks 'a reader whose pods all crash, with status counts omitted' 6 6 '' 2 '' 'False|\nFalse|\n'
+assert_blocks 'a reader with every status count omitted' 6 6 '' '' '' ''
+
+# A suspended reader has nothing to prove and must not pass as "Ready (0/0)".
+if out="$(PATH="$shim_path" FAKE_DESIRED=0 FAKE_READY=0 FAKE_POD_ROWS='' GFS_READER_WAIT_POLL_SECONDS=0 \
+  kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=1s 2>&1)"; then
+  fail 'wait went green on a reader with zero desired replicas'
+fi
+grep -q 'timed out after' <<<"$out" || fail "zero desired replicas blocked for the wrong reason: $out"
+
+# A failed read stops the wait. It must never count as a passed rollout.
+if out="$(PATH="$shim_path" FAKE_FAIL_READ=deployment GFS_READER_WAIT_POLL_SECONDS=0 \
+  kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=30s 2>&1)"; then
+  fail 'wait went green when the Deployment read failed'
+fi
+grep -q 'unable to read rollout status' <<<"$out" || fail "Deployment read failure not reported: $out"
+if out="$(PATH="$shim_path" FAKE_FAIL_READ=pods GFS_READER_WAIT_POLL_SECONDS=0 \
+  kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=30s 2>&1)"; then
+  fail 'wait went green when the pod listing failed'
+fi
+grep -q 'unable to inspect reader pods' <<<"$out" || fail "pod listing failure not reported: $out"
 
 # 8. A malformed snapshot fails at once instead of being read as "not ready".
 malformed_seq="$tmp/malformed.sequence"
