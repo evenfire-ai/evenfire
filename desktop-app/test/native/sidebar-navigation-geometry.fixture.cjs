@@ -24,6 +24,10 @@ async function layout(window) {
         document.querySelector('.compact-navigation-toggle')
       ).pointerEvents,
       sidebar: rect('.left-nav'),
+      sidebarWidth: getComputedStyle(document.querySelector('.app-frame')).getPropertyValue(
+        '--sidebar-width'
+      ),
+      backdrop: rect('.sidebar-mobile-backdrop'),
       viewport: { width: innerWidth, height: innerHeight },
       workspace: rect('.workspace-layout'),
       slot: rect('.sandbox-ui-embed-slot'),
@@ -38,7 +42,7 @@ app.whenReady().then(async () => {
     const tokens = readFileSync(path.join(__dirname, '../../ui/src/styles/tokens.css'), 'utf8')
     const css = readFileSync(path.join(__dirname, '../../ui/src/styles.css'), 'utf8')
     const html = `<!doctype html><html><head><style>${tokens}\n${css}</style></head>
-      <body><div class="app-frame" style="--sidebar-width:328px">
+      <body><div class="app-frame">
         <header class="window-titlebar">
           <div class="window-titlebar__controls"><span>Window controls</span></div>
           <div class="window-titlebar__leading"></div>
@@ -57,19 +61,16 @@ app.whenReady().then(async () => {
       </div></body></html>`
     await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
     await window.webContents.executeJavaScript(`(() => {
-      const sidebar = document.querySelector('#desktop-sidebar-navigation')
-      const toggle = () => sidebar.classList.toggle('compact-open')
       document.querySelector('.window-titlebar__leading').innerHTML =
         '<button class="ui-icon-button compact-navigation-toggle" type="button">Menu</button>'
-      const trigger = document.querySelector('.compact-navigation-toggle')
-      trigger.addEventListener('click', toggle)
-      document.querySelector('.sidebar-mobile-backdrop').addEventListener('click', () => {
-        sidebar.classList.remove('compact-open')
-        trigger.focus()
-      })
     })()`)
     const closed = await layout(window)
     assert.equal(closed.compact, true, '700px window uses the compact navigation breakpoint')
+    assert.equal(
+      closed.sidebarWidth,
+      '0px',
+      'compact titlebar leading slot uses the App width state'
+    )
     assert.equal(closed.overlayOpen, false, 'compact navigation starts closed')
     assert.notEqual(closed.compactToggleDisplay, 'none', 'compact navigation trigger is visible')
     assert.equal(
@@ -79,7 +80,7 @@ app.whenReady().then(async () => {
     )
     const contentBefore = closed.workspace
     await window.webContents.executeJavaScript(
-      "document.querySelector('.compact-navigation-toggle').click()"
+      "document.querySelector('#desktop-sidebar-navigation').classList.add('compact-open')"
     )
     await waitForLayout()
     const overlay = await layout(window)
@@ -90,6 +91,11 @@ app.whenReady().then(async () => {
       `compact navigation starts below the real window titlebar: ${JSON.stringify({ sidebarY: overlay.sidebar.y, titlebarHeight: overlay.titlebar.height })}`
     )
     assert.ok(Math.abs(overlay.sidebar.width - 700) <= 2, 'compact navigation spans the window')
+    assert.ok(Math.abs(overlay.backdrop.width - 700) <= 2, 'backdrop covers the compact sidebar')
+    assert.ok(
+      Math.abs(overlay.backdrop.y - overlay.titlebar.height) <= 1,
+      'backdrop starts below the native titlebar'
+    )
     assert.ok(
       Math.abs(overlay.sidebar.y + overlay.sidebar.height - overlay.viewport.height) <= 1,
       'compact navigation extends to the bottom of the content viewport'
@@ -106,19 +112,8 @@ app.whenReady().then(async () => {
       true,
       `right edge remains a reachable backdrop target: ${backdropTarget.className}`
     )
-    await window.webContents.executeJavaScript(`(() => {
-      const target = document.elementFromPoint(window.innerWidth - 16, window.innerHeight / 2)
-      target.click()
-    })()`)
-    await waitForLayout()
-    const dismissed = await layout(window)
-    assert.equal(dismissed.overlayOpen, false, 'backdrop target dismisses compact navigation')
-    const triggerRestoredFocus = await window.webContents.executeJavaScript(
-      "document.activeElement.classList.contains('compact-navigation-toggle')"
-    )
-    assert.equal(triggerRestoredFocus, true, 'backdrop dismissal restores focus to its trigger')
     await window.webContents.executeJavaScript(
-      "document.querySelector('.compact-navigation-toggle').click()"
+      "document.querySelector('#desktop-sidebar-navigation').classList.remove('compact-open')"
     )
     await waitForLayout()
     assert.deepEqual(
@@ -142,7 +137,6 @@ app.whenReady().then(async () => {
     )
 
     await window.webContents.executeJavaScript(`(() => {
-      document.querySelector('#desktop-sidebar-navigation').classList.remove('compact-open')
       document.querySelector('.app-frame').style.setProperty('--sidebar-width', '460px')
     })()`)
     window.setContentSize(1200, 700)

@@ -2066,6 +2066,51 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     expect(visibleCallOrder).toBeGreaterThan(finalBoundsCall!)
   })
 
+  it('returns focus from the real compact backdrop to its App trigger', async () => {
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({
+      length: 1,
+      item: () => null,
+      [Symbol.iterator]: function* () {
+        yield {} as DOMRect
+      },
+    } as DOMRectList)
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    const trigger = screen.getByTestId('compact-navigation-toggle')
+    fireEvent.click(trigger)
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+
+    const close = document.querySelector('.sidebar-compact-close') as HTMLElement
+    const backdrop = document.querySelector('.sidebar-mobile-backdrop') as HTMLElement
+    expect(close).toBeTruthy()
+    expect(backdrop).toBeTruthy()
+    close.focus()
+    expect(document.activeElement).toBe(close)
+    fireEvent.click(backdrop)
+
+    await waitFor(() => {
+      expect(sidebarHarness.props?.compactMenuOpen).toBe(false)
+      expect(document.activeElement).toBe(trigger)
+    })
+    expect(trigger.isConnected).toBe(true)
+    sidebarHarness.renderActual = false
+  })
+
   it('fails the suite on a flushSync issued from inside an effect', () => {
     function FlushesInAnEffect() {
       useEffect(() => {
