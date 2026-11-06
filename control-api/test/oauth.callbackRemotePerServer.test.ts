@@ -17,6 +17,7 @@ import {
 } from '../src/oauth/mcpServerOAuthSpec.js'
 import { deriveCodeVerifier } from '../src/oauth/pkce.js'
 import { signOAuthState } from '../src/oauth/state.js'
+import { mintMcpState } from './fixtures/mcpOAuthState.js'
 import {
   WORKIQ_URL_SCOPE,
   discoverPilot,
@@ -46,7 +47,7 @@ import { MockGateway } from './mockGateway.js'
  *
  * T1: servers are installed through the real admin install route (CR, uid, row and
  * nonce from the saga); discovery by the real client over probe fixtures; the state by
- * the real signer. The AS token endpoint is the only network edge, recorded here.
+ * the real authorize-url mint. The AS token endpoint is the only network edge, recorded here.
  */
 
 vi.mock('node:dns/promises', () => ({
@@ -157,16 +158,34 @@ async function oauthOf(name: string): Promise<Record<string, unknown>> {
   return cr.spec.oauth
 }
 
-/** The state the authorize-url mint signs for this server: its CR's client id. */
+/**
+ * The state the authorize-url mint signs for this server, from the real mint over the
+ * same resolver the callback uses. Its own reader, so the callback harness's `read`
+ * spy only counts the callback's reads.
+ */
 async function stateFor(name: string): Promise<string> {
-  return signOAuthState(STATE_SECRET, {
-    subjectKind: 'mcp',
-    mcpServerName: name,
-    userId: 'user-9',
-    oauthClientId: String((await oauthOf(name)).id),
-    grantKind: 'user',
-    background: false,
-  } as Parameters<typeof signOAuthState>[1])
+  return mintMcpState(
+    {
+      mcpServerReader: {
+        async read(serverName) {
+          const cr = (await gateway.getResource(
+            'mcpservers',
+            serverName,
+            NS
+          )) as McpServerOAuthSpecInput
+          const resolved = resolveServerOAuthSubject(cr, 'consent')
+          return resolved ? { namespace: NS, ...resolved } : null
+        },
+      },
+      secretReader: {
+        read: async () => {
+          throw new Error('a remote mint reads no Secret')
+        },
+      },
+    },
+    STATE_SECRET,
+    { mcpServerName: name, userId: 'user-9', oauthClientId: String((await oauthOf(name)).id) }
+  )
 }
 
 function perServer(

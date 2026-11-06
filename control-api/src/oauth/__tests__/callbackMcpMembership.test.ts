@@ -7,7 +7,7 @@ vi.mock('../../db.js', () => ({
 
 const { config } = await import('../../config.js')
 const { handleOAuthCallback } = await import('../callback.js')
-const { signOAuthState } = await import('../state.js')
+const { mintMcpState } = await import('../../../test/fixtures/mcpOAuthState.js')
 const { buildOAuthCallbackDeps } = await import('../../routes/external/oauthCallback.js')
 const { MockGateway } = await import('../../../test/mockGateway.js')
 const { membership, seedAgentHost, seedAllowlistedContext } =
@@ -77,19 +77,23 @@ async function installServer(
   return created.metadata.uid
 }
 
-function input(contextId?: string): CallbackInput {
+async function input(
+  gateway: InstanceType<typeof MockGateway>,
+  contextId?: string
+): Promise<CallbackInput> {
   return {
     target: { kind: 'client', id: OAUTH_CLIENT_ID, redirectUri: 'https://example.test/cb' },
     code: 'auth-code-single-use',
-    state: signOAuthState(config.oauthStateHmacSecret, {
-      subjectKind: 'mcp',
-      mcpServerName: SERVER,
-      userId: USER_ID,
-      oauthClientId: OAUTH_CLIENT_ID,
-      grantKind: 'user',
-      background: false,
-      ...(contextId !== undefined ? { contextId } : {}),
-    }),
+    state: await mintMcpState(
+      buildOAuthCallbackDeps(gateway as never),
+      config.oauthStateHmacSecret,
+      {
+        mcpServerName: SERVER,
+        userId: USER_ID,
+        oauthClientId: OAUTH_CLIENT_ID,
+        ...(contextId !== undefined ? { contextId } : {}),
+      }
+    ),
   }
 }
 
@@ -122,7 +126,7 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
     it('denies a user who does not reach the signed Context WITHOUT exchanging', async () => {
       membership(mockPoolQuery, { contexts: {} })
 
-      const result = await handleOAuthCallback(input(CONTEXT), deps())
+      const result = await handleOAuthCallback(await input(gateway, CONTEXT), deps())
 
       expect(result.kind).toBe('context_membership_denied')
       expect(fetchFn).not.toHaveBeenCalled()
@@ -133,7 +137,7 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
       membership(mockPoolQuery, { contexts: { [USER_ID]: ['ctx-2'] } })
       await seedAllowlistedContext(gateway, 'ctx-2', [], config.contextsNamespace)
 
-      const result = await handleOAuthCallback(input('ctx-2'), deps())
+      const result = await handleOAuthCallback(await input(gateway, 'ctx-2'), deps())
 
       expect(result.kind).toBe('context_membership_denied')
       expect(fetchFn).not.toHaveBeenCalled()
@@ -143,7 +147,7 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
     it('refuses a state that names no Context as outdated WITHOUT exchanging or reading', async () => {
       membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } })
 
-      const result = await handleOAuthCallback(input(), deps())
+      const result = await handleOAuthCallback(await input(gateway), deps())
 
       expect(result.kind).toBe('oauth_state_outdated')
       expect(fetchFn).not.toHaveBeenCalled()
@@ -155,7 +159,7 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
         Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
       )
 
-      const result = await handleOAuthCallback(input(CONTEXT), deps())
+      const result = await handleOAuthCallback(await input(gateway, CONTEXT), deps())
 
       expect(result.kind).toBe('ok')
       if (result.kind === 'ok') {
@@ -188,7 +192,7 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
         Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
       )
 
-      const result = await handleOAuthCallback(input(CONTEXT), deps())
+      const result = await handleOAuthCallback(await input(gateway, CONTEXT), deps())
 
       expect(result.kind).toBe('ok')
       expect(grantWrites()[0][1][3]).toBe(CONTEXT)
@@ -204,7 +208,7 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
         Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
       )
 
-      const result = await handleOAuthCallback(input(CONTEXT), deps())
+      const result = await handleOAuthCallback(await input(gateway, CONTEXT), deps())
 
       expect(result.kind).toBe('ok')
       // cr_uid is the last positional param of the shared INSERT.
@@ -215,7 +219,7 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
       membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } })
       const { contextAccessReader: _unwired, ...rest } = deps()
 
-      const result = await handleOAuthCallback(input(CONTEXT), rest)
+      const result = await handleOAuthCallback(await input(gateway, CONTEXT), rest)
 
       expect(result.kind).toBe('context_membership_denied')
       expect(fetchFn).not.toHaveBeenCalled()
@@ -234,7 +238,7 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
         Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
       )
 
-      const result = await handleOAuthCallback(input(), deps())
+      const result = await handleOAuthCallback(await input(gateway), deps())
 
       expect(result.kind).toBe('ok')
       expect(fetchFn).toHaveBeenCalledTimes(1)
@@ -251,7 +255,7 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
         Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
       )
 
-      const result = await handleOAuthCallback(input('nowhere'), deps())
+      const result = await handleOAuthCallback(await input(gateway, 'nowhere'), deps())
 
       expect(result.kind).toBe('ok')
     })
@@ -260,7 +264,7 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
       await seedAllowlistedContext(gateway, CONTEXT, ['another-server'], config.contextsNamespace)
       membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } })
 
-      const result = await handleOAuthCallback(input(), deps())
+      const result = await handleOAuthCallback(await input(gateway), deps())
 
       expect(result.kind).toBe('context_membership_denied')
       expect(fetchFn).not.toHaveBeenCalled()
@@ -272,31 +276,32 @@ describe('handleOAuthCallback — mcp access guards before the exchange', () => 
       membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } })
       const { userServerAccessReader: _unwired, ...rest } = deps()
 
-      const result = await handleOAuthCallback(input(), rest)
+      const result = await handleOAuthCallback(await input(gateway), rest)
 
       expect(result.kind).toBe('context_membership_denied')
       expect(fetchFn).not.toHaveBeenCalled()
     })
   })
 
-  // Pins current behaviour for a subject read from a CR without `metadata.uid`,
-  // which a real apiserver never returns: the callback persists cr_uid NULL
-  // instead of failing closed. Such a row is still purgeable by any teardown, but
-  // the readers only serve it to a baked key of the same provider.
-  it('persists cr_uid NULL for a subject read from a CR without a uid (current behaviour)', async () => {
+  // A real apiserver always returns a uid; a CR without one cannot be told apart
+  // from a same-name reinstall, so the consent is refused before the exchange
+  // instead of writing a grant that no installation owns.
+  it('refuses as outdated when the live CR has no uid, WITHOUT exchanging or writing', async () => {
     await installServer(gateway, 'user')
-    const cr = (await gateway.getResource('mcpservers', SERVER, NS)) as {
-      metadata: Record<string, unknown>
-    }
-    delete cr.metadata.uid
     await seedAllowlistedContext(gateway, CONTEXT, [SERVER], config.contextsNamespace)
     membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } }, () =>
       Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
     )
+    const callbackInput = await input(gateway)
+    const cr = (await gateway.getResource('mcpservers', SERVER, NS)) as {
+      metadata: Record<string, unknown>
+    }
+    delete cr.metadata.uid
 
-    const result = await handleOAuthCallback(input(), deps())
+    const result = await handleOAuthCallback(callbackInput, deps())
 
-    expect(result.kind).toBe('ok')
-    expect(grantWrites()[0][1].at(-1)).toBeNull()
+    expect(result.kind).toBe('oauth_state_outdated')
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(grantWrites()).toHaveLength(0)
   })
 })

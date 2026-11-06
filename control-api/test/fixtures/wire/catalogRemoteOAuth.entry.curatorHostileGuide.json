@@ -1,0 +1,57 @@
+{
+  "status": 200,
+  "body": {
+    "id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+    "name": "@evenfire/hostile-guide",
+    "version": "1.0.0",
+    "entry_type": "mcp-server",
+    "description": "Remote MCP connector",
+    "author": "catalog",
+    "contact_email": null,
+    "origin": "human-authored",
+    "category": "productivity",
+    "tags": [],
+    "visibility": "public",
+    "content_creator_tag": "api-owner",
+    "config_creator_tag": "api-owner",
+    "trust_level": "mid",
+    "quality_tier": "unverified",
+    "status": "published",
+    "channel": "stable",
+    "deprecated_at": null,
+    "version_major": 1,
+    "version_minor": 0,
+    "version_patch": 0,
+    "version_prerelease": null,
+    "downloads": 0,
+    "installs": 0,
+    "created_at": "2026-10-28T00:00:00.000Z",
+    "updated_at": "2026-10-28T00:00:00.000Z",
+    "revision": 1,
+    "server_mode": "remote",
+    "transport": "streamableHttp",
+    "recipe_type": null,
+    "mcp_server_meta": {
+      "remoteEndpoints": [
+        {
+          "url": "https://mcp.linear.app/mcp"
+        }
+      ],
+      "oauth": {
+        "source": "remote",
+        "allowedGrantScopes": ["user"],
+        "expectedRegistration": "pre-registered",
+        "providerConsoleUrl": "https://console.example.com/apps",
+        "setupGuide": "## Register the app\n\n[Safe console](https://console.example.com/apps)\n\n<script>window.setupGuidePwned = true</script>\n\n<img src=\"https://tracker.example.com/raw.png\" alt=\"raw image\">\n\n![Markdown image](https://tracker.example.com/md.png)\n\n[Script link](javascript:alert(1))\n\n[Plain http link](http://insecure.example.com/)\n\n[Protocol-relative link](//evil.example.com/path)\n\n[Relative link](/connectors)\n\n[Mail link](mailto:ops@example.com)\n\n[Data link](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)\n\nAutolinked www.autolink.example.com address\n\n<a href=\"javascript:alert(2)\">Raw script anchor</a>\n\n<a href=\"http://raw-http.example.com/\">Raw http anchor</a>\n\n<iframe src=\"https://evil.example.com/frame\"></iframe>\n\n<div onclick=\"alert(3)\">Inline handler text</div>"
+      }
+    },
+    "recipe_meta": null,
+    "hook_meta": null,
+    "artifact_refs": {},
+    "owner_type": "org",
+    "owner_id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+    "remoteOAuth": {
+      "valid": true
+    }
+  }
+}

@@ -1,4 +1,11 @@
-import type { RegistryEntry } from './api'
+import type {
+  RegistryEntry,
+  RegistryInstalledState,
+  RegistryRemoteOAuthBlock,
+  RegistryRemoteOAuthEntrySlots,
+  RegistryRemoteOAuthGrantScope,
+  RegistryRemoteOAuthRegistration,
+} from './api'
 import { readGenericImmutables } from './oauthGeneric'
 import type { GenericConfigSuggestion, GenericImmutableView } from './oauthGeneric.types'
 import type {
@@ -7,6 +14,8 @@ import type {
   OAuthGrantScope,
   OAuthInstallSubmit,
   OAuthReferenceSecretInput,
+  RemoteOAuthCatalogView,
+  RemoteOAuthProvenanceBadge,
 } from './oauthInstall.types'
 import { readRemoteImmutables } from './oauthRemote'
 import type { RemoteImmutableView } from './oauthRemote.types'
@@ -125,6 +134,10 @@ export function getCatalogOAuthBlock(
   const raw = entry?.mcp_server_meta?.oauth
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const block = raw as Record<string, unknown>
+  // A remote-OAuth entry belongs to the remote wizard. It is refused here even if it
+  // also carries `provider`: control-api rejects that combination as invalid, and the
+  // baked/generic lanes must never claim it.
+  if (block.source === 'remote') return null
   if (typeof block.provider !== 'string' || block.provider.trim().length === 0) return null
 
   const result: CatalogOAuthBlock = { provider: block.provider }
@@ -137,6 +150,152 @@ export function getCatalogOAuthBlock(
   const genericConfig = parseGenericConfig(block.genericConfig)
   if (genericConfig) result.genericConfig = genericConfig
   return result
+}
+
+const REMOTE_OAUTH_GRANT_SCOPES: ReadonlySet<string> = new Set<RegistryRemoteOAuthGrantScope>([
+  'user',
+  'context',
+])
+const REMOTE_OAUTH_REGISTRATIONS: ReadonlySet<string> = new Set<RegistryRemoteOAuthRegistration>([
+  'cimd',
+  'dcr',
+  'pre-registered',
+])
+
+function plainRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+/**
+ * Whether the entry is a Marketplace remote-OAuth connector. The discriminator is
+ * `oauth.source === 'remote'` and nothing else: presentation keys such as
+ * `verification` can be published by anyone and never identify the subtype.
+ */
+export function isRemoteOAuthCatalogEntry(entry: RegistryEntry | null | undefined): boolean {
+  return plainRecord(entry?.mcp_server_meta?.oauth)?.source === 'remote'
+}
+
+/**
+ * The remote-OAuth view of a catalog entry, or null when it is not one. Installable
+ * only when control-api resolved it as `remoteOAuth.valid === true`; a missing verdict
+ * (a control-api without this lane) is not installable either, so such an entry never
+ * falls through to another install lane. The rebuilt block is only narrowed to the
+ * types the UI reads, never re-validated against the catalog rules.
+ */
+export function getRemoteOAuthCatalogBlock(
+  entry: RegistryEntry | null | undefined
+): RemoteOAuthCatalogView | null {
+  if (!entry || !isRemoteOAuthCatalogEntry(entry)) return null
+  const verdict = plainRecord(entry.remoteOAuth)
+  if (!verdict) return { valid: false, reason: 'unresolved' }
+  if (verdict.valid !== true) {
+    return {
+      valid: false,
+      reason: typeof verdict.reason === 'string' && verdict.reason ? verdict.reason : 'invalid',
+    }
+  }
+
+  const oauth = plainRecord(entry.mcp_server_meta?.oauth) as Record<string, unknown>
+  const grantScopes = oauth.allowedGrantScopes
+  const endpoints = entry.mcp_server_meta?.remoteEndpoints
+  const url = Array.isArray(endpoints) ? plainRecord(endpoints[0])?.url : undefined
+  if (
+    !Array.isArray(grantScopes) ||
+    grantScopes.length === 0 ||
+    !grantScopes.every(
+      scope => typeof scope === 'string' && REMOTE_OAUTH_GRANT_SCOPES.has(scope)
+    ) ||
+    typeof oauth.expectedRegistration !== 'string' ||
+    !REMOTE_OAUTH_REGISTRATIONS.has(oauth.expectedRegistration) ||
+    typeof url !== 'string' ||
+    url === ''
+  ) {
+    return { valid: false, reason: 'malformed_response' }
+  }
+
+  const verification = plainRecord(oauth.verification)
+  const block: RegistryRemoteOAuthBlock = {
+    source: 'remote',
+    allowedGrantScopes: grantScopes as RegistryRemoteOAuthGrantScope[],
+    expectedRegistration: oauth.expectedRegistration as RegistryRemoteOAuthRegistration,
+    ...(Array.isArray(oauth.scopes)
+      ? { scopes: oauth.scopes.filter((s): s is string => typeof s === 'string') }
+      : {}),
+    ...(typeof oauth.authorizationServerHint === 'string'
+      ? { authorizationServerHint: oauth.authorizationServerHint }
+      : {}),
+    ...(typeof oauth.providerConsoleUrl === 'string'
+      ? { providerConsoleUrl: oauth.providerConsoleUrl }
+      : {}),
+    ...(typeof oauth.setupGuide === 'string' ? { setupGuide: oauth.setupGuide } : {}),
+    ...(verification &&
+    (verification.status === 'verified' ||
+      verification.status === 'untested' ||
+      verification.status === 'known-issue')
+      ? {
+          verification: {
+            status: verification.status,
+            ...(typeof verification.checkedAt === 'string'
+              ? { checkedAt: verification.checkedAt }
+              : {}),
+            ...(typeof verification.note === 'string' ? { note: verification.note } : {}),
+          },
+        }
+      : {}),
+  }
+  // control-api adds `publisher` to every entry it does not prove to be the curator's.
+  const trusted = entry.publisher === undefined
+  return {
+    valid: true,
+    block,
+    url,
+    trusted,
+    publisher: trusted ? null : (entry.publisher ?? null),
+  }
+}
+
+/**
+ * The chip that says who vouches for a remote-OAuth entry. A non-curator entry is
+ * always "Unverified · published by <scope>": control-api already dropped any badge
+ * it claimed, and naming the publisher keeps a crafted Marketplace link from passing
+ * an org's URL off as a curated one.
+ */
+export function remoteOAuthProvenanceBadge(
+  view: Pick<Extract<RemoteOAuthCatalogView, { valid: true }>, 'trusted' | 'publisher' | 'block'>
+): RemoteOAuthProvenanceBadge {
+  if (!view.trusted) {
+    return {
+      label: `Unverified · published by ${view.publisher ?? 'an unknown organization'}`,
+      tone: 'unverified',
+    }
+  }
+  const verification = view.block.verification
+  if (verification?.status === 'verified') {
+    return {
+      label: verification.checkedAt ? `Verified ${verification.checkedAt}` : 'Verified',
+      tone: 'verified',
+    }
+  }
+  if (verification?.status === 'known-issue') {
+    return { label: 'Known issue', tone: 'unverified', title: verification.note }
+  }
+  return { label: 'Unverified', tone: 'unverified' }
+}
+
+/**
+ * Install state of one remote-OAuth entry's slots. The map is keyed by registry entry
+ * names, so it is read as an own property only: an entry named `constructor` must not
+ * pick up a prototype member.
+ */
+export function getRemoteOAuthSlots(
+  installed: Pick<RegistryInstalledState, 'remoteOAuthSlots'> | null | undefined,
+  entryName: string
+): RegistryRemoteOAuthEntrySlots | undefined {
+  const slots = installed?.remoteOAuthSlots
+  if (!slots || !Object.hasOwn(slots, entryName)) return undefined
+  return slots[entryName]
 }
 
 /**

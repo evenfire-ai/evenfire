@@ -7,6 +7,10 @@ import {
   REGISTRY_SPEC_DIGEST_ANNOTATION,
   registrySpecDigest,
 } from '../../../control-api/src/services/registryMutation'
+import {
+  type RegistryPublisher,
+  registryEntryRow,
+} from '../../../control-api/test/fixtures/registryEntryRow'
 import type { EnvSecret, McpServerResource } from '../../lib/api'
 
 const REGISTRY_PATH = path.resolve(
@@ -690,6 +694,33 @@ function registrySecretFactory(registrySource?: string): {
     throw new Error('Registry Secret producer changed; rederive the frontend fixture')
   }
 
+  // The annotations are stamped from the entry the install route read back from the
+  // registry, so the fixture reads that lookup off the route too: the `entry` bound by
+  // `await getEntryVersion(...)` in the same handler, before the annotations.
+  let handler: ts.Node | undefined = registryAnnotations[0].parent
+  while (handler && !isFunctionLike(handler)) handler = handler.parent
+  const entryLookups: ts.CallExpression[] = []
+  function visitHandler(node: ts.Node): void {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.name.getText(source) === 'entry' &&
+      node.pos < registryAnnotations[0].pos &&
+      node.initializer &&
+      ts.isAwaitExpression(node.initializer) &&
+      ts.isCallExpression(node.initializer.expression) &&
+      node.initializer.expression.expression.getText(source) === 'getEntryVersion' &&
+      node.initializer.expression.arguments.length === 2
+    ) {
+      entryLookups.push(node.initializer.expression)
+    }
+    ts.forEachChild(node, visitHandler)
+  }
+  if (handler) visitHandler(handler)
+  if (entryLookups.length !== 1) {
+    throw new Error('Registry entry lookup changed; rederive the frontend fixture')
+  }
+  const [entryNameArg, entryVersionArg] = entryLookups[0].arguments
+
   const expression = assignments[0].getText(source)
   const nameExpression = secretNames[0].getText(source)
   const managedExpression = managedExpressions[0].getText(source)
@@ -736,7 +767,8 @@ function registrySecretFactory(registrySource?: string): {
      const produceName = (serverName) => (${nameExpression});
      const produceManaged = () => (${managedExpression});
      ${catalogAnnotations.getText(source).replace(/^export /, '')}
-     const produceMetadata = (body, serverName, targetNs, isLocal, mcpServerSpec, resourceOperationId) => {
+     const produceEntryLookup = (body) => [${entryNameArg.getText(source)}, ${entryVersionArg.getText(source)}];
+     const produceMetadata = (body, entry, serverName, targetNs, isLocal, mcpServerSpec, resourceOperationId) => {
        const registryLabels = ${labels.getText(source)};
        const registryAnnotations = ${registryAnnotations[0].getText(source)};
        return (${registryResourceMetadata[0].getText(source)});
@@ -747,13 +779,18 @@ function registrySecretFactory(registrySource?: string): {
     'REGISTRY_OPERATION_ID_ANNOTATION',
     'REGISTRY_SPEC_DIGEST_ANNOTATION',
     'registrySpecDigest',
-    `${compiled}\nreturn { produce, produceName, produceManaged, produceMetadata };`
+    `${compiled}\nreturn { produce, produceName, produceManaged, produceEntryLookup, produceMetadata };`
   )(REGISTRY_OPERATION_ID_ANNOTATION, REGISTRY_SPEC_DIGEST_ANNOTATION, registrySpecDigest) as {
     produce: (secretName: string, credSchema: { keys: { name: string }[] }) => EnvSecret
     produceName: (serverName: string) => string
     produceManaged: () => boolean
+    produceEntryLookup: (body: {
+      registryEntryName: string
+      registryEntryVersion: string
+    }) => [string, string]
     produceMetadata: (
       body: { registryEntryName: string; registryEntryVersion: string },
+      entry: Record<string, unknown>,
       serverName: string,
       targetNs: string,
       isLocal: boolean,
@@ -782,8 +819,24 @@ function registrySecretFactory(registrySource?: string): {
       producers.produce(secretName, { keys: keyNames.map(name => ({ name })) }),
     managed: producers.produceManaged,
     metadata: input => {
+      const body = {
+        registryEntryName: input.catalogId,
+        registryEntryVersion: input.catalogVersion,
+      }
+      const [entryName, entryVersion] = producers.produceEntryLookup(body)
+      // The row the registry stores (and returns) for that lookup, built by the same
+      // registry-row producer control-api's own install tests use.
+      const entry = registryEntryRow(
+        {
+          name: entryName,
+          version: entryVersion,
+          mcpServer: { serverMode: 'local', transport: 'streamableHttp' },
+        },
+        registryPublisherFor(entryName)
+      )
       const metadata = producers.produceMetadata(
-        { registryEntryName: input.catalogId, registryEntryVersion: input.catalogVersion },
+        body,
+        entry,
         input.serverName,
         input.namespace,
         true,
@@ -798,6 +851,17 @@ function registrySecretFactory(registrySource?: string): {
       )
     },
   }
+}
+
+/**
+ * A publisher the registry accepts for `name`: an unscoped or reserved-scope name is
+ * the catalog curator's; any other scope is a personal scope of a user of that name
+ * (who is also a member of the org when one by that name exists).
+ */
+function registryPublisherFor(name: string): RegistryPublisher {
+  const scope = /^@([^/]+)\//.exec(name)?.[1]
+  if (!scope || scope === 'clerum' || scope === 'evenfire') return { kind: 'curator-machine' }
+  return { kind: 'user', username: scope, memberOf: [scope] }
 }
 
 const registrySecret = registrySecretFactory()

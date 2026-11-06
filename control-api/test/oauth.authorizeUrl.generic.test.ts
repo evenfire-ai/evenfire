@@ -19,6 +19,7 @@ const REDIRECT_URI = 'https://control.example.com/api/v1/oauth-callback/my-gener
 function genericSubject(overrides: Record<string, unknown> = {}): McpServerOAuthSubject {
   const resolved = resolveServerOAuthSubject(
     {
+      metadata: { name: 'my-generic', uid: 'uid-my-generic' },
       spec: {
         contextRef: 'ctx-A',
         oauth: {

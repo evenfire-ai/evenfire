@@ -127,7 +127,18 @@ export default function McpServersPage() {
       return true
     } catch (e) {
       if (isSilentApiError(e)) return false
-      setError(connectorAccessMutationError(e, `Failed to give agents access to ${server.name}`))
+      const message = connectorAccessMutationError(
+        e,
+        `Failed to give agents access to ${server.name}`
+      )
+      // Some contexts may have taken the connector before another write failed, and a
+      // vanished connector must leave the list: show what the server holds now.
+      const refreshError = await loadAll()
+      setError(
+        [message, refreshError && `The list could not be refreshed: ${refreshError}`]
+          .filter(Boolean)
+          .join(' ')
+      )
       return false
     } finally {
       setUpdatingAgentAccessKey(null)
@@ -152,7 +163,7 @@ export default function McpServersPage() {
         deletingKey={deletingKey}
         onRefresh={loadAll}
         onCreate={() => router.push(CONTROL_ROUTES.connectors.new)}
-        onAddRemote={() => router.push(CONTROL_ROUTES.connectors.remoteNew)}
+        onAddRemote={() => router.push(CONTROL_ROUTES.connectors.remoteNew())}
         onInstallFromRegistry={() => router.push(CONTROL_ROUTES.marketplace.root)}
         refreshing={loading}
         loading={loading && mcpServers.length === 0}

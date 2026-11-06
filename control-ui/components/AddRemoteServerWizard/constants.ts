@@ -1,4 +1,7 @@
-import type { RemoteDiscoverRegistrationMode } from '../../lib/remoteMcp.types'
+import type {
+  RemoteCatalogExpectedRegistration,
+  RemoteDiscoverRegistrationMode,
+} from '../../lib/remoteMcp.types'
 import type { GrantScopeOption } from './types'
 
 export const REMOTE_WIZARD_STEPS = ['Identify', 'Configure', 'Confirm'] as const
@@ -39,6 +42,16 @@ export const REGISTRATION_MODE_LABEL: Record<RemoteDiscoverRegistrationMode, str
   cimd: 'Client ID Metadata Document (public client)',
   dcr: 'Dynamic Client Registration',
   manual: 'Pre-registered client required',
+}
+
+/** Registration a Marketplace entry declares it expects (catalog-mode drift notice). */
+export const CATALOG_EXPECTED_REGISTRATION_LABEL: Record<
+  RemoteCatalogExpectedRegistration,
+  string
+> = {
+  cimd: REGISTRATION_MODE_LABEL.cimd,
+  dcr: REGISTRATION_MODE_LABEL.dcr,
+  'pre-registered': REGISTRATION_MODE_LABEL.manual,
 }
 
 /** One-line explanation shown under the detected mode. */

@@ -5,7 +5,8 @@ import { lookup } from 'node:dns/promises'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
-import { K8sConflictError, ResourceService } from '../src/services/resourceService.js'
+import { K8sConflictError } from '../src/services/resourceService.js'
+import { fakeCustomObjectsApiserver } from './fixtures/fakeCustomObjectsApiserver.js'
 import { MockGateway } from './mockGateway.js'
 
 function decodeKubernetesData(snapshot: { data?: Record<string, string> }): Record<string, string> {
@@ -212,6 +213,13 @@ describe('routes/resources', () => {
         spec: { contextId: 'research', mcpServers: ['winner-connector'] },
       },
       config.contextsNamespace
+    )
+    // A live server, so the refusal under test is the stale resourceVersion and not
+    // the unknown-server check every added name goes through.
+    await gateway.createResource(
+      'mcpservers',
+      { metadata: { name: 'stale-connector' }, spec: {} },
+      config.mcpServersNamespace
     )
 
     const realUpdate = gateway.updateResource.bind(gateway)
@@ -1607,6 +1615,11 @@ describe('routes/resources — display & identifier spec validation (F0.3 / UT-6
       { metadata: { name: 'legacy-ctx' }, spec: { contextId: 'Legacy Ctx', mcpServers: [] } },
       config.contextsNamespace
     )
+    await gateway.createResource(
+      'mcpservers',
+      { metadata: { name: 'a' }, spec: {} },
+      config.mcpServersNamespace
+    )
     await request(makeApp(gateway))
       .put('/admin/contexts/legacy-ctx')
       .send({ spec: { contextId: 'Legacy Ctx', mcpServers: ['a'] } })
@@ -1637,74 +1650,35 @@ describe('routes/resources — display & identifier spec validation (F0.3 / UT-6
 // direct store lookup (it does NOT model the service's internal read), so a spy
 // on MockGateway.getResource would show only 1 read at HEAD and could not go RED.
 describe('routes/resources — N1 single CR read per hosts/contexts PUT', () => {
-  function realServiceGateway() {
-    const ns = config.contextsNamespace
-    let rv = 0
-    const store = new Map<string, Record<string, unknown>>()
-    const getNamespacedCustomObject = vi.fn(async ({ name }: { name: string }) => {
-      const obj = store.get(name)
-      if (!obj) {
-        const err = new Error(`contexts/${name} not found`) as Error & { code: number }
-        err.code = 404
-        throw err
-      }
-      return obj
-    })
-    const replaceNamespacedCustomObject = vi.fn(
-      async ({ name, body }: { name: string; body: Record<string, unknown> }) => {
-        const stored = {
-          ...body,
-          metadata: {
-            ...(body.metadata as Record<string, unknown>),
-            resourceVersion: String(++rv),
-          },
-        }
-        store.set(name, stored)
-        return stored
-      }
-    )
-    const createNamespacedCustomObject = vi.fn(
-      async ({ body }: { body: { metadata: { name: string } } }) => {
-        const stored = {
-          ...(body as Record<string, unknown>),
-          metadata: { ...body.metadata, resourceVersion: String(++rv) },
-        }
-        store.set(body.metadata.name, stored)
-        return stored
-      }
-    )
-    const customApi = {
-      getNamespacedCustomObject,
-      replaceNamespacedCustomObject,
-      createNamespacedCustomObject,
-    } as unknown as ConstructorParameters<typeof ResourceService>[0]
-    const svc = new ResourceService(customApi, ns, { contexts: ns })
-    const gateway = {
-      getResource: svc.getResource.bind(svc),
-      updateResource: svc.updateResource.bind(svc),
-      createResource: svc.createResource.bind(svc),
-    }
-    return { gateway, getNamespacedCustomObject }
-  }
-
   it('reads the CR exactly once per context PUT (N1)', async () => {
-    const { gateway, getNamespacedCustomObject } = realServiceGateway()
-    await gateway.createResource(
+    const api = fakeCustomObjectsApiserver({
+      namespaces: { contexts: config.contextsNamespace, mcpservers: config.mcpServersNamespace },
+    })
+    await api.gateway.createResource(
       'contexts',
       { metadata: { name: 'ctx-n1' }, spec: { contextId: 'ctx-n1', mcpServers: [] } },
       config.contextsNamespace
     )
+    await api.gateway.createResource(
+      'mcpservers',
+      { metadata: { name: 'a' }, spec: {} },
+      config.mcpServersNamespace
+    )
     const app = express()
     app.use(express.json())
-    app.use(createAdminResourcesRouter(gateway as never))
+    app.use(createAdminResourcesRouter(api.gateway as never))
 
-    getNamespacedCustomObject.mockClear()
+    api.customApi.getNamespacedCustomObject.mockClear()
     await request(app)
       .put('/admin/contexts/ctx-n1')
       .send({ spec: { contextId: 'ctx-n1', mcpServers: ['a'] } })
       .expect(200)
 
     // RED at parent sha: HEAD reads twice (ratchet read + updateResource's own read).
-    expect(getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    // The added server's own existence read is not a Context read.
+    const contextReads = api.customApi.getNamespacedCustomObject.mock.calls.filter(
+      ([args]) => args.plural === 'contexts'
+    )
+    expect(contextReads).toHaveLength(1)
   })
 })

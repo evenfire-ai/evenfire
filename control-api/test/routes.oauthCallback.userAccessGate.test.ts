@@ -3,10 +3,13 @@ import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
-import { signOAuthState } from '../src/oauth/state.js'
-import { createOAuthCallbackRouter } from '../src/routes/external/oauthCallback.js'
+import {
+  buildOAuthCallbackDeps,
+  createOAuthCallbackRouter,
+} from '../src/routes/external/oauthCallback.js'
 import { editContextAllowlist } from '../src/services/contextAllowlist.js'
 import { membership, seedAgentHost, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { mintMcpState } from './fixtures/mcpOAuthState.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -19,8 +22,8 @@ import { MockGateway } from './mockGateway.js'
  *
  * Contexts are written through the real allowlist writer, membership is the
  * `user_contexts` / `user_agents` reads on the mocked pool (the same stand-in
- * the sibling suites use), Host CRs are hand-written, and the state is signed
- * by the real signer. The provider token endpoint is the only network edge:
+ * the sibling suites use), Host CRs are hand-written, and the state comes from
+ * the real authorize-URL mint. The provider token endpoint is the only network edge:
  * `globalThis.fetch`, which the route wires as its baked-lane transport.
  */
 
@@ -65,14 +68,11 @@ async function seedUserScopedOauthServer(gateway: MockGateway): Promise<void> {
   })
 }
 
-function signedState(): string {
-  return signOAuthState(config.oauthStateHmacSecret, {
-    subjectKind: 'mcp',
+function signedState(gateway: MockGateway): Promise<string> {
+  return mintMcpState(buildOAuthCallbackDeps(gateway as never), config.oauthStateHmacSecret, {
     mcpServerName: SERVER,
     userId: USER_ID,
     oauthClientId: OAUTH_CLIENT_ID,
-    grantKind: 'user',
-    background: false,
   })
 }
 
@@ -107,10 +107,11 @@ describe('GET /api/v1/oauth-callback/:oauthClientId — per-user access re-check
     fetchSpy.mockRestore()
   })
 
-  function callback() {
+  async function callback() {
+    const state = await signedState(gateway)
     return request(app)
       .get(`/api/v1/oauth-callback/${OAUTH_CLIENT_ID}`)
-      .query({ code: 'CODE', state: signedState() })
+      .query({ code: 'CODE', state })
   }
 
   it('403 context_membership_denied when no Context of the user enables the server; no exchange, no grant', async () => {

@@ -12,6 +12,13 @@ import {
 } from '@clerum/frontend-components'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
+import { RemoteOAuthProvenanceBadge } from '@components/RemoteOAuthProvenanceBadge'
+import {
+  RemoteOAuthEntryBadges,
+  RemoteOAuthNotInstallable,
+  RemoteOAuthSlotList,
+  useRemoteOAuthSlotActions,
+} from '@components/RemoteOAuthSlots'
 import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconStore } from '@components/Sidebar/icons'
@@ -20,8 +27,21 @@ import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { type RegistryEntry, deleteRegistryEntry, getRegistryCatalog } from '../lib/api'
+import {
+  type RegistryEntry,
+  type RegistryInstalledState,
+  deleteRegistryEntry,
+  getRegistryCatalog,
+} from '../lib/api'
 import { useRegistryCapability } from '../lib/hooks/useRegistryCapability'
+import { getRemoteOAuthCatalogBlock } from '../lib/oauthInstall'
+import type { RemoteOAuthCatalogView } from '../lib/oauthInstall.types'
+import {
+  canInstallRemoteOAuthSlot,
+  remoteOAuthSlotRows,
+  remoteOAuthVerificationKind,
+} from '../lib/remoteOAuthSlots'
+import type { RemoteOAuthSlotRow } from '../lib/remoteOAuthSlots.types'
 
 type CatalogSortKey = 'name' | 'description' | 'quality'
 type SortDirection = 'asc' | 'desc'
@@ -30,7 +50,17 @@ const REGISTRY_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name', width: '24%' },
   { key: 'description', label: 'Description' },
   { key: 'quality', label: 'Verification', width: '9rem' },
+  { key: 'status', label: 'Status', width: '16rem' },
   { key: 'actions', align: 'right', ariaLabel: 'Actions', width: '3.5rem' },
+]
+
+const REMOTE_OAUTH_FILTER_OPTIONS = [
+  { value: 'all', label: 'All connectors' },
+  { value: 'remote-oauth', label: 'Remote OAuth' },
+  { value: 'verified', label: 'Remote OAuth · Verified' },
+  { value: 'untested', label: 'Remote OAuth · Unverified' },
+  { value: 'known-issue', label: 'Remote OAuth · Known issue' },
+  { value: 'third-party', label: 'Remote OAuth · Third-party' },
 ]
 
 export default function RegistryCatalog() {
@@ -40,6 +70,8 @@ export default function RegistryCatalog() {
   const [categories, setCategories] = useState<string[]>([])
   const [installedCatalogKeys, setInstalledCatalogKeys] = useState<Set<string>>(new Set())
   const [installedServerNames, setInstalledServerNames] = useState<Set<string>>(new Set())
+  const [installedState, setInstalledState] = useState<RegistryInstalledState | null>(null)
+  const [remoteOAuthFilter, setRemoteOAuthFilter] = useState('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -93,6 +125,7 @@ export default function RegistryCatalog() {
       )
       setInstalledCatalogKeys(new Set(catalog.installed.catalogKeys))
       setInstalledServerNames(new Set(catalog.installed.serverNames))
+      setInstalledState(catalog.installed)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError))
     } finally {
@@ -121,14 +154,31 @@ export default function RegistryCatalog() {
     }
   }
 
+  const slotActions = useRemoteOAuthSlotActions({ onChanged: loadData })
+
   const connectorEntries = useMemo(
     () => entries.filter(entry => entry.entry_type === 'mcp-server'),
     [entries]
   )
+  const remoteOAuthViews = useMemo(() => {
+    const views = new Map<string, RemoteOAuthCatalogView>()
+    for (const entry of connectorEntries) {
+      const view = getRemoteOAuthCatalogBlock(entry)
+      if (view) views.set(`${entry.name}@${entry.version}`, view)
+    }
+    return views
+  }, [connectorEntries])
   const filtered = useMemo(() => {
     const visibleEntries = connectorEntries.filter(entry => {
       if (entry.visibility === 'private') return false
       if (categoryFilter !== 'all' && entry.category !== categoryFilter) return false
+      if (remoteOAuthFilter !== 'all') {
+        const view = remoteOAuthViews.get(`${entry.name}@${entry.version}`)
+        if (!view) return false
+        if (remoteOAuthFilter !== 'remote-oauth') {
+          if (!view.valid || remoteOAuthVerificationKind(view) !== remoteOAuthFilter) return false
+        }
+      }
       if (!search) return true
       const query = search.toLowerCase()
       return (
@@ -148,7 +198,15 @@ export default function RegistryCatalog() {
       if (comparison !== 0) return comparison * direction
       return `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`)
     })
-  }, [categoryFilter, connectorEntries, search, sortDirection, sortKey])
+  }, [
+    categoryFilter,
+    connectorEntries,
+    remoteOAuthFilter,
+    remoteOAuthViews,
+    search,
+    sortDirection,
+    sortKey,
+  ])
 
   const isInitialLoad = loading && entries.length === 0
 
@@ -161,11 +219,47 @@ export default function RegistryCatalog() {
     setSortDirection('asc')
   }
 
+  // Remote-OAuth entries never use this: their install state is per slot.
   function isEntryInstalled(entry: RegistryEntry): boolean {
     return (
       installedCatalogKeys.has(`${entry.name}@${entry.version}`) ||
       installedServerNames.has(entry.name)
     )
+  }
+
+  // One menu item per thing a slot allows; a slot that is uninstalling or held by
+  // another resource offers nothing, so it can never be installed twice.
+  function slotMenuItems(entry: RegistryEntry, rows: RemoteOAuthSlotRow[]): RowActionMenuItem[] {
+    return rows.flatMap<RowActionMenuItem>(row => {
+      const scopeLabel = row.label.toLowerCase()
+      if (canInstallRemoteOAuthSlot(row)) {
+        return [
+          {
+            key: `install-${row.scope}`,
+            label: `Install (${scopeLabel})`,
+            onClick: () => slotActions.install(entry, row.scope),
+          },
+        ]
+      }
+      if (row.status.kind !== 'installed') return []
+      const { serverName } = row.status
+      const busy = slotActions.isBusy(serverName)
+      return [
+        {
+          key: `agents-${row.scope}`,
+          label: `Agents… (${scopeLabel})`,
+          disabled: busy,
+          onClick: () => void slotActions.openAgents(serverName),
+        },
+        {
+          key: `uninstall-${row.scope}`,
+          label: `Uninstall (${scopeLabel})`,
+          danger: true,
+          disabled: busy,
+          onClick: () => void slotActions.uninstall(serverName),
+        },
+      ]
+    })
   }
 
   // An entry belongs to this deployment's org when its name carries the org
@@ -220,6 +314,13 @@ export default function RegistryCatalog() {
                   disabled={isInitialLoad}
                   ariaLabel="Filter by category"
                 />
+                <FilterSelect
+                  value={remoteOAuthFilter}
+                  onChange={setRemoteOAuthFilter}
+                  options={REMOTE_OAUTH_FILTER_OPTIONS}
+                  disabled={isInitialLoad}
+                  ariaLabel="Filter by Remote OAuth verification"
+                />
               </div>
               {connectionMode !== 'managed' && connectionState !== 'connected' ? (
                 <button
@@ -261,6 +362,11 @@ export default function RegistryCatalog() {
         />
         <MarketplaceTabs active="connectors" />
         {error ? <div className="cu-banner cu-banner--error">Error: {error}</div> : null}
+        {slotActions.error ? (
+          <div className="cu-banner cu-banner--error" role="alert">
+            {slotActions.error}
+          </div>
+        ) : null}
         <TableViewport className="cu-table-wrap cu-marketplace-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band cu-marketplace-table">
             <thead>
@@ -283,7 +389,12 @@ export default function RegistryCatalog() {
               ) : (
                 filtered.map(entry => {
                   const detailRoute = CONTROL_ROUTES.marketplace.entry(entry.name, entry.version)
-                  const installed = isEntryInstalled(entry)
+                  const remoteOAuth = remoteOAuthViews.get(`${entry.name}@${entry.version}`) ?? null
+                  const slotRows =
+                    remoteOAuth?.valid === true
+                      ? remoteOAuthSlotRows(remoteOAuth, entry.name, installedState)
+                      : []
+                  const installed = remoteOAuth ? false : isEntryInstalled(entry)
                   return (
                     <TableRow
                       className="cu-table__row cu-table__row--clickable"
@@ -292,6 +403,17 @@ export default function RegistryCatalog() {
                     >
                       <td>
                         <span className="cu-registry-name">{entry.name}</span>
+                        {remoteOAuth?.valid === true ? (
+                          <div className="cu-registry-name-meta">
+                            <RemoteOAuthEntryBadges view={remoteOAuth} />
+                          </div>
+                        ) : remoteOAuth ? (
+                          <div className="cu-registry-name-meta">
+                            <span className="cu-registry-chip cu-registry-chip--remote-oauth">
+                              Remote OAuth
+                            </span>
+                          </div>
+                        ) : null}
                         {!isCurator && isOwnedEntry(entry) ? (
                           <div className="cu-registry-owned">Owned by your organization</div>
                         ) : null}
@@ -300,11 +422,30 @@ export default function RegistryCatalog() {
                         <TruncatedText value={entry.description} />
                       </td>
                       <td>
-                        <span
-                          className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
-                        >
-                          {entry.quality_tier}
-                        </span>
+                        {remoteOAuth?.valid === true ? (
+                          <RemoteOAuthProvenanceBadge
+                            block={remoteOAuth.block}
+                            publisher={remoteOAuth.publisher}
+                            trusted={remoteOAuth.trusted}
+                          />
+                        ) : (
+                          <span
+                            className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
+                          >
+                            {entry.quality_tier}
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {remoteOAuth?.valid === true ? (
+                          <RemoteOAuthSlotList rows={slotRows} />
+                        ) : remoteOAuth ? (
+                          <RemoteOAuthNotInstallable reason={remoteOAuth.reason} />
+                        ) : installed ? (
+                          <span className="cu-registry-status">Installed</span>
+                        ) : (
+                          <span className="cu-muted">—</span>
+                        )}
                       </td>
                       <td
                         className="cu-table__cell-actions"
@@ -330,28 +471,30 @@ export default function RegistryCatalog() {
                                     },
                                   ]
                                 : []),
-                              ...(installed
-                                ? [
-                                    {
-                                      key: 'installed',
-                                      label: 'Installed',
-                                      disabled: true,
-                                      onClick: () => undefined,
-                                    },
-                                  ]
-                                : [
-                                    {
-                                      key: 'install',
-                                      label: 'Install',
-                                      onClick: () =>
-                                        router.push(
-                                          CONTROL_ROUTES.marketplace.install({
-                                            entry: entry.name,
-                                            version: entry.version,
-                                          })
-                                        ),
-                                    },
-                                  ]),
+                              ...(remoteOAuth
+                                ? slotMenuItems(entry, slotRows)
+                                : installed
+                                  ? [
+                                      {
+                                        key: 'installed',
+                                        label: 'Installed',
+                                        disabled: true,
+                                        onClick: () => undefined,
+                                      },
+                                    ]
+                                  : [
+                                      {
+                                        key: 'install',
+                                        label: 'Install',
+                                        onClick: () =>
+                                          router.push(
+                                            CONTROL_ROUTES.marketplace.install({
+                                              entry: entry.name,
+                                              version: entry.version,
+                                            })
+                                          ),
+                                      },
+                                    ]),
                               ...(isCurator
                                 ? [
                                     {
@@ -388,6 +531,7 @@ export default function RegistryCatalog() {
           </DataTable>
         </TableViewport>
       </div>
+      {slotActions.dialogs}
       {removeTarget ? (
         <div
           role="presentation"

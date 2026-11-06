@@ -50,6 +50,8 @@ export interface SecretResource {
     annotations?: Record<string, string>
     ownerReferences?: Array<unknown>
     finalizers?: string[]
+    /** Set by the apiserver; the client deserializes it to a Date. */
+    creationTimestamp?: Date
   }
   type?: string
   immutable?: boolean

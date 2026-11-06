@@ -1235,6 +1235,11 @@ export type ContextSharedFileSystemRef = {
   name: string
   mountPath: string
 }
+export type ContextGfsMount = {
+  drive: string
+  target: string
+  scopes: string[]
+}
 export type ContextSharedFileSystemStatus = {
   name: string
   mountPath: string
@@ -1250,6 +1255,7 @@ export type ContextSpec = {
   description?: string
   mcpServers: string[]
   sharedFileSystems?: ContextSharedFileSystemRef[]
+  gfs?: { mounts?: ContextGfsMount[] }
 }
 export type ContextResource = {
   metadata?: Metadata
@@ -3638,6 +3644,75 @@ export type RegistryEntry = {
   downloads: number
   installs: number
   created_at: string
+  /**
+   * control-api's verdict on a remote-OAuth entry (`mcp_server_meta.oauth.source:
+   * 'remote'`); absent on every other entry. The UI never re-validates the block:
+   * `valid` decides whether the entry is installable.
+   */
+  remoteOAuth?: RegistryRemoteOAuthResolution
+  /**
+   * Scope that published a remote-OAuth entry not proven to come from the catalog
+   * curator (`@acme`), or null when the name has no parseable scope. Absent on
+   * curator entries, whose presentation metadata is the only one control-api keeps.
+   */
+  publisher?: string | null
+}
+
+export type RegistryRemoteOAuthGrantScope = 'user' | 'context'
+export type RegistryRemoteOAuthRegistration = 'cimd' | 'dcr' | 'pre-registered'
+export type RegistryRemoteOAuthVerificationStatus = 'verified' | 'untested' | 'known-issue'
+
+export type RegistryRemoteOAuthVerification = {
+  status: RegistryRemoteOAuthVerificationStatus
+  checkedAt?: string
+  note?: string
+}
+
+/**
+ * `mcp_server_meta.oauth` of a remote-OAuth entry as control-api serves it: rebuilt
+ * from the validated fields only. `verification`, `setupGuide` and
+ * `providerConsoleUrl` are present only on a valid curator entry; an invalid entry
+ * carries `{ source: 'remote' }` alone.
+ */
+export type RegistryRemoteOAuthBlock = {
+  source: 'remote'
+  allowedGrantScopes: RegistryRemoteOAuthGrantScope[]
+  scopes?: string[]
+  authorizationServerHint?: string
+  expectedRegistration: RegistryRemoteOAuthRegistration
+  providerConsoleUrl?: string
+  setupGuide?: string
+  verification?: RegistryRemoteOAuthVerification
+}
+
+export type RegistryRemoteOAuthResolution = { valid: true } | { valid: false; reason: string }
+
+/** What occupies one install slot (entry × grant scope) of a remote-OAuth entry. */
+export type RegistryRemoteOAuthSlotState =
+  | {
+      kind: 'instance'
+      serverName: string
+      version: string
+      /** False when the CR carries the catalog id under a name other than the slot's. */
+      canonical: boolean
+      /** Being deleted: the slot frees up only once the CR is gone. */
+      terminating: boolean
+    }
+  /** The slot's canonical name is taken by a resource not installed into this slot. */
+  | { kind: 'foreign'; serverName: string }
+
+export type RegistryRemoteOAuthEntrySlots = Partial<
+  Record<RegistryRemoteOAuthGrantScope, RegistryRemoteOAuthSlotState>
+>
+
+/** Keyed by catalog entry name; read it with `getRemoteOAuthSlots`, never by indexing. */
+export type RegistryRemoteOAuthSlots = Record<string, RegistryRemoteOAuthEntrySlots>
+
+/** A remote-OAuth connector installed by URL, outside the Marketplace. */
+export type RegistryManualRemoteOAuthServer = {
+  serverName: string
+  baseUrl: string
+  grantScope: RegistryRemoteOAuthGrantScope
 }
 
 export type CredentialKey = {
@@ -3681,6 +3756,9 @@ export type RegistryInstalledState = {
   serverNames: string[]
   recipeKeys: string[]
   hookKeys?: string[]
+  /** Optional: a control-api older than the Marketplace remote-OAuth lane omits it. */
+  remoteOAuthSlots?: RegistryRemoteOAuthSlots
+  manualRemoteOAuth?: RegistryManualRemoteOAuthServer[]
 }
 export type RegistryCatalogResponse = RegistryEntryListResponse & {
   categories: string[]

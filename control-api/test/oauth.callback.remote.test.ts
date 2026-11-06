@@ -9,7 +9,7 @@ import {
 } from '../src/oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
-import { signOAuthState } from '../src/oauth/state.js'
+import { mintMcpState } from './fixtures/mcpOAuthState.js'
 
 /**
  * C4/DEC-17 — the REMOTE auth-code exchange goes through the IP-pinned
@@ -47,7 +47,7 @@ const TOKEN_ENDPOINT = 'https://mcp.sentry.dev/oauth/token'
 // remote install now rejects such servers (R3F-H1), so this fixture uses Sentry.
 function remoteServerCr() {
   return {
-    metadata: { name: 'sentry-remote', namespace: MCP_NS },
+    metadata: { name: 'sentry-remote', namespace: MCP_NS, uid: 'uid-sentry-remote' },
     spec: {
       contextRef: 'ctx-A',
       auth: { type: 'oauth' },
@@ -107,24 +107,17 @@ function recordingTransport(responseJson: string, status = 200) {
   return { transport, calls }
 }
 
-function remoteState() {
-  // The signed state binds the REAL client id; the URL segment is the reserved
-  // stable `remote` (CIMD/DCR register one fixed redirect_uri).
-  return signOAuthState(STATE_SECRET, {
-    subjectKind: 'mcp',
-    mcpServerName: 'sentry-remote',
-    userId: 'user-9',
-    oauthClientId: REMOTE_CLIENT_ID,
-    grantKind: 'user',
-    background: false,
-  } as Parameters<typeof signOAuthState>[1])
-}
-
-function remoteInput(): CallbackInput {
+async function remoteInput(deps: CallbackDeps): Promise<CallbackInput> {
   return {
     target: { kind: 'remote-shared', origin: 'https://control.example.com' },
     code: 'AUTH_CODE',
-    state: remoteState(),
+    // The signed state binds the REAL client id; the URL carries none on the shared
+    // remote callback.
+    state: await mintMcpState(deps, STATE_SECRET, {
+      mcpServerName: 'sentry-remote',
+      userId: 'user-9',
+      oauthClientId: REMOTE_CLIENT_ID,
+    }),
     // RFC 9207 issuer echoed by the authorization response; matches the pinned
     // `issForCallback` so the mix-up defence passes and the exchange proceeds.
     iss: 'https://mcp.sentry.dev',
@@ -154,7 +147,7 @@ describe('handleOAuthCallback — remote exchange is IP-pinned (DEC-17, T3)', ()
       pinnedTransport: transport,
     }
 
-    const result = await handleOAuthCallback(remoteInput(), deps)
+    const result = await handleOAuthCallback(await remoteInput(deps), deps)
 
     // Observable outcome: a grant was persisted with provider 'remote'.
     expect(result.kind).toBe('ok')
@@ -181,7 +174,7 @@ describe('handleOAuthCallback — remote exchange is IP-pinned (DEC-17, T3)', ()
 describe('baked mcp exchange stays on fetchFn (byte-identical, T5c)', () => {
   it('uses fetchFn and never the pinned transport for a baked server', async () => {
     const bakedServer = {
-      metadata: { name: 'gdrive', namespace: MCP_NS },
+      metadata: { name: 'gdrive', namespace: MCP_NS, uid: 'uid-gdrive' },
       spec: {
         contextRef: 'ctx-A',
         auth: { type: 'oauth' },
@@ -231,14 +224,11 @@ describe('baked mcp exchange stays on fetchFn (byte-identical, T5c)', () => {
         redirectUri: 'https://control.example.com/api/v1/oauth-callback/google-drive',
       },
       code: 'AUTH_CODE',
-      state: signOAuthState(STATE_SECRET, {
-        subjectKind: 'mcp',
+      state: await mintMcpState(deps, STATE_SECRET, {
         mcpServerName: 'gdrive',
         userId: 'user-9',
         oauthClientId: 'google-drive',
-        grantKind: 'user',
-        background: false,
-      } as Parameters<typeof signOAuthState>[1]),
+      }),
     }
 
     const result = await handleOAuthCallback(input, deps)

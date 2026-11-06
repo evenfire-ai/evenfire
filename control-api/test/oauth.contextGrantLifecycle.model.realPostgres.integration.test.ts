@@ -1527,7 +1527,9 @@ describeRealPostgres(
       constructor(readonly u: number) {}
       async run() {
         const user = users[this.u]
-        // What the release before contextId-bound consent signed for this server.
+        // What a release before contextId-bound consent signed for this server: no
+        // Context and no CR uid. The missing uid is what refuses it now, ahead of the
+        // missing Context; either way the outcome is `oauth_state_outdated`.
         const state = signOAuthState(config.oauthStateHmacSecret, {
           subjectKind: 'mcp',
           mcpServerName: SC,
@@ -1535,7 +1537,7 @@ describeRealPostgres(
           oauthClientId: OAUTH_ID,
           grantKind: 'user',
           background: false,
-        })
+        } as Parameters<typeof signOAuthState>[1])
         H.mints.push({ state, claims: { server: SC, user, legacy: true } })
       }
       toString() {

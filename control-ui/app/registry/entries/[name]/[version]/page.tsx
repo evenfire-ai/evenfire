@@ -8,6 +8,13 @@ import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { RegistryEntryDetailSkeleton } from '@components/RegistryEntryDetailSkeleton'
+import { RemoteOAuthProvenanceBadge } from '@components/RemoteOAuthProvenanceBadge'
+import {
+  RemoteOAuthEntryBadges,
+  RemoteOAuthNotInstallable,
+  RemoteOAuthSlotList,
+  useRemoteOAuthSlotActions,
+} from '@components/RemoteOAuthSlots'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconMoreHorizontal } from '@components/icons'
@@ -21,6 +28,9 @@ import {
   installRecipeFromRegistry,
 } from '@lib/api'
 import { useRegistryCapability } from '@lib/hooks/useRegistryCapability'
+import { getRemoteOAuthCatalogBlock } from '@lib/oauthInstall'
+import { canInstallRemoteOAuthSlot, remoteOAuthSlotRows } from '@lib/remoteOAuthSlots'
+import type { RemoteOAuthSlotRow } from '@lib/remoteOAuthSlots.types'
 import { trustBgColor, trustColor } from '@lib/trustLevel'
 import RegistryEntryDetailLoading from './loading'
 
@@ -124,11 +134,15 @@ function RegistryEntryDetailContent() {
 
   const [entry, setEntry] = useState<RegistryEntry | null>(null)
   const [installed, setInstalled] = useState(false)
+  const [installedState, setInstalledState] = useState<RegistryInstalledState | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [removing, setRemoving] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [actionError, setActionError] = useState('')
+  // Kept apart from actionError: a later successful re-read must clear it without
+  // also clearing an install or remove failure the operator has not seen yet.
+  const [refreshError, setRefreshError] = useState('')
   const { confirm, confirmDialog } = useConfirmDialog()
   const { showToast } = useToast()
   const { capability } = useRegistryCapability()
@@ -140,29 +154,93 @@ function RegistryEntryDetailContent() {
     !!entry &&
     (capability?.isCurator === true || (!!orgScope && entry.name.startsWith(`${orgScope}/`)))
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setLoadError('')
-    try {
-      const catalog = await getRegistryCatalog({ limit: '500' })
-      const match = catalog.data.find(e => e.name === name && e.version === version)
-      if (!match) {
-        setLoadError(`Entry "${name}" v${version} not found in Marketplace.`)
-        setEntry(null)
-        return
+  // `background` re-reads after a slot action without swapping the page for the
+  // skeleton, so the slot list and any open dialog stay in place.
+  const load = useCallback(
+    async (options: { background?: boolean } = {}) => {
+      if (!options.background) setLoading(true)
+      setLoadError('')
+      setRefreshError('')
+      try {
+        const catalog = await getRegistryCatalog({ limit: '500' })
+        const match = catalog.data.find(e => e.name === name && e.version === version)
+        if (!match) {
+          setLoadError(`Entry "${name}" v${version} not found in Marketplace.`)
+          setEntry(null)
+          return
+        }
+        setEntry(match)
+        setInstalled(computeInstalled(match, catalog.installed))
+        setInstalledState(catalog.installed)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to load Marketplace entry'
+        if (options.background) setRefreshError(`The entry could not be refreshed: ${message}`)
+        else setLoadError(message)
+      } finally {
+        if (!options.background) setLoading(false)
       }
-      setEntry(match)
-      setInstalled(computeInstalled(match, catalog.installed))
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : 'Failed to load Marketplace entry')
-    } finally {
-      setLoading(false)
-    }
-  }, [name, version])
+    },
+    [name, version]
+  )
 
   useEffect(() => {
     if (name && version) void load()
   }, [name, version, load])
+
+  const slotActions = useRemoteOAuthSlotActions({
+    onChanged: () => load({ background: true }),
+  })
+  const remoteOAuth = useMemo(() => getRemoteOAuthCatalogBlock(entry), [entry])
+  // Slots are keyed by entry name, so a later version shows the instance of an
+  // earlier one: there is no per-version install for this subtype.
+  const slotRows = useMemo(
+    () =>
+      entry && remoteOAuth?.valid === true
+        ? remoteOAuthSlotRows(remoteOAuth, entry.name, installedState)
+        : [],
+    [entry, installedState, remoteOAuth]
+  )
+
+  function renderSlotActions(row: RemoteOAuthSlotRow) {
+    if (!entry) return null
+    if (canInstallRemoteOAuthSlot(row)) {
+      return (
+        <button
+          type="button"
+          className="cu-btn cu-btn--primary cu-btn--sm"
+          aria-label={`Install ${row.label.toLowerCase()}`}
+          onClick={() => slotActions.install(entry, row.scope)}
+        >
+          Install
+        </button>
+      )
+    }
+    if (row.status.kind !== 'installed') return null
+    const { serverName } = row.status
+    const busy = slotActions.isBusy(serverName)
+    return (
+      <>
+        <button
+          type="button"
+          className="cu-btn cu-btn--secondary cu-btn--sm"
+          aria-label={`Agents for ${serverName}`}
+          disabled={busy}
+          onClick={() => void slotActions.openAgents(serverName)}
+        >
+          Agents…
+        </button>
+        <button
+          type="button"
+          className="cu-btn cu-btn--danger cu-btn--sm"
+          aria-label={`Uninstall ${serverName}`}
+          disabled={busy}
+          onClick={() => void slotActions.uninstall(serverName)}
+        >
+          Uninstall
+        </button>
+      </>
+    )
+  }
 
   function backToCatalog() {
     router.push(
@@ -258,7 +336,7 @@ function RegistryEntryDetailContent() {
               actions={
                 entry ? (
                   <>
-                    {entry.status === 'published' ? (
+                    {entry.status === 'published' && !remoteOAuth ? (
                       installed ? (
                         <button type="button" className="cu-btn cu-btn--sm" disabled>
                           Installed
@@ -301,6 +379,16 @@ function RegistryEntryDetailContent() {
         {actionError ? (
           <div className="cu-banner cu-banner--error" role="alert">
             {actionError}
+          </div>
+        ) : null}
+        {refreshError ? (
+          <div className="cu-banner cu-banner--error" role="alert">
+            {refreshError}
+          </div>
+        ) : null}
+        {slotActions.error ? (
+          <div className="cu-banner cu-banner--error" role="alert">
+            {slotActions.error}
           </div>
         ) : null}
 
@@ -350,27 +438,43 @@ function RegistryEntryDetailContent() {
                         : entry.recipe_type || '—'}
                     </span>
                   </div>
-                  <div className="cu-detail-field">
-                    <span className="cu-detail-field__label">Trust</span>
-                    <span
-                      className="cu-registry-chip"
-                      style={{
-                        color: trustColor(entry.trust_level),
-                        backgroundColor: trustBgColor(entry.trust_level),
-                        borderColor: trustColor(entry.trust_level),
-                      }}
-                    >
-                      {entry.trust_level.toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="cu-detail-field">
-                    <span className="cu-detail-field__label">Verification</span>
-                    <span
-                      className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
-                    >
-                      {entry.quality_tier}
-                    </span>
-                  </div>
+                  {/* For a remote-OAuth entry the registry's quality tier turns verified on the
+                      first install report and the trust level is publisher-influenced, so only the
+                      provenance the catalog list shows is offered. */}
+                  {remoteOAuth?.valid === true ? (
+                    <div className="cu-detail-field">
+                      <span className="cu-detail-field__label">Verification</span>
+                      <RemoteOAuthProvenanceBadge
+                        block={remoteOAuth.block}
+                        publisher={remoteOAuth.publisher}
+                        trusted={remoteOAuth.trusted}
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <div className="cu-detail-field">
+                        <span className="cu-detail-field__label">Trust</span>
+                        <span
+                          className="cu-registry-chip"
+                          style={{
+                            color: trustColor(entry.trust_level),
+                            backgroundColor: trustBgColor(entry.trust_level),
+                            borderColor: trustColor(entry.trust_level),
+                          }}
+                        >
+                          {entry.trust_level.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="cu-detail-field">
+                        <span className="cu-detail-field__label">Verification</span>
+                        <span
+                          className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
+                        >
+                          {entry.quality_tier}
+                        </span>
+                      </div>
+                    </>
+                  )}
                   {entry.tags.length > 0 && (
                     <div className="cu-detail-field">
                       <span className="cu-detail-field__label">Tags</span>
@@ -385,6 +489,25 @@ function RegistryEntryDetailContent() {
                   )}
                 </div>
               </div>
+
+              {remoteOAuth ? (
+                <section className="cu-marketplace-detail__section">
+                  <h3 className="cu-marketplace-detail__section-title">Install slots</h3>
+                  {remoteOAuth.valid === true ? (
+                    <>
+                      <RemoteOAuthEntryBadges view={remoteOAuth} />
+                      {entry.status === 'published' ? (
+                        <RemoteOAuthSlotList rows={slotRows} renderActions={renderSlotActions} />
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="cu-marketplace-detail__hint">
+                      <RemoteOAuthNotInstallable reason={remoteOAuth.reason} /> This entry cannot be
+                      installed ({remoteOAuth.reason}).
+                    </p>
+                  )}
+                </section>
+              ) : null}
 
               {images.length > 0 ? (
                 <section className="cu-marketplace-detail__section">
@@ -431,6 +554,7 @@ function RegistryEntryDetailContent() {
           </div>
         ) : null}
         {confirmDialog}
+        {slotActions.dialogs}
       </DashboardLayout>
     </AuthGate>
   )

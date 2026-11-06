@@ -1,0 +1,6 @@
+{
+  "status": 409,
+  "body": {
+    "error": "server_name_in_use"
+  }
+}

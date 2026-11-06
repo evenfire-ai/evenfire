@@ -5,6 +5,7 @@
  * (control-api/src/routes/admin/remoteMcp.ts). They are the contract boundary,
  * so they live here rather than inline in the wizard component.
  */
+import type { RegistryRemoteOAuthBlock } from './api'
 
 /**
  * Client-registration mode the AS resolves to. The dry-run `/discover` never
@@ -141,7 +142,64 @@ export type RemoteTransportProbe =
       detail: string
     }
 
+/** A catalog entry resolved for one slot, ready for the wizard's catalog mode. */
+export interface RemoteCatalogInstallTarget {
+  entry: RemoteCatalogEntryRef
+  grantScope: RemoteGrantScope
+  /**
+   * The entry's URL, shown read-only. Sent with the install only as a precondition:
+   * control-api still installs the entry's own URL and refuses when they differ.
+   */
+  baseUrl: string
+  block: RegistryRemoteOAuthBlock
+  /** Curator entry: its verification badge and setup guide are trusted. */
+  trusted: boolean
+  /** Publishing scope of a non-curator entry, else null. */
+  publisher: string | null
+}
+
+/** What the wizard page's query selects. */
+export type RemoteWizardQuery =
+  | { mode: 'manual' }
+  | { mode: 'catalog'; entry: RemoteCatalogEntryRef; grantScope: RemoteGrantScope }
+  | { mode: 'invalid'; message: string }
+
+/** Loading state of the catalog target the wizard's catalog mode opens on. */
+export type RemoteCatalogTargetState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; target: RemoteCatalogInstallTarget }
+
+/** The catalog entry and version a catalog-mode request names, as the registry returned them. */
+export interface RemoteCatalogEntryRef {
+  name: string
+  version: string
+}
+
+/**
+ * Catalog-mode discovery: the server reads the URL from the entry, so neither a URL
+ * nor a server name is sent.
+ */
+export interface DiscoverCatalogRemoteRequest {
+  catalogEntry: RemoteCatalogEntryRef
+  grantScope: RemoteGrantScope
+  authorizationServer?: string
+}
+
+/** Registration the catalog entry expects; informational only. */
+export type RemoteCatalogExpectedRegistration = 'cimd' | 'dcr' | 'pre-registered'
+
+/** Discovery resolved another registration mode than the entry expects (warning only). */
+export interface RemoteCatalogDrift {
+  expected: RemoteCatalogExpectedRegistration
+  detected: RemoteDiscoverRegistrationMode
+}
+
 export interface DiscoverRemoteResponse {
+  /** Catalog mode only: the slot's canonical name, assigned by control-api. */
+  serverName?: string
+  /** Catalog mode only: present when discovery contradicts the entry's expectation. */
+  catalogDrift?: RemoteCatalogDrift
   detected: RemoteDetected
   /**
    * The MCP transport probe result. Optional so the wizard tolerates a
@@ -166,6 +224,25 @@ export interface InstallRemoteRequest {
   /** Full override of the requested scopes; absent means the advertised ones. */
   scopes?: string[]
   /** The exact unverifiable scopes the operator confirmed as this server's API. */
+  confirmedUnverifiedScopes?: string[]
+}
+
+/**
+ * Catalog-mode install. `serverName` is never sent: control-api derives it from the
+ * slot. `baseUrl` is the entry URL the operator was shown, never one from the link;
+ * control-api installs the entry's own URL and refuses the install when the entry
+ * now names another, so a registry change after the wizard opened is not installed
+ * unseen.
+ */
+export interface InstallCatalogRemoteRequest {
+  catalogEntry: RemoteCatalogEntryRef
+  grantScope: RemoteGrantScope
+  baseUrl: string
+  mode: RemoteInstallMode
+  clientId?: string
+  clientSecret?: string
+  authorizationServer?: string
+  scopes?: string[]
   confirmedUnverifiedScopes?: string[]
 }
 
@@ -234,3 +311,18 @@ export interface RemoteTenantRequiredDetail {
   tenantAuthorityTemplate: string
   detail: string
 }
+
+/**
+ * `error` codes control-api answers a catalog-mode request with, besides the ones the
+ * manual install shares (control-api/src/routes/admin/remoteMcp.ts).
+ */
+export type RemoteCatalogErrorCode =
+  | 'catalog_entry_not_remote_oauth'
+  | 'catalog_entry_invalid'
+  | 'catalog_entry_name_mismatch'
+  | 'catalog_grant_scope_not_allowed'
+  | 'catalog_server_name_not_allowed'
+  | 'catalog_base_url_mismatch'
+  | 'catalog_slot_residue'
+  | 'server_name_in_use'
+  | 'install_in_progress'

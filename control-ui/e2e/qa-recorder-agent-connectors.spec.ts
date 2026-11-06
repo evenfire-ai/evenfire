@@ -62,8 +62,13 @@ test.describe('optional QA recorder: Control UI agent connectors', () => {
     try {
       await loginThroughUi(page, credentials)
 
-      // Seed: context carrying the two attached servers, three catalog
-      // servers, and the host bound to the context.
+      // Seed: three catalog servers, a context carrying two of them, and the
+      // host bound to the context. The servers go first: control-api refuses a
+      // context that names a connector with no McpServer behind it.
+      for (const serverName of [serverAttachedOne, serverAttachedTwo, serverCatalogOnly]) {
+        await createMcpServer(serverName)
+      }
+
       const ctxRes = await api(page.request, 'POST', '/api/v1/admin/contexts', {
         metadata: { name: contextName },
         spec: {
@@ -73,10 +78,6 @@ test.describe('optional QA recorder: Control UI agent connectors', () => {
         },
       })
       expect(ctxRes.status, `create context: ${JSON.stringify(ctxRes.data)}`).toBeLessThan(300)
-
-      for (const serverName of [serverAttachedOne, serverAttachedTwo, serverCatalogOnly]) {
-        await createMcpServer(serverName)
-      }
 
       const hostRes = await api(page.request, 'POST', '/api/v1/admin/hosts', {
         metadata: { name: agentName },

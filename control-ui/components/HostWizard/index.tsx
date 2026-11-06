@@ -28,6 +28,7 @@ import {
   listCodexSubscriptionConnections,
 } from '@/lib/codexSubscription'
 import { isDisabledCapabilityError } from '@/lib/codexSubscriptionFeature'
+import { contextMcpServerRejection, unknownMcpServerNames } from '@/lib/contextMutation'
 import {
   type GrokSubscriptionConnectionView,
   isAssignableGrokGrant,
@@ -320,17 +321,25 @@ export function HostWizard({
   const [selectedTeamIds, setSelectedTeamIds] = useState<string[]>([])
   const [accessTab, setAccessTab] = useState<'members' | 'teams'>('members')
 
+  // Connectors control-api reported as gone, tied to the list they were picked from:
+  // the list is a snapshot that still shows them, but a newly loaded list is current
+  // again and may hold a connector recreated under the same name.
+  const [vanishedMcp, setVanishedMcp] = useState<{
+    list: HostWizardProps['mcpServers']
+    names: string[]
+  }>({ list: mcpServers, names: [] })
   const availableMcp = useMemo(
     () =>
       mcpServers
         .map(m => {
           const name = m.metadata?.name
-          if (!name) return null
+          if (!name || (vanishedMcp.list === mcpServers && vanishedMcp.names.includes(name)))
+            return null
           return { name, meta: mcpConnectorMeta(m.spec) }
         })
         .filter((v): v is { name: string; meta: string } => Boolean(v))
         .sort((left, right) => left.name.localeCompare(right.name)),
-    [mcpServers]
+    [mcpServers, vanishedMcp]
   )
 
   const secretOptions = useMemo(
@@ -913,7 +922,22 @@ export function HostWizard({
       // already produced; masking them as "already in use" told the operator a
       // collision that never happened. Preserve e.message verbatim.
       if (mountedRef.current) {
-        setError(e instanceof Error ? e.message : 'Failed to create agent resources')
+        const unknownConnectors = unknownMcpServerNames(e)
+        if (unknownConnectors && unknownConnectors.length > 0) {
+          // Drop the vanished connectors so a retry does not hit the same refusal.
+          setSelectedMcp(current => current.filter(name => !unknownConnectors.includes(name)))
+          setVanishedMcp(current => ({
+            list: mcpServers,
+            names:
+              current.list === mcpServers
+                ? [...new Set([...current.names, ...unknownConnectors])]
+                : unknownConnectors,
+          }))
+        }
+        setError(
+          contextMcpServerRejection(e) ??
+            (e instanceof Error ? e.message : 'Failed to create agent resources')
+        )
       }
     } finally {
       if (mountedRef.current) setBusy(false)

@@ -37,6 +37,7 @@ describe('mcp state contextId', () => {
       oauthClientId: 'c',
       grantKind: 'user',
       background: false,
+      crUid: 'uid-1',
       contextId: 'c1',
     })
     const r = verifyOAuthStateSignature(SECRET, state)
@@ -54,6 +55,7 @@ describe('mcp state contextId', () => {
       oauthClientId: 'c',
       grantKind: 'user',
       background: false,
+      crUid: 'uid-1',
     })
     const r = verifyOAuthStateSignature(SECRET, state)
     expect(r.kind).toBe('ok')

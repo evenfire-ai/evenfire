@@ -41,7 +41,6 @@ import {
   getCategories,
   getCredentialSchema,
   getDigest,
-  getEntry,
   getEntryVersion,
   listGrantedToMe,
   listOrgEntries,
@@ -50,7 +49,6 @@ import {
   reportInstall,
   resolvePublishScope,
   revokeOrgGrant,
-  searchEntries,
   updateVersionMetadata,
   uploadArtifacts,
 } from '../../services/registryClient.js'
@@ -81,6 +79,21 @@ import {
 } from '../../services/workflowRecipeLimits.js'
 import type { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
 import {
+  getCatalogEntry,
+  getCatalogEntryVersion,
+  resolveCatalogEntry,
+  searchCatalogEntries,
+} from './catalogEntryReads.js'
+import {
+  type CatalogEntryInput,
+  type ListedMcpServer,
+  type ManualRemoteOAuthServer,
+  type RemoteOAuthSlots,
+  classifyRemoteOAuthSlots,
+  isRemoteOAuthEntry,
+  isRemoteOAuthServer,
+} from './catalogRemoteOAuth.js'
+import {
   type GenericOAuthSpecRefs,
   InstallGenericOAuthInputSchema,
   InstallOAuthSecretSchema,
@@ -92,6 +105,7 @@ import {
   shouldAttachEvenfirePullSecret,
 } from './registryImagePullSecret.js'
 import { checkEvenfireImageRefMatchesEntry } from './registryImageRefIdentity.js'
+import { OFFICIAL_EVENFIRE_SCOPES, entryNameScope, registryNameSlug } from './registryNaming.js'
 import {
   pullSecretErrorResponse,
   recipeReferencesPlatformImage,
@@ -108,11 +122,7 @@ function isValidK8sName(name: string): boolean {
 
 /** Generate a spec-compliant name: mcp-{slug}-v{version}-{hash8} (max 63 chars). */
 export function generateRegistryName(entryName: string, version: string): string {
-  const slug = entryName
-    .replace(/[^a-z0-9-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40)
+  const slug = registryNameSlug(entryName)
   const vSlug = version.replace(/\./g, '-')
   const hash = createHash('sha256').update(`${entryName}:${version}`).digest('hex').slice(0, 8)
   return `mcp-${slug}-v${vSlug}-${hash}`.slice(0, 63).replace(/-$/, '')
@@ -278,19 +288,6 @@ type HostShape = {
   spec?: { guardrails?: HostGuardrailsShape } & Record<string, unknown>
 }
 
-/** The `@org` scope from an org-scoped entry name (`@org/name`), or null. */
-function hookOrgScope(entryName: string): string | null {
-  const m = /^@([^/]+)\//.exec(entryName)
-  return m ? `@${m[1]}` : null
-}
-
-/**
- * Official evenfire scopes — always curated (the platform's own reserved orgs).
- * Hardcoded so a misconfigured `CONTROL_API_CURATED_HOOK_ORGS` can never drop
- * platform trust, and so the env list is reserved for extra THIRD-PARTY orgs.
- */
-const OFFICIAL_EVENFIRE_HOOK_ORGS = ['@clerum', '@evenfire']
-
 /**
  * Authoritative trust level for an installed hook (§8.4 / registry gap #1).
  * `entries.trust_level` is publisher-influenced (trigger-computed from
@@ -310,11 +307,14 @@ export function resolveHookTrustLevel(
   clusterOrgScope: string | null
 ): string {
   const column = (entry.trust_level || 'low').toLowerCase()
-  const org = hookOrgScope(entry.name)
+  const org = entryNameScope(entry.name)
   const curated =
     !!org &&
     (org === clusterOrgScope ||
-      OFFICIAL_EVENFIRE_HOOK_ORGS.includes(org) ||
+      // The official scopes are hardcoded (not read from the env) so a misconfigured
+      // `CONTROL_API_CURATED_HOOK_ORGS` can never drop platform trust; the env list
+      // is reserved for extra third-party orgs.
+      OFFICIAL_EVENFIRE_SCOPES.includes(org) ||
       config.curatedHookOrgs.includes(org))
   if (curated) return column
   const cap = config.defaultHookTrustCap
@@ -1646,14 +1646,25 @@ export interface RegistryInstallRequest {
   oauth?: InstallOAuthInput
 }
 
-export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
+export interface InstalledRegistryState {
   catalogKeys: string[]
   serverNames: string[]
   recipeKeys: string[]
   hookKeys: string[]
-}> {
-  if (!gateway) return { catalogKeys: [], serverNames: [], recipeKeys: [], hookKeys: [] }
+  remoteOAuthSlots: RemoteOAuthSlots
+  manualRemoteOAuth: ManualRemoteOAuthServer[]
+}
 
+interface InstalledRegistryResources {
+  servers: unknown[]
+  recipes: unknown[]
+  hooks: unknown[]
+}
+
+async function listInstalledRegistryResources(
+  gateway?: K8sGateway
+): Promise<InstalledRegistryResources> {
+  if (!gateway) return { servers: [], recipes: [], hooks: [] }
   const [servers, recipes, hooks] = await Promise.all([
     gateway.listResource('mcpservers', config.mcpServersNamespace),
     // Matches /admin/recipes and the WorkflowRecipe namespace invariant:
@@ -1664,6 +1675,13 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
     // stamps, so the marketplace can render them as installed (§8.5).
     gateway.listResource('llmhooks', config.llmHooksNamespace),
   ])
+  return { servers, recipes, hooks }
+}
+
+function summarizeInstalledRegistryState(
+  { servers, recipes, hooks }: InstalledRegistryResources,
+  remoteOAuthEntries: readonly CatalogEntryInput[]
+): InstalledRegistryState {
   const catalogKeys = new Set<string>()
   const serverNames = new Set<string>()
   const recipeKeys = new Set<string>()
@@ -1673,17 +1691,25 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
   // '@' and '/', illegal as label values). Fall back to labels so resources
   // installed before this change (which carry them as labels) still read as
   // installed until they are reinstalled/reconciled.
-  for (const server of servers as Array<{
-    metadata?: {
-      name?: string
-      labels?: Record<string, string>
-      annotations?: Record<string, string>
+  const listedServers = servers as Array<
+    ListedMcpServer & {
+      metadata?: {
+        name?: string
+        labels?: Record<string, string>
+        annotations?: Record<string, string>
+      }
     }
-  }>) {
+  >
+  for (const server of listedServers) {
     const serverName = String(server.metadata?.name || '').trim()
-    const catalogId = getCatalogId(server.metadata)
-    const catalogVersion = getCatalogVersion(server.metadata)
     if (serverName) serverNames.add(serverName)
+    // A remote-OAuth connector has one install per grant scope and is never
+    // upgraded in place, so the single entry@version key would misreport it
+    // (installed after one slot, upgradable after a version bump). Its state is
+    // reported per slot in `remoteOAuthSlots` instead.
+    if (isRemoteOAuthServer(server)) continue
+    const catalogId = getCatalogId(server.metadata ?? undefined)
+    const catalogVersion = getCatalogVersion(server.metadata ?? undefined)
     if (catalogId && catalogVersion) catalogKeys.add(`${catalogId}@${catalogVersion}`)
   }
 
@@ -1714,12 +1740,34 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
     if (catalogId && catalogVersion) hookKeys.add(`${catalogId}@${catalogVersion}`)
   }
 
+  const { remoteOAuthSlots, manualRemoteOAuth } = classifyRemoteOAuthSlots(
+    listedServers,
+    remoteOAuthEntries
+  )
+
   return {
     catalogKeys: [...catalogKeys].sort((a, b) => a.localeCompare(b)),
     serverNames: [...serverNames].sort((a, b) => a.localeCompare(b)),
     recipeKeys: [...recipeKeys].sort((a, b) => a.localeCompare(b)),
     hookKeys: [...hookKeys].sort((a, b) => a.localeCompare(b)),
+    remoteOAuthSlots,
+    manualRemoteOAuth,
   }
+}
+
+/**
+ * `remoteOAuthEntries` are the (resolved) catalog entries being shown: a slot of
+ * theirs whose canonical name is taken by another McpServer is reported `foreign`.
+ * Passing the entries the caller already has keeps this free of registry calls.
+ */
+export async function getInstalledRegistryState(
+  gateway?: K8sGateway,
+  remoteOAuthEntries: readonly CatalogEntryInput[] = []
+): Promise<InstalledRegistryState> {
+  return summarizeInstalledRegistryState(
+    await listInstalledRegistryResources(gateway),
+    remoteOAuthEntries
+  )
 }
 
 type RegistryFenceFailure = 'identity-mismatch' | 'identity-unavailable' | 'rejected' | 'unresolved'
@@ -1771,8 +1819,8 @@ export function createAdminRegistryRouter(
   router.get(
     '/admin/registry/catalog',
     asyncHandler(async (req, res) => {
-      const [entries, categories, installed] = await Promise.all([
-        searchEntries({
+      const [entries, categories, installedResources] = await Promise.all([
+        searchCatalogEntries({
           q: req.query.q as string | undefined,
           entryType: req.query.entryType as string | undefined,
           category: req.query.category as string | undefined,
@@ -1784,12 +1832,15 @@ export function createAdminRegistryRouter(
           offset: req.query.offset ? Number(req.query.offset) : undefined,
         }),
         getCategories(),
-        getInstalledRegistryState(gateway),
+        listInstalledRegistryResources(gateway),
       ])
       res.json({
         ...entries,
         categories: Array.isArray(categories.data) ? categories.data : [],
-        installed,
+        installed: summarizeInstalledRegistryState(
+          installedResources,
+          Array.isArray(entries.data) ? entries.data : []
+        ),
       })
     })
   )
@@ -1797,7 +1848,7 @@ export function createAdminRegistryRouter(
   // GET /admin/registry/entries — Search registry catalog
   router.get('/admin/registry/entries', async (req, res, next) => {
     try {
-      const result = await searchEntries({
+      const result = await searchCatalogEntries({
         q: req.query.q as string | undefined,
         entryType: req.query.entryType as string | undefined,
         category: req.query.category as string | undefined,
@@ -1845,7 +1896,7 @@ export function createAdminRegistryRouter(
 
       const body = { ...req.body, name: scopedName }
       const result = await publishEntry(body)
-      res.status(201).json(result)
+      res.status(201).json(resolveCatalogEntry(result))
     } catch (err) {
       next(err)
     }
@@ -1854,7 +1905,7 @@ export function createAdminRegistryRouter(
   // GET /admin/registry/entries/:name — Get latest version
   router.get('/admin/registry/entries/:name', async (req, res, next) => {
     try {
-      const entry = await getEntry(req.params.name)
+      const entry = await getCatalogEntry(req.params.name)
       res.json(entry)
     } catch (err) {
       next(err)
@@ -1864,7 +1915,7 @@ export function createAdminRegistryRouter(
   // GET /admin/registry/entries/:name/versions/:version — Get specific version
   router.get('/admin/registry/entries/:name/versions/:version', async (req, res, next) => {
     try {
-      const entry = await getEntryVersion(req.params.name, req.params.version)
+      const entry = await getCatalogEntryVersion(req.params.name, req.params.version)
       res.json(entry)
     } catch (err) {
       next(err)
@@ -1989,13 +2040,30 @@ export function createAdminRegistryRouter(
         })
         return
       }
+      // Only the egress summary of a published version is editable. The registry
+      // enforces the same, but a forwarded `remoteEndpoints` or `oauth` would
+      // otherwise rewrite what an installed remote-OAuth connector was verified
+      // against, so it is refused here too.
+      if (
+        mcpServer !== undefined &&
+        (typeof mcpServer !== 'object' ||
+          mcpServer === null ||
+          Array.isArray(mcpServer) ||
+          Object.keys(mcpServer).some(key => key !== 'egressSummary'))
+      ) {
+        res.status(400).json({
+          error: 'registry_version_mcp_server_field_not_editable',
+          reason: 'mcpServer only accepts egressSummary on a published version',
+        })
+        return
+      }
       const result = await updateVersionMetadata(req.params.name, req.params.version, {
         description,
         tags,
         visibility,
         mcpServer,
       })
-      res.json(result)
+      res.json(resolveCatalogEntry(result))
     } catch (err) {
       next(err)
     }
@@ -2043,6 +2111,19 @@ export function createAdminRegistryRouter(
 
         // ── Step 1: Fetch entry metadata from registry ────────────────────
         const entry = await getEntryVersion(body.registryEntryName, body.registryEntryVersion)
+
+        // A remote-OAuth connector needs discovery, a transport probe and a client
+        // registration before its CR can be written; this generic lane does none of
+        // that. Refused before any other branch so it can never reach the OAuth
+        // provider lanes below, whatever else the block carries.
+        if (isRemoteOAuthEntry(entry)) {
+          res.status(400).json({
+            error: 'remote_oauth_entry_requires_remote_install',
+            reason:
+              'This entry is a remote OAuth connector; install it from the Marketplace connector flow, not the generic registry install.',
+          })
+          return
+        }
 
         // ── Step 1b: Verify bundle digest (spec §9.2.1 step 6) ───────────
         if (entry.server_mode === 'local') {
@@ -2527,13 +2608,13 @@ export function createAdminRegistryRouter(
         }
         const resourceOperationId = crypto.randomUUID()
         const registryAnnotations: Record<string, string> = {
-          ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
+          ...catalogAnnotations(entry.name, entry.version),
           [REGISTRY_OPERATION_ID_ANNOTATION]: resourceOperationId,
           [REGISTRY_SPEC_DIGEST_ANNOTATION]: registrySpecDigest(mcpServerSpec),
         }
         const credentialOperationId = crypto.randomUUID()
         const credentialAnnotations = {
-          ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
+          ...catalogAnnotations(entry.name, entry.version),
           [REGISTRY_SECRET_OPERATION_ID_ANNOTATION]: credentialOperationId,
         }
 
@@ -4062,6 +4143,18 @@ export function createAdminRegistryRouter(
           return
         }
 
+        // An in-place upgrade rewrites remote.baseUrl, transport.url and egress from
+        // the new version without discovery, leaving the pinned OAuth endpoints of
+        // one URL on a CR that points at another. Remote-OAuth connectors are
+        // reinstalled instead.
+        if (isRemoteOAuthServer(existingServer)) {
+          res.status(409).json({
+            error: 'remote_oauth_upgrade_unsupported',
+            reason: `McpServer "${body.serverName}" is a remote OAuth connector; uninstall it and install it again to change version.`,
+          })
+          return
+        }
+
         if (!existingServer.metadata?.uid || !existingServer.metadata.resourceVersion) {
           res.status(503).json({ error: 'registry_resource_identity_unavailable' })
           return
@@ -4077,16 +4170,39 @@ export function createAdminRegistryRouter(
         }
 
         const installedCatalogId = getCatalogId(existingServer.metadata)
-        if (installedCatalogId && installedCatalogId !== body.registryEntryName) {
+        const identityMismatch = (requested: string) => {
           res.status(409).json({
             error: 'mcp_server_entry_identity_mismatch',
-            reason: `McpServer "${body.serverName}" was installed from "${installedCatalogId}", not "${body.registryEntryName}" — uninstall and install to change entry`,
+            reason: `McpServer "${body.serverName}" was installed from "${installedCatalogId}", not "${requested}" — uninstall and install to change entry`,
           })
+        }
+        // The registry looks an entry up by its exact name, so any other name is a
+        // different entry: refused before fetching a target that may not exist.
+        if (installedCatalogId && installedCatalogId !== body.registryEntryName) {
+          identityMismatch(body.registryEntryName)
           return
         }
 
         // 2. Fetch new version metadata
         const entry = await getEntryVersion(body.registryEntryName, body.registryEntryVersion)
+
+        // Install stamps the name the registry returned, older installs the requested
+        // one; an exact lookup makes those the same string, so one comparison covers
+        // both. It trips only on a registry answering another entry, which would
+        // otherwise move this CR to that entry.
+        if (installedCatalogId && entry.name !== body.registryEntryName) {
+          identityMismatch(entry.name)
+          return
+        }
+        // Same reason from the other side: a CR that is not remote-OAuth would get the
+        // curated URL and the catalog identity without ever running the remote install.
+        if (isRemoteOAuthEntry(entry)) {
+          res.status(409).json({
+            error: 'remote_oauth_upgrade_unsupported',
+            reason: `Entry "${entry.name}@${entry.version}" is a remote OAuth connector; install it from the Marketplace connector flow.`,
+          })
+          return
+        }
         const meta = entry.mcp_server_meta as Record<string, unknown> | null
         const isLocal = entry.server_mode === 'local'
 
@@ -4295,7 +4411,7 @@ export function createAdminRegistryRouter(
               // infrastructure/platform metadata that this writer does not
               // own. Replaying the old map would turn a concurrent metadata
               // update into a false 400 after preflight (R3-L1).
-              ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
+              ...catalogAnnotations(entry.name, entry.version),
               [REGISTRY_SECRET_OPERATION_ID_ANNOTATION]: operationId,
             },
             ...(previousSecretSnapshot?.data ? { data: previousSecretSnapshot.data } : {}),
@@ -4377,7 +4493,7 @@ export function createAdminRegistryRouter(
         }
         const upgradeAnnotations: Record<string, string> = {
           ...(existingServer.metadata?.annotations ?? {}),
-          ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
+          ...catalogAnnotations(entry.name, entry.version),
           [REGISTRY_OPERATION_ID_ANNOTATION]: operationId,
           [REGISTRY_SPEC_DIGEST_ANNOTATION]: desiredSpecDigest,
         }

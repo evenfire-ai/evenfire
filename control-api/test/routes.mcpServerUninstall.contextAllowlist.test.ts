@@ -9,6 +9,7 @@ import {
   discoverRemoteOAuth,
 } from '../src/oauth/discovery.js'
 import { probeMcpTransport } from '../src/oauth/mcpTransportProbe.js'
+import { fakeCustomObjectsApiserver } from './fixtures/fakeCustomObjectsApiserver.js'
 import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -171,9 +172,9 @@ describe('McpServer uninstall vs. Context allowlist writers', () => {
   })
 
   // An enable of ANOTHER name read the Context before the uninstall's
-  // strip and writes after it. Without a resourceVersion fence its write replays the
-  // stale list and puts the uninstalled name back; with it, the stale write is refused
-  // and the console reloads.
+  // strip and writes after it. Its stale list puts the uninstalled name back, so the
+  // write is refused before the resourceVersion fence is reached: the name is added
+  // relative to the current Context and has no live McpServer. The console reloads.
   it('an enable of another name racing the strip does not reintroduce the uninstalled name', async () => {
     const gw = new MockGateway(NS)
     await seed(gw, ['old-srv'])
@@ -188,12 +189,94 @@ describe('McpServer uninstall vs. Context allowlist writers', () => {
     expect(uninstall.status).toBe(200)
 
     const staleEnable = await enable(app, stale, 'new-srv')
-    expect(staleEnable.status).toBe(409)
+    expect(staleEnable.status).toBe(422)
+    expect(staleEnable.body).toMatchObject({
+      error: 'unknown_mcp_server',
+      mcpServers: ['old-srv'],
+    })
     expect(await allowlist(gw)).toEqual([])
     await expect(gw.getResource('mcpservers', 'old-srv', NS)).rejects.toThrow()
 
     const fresh = (await gw.getResource('contexts', 'ctx-a', NS)) as ContextSnapshot
     expect((await enable(app, fresh, 'new-srv')).status).toBe(200)
     expect(await allowlist(gw)).toEqual(['new-srv'])
+  })
+
+  // A dialog read a Context the uninstall never touches (it only rewrites Contexts
+  // that hold the name, so this one keeps its resourceVersion). Its "Add" lands after
+  // the whole uninstall: the resourceVersion still matches, so without the
+  // live-server check the write succeeds and the next install under the same name
+  // comes back already enabled there.
+  it('an Add built from a snapshot read before a full uninstall is refused, and a reinstall is not enabled', async () => {
+    const gw = new MockGateway(NS)
+    await seed(gw, ['srv'])
+    await gw.createResource('mcpservers', { metadata: { name: 'other' }, spec: {} }, NS)
+    await gw.createResource(
+      'contexts',
+      { metadata: { name: 'ctx-b' }, spec: { contextId: 'ctx-b', mcpServers: ['other'] } },
+      NS
+    )
+    const app = makeApp(gw)
+
+    const dialogSnapshot = (await gw.getResource('contexts', 'ctx-b', NS)) as ContextSnapshot
+    const uninstall = await request(app).delete('/admin/mcp-servers/srv')
+    expect(uninstall.status).toBe(200)
+    await expect(gw.getResource('mcpservers', 'srv', NS)).rejects.toThrow()
+    expect(await allowlist(gw)).toEqual([])
+    const ctxB = (await gw.getResource('contexts', 'ctx-b', NS)) as ContextSnapshot
+    expect(ctxB.metadata.resourceVersion).toBe(dialogSnapshot.metadata.resourceVersion)
+
+    const add = await request(app)
+      .put('/admin/contexts/ctx-b')
+      .send({
+        metadata: { resourceVersion: dialogSnapshot.metadata.resourceVersion },
+        spec: { ...dialogSnapshot.spec, mcpServers: ['other', 'srv'] },
+      })
+
+    expect(add.status).toBe(422)
+    expect(add.body).toMatchObject({ error: 'unknown_mcp_server', mcpServers: ['srv'] })
+    const reinstall = await request(app).post('/admin/mcp-servers/remote').send(installBody('srv'))
+    expect(reinstall.status).toBe(201)
+    const after = (await gw.getResource('contexts', 'ctx-b', NS)) as ContextSnapshot
+    expect(after.spec.mcpServers).toEqual(['other'])
+  })
+
+  // Every name stays live here, so the live-server check passes and the stale write
+  // reaches the resourceVersion fence. The real ResourceService runs over an
+  // in-memory apiserver: the fence is its precondition, not a mock's.
+  it('an Add built from a snapshot read before another admin removed a live server is refused by the resourceVersion fence', async () => {
+    const api = fakeCustomObjectsApiserver({ namespaces: { contexts: NS, mcpservers: NS } })
+    for (const name of ['x', 'y']) {
+      await api.gateway.createResource('mcpservers', { metadata: { name }, spec: {} }, NS)
+    }
+    await api.gateway.createResource(
+      'contexts',
+      { metadata: { name: 'ctx-a' }, spec: { contextId: 'ctx-a', mcpServers: ['x'] } },
+      NS
+    )
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(api.gateway as unknown as K8sGateway))
+    const read = async () =>
+      (await api.gateway.getResource('contexts', 'ctx-a', NS)) as ContextSnapshot
+    const putAllowlist = (snapshot: ContextSnapshot, mcpServers: string[]) =>
+      request(app)
+        .put('/admin/contexts/ctx-a')
+        .send({
+          metadata: { resourceVersion: snapshot.metadata.resourceVersion },
+          spec: { ...snapshot.spec, mcpServers },
+        })
+
+    const dialogSnapshot = await read()
+    const removal = await putAllowlist(await read(), [])
+    expect(removal.status).toBe(200)
+
+    const staleAdd = await putAllowlist(dialogSnapshot, ['x', 'y'])
+
+    expect(staleAdd.status).toBe(409)
+    expect(staleAdd.body).toEqual({ error: 'conflict', reason: 'resource_changed' })
+    const final = await read()
+    expect(final.spec.mcpServers).toEqual([])
+    await expect(api.gateway.getResource('mcpservers', 'x', NS)).resolves.toBeTruthy()
   })
 })
