@@ -588,6 +588,70 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
     })
   })
 
+  it('does not let a released queued request reach the consent store after dequeue', async () => {
+    const { service, parentWindow, runtime } = await setupWithLiveFirstApp()
+    const pluginId = 'sandbox-recipes/first-app'
+    const mount = initialMount()
+    const originalPut = runtime.store.put.bind(runtime.store)
+    let releaseGrantWrite!: () => void
+    let grantWriteStarted!: () => void
+    const grantWriteStartedPromise = new Promise<void>(resolve => {
+      grantWriteStarted = resolve
+    })
+    const grantWriteBlocked = new Promise<void>(resolve => {
+      releaseGrantWrite = resolve
+    })
+    let replaced = false
+    let orgGrantReads = 0
+    vi.spyOn(runtime.store, 'put').mockImplementation(async grant => {
+      if (grant.capability === 'identity.read') {
+        grantWriteStarted()
+        await grantWriteBlocked
+      }
+      return originalPut(grant)
+    })
+    const originalGet = runtime.store.get.bind(runtime.store)
+    vi.spyOn(runtime.store, 'get').mockImplementation(async key => {
+      if (key.capability === 'org.read') {
+        orgGrantReads += 1
+        if (replaced) {
+          throw new Error('stale queued request read after its mount was released')
+        }
+      }
+      return originalGet(key)
+    })
+
+    const first = runtime.gate.ensure({
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: ['identity.read'],
+    })
+    await flushUntil(() => runtime.gate.hasPendingPrompt())
+    const second = runtime.gate.ensure({
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: ['org.read'],
+    })
+    await flushUntil(() => orgGrantReads >= 1)
+    const promptId = pendingPromptId(runtime.gate as unknown as { pending: unknown })
+    expect(runtime.gate.resolvePrompt(promptId, ['identity.read'])).toBe(true)
+    await grantWriteStartedPromise
+
+    await service.openSandboxUi(openArgs('first-app', parentWindow))
+    replaced = true
+    releaseGrantWrite()
+    const [firstOutcome, secondOutcome] = await Promise.all([first, second])
+
+    expect(firstOutcome.granted['identity.read']).toBe(false)
+    expect(secondOutcome.granted['org.read']).toBe(false)
+  })
+
   it('fast-check command model keeps queued consent bound to its released mount', async () => {
     type Model = {
       phase: 'idle' | 'active' | 'queued' | 'rechecking' | 'replaced' | 'settled'
