@@ -2,8 +2,8 @@
 # shellcheck disable=SC2329 # wait_for, wait_until and the EXIT trap invoke these
 # functions by name; shellcheck's "never invoked" flow check cannot see through
 # "$@" indirection once the script ends with an explicit exit code.
-# Runtime TLS and log-redaction contract for the remote MCP
-# egress proxy.
+# Runtime TLS, DNS re-resolution and log-redaction contract for the remote
+# MCP egress proxy.
 #
 # Builds nginx-egress-proxy/Dockerfile, renders the per-server
 # default.conf.template with the real HCC McpServerReconciler, and starts the
@@ -30,9 +30,11 @@
 # The upstream sends only the leaf, so OpenSSL reports a missing issuer of the
 # leaf as error 21, not 20 (which needs an intermediate with a missing issuer).
 #
-# Cases (18, the run fails unless exactly this many ran):
+# Cases (19, the run fails unless exactly this many ran):
 #
 #   valid, chain2, untrusted, expired, wrongsan, nobundle   TLS contract
+#   dns-switch     the upstream's A record moves to another container while the
+#                  same NGINX master keeps serving (resolver + `resolve`, TTL 1s)
 #   query-accept   a ${VAR} query placeholder is resolved by envsubst inside the
 #                  container and reaches the upstream
 #   redact         an upstream error line never carries the remote query, in the
@@ -87,6 +89,9 @@
 #   verify-off            proxy_ssl_verify off               -> TLS.untrusted TLS.expired
 #                                                             TLS.wrongsan TLS.nobundle
 #   depth-1               proxy_ssl_verify_depth 1           -> TLS.chain2
+#   no-resolve            drops ` resolve` (dns-switch only) -> DNS_SWITCH
+#   no-ssl-name           drops proxy_ssl_name               -> TLS.valid TLS.chain2
+#                                                             TLS.wrongsan
 #   no-redact             runs the proxy without its filter  -> every REDACT.*, ECHO.* and
 #                                                             FILTER_DEATH.* check
 #   liveness-health-only  liveness script checks /health only -> FILTER_DEATH.liveness
@@ -121,7 +126,11 @@
 # image's release against nginx/0.0.0, so the release gate in filter-lines (and
 # nothing else) goes red. A gate that never read the image would stay green.
 #
-# Exit codes. Default mode: 0 only when there were no failures and all 18 cases
+# Vacuity note (not a mode): removing the common `-e "$PROXY_ENV_ENTRY"` from
+# start_proxy, or emptying the value the render step writes, must turn
+# dns-switch red; if it does not, the resolver flag is not wired.
+#
+# Exit codes. Default mode: 0 only when there were no failures and all 19 cases
 # ran; 1 otherwise. Mutation mode: 0 with "MUTATION <mode> KILLED-AS-EXPECTED"
 # only when the sorted unique failed check IDs equal expected_red_ids for that
 # mode; 1 with missing=[...] unexpected=[...] otherwise; 2 when an
@@ -144,12 +153,20 @@ NAME="$PREFIX-$RUN_ID"
 NETWORK="$NAME-net"
 PROXY_IMAGE="$NAME-proxy:local"
 UPSTREAM="$NAME-upstream"
+UPSTREAM_X="$NAME-upstream-x"
+UPSTREAM_Y="$NAME-upstream-y"
+DNS="$NAME-dns"
 WORK="$(mktemp -d "$REPO_ROOT/scripts/tests/.h15.XXXXXX")"
-EXPECTED_CASES=18
+EXPECTED_CASES=19
 # The release the message list in egress-proxy-log-filter was audited against.
 # filter-lines reads the release of the built image and fails on any other one,
 # so a base bump cannot ship an unaudited upstream-quoting message.
 AUDITED_NGINX_VERSION=nginx/1.30.6
+# Pinned by multi-arch index digest: the CI matrix runs this harness on amd64
+# and arm64, and a tag alone would let the two runs use different CoreDNS
+# builds. registry.k8s.io is used instead of Docker Hub so this image does not
+# need the mirror mapping the nginx base image uses.
+COREDNS_IMAGE="registry.k8s.io/coredns/coredns:v1.12.1@sha256:e8c262566636e6bc340ece6473b0eed193cad045384401529721ddbe6463d31c"
 # shellcheck disable=SC2016  # awk program: $2 is an awk field, not a shell expansion.
 RSS_AWK='/^VmRSS:/ { s += $2 } END { print s + 0 }'
 failures=0
@@ -165,7 +182,7 @@ if [ ! -f "$HCC_NODE_MODULES/ts-node/dist/bin.js" ]; then
   exit 2
 fi
 case "$MUTATION" in
-  "" | verify-off | depth-1 | no-redact | liveness-health-only | \
+  "" | verify-off | depth-1 | no-resolve | no-ssl-name | no-redact | liveness-health-only | \
     redact-first-quote | no-value-check | no-message-redact | message-first-client | \
     message-no-cut | message-no-default | no-ignore-accel | audit-version | \
     template-check-mismatch | query-class-everywhere | query-class-off | query-plus | \
@@ -208,6 +225,8 @@ expected_red_ids() {
   case "$1" in
     verify-off) echo "TLS.nobundle TLS.expired TLS.untrusted TLS.wrongsan" ;;
     depth-1) echo "TLS.chain2" ;;
+    no-resolve) echo "DNS_SWITCH" ;;
+    no-ssl-name) echo "TLS.chain2 TLS.valid TLS.wrongsan" ;;
     no-redact) echo "ECHO.E1 ECHO.E2 ECHO.E3 ECHO.E4 ECHO.E5 ECHO.markers FILTER_DEATH.alive FILTER_DEATH.lines FILTER_DEATH.process FILTER_DEATH.silence REDACT.count REDACT.markers REDACT.req1 REDACT.req3 REDACT.req4" ;;
     liveness-health-only) echo "FILTER_DEATH.liveness" ;;
     redact-first-quote) echo "REDACT.req4" ;;
@@ -437,6 +456,14 @@ echo "base image: $BASE_IMAGE (pulled as $UPSTREAM_IMAGE)"
 echo "proxy image: $(docker run --rm --entrypoint nginx "$PROXY_IMAGE" -v 2>&1)"
 echo "proxy user: $(docker run --rm --entrypoint id "$PROXY_IMAGE")"
 
+if ! docker image inspect "$COREDNS_IMAGE" >/dev/null 2>&1; then
+  if ! docker pull "$COREDNS_IMAGE" >/dev/null; then
+    echo "INFRA: cannot pull the pinned DNS fixture image $COREDNS_IMAGE" >&2
+    exit 2
+  fi
+fi
+echo "dns image: $COREDNS_IMAGE"
+
 # ─── Certificates ────────────────────────────────────────────────────────────
 
 PKI="$WORK/pki"
@@ -623,6 +650,7 @@ upstream_handshake() {
 
 READY_SECONDS=30
 LOG_SECONDS=15
+DNS_FLIP_SECONDS=20
 
 # Polls until the command prints 200, for at most READY_SECONDS of wall-clock
 # time (each attempt has its own curl --max-time, so attempts are not counted).
@@ -726,6 +754,78 @@ for cert in valid chain2 untrusted expired wrongsan; do
   wait_for "upstream port $(port_of "$cert")" "$UPSTREAM" upstream_handshake "$(port_of "$cert")" "ready-$cert"
 done
 
+# ─── DNS fixture for the dns-switch case ─────────────────────────────────────
+
+# Two containers with the same certificate serve the same host on 8446 and
+# answer with their own identity. The DNS record decides which one the proxy
+# reaches; the identity in the body is the witness that the answer changed.
+identity_upstream_config() {
+  local identity="$1"
+  cat <<EOF
+log_format tlstest 'TLSTEST port=\$server_port uri=\$request_uri token=\$http_x_test_token sni=\$ssl_server_name auth="\$http_authorization"';
+server {
+    listen 8446 ssl;
+    server_name upstream.test;
+    ssl_certificate /fixtures/valid.chain.pem;
+    ssl_certificate_key /fixtures/valid.key;
+    access_log /var/log/nginx/access.log tlstest;
+    location / {
+        default_type text/plain;
+        return 200 "echo id=$identity token=\$http_x_test_token\n";
+    }
+}
+EOF
+}
+
+for side in X Y; do
+  container="$UPSTREAM_X"
+  [ "$side" = "Y" ] && container="$UPSTREAM_Y"
+  identity_upstream_config "$side" >"$WORK/upstream-$side.conf"
+  chmod 644 "$WORK/upstream-$side.conf"
+  docker run -d --name "$container" --network "$NETWORK" \
+    -v "$PKI:/fixtures:ro" -v "$WORK/upstream-$side.conf:/etc/nginx/conf.d/default.conf:ro" \
+    "$UPSTREAM_IMAGE" >/dev/null
+done
+
+docker_ip() {
+  docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1"
+}
+
+X_IP="$(docker_ip "$UPSTREAM_X")"
+Y_IP="$(docker_ip "$UPSTREAM_Y")"
+[ -n "$X_IP" ] && [ -n "$Y_IP" ] || { echo "INFRA: could not read the identity upstream addresses" >&2; exit 2; }
+
+mkdir -p "$WORK/dns" "$WORK/coredns"
+printf '%s upstream.test\n' "$X_IP" >"$WORK/dns/hosts"
+cat >"$WORK/coredns/Corefile" <<'CORE'
+upstream.test:53 {
+    hosts /zone/hosts {
+        ttl 1
+        reload 1s
+        no_reverse
+    }
+    log
+    errors
+}
+CORE
+chmod 644 "$WORK/coredns/Corefile"
+
+docker run -d --name "$DNS" --network "$NETWORK" \
+  -v "$WORK/dns:/zone:ro" -v "$WORK/coredns/Corefile:/etc/coredns/Corefile:ro" \
+  "$COREDNS_IMAGE" -conf /etc/coredns/Corefile >/dev/null
+DNS_IP="$(docker_ip "$DNS")"
+[ -n "$DNS_IP" ] || { echo "INFRA: could not read the DNS fixture address" >&2; exit 2; }
+# The proxy's only nameserver is the fixture, so 15-local-resolvers.envsh
+# exports exactly this address as NGINX_LOCAL_RESOLVERS and the rendered
+# `resolver` line uses it instead of Docker's embedded 127.0.0.11.
+printf 'nameserver %s\n' "$DNS_IP" >"$WORK/dns-resolv.conf"
+chmod 644 "$WORK/dns-resolv.conf"
+
+dns_ready() {
+  container_log "$DNS" | grep -q "CoreDNS-"
+}
+wait_until "the DNS fixture to start" "$READY_SECONDS" dns_ready || { docker logs "$DNS" >&2 2>&1; exit 2; }
+
 # ─── Rendered proxy template ─────────────────────────────────────────────────
 
 AUTH_SECRET="secret-$RUN_ID"
@@ -733,6 +833,7 @@ AUTH_SECRET="secret-$RUN_ID"
   cd "$HCC_DIR"
   # shellcheck disable=SC2016 # TypeScript source; ${...} is a JS template literal.
   TEMPLATE_DIR="$WORK/templates" SECURITY_ARGS="$WORK/proxy-security-args" \
+    PROXY_ENV_FILE="$WORK/proxy-env-entry" \
     LIVENESS_FILE="$WORK/proxy-liveness-command" \
     MEMORY_LIMIT_FILE="$WORK/proxy-memory-limit" \
     NODE_PATH="$HCC_NODE_MODULES" node "$HCC_NODE_MODULES/ts-node/dist/bin.js" --transpile-only -e '
@@ -782,6 +883,7 @@ const oauthServer = (baseUrl: string) => {
 for (const port of [8441, 8442, 8443, 8444, 8445]) {
   render(String(port), "https://upstream.test:" + port + "/mcp")
 }
+render("dns-switch", "https://upstream.test:8446/mcp")
 render("query-accept", "https://upstream.test:8441/mcp?apikey=${UPSTREAM_QUERY_KEY}")
 render("redact", "https://upstream.test:8443/mcp?apikey=${UPSTREAM_QUERY_KEY}")
 render("redact-shadow", "https://upstream.test:8441/shadow?apikey=${UPSTREAM_QUERY_KEY}")
@@ -799,6 +901,26 @@ const deployment = (reconciler as any).buildDeployment(server("https://upstream.
 const proxies = deployment.spec.template.spec.containers.filter((c: any) => c.name === "egress-proxy")
 if (proxies.length !== 1) throw new Error(`expected one egress-proxy container, found ${proxies.length}`)
 const proxy = proxies[0]
+
+// The resolver entry must be present and last, because
+// 15-local-resolvers.envsh returns early on an empty value and the CRD env
+// would otherwise win. The harness passes exactly this entry to docker run, so
+// a template that needs the variable while the Deployment stopped setting it
+// fails here instead of silently rendering `${NGINX_LOCAL_RESOLVERS}`.
+const resolverEntries = (proxy.env ?? []).filter(
+  (e: any) => e.name === "NGINX_ENTRYPOINT_LOCAL_RESOLVERS"
+)
+if (resolverEntries.length === 0) {
+  throw new Error("the egress-proxy container has no NGINX_ENTRYPOINT_LOCAL_RESOLVERS entry")
+}
+const resolverEntry = resolverEntries[resolverEntries.length - 1]
+if (resolverEntry.value !== "1") {
+  throw new Error(
+    `the last NGINX_ENTRYPOINT_LOCAL_RESOLVERS entry is ${JSON.stringify(resolverEntry)}; ` +
+      "15-local-resolvers.envsh would skip the resolv.conf export"
+  )
+}
+fs.writeFileSync(process.env.PROXY_ENV_FILE as string, `${resolverEntry.name}=${resolverEntry.value}\n`)
 
 // A1-H1 option (b): the image keeps NGINX as PID 1 and the Deployment turns a
 // dead log filter into a restart with an exec probe. The harness runs the exact
@@ -853,6 +975,13 @@ if [ "${#PROXY_SECURITY_ARGS[@]}" -ne 6 ] || ! [[ "$PROXY_UID_GID" =~ ^[0-9]+:[0
   exit 2
 fi
 
+PROXY_ENV_ENTRY="$(cat "$WORK/proxy-env-entry")"
+case "$PROXY_ENV_ENTRY" in
+  NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1) ;;
+  *) echo "INFRA: unexpected proxy env entry '$PROXY_ENV_ENTRY'" >&2; exit 2 ;;
+esac
+echo "proxy env: $PROXY_ENV_ENTRY"
+
 if [ "$(wc -l <"$WORK/proxy-liveness-command" | tr -d ' ')" != "2" ]; then
   echo "INFRA: unexpected liveness command file: $(cat "$WORK/proxy-liveness-command")" >&2
   exit 2
@@ -896,9 +1025,13 @@ assert_count() {
 
 for port in 8441 8442 8443 8444 8445; do
   t="$WORK/templates/$port/default.conf.template"
-  # shellcheck disable=SC2016  # literal envsubst placeholder expected in the template.
-  assert_count "$t" "proxy_pass https://upstream.test:$port/mcp;" 1
+  # shellcheck disable=SC2016  # literal unbraced envsubst name expected in the template.
+  assert_count "$t" 'resolver $NGINX_LOCAL_RESOLVERS ipv6=off;' 1
+  assert_count "$t" "server upstream.test:$port resolve;" 1
+  assert_count "$t" "proxy_pass https://remote_upstream/mcp;" 1
 done
+# shellcheck disable=SC2016  # literal unbraced envsubst name expected in the template.
+assert_count "$WORK/templates/dns-switch/default.conf.template" 'resolver $NGINX_LOCAL_RESOLVERS ipv6=off;' 1
 # H13's template must carry all three credential kinds the oauth shape emits: the
 # passthrough Bearer, the static header placeholder and the query placeholder.
 # If the template stopped being oauth, echo could pass for the wrong reason.
@@ -908,7 +1041,7 @@ assert_count "$t" 'proxy_set_header Authorization $http_authorization;' 1
 # shellcheck disable=SC2016  # literal envsubst placeholder expected in the template.
 assert_count "$t" 'proxy_set_header X-Api-Key "${UPSTREAM_TOKEN}";' 1
 # shellcheck disable=SC2016  # literal envsubst placeholder expected in the template.
-assert_count "$t" 'proxy_pass https://upstream.test:8441/echo?apikey=${UPSTREAM_QUERY_KEY};' 1
+assert_count "$t" 'proxy_pass https://remote_upstream/echo?apikey=${UPSTREAM_QUERY_KEY};' 1
 assert_count "$t" 'proxy_ignore_headers X-Accel-Redirect X-Accel-Charset;' 1
 
 case "$MUTATION" in
@@ -921,6 +1054,15 @@ case "$MUTATION" in
     for port in 8441 8442 8443 8444 8445; do
       mutate "$WORK/templates/$port/default.conf.template" "proxy_ssl_verify_depth 3;" "proxy_ssl_verify_depth 1;"
     done
+    ;;
+  no-ssl-name)
+    for port in 8441 8442 8443 8444 8445; do
+      mutate "$WORK/templates/$port/default.conf.template" \
+        "proxy_ssl_name upstream.test;" "# proxy_ssl_name removed by NGINX_TLS_TEST_MUTATION=no-ssl-name"
+    done
+    ;;
+  no-resolve)
+    mutate "$WORK/templates/dns-switch/default.conf.template" " resolve;" ";"
     ;;
   no-ignore-accel)
     # The template stops ignoring the two headers NGINX logs in messages the
@@ -966,6 +1108,7 @@ start_proxy() {
   local args=(
     -d --name "$container" --network "$NETWORK"
     "${PROXY_SECURITY_ARGS[@]}"
+    -e "$PROXY_ENV_ENTRY"
     -e "UPSTREAM_TOKEN=${PROXY_UPSTREAM_TOKEN:-$AUTH_SECRET}"
     -v "$WORK/templates/$template:/etc/nginx/templates$mount_opts"
     -p 127.0.0.1::3000
@@ -1219,6 +1362,110 @@ expect_reject() {
   docker rm -f "$container" >/dev/null 2>&1 || true
 }
 
+# ─── H7: DNS re-resolution inside one NGINX master ───────────────────────────
+
+# Number of A queries for upstream.test that the fixture DNS received from the
+# proxy's own address.
+dns_query_count() {
+  local container="$1" proxy_ip="$2" log
+  log="$(container_log "$container")" || return 2
+  printf '%s\n' "$log" | grep -F "$proxy_ip:" | grep -c 'A IN upstream.test\.' || true
+}
+
+expect_dns_switch() {
+  local case_name="dns-switch" container="$NAME-proxy-dns-switch" template="$WORK/templates/dns-switch/default.conf.template"
+  local token code proxy_ip q0 q1 pid_before pid_after started_before started_after restarts_before restarts_after seen_x
+  local deadline last="" flip_token="" flipped=0
+  cases=$((cases + 1))
+
+  if [ "$(grep -cF 'proxy_ssl_verify on;' "$template" || true)" != "1" ]; then
+    fail_check "DNS_SWITCH" "$case_name: the rendered template does not enable proxy_ssl_verify exactly once"
+  fi
+
+  start_proxy "$case_name" dns-switch yes on - -v "$WORK/dns-resolv.conf:/etc/resolv.conf:ro" || return
+  proxy_ip="$(docker_ip "$container")"
+  if [ -z "$proxy_ip" ]; then
+    infra_fail "$case_name: could not read the proxy address"
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    return
+  fi
+  if ! wait_until "the proxy to query the DNS fixture" "$READY_SECONDS" \
+    dns_query_seen "$DNS" "$proxy_ip"; then
+    fail_check "DNS_SWITCH" "$case_name: the proxy never queried the fixture DNS for upstream.test"
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    return
+  fi
+
+  # Warmup: the first answer must be X, so a later Y can only come from the
+  # record change. Without it the case could pass with Y as the first answer.
+  token="warmup-$case_name-$RUN_ID"
+  code="$(proxy_request "$container" "$token")"
+  if [ "$code" != "200" ] || ! grep -qF "id=X" "$WORK/body"; then
+    fail_check "DNS_SWITCH" "$case_name: warmup expected 200 id=X, got $code $(cat "$WORK/body")"
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    return
+  fi
+  if ! wait_log "$UPSTREAM_X" "token=$token "; then
+    fail_check "DNS_SWITCH" "$case_name: upstream X did not log the warmup token within ${LOG_SECONDS}s"
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    return
+  fi
+
+  q0="$(dns_query_count "$DNS" "$proxy_ip")"
+  pid_before="$(docker exec "$container" cat /tmp/nginx.pid | tr -d '[:space:]')"
+  started_before="$(docker inspect -f '{{.State.StartedAt}}' "$container")"
+  restarts_before="$(docker inspect -f '{{.RestartCount}}' "$container")"
+
+  # Switch the record by writing a new file and renaming it into the mounted
+  # directory. A single-file bind mount would pin the old inode.
+  printf '%s upstream.test\n' "$Y_IP" >"$WORK/dns/hosts.new"
+  mv "$WORK/dns/hosts.new" "$WORK/dns/hosts"
+  echo "$case_name: switched upstream.test from X ($X_IP) to Y ($Y_IP)"
+
+  deadline=$((SECONDS + DNS_FLIP_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    token="flip-$case_name-$RUN_ID-$RANDOM"
+    code="$(proxy_request "$container" "$token")"
+    if [ "$code" = "200" ] && grep -qF "id=Y" "$WORK/body"; then
+      flip_token="$token"
+      flipped=1
+      break
+    fi
+    last="http=$code body=$(cat "$WORK/body")"
+    sleep 0.5
+  done
+
+  q1="$(dns_query_count "$DNS" "$proxy_ip")"
+  pid_after="$(docker exec "$container" cat /tmp/nginx.pid | tr -d '[:space:]')"
+  started_after="$(docker inspect -f '{{.State.StartedAt}}' "$container")"
+  restarts_after="$(docker inspect -f '{{.RestartCount}}' "$container")"
+
+  if [ "$flipped" -ne 1 ]; then
+    fail_check "DNS_SWITCH" "$case_name: still not id=Y within ${DNS_FLIP_SECONDS}s (last: $last, DNS queries ${q0}->${q1})"
+  elif ! wait_log "$UPSTREAM_Y" "token=$flip_token "; then
+    fail_check "DNS_SWITCH" "$case_name: upstream Y did not log the flip token within ${LOG_SECONDS}s"
+  elif ! seen_x="$(upstream_log_line "$UPSTREAM_X" "$flip_token")"; then
+    infra_fail "$case_name: could not read the log of upstream X"
+  elif [ -n "$seen_x" ]; then
+    fail_check "DNS_SWITCH" "$case_name: upstream X logged the flip token; the request did not follow the record"
+  elif [ "${q1:-0}" -le "${q0:-0}" ]; then
+    fail_check "DNS_SWITCH" "$case_name: the proxy's DNS query count did not grow after the switch (${q0}->${q1})"
+  elif [ "$pid_before" != "$pid_after" ]; then
+    fail_check "DNS_SWITCH" "$case_name: the NGINX master pid changed ($pid_before -> $pid_after)"
+  elif [ "$started_before" != "$started_after" ] || [ "$restarts_before" != "$restarts_after" ]; then
+    fail_check "DNS_SWITCH" "$case_name: the container restarted (startedAt $started_before -> $started_after, restarts $restarts_before -> $restarts_after)"
+  else
+    echo "PASS: $case_name -> id=Y after the A record change, DNS queries ${q0}->${q1}, master pid $pid_after unchanged"
+  fi
+  docker rm -f "$container" >/dev/null 2>&1 || true
+}
+
+dns_query_seen() {
+  local count
+  count="$(dns_query_count "$1" "$2")" || return 1
+  [ "${count:-0}" -ge 1 ]
+}
+
 # ─── H8: a query placeholder resolved only inside the container ──────────────
 
 expect_query_accept() {
@@ -1227,8 +1474,8 @@ expect_query_accept() {
   cases=$((cases + 1))
 
   # shellcheck disable=SC2016  # literal envsubst placeholder expected in the template.
-  if [ "$(grep -cF 'proxy_pass https://upstream.test:8441/mcp?apikey=${UPSTREAM_QUERY_KEY};' "$template" || true)" != "1" ]; then
-    fail_check "QUERY_ACCEPT.template" "$case_name: the rendered template does not carry the query placeholder exactly once"
+  if [ "$(grep -oF -- '/mcp?apikey=${UPSTREAM_QUERY_KEY}' "$template" | grep -c . || true)" != "2" ]; then
+    fail_check "QUERY_ACCEPT.template" "$case_name: the rendered template does not carry the query placeholder exactly twice (proxy_pass and proxy_redirect)"
     return
   fi
   start_proxy "$case_name" query-accept yes on - -e "UPSTREAM_QUERY_KEY=$QUERY_MARKER" || return
@@ -2207,8 +2454,8 @@ expect_swap() {
   # literal value is only ever sent when the v2 generation is the rendered one.
   # shellcheck disable=SC2016 # literal NGINX template text.
   mutate "$mount/..v2/default.conf.template" \
-    '        proxy_pass https://upstream.test:8441/mcp?apikey=${UPSTREAM_QUERY_KEY};' \
-    '        proxy_pass https://upstream.test:8441/mcp?apikey=${UPSTREAM_QUERY_KEY};
+    '        proxy_pass https://remote_upstream/mcp?apikey=${UPSTREAM_QUERY_KEY};' \
+    '        proxy_pass https://remote_upstream/mcp?apikey=${UPSTREAM_QUERY_KEY};
         proxy_set_header X-Evil "swapped-in";'
   ln -s ..v1 "$mount/..data"
   ln -s ..data/default.conf.template "$mount/default.conf.template"
@@ -2408,6 +2655,7 @@ run_case expect_reject untrusted yes "(21:unable to verify the first certificate
 run_case expect_reject expired yes "(10:certificate has expired)"
 run_case expect_reject wrongsan yes 'upstream SSL certificate does not match "upstream.test"'
 run_case expect_reject nobundle no "(21:unable to verify the first certificate)"
+run_case expect_dns_switch
 run_case expect_query_accept
 run_case expect_redact
 run_case expect_echo
@@ -2437,7 +2685,7 @@ if [ -z "$MUTATION" ]; then
   if [ "$failures" -ne 0 ]; then
     exit 1
   fi
-  echo "OK -- nginx egress proxy TLS and log-redaction contract ($cases cases)"
+  echo "OK -- nginx egress proxy TLS, DNS and log-redaction contract ($cases cases)"
   exit 0
 fi
 
