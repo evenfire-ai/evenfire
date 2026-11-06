@@ -1940,6 +1940,42 @@ describe('reconcileChannelReaderDeployment', () => {
     ).toBe('2026-07-10T00:00:00Z')
   })
 
+  it('keeps the token stamp annotation of a live channel-reader Deployment across a replace', async () => {
+    const { reconciler, appsApi, coreApi } = createReconciler()
+    const host = makeHost({ name: 'a' })
+    const existing = structuredClone(
+      (reconciler as any).buildChannelReaderDeployment(host, '')
+    ) as k8s.V1Deployment
+    existing.metadata = {
+      ...existing.metadata,
+      resourceVersion: '42',
+      annotations: {
+        ...existing.metadata?.annotations,
+        'clerum.io/inter-service-tokens-sha256': 'restart-pending',
+      },
+    }
+    existing.spec!.template.metadata = {
+      ...existing.spec!.template.metadata,
+      annotations: {
+        'clerum.io/credentials-revision': 'stale-revision',
+        'kubectl.kubernetes.io/restartedAt': '2026-07-10T00:00:00Z',
+      },
+    }
+    appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
+    appsApi.readNamespacedDeployment.mockResolvedValue(existing)
+    appsApi.replaceNamespacedDeployment.mockResolvedValue({})
+    coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+
+    await (reconciler as any).reconcileChannelReaderDeployment(host)
+
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+    const replacement = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
+      .body as k8s.V1Deployment
+    expect(replacement.metadata?.annotations?.['clerum.io/inter-service-tokens-sha256']).toBe(
+      'restart-pending'
+    )
+  })
+
   it('stops retrying when a fresh channel-reader Deployment converges after a conflict', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     const host = makeHost({ name: 'a' })

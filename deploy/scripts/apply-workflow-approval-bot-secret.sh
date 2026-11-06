@@ -25,7 +25,8 @@ set -euo pipefail
 #
 # Idempotency: each value is resolved env var → existing Secret value →
 #   (telegram-webhook-secret only) freshly generated. Re-running never rotates
-#   a present value silently.
+#   a present value silently. A Secret that cannot be read (any error other
+#   than NotFound, after retries) stops the script before it writes anything.
 #
 # Env vars consumed:
 #   CONTEXT                              kubectl context (unset = current)
@@ -62,21 +63,7 @@ is_minikube_context() {
   is_clerum_minikube_context
 }
 
-# Read a plain string key from a Secret. Returns empty if Secret/key missing
-# or the value looks like a `replace-with-*` placeholder.
-read_secret_key() {
-  local ns="$1" secret="$2" key="$3"
-  local encoded decoded
-  encoded="$(kctl -n "$ns" get secret "$secret" -o jsonpath="{.data.$key}" 2>/dev/null || true)"
-  [ -z "$encoded" ] && { echo ""; return; }
-  decoded="$(printf '%s' "$encoded" | base64 --decode 2>/dev/null || echo "")"
-  case "$decoded" in
-    replace-with-*|"") echo ""; return ;;
-  esac
-  printf '%s' "$decoded"
-}
-
-# Resolve a value: env var → existing Secret value → (empty).
+# Resolve a value: env var → existing Secret value → (empty). Fails when the Secret cannot be read.
 resolve_value() {
   local env_var="$1" ns="$2" secret="$3" key="$4"
   local env_val="${!env_var:-}"

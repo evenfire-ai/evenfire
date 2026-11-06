@@ -27,6 +27,8 @@ set -euo pipefail
 # rotates tokens silently. Member-registration HMAC is stricter: env var →
 # existing Secret value → minikube local dev value, and outside minikube it
 # fails closed unless the env var or existing Secret value is present.
+# A Secret that cannot be read (any error other than NotFound, after retries)
+# stops the script before it writes anything.
 #
 # Env vars consumed:
 #   CONTEXT                              kubectl context (unset = current)
@@ -66,21 +68,6 @@ kctl() {
 log() { printf '[inter-service-tokens] %s\n' "$*" >&2; }
 die() { printf '[inter-service-tokens] ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Read a plain string key from a Secret. Returns empty if Secret/key missing
-# or if the current value looks like a legacy `replace-with-*` placeholder
-# (so we treat those as "no real value present" and regenerate).
-read_secret_key() {
-  local ns="$1" secret="$2" key="$3"
-  local encoded decoded
-  encoded="$(kctl -n "$ns" get secret "$secret" -o jsonpath="{.data.$key}" 2>/dev/null || true)"
-  [ -z "$encoded" ] && { echo ""; return; }
-  decoded="$(printf '%s' "$encoded" | base64 --decode 2>/dev/null || echo "")"
-  case "$decoded" in
-    replace-with-*|"") echo ""; return ;;
-  esac
-  printf '%s' "$decoded"
-}
-
 resolve_token() {
   local env_var="$1" ns="$2" secret="$3" key="$4"
   local env_val="${!env_var:-}"
@@ -88,7 +75,7 @@ resolve_token() {
     printf '%s' "$env_val"; return
   fi
   local existing
-  existing="$(read_secret_key "$ns" "$secret" "$key")"
+  existing="$(read_secret_key "$ns" "$secret" "$key")" || exit 1
   if [ -n "$existing" ]; then
     printf '%s' "$existing"; return
   fi
@@ -126,7 +113,7 @@ resolve_member_registration_hmac() {
   fi
 
   local existing
-  existing="$(read_secret_key control-plane control-api-internal-tokens "$MEMBER_REGISTRATION_HMAC_KEY")"
+  existing="$(read_secret_key control-plane control-api-internal-tokens "$MEMBER_REGISTRATION_HMAC_KEY")" || exit 1
   if [ -n "$existing" ]; then
     printf '%s' "$existing"; return
   fi
@@ -237,7 +224,11 @@ INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TO
 #
 # Each control-api service token has two ends: the caller reads it from its own
 # Secret, and control-api verifies it from CONTROL_API_INTERNAL_SERVICE_TOKENS.
-# A token that changed at either end counts as changed for both ends.
+# Each end is "true" when a value it reads changes. When only the other end
+# changes it is "peer": that marks a consumer without a stamp, for which a
+# changed other end is the only sign that its own Secret was edited without a
+# restart; a stamped consumer is decided by its stamp
+# (lib/token-consumer-stamp.sh), since it does not read the other end.
 #
 # Prints "true" or "false". Arguments are repeated
 # (namespace, secret, key, value-this-run-writes) groups.
@@ -246,7 +237,7 @@ consumer_tokens_changed() {
     die "consumer_tokens_changed: expected (namespace secret key value) groups"
   local current
   while [ "$#" -gt 0 ]; do
-    current="$(read_secret_key "$1" "$2" "$3")"
+    current="$(read_secret_key "$1" "$2" "$3")" || exit 1
     if [ -z "$current" ] || [ "$current" != "$4" ]; then
       echo true; return
     fi
@@ -258,9 +249,9 @@ consumer_tokens_changed() {
 # Current control-api service-token map ("name=token,..."), read once.
 CURRENT_SERVICE_TOKENS_MAP="$(read_secret_key control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)"
 
-# Prints "true" when a control-api service token changed at either end: the
-# caller's Secret key (namespace, secret, key) or the caller's entry (name) in
-# control-api's current service-token map. Arguments:
+# Prints "true" when the caller's own Secret key changes in this run, "peer"
+# when only its entry (name) in control-api's current service-token map differs
+# or is missing, else "false". Arguments:
 # name namespace secret key value-this-run-writes.
 service_token_changed() {
   local name="$1" ns="$2" secret="$3" key="$4" value="$5"
@@ -281,7 +272,7 @@ service_token_changed() {
     fi
   done
   if [ "$current_entry" != "$value" ]; then
-    echo true; return
+    echo peer; return
   fi
   echo false
 }
@@ -308,7 +299,8 @@ CHANNEL_READER_CHANGED="$(consumer_tokens_changed \
 if [ "$WA_READER_CONTROL_API_TOKEN_CHANGED" = "true" ] || [ "$CHANNEL_READER_CHANGED" = "true" ]; then
   WA_READER_CHANGED=true
 else
-  WA_READER_CHANGED=false
+  # "peer" (only control-api's map entry for the reader differs) or "false".
+  WA_READER_CHANGED="$WA_READER_CONTROL_API_TOKEN_CHANGED"
 fi
 WORKFLOW_RECIPES_CHANGED="$(consumer_tokens_changed \
   control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET "$INTERNAL_CONTROL_WRC_HMAC")"
@@ -316,8 +308,8 @@ HCC_CHANGED="$(consumer_tokens_changed \
   control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET "$INTERNAL_CONTROL_HCC_HMAC")"
 # control-api envFrom-loads control-api-internal-tokens and
 # internal-control-jwt-secrets whole; only the keys written here are compared.
-# It also restarts whenever a service token it verifies changed at the caller's
-# end (the other end of each pair above).
+# When none of them changes but a caller's own key does (the other end of that
+# caller's token), control-api is "peer".
 CONTROL_API_CHANGED="$(consumer_tokens_changed \
   control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS "$SERVICE_TOKENS_MAP" \
   control-plane control-api-internal-tokens CONTROL_API_INTERNAL_TOKENS "$INTERNAL_TOKENS_LIST" \
@@ -327,8 +319,8 @@ CONTROL_API_CHANGED="$(consumer_tokens_changed \
 for caller_changed in "$EXTERNAL_REST_API_CHANGED" "$RPC_PROXY_CHANGED" "$WEBHOOK_PROXY_CHANGED" \
                       "$CODEX_LLM_PROXY_CHANGED" "$GROK_LLM_PROXY_CHANGED" \
                       "$WA_READER_CONTROL_API_TOKEN_CHANGED"; do
-  if [ "$caller_changed" = "true" ]; then
-    CONTROL_API_CHANGED=true
+  if [ "$caller_changed" = "true" ] && [ "$CONTROL_API_CHANGED" = "false" ]; then
+    CONTROL_API_CHANGED=peer
   fi
 done
 

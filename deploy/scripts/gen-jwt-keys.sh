@@ -274,9 +274,9 @@ if [[ "$RESTARTS_PENDING" -eq 1 ]]; then
   echo "RESTARTS PENDING: the keys are rotated but some consumers were not restarted (see the commands above)."
 fi
 echo ""
-echo "GFSC KEY SYNC REQUIRED: control-api signs gfs tokens with the new RPC key once it restarts, but this"
-echo "script does not write gfs-config, so gfsc keeps verifying them with the previous key until"
-echo "scripts/minikube/sync-auth-key.sh runs. The next deploy runs it; to converge now, run the"
+echo "GFSC KEY SYNC REQUIRED: where gfsc is deployed, control-api signs gfs tokens with the new RPC key once it"
+echo "restarts, but this script does not write gfs-config, so gfsc keeps verifying them with the previous key"
+echo "until scripts/minikube/sync-auth-key.sh runs. The next deploy runs it; to converge now, run the"
 echo "sync-auth-key target for this environment."
 if [[ "$VALIDATION_FAILED" -eq 1 ]]; then
   echo ""

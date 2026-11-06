@@ -32,8 +32,9 @@
 # keys when it is created. Reads and restarts are retried; a consumer that
 # still fails does not stop the walk. Every other consumer is restarted, then
 # the function prints one runnable restart command per pending Deployment and
-# returns 1. Re-running the key script is not a recovery: it would rotate every
-# key again.
+# returns 1. Re-running the key script is not a recovery: gen-jwt-keys.sh
+# rotates every key again, and scripts/minikube/generate-keys.sh without
+# FORCE_REGEN=true writes nothing and restarts nothing.
 #
 # A pending consumer that apply-inter-service-tokens.sh also reconciles is
 # marked with that script's restart-pending token stamp
@@ -98,7 +99,7 @@ jwt_key_restart_deployment() {
 jwt_key_report_pending() {
   local item ns dep
   [ "${#JWT_KEY_PENDING[@]}" -eq 0 ] && return 0
-  echo "  ERROR: the keys are rotated but these restarts are pending. Do not re-run the key script (it would rotate every key again); restart each one:" >&2
+  echo "  ERROR: the keys are rotated but these restarts are pending. Restart each one (re-running gen-jwt-keys.sh rotates every key again; scripts/minikube/generate-keys.sh without FORCE_REGEN=true writes nothing and restarts nothing):" >&2
   for item in "${JWT_KEY_PENDING[@]}"; do
     ns="${item%%/*}"
     dep="${item#*/}"

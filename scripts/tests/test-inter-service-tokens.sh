@@ -45,8 +45,9 @@ WRC_NEW="2222222222222222222222222222222222222222222222222222222222222222"
 ROTATED="3333333333333333333333333333333333333333333333333333333333333333"
 MEMBER_HMAC="test-member-registration-hmac"
 
-# Consumers as <ns>/<deployment>; the last one is an HCC-built per-Host
-# channel-reader (label app=channel-reader).
+# Consumers as <ns>/<deployment>; the last two are HCC-built per-Host
+# channel-readers (label app=channel-reader). The first nine are the fixed
+# consumers.
 ALL_TOKEN_CONSUMERS=(
   control-plane/control-api
   control-plane/codex-llm-proxy
@@ -58,6 +59,7 @@ ALL_TOKEN_CONSUMERS=(
   webhook-ingress/webhook-proxy
   channels/clerum-workflow-approval-request-reader
   channels/channel-reader-stubhost
+  channels/channel-reader-stubhost-b
 )
 TOKEN_SECRETS=(
   control-plane/control-api-internal-tokens
@@ -121,8 +123,10 @@ has_arg() {
   return 1
 }
 # Injected failures: KUBE_<OP>_FAIL (GET_DEPLOY, PATCH, ANNOTATE, STAMP_WRITE,
-# ROLLOUT) lists "<ns>/<name>" that always fail;
-# KUBE_FLAKY lists "<op>:<ns>/<name>" that fail on their first attempt only.
+# ROLLOUT, SECRET_READ) lists "<ns>/<name>" that always fail;
+# KUBE_FLAKY lists "<op>:<ns>/<name>" that fail on their first attempt only;
+# KUBE_SECRET_READ_FLAKE lists "<ns>/<secret>/<key>#<n>" Secret reads that fail
+# on their n-th call.
 inject() {
   local op="$1" target="$2" persistent="$3" marker
   if [[ " $persistent " == *" $target "* ]]; then
@@ -151,7 +155,30 @@ case "${args[0]:-}" in
             output="${args[$((i+1))]:-}"
           fi
         done
-        [[ -d "$store/$ns/$name" ]] || exit 1
+        # Secret reads (-o jsonpath) are logged as <ns>/<secret>/<key>, one line
+        # per call. KUBE_SECRET_READ_FAIL lists "<ns>/<secret>" whose reads always
+        # fail; KUBE_SECRET_READ_FLAKE lists "<ns>/<secret>/<key>#<n>": the n-th read
+        # of that key in this run fails. Both are API errors, not NotFound. Each
+        # injected failure is recorded as "<ns>/<secret>/<key>#<n>" in
+        # $SECRET_READ_LOG.injected, so a test can witness it whatever the
+        # script does with kubectl's stderr.
+        if [[ "$output" == jsonpath=* ]]; then
+          read_key="${output#jsonpath=\{.data.}"
+          read_key="${read_key%\}}"
+          printf '%s\n' "$ns/$name/$read_key" >> "${SECRET_READ_LOG:?}"
+          read_n="$(grep -cxF "$ns/$name/$read_key" "$SECRET_READ_LOG")"
+          if [[ " ${KUBE_SECRET_READ_FAIL:-} " == *" $ns/$name "* \
+                || " ${KUBE_SECRET_READ_FLAKE:-} " == *" $ns/$name/$read_key#$read_n "* ]]; then
+            printf '%s\n' "$ns/$name/$read_key#$read_n" >> "$SECRET_READ_LOG.injected"
+            echo "Error from server (InternalError): injected read failure for $ns/$name/$read_key (read $read_n)" >&2
+            exit 1
+          fi
+        fi
+        if [[ ! -d "$store/$ns/$name" ]]; then
+          has_arg --ignore-not-found && exit 0
+          echo "Error from server (NotFound): secrets \"$name\" not found" >&2
+          exit 1
+        fi
         case "$output" in
           "") exit 0 ;;
           json) printf '%s\n' '{"data":{}}'; exit 0 ;;
@@ -223,6 +250,12 @@ case "${args[0]:-}" in
   patch)
     if [[ "${args[1]:-}" == "secret" ]]; then
       name="${args[2]:?}"
+      # KUBE_CREATE_DEPLOY_ON_PATCH=<ns>/<deployment>: that Deployment is created
+      # at the first Secret patch and loads the Secrets as they are then.
+      if [[ -n "${KUBE_CREATE_DEPLOY_ON_PATCH:-}" && ! -d "$dstore/$KUBE_CREATE_DEPLOY_ON_PATCH" ]]; then
+        mkdir -p "$dstore/$KUBE_CREATE_DEPLOY_ON_PATCH/annotations"
+        fake-snapshot-loaded snapshot "$store" "$KUBE_CREATE_DEPLOY_ON_PATCH"
+      fi
       inject patch "$ns/$name" "${KUBE_PATCH_FAIL:-}"
       patch=""
       merge=false
@@ -289,7 +322,10 @@ set -euo pipefail
 # The Secret keys each consumer Deployment loads at startup, as
 # "<ns>/<deployment> <secret-ns>/<secret>/<key>". Mirrors the stamp inputs of
 # apply-inter-service-tokens.sh and apply-workflow-approval-bot-secret.sh.
+# Per-Host channel-readers are every Deployment labelled app=channel-reader in
+# the store. Argument: the store.
 consumer_keys() {
+  local store="$1" dir
   cat <<'KEYS'
 control-plane/control-api control-plane/control-api-internal-tokens/CONTROL_API_INTERNAL_SERVICE_TOKENS
 control-plane/control-api control-plane/control-api-internal-tokens/CONTROL_API_INTERNAL_TOKENS
@@ -306,20 +342,56 @@ webhook-ingress/webhook-proxy webhook-ingress/webhook-proxy-secrets/WEBHOOK_PROX
 channels/clerum-workflow-approval-request-reader channels/workflow-approval-request-reader-credentials/control-api-token
 channels/clerum-workflow-approval-request-reader channels/workflow-approval-request-reader-credentials/channel-reader-handoff-token
 channels/clerum-workflow-approval-request-reader channels/workflow-approval-request-reader-credentials/telegram-webhook-secret
-channels/channel-reader-stubhost channels/workflow-approval-request-reader-credentials/channel-reader-handoff-token
 KEYS
+  for dir in "$store/_deploy/channels"/*/; do
+    [[ "$(cat "$dir/app" 2>/dev/null)" == channel-reader ]] || continue
+    printf 'channels/%s channels/workflow-approval-request-reader-credentials/channel-reader-handoff-token\n' "$(basename "$dir")"
+  done
 }
 case "${1:?mode}" in
-  list) consumer_keys ;;
+  list) consumer_keys "${2:?store}" ;;
   snapshot)
     store="${2:?store}" consumer="${3:?consumer}"
     dir="$store/_deploy/$consumer/loaded"
     rm -rf "$dir"
     mkdir -p "$dir"
-    consumer_keys | while read -r owner src; do
+    consumer_keys "$store" | while read -r owner src; do
       [[ "$owner" == "$consumer" ]] || continue
       if [[ -f "$store/$src" ]]; then cp "$store/$src" "$dir/${src//\//__}"; fi
     done
+    ;;
+  # settled <store> <consumer> <annotation>: exits 0 when the Deployment exists,
+  # its pods run the current value of every key it reads, and it carries a
+  # sha256 stamp under <annotation>.
+  settled)
+    store="${2:?store}" consumer="${3:?consumer}" annotation="${4:?annotation}"
+    [[ -d "$store/_deploy/$consumer" ]] || exit 1
+    stamp_file="$store/_deploy/$consumer/annotations/${annotation//\//__}"
+    [[ -f "$stamp_file" ]] || exit 1
+    [[ "$(cat "$stamp_file")" =~ ^[0-9a-f]{64}$ ]] || exit 1
+    keys=0
+    while read -r owner src; do
+      [[ "$owner" == "$consumer" ]] || continue
+      keys=$((keys + 1))
+      loaded="$store/_deploy/$consumer/loaded/${src//\//__}"
+      if [[ -f "$store/$src" ]]; then
+        cmp -s "$store/$src" "$loaded" || exit 1
+      else
+        [[ ! -e "$loaded" ]] || exit 1
+      fi
+    done < <(consumer_keys "$store")
+    [[ "$keys" -gt 0 ]] || { echo "fake-snapshot-loaded: $consumer reads no key" >&2; exit 2; }
+    exit 0
+    ;;
+  # inputs <store> <consumer>: sha256 of the current values of the keys the
+  # consumer reads, in consumer_keys order (an absent key counts as "-").
+  inputs)
+    store="${2:?store}" consumer="${3:?consumer}"
+    consumer_keys "$store" | while read -r owner src; do
+      [[ "$owner" == "$consumer" ]] || continue
+      if [[ -f "$store/$src" ]]; then cat "$store/$src"; else printf -- '-'; fi
+      printf '\n'
+    done | "$(dirname "$0")/openssl" dgst -sha256 | awk '{print $NF}'
     ;;
   *) echo "fake-snapshot-loaded: unknown mode $1" >&2; exit 2 ;;
 esac
@@ -352,6 +424,7 @@ new_cluster() {
     mkdir -p "$TMP/store/_deploy/$consumer/annotations"
   done
   printf 'channel-reader' > "$TMP/store/_deploy/channels/channel-reader-stubhost/app"
+  printf 'channel-reader' > "$TMP/store/_deploy/channels/channel-reader-stubhost-b/app"
   for consumer in "${ALL_TOKEN_CONSUMERS[@]}"; do pod_restart "$consumer"; done
 }
 
@@ -386,7 +459,7 @@ pod_restart() {
 # from the Secret must be absent from what the pod loaded.
 assert_loaded_matches_secrets() {
   local consumer src loaded pairs checked=0
-  pairs="$("$TMP/bin/fake-snapshot-loaded" list)"
+  pairs="$("$TMP/bin/fake-snapshot-loaded" list "$TMP/store")"
   while read -r consumer src; do
     [[ -d "$TMP/store/_deploy/$consumer" ]] || continue
     loaded="$TMP/store/_deploy/$consumer/loaded/${src//\//__}"
@@ -406,22 +479,90 @@ unstamp() {
 }
 
 RUN_SALT=0
+RUN_STAMP_KEY=""
+
+# Records, for every deployed consumer, whether it is settled (it runs its
+# Secrets' current values and carries a sha256 stamp under RUN_STAMP_KEY), the
+# digest of the values it reads, and its stamp; assert_no_extra_restart compares
+# them after the run.
+record_settled_before() {
+  local consumer consumers settled digest
+  : > "$TMP/settled-before"
+  consumers="$("$TMP/bin/fake-snapshot-loaded" list "$TMP/store" | awk '{print $1}' | sort -u)" \
+    || fail "cannot list the consumers for the extra-restart check"
+  [[ -n "$consumers" ]] || fail "the extra-restart check found no consumer"
+  while read -r consumer; do
+    [[ -d "$TMP/store/_deploy/$consumer" ]] || continue
+    settled=no
+    if "$TMP/bin/fake-snapshot-loaded" settled "$TMP/store" "$consumer" "$RUN_STAMP_KEY"; then
+      settled=yes
+    fi
+    digest="$("$TMP/bin/fake-snapshot-loaded" inputs "$TMP/store" "$consumer")" \
+      || fail "cannot digest the inputs of $consumer"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail "empty or malformed input digest for $consumer"
+    printf '%s %s %s %s\n' "$consumer" "$settled" "$digest" \
+      "$(stamp_of "$consumer" "$RUN_STAMP_KEY")" >> "$TMP/settled-before"
+  done <<<"$consumers"
+}
+
+# A settled consumer (running its Secrets' current values, stamped by this
+# script) whose inputs did not change and whose stamp is unchanged after the run
+# was restarted for nothing. This check does not use the expected-restart lists.
+assert_no_extra_restart() {
+  local rollout="$1" consumer settled digest stamp checked=0
+  while read -r consumer settled digest stamp; do
+    [[ "$settled" == yes ]] || continue
+    [[ "$("$TMP/bin/fake-snapshot-loaded" inputs "$TMP/store" "$consumer")" == "$digest" ]] || continue
+    [[ "$(stamp_of "$consumer" "$RUN_STAMP_KEY")" == "$stamp" ]] || continue
+    checked=$((checked + 1))
+    printf '%s\n' "$consumer" >> "$TMP/settled-checked-list"
+    if grep -qxF "$consumer" "$rollout"; then
+      fail "$consumer was restarted although it was settled and nothing it reads changed"
+    fi
+  done < "$TMP/settled-before"
+  printf '%s' "$checked" > "$TMP/settled-checked"
+}
+
+# The extra-restart check runs after every run except FORCE_CONSUMER_RESTART=true,
+# the one designed restart of settled consumers.
+check_extra_restarts_after_run() {
+  local rollout="$1"
+  shift
+  if [[ " $* " == *" FORCE_CONSUMER_RESTART=true "* ]]; then
+    printf 'forced' > "$TMP/settled-checked"
+    return 0
+  fi
+  assert_no_extra_restart "$rollout"
+}
+
 # run_script <script> <rollout-log> [capture-file] -- env [VAR=value | -u VAR]...
 run_script() {
   local script="$1" rollout="$2" capture="$3" rc=0
   shift 3
+  case "$script" in
+    "$TOKENS_SCRIPT") RUN_STAMP_KEY="$TOKEN_STAMP_KEY" ;;
+    "$BOT_SECRET_SCRIPT") RUN_STAMP_KEY="$BOT_STAMP_KEY" ;;
+    *) fail "run_script: unknown script $script" ;;
+  esac
   RUN_SALT=$((RUN_SALT + 1))
   : > "$rollout"
   : > "$TMP/patches.log"
   : > "$TMP/annotations.log"
   : > "$TMP/openssl-rand-count"
+  : > "$TMP/secret-reads.log"
+  : > "$TMP/secret-reads.log.injected"
+  : > "$TMP/settled-checked"
+  : > "$TMP/settled-checked-list"
+  record_settled_before
   CAPTURE_FILE="$capture" ROLLOUT_LOG="$rollout" PATCH_LOG="$TMP/patches.log" \
     ANNOTATE_LOG="$TMP/annotations.log" FLAKY_STATE="$TMP/flaky" \
+    SECRET_READ_LOG="$TMP/secret-reads.log" \
     KUBE_STORE="$TMP/store" PATH="$TMP/bin:$PATH" TOKEN_STAMP_RETRY_SECONDS=0 \
     OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" OPENSSL_RAND_SALT="$RUN_SALT" \
     CLERUM_PROJECT_DIR="$TMP/sibling" "$@" \
     bash "$script" >"$TMP/stdout" 2>"$TMP/stderr" </dev/null || rc=$?
   assert_no_secret_material
+  check_extra_restarts_after_run "$rollout" "$@"
   return "$rc"
 }
 
@@ -438,18 +579,39 @@ run_bot_secret() {
   run_script "$BOT_SECRET_SCRIPT" "$rollout" "" "$@" CONTEXT=gke-dev
 }
 
+# Exits 0 when the file holds secret material: a hex run of 16 or more
+# characters (every token and stamp in these tests is hex, so this also catches
+# a prefix), the base64 of a run of zeros (every fake `openssl rand` token starts
+# with more than 40 zeros), a fixture string, or the base64 form of a fixture.
+has_secret_material() {
+  grep -qE '[0-9a-f]{16,}|(MDAw){10}|member-registration-hmac|stale-|replace-with-|retired' "$1" \
+    || grep -qF -f "$TMP/leak-base64.txt" "$1"
+}
+
 assert_no_secret_material() {
   local log
   for log in "$TMP/stdout" "$TMP/stderr"; do
-    # Every token in these tests is 64 hex characters (fixtures and the fake
-    # openssl), as are real `openssl rand -hex 32` tokens and the stamps.
-    if grep -E '[0-9a-f]{64}|member-registration-hmac|stale-|replace-with-|retired' "$log" >/dev/null; then
+    if has_secret_material "$log"; then
       echo "secret material leaked into $log" >&2
       cat "$log" >&2
       exit 1
     fi
   done
 }
+
+# The first 40 base64 characters of each fixture (40 also matches a wrapped
+# base64 line).
+for fixture in "$HCC_OLD" "$HCC_NEW" "$WRC_OLD" "$WRC_NEW" "$ROTATED" "$MEMBER_HMAC" \
+               dev-member-registration-hmac-secret rotated-member-registration-hmac; do
+  printf '%s' "$fixture" | base64 | tr -d '\n' | cut -c1-40
+done > "$TMP/leak-base64.txt"
+[[ "$(wc -l < "$TMP/leak-base64.txt" | tr -d ' ')" == "8" ]] || { echo "FAIL: leak-base64.txt is incomplete" >&2; exit 1; }
+# Liveness of the patterns: they must match the base64 of a fixture and of a
+# fake `openssl rand` token.
+printf '%s' "$HCC_OLD" | base64 > "$TMP/leak-self-check"
+has_secret_material "$TMP/leak-self-check" || { echo "FAIL: leak check misses the base64 of a fixture" >&2; exit 1; }
+printf '%064x' 1001 | base64 > "$TMP/leak-self-check"
+grep -qE '(MDAw){10}' "$TMP/leak-self-check" || { echo "FAIL: leak check misses the base64 of a generated token" >&2; exit 1; }
 
 # assert_restarted_exactly <rollout-log> [<ns>/<deployment>]...
 assert_restarted_exactly() {
@@ -488,6 +650,37 @@ assert_noop_witness() {
       || fail "missing skip line for $consumer"
   done
   [[ ! -s "$TMP/annotations.log" ]] || fail "a no-op run must not rewrite any stamp"
+  assert_settled_checked "${#ALL_TOKEN_CONSUMERS[@]}"
+}
+
+# Liveness of the extra-restart check: it compared this many settled consumers.
+assert_settled_checked() {
+  [[ "$(cat "$TMP/settled-checked")" == "$1" ]] \
+    || fail "the extra-restart check did not cover every consumer (checked $(cat "$TMP/settled-checked"), expected $1)"
+}
+
+# Liveness of the extra-restart check in a targeted case: it compared at least
+# one consumer, and among them the one the case expects untouched.
+assert_extra_restart_checked() {
+  local consumer="$1" checked
+  checked="$(cat "$TMP/settled-checked")"
+  [[ "$checked" =~ ^[0-9]+$ && "$checked" -gt 0 ]] \
+    || fail "the extra-restart check compared no consumer (settled-checked: ${checked:-<empty>})"
+  grep -qxF "$consumer" "$TMP/settled-checked-list" \
+    || fail "the extra-restart check did not compare $consumer"
+}
+
+# The fake injected a Secret-read failure for <ns>/<secret>/<key>#<n>. Read from
+# the fake's own record, not from the script's output.
+assert_read_injected() {
+  grep -qxF "$1" "$TMP/secret-reads.log.injected" || fail "the Secret-read failure $1 was never injected"
+}
+
+# Digest of every Secret value in the store, to show a run changed none.
+secrets_digest() {
+  find "$TMP/store" -path "$TMP/store/_deploy" -prune -o -type f -print | LC_ALL=C sort \
+    | while IFS= read -r file; do printf '%s\n' "${file#"$TMP"/store/}"; cat "$file"; printf '\n'; done \
+    | "$TMP/bin/openssl" dgst -sha256 | awk '{print $NF}'
 }
 
 assert_openssl_rand_calls() {
@@ -538,15 +731,23 @@ run_tokens_killable() {
   : > "$TMP/patches.log"
   : > "$TMP/annotations.log"
   : > "$TMP/openssl-rand-count"
+  : > "$TMP/secret-reads.log"
+  : > "$TMP/secret-reads.log.injected"
+  : > "$TMP/settled-checked"
+  : > "$TMP/settled-checked-list"
   RUN_SALT=$((RUN_SALT + 1))
+  RUN_STAMP_KEY="$TOKEN_STAMP_KEY"
+  record_settled_before
   CAPTURE_FILE="" ROLLOUT_LOG="$rollout" PATCH_LOG="$TMP/patches.log" \
     ANNOTATE_LOG="$TMP/annotations.log" FLAKY_STATE="$TMP/flaky" \
+    SECRET_READ_LOG="$TMP/secret-reads.log" \
     KUBE_STORE="$TMP/store" PATH="$TMP/bin:$PATH" TOKEN_STAMP_RETRY_SECONDS=0 \
     OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" OPENSSL_RAND_SALT="$RUN_SALT" \
     CLERUM_PROJECT_DIR="$TMP/sibling" "$@" CONTEXT=gke-dev KUBE_KILL_AT_ROLLOUT="$TMP/script.pid" \
     bash -c 'printf %s "$$" > "$1"; exec bash "$2"' _ "$TMP/script.pid" "$TOKENS_SCRIPT" \
     >"$TMP/stdout" 2>"$TMP/stderr" </dev/null || rc=$?
   assert_no_secret_material
+  check_extra_restarts_after_run "$rollout" "$@"
   return "$rc"
 }
 
@@ -600,6 +801,106 @@ assert_noop_witness
 assert_openssl_rand_calls 0
 assert_loaded_matches_secrets
 
+# --- Secret read failures (an API error, not NotFound) ---
+
+# A no-op on a stamped cluster with one Secret read failing once at each
+# change-detection site: the read is retried and the run stays a no-op.
+for spec in \
+  "profiles/external-rest-api-secrets/EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN#2" \
+  "control-plane/control-api-internal-tokens/CONTROL_API_INTERNAL_SERVICE_TOKENS#1" \
+  "control-plane/internal-control-jwt-secrets/INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET#2"; do
+  rollout="$TMP/rollout-read-site.log"
+  run_tokens gke-dev "$rollout" "" env KUBE_SECRET_READ_FLAKE="$spec" \
+    || fail "a transient Secret read failure ($spec) failed the run"
+  assert_read_injected "$spec"
+  assert_restarted_exactly "$rollout"
+  assert_noop_witness
+  assert_openssl_rand_calls 0
+  assert_loaded_matches_secrets
+done
+
+# Census of the -o jsonpath Secret reads of a no-op, then one run per read with
+# that read failing once: every run stays a no-op and writes the same values.
+# A no-op makes 25 such reads: 9 resolve_token reads (the six caller tokens,
+# the handoff token, the WRC and HCC HMACs), 1 member-registration HMAC read,
+# 1 read of control-api's service-token map, 6 caller change checks (each
+# caller's own key), 1 handoff check, 1 WRC and 1 HCC check, and 5 control-api
+# checks (map, flat list, member HMAC, WRC, HCC). ensure_secret's existence read
+# and the legacy-key read (-o json) are not jsonpath reads and are not counted.
+rollout="$TMP/rollout-read-census.log"
+run_tokens gke-dev "$rollout" "" env || fail "the census run failed"
+reads="$(awk '{n[$0]++; print $0 "#" n[$0]}' "$TMP/secret-reads.log")"
+read_count="$(printf '%s\n' "$reads" | sed '/^$/d' | wc -l | tr -d ' ')"
+[[ "$read_count" == "25" ]] || fail "the census expected 25 Secret reads, saw $read_count"
+for site in "profiles/external-rest-api-secrets/EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN#2" \
+            "control-plane/control-api-internal-tokens/CONTROL_API_INTERNAL_SERVICE_TOKENS#1"; do
+  printf '%s\n' "$reads" | grep -qxF "$site" || fail "the census misses $site"
+done
+while IFS= read -r spec; do
+  rollout="$TMP/rollout-read-flake.log"
+  run_tokens gke-dev "$rollout" "" env KUBE_SECRET_READ_FLAKE="$spec" \
+    || fail "a transient Secret read failure ($spec) failed the run"
+  assert_read_injected "$spec"
+  assert_restarted_exactly "$rollout"
+  assert_noop_witness
+  assert_openssl_rand_calls 0
+done <<<"$reads"
+assert_loaded_matches_secrets
+
+# A Secret that cannot be read stops the run before anything is written: an
+# unreadable value is neither absent (a new token) nor changed (a restart).
+for unreadable in profiles/external-rest-api-secrets control-plane/control-api-internal-tokens; do
+  rollout="$TMP/rollout-secret-unreadable.log"
+  if run_tokens gke-dev "$rollout" "" env KUBE_SECRET_READ_FAIL="$unreadable"; then
+    fail "an unreadable Secret ($unreadable) must fail the run"
+  fi
+  [[ "$(grep -c "^$unreadable/" "$TMP/secret-reads.log.injected")" == "3" ]] \
+    || fail "the read of $unreadable was not attempted three times"
+  grep -qF "cannot read Secret $unreadable; no Secret was written" "$TMP/stderr" \
+    || fail "missing Secret read error line"
+  if grep -qF 'is required when no existing control-api Secret value is present' "$TMP/stderr"; then
+    fail "an unreadable Secret was treated as absent"
+  fi
+  [[ ! -s "$TMP/patches.log" ]] || fail "no Secret may be written after a failed Secret read"
+  [[ ! -s "$TMP/annotations.log" ]] || fail "no consumer may be marked after a failed Secret read"
+  assert_openssl_rand_calls 0
+  assert_restarted_exactly "$rollout"
+done
+# The caller key is readable for resolve_token and then fails on every attempt
+# of the change check: the run still stops before writing.
+spec_key="profiles/external-rest-api-secrets/EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN"
+rollout="$TMP/rollout-secret-check-unreadable.log"
+if run_tokens gke-dev "$rollout" "" env KUBE_SECRET_READ_FLAKE="$spec_key#2 $spec_key#3 $spec_key#4"; then
+  fail "a change check that cannot read its Secret must fail the run"
+fi
+assert_read_injected "$spec_key#4"
+grep -qF "cannot read Secret profiles/external-rest-api-secrets; no Secret was written" "$TMP/stderr" \
+  || fail "missing Secret read error line for the change check"
+[[ ! -s "$TMP/patches.log" ]] || fail "no Secret may be written after a failed change check"
+[[ ! -s "$TMP/annotations.log" ]] || fail "no consumer may be marked after a failed change check"
+assert_restarted_exactly "$rollout"
+assert_loaded_matches_secrets
+
+# control-api's service-token map cannot be read on any attempt (it is read
+# once, at top level, after every token is resolved): the run stops before
+# marking or writing anything.
+spec_key="control-plane/control-api-internal-tokens/CONTROL_API_INTERNAL_SERVICE_TOKENS"
+secrets_before="$(secrets_digest)"
+rollout="$TMP/rollout-map-unreadable.log"
+if run_tokens gke-dev "$rollout" "" env KUBE_SECRET_READ_FLAKE="$spec_key#1 $spec_key#2 $spec_key#3"; then
+  fail "a map that cannot be read must fail the run"
+fi
+assert_read_injected "$spec_key#3"
+[[ "$(grep -c "^$spec_key#" "$TMP/secret-reads.log.injected")" == "3" ]] \
+  || fail "the map read was not attempted three times"
+grep -qF "cannot read Secret control-plane/control-api-internal-tokens; no Secret was written" "$TMP/stderr" \
+  || fail "missing Secret read error line for the map"
+[[ ! -s "$TMP/patches.log" ]] || fail "no Secret may be written after a failed map read"
+[[ ! -s "$TMP/annotations.log" ]] || fail "no consumer may be marked after a failed map read"
+assert_restarted_exactly "$rollout"
+[[ "$(secrets_digest)" == "$secrets_before" ]] || fail "a Secret value changed although the map read failed"
+assert_loaded_matches_secrets
+
 # A key edited out of band (control-api's flat token list) and loaded by a
 # control-api pod that restarted since (eviction): the run writes the list back
 # and restarts control-api, the only consumer that reads it.
@@ -616,7 +917,9 @@ assert_loaded_matches_secrets
 
 # control-api's service-token map edited out of band (rpc-proxy entry) and
 # loaded by a restarted control-api pod: the run writes the map back and
-# restarts both ends of that token; the run after it is a no-op.
+# restarts control-api, the only consumer that reads the map. rpc-proxy reads
+# only its own Secret, which did not change, and its stamp matches: it is
+# neither marked nor restarted. The run after it is a no-op.
 live_map="$(store_get control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)"
 # rpc-proxy is never the first map entry, so ",rpc-proxy=" is unique.
 map_tail="${live_map#*,rpc-proxy=}"
@@ -626,7 +929,15 @@ store_set control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE
 pod_restart control-plane/control-api
 rollout="$TMP/rollout-map-drift.log"
 run_tokens gke-dev "$rollout" "" env || fail "the map drift run failed"
-assert_restarted_exactly "$rollout" control-plane/control-api rpc-proxy/rpc-proxy
+assert_restarted_exactly "$rollout" control-plane/control-api
+grep -qF 'Recorded pending restart on control-plane/control-api before writing Secrets' "$TMP/stderr" \
+  || fail "control-api was not marked before the write"
+grep -qF 'Skipping rollout of rpc-proxy/rpc-proxy: tokens unchanged' "$TMP/stderr" \
+  || fail "rpc-proxy was not evaluated"
+if grep -q '^rpc-proxy/rpc-proxy ' "$TMP/annotations.log"; then
+  fail "rpc-proxy must not be marked when only control-api's map entry changed"
+fi
+assert_extra_restart_checked rpc-proxy/rpc-proxy
 [[ "$(store_get control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)" == "$live_map" ]] \
   || fail "the map was not written back"
 assert_loaded_matches_secrets
@@ -634,6 +945,122 @@ rollout="$TMP/rollout-map-drift-settled.log"
 run_tokens gke-dev "$rollout" "" env
 assert_restarted_exactly "$rollout"
 assert_noop_witness
+assert_loaded_matches_secrets
+
+# A map without the grok-llm-proxy entry (an upgrade that adds a caller, or an
+# out-of-band edit): the run adds it back and restarts control-api only.
+[[ "$live_map" == *",grok-llm-proxy="* ]] || fail "grok-llm-proxy is not in the map"
+store_set control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS "${live_map%,grok-llm-proxy=*}"
+pod_restart control-plane/control-api
+rollout="$TMP/rollout-map-missing-entry.log"
+run_tokens gke-dev "$rollout" "" env || fail "the missing-entry run failed"
+assert_restarted_exactly "$rollout" control-plane/control-api
+grep -qF 'Skipping rollout of control-plane/grok-llm-proxy: tokens unchanged' "$TMP/stderr" \
+  || fail "grok-llm-proxy was not evaluated"
+if grep -q '^control-plane/grok-llm-proxy ' "$TMP/annotations.log"; then
+  fail "grok-llm-proxy must not be marked when only its map entry is missing"
+fi
+assert_extra_restart_checked control-plane/grok-llm-proxy
+[[ "$(store_get control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)" == "$live_map" ]] \
+  || fail "the grok-llm-proxy entry was not added back"
+assert_loaded_matches_secrets
+
+# The same rpc-proxy map edit, and rpc-proxy's Deployment cannot be read before
+# the write: an existing consumer whose other end changes must be read (it may
+# have no stamp), so the run stops before writing any Secret. The next plain
+# run restarts control-api only.
+store_set control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS "$oob_map"
+pod_restart control-plane/control-api
+rollout="$TMP/rollout-map-peer-read-fails.log"
+if run_tokens gke-dev "$rollout" "" env KUBE_GET_DEPLOY_FAIL="rpc-proxy/rpc-proxy"; then
+  fail "a failed Deployment read of a consumer whose other end changes must fail the run"
+fi
+grep -qF 'cannot read deployment rpc-proxy/rpc-proxy before writing Secrets; no Secret was written' "$TMP/stderr" \
+  || fail "missing pre-write read error line for rpc-proxy"
+grep -qF 'injected get failure for rpc-proxy/rpc-proxy' "$TMP/stderr" || fail "the rpc-proxy read failure was never injected"
+[[ ! -s "$TMP/patches.log" ]] || fail "no Secret may be written after a failed pre-write read"
+assert_restarted_exactly "$rollout"
+rollout="$TMP/rollout-map-peer-read-heals.log"
+run_tokens gke-dev "$rollout" "" env || fail "the run after a failed rpc-proxy read failed"
+assert_restarted_exactly "$rollout" control-plane/control-api
+[[ "$(store_get control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)" == "$live_map" ]] \
+  || fail "the map was not written back after the failed read"
+assert_loaded_matches_secrets
+
+# An extra map entry added out of band: the run removes it and restarts
+# control-api only.
+store_set control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS "$live_map,extra-caller=$ROTATED"
+pod_restart control-plane/control-api
+rollout="$TMP/rollout-map-extra-entry.log"
+run_tokens gke-dev "$rollout" "" env || fail "the extra-entry run failed"
+assert_restarted_exactly "$rollout" control-plane/control-api
+[[ "$(store_get control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)" == "$live_map" ]] \
+  || fail "the extra map entry was not removed"
+assert_loaded_matches_secrets
+
+# Only control-api's end of the reader's token changes: the reader's entry in
+# the map is edited out of band and loaded by a restarted control-api pod. The
+# run writes the map back and restarts control-api; the reader reads only its
+# own Secret, which did not change, and its stamp matches, so it is neither
+# marked nor restarted.
+map_tail="${live_map#*,workflow-approval-reader=}"
+oob_reader_map="${live_map%%,workflow-approval-reader=*},workflow-approval-reader=$ROTATED,${map_tail#*,}"
+[[ "$oob_reader_map" != "$live_map" ]] || fail "the out-of-band reader entry edit did not apply"
+store_set control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS "$oob_reader_map"
+pod_restart control-plane/control-api
+rollout="$TMP/rollout-map-reader-entry.log"
+run_tokens gke-dev "$rollout" "" env || fail "the reader-entry run failed"
+assert_restarted_exactly "$rollout" control-plane/control-api
+grep -qF 'Recorded pending restart on control-plane/control-api before writing Secrets' "$TMP/stderr" \
+  || fail "control-api was not marked before the write"
+grep -qF 'Skipping rollout of channels/clerum-workflow-approval-request-reader: tokens unchanged' "$TMP/stderr" \
+  || fail "the reader was not evaluated"
+if grep -q '^channels/clerum-workflow-approval-request-reader ' "$TMP/annotations.log"; then
+  fail "the reader must not be marked when only control-api's entry for it changed"
+fi
+assert_extra_restart_checked channels/clerum-workflow-approval-request-reader
+[[ "$(store_get control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)" == "$live_map" ]] \
+  || fail "the reader's map entry was not written back"
+assert_loaded_matches_secrets
+
+# Only the caller's end of a token changes: rpc-proxy's Secret is edited out of
+# band and the run pins the token to the value control-api's map already holds.
+# rpc-proxy's own key changes, so it is marked and restarted; control-api's
+# keys do not change and its stamp matches, so it is neither marked nor
+# restarted.
+rpc_entry="${live_map#*,rpc-proxy=}"
+rpc_entry="${rpc_entry%%,*}"
+[[ "$(store_get rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN)" == "$rpc_entry" ]] \
+  || fail "rpc-proxy's Secret does not hold its map entry before the edit"
+store_set rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN "$ROTATED"
+rollout="$TMP/rollout-caller-end-only.log"
+run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_RPC="$rpc_entry" \
+  || fail "the caller-end-only run failed"
+assert_restarted_exactly "$rollout" rpc-proxy/rpc-proxy
+grep -qF 'Recorded pending restart on rpc-proxy/rpc-proxy before writing Secrets' "$TMP/stderr" \
+  || fail "rpc-proxy was not marked before the write"
+grep -qF 'Skipping rollout of control-plane/control-api: tokens unchanged' "$TMP/stderr" \
+  || fail "control-api was not evaluated"
+if grep -q '^control-plane/control-api ' "$TMP/annotations.log"; then
+  fail "control-api must not be marked when only the caller's end of a token changed"
+fi
+assert_extra_restart_checked control-plane/control-api
+[[ "$(store_get rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN)" == "$rpc_entry" ]] \
+  || fail "rpc-proxy's Secret was not written back"
+assert_loaded_matches_secrets
+
+# A Deployment created after the pre-write read and before its Secret is
+# patched, with a value it reads changing: it has no stamp and may have loaded
+# the old value, so it restarts.
+rm -rf "$TMP/store/_deploy/rpc-proxy/rpc-proxy"
+rollout="$TMP/rollout-created-mid-run.log"
+run_tokens gke-dev "$rollout" "" env CONTROL_API_INTERNAL_TOKEN_RPC="$(printf '%064x' 0xA1138)" \
+  KUBE_CREATE_DEPLOY_ON_PATCH=rpc-proxy/rpc-proxy || fail "the created-mid-run run failed"
+[[ -d "$TMP/store/_deploy/rpc-proxy/rpc-proxy" ]] || fail "the rpc-proxy Deployment was never created"
+assert_restarted_exactly "$rollout" control-plane/control-api rpc-proxy/rpc-proxy
+grep -qF 'Rolling deployment rpc-proxy/rpc-proxy to pick up fresh Secret values (no stamp and tokens changed)' \
+  "$TMP/stderr" || fail "missing no-stamp restart reason"
+assert_loaded_matches_secrets
 
 # A rotation that dies after control-api's Secret is written (the rpc-proxy
 # Secret patch fails): a control-api pod that starts before the next run loads
@@ -693,7 +1120,8 @@ assert_loaded_matches_secrets
 rollout="$TMP/rollout-handoff-rotated.log"
 run_tokens gke-dev "$rollout" "" env CHANNEL_READER_HANDOFF_TOKEN="$ROTATED"
 assert_restarted_exactly "$rollout" \
-  channels/clerum-workflow-approval-request-reader channels/channel-reader-stubhost
+  channels/clerum-workflow-approval-request-reader channels/channel-reader-stubhost \
+  channels/channel-reader-stubhost-b
 assert_loaded_matches_secrets
 
 # A legacy `replace-with-*` placeholder counts as absent: regenerated, restarted.
@@ -791,6 +1219,7 @@ assert_pending profiles/external-rest-api
 rollout="$TMP/rollout-stamp-heals.log"
 run_tokens gke-dev "$rollout" "" env || fail "the run after a failed stamp write failed"
 assert_restarted_exactly "$rollout" profiles/external-rest-api
+assert_loaded_matches_secrets
 rollout="$TMP/rollout-stamp-settled.log"
 run_tokens gke-dev "$rollout" "" env
 assert_restarted_exactly "$rollout"
@@ -822,13 +1251,14 @@ assert_restarted_exactly "$rollout"
 rollout="$TMP/rollout-selector-heals.log"
 run_tokens gke-dev "$rollout" "" env CHANNEL_READER_HANDOFF_TOKEN="$WRC_NEW" \
   || fail "the handoff rotation after a list failure failed"
-assert_restarted_exactly "$rollout" channels/clerum-workflow-approval-request-reader channels/channel-reader-stubhost
+assert_restarted_exactly "$rollout" channels/clerum-workflow-approval-request-reader channels/channel-reader-stubhost \
+  channels/channel-reader-stubhost-b
 assert_loaded_matches_secrets
 
-# The list succeeds before the write and fails after it: the listed
-# channel-reader was marked before the write, so the next plain run restarts
-# it, and the printed command uses the label selector (a Deployment name
-# cannot contain "=").
+# The list succeeds before the write and fails after it: both unstamped
+# channel-readers were listed and marked before the write, so the next plain
+# run restarts both, and the printed command uses the label selector (a
+# Deployment name cannot contain "=").
 seed_unstamped
 rollout="$TMP/rollout-selector-post-fails.log"
 if run_tokens gke-dev "$rollout" "" env CHANNEL_READER_HANDOFF_TOKEN="$HCC_NEW" KUBE_LIST_FAIL_FROM=2; then
@@ -837,6 +1267,7 @@ fi
 grep -qF 'injected list failure for channels/app=channel-reader' "$TMP/stderr" || fail "the post-write list failure was never injected"
 assert_restarted_exactly "$rollout" channels/clerum-workflow-approval-request-reader
 [[ "$(stamp_of channels/channel-reader-stubhost)" == "restart-pending" ]] || fail "the listed channel-reader was not marked"
+[[ "$(stamp_of channels/channel-reader-stubhost-b)" == "restart-pending" ]] || fail "the second listed channel-reader was not marked"
 grep -qF 'restarts are pending: channels/app=channel-reader' "$TMP/stderr" || fail "missing selector pending entry"
 assert_pending channels/app=channel-reader
 if grep -qF 'rollout restart deploy app=channel-reader' "$TMP/stderr"; then
@@ -844,9 +1275,11 @@ if grep -qF 'rollout restart deploy app=channel-reader' "$TMP/stderr"; then
 fi
 rollout="$TMP/rollout-selector-post-heals.log"
 run_tokens gke-dev "$rollout" "" env || fail "the healing run after a post-write list failure failed"
-assert_restarted_exactly "$rollout" channels/channel-reader-stubhost
-grep -qF 'Rolling deployment channels/channel-reader-stubhost to pick up fresh Secret values (restart pending (recorded before a Secret write))' \
-  "$TMP/stderr" || fail "missing restart-pending reason"
+assert_restarted_exactly "$rollout" channels/channel-reader-stubhost channels/channel-reader-stubhost-b
+for channel_reader in channels/channel-reader-stubhost channels/channel-reader-stubhost-b; do
+  grep -qF "Rolling deployment $channel_reader to pick up fresh Secret values (restart pending (recorded before a Secret write))" \
+    "$TMP/stderr" || fail "missing restart-pending reason for $channel_reader"
+done
 assert_loaded_matches_secrets
 
 # --- Stamps missing (first run with stamps, or a recreated Deployment) ---
@@ -1085,6 +1518,42 @@ run_tokens gke-dev "$rollout" "" env || fail "the token run after a key hand-off
 assert_restarted_exactly "$rollout" rpc-proxy/rpc-proxy
 assert_loaded_matches_secrets
 
+# --- Stamp library: the recovery commands run as printed without CONTEXT ---
+STAMP_LIB="$ROOT/deploy/scripts/lib/token-consumer-stamp.sh"
+mkdir -p "$TMP/argv-bin"
+cat > "$TMP/argv-bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${KUBECTL_ARGV_LOG:?}"
+SH
+chmod +x "$TMP/argv-bin/kubectl"
+report_rc=0
+bash -c 'log() { printf "%s\n" "$*" >&2; }; source "$1"; TOKEN_RESTART_PENDING=(rpc-proxy/rpc-proxy channels/app=channel-reader); token_stamp_fail_if_pending ""' \
+  _ "$STAMP_LIB" 2>"$TMP/report.err" || report_rc=$?
+[[ "$report_rc" == "1" ]] || fail "a pending report must return 1 (got $report_rc)"
+grep '^  kubectl ' "$TMP/report.err" > "$TMP/report-commands" \
+  || fail "no recovery command was printed: $(cat "$TMP/report.err")"
+[[ "$(wc -l < "$TMP/report-commands" | tr -d ' ')" == "2" ]] \
+  || fail "expected two printed recovery commands, got: $(cat "$TMP/report.err")"
+: > "$TMP/kubectl-argv.log"
+while IFS= read -r command; do
+  command="${command#  }"
+  command_rc=0
+  (cd "$TMP" && PATH="$TMP/argv-bin:$PATH" KUBECTL_ARGV_LOG="$TMP/kubectl-argv.log" bash -c "$command") \
+    </dev/null 2>"$TMP/command.err" || command_rc=$?
+  [[ "$command_rc" == "0" ]] || fail "the printed command '$command' does not run: $(cat "$TMP/command.err")"
+done < "$TMP/report-commands"
+[[ "$(cat "$TMP/kubectl-argv.log")" == "$(printf '%s\n' \
+  '-n rpc-proxy rollout restart deploy rpc-proxy' \
+  '-n channels rollout restart deploy -l app=channel-reader')" ]] \
+  || fail "the printed commands ran other kubectl arguments: $(cat "$TMP/kubectl-argv.log")"
+# An unknown changed-in-run value is refused before any kubectl call.
+mark_rc=0
+bash -c 'log() { printf "%s\n" "$*" >&2; }; kctl() { exit 9; }; source "$1"; token_stamp_mark_pending a ns dep bogus' \
+  _ "$STAMP_LIB" 2>"$TMP/mark.err" || mark_rc=$?
+[[ "$mark_rc" == "1" ]] || fail "an invalid changed-in-run value must return 1 (got $mark_rc)"
+grep -qF 'ERROR: invalid changed-in-run value for ns/dep; no Secret was written' "$TMP/mark.err" \
+  || fail "missing invalid changed-in-run line"
+
 # HCC rebuilt a channel-reader Deployment without the stamp: it is re-stamped.
 unstamp channels/channel-reader-stubhost
 rollout="$TMP/rollout-rebuilt-channel-reader.log"
@@ -1187,7 +1656,81 @@ grep -qx 'channels/workflow-approval-request-reader-credentials' "$TMP/patches.l
   || fail "bot-secret no-op run did not patch the reader Secret"
 grep -q '\] Done\.$' "$TMP/stderr" || fail "bot-secret script did not reach Done."
 assert_openssl_rand_calls 0
+assert_settled_checked 1
 assert_loaded_matches_secrets
+
+# The webhook secret's change check reads it once more after resolving it; one
+# failing read there is retried and the run stays a no-op.
+spec="channels/workflow-approval-request-reader-credentials/telegram-webhook-secret#2"
+rollout="$TMP/rollout-bot-read-site.log"
+run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET KUBE_SECRET_READ_FLAKE="$spec" \
+  || fail "a transient read failure of the webhook secret failed the bot run"
+assert_read_injected "$spec"
+assert_restarted_exactly "$rollout"
+grep -qF "$READER_SKIP" "$TMP/stderr" || fail "bot-secret skip line missing"
+grep -q '\] Done\.$' "$TMP/stderr" || fail "bot-secret script did not reach Done."
+[[ ! -s "$TMP/annotations.log" ]] || fail "a bot no-op must not rewrite any stamp"
+assert_openssl_rand_calls 0
+assert_settled_checked 1
+assert_loaded_matches_secrets
+
+# Census of the bot's Secret reads, then one run per read with that read
+# failing once: every run stays a no-op.
+rollout="$TMP/rollout-bot-read-census.log"
+run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET || fail "the bot census run failed"
+bot_reads="$(awk '{n[$0]++; print $0 "#" n[$0]}' "$TMP/secret-reads.log")"
+[[ "$(printf '%s\n' "$bot_reads" | sed '/^$/d' | wc -l | tr -d ' ')" == "2" ]] \
+  || fail "the bot census expected 2 Secret reads, saw: $bot_reads"
+while IFS= read -r spec; do
+  rollout="$TMP/rollout-bot-read-flake.log"
+  run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET KUBE_SECRET_READ_FLAKE="$spec" \
+    || fail "a transient Secret read failure ($spec) failed the bot run"
+  assert_read_injected "$spec"
+  assert_restarted_exactly "$rollout"
+  grep -qF "$READER_SKIP" "$TMP/stderr" || fail "bot-secret skip line missing"
+  [[ ! -s "$TMP/annotations.log" ]] || fail "a bot no-op must not rewrite any stamp"
+  assert_openssl_rand_calls 0
+  assert_settled_checked 1
+done <<<"$bot_reads"
+assert_loaded_matches_secrets
+
+# The reader's Secret cannot be read: the bot run stops before writing.
+webhook_before="$(store_get channels workflow-approval-request-reader-credentials telegram-webhook-secret)"
+rollout="$TMP/rollout-bot-secret-unreadable.log"
+if run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET \
+     KUBE_SECRET_READ_FAIL=channels/workflow-approval-request-reader-credentials; then
+  fail "an unreadable reader Secret must fail the bot run"
+fi
+[[ "$(grep -c '^channels/workflow-approval-request-reader-credentials/' "$TMP/secret-reads.log.injected")" == "3" ]] \
+  || fail "the reader Secret read was not attempted three times"
+grep -qF 'cannot read Secret channels/workflow-approval-request-reader-credentials; no Secret was written' "$TMP/stderr" \
+  || fail "missing bot Secret read error line"
+[[ ! -s "$TMP/patches.log" ]] || fail "no Secret may be written after a failed bot Secret read"
+[[ ! -s "$TMP/annotations.log" ]] || fail "the reader may not be marked after a failed bot Secret read"
+assert_openssl_rand_calls 0
+assert_restarted_exactly "$rollout"
+[[ "$(store_get channels workflow-approval-request-reader-credentials telegram-webhook-secret)" == "$webhook_before" ]] \
+  || fail "the webhook secret changed although the bot run stopped before writing"
+
+# The webhook secret resolves, then its second read (the change check) fails on
+# every attempt: the bot run stops before marking or writing anything.
+spec_key="channels/workflow-approval-request-reader-credentials/telegram-webhook-secret"
+secrets_before="$(secrets_digest)"
+rollout="$TMP/rollout-bot-check-unreadable.log"
+if run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET \
+     KUBE_SECRET_READ_FLAKE="$spec_key#2 $spec_key#3 $spec_key#4"; then
+  fail "a webhook-secret change check that cannot read its Secret must fail the bot run"
+fi
+assert_read_injected "$spec_key#4"
+[[ "$(grep -c "^$spec_key#" "$TMP/secret-reads.log.injected")" == "3" ]] \
+  || fail "the webhook-secret change check was not attempted three times"
+grep -qF 'cannot read Secret channels/workflow-approval-request-reader-credentials; no Secret was written' "$TMP/stderr" \
+  || fail "missing bot Secret read error line for the change check"
+[[ ! -s "$TMP/patches.log" ]] || fail "no Secret may be written after a failed webhook-secret change check"
+[[ ! -s "$TMP/annotations.log" ]] || fail "the reader may not be marked after a failed webhook-secret change check"
+assert_openssl_rand_calls 0
+assert_restarted_exactly "$rollout"
+[[ "$(secrets_digest)" == "$secrets_before" ]] || fail "a Secret value changed although the bot change check failed"
 
 # The two scripts keep separate stamps on the reader: the token script's run
 # neither reads nor rewrites the bot-secret stamp.
@@ -1198,6 +1741,7 @@ run_tokens gke-dev "$TMP/rollout-tokens-on-reader.log" "" env CONTROL_API_MEMBER
 rollout="$TMP/rollout-bot-after-tokens.log"
 run_bot_secret "$rollout" env -u WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET
 assert_restarted_exactly "$rollout"
+assert_loaded_matches_secrets
 
 rollout="$TMP/rollout-bot-rotated.log"
 run_bot_secret "$rollout" env WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET="$ROTATED"

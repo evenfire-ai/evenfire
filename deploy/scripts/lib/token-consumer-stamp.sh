@@ -17,7 +17,12 @@
 #   a value it reads changed in this run         -> marked restart-pending before
 #                                                   any Secret write, then restart
 #                                                   and stamp
+#   no stamp, and only the other end of one of   -> marked restart-pending before
+#   its service tokens changed in this run          any Secret write, then restart
+#                                                   and stamp
 #   stamp equal to the values this run writes    -> no restart
+#   (also when only the other end of one of its
+#   service tokens changed)
 #   stamp different, or restart-pending          -> restart, then stamp
 #   no stamp, nothing it reads changed           -> stamp only; its pods already
 #                                                   run these values (a Deployment
@@ -36,8 +41,9 @@
 #
 # A failed read, restart or stamp write is retried, then recorded as pending and
 # the walk continues; the calling script exits non-zero so the failure is
-# visible in the job. A stamp write never rolls pods (it is metadata, not the
-# pod template). Not covered: a Deployment created between the caller's
+# visible in the job. A Secret read that still fails stops the calling script
+# before it marks or writes anything (read_secret_key). A stamp write never
+# rolls pods (it is metadata, not the pod template). Not covered: a Deployment created between the caller's
 # pre-write read and the Secret patch whose restart then also fails (it may
 # start on the old value and has no mark); closing it needs the creator to
 # stamp what it creates.
@@ -83,6 +89,32 @@ token_stamp_retry() {
   return 1
 }
 
+# read_secret_key <namespace> <secret> <key>
+# Prints the value of a plain string key of a Secret. Prints nothing when the
+# Secret or the key does not exist (NotFound), or when the value is a legacy
+# `replace-with-*` placeholder: callers treat those as absent and generate a
+# value. Any other read error is retried (token_stamp_retry); if it persists,
+# it is logged and the function returns 1, and the caller stops before writing
+# any Secret: an unreadable value is neither absent (a new one would rotate the
+# token) nor changed (it would restart its consumers).
+read_secret_key() {
+  local ns="$1" secret="$2" key="$3" encoded decoded
+  if ! encoded="$(token_stamp_retry kctl -n "$ns" get secret "$secret" --ignore-not-found \
+       -o "jsonpath={.data.$key}")"; then
+    log "ERROR: cannot read Secret $ns/$secret; no Secret was written"
+    return 1
+  fi
+  [ -n "$encoded" ] || return 0
+  if ! decoded="$(printf '%s' "$encoded" | base64 --decode)"; then
+    log "ERROR: Secret $ns/$secret holds a value that is not base64; no Secret was written"
+    return 1
+  fi
+  case "$decoded" in
+    replace-with-*) return 0 ;;
+  esac
+  printf '%s' "$decoded"
+}
+
 # Reads the stamp of an existing Deployment. Prints "absent" when the
 # Deployment does not exist, "none" when it has no stamp, else the stamp.
 # Returns 1 when the Deployment cannot be read.
@@ -101,17 +133,28 @@ token_stamp_read() {
 }
 
 # token_stamp_mark_pending <annotation> <namespace> <deployment> <changed-in-run>
-# Call before any Secret write. When a value the consumer reads changes in this
-# run (the Secret before the run differs from what it writes) and the
-# Deployment exists, writes the restart-pending stamp, whatever stamp it had:
-# its pods may run a value other than the one written (a reverted out-of-band
-# edit loaded by a pod started since, or a half-applied earlier run), and a stamp
-# records what this script restarted, not what a pod loaded. A missing
-# Deployment reads the new value when it is created. Returns 1 when the
-# obligation cannot be recorded; the caller then exits before writing.
+# Call before any Secret write. <changed-in-run> is "true" when a value the
+# consumer reads changes in this run (the Secret before the run differs from
+# what it writes), "peer" when only the other end of one of its service tokens
+# changes (see apply-inter-service-tokens.sh), else "false".
+# For "true" and an existing Deployment, writes the restart-pending stamp
+# whatever stamp it had: its pods may run a value other than the one written (a
+# reverted out-of-band edit loaded by a pod started since, or a half-applied
+# earlier run), and a stamp records what this script restarted, not what a pod
+# loaded. For "peer", writes it only on a Deployment without a stamp: the
+# consumer does not read the other end, so its stamp decides; without a stamp,
+# a changed other end is the only sign that its own Secret changed without a
+# restart. A missing Deployment reads the new value when it is created. Returns
+# 1 when the obligation cannot be recorded; the caller then exits before
+# writing.
 token_stamp_mark_pending() {
-  local annotation="$1" ns="$2" dep="$3" changed="$4" current
-  [ "$changed" = "true" ] || return 0
+  local annotation="$1" ns="$2" dep="$3" changed="$4" current why
+  case "$changed" in
+    true) why="a value it reads changes" ;;
+    peer) why="the other end of one of its service tokens changes and it has no stamp" ;;
+    false) return 0 ;;
+    *) log "ERROR: invalid changed-in-run value for $ns/$dep; no Secret was written"; return 1 ;;
+  esac
   if ! current="$(token_stamp_read "$annotation" "$ns" "$dep")"; then
     log "ERROR: cannot read deployment $ns/$dep before writing Secrets; no Secret was written"
     return 1
@@ -119,12 +162,15 @@ token_stamp_mark_pending() {
   case "$current" in
     absent|"$TOKEN_STAMP_PENDING_VALUE") return 0 ;;
   esac
+  if [ "$changed" = "peer" ] && [ "$current" != "none" ]; then
+    return 0
+  fi
   if ! token_stamp_retry kctl -n "$ns" annotate deploy "$dep" --overwrite \
        "$annotation=$TOKEN_STAMP_PENDING_VALUE" >/dev/null; then
     log "ERROR: cannot record the pending restart of $ns/$dep; no Secret was written"
     return 1
   fi
-  log "Recorded pending restart on $ns/$dep before writing Secrets (a value it reads changes)"
+  log "Recorded pending restart on $ns/$dep before writing Secrets ($why)"
 }
 
 # reconcile_token_consumer <annotation> <namespace> <deployment> <changed-in-run> <desired-stamp>
@@ -185,9 +231,9 @@ token_stamp_fail_if_pending() {
     target="${item#*/}"
     # A Deployment name cannot contain "=", so such an entry is a label selector.
     if [[ "$target" == *=* ]]; then
-      log "  kubectl --context ${context:-<current>} -n ${item%%/*} rollout restart deploy -l $target"
+      log "  kubectl${context:+ --context $context} -n ${item%%/*} rollout restart deploy -l $target"
     else
-      log "  kubectl --context ${context:-<current>} -n ${item%%/*} rollout restart deploy $target"
+      log "  kubectl${context:+ --context $context} -n ${item%%/*} rollout restart deploy $target"
     fi
   done
   log "or re-run this script with FORCE_CONSUMER_RESTART=true (restarts every consumer)."

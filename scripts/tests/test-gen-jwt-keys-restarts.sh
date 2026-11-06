@@ -259,7 +259,7 @@ assert_key_restarts_pending() {
   shift
   grep -q '^=== Done ===$' "$TMP/out" && fail "a run with pending restarts must stop before Done"
   grep -qF 'these restarts are pending' "$TMP/out" || fail "missing pending-restarts error"
-  grep -qF 'Do not re-run the key script' "$TMP/out" || fail "missing do-not-rerun notice"
+  grep -qF 're-running gen-jwt-keys.sh rotates every key again' "$TMP/out" || fail "missing re-run notice"
   for item in "$@"; do
     grep -qF "    $kubectl_prefix -n ${item%%/*} rollout restart deploy ${item#*/}" "$TMP/out" \
       || fail "missing restart command for $item"
@@ -447,6 +447,15 @@ grep -qF 'VALIDATION FAILED' "$TMP/out" || fail "missing validation failure"
 grep -qF 'MCP-HOST SYNC PENDING' "$TMP/out" || fail "MCP-HOST SYNC PENDING not printed on a failed validation"
 grep -qF 'RESTARTS PENDING' "$TMP/out" || fail "RESTARTS PENDING not printed on a failed validation"
 grep -qF 'GFSC KEY SYNC REQUIRED' "$TMP/out" || fail "the gfsc notice not printed on a failed validation"
+# The summaries come before the validation verdict, so an operator reading the
+# end of a failed run sees what is still pending.
+line_of() { grep -m 1 -nF "$1" "$TMP/out" | cut -d: -f1; }
+validation_line="$(line_of 'VALIDATION FAILED')" || fail "VALIDATION FAILED is not printed"
+for summary in 'MCP-HOST SYNC PENDING' 'RESTARTS PENDING' 'GFSC KEY SYNC REQUIRED'; do
+  summary_line="$(line_of "$summary")" || fail "$summary is not printed"
+  [[ -n "$summary_line" && "$summary_line" -lt "$validation_line" ]] \
+    || fail "$summary is not printed before VALIDATION FAILED"
+done
 
 # --- A pending key-consumer restart is handed to the next token step ---
 # rpc-proxy is also reconciled by apply-inter-service-tokens.sh, so it gets the
