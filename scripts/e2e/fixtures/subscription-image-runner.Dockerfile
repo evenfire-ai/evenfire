@@ -11,12 +11,14 @@ ARG RUNNER_BASE_IMAGE
 FROM ${RUNNER_BASE_IMAGE} AS build
 USER 0:0
 WORKDIR /opt/evenfire
+COPY .nvmrc ./.nvmrc
+COPY scripts/check-node-version.cjs ./scripts/check-node-version.cjs
 # Reviewed SocketDev/sfw-free binary staged by the host admission writer. It is
 # a third-party artifact with its own receipt and hash binding, never part of
 # the Git source manifest, and it is the only sfw in the image.
 COPY third-party/sfw-free /usr/local/bin/sfw
 RUN chmod 0755 /usr/local/bin/sfw \
-    && node -e "if (process.versions.node.split('.')[0] !== '24') process.exit(1)" \
+    && node scripts/check-node-version.cjs --major=24 \
     && command -v apt-get && command -v sfw
 RUN sfw apt-get update && sfw apt-get install -y --no-install-recommends \
       ca-certificates git python3 make g++ pkg-config libsecret-1-dev \
@@ -58,6 +60,8 @@ RUN node --input-type=module -e "import fs from 'node:fs'; import {verifyInputSo
 FROM ${RUNNER_BASE_IMAGE} AS runner
 USER 0:0
 WORKDIR /opt/evenfire
+COPY --from=build /opt/evenfire/.nvmrc ./.nvmrc
+COPY --from=build /opt/evenfire/scripts/check-node-version.cjs ./scripts/check-node-version.cjs
 COPY third-party/sfw-free /usr/local/bin/sfw
 # Runtime X/dbus/keyring and Electron shared libraries. ca-certificates is
 # required because node:*-slim purges it after fetching Node.
@@ -69,7 +73,7 @@ RUN chmod 0755 /usr/local/bin/sfw \
       libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libgtk-3-0 \
       libx11-xcb1 libxcb-dri3-0 libxshmfence1 fonts-liberation \
     && rm -rf /var/lib/apt/lists/* \
-    && node -e "if (process.versions.node.split('.')[0] !== '24') process.exit(1)" \
+    && node scripts/check-node-version.cjs --major=24 \
     && command -v Xvfb && command -v xauth && command -v dbus-daemon \
     && command -v gnome-keyring-daemon
 RUN test ! -e /home/evenfire-e2e \

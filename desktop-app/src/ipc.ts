@@ -1,5 +1,6 @@
 import {
   BrowserWindow,
+  IpcMainEvent,
   IpcMainInvokeEvent,
   Notification,
   app,
@@ -12,12 +13,21 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { AppService } from './appService.js'
+import { runChatGetIndex } from './chatGetIndexHandler.js'
 import {
   getChatStoreBindingGeneration,
   requireChatStore,
   requireChatStoreForBindingGeneration,
 } from './chatStoreBinding.js'
+import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import {
+  abortZipJob,
+  appendZipEntry,
+  appendZipEntryStreaming,
+  finishZipJob,
+  startZipJob,
+} from './gfs/zipStream.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   PLUGIN_SDK_CAPABILITIES_CHANNEL,
@@ -29,6 +39,7 @@ import {
 import {
   type ChatAuthorityScope,
   type ChatDeleteFence,
+  type DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfig,
   EntityChangeStreamEvent,
   HostActivityStreamEvent,
@@ -39,18 +50,88 @@ import {
   WorkflowNotificationStreamEvent,
 } from './types.js'
 
+type DeepLinkQueue = {
+  list(): Array<{ id: number }>
+  acknowledge(id: number): void
+}
+
+type DeepLinkAcknowledgmentQueues = {
+  appQueue: DeepLinkQueue
+  gfsQueue: DeepLinkQueue
+  navigation: { current(): number }
+}
+
+function parseDeepLinkAcknowledgmentAuthority(input: unknown): DeepLinkAcknowledgmentAuthority {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Invalid deep-link acknowledgment authority')
+  }
+  const value = input as Record<string, unknown>
+  for (const generation of [value.sessionGeneration, value.userNavigationGeneration]) {
+    if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0) {
+      throw new Error('Invalid deep-link acknowledgment authority')
+    }
+  }
+  return {
+    sessionGeneration: value.sessionGeneration as number,
+    userNavigationGeneration: value.userNavigationGeneration as number,
+  }
+}
+
+export function registerDeepLinkAcknowledgmentHandlers(
+  service: AppService,
+  getMainWindow: () => BrowserWindow | null,
+  queues: DeepLinkAcknowledgmentQueues
+): void {
+  const register = (channel: string, queue: DeepLinkQueue, message: string) => {
+    ipcMain.handle(channel, (event, payload: { id?: unknown; authority?: unknown }) => {
+      assertTrustedSender(event)
+      if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'authority')) {
+        const id = Number(payload?.id)
+        if (!Number.isInteger(id) || id <= 0) throw new Error(message)
+        queue.acknowledge(id)
+        return
+      }
+
+      const id = payload.id
+      if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
+        throw new Error(message)
+      }
+      const authority = parseDeepLinkAcknowledgmentAuthority(payload.authority)
+      const mainWindow = getMainWindow()
+      if (!mainWindow || event.sender !== mainWindow.webContents) {
+        throw new Error('Deep-link acknowledgment requires the owning window')
+      }
+      if (
+        authority.sessionGeneration !== service.getSessionGeneration() ||
+        authority.userNavigationGeneration !== queues.navigation.current()
+      ) {
+        return false
+      }
+      if (!queue.list().some(item => item.id === id)) return false
+      queue.acknowledge(id)
+      return true
+    })
+  }
+
+  register('sandboxUi:acknowledgeDeepLink', queues.appQueue, 'Invalid app deep-link id')
+  register('gfs:acknowledgeDeepLink', queues.gfsQueue, 'Invalid EvenDrive deep-link id')
+}
+
 function sanitizeString(input: unknown): string {
   return String(input || '').trim()
 }
 
 // The renderer names each sandbox-ui open so it can tell events of the view
 // that open mounted from those of a view it replaced (same appRef on a
-// relaunch). The id is echoed verbatim on IPC events, so bound it here.
-const SANDBOX_UI_LAUNCH_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/
+// relaunch). Main outlives renderer reloads and keeps reporting views opened by
+// an earlier renderer, so the id must be unique across renderer lifetimes: a
+// random UUID, never a counter. It is echoed verbatim on IPC events.
+const SANDBOX_UI_LAUNCH_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function parseSandboxUiLaunchId(input: unknown): string {
   if (typeof input !== 'string' || !SANDBOX_UI_LAUNCH_ID_PATTERN.test(input)) {
-    throw new Error('launchId must be 1-64 characters of [A-Za-z0-9-]')
+    throw new Error('launchId must be a UUID')
   }
   return input
 }
@@ -309,7 +390,7 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   return parsed
 }
 
-export function assertTrustedSender(event: IpcMainInvokeEvent): void {
+export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): void {
   const senderUrl = String(event.senderFrame?.url || '')
   const devUrl = String(process.env.EVENFIRE_RENDERER_URL || '').trim()
   const isFileSender = senderUrl.startsWith('file://')
@@ -317,6 +398,16 @@ export function assertTrustedSender(event: IpcMainInvokeEvent): void {
   if (!isFileSender && !isDevSender) {
     throw new Error('Untrusted IPC sender')
   }
+}
+
+/**
+ * The identity of the window that owns a ZIP job (R3-M2). A job is opened by
+ * one window and may only be driven by that window: without this, any renderer
+ * that got hold of a job id could append to, finish or abort another
+ * window's archive.
+ */
+function zipJobOwnerId(event: IpcMainInvokeEvent): string {
+  return String(event.sender?.id ?? 'unknown')
 }
 
 type DesktopNotificationActionInput = {
@@ -349,14 +440,44 @@ function sanitizeDesktopNotificationActions(
     .slice(0, 3)
 }
 
-export function registerIpcHandlers(service: AppService): void {
+export function registerIpcHandlers(service: AppService, logout: () => Promise<number>): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
 
+  // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
+  // R1-M1): the renderer attaches a requestId to an invoke and fires
+  // 'gfs:abort' on Stop; the in-flight request's AbortController ends the
+  // producer fetch instead of leaving it to burn the read budget.
+  const gfsRequestAborters = new Map<string, AbortController>()
+  ipcMain.on('gfs:abort', (event, payload: { requestId?: string }) => {
+    try {
+      assertTrustedSender(event)
+    } catch {
+      return
+    }
+    const requestId = payload?.requestId ? sanitizeString(payload.requestId) : ''
+    if (requestId) gfsRequestAborters.get(requestId)?.abort()
+  })
+  function runWithGfsAbortSignal<T>(
+    requestId: string | undefined,
+    run: (signal?: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    if (!requestId) return run(undefined)
+    const controller = new AbortController()
+    gfsRequestAborters.set(requestId, controller)
+    return run(controller.signal).finally(() => {
+      gfsRequestAborters.delete(requestId)
+    })
+  }
+
   ipcMain.handle('auth:getSessionState', async event => {
     assertTrustedSender(event)
     return service.getSessionState()
+  })
+  ipcMain.handle('auth:getSessionGeneration', async event => {
+    assertTrustedSender(event)
+    return service.getSessionGeneration()
   })
   ipcMain.handle('auth:getDependenciesHealth', async event => {
     assertTrustedSender(event)
@@ -370,18 +491,52 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.selectRuntimeConfig(sanitizeString(payload?.optionId))
   })
+  ipcMain.handle(
+    'auth:selectRuntimeConfigForHandoff',
+    async (event, payload: { optionId: string; expectedSessionGeneration: unknown }) => {
+      assertTrustedSender(event)
+      const expectedSessionGeneration = payload?.expectedSessionGeneration
+      if (
+        typeof expectedSessionGeneration !== 'number' ||
+        !Number.isSafeInteger(expectedSessionGeneration) ||
+        expectedSessionGeneration < 0
+      ) {
+        throw new Error('Invalid session generation')
+      }
+      return service.selectRuntimeConfigForHandoff(
+        sanitizeString(payload?.optionId),
+        expectedSessionGeneration
+      )
+    }
+  )
   ipcMain.handle('auth:clearRuntimeConfigSelection', async event => {
     assertTrustedSender(event)
     return service.clearRuntimeConfigSelection()
   })
-  ipcMain.handle('auth:saveRuntimeConfig', async (event, payload: DesktopRuntimeConfig) => {
-    assertTrustedSender(event)
-    return service.saveRuntimeConfig({
-      externalRestApiBaseUrl: sanitizeString(payload?.externalRestApiBaseUrl),
-      rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
-      appName: sanitizeString(payload?.appName),
-    })
-  })
+  ipcMain.handle(
+    'auth:saveRuntimeConfig',
+    async (event, payload: DesktopRuntimeConfig & { expectedSessionGeneration?: unknown }) => {
+      assertTrustedSender(event)
+      const rawExpectedSessionGeneration = payload?.expectedSessionGeneration
+      if (
+        rawExpectedSessionGeneration !== undefined &&
+        (typeof rawExpectedSessionGeneration !== 'number' ||
+          !Number.isSafeInteger(rawExpectedSessionGeneration) ||
+          rawExpectedSessionGeneration < 0)
+      ) {
+        throw new Error('Invalid session generation')
+      }
+      const runtimeConfig = {
+        externalRestApiBaseUrl: sanitizeString(payload?.externalRestApiBaseUrl),
+        rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
+        appName: sanitizeString(payload?.appName),
+      }
+      if (rawExpectedSessionGeneration === undefined) {
+        return service.saveRuntimeConfig(runtimeConfig)
+      }
+      return service.saveRuntimeConfig(runtimeConfig, rawExpectedSessionGeneration)
+    }
+  )
   ipcMain.handle('auth:deleteRuntimeConfig', async (event, payload: { optionId: string }) => {
     assertTrustedSender(event)
     return service.deleteRuntimeConfig(sanitizeString(payload?.optionId))
@@ -464,8 +619,8 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
-    await service.logout()
-    return { ok: true }
+    const sessionGeneration = await logout()
+    return { ok: true, sessionGeneration }
   })
 
   ipcMain.handle('notifications:isSupported', async event => {
@@ -543,10 +698,30 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
   })
-  ipcMain.handle('gfs:download', async (event, payload: { uri: string }) => {
+  ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
-    return service.downloadGfsUri(sanitizeString(payload?.uri))
+    const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
+    clipboard.writeText(result.url)
+    return result
   })
+  ipcMain.handle(
+    'gfs:download',
+    async (event, payload: { uri: string; maxBytes?: number; requestId?: string }) => {
+      assertTrustedSender(event)
+      // Optional producer-side bound (folder-zip walk): when present it is
+      // validated here in main so an over-large body is rejected before it
+      // materializes in either process. Absent keeps the single-file
+      // save-to-disk path uncapped.
+      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+      if (maxBytes !== undefined && maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('download limit exceeds the allowed maximum')
+      }
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      return runWithGfsAbortSignal(requestId, signal =>
+        service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes, signal)
+      )
+    }
+  )
   ipcMain.handle(
     'gfs:downloadPreview',
     async (event, payload: { uri: string; maxBytes: number }) => {
@@ -579,11 +754,17 @@ export function registerIpcHandlers(service: AppService): void {
   )
   ipcMain.handle(
     'gfs:listChildren',
-    async (event, payload: { resourceId: string; drive?: string; cursor?: string }) => {
+    async (
+      event,
+      payload: { resourceId: string; drive?: string; cursor?: string; requestId?: string }
+    ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
       const cursor = payload?.cursor ? sanitizeString(payload.cursor) : undefined
-      return service.listGfsChildren(sanitizeString(payload?.resourceId), drive, cursor)
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      return runWithGfsAbortSignal(requestId, signal =>
+        service.listGfsChildren(sanitizeString(payload?.resourceId), drive, cursor, signal)
+      )
     }
   )
   ipcMain.handle(
@@ -594,6 +775,99 @@ export function registerIpcHandlers(service: AppService): void {
       return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
     }
   )
+  // Streamed, file-backed folder-zip assembly (R1-H2): entries append to a
+  // main-process temp file, finish saves through a native dialog. All five
+  // channels trust-check.
+  //
+  // The MAIN process owns the guarantees here (the renderer is untrusted):
+  //   - every entry name is validated as a canonical relative path BEFORE a
+  //     byte of entry data is written (R3-M1);
+  //   - the aggregate byte/entry budget, the ZIP32 bounds, the job's owner and
+  //     the concurrency bounds are enforced here, not only in the renderer
+  //     (R3-M2);
+  //   - the job owns its handle and its temp file until the save completes
+  //     (R3-M3).
+  //
+  // The job is bound to the window that opened it: another window cannot
+  // append to, finish or abort it.
+  ipcMain.handle('gfs:zipStream:start', async event => {
+    assertTrustedSender(event)
+    return { jobId: await startZipJob(zipJobOwnerId(event)) }
+  })
+  ipcMain.handle(
+    'gfs:zipStream:append',
+    async (event, payload: { jobId: string; name: string; bytes: ArrayBuffer }) => {
+      assertTrustedSender(event)
+      const name = sanitizeString(payload?.name)
+      if (!name) throw new Error('zipStream append requires an entry name')
+      if (!(payload?.bytes instanceof ArrayBuffer)) {
+        throw new Error('zipStream append requires entry bytes')
+      }
+      if (payload.bytes.byteLength > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('zip entry exceeds the allowed maximum')
+      }
+      const writtenName = await appendZipEntry(
+        sanitizeString(payload.jobId),
+        zipJobOwnerId(event),
+        name,
+        payload.bytes
+      )
+      return { name: writtenName }
+    }
+  )
+  // The folder-zip transfer (R1-H2): the main process fetches the resource and
+  // writes it straight into the temp file, chunk by chunk. The payload never
+  // crosses the IPC boundary and never materializes as one buffer in either
+  // process — the renderer only learns the entry's name and size.
+  ipcMain.handle(
+    'gfs:zipStream:appendFromUri',
+    async (
+      event,
+      payload: { jobId: string; name: string; uri: string; maxBytes: number; requestId?: string }
+    ) => {
+      assertTrustedSender(event)
+      const name = sanitizeString(payload?.name)
+      if (!name) throw new Error('zipStream appendFromUri requires an entry name')
+      const uri = sanitizeString(payload?.uri)
+      if (!uri) throw new Error('zipStream appendFromUri requires a resource URI')
+      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+      if (maxBytes === undefined) {
+        throw new Error('zipStream appendFromUri requires a positive maxBytes')
+      }
+      if (maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('zip entry exceeds the allowed maximum')
+      }
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      const result = await runWithGfsAbortSignal(requestId, signal =>
+        appendZipEntryStreaming(
+          sanitizeString(payload.jobId),
+          zipJobOwnerId(event),
+          name,
+          async sink => {
+            await service.downloadGfsUriInto(uri, maxBytes, signal, chunk => sink.write(chunk))
+          },
+          {}
+        )
+      )
+      return { name: result.name, bytes: result.bytes }
+    }
+  )
+  ipcMain.handle(
+    'gfs:zipStream:finish',
+    async (event, payload: { jobId: string; suggestedName: string }) => {
+      assertTrustedSender(event)
+      return finishZipJob(
+        sanitizeString(payload.jobId),
+        zipJobOwnerId(event),
+        sanitizeString(payload.suggestedName)
+      )
+    }
+  )
+  ipcMain.handle('gfs:zipStream:abort', async (event, payload: { jobId: string }) => {
+    assertTrustedSender(event)
+    await abortZipJob(sanitizeString(payload.jobId), zipJobOwnerId(event))
+    return { aborted: true }
+  })
   ipcMain.handle(
     'gfs:createFolder',
     async (event, payload: { parentResourceId: string; name: string; drive?: string }) => {
@@ -787,15 +1061,32 @@ export function registerIpcHandlers(service: AppService): void {
     'gfs:moveResource',
     async (
       event,
-      payload: { resourceId: string; destinationId: string; drive?: string; ifMatch?: number }
+      payload: {
+        resourceId: string
+        destinationId: string
+        expectedSessionGeneration: number
+        drive?: string
+        ifMatch?: number
+        newName?: string
+      }
     ) => {
       assertTrustedSender(event)
+      const requestedGeneration = payload?.expectedSessionGeneration
+      if (
+        typeof requestedGeneration !== 'number' ||
+        !Number.isSafeInteger(requestedGeneration) ||
+        requestedGeneration < 0
+      ) {
+        throw new Error('invalid_session_generation')
+      }
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
       return service.moveGfsResource(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.destinationId),
+        requestedGeneration,
         drive,
-        sanitizeOptionalInteger(payload?.ifMatch)
+        sanitizeOptionalInteger(payload?.ifMatch),
+        payload?.newName !== undefined ? sanitizeString(payload.newName) : undefined
       )
     }
   )
@@ -1817,7 +2108,7 @@ export function registerIpcHandlers(service: AppService): void {
       event,
       payload: {
         agentRef: string
-        sessions?: Array<{ chatId?: unknown; lastActivityAt?: unknown }>
+        sessions?: Array<{ chatId?: unknown; lastActivityAt?: unknown; title?: unknown }>
       }
     ) => {
       assertTrustedSender(event)
@@ -1829,6 +2120,8 @@ export function registerIpcHandlers(service: AppService): void {
               chatId: sanitizeString(session?.chatId),
               lastActivityAt:
                 typeof session?.lastActivityAt === 'string' ? session.lastActivityAt : undefined,
+              title:
+                typeof session?.title === 'string' ? session.title.trim() || undefined : undefined,
             }))
             .filter(session => Boolean(session.chatId))
         : []
@@ -1840,25 +2133,20 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     const agentRef = sanitizeString(payload?.agentRef)
     if (!agentRef) throw new Error('agentRef is required')
-    const store = requireChatStore()
-    // The catalog read must never depend on the deleted-chat artifact cleanup:
-    // a cleanup failure (scope changed mid-flight, no session, an unreadable
-    // chats directory) would otherwise reject the read and leave the renderer
-    // without the tombstones it filters deleted chats with. The failure is
-    // reported with its code and the cleanup stays queued for the next read.
-    // Only this agent's queue is retried (the renderer reads every agent in a
-    // fan-out); the store walks every agent once per bind on its own.
-    try {
-      const authority = service.getChatDeletionFenceAuthority()
-      await store.retryPendingDeleteCleanups(authority.authorityScope, agentRef)
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException | undefined)?.code
-      console.warn(
-        `[chat:getIndex] Deleted-chat cleanup retry failed for agent "${agentRef}"${code ? ` (${code})` : ''}; returning the index with its tombstones`,
-        error
-      )
-    }
-    return store.getIndex(agentRef)
+    return runChatGetIndex(
+      {
+        store: requireChatStore(),
+        getChatDeletionFenceAuthority: () => service.getChatDeletionFenceAuthority(),
+        warnCleanupFailure: error => {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code
+          console.warn(
+            `[chat:getIndex] Deleted-chat cleanup retry failed for agent "${agentRef}"${code ? ` (${code})` : ''}; returning the index with its tombstones`,
+            error
+          )
+        },
+      },
+      agentRef
+    )
   })
 
   ipcMain.handle('chat:dismissOnboarding', async (event, payload: { agentRef: string }) => {
@@ -2033,6 +2321,11 @@ export function registerIpcHandlers(service: AppService): void {
     return { x, y, width, height, dpr }
   }
 
+  // `sandboxUi:open` and `sandboxUi:close` must reach the AppService queue with
+  // no `await` before it, in both handlers: a close the renderer sends right
+  // after an open for the same launch would otherwise be enqueued first and
+  // miss the view the open then mounts. `sandboxUi:reload` follows the same
+  // rule, so main serves it in the order the renderer sent it.
   ipcMain.handle(
     'sandboxUi:open',
     async (
@@ -2060,6 +2353,7 @@ export function registerIpcHandlers(service: AppService): void {
       const bounds = parseBounds(payload?.bounds)
       const appRef = `${recipeNs}/${recipeName}`
       await service.openSandboxUi({
+        launchId,
         recipeNs,
         recipeName,
         // Human title from the installed recipe, used verbatim in consent
@@ -2070,13 +2364,22 @@ export function registerIpcHandlers(service: AppService): void {
         routePath: typeof payload?.routePath === 'string' ? payload.routePath : undefined,
         bounds,
         parentWindow,
-        onClosed: () => {
+        // Only the window the view was mounted in owns it.
+        onReleased: released => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:closed', { appRef, launchId })
+          parentWindow.webContents.send('sandboxUi:released', {
+            launchId: released.launchId,
+            reason: released.reason,
+            location: released.location,
+          })
         },
         onRefreshError: message => {
           if (parentWindow.isDestroyed()) return
           parentWindow.webContents.send('sandboxUi:refreshError', { appRef, launchId, message })
+        },
+        onRefreshRecovered: () => {
+          if (parentWindow.isDestroyed()) return
+          parentWindow.webContents.send('sandboxUi:refreshRecovered', { appRef, launchId })
         },
         onTitleChanged: title => {
           if (parentWindow.isDestroyed()) return
@@ -2086,23 +2389,21 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
 
-  ipcMain.handle('sandboxUi:close', async event => {
+  // The launch id is mandatory: a close that names no launch, or a malformed
+  // one, must not degrade into closing whatever view is live, which another
+  // launch may own by the time the queue reaches it.
+  ipcMain.handle('sandboxUi:close', async (event, payload?: { launchId?: unknown } | null) => {
     assertTrustedSender(event)
-    await service.closeSandboxUi()
+    const launchId = parseSandboxUiLaunchId(payload?.launchId)
+    await service.closeSandboxUi({ launchId })
   })
 
-  ipcMain.handle('sandboxUi:reload', async event => {
+  // Same launch-id contract as close: a reload that names no launch must not
+  // degrade into reloading whatever view is live.
+  ipcMain.handle('sandboxUi:reload', async (event, payload?: { launchId?: unknown } | null) => {
     assertTrustedSender(event)
-    await service.reloadSandboxUi()
-  })
-
-  // Read the active embed's current in-app route so the renderer can persist it
-  // on the app tab before deactivation (mini-spec 05 §1). Returns null when no
-  // embed is mounted; rejects when the current URL is outside the recipe prefix
-  // (the renderer treats a rejection as "fall back to the default route").
-  ipcMain.handle('sandboxUi:getLocation', async event => {
-    assertTrustedSender(event)
-    return service.getSandboxUiLocation()
+    const launchId = parseSandboxUiLaunchId(payload?.launchId)
+    await service.reloadSandboxUi({ launchId })
   })
 
   ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {

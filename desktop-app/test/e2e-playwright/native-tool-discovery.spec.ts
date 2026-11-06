@@ -25,6 +25,7 @@ const BRIDGE_TOOLS = ['clerum__tool_search', 'clerum__tool_describe', 'clerum__t
 const DEFERRED_GENERATORS = [
   'clerum__generate_chart',
   'clerum__generate_dashboard',
+  'clerum__generate_docx',
   'clerum__generate_pdf',
   'clerum__generate_pptx',
   'clerum__generate_xlsx',
@@ -214,16 +215,16 @@ test('a small generator stays directly listed in both modes', async ({
   const since = new Date().toISOString()
   await send(
     page,
-    `Create a short Word (docx) document with one paragraph about water, file name r2-${runId}.docx. Use the docx generation tool directly and attach the file.`
+    `Create a short Markdown (md) document with one paragraph about water, file name r2-${runId}.md. Use the markdown generation tool directly and attach the file.`
   )
   await expectSettledAnswer(page)
-  const fileName = await expectGeneratedFile(page, 'docx')
+  const fileName = await expectGeneratedFile(page, 'md')
 
   const events = hostEventsSince(since)
   const selected = selectedToolNames(events)
-  await attachEvidence(testInfo, 'docx-turn', { fileName, selected, events })
+  await attachEvidence(testInfo, 'markdown-turn', { fileName, selected, events })
   expectPresentation(events, selected)
-  expect(selected).toContain('clerum__generate_docx')
+  expect(selected).toContain('clerum__generate_markdown')
   expect(selected).not.toContain('clerum__tool_call')
 })
 

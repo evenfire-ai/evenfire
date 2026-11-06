@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM node:24-alpine AS builder
+FROM node:24.22.1-alpine AS builder
 
 WORKDIR /app
 
@@ -28,7 +28,7 @@ COPY workflow-recipes/tsconfig.json workflow-recipes/tsconfig.build.json ./
 COPY workflow-recipes/src ./src
 RUN npm run build:docker
 
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 
 WORKDIR /app
 

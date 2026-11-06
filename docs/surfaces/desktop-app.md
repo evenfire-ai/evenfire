@@ -15,10 +15,9 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
 
 ## The daily loop
 
-1. **Log in.** Password login posts to `POST /api/v1/auth/password-login`;
-   Google login posts an already-issued `idToken` to
-   `POST /api/v1/auth/google` — the token has to already exist, since the
-   app does not drive a full OAuth browser redirect yet. Once a session is
+1. **Log in.** The sign-in screen offers email and password, posted to
+   `POST /api/v1/auth/password-login`. (The main process also exposes a
+   Google `idToken` login IPC, but no screen uses it today.) Once a session is
    established, it is restored from the OS keychain via `keytar`, with a
    local file fallback when no keychain is available.
 2. **Pick a team.** Team listing and switching read the access catalog:
@@ -95,11 +94,16 @@ link.
 
 ## Screens
 
-The app's top-level navigation (`NavItem` in
-`desktop-app/ui/src/uiTypes.ts`) covers: chat, agents, mcp-servers, contexts,
-teams, workflows, sandbox-ui, files, and settings. Outside that authenticated
-shell sit two more states: the auth page (login) and `UnavailablePage`, shown
-instead of login when a required backend dependency is unreachable.
+The app's top-level routes (`DESKTOP_ROUTES` in
+`desktop-app/ui/src/constants/navigation.ts`) are: **Chat** (`chat`),
+**Apps** (`sandbox-ui`), **Agents** (`agents`), **Connectors**
+(`mcp-servers`), **Plugins** (`workflows`), **EvenDrive** (`files`), a file
+`preview` view, and **Settings**. Inside an agent, the workspace has
+Connectors, Members and Activity sub-routes (plus **Agent Files** when the
+app is built with `VITE_SHOW_AGENT_FILES_UI`). Outside that
+authenticated shell sit the first-run onboarding flow, the auth page (login),
+and `UnavailablePage`, shown instead of login when a required backend
+dependency is unreachable.
 
 Two screens worth calling out specifically:
 
@@ -113,12 +117,13 @@ Two screens worth calling out specifically:
   fourth top-level product.
 
   Below, the LeadForge recipe's own dashboard runs inside the Desktop App's
-  frame — the app's rail and its "Back to apps" bar are still in charge, and
+  frame — the Desktop App's own navigation stays in charge, and
   everything the plugin's UI loads comes through `rpc-proxy`. The plugin gets
   a real interface; it does not get a second client to install.
 
-  ![The LeadForge plugin's dashboard rendered inside the Evenfire Desktop App: the app's own icon rail and "Back to apps" bar surround a recipe-supplied prospecting UI showing contact, company, and outreach-funnel counters](../assets/desktop-app-sandbox-ui.webp)
-  *Dev cluster, demo tenant.*
+  ![The LeadForge plugin's dashboard rendered inside the Evenfire Desktop App: the app's own icon rail surrounds a recipe-supplied prospecting UI showing contact, company, and outreach-funnel counters](../assets/desktop-app-sandbox-ui.webp)
+  *Dev cluster, demo tenant. Captured before the "Back to apps" bar was
+  removed; the sidebar now returns you to the app picker.*
 
 ## How it is wired
 
@@ -167,51 +172,140 @@ the frontend process, and tear every port-forward down together on exit.
 
 ## Ship it to your users
 
-This is documentation for build tooling that has existed in this repo all
-along (`desktop-app/forge.config.js`) without ever being written up.
-
-`electron-forge` is already configured with these makers:
+`electron-forge` (`desktop-app/forge.config.js`) is configured with these
+makers:
 
 - **zip** — macOS, Windows, and Linux
 - **dmg** — macOS
-- **squirrel** — Windows
+- **squirrel** — Windows (`EvenfireSetup.exe`)
 - **deb** and **rpm** — Linux
 
-Six `npm` scripts in `desktop-app/package.json` drive them, each running
-`electron-forge make --platform=<platform> --arch=<arch>` (packaging always
-runs `npm run build` first, via the forge `prePackage` hook):
+### Prepare the toolchain
 
-| Script              | Platform | Arch  |
-| ------------------- | -------- | ----- |
-| `make:mac:x64`      | darwin   | x64   |
-| `make:mac:arm64`    | darwin   | arm64 |
-| `make:windows:x64`  | win32    | x64   |
-| `make:windows:arm64`| win32    | arm64 |
-| `make:linux:x64`    | linux    | x64   |
-| `make:linux:arm64`  | linux    | arm64 |
+Packaging uses the same guard as every other Desktop build. Use Node 24.22.1 or later in the Node 24 line
+(`engines.node` is `^24.22.1`), install with `npm ci` **without**
+`--ignore-scripts` so Electron's `postinstall` downloads the runtime, then run
+the check:
+
+```bash
+cd desktop-app
+npm ci
+npm run verify:electron   # fails unless Node is 24.x >=24.22.1 and `electron` resolves to a runtime
+```
+
+A skipped `postinstall` still lets `npm ci` exit 0; `verify:electron` is what
+catches it. If it reports that Electron is not installed, switch to Node 24 and
+rerun `npm ci`. Do not set `ELECTRON_SKIP_BINARY_DOWNLOAD`.
+
+### Build installers
+
+Six `npm` scripts in `desktop-app/package.json` drive the makers, each running
+`electron-forge make --platform=<platform> --arch=<arch>`. Packaging runs
+`npm run build` first through the forge `prePackage` hook (set
+`EVENFIRE_SKIP_PACKAGE_BUILD=1` to reuse an existing build). `desktop-app/Makefile`
+has no packaging targets — only install, build, dev, start, clean,
+reinstall, and port-forward helpers — so use the scripts directly:
+
+| Script               | Platform | Arch  | Makers                |
+| -------------------- | -------- | ----- | --------------------- |
+| `make:mac:x64`       | darwin   | x64   | zip, dmg              |
+| `make:mac:arm64`     | darwin   | arm64 | zip, dmg              |
+| `make:windows:x64`   | win32    | x64   | zip, squirrel         |
+| `make:windows:arm64` | win32    | arm64 | zip, squirrel         |
+| `make:linux:x64`     | linux    | x64   | zip, deb, rpm         |
+| `make:linux:arm64`   | linux    | arm64 | zip, deb, rpm         |
+
+Output lands in `desktop-app/out/` (git-ignored). Run the macOS scripts on a
+macOS host. Signing and notarization run only when the **build host** is macOS
+(and `ENABLE_APPLE_CODESIGN=1`). The adaptive-icon step (`xcrun actool`) runs
+for every **darwin target**, whatever the host, and needs `xcrun`, which exists
+only on macOS. It is best-effort: on failure it falls back to the static icon,
+unless `EVENFIRE_REQUIRE_ADAPTIVE_ICONS=1` makes the failure stop the build.
+
+The package is built with ASAR integrity validation, `OnlyLoadAppFromAsar`, and
+the `RunAsNode`, `NODE_OPTIONS`, and inspector-argument fuses turned off.
+
+### Signing and notarization
+
+| Platform | What the config supports                                                                                                    |
+| -------- | --------------------------------------------------------------------------------------------------------------------------- |
+| macOS    | Opt-in code signing and notarization, enabled only when `ENABLE_APPLE_CODESIGN=1` on a macOS build host. Off by default.    |
+| Windows  | No signing configuration. Squirrel and zip output is unsigned.                                                              |
+| Linux    | No signing configuration for deb, rpm, or zip.                                                                              |
+
+macOS variables (names only — keep the values in your keychain or CI secrets):
+
+| Variable                                                  | Effect                                                                                       |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `ENABLE_APPLE_CODESIGN`                                   | `1` turns on `osxSign` and `osxNotarize`. Any other value leaves the build unsigned.          |
+| `APPLE_CODESIGN_IDENTITY`                                 | Optional signing identity passed to `osxSign`.                                               |
+| `APPLE_KEYCHAIN`                                          | Optional keychain for signing and for keychain-profile notarization.                         |
+| `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`   | Notarize with an App Store Connect API key. All three are needed together.                   |
+| `APPLE_KEYCHAIN_PROFILE`                                  | Notarize with a stored `notarytool` keychain profile instead of the API key.                 |
+| `APPLE_BUNDLE_ID`                                         | Bundle identifier. Default `ai.evenfire.desktop`.                                            |
+
+With `ENABLE_APPLE_CODESIGN=1`, the build fails at config load unless one of the
+two notarization credential sets is present.
+
+**There is no published build pipeline in this repo.** No workflow in
+`.github/workflows` runs `electron-forge make` or attaches installers to a
+release: CI only runs `verify:electron`, the build, and the tests. (The
+`mcp-host-desktop` image built there is a container image, not the Electron
+app.) Signed installers are produced by whoever runs the scripts above with
+their own Apple credentials.
+
+### Versions and updates
+
+The Desktop version is the `version` in `desktop-app/package.json`.
+`scripts/release/prepare-release.mjs --version <x.y.z> --release-id <id>
+[--minimum-desktop-version <x.y.z>]` bumps it together with the release
+manifest in `external-rest-api/src/releaseManifest.ts`. There is no separate
+desktop tag: the update link targets `v<desktopVersion>`, the platform release
+tag of the release that last bumped the Desktop version.
+
+Updates are **detected, not installed**. After sign-in the app calls the
+selected environment's External REST API `GET /api/v1/desktop/release`, which
+returns the manifest's `desktopVersion` and `minimumDesktopVersion`, a
+`releaseTag` of `v<desktopVersion>`, and a `releaseUrl` of
+`<EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL>/tag/<releaseTag>` (default base
+`https://github.com/evenfire-ai/evenfire/releases`). If the installed version is
+below `minimumDesktopVersion`, the app shows **Desktop update required**;
+**Download update** opens `releaseUrl` in the browser. The app has no
+`autoUpdater` and never downloads or installs a build itself. Point
+`EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL` at wherever you publish your own
+installers. The user-facing flow is in
+[Desktop setup & updates](../how-to/desktop-setup-and-updates.md).
+
+### Point the app at an instance
 
 You ship **one** packaged app, not a build per customer. A packaged build does
 **not** read `EXTERNAL_REST_API_BASE_URL` or `RPC_PROXY_BASE_URL` from the
 environment — those apply only to unpackaged dev runs, since
-`desktop-app/src/config.ts` gates them behind `!app.isPackaged`. Instead, each
+`desktop-app/src/config.ts` gates them behind `!app.isPackaged`. (The one
+exception is a packaged build launched with `--evenfire-desktop-dev-package`
+whose two URLs are the localhost defaults; it is for local packaging tests.)
+Instead, each
 user points the installed app at whatever instance they want — your hosted
 service, a teammate's, or local `make`-forwarded services — from the app's own
 **Environment** screen: name it, paste the External REST API URL, Save. The RPC
 proxy address follows from that environment; there is no second URL to enter.
-Environments can also be pre-seeded for a fleet through Profile UI's
-`evenfire://desktop-environment` deep link or a `CLERUM_DESKTOP_CONFIG_PATH`
+When Profile-to-Desktop handoff is enabled, Profile UI's
+`evenfire://desktop-environment` link selects one exact saved REST URL or asks
+the user before adding it; an already-active exact REST endpoint is retained
+before duplicate saved matches are rejected. The REST API supplies the RPC
+proxy URL. This producer is disabled by default. Release operators enable the
+`PROFILE_DESKTOP_HANDOFF_ENABLED` image-build variable only after releasing the
+updated Desktop client and retiring older supported clients. While the gate is
+off, users can copy the REST URL from Profile UI Settings and add it in Desktop.
+Fleets can also pre-seed environments with a `CLERUM_DESKTOP_CONFIG_PATH`
 config file. Adding and switching environments, the invitation setup path, and
 how a packaged app surfaces a **required** update are covered in
 [Desktop setup & updates](../how-to/desktop-setup-and-updates.md).
 
 Two variables **do** apply to a packaged build, read from the environment or
-the bundled `.env.prod`: `MEMBER_REGISTRATION_SERVICE_BASE_URL` — which has
-**no working default**, so left unset it silently falls back to the placeholder
-`https://example.com` — and `REQUEST_TIMEOUT_MS`.
-
-Code signing, notarization, and auto-update are **not covered here** — that
-work is deferred, and this page does not say whether the produced artifacts
-are signed.
+the bundled `.env.prod`: `MEMBER_REGISTRATION_SERVICE_BASE_URL` — left unset
+(or empty) it falls back to `https://registration.evenfire.ai`, the hosted
+evenfire service, so set it when you run your own — and `REQUEST_TIMEOUT_MS`.
 
 ## The `member-registration-service` gap
 
@@ -236,13 +330,16 @@ above for why leaving it unset is silently wrong rather than loudly broken.
 
 ## Limits
 
-- The Google login path expects an already-issued `idToken`; there is no
-  full OAuth browser redirect yet.
+- There is no Google or SSO sign-in screen; members sign in with email and
+  password.
 - The activity stream never carries internal reasoning / chain-of-thought
   content, and it is read-only — message submission always goes through the
   `/messages` endpoint, never the stream.
-- Code signing, notarization, and auto-update are out of scope for this page
-  — see **Ship it to your users** above.
+- macOS code signing and notarization are opt-in (`ENABLE_APPLE_CODESIGN=1`
+  on a macOS build host); Windows and Linux packages are unsigned. This repo
+  publishes no installers, and the app only detects required updates — it
+  never downloads or installs them. See
+  [Ship it to your users](#ship-it-to-your-users).
 - For the complete environment variable reference, the E2E test suites
   (Vitest IPC-harness and Playwright/Electron phases), and the full
   endpoint/scope table, see
@@ -251,6 +348,7 @@ above for why leaving it unset is silently wrong rather than loudly broken.
 
 ## Next
 
+- [Use the Desktop App](../how-to/use-the-desktop-app.md) — the end-user guide: chat, attachments, EvenDrive, shortcuts, deep links
 - [UI Surfaces](README.md) — the persona matrix across all three consoles
 - [Control UI](control-ui.md) — the admin console
 - [Profile UI](profile-ui.md) — the invited member's front door

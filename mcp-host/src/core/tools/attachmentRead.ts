@@ -381,6 +381,18 @@ export class AttachmentReadTool implements Tool {
     const notice = this.exhaustedResult(identity.attachmentId, identity.referenceId, offset)
     const noticeCost = measure(JSON.stringify(notice))
     const allowance = this.ledger.pageAllowance(this.contextWindowTokens, noticeCost)
+    // No text page can fit once the reserved notices consume the allowance.
+    // Avoid serializing, sanitizing and tokenizing full candidates on every
+    // retry; finalizeResult still charges the notice and enforces the stop.
+    if (allowance === 0) {
+      return this.ok(notice, start, {
+        identity,
+        offset,
+        fileBytes: bytes.length,
+        reservedCost: noticeCost,
+        exhausted: true,
+      })
+    }
     let binding: AttachmentReadLimit | null = end < bytes.length ? 'max_bytes' : null
     const serialized = this.serializePage(bytes, identity, offset, end, end < bytes.length, binding)
     if (measure(serialized) > allowance) {

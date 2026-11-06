@@ -20,9 +20,21 @@ export interface GfsDelegationPanelProps {
   subjectOptions: GfsDelegationSubjectOption[]
   subjectOptionsLoading?: boolean
   subjectOptionsError?: string | null
+  /** Legacy presentation details retained until all callers use the explicit check state. */
+  permissionPending?: boolean
+  permissionError?: string | null
+  /** The cached affordance result is being revalidated and cannot authorize a grant. */
+  permissionCheckPending?: boolean
+  /** The latest affordance check failed; cached bits remain non-actionable. */
+  permissionCheckFailed?: boolean
   /** Directories offer the "Include contents" toggle (default ON); files always send inherit=false. */
   isDirectory: boolean
-  onGrant: (subjectKeys: string[], bits: string[], inherit: boolean) => Promise<void>
+  onGrant: (
+    subjectKeys: string[],
+    bits: string[],
+    inherit: boolean,
+    isDraftCurrent: () => boolean
+  ) => Promise<void>
   onDetailViewChange?: (open: boolean) => void
 }
 
@@ -69,7 +81,9 @@ export interface GfsShareListItem {
  * (includeDescendants=true), consolidated per folder with the row ids a
  * confirmed edit mutates. Derivation keeps EVERY contributing folder
  * (R1-H1): a removal revokes all of them and a downgrade lowers each one
- * above the target role.
+ * above the target role. Per-row provenance (R1-M5): the grant's own bits and
+ * scope flag and every share's own bits/scope are retained — a role change
+ * rewrites only grant-backed rows and never deletes or converts shares.
  */
 export interface GfsInheritedAccessSource {
   resourceId: string
@@ -78,6 +92,16 @@ export interface GfsInheritedAccessSource {
   permissions: string[]
   grantId: string | null
   shareIds: string[]
+  /** Exact bits of this folder's grant row, when one contributes. */
+  grantPermissions: string[] | null
+  /** The grant row's own scope flag; null when no grant row exists. */
+  grantInherit: boolean | null
+  /** Every contributing share row with its own bits and descendant scope. */
+  shareEntries: Array<{
+    rowId: string
+    permissions: string[]
+    includeDescendants: boolean
+  }>
 }
 
 /**
@@ -94,4 +118,25 @@ export interface GfsInheritedAccessItem {
   inheritedFrom: string[]
   /** Every contributing ancestor folder, nearest first (R1-H1). */
   sources: GfsInheritedAccessSource[]
+}
+
+/**
+ * Terminal coverage of one inherited-access walk (R1-H3, permissions.md T1).
+ * Every non-`complete` state still carries the rows folded so far — known
+ * authorized sources are retained and stay editable; the state only decides
+ * which notice the dialog shows.
+ */
+export type GfsInheritedCoverageState =
+  | 'complete'
+  /** Resolve 403 above the readable chain: an expected privacy boundary. */
+  | 'read-boundary'
+  /** A readable ancestor's grants/shares list answered 403 (no manage_acl). */
+  | 'acl-limited'
+  /** missing / rate-limited / retryable / error / cycle / depth-cap. */
+  | 'unavailable'
+
+/** `deriveGfsInheritedAccess` result: retained rows plus honest coverage. */
+export interface GfsInheritedAccessResult {
+  items: GfsInheritedAccessItem[]
+  coverage: GfsInheritedCoverageState
 }

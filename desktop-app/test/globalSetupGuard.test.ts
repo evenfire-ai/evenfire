@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { validateBaseUrls } from './e2e-playwright/global-setup'
+import {
+  ALLOWED_CONTEXTS,
+  assertAllowedKubeContext,
+  assertHostedDevServices,
+  isLocalPortForwardContext,
+  isProductionContext,
+  validateBaseUrls,
+} from './e2e-playwright/global-setup'
 
 const DEV_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_example-dev'
 
@@ -116,5 +123,62 @@ describe('validateBaseUrls', () => {
         allowDevPortForward: false,
       })
     ).toThrow(/requires non-localhost URLs/)
+  })
+})
+
+describe('assertAllowedKubeContext', () => {
+  it('accepts a branch profile and refuses production with the same call', () => {
+    // Positive control: the guard returns for the context the A/B benchmark actually uses.
+    expect(isLocalPortForwardContext('clerum-fix-issue-1091-chat-open-latency-d7ddc3ab')).toBe(true)
+    expect(() =>
+      assertAllowedKubeContext(
+        'clerum-fix-issue-1091-chat-open-latency-d7ddc3ab',
+        'CHAT_OPEN_AB_KUBE_CONTEXT'
+      )
+    ).not.toThrow()
+    expect(isProductionContext('gke_example_us-central1-a_clerum-prod')).toBe(true)
+    expect(() =>
+      assertAllowedKubeContext('gke_example_us-central1-a_clerum-prod', 'CHAT_OPEN_AB_KUBE_CONTEXT')
+    ).toThrow(/Production context .* is hard-blocked/)
+  })
+
+  it('refuses a context that is neither a local profile nor allow-listed', () => {
+    expect(ALLOWED_CONTEXTS.has(DEV_CONTEXT)).toBe(false)
+    expect(() => assertAllowedKubeContext(DEV_CONTEXT, 'CHAT_OPEN_AB_KUBE_CONTEXT')).toThrow(
+      /CHAT_OPEN_AB_KUBE_CONTEXT=.* is not in the allow-list/
+    )
+  })
+})
+
+describe('assertHostedDevServices', () => {
+  it('checks exactly the services the Desktop lane drives', () => {
+    const asked: string[] = []
+    assertHostedDevServices('dev', (_context, namespace, service) => {
+      asked.push(`${namespace}/${service}`)
+      return 'pod-1\n'
+    })
+    expect(asked).toEqual([
+      'control-plane/control-api',
+      'profiles/external-rest-api',
+      'rpc-proxy/rpc-proxy',
+    ])
+  })
+
+  it('accepts a hosted dev context whose services have a ready endpoint', () => {
+    expect(() => assertHostedDevServices('dev', () => 'pod-1\n')).not.toThrow()
+  })
+
+  it('refuses a service without a ready endpoint', () => {
+    expect(() => assertHostedDevServices('dev', () => '\n')).toThrow(
+      /hosted dev context=dev has no ready endpoint for control-plane\/control-api/
+    )
+  })
+
+  it('refuses an unreadable service instead of starting a journey against it', () => {
+    expect(() =>
+      assertHostedDevServices('dev', () => {
+        throw new Error('connection refused')
+      })
+    ).toThrow(/has no readable endpoint for control-plane\/control-api: connection refused/)
   })
 })

@@ -8,7 +8,11 @@
  *   - endpoint  — image target: the digest-dedup Service DNS the controller
  *                 deploys (`llmhook-<podKey>.<ns>.svc`); service target: the
  *                 referenced Service DNS; remote target: the external baseUrl.
- *   - path / lifecyclePoints / capabilities / failMode / order from the CR spec.
+ *   - path / capabilities / failMode / order from the CR spec.
+ *   - lifecyclePoints — the INTERSECTION of the CR's declared points and the
+ *                 Host phase keys the hook is referenced under, so a hook runs
+ *                 only where the Host admin placed it (removing it from one
+ *                 phase stops it there even if the CR still declares it).
  *
  * The pod-key derivation MUST byte-match host-context-controller's
  * `computePodKey` (llmHookReconciler.ts) or the Service DNS won't resolve.
@@ -20,6 +24,7 @@ import type { GuardrailsConfig } from './core/guardrails/config'
 import type { HookDescriptor, LifecyclePoint } from './core/guardrails/hooks/types'
 import type { Capability } from './core/guardrails/types'
 import type { LlmHookCR } from './k8sClient'
+import { logger } from './logger'
 
 /** Host phase key (CRD/Host naming) → engine lifecycle point. */
 const PHASE_TO_POINT: Record<string, LifecyclePoint> = {
@@ -50,16 +55,34 @@ export interface ResolveHookDeps {
   llmHooksNamespace: string
 }
 
-/** Unique referenced hook ids (across all phases) → the first digest seen for each. */
-function collectRefs(guardrails: GuardrailsConfig | undefined): Map<string, string | undefined> {
-  const out = new Map<string, string | undefined>()
+interface CollectedRef {
+  /** First digest seen for this id across phases. */
+  digest: string | undefined
+  /** Engine lifecycle points this id is referenced under on the Host. */
+  points: Set<LifecyclePoint>
+}
+
+/**
+ * Unique referenced hook ids (across all phases) → the first digest seen for
+ * each, plus the set of Host phases (as engine points) the id appears under.
+ * Unknown phase keys contribute no point.
+ */
+function collectRefs(guardrails: GuardrailsConfig | undefined): Map<string, CollectedRef> {
+  const out = new Map<string, CollectedRef>()
   const hooks = guardrails?.hooks as Record<string, unknown> | undefined
   if (!hooks) return out
   for (const phase of Object.keys(hooks)) {
     const refs = hooks[phase]
     if (!Array.isArray(refs)) continue
+    const point = PHASE_TO_POINT[phase] as LifecyclePoint | undefined
     for (const r of refs as HookRef[]) {
-      if (r && typeof r.id === 'string' && !out.has(r.id)) out.set(r.id, r.digest)
+      if (!r || typeof r.id !== 'string') continue
+      let entry = out.get(r.id)
+      if (!entry) {
+        entry = { digest: r.digest, points: new Set() }
+        out.set(r.id, entry)
+      }
+      if (point) entry.points.add(point)
     }
   }
   return out
@@ -124,8 +147,7 @@ function endpointFor(cr: LlmHookCR, ns: string): ResolvedEndpoint | null {
 function isDuplicatePathLoser(cr: LlmHookCR): boolean {
   const conditions = (
     cr.status as
-      | { conditions?: Array<{ type?: string; status?: string; reason?: string }> }
-      | undefined
+      { conditions?: Array<{ type?: string; status?: string; reason?: string }> } | undefined
   )?.conditions
   return (
     Array.isArray(conditions) &&
@@ -147,27 +169,45 @@ export async function resolveGuardrailHookDescriptors(
   const refs = collectRefs(guardrails)
   const out: HookDescriptor[] = []
 
-  for (const [id, refDigest] of refs) {
+  for (const [id, ref] of refs) {
+    const refDigest = ref.digest
     let cr: LlmHookCR | null
     try {
       cr = await deps.getLlmHook(id)
     } catch (err) {
-      console.error(`[Guardrails] failed reading LlmHook ${id}:`, err)
+      logger.error(
+        { hookId: id, error: err instanceof Error ? err.message : String(err) },
+        '[Guardrails] failed reading LlmHook'
+      )
       continue
     }
     if (!cr) continue // dangling reference → skip
 
     const ep = endpointFor(cr, deps.llmHooksNamespace)
     if (!ep) {
-      console.warn(`[Guardrails] LlmHook ${id} has no resolvable target; skipping`)
+      logger.warn({ hookId: id }, '[Guardrails] LlmHook has no resolvable target; skipping')
       continue
     }
 
-    const points = (cr.spec?.lifecyclePoints ?? [])
+    const declared = (cr.spec?.lifecyclePoints ?? [])
       .map(p => PHASE_TO_POINT[p])
       .filter((p): p is LifecyclePoint => !!p)
+    if (declared.length === 0) {
+      logger.warn(
+        { hookId: id },
+        '[Guardrails] LlmHook declares no known lifecycle points; skipping'
+      )
+      continue
+    }
+    // Run the hook only at the phases the Host references it under (§8.2): the
+    // Host phase key is the admin's placement, the CR's points are what the hook
+    // supports. A Host phase the hook does not declare is ignored.
+    const points = declared.filter(p => ref.points.has(p))
     if (points.length === 0) {
-      console.warn(`[Guardrails] LlmHook ${id} declares no known lifecycle points; skipping`)
+      logger.warn(
+        { hookId: id, declared, referenced: [...ref.points] },
+        '[Guardrails] LlmHook is not referenced under any phase it declares; skipping'
+      )
       continue
     }
 
@@ -222,13 +262,15 @@ export async function resolveGuardrailHookDescriptors(
     const duplicatePathLoser = isDuplicatePathLoser(cr)
     const quarantined = digestMismatch || duplicatePathLoser
     if (digestMismatch) {
-      console.warn(
-        `[Guardrails] LlmHook ${id} digest mismatch (ref=${refDigest} observed=${cr.status?.observedDigest}); quarantining (fail-closed for may_deny)`
+      logger.warn(
+        { hookId: id, refDigest, observedDigest: cr.status?.observedDigest },
+        '[Guardrails] LlmHook digest mismatch; quarantining (fail-closed for may_deny)'
       )
     }
     if (duplicatePathLoser) {
-      console.warn(
-        `[Guardrails] LlmHook ${id} is a DuplicatePath collision loser (Ready=False); quarantining (fail-closed for may_deny)`
+      logger.warn(
+        { hookId: id },
+        '[Guardrails] LlmHook is a DuplicatePath collision loser (Ready=False); quarantining (fail-closed for may_deny)'
       )
     }
 
@@ -245,8 +287,20 @@ export async function resolveGuardrailHookDescriptors(
       ...(contentAccess ? { contentAccess } : {}),
       ...(quarantined ? { quarantined: true } : {}),
     })
-    console.log(
-      `[Guardrails] resolved hook ${id} -> ${ep.endpoint}${path} points=[${points.join(',')}] caps=[${capabilities.join(',')}] failMode=${failMode}${external ? ' external=true(SSRF-guarded)' : ''}${quarantined ? ` quarantined=true(${duplicatePathLoser ? 'duplicate-path' : 'digest-mismatch'})` : ''}`
+    logger.info(
+      {
+        hookId: id,
+        endpointKind: ep.kind,
+        path,
+        points,
+        capabilities,
+        failMode,
+        external,
+        ...(quarantined
+          ? { quarantined: duplicatePathLoser ? 'duplicate-path' : 'digest-mismatch' }
+          : {}),
+      },
+      '[Guardrails] resolved hook'
     )
   }
 

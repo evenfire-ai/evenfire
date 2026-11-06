@@ -1,4 +1,4 @@
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 WORKDIR /app
 COPY tests/e2e/fixtures/codex-subscription/approved-tools/server.mjs ./server.mjs
 USER node

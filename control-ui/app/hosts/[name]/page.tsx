@@ -15,6 +15,7 @@ import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapability
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
 import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
@@ -104,7 +105,7 @@ function parseHostTab(value: string | undefined): HostTab {
 }
 
 function contextResourceName(context: ContextResource | null): string {
-  return String(context?.metadata?.name || context?.spec?.contextId || '').trim()
+  return context?.metadata?.name ?? ''
 }
 
 function normalizeConnectorNames(value: unknown): string[] {
@@ -333,8 +334,12 @@ export default function HostDetailsPage() {
   // and carry the resourceVersion without exposing the context in the UI.
   const [agentContext, setAgentContext] = useState<ContextResource | null>(null)
   const [availableConnectorNames, setAvailableConnectorNames] = useState<string[]>([])
+  const [connectorAuthenticationByName, setConnectorAuthenticationByName] = useState<
+    Record<string, string>
+  >({})
   const [connectorCatalogLoaded, setConnectorCatalogLoaded] = useState(false)
   const [connectorCatalogLoading, setConnectorCatalogLoading] = useState(false)
+  const connectorCatalogAttemptedRef = useRef(false)
   const [showAddConnector, setShowAddConnector] = useState(false)
   const [selectedConnectorNames, setSelectedConnectorNames] = useState<string[]>([])
   const [hostStatusLabel, setHostStatusLabel] = useState('Unknown')
@@ -583,10 +588,14 @@ export default function HostDetailsPage() {
         setContextRefDraft(overview.contextRef)
         setChannelsDraft(overview.channels)
         // Overview read-only summary: linked context's MCP servers + access counts.
-        const ref = overview.contextRef.trim()
-        const matched = (contextsList || []).find(
-          item => String(item.spec?.contextId || item.metadata?.name || '').trim() === ref
-        ) as ContextResource | undefined
+        // The token broker resolves a Host's Context by exact name; spec.contextId is only an
+        // alias and must not redirect connector edits to another Context.
+        const ref = overview.contextRef
+        const matched = ref
+          ? ((contextsList || []).find(item => item.metadata?.name === ref) as
+              | ContextResource
+              | undefined)
+          : undefined
         setAgentContext(matched ?? null)
         const servers = normalizeConnectorNames(matched?.spec?.mcpServers)
         setContextMcpServers(servers)
@@ -694,26 +703,44 @@ export default function HostDetailsPage() {
     void loadData()
   }, [routeName])
 
+  const loadConnectorCatalog = useCallback(async (force = false) => {
+    if (!force && connectorCatalogAttemptedRef.current) return
+    connectorCatalogAttemptedRef.current = true
+    setConnectorCatalogLoading(true)
+    try {
+      const response = await getMcpServers()
+      const connectors = (response.items || []).flatMap(item => {
+        const name = String(item.metadata?.name || '').trim()
+        if (!name) return []
+        const spec = item.spec || {}
+        const auth =
+          spec.auth && typeof spec.auth === 'object' ? (spec.auth as Record<string, unknown>) : {}
+        return [{ name, authentication: connectorAuthenticationLabel(auth.type) }]
+      })
+      const names = connectors.map(connector => connector.name).sort((a, b) => a.localeCompare(b))
+      setAvailableConnectorNames(Array.from(new Set(names)))
+      setConnectorAuthenticationByName(
+        Object.fromEntries(connectors.map(connector => [connector.name, connector.authentication]))
+      )
+      setConnectorCatalogLoaded(true)
+    } catch (e) {
+      connectorCatalogAttemptedRef.current = false
+      setError(e instanceof Error ? e.message : 'Failed to load available connectors.')
+    } finally {
+      setConnectorCatalogLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (activeTab === 'connectors') void loadConnectorCatalog()
+  }, [activeTab, loadConnectorCatalog])
+
   async function openAddConnectorDialog() {
     setSelectedConnectorNames([])
     setShowAddConnector(true)
     setError('')
     if (connectorCatalogLoaded || connectorCatalogLoading) return
-
-    setConnectorCatalogLoading(true)
-    try {
-      const response = await getMcpServers()
-      const names = (response.items || [])
-        .map(item => String(item.metadata?.name || '').trim())
-        .filter(Boolean)
-        .sort((a, b) => a.localeCompare(b))
-      setAvailableConnectorNames(Array.from(new Set(names)))
-      setConnectorCatalogLoaded(true)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load available connectors.')
-    } finally {
-      setConnectorCatalogLoading(false)
-    }
+    await loadConnectorCatalog(true)
   }
 
   async function saveAgentConnectors(nextServers: string[]): Promise<boolean> {
@@ -728,13 +755,12 @@ export default function HostDetailsPage() {
 
     const normalizedServers = normalizeConnectorNames(nextServers)
     const currentSpec = (agentContext?.spec || {}) as Record<string, unknown>
-    const contextId = String(currentSpec.contextId || contextName).trim()
-    if (!contextId) {
-      setError(
-        'Connector settings are not available for this agent yet. Reload the agent and try again.'
-      )
-      return false
-    }
+    // Forwarded untouched: control-api rejects a changed alias that differs from the name, so
+    // normalizing an externally written value would block every edit of this Context.
+    const contextId =
+      typeof currentSpec.contextId === 'string' && currentSpec.contextId
+        ? currentSpec.contextId
+        : contextName
 
     setBusy(true)
     setError('')
@@ -1628,19 +1654,20 @@ export default function HostDetailsPage() {
                 <thead>
                   <tr>
                     <th>Connector</th>
+                    <th>Authentication</th>
                     <th className="cu-table__col-actions">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {initialLoading ? (
                     <tr>
-                      <td colSpan={2} className="cu-empty">
+                      <td colSpan={3} className="cu-empty">
                         Loading…
                       </td>
                     </tr>
                   ) : contextMcpServers.length === 0 ? (
                     <tr>
-                      <td colSpan={2} className="cu-empty">
+                      <td colSpan={3} className="cu-empty">
                         No connectors attached yet.
                       </td>
                     </tr>
@@ -1649,6 +1676,16 @@ export default function HostDetailsPage() {
                       <tr key={server}>
                         <td>
                           <span className="cu-table__cell-name">{server}</span>
+                        </td>
+                        <td>
+                          {connectorCatalogLoading ? (
+                            <span className="cu-connector-badge">Loading…</span>
+                          ) : !connectorCatalogLoaded ||
+                            connectorAuthenticationByName[server] === '' ? null : (
+                            <span className="cu-connector-badge">
+                              {connectorAuthenticationByName[server] ?? 'Unknown'}
+                            </span>
+                          )}
                         </td>
                         <td className="cu-table__cell-actions">
                           <div className="cu-table-actions">

@@ -92,8 +92,8 @@ type Config = {
   // Publisher UI surface (Sidebar entry + /publisher route) toggle, surfaced
   // to control-ui on the publish-scope response. Static config value — not
   // part of resolvePublishScope()'s cached registry-derived fields. Default
-  // OFF for self-hosted deploys, ON for managed; CONTROL_API_PUBLISHER_UI_ENABLED
-  // overrides the default either way.
+  // ON for every deploy (managed and self-hosted);
+  // CONTROL_API_PUBLISHER_UI_ENABLED='false' disables it.
   publisherUiEnabled: boolean
   adminAuthMaxFailures: number
   adminAuthLockMinutes: number
@@ -171,6 +171,7 @@ type Config = {
   // also guards implausibly-low provider counts.
   llmCatalogSyncProviderMinLive: number
   registryPullSecretReconcileIntervalMs: number
+  oauthSharedGrantSweepIntervalMs: number
   // OAuth proactive-refresh cron (mini-spec L). Default OFF until e2e; renews
   // remote access tokens inside the proactive window so a background grant's
   // rotating refresh token is exercised before it lapses, and sweeps DCR
@@ -516,6 +517,7 @@ const SANDBOX_UI_NAMESPACE = process.env.CONTROL_API_SANDBOX_UI_NAMESPACE || 'sa
 const DEFAULT_MCP_HOST_JWT_MAX_HOST_REFS = 32
 const DEFAULT_MCP_HOST_JWT_MAX_HOST_REF_LENGTH = 63 + 1 + 253
 const REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS = 10_000
+const OAUTH_SHARED_GRANT_SWEEP_MIN_INTERVAL_MS = 10_000
 // A 24h-default cron should never be dialed below a minute — refuse a hot loop.
 const LLM_CATALOG_SYNC_MIN_INTERVAL_MS = 60_000
 // Image-input evidence written by a sync expires this long after the capture it
@@ -698,9 +700,8 @@ if (memberRegistrationMode === 'hosted') {
   }
 }
 
-// Computed once so registryConnectionMode and publisherUiEnabled's mode-based
-// default read the exact same resolved value below (rather than re-parsing
-// REGISTRY_CONNECTION_MODE a second time).
+// Computed once so every consumer below reads the exact same resolved value
+// (rather than re-parsing REGISTRY_CONNECTION_MODE a second time).
 const registryConnectionMode: 'managed' | 'self-hosted' = parseRegistryConnectionMode()
 
 // Computed as locals because the two values are coupled: image-input evidence
@@ -947,6 +948,14 @@ export const config: Config = {
     'REGISTRY_PULL_SECRET_RECONCILE_INTERVAL_MS',
     600_000,
     REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS
+  ),
+  // Shared OAuth grant sweep: purges `context`-scope grants that no Context enables any
+  // more. Always on. Each tick is one Context list plus one delete per Context, so the
+  // floor only rules out a hot loop.
+  oauthSharedGrantSweepIntervalMs: intervalMsFromEnv(
+    'OAUTH_SHARED_GRANT_SWEEP_INTERVAL_MS',
+    600_000,
+    OAUTH_SHARED_GRANT_SWEEP_MIN_INTERVAL_MS
   ),
   // OAuth proactive-refresh cron (mini-spec L). Default OFF: `=== 'true'`, so the
   // sweep stays dark until an operator opts in after e2e.

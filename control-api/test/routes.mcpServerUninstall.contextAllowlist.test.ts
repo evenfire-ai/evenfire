@@ -13,14 +13,15 @@ import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.
 import { MockGateway } from './mockGateway.js'
 
 /**
- * The McpServer uninstall vs. the Context allowlist writers of the install routes
- * (R3-H5b + R3-S6), observed as the FINAL allowlist (T4).
+ * The McpServer uninstall vs. the Context allowlist writer that enables a server,
+ * observed as the FINAL allowlist (T4).
  *
- * Both concurrent actors are the real routes mounted on one app over one stateful
- * MockGateway: the generic uninstall (`DELETE /admin/mcp-servers/:name`) and the
- * remote install saga (`POST /admin/mcp-servers/remote`, CIMD mode). The race is
- * forced from a gateway hook that runs one route inside the other's K8s call — no
- * allowlist write is hand-emulated (T1).
+ * Every concurrent actor is a real route mounted on one app over one stateful
+ * MockGateway: the generic uninstall (`DELETE /admin/mcp-servers/:name`), the remote
+ * install saga (`POST /admin/mcp-servers/remote`, CIMD mode), which writes no allowlist,
+ * and the console's enable (`PUT /admin/contexts/:name` with the resourceVersion it
+ * read). The race is forced from a gateway hook that runs one route inside the other's
+ * K8s call — no allowlist write is hand-emulated (T1).
  *
  * The OAuth teardown's DB is a benign empty stub: these tests are about K8s order.
  */
@@ -78,9 +79,8 @@ beforeEach(() => {
     ok: true,
     result: rfc9207Result,
   } as DiscoveryOutcome)
-  // The saga reads the Context in the gateway default namespace and the uninstall
-  // in `contextsNamespace`; pinning them together makes both address one object, as
-  // they do in production.
+  // The uninstall and the enable address the Context in `contextsNamespace`; pinning
+  // it to the gateway default keeps the seed and both writers on one object.
   prevContextsNs = config.contextsNamespace
   config.contextsNamespace = NS
   prevCallbackBaseUrl = config.oauthCallbackBaseUrl
@@ -113,10 +113,22 @@ async function seed(gw: MockGateway, servers: string[]): Promise<void> {
 
 const installBody = (serverName: string) => ({
   serverName,
-  contextRef: 'ctx-a',
   baseUrl: 'https://mcp.notion.com/mcp',
   mode: 'cimd',
 })
+
+type ContextSnapshot = { metadata: { resourceVersion?: string }; spec: Record<string, unknown> }
+
+/** The console's enable: the allowlist it read plus the server, under that resourceVersion. */
+function enable(app: express.Express, read: ContextSnapshot, serverName: string) {
+  const servers = (read.spec.mcpServers as string[] | undefined) ?? []
+  return request(app)
+    .put('/admin/contexts/ctx-a')
+    .send({
+      metadata: { resourceVersion: read.metadata.resourceVersion },
+      spec: { ...read.spec, mcpServers: [...servers, serverName] },
+    })
+}
 
 async function allowlist(gw: MockGateway): Promise<string[]> {
   const ctx = (await gw.getResource('contexts', 'ctx-a', NS)) as {
@@ -128,7 +140,7 @@ async function allowlist(gw: MockGateway): Promise<string[]> {
 describe('McpServer uninstall vs. Context allowlist writers', () => {
   // §7 row 7 (R3-H5b): a same-name reinstall can only create its CR once the old one
   // is gone. Stripping the allowlist AFTER that delete removed the reinstall's entry.
-  it('a same-name reinstall that attaches right after the CR delete keeps its allowlist entry', async () => {
+  it('a same-name reinstall enabled right after the CR delete keeps its allowlist entry', async () => {
     const gw = new MockGateway(NS)
     await seed(gw, ['srv', 'other'])
     const app = makeApp(gw)
@@ -142,7 +154,9 @@ describe('McpServer uninstall vs. Context allowlist writers', () => {
         const reinstall = await request(app)
           .post('/admin/mcp-servers/remote')
           .send(installBody('srv'))
-        reinstallStatus = reinstall.status
+        const read = (await gw.getResource('contexts', 'ctx-a', NS)) as ContextSnapshot
+        const enabled = await enable(app, read, 'srv')
+        reinstallStatus = enabled.status === 200 ? reinstall.status : enabled.status
       }
       return result
     })
@@ -156,35 +170,30 @@ describe('McpServer uninstall vs. Context allowlist writers', () => {
     expect(await allowlist(gw)).toEqual(['other', 'srv'])
   })
 
-  // §6.7 (R3-S6): an install of ANOTHER name read the Context before the uninstall's
+  // An enable of ANOTHER name read the Context before the uninstall's
   // strip and writes after it. Without a resourceVersion fence its write replays the
-  // stale list and puts the uninstalled name back.
-  it('an install of another name racing the strip does not reintroduce the uninstalled name', async () => {
+  // stale list and puts the uninstalled name back; with it, the stale write is refused
+  // and the console reloads.
+  it('an enable of another name racing the strip does not reintroduce the uninstalled name', async () => {
     const gw = new MockGateway(NS)
     await seed(gw, ['old-srv'])
     const app = makeApp(gw)
 
-    let uninstallStatus: number | undefined
-    let armed = true
-    vi.spyOn(gw, 'getResource').mockImplementation(async (plural, name, ns) => {
-      const current = await MockGateway.prototype.getResource.call(gw, plural, name, ns)
-      if (armed && plural === 'contexts' && name === 'ctx-a') {
-        armed = false
-        // The install's read is taken; the uninstall of old-srv then runs to
-        // completion before the install gets to write.
-        const stale = structuredClone(current)
-        const uninstall = await request(app).delete('/admin/mcp-servers/old-srv')
-        uninstallStatus = uninstall.status
-        return stale
-      }
-      return current
-    })
+    const install = await request(app)
+      .post('/admin/mcp-servers/remote')
+      .send(installBody('new-srv'))
+    expect(install.status).toBe(201)
+    const stale = (await gw.getResource('contexts', 'ctx-a', NS)) as ContextSnapshot
+    const uninstall = await request(app).delete('/admin/mcp-servers/old-srv')
+    expect(uninstall.status).toBe(200)
 
-    const res = await request(app).post('/admin/mcp-servers/remote').send(installBody('new-srv'))
-
-    expect(uninstallStatus).toBe(200)
-    expect(res.status).toBe(201)
+    const staleEnable = await enable(app, stale, 'new-srv')
+    expect(staleEnable.status).toBe(409)
+    expect(await allowlist(gw)).toEqual([])
     await expect(gw.getResource('mcpservers', 'old-srv', NS)).rejects.toThrow()
+
+    const fresh = (await gw.getResource('contexts', 'ctx-a', NS)) as ContextSnapshot
+    expect((await enable(app, fresh, 'new-srv')).status).toBe(200)
     expect(await allowlist(gw)).toEqual(['new-srv'])
   })
 })

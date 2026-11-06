@@ -66,6 +66,7 @@ import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
 import {
   type PreparedGfsFile,
   attachedFilesForTurnContext,
+  attachedImagesForTurnContext,
   buildTurnContextBlock,
 } from '../core/orchestration/turnContext'
 import { DefaultReasoningFactory } from '../core/reasoning'
@@ -108,6 +109,7 @@ import type {
 import { ApprovalExpiredError } from '../core/types'
 import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
+import { GFS_SAVE_ATTACHMENT_TOOL } from '../internalTools/gfs'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
@@ -187,6 +189,20 @@ export function resolveTaskSessionKey(task: Task): string {
  */
 export function executionModeForSource(source: TaskSource): 'interactive' | 'unattended' {
   return source === 'channel' ? 'interactive' : 'unattended'
+}
+
+/**
+ * The caller root generated files go under. A message with no sender would
+ * share one folder with every other sender-less message on its channel, so it
+ * gets none and the generators refuse to write. A task with no message at all
+ * (cron, system) keeps the reserved system folder.
+ */
+export function generatedOutputsRoot(
+  sourceMessage: Task['sourceMessage'],
+  callerRoot: string | undefined
+): string | undefined {
+  if (sourceMessage && !(sourceMessage.sender ?? '').trim()) return undefined
+  return callerRoot
 }
 
 export interface TaskExecutorDeps {
@@ -1240,15 +1256,19 @@ export class TaskExecutor {
     const hasFileAttachments =
       this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
     const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
-    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences) {
-      this.prependTurnContextBlock(messages)
-    }
     const promptAssemblyStart = Date.now()
     const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
+    const promptAssemblyMs = Date.now() - promptAssemblyStart
+    // The save instruction follows the registry that was actually built, so it
+    // appears exactly when the model can call the tool.
+    const saveAvailable = loopConfig.toolRegistry.get(GFS_SAVE_ATTACHMENT_TOOL) !== null
+    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences || saveAvailable) {
+      this.prependTurnContextBlock(messages, saveAvailable)
+    }
     if (this.turnTiming) {
       // buildLoopConfig assembles the tool registry (MCP schemas) and the
       // system identity (workspace files / tiered prompt parts).
-      this.turnTiming.addPromptAssemblyMs(Date.now() - promptAssemblyStart)
+      this.turnTiming.addPromptAssemblyMs(promptAssemblyMs)
       let inputChars = 0
       for (const m of messages) {
         if (typeof m.content === 'string') inputChars += m.content.length
@@ -1265,7 +1285,7 @@ export class TaskExecutor {
    * no human user text we inject a synthetic `<cron task>` placeholder so the
    * wire shape stays consistent (P1-004 §5.5).
    */
-  private prependTurnContextBlock(messages: ChatMessage[]): void {
+  private prependTurnContextBlock(messages: ChatMessage[], saveAvailable: boolean): void {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
@@ -1282,6 +1302,9 @@ export class TaskExecutor {
             }
           : undefined,
         attachedFiles: attachedFilesForTurnContext(this.task.sourceMessage?.attachments),
+        attachmentSave: saveAvailable
+          ? { images: attachedImagesForTurnContext(this.task.sourceMessage?.attachments) }
+          : undefined,
         referencedFiles: referencedFilesForTurnContext(
           this.task.sourceMessage?.fileReferenceResolutions
         ),
@@ -2285,7 +2308,8 @@ export class TaskExecutor {
       // §13 (stateless agents): the active provider's credential slot is the
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType(),
-      gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined
+      gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined,
+      generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath)
     )
     await registerDesktopTools(nativeRegistry)
     // Eagerly open this caller's remote OAuth partitions before the catalog is

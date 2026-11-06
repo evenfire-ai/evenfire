@@ -96,7 +96,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: nginx
-          image: nginx:1.30.1-alpine
+          image: nginx:1.30.6-alpine
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

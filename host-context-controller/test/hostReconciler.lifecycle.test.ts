@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { asApiserverDeployment } from '../src/__tests__/asApiserverDeployment'
 import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
@@ -58,6 +60,7 @@ vi.mock('../src/config', () => ({
     hostWorkspaceStorageClassName: 'do-block-storage-retain',
     hostWorkspaceStorageSize: '10Gi',
     hostWorkspacePath: '/workspace',
+    workspaceLayoutMerge: true,
     hostResources: {
       requests: { memory: '128Mi', cpu: '100m' },
       limits: { memory: '512Mi', cpu: '500m' },
@@ -378,8 +381,7 @@ async function mintedRuntimeCredentialRecord(
   coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
   await (producer as any).ensureMcpHostRuntimeTokenSecret(host)
   const created = coreApi.createNamespacedSecret.mock.calls.at(-1)?.[0].body as
-    | k8s.V1Secret
-    | undefined
+    k8s.V1Secret | undefined
   if (!created?.stringData) throw new Error('producer pass wrote no runtime credential Secret')
   let record: k8s.V1Secret = {
     ...created,
@@ -404,8 +406,7 @@ async function mintedRuntimeCredentialRecord(
     coreApi.readNamespacedSecret.mockResolvedValue(record)
     await (producer as any).ensureMcpHostRuntimeTokenSecret(host)
     const consumed = coreApi.replaceNamespacedSecret.mock.calls.at(-1)?.[0].body as
-      | k8s.V1Secret
-      | undefined
+      k8s.V1Secret | undefined
     if (
       consumed?.metadata?.annotations?.['clerum.io/runtime-token-bootstrap-state'] !== 'consumed'
     ) {
@@ -1481,12 +1482,11 @@ describe('HostReconciler resource rollout bootstrap', () => {
 })
 
 describe('HostReconciler stateless lifecycle — buildDeployment replicas', () => {
-  it('pins replicas=1 and maxSurge=0 for a non-stateless host', () => {
+  it('pins replicas=1 and the Recreate strategy for a non-stateless host', () => {
     const { reconciler } = createReconciler()
     const dep = reconciler.buildDeployment(makeHost())
     expect(dep.spec?.replicas).toBe(1)
-    expect(dep.spec?.strategy?.rollingUpdate?.maxSurge).toBe(0)
-    expect(dep.spec?.strategy?.rollingUpdate?.maxUnavailable).toBe(1)
+    expect(dep.spec?.strategy).toEqual({ type: 'Recreate' })
     expect(dep.spec?.template.spec?.priorityClassName).toBeUndefined()
   })
 
@@ -1866,22 +1866,22 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
     )
     expect(hostReplacements).toHaveLength(1)
     const replacement = hostReplacements[0][0].body as k8s.V1Deployment
+    // Witness: the flip really changed the lifecycle-specific template.
     expect(replacement.spec?.replicas).toBe(1)
     expect(replacement.spec?.template.spec?.priorityClassName).toBe('clerum-interactive-host')
-    expect(
-      replacement.spec?.template.spec?.initContainers?.map(container => container.name)
-    ).toContain('workspace-layout-init')
     expect(envValue(replacement, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
-    expect(replacement.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
-      name: 'workspace',
-      mountPath: '/workspace',
-      subPath: 'workspace',
+    // Storage is identical across the flip: mounts, storage env and the init.
+    const storage = (dep: k8s.V1Deployment) => ({
+      mounts: dep.spec?.template.spec?.containers?.[0]?.volumeMounts,
+      store: envValue(dep, 'CLERUM_SESSION_STORE'),
+      dbDir: envValue(dep, 'CLERUM_SESSION_DB_DIR'),
+      inits: dep.spec?.template.spec?.initContainers,
     })
-    expect(replacement.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
-      name: 'workspace',
-      mountPath: '/var/lib/clerum/state',
-      subPath: 'state',
-    })
+    expect(JSON.stringify(storage(replacement))).toBe(JSON.stringify(storage(runningStateful)))
+    expect(storage(replacement).dbDir).toBe('/workspace')
+    expect(storage(replacement).inits?.map(container => container.name)).toEqual([
+      'workspace-layout-merge',
+    ])
   })
 })
 
@@ -1919,36 +1919,31 @@ describe('HostReconciler stateless lifecycle — env injection', () => {
     const created = hostDeploymentBody(appsApi, 'new-stateless-host')
     expect(created.spec?.replicas).toBe(1)
     expect(created.spec?.template.spec?.priorityClassName).toBe('clerum-interactive-host')
-    expect(created.spec?.template.spec?.initContainers?.map(container => container.name)).toContain(
-      'workspace-layout-init'
-    )
+    expect(created.spec?.template.spec?.initContainers?.map(container => container.name)).toEqual([
+      'workspace-layout-merge',
+    ])
     expect(envValue(created, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(created.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
       name: 'workspace',
       mountPath: '/workspace',
-      subPath: 'workspace',
-    })
-    expect(created.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
-      name: 'workspace',
-      mountPath: '/var/lib/clerum/state',
-      subPath: 'state',
     })
   })
 
-  it('injects the three stateless env vars when stateless is enabled', () => {
+  it('injects the stateless env and the root storage env when stateless is enabled', () => {
     const { reconciler } = createReconciler()
     const dep = reconciler.buildDeployment(makeStatelessHost())
     expect(envValue(dep, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(envValue(dep, 'CLERUM_SESSION_STORE')).toBe('sqlite')
-    expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+    expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
   })
 
-  it('does not inject the stateless env vars when stateless is off', () => {
+  it('injects the root storage env but not the stateless env when stateless is off', () => {
     const { reconciler } = createReconciler()
-    const names = containerEnv(reconciler.buildDeployment(makeHost())).map(e => e.name)
-    expect(names).not.toContain('CLERUM_STATELESS_LIFECYCLE')
-    expect(names).not.toContain('CLERUM_SESSION_STORE')
-    expect(names).not.toContain('CLERUM_SESSION_DB_DIR')
+    const dep = reconciler.buildDeployment(makeHost())
+    expect(containerEnv(dep).map(e => e.name)).not.toContain('CLERUM_STATELESS_LIFECYCLE')
+    // Witness: the same container carries the storage env every Host gets.
+    expect(envValue(dep, 'CLERUM_SESSION_STORE')).toBe('sqlite')
+    expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
   })
 })
 
@@ -4025,7 +4020,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
     const live = persistHostDeployment(appsApi, host, hostDeploymentBody(appsApi, host.name))
     const baseline = structuredClone(live().spec?.template)
-    expect(envValue(live(), 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+    expect(envValue(live(), 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
 
     for (let cycle = 1; cycle <= 2; cycle++) {
       cacheSynced = false
@@ -4039,7 +4034,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       const deployment = live()
       expect(deployment.spec?.replicas).toBe(1)
       expect(deployment.spec?.template).toEqual(baseline)
-      expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+      expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
       expect(reconciler.getEffectiveLifecycle(host)).toMatchObject({
         stateless: true,
         suspensionBlocked: true,
@@ -4107,7 +4102,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(deployment.spec?.replicas).toBe(0)
     expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(envValue(deployment, 'CLERUM_SESSION_STORE')).toBe('sqlite')
-    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
     const writes = lifecycleStatusWrites(customApi)
     expect(writes).toHaveLength(2)
     expect(writes[0].lifecycle?.state).toBe('suspended')
@@ -4412,7 +4407,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(deployment.spec?.replicas).toBe(1)
     expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(envValue(deployment, 'CLERUM_SESSION_STORE')).toBe('sqlite')
-    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
   })
 
   it('rejects stateless by default when CommunicationChannels reference the host', async () => {
@@ -5124,63 +5119,198 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
   })
 })
 
-describe('HostReconciler stateless lifecycle — initContainer and mounts', () => {
-  it('adds the workspace-layout initContainer with dual subPath mounts', () => {
-    const { reconciler } = createReconciler()
-    const dep = reconciler.buildDeployment(makeStatelessHost())
+describe('HostReconciler storage layout — one shape for every lifecycle', () => {
+  const kinds = [
+    { kind: 'stateful', host: () => makeHost(), workspacePath: '/workspace' },
+    { kind: 'stateless', host: () => makeStatelessHost(), workspacePath: '/workspace' },
+    {
+      kind: 'desktop',
+      host: () => makeHost({ spec: { ...makeHost().spec, desktop: { browser: true } } }),
+      workspacePath: '/config/workspace',
+    },
+  ]
 
-    const initContainers = dep.spec?.template?.spec?.initContainers
-    if (!initContainers || initContainers.length !== 1) {
-      throw new Error('expected exactly one initContainer on the stateless pod')
+  it.each(kinds)(
+    'renders the root mount, storage env and merge init for a $kind Host',
+    ({ host, workspacePath }) => {
+      const { reconciler } = createReconciler()
+      const dep = reconciler.buildDeployment(host())
+      const podSpec = dep.spec?.template?.spec
+      const main = podSpec?.containers?.[0]
+
+      expect(main?.volumeMounts?.filter(mount => mount.name === 'workspace')).toEqual([
+        { name: 'workspace', mountPath: workspacePath },
+      ])
+      expect(JSON.stringify(dep)).not.toContain('subPath')
+      expect(envValue(dep, 'CLERUM_SESSION_STORE')).toBe('sqlite')
+      expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe(workspacePath)
+      expect(dep.spec?.strategy).toEqual({ type: 'Recreate' })
+
+      const inits = podSpec?.initContainers ?? []
+      expect(inits.map(init => init.name)).toEqual(['workspace-layout-merge'])
+      const [merge] = inits
+      expect(merge.image).toBe(main?.image)
+      expect(merge.imagePullPolicy).toBe(main?.imagePullPolicy)
+      expect(merge.securityContext).toEqual(main?.securityContext)
+      expect(merge.securityContext).toMatchObject({ runAsUser: 1001, runAsNonRoot: true })
+      expect(merge.volumeMounts).toEqual([{ name: 'workspace', mountPath: '/mnt/workspace-root' }])
+      expect(merge.command?.[2]).toContain('workspace layout merge refused')
+      // A Pod's scheduling request counts its largest init container; dev
+      // requests 25m CPU for a Host, so the merge stays at or below 25m/128Mi.
+      expect(merge.resources?.requests).toEqual({ cpu: '10m', memory: '32Mi' })
+
+      const names = [...(main?.env ?? []), ...(merge.env ?? [])].map(env => env.name)
+      // Witness: the env list is populated with the storage env asserted above.
+      expect(names).toContain('CLERUM_SESSION_DB_DIR')
+      for (const withdrawn of [
+        'CLERUM_STORAGE_LAYOUT',
+        'CLERUM_STORAGE_STORE_ID',
+        'CLERUM_STORAGE_GENESIS',
+        'CLERUM_DB_BARRIER_MODE',
+      ]) {
+        expect(names).not.toContain(withdrawn)
+      }
     }
-    const init = initContainers[0]
-    expect(init.name).toBe('workspace-layout-init')
-    expect(init.image).toBe('clerum/mcp-host:0.6.0')
-    expect(init.command?.[0]).toBe('/bin/sh')
-    expect(init.command?.[2]).toContain('assert_managed_dir "$root/workspace" workspace')
-    expect(init.command?.[2]).toContain('directory is a symlink')
-    expect(init.command?.[2]).toContain('state.db-wal')
-    expect(init.volumeMounts).toEqual([{ name: 'workspace', mountPath: '/mnt/workspace-root' }])
-    expect(init.securityContext).toEqual({
-      allowPrivilegeEscalation: false,
-      runAsNonRoot: true,
-      runAsUser: 1001,
-      runAsGroup: 1001,
-      capabilities: { drop: ['ALL'] },
-      seccompProfile: { type: 'RuntimeDefault' },
-    })
+  )
 
-    const mounts = dep.spec?.template?.spec?.containers?.[0]?.volumeMounts ?? []
-    expect(mounts).toContainEqual({
-      name: 'workspace',
-      mountPath: '/workspace',
-      subPath: 'workspace',
-    })
-    expect(mounts).toContainEqual({
-      name: 'workspace',
-      mountPath: '/var/lib/clerum/state',
-      subPath: 'state',
-    })
+  it('changes only lifecycle fields when a Host flips lifecycle', () => {
+    const { reconciler } = createReconciler()
+    const stateful = reconciler.buildDeployment(makeHost())
+    const stateless = reconciler.buildDeployment(
+      makeHost({ spec: { ...makeHost().spec, lifecycle: { stateless: true } } })
+    )
+
+    // Witness: the lifecycle-specific template really differs.
+    expect(envValue(stateless, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
+    expect(containerEnv(stateful).map(env => env.name)).not.toContain('CLERUM_STATELESS_LIFECYCLE')
+    expect(stateless.spec?.template?.spec?.priorityClassName).toBe('clerum-interactive-host')
+    expect(stateful.spec?.template?.spec?.priorityClassName).toBeUndefined()
+
+    const storage = (dep: k8s.V1Deployment) =>
+      JSON.stringify({
+        mounts: dep.spec?.template?.spec?.containers?.[0]?.volumeMounts,
+        volumes: dep.spec?.template?.spec?.volumes,
+        store: envValue(dep, 'CLERUM_SESSION_STORE'),
+        dbDir: envValue(dep, 'CLERUM_SESSION_DB_DIR'),
+        inits: dep.spec?.template?.spec?.initContainers,
+        strategy: dep.spec?.strategy,
+      })
+    expect(storage(stateless)).toBe(storage(stateful))
   })
 
-  it('keeps the non-stateless pod spec identical to the legacy shape', () => {
+  it('renders the same manifest for an explicit non-stateless lifecycle argument', () => {
     const { reconciler } = createReconciler()
     const dep = reconciler.buildDeployment(makeHost())
-
-    expect(dep.spec?.template?.spec?.initContainers).toBeUndefined()
-    const mounts = dep.spec?.template?.spec?.containers?.[0]?.volumeMounts ?? []
-    expect(mounts).toContainEqual({ name: 'workspace', mountPath: '/workspace' })
-    const serialized = JSON.stringify(dep)
-    expect(serialized).not.toContain('subPath')
-    expect(serialized).not.toContain('CLERUM_STATELESS_LIFECYCLE')
-    expect(serialized).not.toContain('workspace-layout-init')
-    // An explicit non-stateless lifecycle argument yields the exact same manifest.
     const explicit = reconciler.buildDeployment(makeHost(), [], '', {
       stateless: false,
       state: 'active',
     })
     expect(explicit).toEqual(dep)
+    expect(dep.spec?.template?.spec?.initContainers?.map(init => init.name)).toEqual([
+      'workspace-layout-merge',
+    ])
   })
+
+  describe('with CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE=false', () => {
+    afterEach(() => {
+      config.workspaceLayoutMerge = true
+    })
+
+    it.each(kinds)(
+      'renders no merge init and keeps the root layout for a $kind Host',
+      ({ host, workspacePath }) => {
+        const { reconciler } = createReconciler()
+        // Witness: with the flag on, the same Host renders the merge init.
+        expect(
+          reconciler.buildDeployment(host()).spec?.template?.spec?.initContainers?.map(i => i.name)
+        ).toEqual(['workspace-layout-merge'])
+
+        config.workspaceLayoutMerge = false
+        const dep = reconciler.buildDeployment(host())
+        expect(dep.spec?.template?.spec?.initContainers).toBeUndefined()
+        expect(dep.spec?.template?.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+          name: 'workspace',
+          mountPath: workspacePath,
+        })
+        expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe(workspacePath)
+        expect(JSON.stringify(dep)).not.toContain('subPath')
+      }
+    )
+  })
+})
+
+describe('HostReconciler storage layout — upgrade from a v0.11.0 Deployment', () => {
+  // The fixtures are the Deployments v0.11.0's HostReconciler renders for these
+  // Hosts with this file's mocks (dumped from the tag, not written by hand).
+  // v0.10.0 renders the same template: statelessDeployment.ts is identical.
+  const legacy = (file: string): k8s.V1Deployment =>
+    JSON.parse(readFileSync(join(__dirname, '__fixtures__', file), 'utf8'))
+
+  const cases = [
+    {
+      state: 'active',
+      host: () => makeStatelessHost({ name: 'upgrade-active' }),
+      fixture: 'v0.11.0-stateless-active-deployment.json',
+      replicas: 1,
+    },
+    {
+      state: 'suspended',
+      host: () => makeStatelessHost({ name: 'upgrade-suspended', status: suspendedStatus(7) }),
+      fixture: 'v0.11.0-stateless-suspended-deployment.json',
+      replicas: 0,
+    },
+  ]
+
+  it.each(cases)(
+    'replaces the split template of a $state stateless Host once',
+    async ({ host: makeUpgradeHost, fixture, replicas }) => {
+      const host = makeUpgradeHost()
+      const previous = legacy(fixture)
+      // Witness: the fixture carries the v0.11.0 split layout.
+      expect(previous.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+        'workspace-layout-init',
+      ])
+      expect(previous.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+        name: 'workspace',
+        mountPath: '/var/lib/clerum/state',
+        subPath: 'state',
+      })
+      expect(previous.spec?.replicas).toBe(replicas)
+
+      const { reconciler, appsApi, customApi } = createReconciler()
+      customApi.getNamespacedCustomObject.mockResolvedValue({
+        ...hostApiObject(host),
+        status: host.status ?? { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+      })
+      const live = persistHostDeployment(appsApi, host, previous)
+
+      await reconciler.reconcile(host)
+
+      const replacements = () =>
+        appsApi.replaceNamespacedDeployment.mock.calls.filter(
+          ([request]) => request.name === host.name
+        )
+      expect(replacements()).toHaveLength(1)
+      const replaced = live()
+      expect(replaced.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+        'workspace-layout-merge',
+      ])
+      expect(JSON.stringify(replaced)).not.toContain('subPath')
+      expect(replaced.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+        name: 'workspace',
+        mountPath: '/workspace',
+      })
+      expect(envValue(replaced, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
+      expect(replaced.spec?.strategy).toEqual({ type: 'Recreate' })
+      expect(replaced.spec?.replicas).toBe(replicas)
+      expect(envValue(replaced, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
+
+      // Witness: the replaced template is up to date, so the next reconcile
+      // leaves it alone.
+      await reconciler.reconcile(host)
+      expect(replacements()).toHaveLength(1)
+    }
+  )
 })
 
 describe('HostReconciler stateless lifecycle — suspension durability', () => {
@@ -5401,6 +5531,8 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
     const { reconciler } = createReconciler()
     const { container, init } = podContainers(reconciler.buildDeployment(makeHost()))
     expect(container.imagePullPolicy).toBe('Always')
-    expect(init).toBeUndefined()
+    // The merge init follows the main container's policy on every Host.
+    expect(init?.name).toBe('workspace-layout-merge')
+    expect(init?.imagePullPolicy).toBe('Always')
   })
 })

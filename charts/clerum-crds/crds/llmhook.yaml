@@ -102,9 +102,11 @@ spec:
                         egressBindings:
                           type: array
                           description: >-
-                            External egress this hook pod is permitted. NOTE: this is
-                            looser than McpServer.egressBindings (no SSRF/private-range
-                            CEL hardening yet) — tracked as a follow-up (§8.2/§8.4).
+                            External egress this hook pod is permitted. Not CEL-validated
+                            at admission; host-context-controller validates each binding
+                            at reconcile (private, metadata, link-local and reserved
+                            CIDRs/hostnames are rejected) and fails the hook closed with
+                            Ready=False reason InvalidEgress.
                           items:
                             type: object
                             properties:

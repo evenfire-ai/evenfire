@@ -50,18 +50,22 @@ vi.mock('../src/services/registryClient.js', () => ({
 }))
 
 const dbHolder = vi.hoisted(() => ({
-  target: null as null | { query: (text: string, values?: unknown[]) => Promise<unknown> },
+  pool: null as null | import('pg').Pool,
 }))
 vi.mock('../src/db.js', async importActual => {
   const actual = await importActual<typeof import('../src/db.js')>()
+  const current = () => {
+    if (!dbHolder.pool) throw new Error('test database not ready')
+    return dbHolder.pool
+  }
   return {
     ...actual,
     pool: {
-      query: async (text: string, values?: unknown[]) => {
-        if (!dbHolder.target) throw new Error('test database not ready')
-        return dbHolder.target.query(text, values)
-      },
+      query: async (text: string, values?: unknown[]) => current().query(text, values),
+      connect: () => current().connect(),
     },
+    withTransaction: (work: Parameters<typeof actual.withTransaction>[0]) =>
+      actual.withTransaction(work, current()),
   }
 })
 
@@ -75,6 +79,9 @@ const { createOAuthCallbackRouter } = await import('../src/routes/external/oauth
 const { resolveBatchGrantExistence } = await import('../src/routes/mcpOauth.js')
 const { getCredentialSchema, getDigest, getEntryVersion, reportInstall } =
   await import('../src/services/registryClient.js')
+const { seedActiveMember, seedAgentHost } = await import('./fixtures/contextAllowlist.js')
+const { enableServerInContext } = await import('./fixtures/perServerInstall.js')
+const { resolveHccHostBinding } = await import('./fixtures/hccControlToken.js')
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -87,7 +94,7 @@ function databaseUrl(baseUrl: string, database: string): string {
 
 const NS = 'mcp-server'
 const SERVER = 'my-gmail'
-const USER = 'user-9'
+const HOST = 'agent-host'
 
 /** Baked-OAuth catalog entry, same shape as the registry OAuth install tests. */
 const GMAIL_ENTRY = {
@@ -126,6 +133,9 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
   let prevCallbackBase = ''
   let prevMcpNs = ''
   let prevContextsNs = ''
+  // The consenting user: a real row whose Context access is written by the
+  // production writer; the per-user callback re-checks it before the exchange.
+  let user = ''
 
   beforeAll(async () => {
     if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
@@ -134,12 +144,12 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
     dbPool = new Pool({ connectionString: databaseUrl(adminUrl, database) })
     await initDb({ connect: () => dbPool.connect() })
     db = { query: (text, values) => dbPool.query(text, values) }
-    dbHolder.target = db
+    dbHolder.pool = dbPool
   })
 
   afterAll(async () => {
     try {
-      dbHolder.target = null
+      dbHolder.pool = null
       await endPoolAndWaitForClients(dbPool)
       if (adminPool) {
         await adminPool.query(
@@ -198,12 +208,12 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
     return app
   }
 
-  const install = (app: express.Express) =>
-    request(app)
+  /** The registry install, then the separate enable an install no longer does itself. */
+  const install = async (app: express.Express, gw: MockGateway) => {
+    const res = await request(app)
       .post('/admin/registry/install')
       .send({
         serverName: SERVER,
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -212,6 +222,9 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
           secret: { mode: 'managed', clientId: 'cid-value', clientSecret: 'csec-value' },
         },
       })
+    if (res.status === 201) await enableServerInContext(gw, 'default-context', SERVER, db)
+    return res
+  }
 
   /** Mint the state with the real authorize-URL builder, then hit the real callback. */
   async function consent(app: express.Express, gw: MockGateway): Promise<request.Response> {
@@ -220,7 +233,7 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
         subjectKind: 'mcp',
         mcpServerName: SERVER,
         oauthClientId: SERVER,
-        userId: USER,
+        userId: user,
         grantKind: 'user',
         redirectUri: `https://control.example.com/api/v1/oauth-callback/${SERVER}`,
       },
@@ -256,10 +269,17 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
     return request(app).get(`/oauth-callback/${SERVER}`).query({ code: 'AUTH_CODE', state })
   }
 
-  const sweep = (gw: MockGateway) =>
+  // The binding is resolved per sweep, as the route does on every batch: the enable
+  // and the registry uninstall both write the Context allowlist.
+  const sweep = async (gw: MockGateway) =>
     resolveBatchGrantExistence(
-      { db, gateway: gw as unknown as K8sGateway, mcpServersNamespace: NS },
-      [{ mcpServerName: SERVER, userId: USER }]
+      {
+        db,
+        gateway: gw as unknown as K8sGateway,
+        binding: await resolveHccHostBinding(gw, HOST),
+        mcpServersNamespace: NS,
+      },
+      [{ mcpServerName: SERVER, userId: user }]
     )
 
   it('a same-name reinstall starts with no connected user after a registry uninstall', async () => {
@@ -268,20 +288,22 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
       metadata: { name: 'default-context' },
       spec: { contextId: 'default-context', mcpServers: [] },
     })
+    await seedAgentHost(gw, HOST, 'default-context')
     const app = makeApp(gw)
+    user = await seedActiveMember(db, { contexts: ['default-context'], agents: [HOST] })
 
-    expect((await install(app)).status).toBe(201)
+    expect((await install(app, gw)).status).toBe(201)
     expect((await consent(app, gw)).status).toBe(200)
     // Precondition: the consent produced a connected user, visible to both readers.
     expect(await listUserGrantsForServer(db, { namespace: NS, name: SERVER })).toHaveLength(1)
-    expect(await sweep(gw)).toEqual([{ mcpServerName: SERVER, userId: USER, exists: true }])
+    expect(await sweep(gw)).toEqual([{ mcpServerName: SERVER, userId: user, exists: true }])
 
     const uninstall = await request(app).delete(`/admin/registry/uninstall/${SERVER}`)
     expect(uninstall.status).toBe(200)
-    expect((await install(app)).status).toBe(201)
+    expect((await install(app, gw)).status).toBe(201)
 
     // The reinstall has the same oauth_client_id; no user may appear connected to it.
     expect(await listUserGrantsForServer(db, { namespace: NS, name: SERVER })).toEqual([])
-    expect(await sweep(gw)).toEqual([{ mcpServerName: SERVER, userId: USER, exists: false }])
+    expect(await sweep(gw)).toEqual([{ mcpServerName: SERVER, userId: user, exists: false }])
   })
 })

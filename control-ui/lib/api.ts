@@ -9,6 +9,7 @@ import type { ApiRequestError, ApiRequestOptions } from './api.types'
 import type { GenericDiscoveryPrefill } from './oauthGeneric.types'
 import type {
   McpSecretSummary,
+  OAuthCallbackConfig,
   OAuthCredentialManifest,
   OAuthInstallSubmit,
 } from './oauthInstall.types'
@@ -132,6 +133,7 @@ export type Metadata = {
    * optimistic-concurrency precondition (docs/architecture/stateless-invariants.md).
    */
   resourceVersion?: string
+  generation?: number
   /** K8s-standard creation timestamp (RFC3339). Not in the type for older
    *  endpoints but carried by the new admin payloads. */
   creationTimestamp?: string
@@ -1282,6 +1284,7 @@ export type HostResource = {
  * Fase 3 requisito 6).
  */
 export type McpServerCondition = {
+  observedGeneration?: number
   type: string
   status: 'True' | 'False' | 'Unknown'
   reason: string
@@ -1810,7 +1813,6 @@ export async function createMcpServer(payload: {
   metadata: { name: string }
   spec: {
     image: string
-    contextRef: string
     description?: string
     enabled?: boolean
     managed?: boolean
@@ -1923,7 +1925,10 @@ export async function getMcpServer(name: string) {
   ) as Promise<McpServerResource>
 }
 
-export async function updateMcpServer(name: string, payload: { spec: Record<string, unknown> }) {
+export async function updateMcpServer(
+  name: string,
+  payload: { spec: Record<string, unknown>; metadata?: { uid?: string; resourceVersion?: string } }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`,
@@ -3743,6 +3748,15 @@ export async function getOAuthCredentialManifest(
 }
 
 /**
+ * The deployment's public OAuth callback for Marketplace OAuth installs. control-api
+ * owns CONTROL_API_OAUTH_CALLBACK_BASE_URL and returns the exact redirect-URI template
+ * (over `{oauthClientId}`), or `configured: false` when none is set.
+ */
+export async function getOAuthCallbackConfig(): Promise<OAuthCallbackConfig> {
+  return apiGet('/api/v1/admin/oauth/callback') as Promise<OAuthCallbackConfig>
+}
+
+/**
  * Dry-run generic AS discovery (E-19.5, D-A6). Posts the operator-typed issuer/URL and
  * resolves to the prefill SUGGESTION the wizard offers on Apply. No writes. On failure
  * the thrown Error carries `.code`/`.body` (the `discovery_failed` detail kind or a
@@ -3766,7 +3780,6 @@ export async function listMcpSecrets(): Promise<{ items: McpSecretSummary[] }> {
 export type InstallFromRegistryRequest = {
   serverName?: string
   namespace?: string
-  contextRef: string
   registryEntryName: string
   registryEntryVersion: string
   credentials?: Record<string, string>
@@ -3777,14 +3790,22 @@ export type InstallFromRegistryRequest = {
   oauth?: OAuthInstallSubmit
 }
 
+/** A credential Secret the install referenced but could not fill: the entry requires keys and none were sent. */
+export type PendingMcpEnvSecretRef = {
+  kind: 'mcpEnvSecret'
+  secretName: string
+  namespace: string
+  keys: string[]
+  field: 'spec.envSecret'
+}
+
 export type InstallFromRegistryResponse = {
-  installed: boolean
   serverName: string
   namespace: string
-  contextRef: string
-  // The saga endpoint returns additional fields (correlationId, addedToContext, etc.)
-  // — we keep it open so callers can read whatever the BFF chooses to surface.
-  [key: string]: unknown
+  registryEntry: string
+  registryVersion: string
+  correlationId: string
+  pendingCredentials: PendingMcpEnvSecretRef[]
 }
 
 export async function installFromRegistry(

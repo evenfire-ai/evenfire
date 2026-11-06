@@ -399,7 +399,7 @@ export class TokenStore {
 
   async clearSessionToken(
     envKey: string,
-    options: { legacyEnvKeys?: readonly string[] } = {}
+    options: { legacyEnvKeys?: readonly string[]; clearLegacyGlobalSlot?: boolean } = {}
   ): Promise<void> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
@@ -424,9 +424,11 @@ export class TokenStore {
       for (const scopedEnvKey of scopedEnvKeys) {
         await deleteKeychainPassword(accountFor(scopedEnvKey))
       }
-      // Best-effort cleanup of the legacy global slot so it can't be migrated
-      // into another environment later.
-      await deleteKeychainPassword(LEGACY_ACCOUNT)
+      if (options.clearLegacyGlobalSlot !== false) {
+        // Best-effort cleanup of the legacy global slot so it can't be migrated
+        // into another environment later.
+        await deleteKeychainPassword(LEGACY_ACCOUNT)
+      }
     }
     // Always clean up file-based storage regardless of keychain result,
     // since prior versions may have written both stores.
@@ -444,14 +446,17 @@ export class TokenStore {
       await Promise.all(scopedFileRemovals)
       return
     }
-    await Promise.all([
-      ...scopedFileRemovals,
-      legacyEncryptedFilePath()
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
-      legacyFilePath()
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
-    ])
+    const legacyGlobalFileRemovals =
+      options.clearLegacyGlobalSlot === false
+        ? []
+        : [
+            legacyEncryptedFilePath()
+              .then(file => fs.unlink(file))
+              .catch(() => {}),
+            legacyFilePath()
+              .then(file => fs.unlink(file))
+              .catch(() => {}),
+          ]
+    await Promise.all([...scopedFileRemovals, ...legacyGlobalFileRemovals])
   }
 }

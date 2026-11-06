@@ -15,12 +15,24 @@ type AppVm = ReturnType<typeof useAppController>
 export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValue {
   const chatEndRef = vm.chatEndRef
   const scrollChatToBottom = useStableCallback(vm.scrollChatToBottom)
-  const handleCreateChat = useStableCallback(vm.handleCreateChat)
+  // The controller owns phase-specific, current feedback. UI events observe
+  // rejection; deliberate raw API awaiters still receive the original error.
+  const handleCreateChat = useStableCallback(async () => {
+    await vm.handleCreateChat().catch(() => undefined)
+  })
   const handleRenameChat = useStableCallback(vm.handleRenameChat)
   const handleRenameChatForAgent = useStableCallback(vm.handleRenameChatForAgent)
   const captureChatDeleteFence = useStableCallback(vm.captureChatDeleteFence)
-  const handleDeleteChat = useStableCallback(vm.handleDeleteChat)
-  const handleDeleteChatForAgent = useStableCallback(vm.handleDeleteChatForAgent)
+  const handleDeleteChat = useStableCallback(
+    async (...args: Parameters<AppVm['handleDeleteChat']>) => {
+      await vm.handleDeleteChat(...args).catch(() => undefined)
+    }
+  )
+  const handleDeleteChatForAgent = useStableCallback(
+    async (...args: Parameters<AppVm['handleDeleteChatForAgent']>) => {
+      await vm.handleDeleteChatForAgent(...args).catch(() => undefined)
+    }
+  )
   const handleSelectChat = useStableCallback(vm.handleSelectChat)
   const clearComposerSendError = useStableCallback(vm.clearComposerSendError)
   const handleAddComposerImageAttachments = useStableCallback(vm.handleAddComposerImageAttachments)
@@ -40,6 +52,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
   const handleRemoveComposerReferenceAttachment = useStableCallback(
     vm.handleRemoveComposerReferenceAttachment
   )
+  const handleClearComposerAttachments = useStableCallback(vm.handleClearComposerAttachments)
   const handleSendAgentMessage = useStableCallback(vm.handleSendAgentMessage)
   const handleRetryFailedAgentSend = useStableCallback(vm.handleRetryFailedAgentSend)
   const handleRecoverFailedAgentSend = useStableCallback(vm.handleRecoverFailedAgentSend)
@@ -64,6 +77,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleRemoveComposerFileAttachment,
       handleAddComposerReferenceAttachments,
       handleRemoveComposerReferenceAttachment,
+      handleClearComposerAttachments,
       handleSendAgentMessage,
       handleRetryFailedAgentSend,
       handleRecoverFailedAgentSend,
@@ -87,6 +101,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleRemoveComposerFileAttachment,
       handleAddComposerReferenceAttachments,
       handleRemoveComposerReferenceAttachment,
+      handleClearComposerAttachments,
       handleSendAgentMessage,
       handleRetryFailedAgentSend,
       handleRecoverFailedAgentSend,

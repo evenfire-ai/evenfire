@@ -7,8 +7,11 @@ import { claimDeleteDynamicClientForResource } from '../src/oauth/dynamicClientS
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { signOAuthState } from '../src/oauth/state.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
+import { attachServerToContext } from '../src/services/contextAllowlist.js'
+import { membershipResult } from './fixtures/contextAllowlist.js'
 import {
   discoverPilot,
+  enableServerInContext,
   installRemoteServer,
   seedContext,
   withRfc9207,
@@ -45,9 +48,10 @@ vi.mock('../src/db.js', async importActual => {
     pool: {
       query: (text: string, values?: unknown[]) => {
         // Membership is the only non-OAuth read on these paths.
-        if (text.includes('FROM user_contexts')) {
-          return Promise.resolve({ rows: [{ context_id: dbHolder.context }], rowCount: 1 })
-        }
+        const member = membershipResult(text, values, {
+          contexts: { 'user-9': [dbHolder.context] },
+        })
+        if (member) return Promise.resolve(member)
         if (!dbHolder.db) throw new Error('test db not initialised')
         return dbHolder.db.query(text, values)
       },
@@ -126,7 +130,7 @@ beforeEach(async () => {
   savedBaseUrl = config.oauthCallbackBaseUrl
   config.oauthCallbackBaseUrl = ORIGIN
   gateway = new MockGateway(NS)
-  await seedContext(gateway, NS, CONTEXT)
+  await seedContext(gateway, config.contextsNamespace, CONTEXT)
   db = makeInMemoryDynamicClientsDb().db
   dbHolder.db = db
   app = createApp(gateway as never)
@@ -150,7 +154,6 @@ async function install(
     discovery,
     body: {
       serverName: name,
-      contextRef: CONTEXT,
       baseUrl,
       mode,
       ...(mode === 'pre-registered'
@@ -159,6 +162,7 @@ async function install(
     },
   })
   if (res.status !== 201) throw new Error(`install failed: ${JSON.stringify(res.body)}`)
+  await enableServerInContext(gateway, CONTEXT, name)
   return String(res.body.redirectUri)
 }
 
@@ -434,6 +438,9 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url — remote redirect URI'
       },
       NS
     )
+    // Enabled in the member's Context, so the request reaches the redirect-URI
+    // check past the per-user access gate.
+    await attachServerToContext(gateway as never, { name: CONTEXT, namespace: NS }, 'atlassian.v2')
 
     const res = await mint('atlassian.v2')
 

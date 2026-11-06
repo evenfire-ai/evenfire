@@ -49,6 +49,12 @@ import { userIdFromRpcPrefix } from './sessionKeyParts'
  */
 export class ConversationManager {
   private store: ConversationStore
+  /**
+   * Load-or-create in flight per session key. Concurrent callers on a new
+   * chat share one creation; two would insert two rows with the same
+   * `session_key`, and the second insert fails on its unique index.
+   */
+  private readonly pendingCreates = new Map<string, Promise<Conversation>>()
 
   constructor(store: ConversationStore = new InMemoryConversationStore()) {
     this.store = store
@@ -88,11 +94,21 @@ export class ConversationManager {
       return cached
     }
 
-    const loaded = await this.store.getOrLoad(sessionKey)
-    if (loaded) {
-      this.assertSessionOwner(loaded, opts?.userId)
-      return loaded
+    let pending = this.pendingCreates.get(sessionKey)
+    if (!pending) {
+      pending = this.loadOrCreate(sessionKey, opts).finally(() => {
+        this.pendingCreates.delete(sessionKey)
+      })
+      this.pendingCreates.set(sessionKey, pending)
     }
+    const conv = await pending
+    this.assertSessionOwner(conv, opts?.userId)
+    return conv
+  }
+
+  private async loadOrCreate(sessionKey: string, opts?: GetOrCreateOptions): Promise<Conversation> {
+    const loaded = await this.store.getOrLoad(sessionKey)
+    if (loaded) return loaded
 
     const parsed = parseSessionKey(sessionKey)
 

@@ -151,7 +151,7 @@ derive_cleanup_limit_inputs() {
 
 print_workload() {
   local id=$1
-  printf '  - id: %s\n    type: deployment\n    image: nginxinc/nginx-unprivileged:1.27-alpine\n    port: 8080\n' "$id"
+  printf '  - id: %s\n    type: deployment\n    image: nginxinc/nginx-unprivileged:1.30.6-alpine\n    port: 8080\n' "$id"
 }
 
 print_internal_ref() {
@@ -271,9 +271,7 @@ validate_test_limit_inputs
 header "Phase 0 - Prerequisites"
 require_safe_kube_context
 check_prerequisites
-for ns in "$SANDBOX_UI_NS"; do
-  kctl get ns "$ns" >/dev/null && ok "Namespace '${ns}' exists" || fail "Namespace '${ns}' not found"
-done
+kctl get ns "$SANDBOX_UI_NS" >/dev/null && ok "Namespace '${SANDBOX_UI_NS}' exists" || fail "Namespace '${SANDBOX_UI_NS}' not found"
 kctl get configmap "$LIMIT_CONFIGMAP" -n "$CONTROL_NS" >/dev/null &&
   ok "ConfigMap ${CONTROL_NS}/${LIMIT_CONFIGMAP} exists" ||
   fail "ConfigMap ${CONTROL_NS}/${LIMIT_CONFIGMAP} not found"

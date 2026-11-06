@@ -4,9 +4,10 @@ Reference guide for deploying the **full** evenfire platform on local minikube
 (all services, JWT auth chain, NetworkPolicies). Historical scripts and profiles
 may still say **clerum** ([code names](../concepts/code-names.md)).
 
-> **New here?** For a 10-minute agent-only try without Kubernetes, use the
-> [Quickstart](../get-started/quickstart.md) first. This guide is the full local
-> platform path (Path C in the [learning path](../get-started/learning-path.md)).
+> **New here?** Start with the [Quickstart](../get-started/quickstart.md): it
+> brings up this same full platform with one command and walks you to a first
+> chat. This guide is the in-depth reference for the full local platform path
+> (Path C in the [learning path](../get-started/learning-path.md)).
 
 Includes the correct order of operations, the JWT authentication chain, and known issues.
 
@@ -47,7 +48,7 @@ Ready before E2E results are interpreted.
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl** (`brew install kubectl`)
 - **python3** (for JWT key sync)
-- **Node.js** 24+ (for building services and desktop app)
+- **Node.js** 24.22.1 or later (Node 24 is required for Desktop and the validation harness)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration overlay)
 - `.env` file at project root with LLM API keys (optional — uses placeholders if missing)
 
@@ -59,11 +60,60 @@ Ready before E2E results are interpreted.
 ## Full Setup (First Time — from scratch)
 
 ```bash
-MINIKUBE_IMAGE_TAG=latest make minikube-setup   # cluster → namespaces → CRDs → keys → secrets → images → deploy → verify
-make minikube-status                            # Confirm all services after setup
+make minikube-setup    # cluster → namespaces → CRDs → keys → secrets → images → deploy → verify
+make minikube-status   # Confirm all services after setup
 ```
 
 The script is idempotent — safe to run again if interrupted or if something fails.
+It needs `ADMIN_PASSWORD` in `.env` for the default seed profile.
+
+### Setup options
+
+`make minikube-setup` passes Make variables to `scripts/minikube/full-setup.sh`
+and `ARGS="..."` through as flags. (`scripts/minikube/setup.sh` is an older
+compatibility path that takes only `--build`; none of the options below apply
+to it.)
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `SEED_PROFILE=minimal\|e2e` or `ARGS="--seed-profile=e2e"` | `minimal` | `minimal` is a clean install: the `admin@evenfire.local` admin and one agent, no test fixtures. `e2e` adds the E2E fixtures: a test user, `e2e-*` recipes, and demo MCP servers (placeholder credentials unless `.env` or `mcp-servers/<svc>/secret.yaml` supplies real ones). Any other value is an error. |
+| `make minikube-setup-e2e` | — | `minikube-setup SEED_PROFILE=e2e`, then, on a ghcr cluster, builds the two unpublished E2E coordinator fixtures (`make minikube-build-e2e-fixtures`). Use this rather than `--seed-profile=e2e` alone on a ghcr cluster. |
+| `IMAGE_SOURCE=ghcr\|local` or `make minikube-setup-local` | `ghcr` | `ghcr` pulls published images and renders the `minikube-ghcr` overlay. `local` builds every image from source and renders `minikube`. |
+| `MINIKUBE_IMAGE_TAG=<tag>` | committed pin | Render-time override of the ghcr tag in `deploy/components/ghcr-images/kustomization.yaml`; never committed. |
+| `SKIP_UIS=true` or `ARGS="--skip-uis"` | `false` | Skips the Control UI, Profile UI, and Desktop App image builds and the Control UI / Profile UI Deployments, by rendering `minikube-no-uis` (or `minikube-no-uis-ghcr`). Run the frontends locally with `npm run ui`. |
+| `ARGS="--skip-build"` | off | Re-deploys without acquiring images (~1 min). The overlay follows the mode recorded in `deploy/minikube/.image-manifest.json`, not `IMAGE_SOURCE`. It does not change the DB default: on an existing cluster pair it with `REUSE_DB=true` unless you want the DB rebuilt too. |
+| `REUSE_DB=true` or `ARGS="--keep-db"` | off | Keeps the existing `control-postgres-data` volume instead of rebuilding the DB. |
+| `ARGS="--reset-db"` | on | Rebuilds the DB (already the default). On a cluster that already has the volume it also needs `CONTROL_DB_RESET_PVC_UID` (see below). |
+| `ARGS="--defer-bootstrap-seed"` or `MINIKUBE_DEFER_BOOTSTRAP_SEED=true` | off | Skips the admin/user seed so the first admin is created through the Control UI setup screen (`/api/v1/admin/auth/setup`). Requires `IMAGE_SOURCE=local` and the `minimal` seed profile; `ADMIN_PASSWORD` is then not needed. |
+| `ARGS="--force-keys"` | off | Regenerates all JWT signing keys; invalidates existing tokens. |
+| `MINIKUBE_MEMORY=<MB>`, `MINIKUBE_CPUS=<n>` | `10240`, `6` | Size of the minikube VM when setup has to start it (`scripts/minikube/start.sh`). |
+
+Combine them as needed, for example
+`make minikube-setup SKIP_UIS=true REUSE_DB=true ARGS="--skip-build"`.
+
+**Database rebuild.** By default setup deletes the `control-postgres-data`
+volume and replays every migration from an empty schema, so a leftover DB from
+an older build cannot drift from the current schema/grant contract — that drift
+otherwise surfaces at the migration gate as
+`control_api_runtime relation privileges differ from the explicit access contract`.
+On a fresh cluster (no volume, no reset state) there is nothing to delete and
+setup continues. On a cluster that already has the volume, the reset refuses to
+run unless you name the exact volume it may delete. This deletes all data in
+that volume, so check the UID yourself before passing it — do not read it inline:
+
+```bash
+# 1. Inspect the volume you are about to delete and note its UID
+kubectl --context clerum-test -n control-plane get pvc control-postgres-data \
+  -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp
+
+# 2. Paste that UID as a literal value
+CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-setup
+
+# or keep the data instead:
+make minikube-setup REUSE_DB=true
+```
+
+`CONTROL_DB_RESET_PVC_UID=none` asserts that no such volume exists.
 
 ### Images are pulled, not built
 
@@ -74,19 +124,21 @@ run is roughly 15 minutes, dominated by network transfer; a warm cache is far
 quicker.
 
 `make minikube-setup-local` (equivalently `IMAGE_SOURCE=local`) restores the
-previous build-everything behaviour.
+previous build-everything behaviour. The overlay follows the mode: `minikube-ghcr`
+for pulled images, `minikube` for local builds, and the `minikube-no-uis` /
+`minikube-no-uis-ghcr` pair when `SKIP_UIS=true`.
 
 MCP servers are no longer loaded into the cluster at setup. They are
 distributed through the evenfire registry and installed on demand.
 
-### Two overrides a first run needs
+### Overrides a first run may need
 
-**`MINIKUBE_IMAGE_TAG=latest`** — required until the next release is tagged.
-The ghcr component pins that release tag, and the images for it are created by
-promotion _on_ the tag, so the pin names something that does not exist yet.
-Without the override the pull fails with an explicit message naming the image,
-the tag, and this variable — not a raw `MANIFEST_UNKNOWN`. After the release is
-cut and promoted, drop the override.
+**`MINIKUBE_IMAGE_TAG=latest`** — only when the committed pin names a release
+that has not been promoted yet (for example on a release-prep branch). The
+images for a release are created by promotion _on_ its tag, so until then the
+pin names something that does not exist. The pull then fails with an explicit
+message naming the image, the tag, and this variable — not a raw
+`MANIFEST_UNKNOWN`. Drop the override once the release is promoted.
 
 **`MINIKUBE_MEMORY=9216`** — if minikube fails to start. The default requests
 10240 MB, which is above a stock Docker Desktop ceiling.
@@ -124,9 +176,9 @@ before enabling the feature flag.
 When deployable code changed and the E2E runner will manage port-forwards
 itself, force the sync and skip the short-lived background port-forward refresh.
 Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that globally
-into `make minikube-t2`. Do not kill this lane's `branch-profile-pf`.
-`make minikube-pf-all-bg` is a gate refresh only; it must not replace
-`branch-profile-pf`.
+into `make minikube-t2`. On a branch-owned profile, keep `branch-profile-pf`
+running: `make minikube-pf-all-bg` only refreshes forwards for a gate and does
+not replace it.
 
 ```bash
 make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
@@ -160,18 +212,15 @@ npm run ui
 open http://localhost:3000
 ```
 
-`make minikube-setup` seeds the default test user and agent/context access. `npm run ui` keeps the required API port-forwards open while it runs the local frontends.
+`make minikube-setup` seeds the `admin@evenfire.local` admin (default `minimal`
+seed profile) and the `chatllm` agent with its context. `npm run ui` keeps the required API port-forwards open while it runs the local frontends.
 
-For a branch-owned profile, the host-side hold for Control UI / Desktop is
-the first-hand entry point `scripts/minikube-profiles/branch.mk`.
-Implementation: `scripts/minikube-profiles/branch-profile.sh`.
-HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
-Profile-owned random ports only (never shared `:3000`/`:8090`).
-`make minikube-pf-all-bg` is a gate refresh only; it must not replace
-`branch-profile-pf`. Do not start UI PFs from a sandboxed agent shell. Run
-the make target on the host. Do not kill this lane's `branch-profile-pf`.
-`branch-profile-pf-health` starts PFs then STOPS them on EXIT — do not use
-it as the lasting hold.
+**Branch-owned profiles** (contributors running several clusters side by
+side) use `scripts/minikube-profiles/branch.mk` instead of the shared
+`:3000`/`:8090` mapping. It forwards on profile-owned random ports and must
+run on the host, not inside a sandboxed shell. `branch-profile-pf` is the
+lasting hold; `branch-profile-pf-health` starts forwards, checks them, and
+stops them on exit.
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
@@ -297,25 +346,6 @@ An unreadable list is a refusal, never an empty list.
 
 When a context guard refuses, the context it names may belong to another
 session or cluster: stop and ask before renaming or removing it.
-
-### Options
-
-```bash
-make minikube-setup                        # Full setup; rebuilds the DB from scratch every run
-make minikube-setup-local                  # Same, building every image instead of pulling
-make minikube-setup ARGS="--skip-build"    # Re-deploy without re-acquiring images (~1 min)
-make minikube-setup REUSE_DB=true          # Preserve the existing postgres DB volume
-make minikube-setup ARGS="--reset-db"      # Force a DB rebuild (already the default; also fixes WAL corruption)
-make minikube-setup ARGS="--force-keys"    # Regenerate all JWT signing keys
-```
-
-`make minikube-setup` deletes the `control-postgres-data` volume and replays every
-migration from an empty schema by default, so a leftover DB from an older build
-cannot drift from the current schema/grant contract — that drift otherwise
-surfaces at the migration gate as
-`control_api_runtime relation privileges differ from the explicit access contract`.
-The rebuild is a no-op on a fresh cluster (nothing to delete). Pass
-`REUSE_DB=true` to keep an existing volume (the old fast-iterate / keep-data path).
 
 ### Manual Steps (Advanced)
 
@@ -606,8 +636,8 @@ kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
 
 ## Port Forwards for the Desktop App
 
-On a branch-owned profile, do not use the shared `:3000`/`:8090` mapping
-below. First-hand entry point `scripts/minikube-profiles/branch.mk`:
+On a branch-owned profile, use `scripts/minikube-profiles/branch.mk` instead
+of the shared `:3000`/`:8090` mapping below:
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
@@ -617,11 +647,8 @@ MINIKUBE_PROFILE=<owned-profile> \
   make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
-Implementation: `scripts/minikube-profiles/branch-profile.sh`.
-HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
-`make minikube-pf-all-bg` is a gate refresh only; it must not replace
-`branch-profile-pf`. `branch-profile-pf-health` starts PFs then STOPS them
-on EXIT — do not use it as the lasting hold.
+`branch-profile-pf` is the lasting hold; `branch-profile-pf-health` stops its
+forwards on exit, and `make minikube-pf-all-bg` does not replace either.
 
 The shared `clerum-test` Desktop mapping remains:
 
@@ -657,9 +684,18 @@ make minikube-pf-desktop      # Re-establish port forwards
 ## Restart With Database Wipe
 
 ```bash
-make minikube-db-reset        # Deletes postgres PVC, recreates it, restarts control-api
+# Destructive: deletes the postgres PVC and all its data, recreates it,
+# restarts control-api.
+# 1. Inspect the PVC it will delete and note its UID:
+kubectl --context clerum-test -n control-plane get pvc control-postgres-data \
+  -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp
+
+# 2. Paste that UID as a literal value (or `none` if there is no PVC):
+CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-db-reset
 # → Allows re-running the initial admin setup in Control UI
 ```
+
+Without `CONTROL_DB_RESET_PVC_UID` the target stops with an error.
 
 ---
 
@@ -703,10 +739,9 @@ there) cannot read the public key and all workflow JWTs fail with `401 Invalid t
 | `CLERUM_MCP_HOST_IMAGE`    | `clerum/mcp-host:0.9.5`                    | mcp_host image injected into workflows     |
 | `CLERUM_WRC_SERVICE_NAME`  | not set (code fallback `workflow-recipes`) | Service name for coordinator DNS callbacks |
 
-The first two are set in `deploy/base/control-plane/workflow-recipes.yaml` (lines
-153-156). `CLERUM_WRC_SERVICE_NAME` is **not** in any manifest — it is an optional
+The first two are set in `deploy/base/control-plane/workflow-recipes.yaml`. `CLERUM_WRC_SERVICE_NAME` is **not** in any manifest — it is an optional
 override read from the process environment, with the fallback `workflow-recipes`
-hardcoded in `workflow-recipes/src/reconciler/workflowRecipeReconciler.ts:622`.
+hardcoded in `workflow-recipes/src/reconciler/workflowRecipeReconciler.ts`.
 
 These are env-var values, not container images, so the plain `images:` block
 would not see them. `deploy/overlays/minikube/kustomizeconfig/imagetags.yaml`
@@ -1071,7 +1106,7 @@ and rpc-proxy verifies them with the public half.
 Service tokens may not be properly applied. Run:
 
 ```bash
-make minikube-setup ARGS="--skip-build"   # Re-applies kustomize overlay with correct tokens
+make minikube-setup REUSE_DB=true ARGS="--skip-build"   # Re-applies kustomize overlay with correct tokens
 ```
 
 ### ImagePullBackOff on pods
@@ -1112,10 +1147,19 @@ re-applies the manifests.
 
 ### Postgres CrashLoopBackOff (WAL corruption)
 
-Common after cold starts. The setup script detects and auto-fixes this, but you can also run manually:
+Common after cold starts. The setup script detects an invalid checkpoint and
+stops; it does not repair the volume, because automatic destructive recovery is
+disabled. Fix it by rebuilding the DB, which deletes all data in the
+`control-postgres-data` volume:
 
 ```bash
-make minikube-setup ARGS="--reset-db --skip-build"
+# 1. Inspect the PVC you are about to delete and note its UID
+kubectl --context clerum-test -n control-plane get pvc control-postgres-data \
+  -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp
+
+# 2. Paste that UID as a literal value
+CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> \
+  make minikube-setup ARGS="--reset-db --skip-build"
 ```
 
 ### JWT 401 errors after key regeneration
@@ -1149,7 +1193,7 @@ make minikube-restart-all                 # Restart all pods to pick up new keys
 | `403: "Forbidden: user cannot access this host"`                             | hostRef does not match what is authorized in control-api, or the Host CRD does not exist                                                                                                                                                                                           | Verify `kubectl get host chatllm -n mcp-host`, verify host assignment to team                                                                                                    |
 | Pod in `ImagePullBackOff`                                                    | The cluster does not hold an image it was told to run                                                                                                                                                                                                                              | `make minikube-verify-images` to see the mode and the missing refs, then `make minikube-pull-images` (ghcr) or `make minikube-build-images` (local). See the section above.      |
 | Port forward dropped after pod restart                                       | Kubernetes closes the tunnel when the pod restarts                                                                                                                                                                                                                                 | `make minikube-pf-desktop`                                                                                                                                                       |
-| `409 Conflict` on first setup                                                | Previous data in postgres                                                                                                                                                                                                                                                          | `make minikube-db-reset`                                                                                                                                                         |
+| `409 Conflict` on first setup                                                | Previous data in postgres                                                                                                                                                                                                                                                          | `make minikube-db-reset` with `CONTROL_DB_RESET_PVC_UID` set (see Restart With Database Wipe)                                                                                    |
 | SSE stream closes with `"auth-expired"`                                      | mcp-host rejected 3 consecutive `/v1/runtime/status` polls with 401/403. Those polls carry only `x-clerum-edge-*` headers (no bearer token), so this is an edge-guard/host-access rejection, not RPC-token expiry.                                                                 | The Desktop App clears its token cache and reconnects automatically. If it repeats, check chatllm logs for `Missing runtime edge caller context` / `Runtime edge host mismatch`. |
 | **Workflow** — `WRC returned 404 on GET status`                              | Stale rollout, old WRC, or a legacy recipe CRD outside `sandbox-recipes`                                                                                                                                                                                                           | Run the clean pre-gate sync, verify `kubectl get workflowrecipes -n sandbox-recipes`, and delete any legacy `workflowrecipes` in `mcp-server`.                                   |
 | **Workflow** — `Failed to connect to MCP servers`                            | NP-01: incorrect egress label (`{workloadId}` instead of `{recipeName}-{workloadId}`) or NP-02: missing ingress in `mcp-server`                                                                                                                                                    | List the recipe's NPs with `kubectl get netpol -n sandbox-recipes` and `-n mcp-server`. Reset workflow.                                                                          |

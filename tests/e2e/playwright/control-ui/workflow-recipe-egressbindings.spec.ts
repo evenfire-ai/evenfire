@@ -52,7 +52,7 @@ function recipeWithEgress(name: string, egressBindings: unknown[]) {
         {
           id: 'worker',
           type: 'deployment',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           egressBindings,
         },
       ],
@@ -78,7 +78,7 @@ function internalSiblingRecipe(name: string, dns = 'db.sandbox-recipes.svc.clust
         {
           id: 'api',
           type: 'deployment',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           port: 8080,
           env: [
             { name: 'PG_HOST', value: '{{db:host}}' },
@@ -89,7 +89,7 @@ function internalSiblingRecipe(name: string, dns = 'db.sandbox-recipes.svc.clust
         {
           id: 'db',
           type: 'statefulset',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           port: 5432,
         },
       ],
@@ -115,7 +115,7 @@ function helpdeskPluginRecipe(
         {
           id: 'chat-api',
           type: 'deployment',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           port: 8080,
           env: [
             { name: 'PG_HOST', value: '{{helpdesk-db:host}}' },
@@ -126,13 +126,13 @@ function helpdeskPluginRecipe(
         {
           id: 'helpdesk-db',
           type: 'statefulset',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           port: 5432,
         },
         {
           id: 'surveyor',
           type: 'cronjob',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           schedule: '0 */6 * * *',
           command: ['sh', '-c'],
           args: ['echo surveyor'],
@@ -145,7 +145,7 @@ function helpdeskPluginRecipe(
         {
           id: 'ui',
           type: 'deployment',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           port: 8080,
           env: [
             { name: 'API_HOST', value: '{{chat-api:host}}' },
@@ -181,25 +181,25 @@ function salesCrmLikeRecipe(name: string) {
         {
           id: 'api',
           type: 'deployment',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           port: 8080,
           egressBindings: [{ dns: 'api.salesforce.com', port: 443, protocol: 'TCP' }],
         },
         {
           id: 'ui',
           type: 'deployment',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           port: 8080,
         },
         {
           id: 'db',
           type: 'statefulset',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
         },
         {
           id: 'followup',
           type: 'cronjob',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           schedule: '*/15 * * * *',
           command: ['sh', '-c'],
           args: ['echo followup'],
@@ -208,7 +208,7 @@ function salesCrmLikeRecipe(name: string) {
         {
           id: 'inbox-poll',
           type: 'cronjob',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           schedule: '*/10 * * * *',
           command: ['sh', '-c'],
           args: ['echo inbox-poll'],
@@ -229,7 +229,7 @@ function transportPublicWebRecipe(name: string) {
         {
           id: 'web-search',
           type: 'deployment',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
           port: 3000,
           transport: { type: 'streamableHttp' },
           egressBindings: [{ egressClass: 'public-web' }],

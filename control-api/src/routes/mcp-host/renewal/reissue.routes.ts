@@ -4,8 +4,7 @@ import { mcpHostHttpMetrics } from '../../../middleware/mcpHostHttpMetrics.js'
 import { rateLimitMiddleware } from '../../../middleware/rateLimitMiddleware.js'
 import { mcpHostJwtReissueTotal } from '../../../observability/metrics.js'
 import {
-  MCP_HOST_CREDENTIAL_CAPABILITY,
-  consumeExpiredRefreshJti,
+  consumeRefreshJti,
   getMcpHostExpiredRefreshRateLimitKey,
   issueMcpHostAccessJwt,
   issueMcpHostControlJwt,
@@ -13,8 +12,9 @@ import {
   verifyExpiredMcpHostRefreshJwtDetailed,
 } from '../../../utils/auth/mcpHostJwtToken.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
+import { type RenewalHostGateway, resolveRenewalHostBinding } from './hostBinding.js'
 
-export function createMcpHostReissueRoutes(): Router {
+export function createMcpHostReissueRoutes(gateway: RenewalHostGateway): Router {
   const router = Router()
 
   function bodyString(body: unknown, snakeKey: string, camelKey: string): string | undefined {
@@ -49,6 +49,9 @@ export function createMcpHostReissueRoutes(): Router {
           | 'revoked'
           | 'mismatch'
           | 'bad_request'
+          | 'host_mismatch'
+          | 'host_unavailable'
+          | 'lineage_without_audience'
         let resultLabel: ResultLabel = 'invalid_sig'
         try {
           const token = extractBearerToken(req)
@@ -151,7 +154,33 @@ export function createMcpHostReissueRoutes(): Router {
             return res.status(401).json({ error: 'Unauthorized' })
           }
 
-          const consumed = await consumeExpiredRefreshJti(claims.jti, claims.exp)
+          const binding = await resolveRenewalHostBinding(gateway, claims)
+          if (binding.kind === 'unavailable') {
+            resultLabel = 'host_unavailable'
+            req.log?.warn(
+              { event: 'host_state_unavailable', route: 'workflow_auth_reissue', mode },
+              'host lookup failed; refresh token left unconsumed'
+            )
+            return res.status(503).json({ error: 'host_state_unavailable' })
+          }
+          if (binding.kind === 'denied') {
+            resultLabel =
+              binding.reason === 'hcc_lineage_without_audience'
+                ? 'lineage_without_audience'
+                : 'host_mismatch'
+            req.log?.info(
+              {
+                event: 'auth_denied',
+                reason: binding.reason,
+                route: 'workflow_auth_reissue',
+                mode,
+              },
+              'auth denied'
+            )
+            return res.status(401).json({ error: 'Unauthorized' })
+          }
+
+          const consumed = await consumeRefreshJti(claims.jti, claims.exp)
           if (!consumed) {
             resultLabel = 'revoked'
             req.log?.info(
@@ -161,9 +190,7 @@ export function createMcpHostReissueRoutes(): Router {
             return res.status(401).json({ error: 'Unauthorized' })
           }
 
-          const hccCredential = claims.mcpCapabilities.includes(MCP_HOST_CREDENTIAL_CAPABILITY)
-            ? { hostUid: claims.host_uid! }
-            : undefined
+          const { hccCredential } = binding
 
           // Preserve hostRefs from the incoming (expired) refresh token so
           // the host identity binding survives the recovery re-issue.
@@ -183,8 +210,14 @@ export function createMcpHostReissueRoutes(): Router {
             claims.recipeNamespace,
             claims.recipeName,
             claims.hostRefs,
-            { scopes: claims.workflowControlScopes }
+            { scopes: claims.workflowControlScopes, hccCredential }
           )
+          if (control.scopeStripped) {
+            req.log?.warn(
+              { event: 'oauth_user_token_scope_stripped', route: 'reissue' },
+              'oauth:user-token dropped from a non-HCC control token'
+            )
+          }
           resultLabel = 'ok'
 
           req.log?.info(

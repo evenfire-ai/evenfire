@@ -94,14 +94,85 @@ wait_for_phase() {
   return 1
 }
 
+# Every Context name with its sorted allowlist; fails unless the listing is real.
+contexts_snapshot() {
+  kubectl get contexts -n "$MCP_NS" -o json 2>/dev/null | jq -cS '
+    if (.items | type) == "array" then
+      [.items[] | {name: .metadata.name, mcpServers: ((.spec.mcpServers // []) | sort)}]
+      | sort_by(.name)
+    else error("contexts listing unavailable") end'
+}
+
+# Installing an MCP server never ties it to a Context: no spec.contextRef, no
+# private Context, no allowlist entry. Enabling it is a separate Context edit.
+assert_install_left_contexts_untouched() {
+  local server_name=$1 contexts_before=$2 contexts_after server_json new_contexts
+  if [ -z "$contexts_before" ] || ! contexts_after=$(contexts_snapshot); then
+    fail "Could not list Contexts to verify the install of ${server_name}"
+    return
+  fi
+  # Other actors (WRC, operators) may delete or edit unrelated Contexts while the
+  # install runs, so only a Context that did not exist before counts against it.
+  if ! new_contexts=$(jq -rn --argjson before "$contexts_before" --argjson after "$contexts_after" \
+    '($before | map(.name)) as $old | [$after[].name | select(. as $n | $old | index($n) | not)] | join(", ")'); then
+    fail "Could not compare Contexts to verify the install of ${server_name}"
+  elif [ -z "$new_contexts" ]; then
+    ok "Install of ${server_name} created no Context"
+  else
+    fail "Install of ${server_name} created Context(s): ${new_contexts}"
+  fi
+  if jq -e --arg s "$server_name" 'any(.[]; .mcpServers | index($s) != null)' \
+    <<<"$contexts_after" >/dev/null; then
+    fail "${server_name} is in a Context allowlist right after install"
+  else
+    ok "${server_name} is in no Context allowlist after install"
+  fi
+  server_json=$(kubectl get mcpserver "$server_name" -n "$MCP_NS" -o json 2>/dev/null || echo "")
+  if [ -n "$server_json" ] && jq -e '.spec | has("contextRef") | not' <<<"$server_json" >/dev/null; then
+    ok "${server_name} has no spec.contextRef"
+  else
+    fail "${server_name} is missing or carries spec.contextRef"
+  fi
+}
+
+# Enable a server the way an operator does: read the Context through control-api
+# and PUT its spec back with the server appended, guarded by resourceVersion.
+enable_server_in_context() {
+  local server_name=$1 context_name=$2 current body updated
+  current=$(api GET "/api/v1/admin/contexts/${context_name}" | jq -c '.item // .')
+  body=$(jq -c --arg s "$server_name" '
+    select((.metadata.resourceVersion // "") != "" and (.spec | type) == "object")
+    | {metadata: {resourceVersion: .metadata.resourceVersion},
+       spec: (.spec + {mcpServers: (((.spec.mcpServers // []) + [$s]) | unique)})}
+  ' <<<"$current" 2>/dev/null || echo "")
+  [ -n "$body" ] || return 1
+  updated=$(api PUT "/api/v1/admin/contexts/${context_name}" "$body")
+  jq -e --arg s "$server_name" '(.item // .).spec.mcpServers | index($s) != null' \
+    <<<"$updated" >/dev/null 2>&1
+}
+
 # ─── Valid McpServer CRD bundle (base64) ──────────────────────────────
 VALID_BUNDLE=$(printf 'apiVersion: clerum.io/v1alpha1\nkind: McpServer\nmetadata:\n  name: e2e-mock-mcp\nspec:\n  image: clerum/mock-mcp-server:test\n  transport:\n    type: streamableHttp\n    port: 3000\n' | base64 | tr -d '\n')
 
+# Install names are deterministic and Group 2 enables the server in a Context, so
+# an aborted run leaves the next install already allowlisted. The uninstall API is
+# what strips the name from every Context allowlist (it only can while the CR still
+# exists); kubectl delete is the fallback for whatever the API could not remove.
+cleanup_stale_mcpservers() {
+  local r
+  kubectl get mcpserver -n "$MCP_NS" -o name 2>/dev/null | grep -E "e2e-|mock-mcp" | while read -r r; do
+    api DELETE "/api/v1/admin/registry/uninstall/${r#*/}" >/dev/null 2>&1 || true
+    kubectl delete "$r" -n "$MCP_NS" --ignore-not-found 2>/dev/null || true
+  done
+}
+
+if [[ "${E2E_REGISTRY_LIFECYCLE_LIB_ONLY:-}" == "true" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 # ─── Cleanup stale K8s resources from previous runs ──────────────────
 # Delete any leftover McpServers, recipes, secrets and deployments created by e2e.
-kubectl get mcpserver -n "$MCP_NS" -o name 2>/dev/null | grep -E "e2e-|mock-mcp" | while read -r r; do
-  kubectl delete "$r" -n "$MCP_NS" --ignore-not-found 2>/dev/null || true
-done
+cleanup_stale_mcpservers
 kubectl get workflowrecipe -n "$SANDBOX_NS" -o name 2>/dev/null | grep -E "e2e-|mock-mcp" | while read -r r; do
   kubectl delete "$r" -n "$SANDBOX_NS" --ignore-not-found 2>/dev/null || true
 done
@@ -130,6 +201,8 @@ header "Registry Full Lifecycle E2E Tests"
 CONTEXT_NAME=$(kubectl get contexts -n "$MCP_NS" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
 [ -z "$CONTEXT_NAME" ] && { fail "No Context CRD found in $MCP_NS namespace"; exit 1; }
 log "Using context: $CONTEXT_NAME"
+CONTEXTS_BEFORE=$(contexts_snapshot || echo "")
+[ -z "$CONTEXTS_BEFORE" ] && { fail "Could not list Contexts in $MCP_NS"; exit 1; }
 
 # ═══ Group 1: Push entries to registry ════════════════════════════════
 header "Group 1: Push Entries to Registry"
@@ -226,7 +299,6 @@ LATEST=$(reg GET "/api/v1/entries/e2e-mock-mcp" | jq -r '.version // empty')
 header "Group 2: Local MCP Server Install"
 
 INSTALL=$(api POST "/api/v1/admin/registry/install" "{
-  \"contextRef\": \"${CONTEXT_NAME}\",
   \"registryEntryName\": \"e2e-mock-mcp\",
   \"registryEntryVersion\": \"1.0.0\"
 }")
@@ -251,9 +323,15 @@ if [ -n "$LOCAL_SERVER_NAME" ]; then
     kubectl logs deployment/host-context-controller -n control-plane --tail=20 2>/dev/null | grep -iE "$LOCAL_SERVER_NAME|error" || true
   fi
 
-  # Context allowlist
-  CTX_SERVERS=$(kubectl get contexts "$CONTEXT_NAME" -n "$MCP_NS" -o jsonpath='{.spec.mcpServers}' 2>/dev/null || echo "[]")
-  echo "$CTX_SERVERS" | grep -q "$LOCAL_SERVER_NAME" && ok "Context allowlist updated" || fail "Not in context allowlist"
+  assert_install_left_contexts_untouched "$LOCAL_SERVER_NAME" "$CONTEXTS_BEFORE"
+
+  # The uninstall in Group 7 must strip the server from the allowlist, so it is
+  # enabled here explicitly, as a separate Context edit.
+  if enable_server_in_context "$LOCAL_SERVER_NAME" "$CONTEXT_NAME"; then
+    ok "Enabled $LOCAL_SERVER_NAME in Context $CONTEXT_NAME via control-api"
+  else
+    fail "Could not enable $LOCAL_SERVER_NAME in Context $CONTEXT_NAME via control-api"
+  fi
 else
   fail "Install failed: $(echo "$INSTALL" | jq -r '.error // .')"
 fi
@@ -261,9 +339,9 @@ fi
 # ═══ Group 3: Install Remote MCP from Registry ═══════════════════════
 header "Group 3: Remote MCP Server Install"
 
+REMOTE_CONTEXTS_BEFORE=$(contexts_snapshot || echo "")
 RINSTALL=$(api POST "/api/v1/admin/registry/install" "{
   \"serverName\": \"e2e-remote-srv\",
-  \"contextRef\": \"${CONTEXT_NAME}\",
   \"registryEntryName\": \"e2e-remote-mcp\",
   \"registryEntryVersion\": \"1.0.0\",
   \"credentials\": {\"API_KEY\": \"e2e-test-key-value\"}
@@ -276,6 +354,8 @@ if [ "$REMOTE_SERVER_NAME" = "e2e-remote-srv" ]; then
   # Labels
   MODE=$(kubectl get mcpserver "$REMOTE_SERVER_NAME" -n "$MCP_NS" -o jsonpath='{.metadata.labels.clerum\.io/server-mode}' 2>/dev/null || echo "")
   [ "$MODE" = "remote" ] && ok "Label server-mode=remote" || fail "Wrong mode: $MODE"
+
+  assert_install_left_contexts_untouched "$REMOTE_SERVER_NAME" "$REMOTE_CONTEXTS_BEFORE"
 
   # Secret
   kubectl get secret "${REMOTE_SERVER_NAME}-credentials" -n "$MCP_NS" >/dev/null 2>&1 && ok "Credentials Secret exists" || fail "Secret missing"

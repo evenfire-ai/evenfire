@@ -127,6 +127,8 @@ function buildDeps(
       read: vi.fn(async () => ({}) as Record<string, string>),
     } as unknown as CallbackDeps['secretReader'],
     mcpServerReader: { read: vi.fn(async () => opts.subject ?? remoteSubject()) },
+    // Per-user remote subjects: a Context of the user enables the server.
+    userServerAccessReader: vi.fn(async () => true),
     // Remote lane never touches globalThis fetch (DEC-17); a call is a regression.
     fetchFn: vi.fn() as unknown as typeof fetch,
     stateSecret: STATE_SECRET,

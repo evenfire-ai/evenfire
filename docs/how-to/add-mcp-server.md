@@ -6,13 +6,15 @@ platform enforces that with NetworkPolicies on Kubernetes.
 
 ## Option A — mcp-host dev mode (contributors, no cluster)
 
-When running `mcp-host` standalone (`CLERUM_DEV_MODE=true npm run dev`), wire
+When running `mcp-host` standalone (`CLERUM_DEV_MODE=true CLERUM_ENABLE_AUTH=false npm run dev`; see
+[Dev mode](../get-started/dev-mode.md)), wire
 servers with `CLERUM_MCP_SERVERS` (JSON array). Each entry needs `name`,
-`contextRef`, `transport`, `enabled`, and
-`status: { deployed: true, ready: true }` or it is skipped as not ready:
+`transport`, `enabled`, and `status.ready: true`, or it is
+skipped as not ready (mcp-host checks only `ready`; `deployed` in the example
+is not read):
 
 ```bash
-CLERUM_MCP_SERVERS=[{"name":"my-mcp","contextRef":"dev-context","transport":{"type":"streamableHttp","url":"http://my-mcp:3000/mcp"},"enabled":true,"status":{"deployed":true,"ready":true}}]
+CLERUM_MCP_SERVERS=[{"name":"my-mcp","transport":{"type":"streamableHttp","url":"http://my-mcp:3000/mcp"},"enabled":true,"status":{"deployed":true,"ready":true}}]
 ```
 
 Restart the dev process after changing env. There is **no** NetworkPolicy
@@ -83,7 +85,7 @@ Check:
 
 ## Option C — the Control UI
 
-Connectors → `/mcp-servers` → **Create** builds the same `McpServer` resource
+**Installed Connectors** (`/connectors`) → **Create** builds the same `McpServer` resource
 as Option B, through a guided form (identity, transport/runtime, secrets) plus
 an `EgressEditor` step for the egress policy: closed-by-default, with
 private, metadata, link-local, and reserved IPv4 ranges rejected outright.
@@ -94,6 +96,9 @@ signal comes later, at reconcile: `host-context-controller` logs a would-be
 denial ("audit mode, allowing") for a non-allowlisted image and still builds
 it, by default. This allowlist is separate from the sha256 digest pinning
 used for custom coordinator images. See [Control UI](../surfaces/control-ui.md).
+Creating the connector does not enable it for any agent: as in step 2 of
+Option B, access is a separate edit of a Context's `mcpServers`, made from the
+connector's **Give agents access to this connector** dialog.
 
 ![Control UI connectors list at /mcp-servers](../assets/control-ui-connectors.webp)
 *Dev cluster, demo tenant.*
@@ -116,5 +121,6 @@ See [stdio-bridge README](../../stdio-bridge/README.md) and
 
 ## Related
 
+- [Connect an OAuth connector](connect-oauth-connector.md): remote MCP servers, OAuth sign-in, and updating connector credentials
 - [CRD index](../crds/README.md)
 - [Architecture overview](../architecture/overview.md)

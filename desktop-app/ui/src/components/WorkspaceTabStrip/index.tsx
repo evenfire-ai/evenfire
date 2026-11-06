@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useContext, useLayoutEffect, useRef, useState } from 'react'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListContext } from '@contexts/ChatListContext'
 import { Button, IconButton } from '@components/Common'
@@ -6,13 +6,10 @@ import { IconChevronLeft, IconChevronRight } from '@components/SidebarNav/icons'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
 import type { WorkspaceTab } from '@lib/workspaceTabs.types'
 import type { WorkspaceTabStripProps } from './types'
+import { useWorkspaceTabOverflow } from './useWorkspaceTabOverflow'
 
 type DropSide = 'before' | 'after'
 type DropTarget = { id: string; side: DropSide }
-type ScrollState = { hasOverflow: boolean; canScrollLeft: boolean; canScrollRight: boolean }
-
-const SCROLL_EPSILON = 1
-const WHEEL_LINE_PIXELS = 16
 
 /** Which half of a tab the cursor is over — the insertion side for the drop. */
 function sideFromEvent(event: React.DragEvent<HTMLElement>): DropSide {
@@ -45,13 +42,10 @@ export function WorkspaceTabStrip({
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const stripRef = useRef<HTMLDivElement | null>(null)
-  const scrollerRef = useRef<HTMLDivElement | null>(null)
-  const activeTabToRevealRef = useRef<string | null>(null)
-  const previousActiveTabIdRef = useRef<string | null>(null)
-  const [scrollState, setScrollState] = useState<ScrollState>({
-    hasOverflow: false,
-    canScrollLeft: false,
-    canScrollRight: false,
+  const { scrollerRef, hasOverflow, leftButtonProps, rightButtonProps } = useWorkspaceTabOverflow({
+    tabs,
+    activeTabId,
+    stripRef,
   })
   // Set when a KEYBOARD close removes the active tab's control: the close, unlike a
   // reorder, drops the keyed node the user was on, so focus would fall to <body>.
@@ -62,147 +56,6 @@ export function WorkspaceTabStrip({
     setDraggingId(null)
     setDropTarget(null)
   }
-
-  const updateScrollState = useCallback(() => {
-    const scroller = scrollerRef.current
-    if (!scroller) return
-    const maximum = Math.max(0, scroller.scrollWidth - scroller.clientWidth)
-    const next: ScrollState = {
-      hasOverflow: maximum > SCROLL_EPSILON,
-      canScrollLeft: scroller.scrollLeft > SCROLL_EPSILON,
-      canScrollRight: scroller.scrollLeft < maximum - SCROLL_EPSILON,
-    }
-    setScrollState(current =>
-      current.hasOverflow === next.hasOverflow &&
-      current.canScrollLeft === next.canScrollLeft &&
-      current.canScrollRight === next.canScrollRight
-        ? current
-        : next
-    )
-  }, [])
-
-  const getTabNodes = () => {
-    const list = scrollerRef.current?.firstElementChild
-    return list
-      ? Array.from(list.children).filter((node): node is HTMLElement => node instanceof HTMLElement)
-      : []
-  }
-
-  const scrollTabIntoView = useCallback(
-    (tab: HTMLElement) => {
-      const scroller = scrollerRef.current
-      if (!scroller) return
-      const viewportLeft = scroller.getBoundingClientRect().left + scroller.clientLeft
-      const viewportRight = viewportLeft + scroller.clientWidth
-      const rect = tab.getBoundingClientRect()
-      let nextScrollLeft = scroller.scrollLeft
-      if (rect.left < viewportLeft - SCROLL_EPSILON) {
-        nextScrollLeft += rect.left - viewportLeft
-      } else if (rect.right > viewportRight + SCROLL_EPSILON) {
-        nextScrollLeft += rect.right - viewportRight
-      }
-      scroller.scrollLeft = Math.max(
-        0,
-        Math.min(scroller.scrollWidth - scroller.clientWidth, nextScrollLeft)
-      )
-      updateScrollState()
-    },
-    [updateScrollState]
-  )
-
-  const scrollToNearestHiddenTab = (direction: 'left' | 'right') => {
-    const scroller = scrollerRef.current
-    if (!scroller) return
-    const viewportLeft = scroller.getBoundingClientRect().left + scroller.clientLeft
-    const viewportRight = viewportLeft + scroller.clientWidth
-    const candidates = getTabNodes()
-    const tab =
-      direction === 'right'
-        ? candidates.find(
-            node => node.getBoundingClientRect().right > viewportRight + SCROLL_EPSILON
-          )
-        : candidates
-            .slice()
-            .reverse()
-            .find(node => node.getBoundingClientRect().left < viewportLeft - SCROLL_EPSILON)
-    if (tab) scrollTabIntoView(tab)
-  }
-
-  const handleWheel = useCallback(
-    (event: WheelEvent) => {
-      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
-      const scroller = scrollerRef.current
-      if (!scroller) return
-      const maximum = Math.max(0, scroller.scrollWidth - scroller.clientWidth)
-      if (maximum <= SCROLL_EPSILON) return
-      const scale =
-        event.deltaMode === WheelEvent.DOM_DELTA_LINE
-          ? WHEEL_LINE_PIXELS
-          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-            ? scroller.clientWidth
-            : 1
-      // Trackpads may report both axes for a diagonal gesture. Prefer the native
-      // horizontal component and translate vertical-only wheel input once.
-      const delta = event.deltaX !== 0 ? event.deltaX * scale : event.deltaY * scale
-      if (delta === 0) return
-      const nextScrollLeft = Math.max(0, Math.min(maximum, scroller.scrollLeft + delta))
-      if (Math.abs(nextScrollLeft - scroller.scrollLeft) <= SCROLL_EPSILON) return
-      event.preventDefault()
-      scroller.scrollLeft = nextScrollLeft
-      updateScrollState()
-    },
-    [updateScrollState]
-  )
-
-  useLayoutEffect(() => {
-    const scroller = scrollerRef.current
-    if (!scroller) return
-    const measure = () => updateScrollState()
-    measure()
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
-    observer?.observe(scroller)
-    if (scroller.firstElementChild) observer?.observe(scroller.firstElementChild)
-    window.addEventListener('resize', measure)
-    scroller.addEventListener('scroll', measure, { passive: true })
-    return () => {
-      observer?.disconnect()
-      window.removeEventListener('resize', measure)
-      scroller.removeEventListener('scroll', measure)
-    }
-  }, [tabs, updateScrollState])
-
-  useEffect(() => {
-    const scroller = scrollerRef.current
-    if (!scroller) return
-    scroller.addEventListener('wheel', handleWheel, { passive: false })
-    return () => scroller.removeEventListener('wheel', handleWheel)
-  }, [handleWheel])
-
-  useLayoutEffect(() => {
-    if (previousActiveTabIdRef.current === activeTabId) return
-    previousActiveTabIdRef.current = activeTabId
-    activeTabToRevealRef.current = activeTabId
-  }, [activeTabId])
-
-  useLayoutEffect(() => {
-    if (!activeTabId || activeTabToRevealRef.current !== activeTabId) return
-    const scroller = scrollerRef.current
-    if (!scroller) return
-    const hasMeasuredOverflow = scroller.scrollWidth - scroller.clientWidth > SCROLL_EPSILON
-    const hasScrollControls = Boolean(
-      stripRef.current?.querySelector('.chat-view-tabs__scroll-button')
-    )
-    // Wait until overflow controls have taken their space before revealing a
-    // newly active tab. Geometry changes alone must not trigger a stale reveal.
-    if (hasMeasuredOverflow !== hasScrollControls) return
-    const activeTab = getTabNodes().find(node => node.dataset.workspaceTabId === activeTabId)
-    if (!activeTab) {
-      activeTabToRevealRef.current = null
-      return
-    }
-    scrollTabIntoView(activeTab)
-    activeTabToRevealRef.current = null
-  }, [activeTabId, scrollState.hasOverflow, scrollTabIntoView])
 
   // Restore keyboard focus after a close removed the active tab. The reorder path
   // keeps focus for free (the moved node survives, keyed by id); the close does not,
@@ -268,13 +121,12 @@ export function WorkspaceTabStrip({
       ref={stripRef}
       tabIndex={-1}
     >
-      {scrollState.hasOverflow && (
+      {hasOverflow && (
         <IconButton
           aria-label="Scroll tabs left"
           className="chat-view-tabs__scroll-button"
-          disabled={!scrollState.canScrollLeft}
+          {...leftButtonProps}
           label="Scroll tabs left"
-          onClick={() => scrollToNearestHiddenTab('left')}
           size="xs"
         >
           <IconChevronLeft />
@@ -352,13 +204,12 @@ export function WorkspaceTabStrip({
           })}
         </div>
       </div>
-      {scrollState.hasOverflow && (
+      {hasOverflow && (
         <IconButton
           aria-label="Scroll tabs right"
           className="chat-view-tabs__scroll-button"
-          disabled={!scrollState.canScrollRight}
+          {...rightButtonProps}
           label="Scroll tabs right"
-          onClick={() => scrollToNearestHiddenTab('right')}
           size="xs"
         >
           <IconChevronRight />

@@ -115,7 +115,6 @@ const MCP_ENTRY_VERSION = safeToken(
   process.env.E2E_PRIVATE_MCP_VERSION ?? '1.0.5',
   'E2E_PRIVATE_MCP_VERSION'
 )
-const CONTEXT_REF = safeToken(process.env.E2E_CONTEXT_ID ?? 'context1', 'E2E_CONTEXT_ID')
 
 const RUN_ID = Date.now().toString(36)
 const RECIPE_NAME = `e2e-pullsecret-recipe-${RUN_ID}`
@@ -1002,7 +1001,6 @@ describe('registry pull secret — McpServer delegation, HCC materialization, re
 
     const { status, data } = await adminRequest('POST', '/api/v1/admin/registry/install', {
       serverName: MCP_NAME,
-      contextRef: CONTEXT_REF,
       registryEntryName: MCP_ENTRY,
       registryEntryVersion: MCP_ENTRY_VERSION,
     })

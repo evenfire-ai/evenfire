@@ -179,6 +179,10 @@ spec:
     schedule:
       cron: "*/1 * * * *"
       timezone: UTC
+      # This script tests cadence, not concurrency: Case 4 needs >=2 runs
+      # within the wait window, which the default Forbid would usually skip.
+      # Forbid is covered by control-api unit and real-Postgres tests.
+      concurrencyPolicy: Allow
   steps:
     - id: scheduled-step
       instruction: "Phase 5 scheduled E2E step."

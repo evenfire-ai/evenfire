@@ -94,6 +94,17 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     expect(await store.getSessionToken(ENV_A)).toBeNull()
   })
 
+  it('can clear one environment without touching the legacy global token slot', async () => {
+    keychain.set(keyOf(SERVICE, LEGACY_ACCOUNT), 'legacy-token')
+    await new TokenStore().setSessionToken('rest-only-token', ENV_A)
+    const store = new TokenStore()
+
+    await store.clearSessionToken(ENV_A, { clearLegacyGlobalSlot: false })
+
+    expect(keychain.has(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe(false)
+    expect(keychain.get(keyOf(SERVICE, LEGACY_ACCOUNT))).toBe('legacy-token')
+  })
+
   it('migrates a legacy global-slot token into the active env slot, then deletes it', async () => {
     // Simulate a pre-per-env install: token in the single global account.
     keychain.set(keyOf(SERVICE, LEGACY_ACCOUNT), 'legacy-tok')

@@ -6,7 +6,7 @@ import {
   StepRouterConnectionError,
   ToolDispatchError,
 } from '../stepRouter'
-import type { StepMcpServerRef } from '../types'
+import type { AllowedToolsConfig, StepMcpServerRef } from '../types'
 
 describe('internal tool execution context', () => {
   it('forwards cancellation and deadline while projecting both recorded destinations', async () => {
@@ -252,6 +252,127 @@ describe('StepMcpRouter.callTool', () => {
     const router = new StepMcpRouter(() => mockClient())
     await router.connect([])
     await expect(router.callTool('unknown__tool', {})).rejects.toThrow(ToolDispatchError)
+  })
+})
+
+describe('StepMcpRouter call-time allowlist (spec §3.1.2)', () => {
+  const notAllowed = (toolName: string) =>
+    `Tool '${toolName}' is not allowed in this step and was not run. Use only the tools provided for this step.`
+
+  async function routerWithAllowlist(allowedTools?: AllowedToolsConfig) {
+    const client = mockClient([{ name: 'read' }, { name: 'write' }])
+    const execute = vi.fn(async () => ({ success: true, content: 'internal ran' }))
+    const router = new StepMcpRouter(mockFactory(new Map([['srv', client]])))
+    router.registerInternalTools(
+      [
+        {
+          name: 'clerum__read_workflow',
+          description: 'read',
+          parameters: { type: 'object' },
+          execute,
+        },
+        {
+          name: 'clerum__list_workflows',
+          description: 'list',
+          parameters: { type: 'object' },
+          execute,
+        },
+      ],
+      '/output'
+    )
+    await router.connect([{ name: 'srv', url: 'http://srv:3000' }])
+    router.setAllowedTools(allowedTools)
+    return { client, execute, router }
+  }
+
+  it('returns a recoverable tool error for an MCP tool outside include and never calls the server', async () => {
+    const { client, router } = await routerWithAllowlist({ include: ['srv__read'] })
+
+    const { result, record } = await router.callTool('srv__write', { path: 'README.md' })
+
+    const errorResult = { success: false, error: notAllowed('srv__write') }
+    expect(result).toEqual({ content: errorResult, isError: true })
+    expect(record).toEqual({
+      serverName: 'srv',
+      toolName: 'write',
+      args: { path: 'README.md' },
+      result: errorResult,
+      durationMs: 0,
+    })
+    expect(client.callTool).not.toHaveBeenCalled()
+  })
+
+  it('returns a recoverable tool error for a registered internal tool outside include and never executes it', async () => {
+    const { execute, router } = await routerWithAllowlist({ include: ['srv__read'] })
+
+    const { result, record } = await router.callTool('clerum__read_workflow', {
+      namespace: 'sandbox-recipes',
+      name: 'other-recipe',
+    })
+
+    expect(result).toEqual({
+      content: { success: false, error: notAllowed('clerum__read_workflow') },
+      isError: true,
+    })
+    expect(record.serverName).toBe('clerum')
+    expect(record.toolName).toBe('read_workflow')
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('answers a listed name that no server registered with a tool error instead of throwing', async () => {
+    const { client, router } = await routerWithAllowlist({
+      include: ['srv__read', 'srv__delete', 'shell_exec'],
+    })
+
+    await expect(router.callTool('srv__delete', {})).resolves.toMatchObject({
+      result: { content: { success: false, error: notAllowed('srv__delete') }, isError: true },
+      record: { serverName: 'srv', toolName: 'delete' },
+    })
+    await expect(router.callTool('shell_exec', {})).resolves.toMatchObject({
+      result: { isError: true },
+      record: { serverName: 'unknown', toolName: 'shell_exec' },
+    })
+    expect(client.callTool).not.toHaveBeenCalled()
+  })
+
+  it('dispatches listed MCP and internal tools normally', async () => {
+    const { client, execute, router } = await routerWithAllowlist({
+      include: ['srv__read', 'clerum__list_workflows'],
+    })
+
+    const mcp = await router.callTool('srv__read', { q: 1 })
+    const internal = await router.callTool('clerum__list_workflows', {})
+
+    expect(client.callTool).toHaveBeenCalledWith('read', { q: 1 }, {})
+    expect(mcp.result).toEqual({ content: 'result', isError: false })
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(internal.result).toEqual({
+      content: { success: true, content: 'internal ran' },
+      isError: false,
+    })
+  })
+
+  it.each<[string, AllowedToolsConfig | undefined]>([
+    ['absent', undefined],
+    ['empty', { include: [] }],
+  ])('keeps unrestricted dispatch when include is %s', async (_label, allowedTools) => {
+    const { client, execute, router } = await routerWithAllowlist(allowedTools)
+
+    await router.callTool('srv__write', { path: 'notes.md' })
+    await router.callTool('clerum__read_workflow', {})
+
+    expect(client.callTool).toHaveBeenCalledWith('write', { path: 'notes.md' }, {})
+    expect(execute).toHaveBeenCalledTimes(1)
+    await expect(router.callTool('unknown__tool', {})).rejects.toThrow(ToolDispatchError)
+  })
+
+  it('still throws for an already cancelled caller before the allowlist check', async () => {
+    const { client, router } = await routerWithAllowlist({ include: ['srv__read'] })
+
+    await expect(
+      router.callTool('srv__write', {}, { signal: AbortSignal.abort('step-timeout') })
+    ).rejects.toThrow('step-timeout')
+    expect(client.callTool).not.toHaveBeenCalled()
   })
 })
 

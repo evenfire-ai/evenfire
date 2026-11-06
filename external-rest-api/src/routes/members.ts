@@ -1,7 +1,7 @@
 import { type NextFunction, type Response, Router } from 'express'
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { randomUUID } from 'node:crypto'
-import { ControlApiError } from '../controlApiClient.js'
+import { ControlApiError, ControlApiUnexpectedResponseError } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   cancelManagedInvitation,
@@ -315,12 +315,13 @@ export function createMembersRouter(): Router {
       } catch (error) {
         const message = error instanceof Error ? error.message : ''
         if (error instanceof ControlApiError && error.status === 400) {
-          const code =
-            error.body && typeof error.body === 'object' && 'error' in error.body
-              ? String((error.body as { error: unknown }).error)
-              : ''
+          const code = error.code ?? ''
           if (code === 'reason_required' || code === 'idempotency_key_required') {
             res.status(400).json(error.body)
+            return
+          }
+          if (error.code === null) {
+            next(new ControlApiUnexpectedResponseError())
             return
           }
         }

@@ -176,6 +176,8 @@ trigger_seeded_fixtures() {
     pass "triggered ${recipe} (run_id=${run_id})"
   done
 
+  # If SCHEDULE_RECIPE is also in TRIGGER_RECIPES, its live on-demand run makes
+  # the forced tick skip under concurrencyPolicy Forbid (the default).
   if [[ -n "$SCHEDULE_RECIPE" ]]; then
     local schedule_rows
     schedule_rows=$(pg_psql "UPDATE workflow_schedules

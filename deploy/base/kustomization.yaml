@@ -16,8 +16,9 @@ resources:
   - webhook-ingress
   - gfs
   # deploy/base/ingress/ is intentionally NOT listed here — the Cloudflare Tunnel
-  # stack is opt-in per GKE overlay (gcp-prod/gcp-dev add `- ../../base/ingress`),
-  # so the minikube overlay never inherits an unconfigurable cloudflared pod.
+  # stack is opt-in: your production overlay adds `- ../../base/ingress` (see
+  # docs/deploy/production.md), so the minikube overlay never inherits an
+  # unconfigurable cloudflared pod.
 
 replacements:
   - source:

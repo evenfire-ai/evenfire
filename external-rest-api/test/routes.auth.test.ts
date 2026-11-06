@@ -46,6 +46,22 @@ describe('routes/auth password-login', () => {
     expect(res.body).toEqual({ error: 'invalid_credentials' })
   })
 
+  it('sanitizes password-operation programming errors without marking them retryable', async () => {
+    authServiceMock.loginWithPassword.mockRejectedValueOnce(
+      new TypeError('private URL and credential detail')
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/password-login')
+      .send({ email: 'user@example.invalid', password: 'synthetic-password' })
+
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({ error: 'Internal Server Error' })
+    expect(res.headers['retry-after']).toBeUndefined()
+    expect(res.text).not.toContain('private URL')
+    expect(res.text).not.toContain('credential detail')
+  })
+
   it('sets an HttpOnly profile session cookie and omits bearer token body for browser login', async () => {
     authServiceMock.loginWithPassword.mockResolvedValueOnce({
       token: 'profile-session-jwt',
@@ -71,9 +87,10 @@ describe('routes/auth password-login', () => {
     expect(res.body.me.email).toBe('user@example.invalid')
     expect(String(res.headers['set-cookie'])).toContain('profile_session=profile-session-jwt')
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
-    expect(String(res.headers['set-cookie'])).toContain('Max-Age=43200')
+    expect(String(res.headers['set-cookie'])).toContain('Max-Age=604800')
     expect(String(res.headers['set-cookie'])).toContain('Secure')
     expect(String(res.headers['set-cookie'])).toContain('SameSite=Lax')
+    expect(String(res.headers['set-cookie'])).toContain('Path=/')
   })
 
   it('returns the bearer token body for non-browser Desktop App login', async () => {

@@ -1,9 +1,11 @@
-import type { ReactNode } from 'react'
+import { type ReactNode, useLayoutEffect } from 'react'
 import { vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { act, renderHook } from '@testing-library/react'
 import type { HostAuthorityHoldKind } from '../../../../lib/hostAuthorityStore'
+import type { Tone } from '../../../../uiTypes'
 import { useAgentChatController } from '../../useAgentChatController'
+import type { PushToastOptions } from '../../useToastController'
 import { type HarnessHostAuthority, useHarnessHostAuthority } from './hostAuthorityHarness'
 
 type ControllerParams = Parameters<typeof useAgentChatController>[0]
@@ -26,13 +28,22 @@ export interface RenderControllerResult {
     isBlocked: (agentRef: string) => boolean
   }
   spies: {
-    pushToast: ReturnType<typeof vi.fn>
+    pushToast: ReturnType<
+      typeof vi.fn<(message: string, tone: Tone, options?: PushToastOptions) => void>
+    >
     pushNotification: ReturnType<typeof vi.fn>
     showDesktopNotification: ReturnType<typeof vi.fn>
     openAgentConversationFromNotification: ReturnType<typeof vi.fn>
     decideApprovalFromNotification: ReturnType<typeof vi.fn>
     canDeliverChatResponseNotification: ReturnType<typeof vi.fn>
   }
+}
+
+export interface RenderControllerOptions {
+  /** Observe committed controller state before its passive effects synchronize refs. */
+  onLayoutCommit?: (controller: ReturnType<typeof useAgentChatController>) => void
+  /** Called with the controller's return value on every render, for frame-level assertions. */
+  onRender?: (controller: ReturnType<typeof useAgentChatController>) => void
 }
 
 /**
@@ -47,10 +58,11 @@ export interface RenderControllerResult {
  * factory, so epoch comparisons in the controller are exercised for real.
  */
 export function renderController(
-  overrides: Partial<ControllerParams> = {}
+  overrides: Partial<ControllerParams> = {},
+  options: RenderControllerOptions = {}
 ): RenderControllerResult {
   const spies = {
-    pushToast: vi.fn(),
+    pushToast: vi.fn<(message: string, tone: Tone, options?: PushToastOptions) => void>(),
     pushNotification: vi.fn(),
     showDesktopNotification: vi.fn(async () => 'granted' as const),
     openAgentConversationFromNotification: vi.fn(async () => undefined),
@@ -93,7 +105,7 @@ export function renderController(
     (p: Partial<ControllerParams>) => {
       const hostAuthority = useHarnessHostAuthority()
       authority = hostAuthority
-      return useAgentChatController({
+      const controller = useAgentChatController({
         onHostAccessRevoked: hostAuthority.onHostAccessRevoked,
         onHostAuthorityUncertain: hostAuthority.onHostAuthorityUncertain,
         isHostAccessBlocked: hostAuthority.isHostAccessBlocked,
@@ -101,6 +113,16 @@ export function renderController(
         hostAuthorityRevision: hostAuthority.revision,
         ...p,
       } as ControllerParams)
+      options.onRender?.(controller)
+      useLayoutEffect(() => {
+        options.onLayoutCommit?.(controller)
+      }, [
+        controller.activeChatId,
+        controller.chatMessages,
+        controller.chatMessagesLoading,
+        options.onLayoutCommit,
+      ])
+      return controller
     },
     {
       initialProps: params,

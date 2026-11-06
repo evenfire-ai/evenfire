@@ -1,9 +1,11 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { AttachConnectorCredentials } from '@components/AttachConnectorCredentials'
 import { AuthGate } from '@components/AuthGate'
 import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
+import { ChangeConnectorSecret } from '@components/ChangeConnectorSecret'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
@@ -14,9 +16,15 @@ import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
 import {
+  nonCanonicalEnvSecretName,
+  resolveEnvSecret,
+  resolveRegistryCredentialSource,
+} from '@components/UpdateConnectorCredentials/mcpServerCredentialResolvers'
+import {
   isRecipeOwned,
   resolveCredentialSurface,
 } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
+import { Button, FormSection } from '@components/ui'
 import {
   CONNECTOR_EDIT_DEFAULT_TAB,
   CONNECTOR_EDIT_TABS,
@@ -33,43 +41,20 @@ import {
   getMcpServer,
   updateMcpServer,
 } from '@lib/api'
-import type {
-  ContextResource,
-  EgressBinding,
-  EnvSecret,
-  EnvSecretKeyMapping,
-  HostResource,
-  McpServerResource,
-} from '@lib/api'
+import type { ContextResource, EgressBinding, HostResource, McpServerResource } from '@lib/api'
 import {
   hostOwnedContextNamesForConnector,
   mergeAccessSummaries,
   sortAccessPrincipals,
 } from '@lib/connectorAccess'
+import {
+  credentialAttachUnavailable,
+  credentialReferenceChangeUnavailable,
+  sameCredentialSpec,
+} from '@lib/connectorCredentials'
+import { buildMcpEgressStatus, deriveEgressEditorInputs } from '@lib/egressModel'
 import type { EgressEditorStatus } from '@lib/egressModel'
 import { extractOAuthImmutables, oauthClientSecretRefName } from '@lib/oauthInstall'
-
-/**
- * Narrows `server.spec.envSecret` (typed as `unknown` on the generic
- * `AnyRecord` spec) into the shape UpdateConnectorCredentials needs. A
- * malformed or partial envSecret (missing name, keys not an array, or no
- * usable key mappings) is treated the same as "no envSecret" — there is
- * nothing safely rotatable through this form either way.
- */
-function resolveEnvSecret(spec: Record<string, unknown> | undefined): EnvSecret | undefined {
-  const raw = spec?.envSecret
-  if (!raw || typeof raw !== 'object') return undefined
-  const candidate = raw as { name?: unknown; keys?: unknown }
-  if (typeof candidate.name !== 'string' || !Array.isArray(candidate.keys)) return undefined
-  const keys = candidate.keys.filter(
-    (k): k is EnvSecretKeyMapping =>
-      Boolean(k) &&
-      typeof (k as EnvSecretKeyMapping).secretKey === 'string' &&
-      typeof (k as EnvSecretKeyMapping).envVar === 'string'
-  )
-  if (keys.length === 0) return undefined
-  return { name: candidate.name, keys }
-}
 
 function parseConnectorEditTab(value: string | string[] | undefined): ConnectorEditTab {
   const candidate = Array.isArray(value) ? value[0] : value
@@ -82,20 +67,6 @@ type ContextAccess = {
   users: Array<{ id: string; label: string }>
 }
 
-function resolveRegistryCredentialSource(
-  metadata: McpServerResource['metadata'] | undefined
-): { name: string; version: string } | undefined {
-  const labels = (metadata?.labels ?? {}) as Record<string, unknown>
-  const annotations = (metadata?.annotations ?? {}) as Record<string, unknown>
-  const name = String(
-    annotations['clerum.io/catalog-id'] ?? labels['clerum.io/catalog-id'] ?? ''
-  ).trim()
-  const version = String(
-    annotations['clerum.io/catalog-version'] ?? labels['clerum.io/catalog-version'] ?? ''
-  ).trim()
-  return name && version ? { name, version } : undefined
-}
-
 const EMPTY_CONTEXT_ACCESS: ContextAccess = { agents: [], teams: [], users: [] }
 
 const CONTEXT_ACCESS_GROUPS: Array<{ key: keyof ContextAccess; title: string }> = [
@@ -103,6 +74,10 @@ const CONTEXT_ACCESS_GROUPS: Array<{ key: keyof ContextAccess; title: string }> 
   { key: 'teams', title: 'Teams' },
   { key: 'agents', title: 'Agents' },
 ]
+
+/** Keyboard focus must survive the credentials-panel swap when the change
+ *  flow closes, so the trigger is addressed by a stable element id. */
+const CHANGE_SECRET_TRIGGER_ID = 'change-assigned-secret-trigger'
 
 export default function EditMcpServerPage() {
   const router = useRouter()
@@ -116,6 +91,11 @@ export default function EditMcpServerPage() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [reloadTick, setReloadTick] = useState(0)
+  const [changeSource, setChangeSource] = useState<McpServerResource | null>(null)
+  const [attachActive, setAttachActive] = useState(false)
+  const [attachBusy, setAttachBusy] = useState(false)
+  const [egressDirty, setEgressDirty] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [egressBindings, setEgressBindings] = useState<EgressBinding[] | undefined>(undefined)
   const [egressStatus, setEgressStatus] = useState<EgressEditorStatus | null>(null)
@@ -128,10 +108,12 @@ export default function EditMcpServerPage() {
   const [loadingContextAccess, setLoadingContextAccess] = useState(false)
 
   function backToList() {
+    if (attachBusy) return
     router.push(CONTROL_ROUTES.connectors.root)
   }
 
   function selectTab(next: ConnectorEditTab) {
+    if (attachBusy) return
     if (next === CONNECTOR_EDIT_DEFAULT_TAB) {
       router.replace(CONTROL_ROUTES.connectors.edit(name))
     } else {
@@ -139,12 +121,21 @@ export default function EditMcpServerPage() {
     }
   }
 
+  const baselineEgress = useMemo(() => {
+    const inputs = deriveEgressEditorInputs(
+      server?.spec?.egressBindings as EgressBinding[] | undefined,
+      { allowCidr: true }
+    )
+    return buildMcpEgressStatus(inputs.mode, inputs.domainInput, inputs.portInput)
+  }, [server?.spec?.egressBindings])
+
   const handleEgressChange = useCallback(
     (nextBindings: EgressBinding[] | undefined, nextStatus: EgressEditorStatus) => {
       setEgressBindings(nextBindings)
       setEgressStatus(nextStatus)
+      setEgressDirty(!sameCredentialSpec(nextStatus, baselineEgress))
     },
-    []
+    [baselineEgress]
   )
 
   useEffect(() => {
@@ -156,9 +147,11 @@ export default function EditMcpServerPage() {
         const result = await getMcpServer(name)
         if (cancelled) return
         setServer(result)
+        setEgressDirty(false)
         setEgressBindings((result.spec?.egressBindings as EgressBinding[] | undefined) ?? undefined)
       } catch (error) {
         if (!cancelled) {
+          setServer(null)
           setLoadError(error instanceof Error ? error.message : 'Failed to load connector')
         }
       } finally {
@@ -169,7 +162,7 @@ export default function EditMcpServerPage() {
     return () => {
       cancelled = true
     }
-  }, [name])
+  }, [name, reloadTick])
 
   useEffect(() => {
     let cancelled = false
@@ -185,7 +178,7 @@ export default function EditMcpServerPage() {
         const contextNameSet = new Set(nextContextNames)
         const agentsById = new Map<string, ContextAccess['agents'][number]>()
         for (const host of hosts) {
-          const contextRef = String(host.spec?.contextRef ?? '').trim()
+          const contextRef = host.spec?.contextRef ?? ''
           const id = String(host.metadata?.name ?? '').trim()
           if (!contextNameSet.has(contextRef) || !id) continue
           agentsById.set(id, { id, label: getAgentDisplayName(id, hosts) })
@@ -279,7 +272,7 @@ export default function EditMcpServerPage() {
 
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!server?.spec || saving || egressStatus?.errors.length) return
+    if (!server?.spec || saving || attachBusy || egressStatus?.errors.length) return
     setSaving(true)
     setSaveError('')
     try {
@@ -302,6 +295,9 @@ export default function EditMcpServerPage() {
   const envSecret = server?.spec
     ? resolveEnvSecret(server.spec as Record<string, unknown>)
     : undefined
+  const nonCanonicalSecretName = server?.spec
+    ? nonCanonicalEnvSecretName(server.spec as Record<string, unknown>)
+    : undefined
   const oauthImmutables = server?.spec
     ? extractOAuthImmutables(server.spec as Record<string, unknown>)
     : null
@@ -309,6 +305,44 @@ export default function EditMcpServerPage() {
     () => resolveRegistryCredentialSource(server?.metadata),
     [server?.metadata]
   )
+
+  const attachUnavailable = server ? credentialAttachUnavailable(server) : undefined
+  const onSpecSaved = useCallback((updated: McpServerResource) => {
+    setAttachActive(true)
+    setServer(updated)
+  }, [])
+  const onAttachFinished = useCallback(() => {
+    setAttachActive(false)
+    setChangeSource(null)
+    setAttachBusy(false)
+    setReloadTick(tick => tick + 1)
+  }, [])
+
+  // The change flow replaces the whole credentials panel; after it closes the
+  // trigger remounts (after a reload when a save happened). Park the return
+  // focus until the panel has settled, then hand focus back to the trigger.
+  const returnFocusState = useRef<'idle' | 'waiting-reload' | 'ready'>('idle')
+  const finishChangeFlow = useCallback(() => {
+    returnFocusState.current = 'waiting-reload'
+    onAttachFinished()
+  }, [onAttachFinished])
+  const cancelChangeFlow = useCallback(() => {
+    returnFocusState.current = 'ready'
+    setChangeSource(null)
+  }, [])
+  useEffect(() => {
+    if (returnFocusState.current === 'waiting-reload') {
+      // A save schedules a reload; focus must wait for it to finish.
+      if (loading) returnFocusState.current = 'ready'
+      return
+    }
+    if (returnFocusState.current !== 'ready') return
+    if (loading || changeSource || attachActive) return
+    const trigger = document.getElementById(CHANGE_SECRET_TRIGGER_ID)
+    if (!trigger) return
+    returnFocusState.current = 'idle'
+    trigger.focus()
+  }, [loading, changeSource, attachActive])
 
   return (
     <AuthGate>
@@ -331,6 +365,7 @@ export default function EditMcpServerPage() {
             onChange={selectTab}
             options={CONNECTOR_EDIT_TABS.map(tab => ({
               value: tab,
+              disabled: attachBusy,
               label: CONNECTOR_EDIT_TAB_LABELS[tab],
               href:
                 tab === CONNECTOR_EDIT_DEFAULT_TAB
@@ -339,7 +374,11 @@ export default function EditMcpServerPage() {
             }))}
           />
 
-          {loadError ? <div className="cu-banner cu-banner--error">{loadError}</div> : null}
+          {loadError ? (
+            <div className="cu-banner cu-banner--error" role="alert">
+              {loadError}
+            </div>
+          ) : null}
 
           {loading ? (
             activeTab === 'credentials' ? (
@@ -369,30 +408,125 @@ export default function EditMcpServerPage() {
             )
           ) : server ? (
             activeTab === 'credentials' ? (
-              <div className="cu-connector-edit-form">
-                {oauthImmutables ? (
-                  // An OAuth connector's credential lives in its clientSecretRef
-                  // Secret, not spec.envSecret — so UpdateConnectorCredentials would
-                  // fall to its "nothing to rotate here" branch and mislead. Show the
-                  // accurate OAuth panel instead (D-B7; rotation is a follow-up).
+              <div className="cu-connector-edit-form cu-connector-edit-content">
+                {changeSource ? (
+                  <ChangeConnectorSecret
+                    serverName={name}
+                    server={changeSource}
+                    reference={resolveEnvSecret(changeSource.spec)!}
+                    blockedReason={
+                      egressDirty
+                        ? 'Save or discard your egress changes before changing the assigned Secret.'
+                        : saving
+                          ? 'Wait for the egress save to finish.'
+                          : undefined
+                    }
+                    onBusyChange={setAttachBusy}
+                    onSpecSaved={setServer}
+                    onFinished={finishChangeFlow}
+                    onCancel={cancelChangeFlow}
+                  />
+                ) : attachActive || !attachUnavailable ? (
+                  <>
+                    <AttachConnectorCredentials
+                      key={name}
+                      serverName={name}
+                      server={server}
+                      registryCredentialSource={registryCredentialSource}
+                      blockedReason={
+                        egressDirty
+                          ? 'Save or discard your egress changes before attaching credentials.'
+                          : saving
+                            ? 'Wait for the egress save to finish.'
+                            : undefined
+                      }
+                      onBusyChange={setAttachBusy}
+                      onSpecSaved={onSpecSaved}
+                      onFinished={onAttachFinished}
+                    />
+                    {egressDirty && !attachBusy ? (
+                      <Button
+                        onClick={() => {
+                          setEgressBindings(
+                            server.spec?.egressBindings as EgressBinding[] | undefined
+                          )
+                          setEgressStatus(null)
+                          setEgressDirty(false)
+                        }}
+                      >
+                        Discard egress changes
+                      </Button>
+                    ) : null}
+                  </>
+                ) : nonCanonicalSecretName !== undefined ? (
+                  <div className="cu-banner cu-banner--error" role="alert">
+                    This connector stores a non-canonical Secret name:{' '}
+                    <code>{JSON.stringify(nonCanonicalSecretName)}</code>. Correct the connector
+                    reference before editing credentials.
+                  </div>
+                ) : oauthImmutables ? (
+                  // OAuth credentials live in clientSecretRef, not envSecret.
                   <OAuthImmutableFields
                     oauth={oauthImmutables}
                     credentialSecretName={oauthClientSecretRefName(
                       server.spec as Record<string, unknown>
                     )}
                   />
+                ) : envSecret ? (
+                  <>
+                    {!credentialReferenceChangeUnavailable(server) ? (
+                      <FormSection
+                        title="Assigned Secret"
+                        description="Choose a Secret and its key mappings. Rotate individual values below."
+                      >
+                        <div className="cu-assigned-secret-row">
+                          <div
+                            className="cu-assigned-secret-field"
+                            role="group"
+                            aria-labelledby="connector-current-secret-label"
+                          >
+                            <span
+                              className="cu-assigned-secret-field__label"
+                              id="connector-current-secret-label"
+                            >
+                              Current Secret
+                            </span>
+                            <div className="cu-assigned-secret-field__value">{envSecret.name}</div>
+                          </div>
+                          <Button
+                            id={CHANGE_SECRET_TRIGGER_ID}
+                            variant="primary"
+                            disabled={attachBusy || saving || egressDirty}
+                            onClick={() => setChangeSource(server)}
+                          >
+                            Change assigned Secret
+                          </Button>
+                        </div>
+                        {egressDirty ? (
+                          <p role="status">
+                            Save or discard your egress changes before changing the assigned Secret.
+                          </p>
+                        ) : null}
+                      </FormSection>
+                    ) : null}
+                    <UpdateConnectorCredentials
+                      perKeyEditing
+                      onBusyChange={setAttachBusy}
+                      serverName={name}
+                      envSecret={envSecret}
+                      registryCredentialSource={registryCredentialSource}
+                      surface={resolveCredentialSurface(
+                        server.status?.conditions,
+                        server.spec as { managed?: boolean } | undefined
+                      )}
+                      // Ownership is a spec fact, independent of observed status.
+                      recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
+                    />
+                  </>
                 ) : (
-                  <UpdateConnectorCredentials
-                    serverName={name}
-                    envSecret={envSecret}
-                    registryCredentialSource={registryCredentialSource}
-                    surface={resolveCredentialSurface(
-                      server.status?.conditions,
-                      server.spec as { managed?: boolean } | undefined
-                    )}
-                    // Ownership is a spec fact, independent of observed status.
-                    recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
-                  />
+                  <FormSection title="Connector credentials">
+                    <p className="cu-muted">{attachUnavailable}</p>
+                  </FormSection>
                 )}
               </div>
             ) : activeTab === 'access' ? (
@@ -494,7 +628,7 @@ export default function EditMcpServerPage() {
                   <button
                     type="button"
                     className="cu-btn cu-btn--ghost"
-                    disabled={saving}
+                    disabled={saving || attachBusy}
                     onClick={backToList}
                   >
                     Cancel
@@ -502,7 +636,7 @@ export default function EditMcpServerPage() {
                   <button
                     type="submit"
                     className="cu-btn cu-btn--primary"
-                    disabled={saving || Boolean(egressStatus?.errors.length)}
+                    disabled={saving || attachBusy || Boolean(egressStatus?.errors.length)}
                   >
                     {saving ? 'Saving...' : 'Save egress'}
                   </button>

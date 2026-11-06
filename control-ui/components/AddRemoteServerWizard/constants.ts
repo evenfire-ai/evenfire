@@ -5,9 +5,9 @@ export const REMOTE_WIZARD_STEPS = ['Identify', 'Configure', 'Confirm'] as const
 
 export const REMOTE_WIZARD_STEP_DETAILS = [
   {
-    description: 'URL, name, and agent context',
+    description: 'URL and name',
     title: 'Identify the remote server',
-    subtitle: 'Enter the remote MCP server URL, name it, and pick the context to attach it to.',
+    subtitle: 'Enter the remote MCP server URL and name it.',
   },
   {
     description: 'Detected OAuth configuration',
@@ -48,3 +48,10 @@ export const REGISTRATION_MODE_HINT: Record<RemoteDiscoverRegistrationMode, stri
   manual:
     'The server offers neither CIMD nor dynamic registration, so you must supply a pre-registered client_id and client_secret.',
 }
+
+/**
+ * Scopes the operator may type; mirrors the McpServer CRD `spec.oauth.scopes` maxItems.
+ * Scopes an authorization-server profile adds (Entra's offline_access) are counted only
+ * by control-api, which answers with its own message when the total is over.
+ */
+export const REMOTE_SCOPES_MAX = 128

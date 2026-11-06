@@ -6,8 +6,9 @@ function normalized(value: unknown): string {
 
 /**
  * Contexts historically exposed both their Kubernetes resource name and
- * spec.contextId as identifiers. Treat both as aliases everywhere that joins
- * Contexts to Host contextRef values or legacy URLs.
+ * spec.contextId as identifiers. Only labels and legacy URL redirects still
+ * accept either; anything that decides which Context a Host reaches matches
+ * Host.spec.contextRef against metadata.name exactly, as the token broker does.
  */
 export function contextAliases(context: ContextResource): string[] {
   return Array.from(
@@ -21,11 +22,6 @@ export function contextWireId(context: ContextResource): string {
   return normalized(context.spec?.contextId) || normalized(context.metadata?.name)
 }
 
-/** Stable identifier accepted by Context resource CRUD endpoints. */
-export function contextResourceName(context: ContextResource): string {
-  return normalized(context.metadata?.name) || normalized(context.spec?.contextId)
-}
-
 export function contextForAlias(
   contexts: readonly ContextResource[],
   alias: string
@@ -33,12 +29,4 @@ export function contextForAlias(
   const normalizedAlias = normalized(alias)
   if (!normalizedAlias) return undefined
   return contexts.find(context => contextAliases(context).includes(normalizedAlias))
-}
-
-export function contextResourceNameForAlias(
-  contexts: readonly ContextResource[],
-  alias: string
-): string {
-  const context = contextForAlias(contexts, alias)
-  return context ? contextResourceName(context) : normalized(alias)
 }

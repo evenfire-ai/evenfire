@@ -111,13 +111,13 @@ describe('resolveInvocableMcpServersForContexts — rpc-proxy grant-presence gat
     // No grant.
     grantExists.mockResolvedValue(false)
     expect(
-      names(await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB))
+      names(await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB, NS))
     ).toEqual([])
 
     // Grant present.
     grantExists.mockResolvedValue(true)
     expect(
-      names(await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB))
+      names(await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB, NS))
     ).toEqual(['gdrive'])
   })
 
@@ -132,7 +132,7 @@ describe('resolveInvocableMcpServersForContexts — rpc-proxy grant-presence gat
     })
     grantExists.mockResolvedValue(true)
 
-    await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB)
+    await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB, NS)
 
     expect(grantExists).toHaveBeenCalledTimes(1)
     expect(grantExists.mock.calls[0][1]).toEqual({
@@ -156,13 +156,13 @@ describe('resolveInvocableMcpServersForContexts — rpc-proxy grant-presence gat
     seedOauthServer(g, { name: 'gdrive', contextRef: 'ctx-1', oauthId: 'google-drive' }) // no grantScope
     grantExists.mockResolvedValue(true)
 
-    await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB)
+    await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB, NS)
     expect(grantExists.mock.calls[0][1]).toMatchObject({ grantKind: 'user', userId: CALLER })
   })
 })
 
 describe('resolveInvocableMcpServersForContexts — context (shared) flavor', () => {
-  it('queries the SHARED coordinate keyed by the server contextRef, DECOUPLED from the caller userId', async () => {
+  it('queries the SHARED coordinate keyed by the enabling Context, DECOUPLED from the caller userId and any legacy CR field', async () => {
     const g = new MockGateway(NS)
     seedContext(g, 'ctx-team', ['gdrive-shared'])
     seedOauthServer(g, {
@@ -173,7 +173,7 @@ describe('resolveInvocableMcpServersForContexts — context (shared) flavor', ()
     })
     grantExists.mockResolvedValue(true)
 
-    const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-team'], CALLER, DB)
+    const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-team'], CALLER, DB, NS)
 
     expect(names(out)).toEqual(['gdrive-shared'])
     const key = grantExists.mock.calls[0][1]
@@ -182,7 +182,7 @@ describe('resolveInvocableMcpServersForContexts — context (shared) flavor', ()
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-shared',
-      contextId: 'ctx-authoritative', // server's spec.contextRef, NOT the scoped ctx-team
+      contextId: 'ctx-team', // the scoped Context that enables it, NOT the CR's legacy field
       oauthClientId: 'google-drive',
       crUid: (
         (await g.getResource('mcpservers', 'gdrive-shared', NS)) as { metadata: { uid: string } }
@@ -206,7 +206,7 @@ describe('resolveInvocableMcpServersForContexts — context (shared) flavor', ()
     grantExists.mockImplementation(async (_db, input) => input.grantKind === 'shared')
 
     expect(
-      names(await resolveInvocableMcpServersForContexts(g, NS, ['ctx-team'], CALLER, DB))
+      names(await resolveInvocableMcpServersForContexts(g, NS, ['ctx-team'], CALLER, DB, NS))
     ).toEqual(['gdrive-shared'])
   })
 })
@@ -217,20 +217,23 @@ describe('resolveInvocableMcpServersForContexts — fail-closed + non-oauth', ()
     seedContext(g, 'ctx-1', ['plain'])
     seedNoneServer(g, 'plain')
 
-    const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB)
+    const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB, NS)
     expect(names(out)).toEqual(['plain'])
     expect(grantExists).not.toHaveBeenCalled()
   })
 
-  it('excludes a context-flavor server missing contextRef (fail-closed, no query issued)', async () => {
+  it('excludes a context-flavor server whose only grant belongs to a Context outside the scope', async () => {
     const g = new MockGateway(NS)
     seedContext(g, 'ctx-1', ['ctx-server'])
-    seedOauthServer(g, { name: 'ctx-server', grantScope: 'context', oauthId: 'google-drive' }) // no contextRef
-    grantExists.mockResolvedValue(true)
+    seedContext(g, 'ctx-elsewhere', ['ctx-server'])
+    seedOauthServer(g, { name: 'ctx-server', grantScope: 'context', oauthId: 'google-drive' })
+    grantExists.mockImplementation(
+      async (_db, input) => input.grantKind === 'shared' && input.contextId === 'ctx-elsewhere'
+    )
 
-    const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB)
+    const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB, NS)
     expect(names(out)).toEqual([])
-    expect(grantExists).not.toHaveBeenCalled()
+    expect(grantExists.mock.calls.map(([, key]) => key.contextId)).toEqual(['ctx-1'])
   })
 
   it('excludes an OAuth server with no usable oauth.id (fail-closed, no query issued)', async () => {
@@ -244,7 +247,7 @@ describe('resolveInvocableMcpServersForContexts — fail-closed + non-oauth', ()
     })
     grantExists.mockResolvedValue(true)
 
-    const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB)
+    const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB, NS)
     expect(names(out)).toEqual([])
     expect(grantExists).not.toHaveBeenCalled()
   })
@@ -271,7 +274,7 @@ describe('resolveInvocableMcpServersForContexts — fail-closed + non-oauth', ()
       return true // 'good'
     })
 
-    const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB)
+    const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB, NS)
     // Observable outcome (T4): 'broken' excluded (fail-closed on its DB error),
     // 'plain' (none) + 'good' survive. Sorted.
     expect(names(out)).toEqual(['good', 'plain'])

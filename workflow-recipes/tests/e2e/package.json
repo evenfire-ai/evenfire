@@ -1,6 +1,6 @@
 {
   "name": "workflow-recipes-e2e",
-  "version": "0.1.19",
+  "version": "0.1.22",
   "private": true,
   "description": "E2E tests for Workload Recipes Controller (minikube)",
   "scripts": {

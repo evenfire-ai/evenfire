@@ -15,6 +15,8 @@ import type {
  */
 export interface ChatComposerStateContextValue {
   activeChatId: string | null
+  /** Exact workspace chat-tab identity that owns the mounted composer. */
+  workspaceChatTabId?: string | null
   composerImageAttachments: ComposerImageAttachment[]
   composerFileAttachments: ComposerFileAttachment[]
   /** Why the documents of the last attach were not attached (#678). */

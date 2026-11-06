@@ -2,11 +2,44 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
+  DeepLinkAcknowledgmentAuthority,
+  DesktopRuntimeConfigHandoffSelection,
   EntityChangeStreamEvent,
+  GfsResourceDeepLinkEnvelope,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
+  SandboxUiReleasedEvent,
 } from './types.js'
+
+type SandboxUiQueuedDeepLinkEnvelope = SandboxUiDeepLinkEnvelope & {
+  userNavigationGenerationAtActivation: number
+}
+type SandboxUiSessionInvalidation = {
+  sessionGeneration: number
+  appDeepLinkMinimumId: number
+  gfsDeepLinkMinimumId: number
+}
+
+function parseSandboxUiSessionInvalidation(value: unknown): SandboxUiSessionInvalidation | null {
+  if (!value || typeof value !== 'object') return null
+  const event = value as Record<string, unknown>
+  if (
+    !Number.isSafeInteger(event.sessionGeneration) ||
+    Number(event.sessionGeneration) < 0 ||
+    !Number.isSafeInteger(event.appDeepLinkMinimumId) ||
+    Number(event.appDeepLinkMinimumId) < 1 ||
+    !Number.isSafeInteger(event.gfsDeepLinkMinimumId) ||
+    Number(event.gfsDeepLinkMinimumId) < 1
+  ) {
+    return null
+  }
+  return {
+    sessionGeneration: Number(event.sessionGeneration),
+    appDeepLinkMinimumId: Number(event.appDeepLinkMinimumId),
+    gfsDeepLinkMinimumId: Number(event.gfsDeepLinkMinimumId),
+  }
+}
 
 // Sandboxed Electron preloads cannot load relative runtime modules. Keep this
 // allowlist self-contained and pin it to the authoritative registry in
@@ -45,6 +78,30 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'app.backToApps',
 ])
 
+/**
+ * Producer-side cancellation wiring (folder-zip Stop, R1-M1): a cancellable
+ * invoke carries a requestId; if the caller's signal aborts, main aborts the
+ * in-flight request. An already-aborted signal never starts producer work —
+ * no invoke, no gfs:abort event (R2-L3). Kept INLINE: the sandboxed preload
+ * must stay free of relative value imports (self-containment contract).
+ */
+function cancellableGfsInvoke<T>(
+  channel: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!signal) return ipcRenderer.invoke(channel, payload) as Promise<T>
+  if (signal.aborted) {
+    return Promise.reject(new DOMException('Request was stopped before it started.', 'AbortError'))
+  }
+  const requestId = crypto.randomUUID()
+  const onAbort = () => ipcRenderer.send('gfs:abort', { requestId })
+  signal.addEventListener('abort', onAbort, { once: true })
+  return ipcRenderer
+    .invoke(channel, { ...payload, requestId })
+    .finally(() => signal.removeEventListener('abort', onAbort)) as Promise<T>
+}
+
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
   return typeof value === 'string' && DESKTOP_COMMAND_IDS.has(value as DesktopCommandId)
 }
@@ -69,16 +126,29 @@ const clerum = Object.freeze({
   },
   auth: {
     getSessionState: () => ipcRenderer.invoke('auth:getSessionState'),
+    getSessionGeneration: () => ipcRenderer.invoke('auth:getSessionGeneration'),
     getDependenciesHealth: () => ipcRenderer.invoke('auth:getDependenciesHealth'),
     getRuntimeConfigState: () => ipcRenderer.invoke('auth:getRuntimeConfigState'),
     selectRuntimeConfig: (optionId: string) =>
       ipcRenderer.invoke('auth:selectRuntimeConfig', { optionId }),
+    selectRuntimeConfigForHandoff: (optionId: string, expectedSessionGeneration: number) =>
+      ipcRenderer.invoke('auth:selectRuntimeConfigForHandoff', {
+        optionId,
+        expectedSessionGeneration,
+      }) as Promise<DesktopRuntimeConfigHandoffSelection>,
     clearRuntimeConfigSelection: () => ipcRenderer.invoke('auth:clearRuntimeConfigSelection'),
-    saveRuntimeConfig: (config: {
-      externalRestApiBaseUrl: string
-      rpcProxyBaseUrl?: string
-      appName?: string
-    }) => ipcRenderer.invoke('auth:saveRuntimeConfig', config),
+    saveRuntimeConfig: (
+      config: {
+        externalRestApiBaseUrl: string
+        rpcProxyBaseUrl?: string
+        appName?: string
+      },
+      expectedSessionGeneration?: number
+    ) =>
+      ipcRenderer.invoke(
+        'auth:saveRuntimeConfig',
+        expectedSessionGeneration === undefined ? config : { ...config, expectedSessionGeneration }
+      ),
     deleteRuntimeConfig: (optionId: string) =>
       ipcRenderer.invoke('auth:deleteRuntimeConfig', { optionId }),
     googleLogin: (idToken: string) => ipcRenderer.invoke('auth:googleLogin', { idToken }),
@@ -106,17 +176,12 @@ const clerum = Object.freeze({
       return () => ipcRenderer.off('auth:desktopSetupToken', listener)
     },
     onDesktopEnvironmentSetup: (
-      callback: (payload: {
-        externalRestApiBaseUrl: string
-        rpcProxyBaseUrl: string
-        appName?: string
-      }) => void
+      callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
     ) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
         payload: {
           externalRestApiBaseUrl: string
-          rpcProxyBaseUrl: string
           appName?: string
         }
       ) => callback(payload)
@@ -142,16 +207,61 @@ const clerum = Object.freeze({
     switch: (teamId: string) => ipcRenderer.invoke('team:switch', { teamId }),
   },
   gfs: {
+    getUserNavigationGeneration: (): number | null =>
+      ipcRenderer.sendSync('gfs:getUserNavigationGeneration'),
+    advanceUserNavigationGeneration: (): number | null =>
+      ipcRenderer.sendSync('gfs:advanceUserNavigationGeneration'),
+    listPendingDeepLinks: () => ipcRenderer.invoke('gfs:listPendingDeepLinks'),
+    clearPendingDeepLinks: () => ipcRenderer.invoke('gfs:clearPendingDeepLinks'),
+    acknowledgeDeepLink: (id: number, authority?: DeepLinkAcknowledgmentAuthority) =>
+      ipcRenderer.invoke('gfs:acknowledgeDeepLink', {
+        id,
+        ...(authority !== undefined ? { authority } : {}),
+      }),
+    onDeepLink: (callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
+      const listener = (_event: unknown, payload: GfsResourceDeepLinkEnvelope) => callback(payload)
+      ipcRenderer.on('gfs:deepLink', listener)
+      return () => ipcRenderer.off('gfs:deepLink', listener)
+    },
+    copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
-    download: (uri: string) => ipcRenderer.invoke('gfs:download', { uri }),
+    download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
+      cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
     downloadPreview: (uri: string, maxBytes: number) =>
       ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
     listAccessible: (drive?: string, cursor?: string) =>
       ipcRenderer.invoke('gfs:listAccessible', { drive, cursor }),
-    listChildren: (resourceId: string, drive?: string, cursor?: string) =>
-      ipcRenderer.invoke('gfs:listChildren', { resourceId, drive, cursor }),
+    listChildren: (
+      resourceId: string,
+      drive?: string,
+      cursor?: string,
+      options?: { signal?: AbortSignal }
+    ) => cancellableGfsInvoke('gfs:listChildren', { resourceId, drive, cursor }, options?.signal),
     affordances: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
+    zipStream: {
+      start: () => ipcRenderer.invoke('gfs:zipStream:start'),
+      append: (jobId: string, name: string, bytes: ArrayBuffer) =>
+        ipcRenderer.invoke('gfs:zipStream:append', { jobId, name, bytes }),
+      // The folder-zip transfer (R1-H2): the MAIN process fetches the
+      // resource and writes it into the archive chunk by chunk, so the payload
+      // never crosses this boundary. The walk's stop signal rides along as a
+      // requestId, exactly like the other cancellable GFS calls.
+      appendFromUri: (
+        jobId: string,
+        name: string,
+        uri: string,
+        options?: { maxBytes?: number; signal?: AbortSignal }
+      ) =>
+        cancellableGfsInvoke(
+          'gfs:zipStream:appendFromUri',
+          { jobId, name, uri, maxBytes: options?.maxBytes },
+          options?.signal
+        ),
+      finish: (jobId: string, suggestedName: string) =>
+        ipcRenderer.invoke('gfs:zipStream:finish', { jobId, suggestedName }),
+      abort: (jobId: string) => ipcRenderer.invoke('gfs:zipStream:abort', { jobId }),
+    },
     createFolder: (parentResourceId: string, name: string, drive?: string) =>
       ipcRenderer.invoke('gfs:createFolder', { parentResourceId, name, drive }),
     createFile: (parentResourceId: string, name: string, encodedData: string, drive?: string) =>
@@ -206,8 +316,22 @@ const clerum = Object.freeze({
     getPathForFile: (file: File) => webUtils.getPathForFile(file),
     renameResource: (resourceId: string, newName: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:renameResource', { resourceId, newName, drive, ifMatch }),
-    moveResource: (resourceId: string, destinationId: string, drive?: string, ifMatch?: number) =>
-      ipcRenderer.invoke('gfs:moveResource', { resourceId, destinationId, drive, ifMatch }),
+    moveResource: (
+      resourceId: string,
+      destinationId: string,
+      drive: string | undefined,
+      ifMatch: number | undefined,
+      newName: string | undefined,
+      expectedSessionGeneration: number
+    ) =>
+      ipcRenderer.invoke('gfs:moveResource', {
+        resourceId,
+        destinationId,
+        expectedSessionGeneration,
+        drive,
+        ifMatch,
+        newName,
+      }),
     deleteResource: (resourceId: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:deleteResource', { resourceId, drive, ifMatch }),
     grant: (
@@ -653,7 +777,7 @@ const clerum = Object.freeze({
     getIndex: (agentRef: string) => ipcRenderer.invoke('chat:getIndex', { agentRef }),
     reconcileServerSessions: (
       agentRef: string,
-      sessions: Array<{ chatId: string; lastActivityAt?: string }>
+      sessions: Array<{ chatId: string; lastActivityAt?: string; title?: string }>
     ) => ipcRenderer.invoke('chat:reconcileSessions', { agentRef, sessions }),
     dismissOnboarding: (agentRef: string) =>
       ipcRenderer.invoke('chat:dismissOnboarding', { agentRef }),
@@ -671,14 +795,18 @@ const clerum = Object.freeze({
       bounds: { x: number; y: number; width: number; height: number; dpr?: number }
       launchId: string
     }) => ipcRenderer.invoke('sandboxUi:open', args),
-    close: () => ipcRenderer.invoke('sandboxUi:close'),
-    reload: () => ipcRenderer.invoke('sandboxUi:reload'),
-    getLocation: () => ipcRenderer.invoke('sandboxUi:getLocation'),
+    // Closes that launch's view only if it is still the live one.
+    close: (args: { launchId: string }) => ipcRenderer.invoke('sandboxUi:close', args),
+    // Reloads that launch's view in place only if it is still the live one.
+    reload: (args: { launchId: string }) => ipcRenderer.invoke('sandboxUi:reload', args),
     copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
     listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),
-    acknowledgeDeepLink: (id: number) =>
-      ipcRenderer.invoke('sandboxUi:acknowledgeDeepLink', { id }),
+    acknowledgeDeepLink: (id: number, authority?: DeepLinkAcknowledgmentAuthority) =>
+      ipcRenderer.invoke('sandboxUi:acknowledgeDeepLink', {
+        id,
+        ...(authority !== undefined ? { authority } : {}),
+      }),
     setBounds: (bounds: { x: number; y: number; width: number; height: number; dpr?: number }) =>
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
     setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),
@@ -724,16 +852,23 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:findResult', listener)
       return () => ipcRenderer.off('sandboxUi:findResult', listener)
     },
-    onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => {
-      const listener = (_event: unknown, args: SandboxUiDeepLinkEnvelope) => callback(args)
+    onDeepLink: (callback: (args: SandboxUiQueuedDeepLinkEnvelope) => void) => {
+      const listener = (_event: unknown, args: SandboxUiQueuedDeepLinkEnvelope) => callback(args)
       ipcRenderer.on('sandboxUi:deepLink', listener)
       return () => ipcRenderer.off('sandboxUi:deepLink', listener)
     },
-    onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => {
-      const listener = (_event: unknown, args: { appRef: string; launchId: string }) =>
-        callback(args)
-      ipcRenderer.on('sandboxUi:closed', listener)
-      return () => ipcRenderer.off('sandboxUi:closed', listener)
+    onSessionInvalidated: (callback: (event: SandboxUiSessionInvalidation) => void) => {
+      const listener = (_event: unknown, payload: unknown) => {
+        const event = parseSandboxUiSessionInvalidation(payload)
+        if (event) callback(event)
+      }
+      ipcRenderer.on('sandboxUi:sessionInvalidated', listener)
+      return () => ipcRenderer.off('sandboxUi:sessionInvalidated', listener)
+    },
+    onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => {
+      const listener = (_event: unknown, args: SandboxUiReleasedEvent) => callback(args)
+      ipcRenderer.on('sandboxUi:released', listener)
+      return () => ipcRenderer.off('sandboxUi:released', listener)
     },
     onRefreshError: (
       callback: (args: { appRef: string; launchId: string; message: string }) => void
@@ -744,6 +879,12 @@ const clerum = Object.freeze({
       ) => callback(args)
       ipcRenderer.on('sandboxUi:refreshError', listener)
       return () => ipcRenderer.off('sandboxUi:refreshError', listener)
+    },
+    onRefreshRecovered: (callback: (args: { appRef: string; launchId: string }) => void) => {
+      const listener = (_event: unknown, args: { appRef: string; launchId: string }) =>
+        callback(args)
+      ipcRenderer.on('sandboxUi:refreshRecovered', listener)
+      return () => ipcRenderer.off('sandboxUi:refreshRecovered', listener)
     },
     onTitleChanged: (
       callback: (args: { appRef: string; launchId: string; title: string }) => void

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { passwordAdmissionMigrationFixtureResult } from './helpers/passwordAdmissionMigrationFixture.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -27,6 +28,8 @@ describe('db.initDb workflow_runs recipe ordering index migration', () => {
 
   it('adds the index on clusters that already recorded earlier migrations', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [

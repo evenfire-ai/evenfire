@@ -7,6 +7,11 @@ const REMOTE_SERVER_NAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 // Lowercase only: control-api mints the nonce with crypto.randomUUID(), which is
 // always lowercase, so any other casing is not a redirect URI it ever registered.
 const INSTALL_NONCE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+// Client ID Metadata Document (SEP-991) for the remote MCP-OAuth lane. Must equal
+// control-api's CIMD_ROUTE_PATH (control-api/src/oauth/cimdIdentity.ts): the CIMD
+// client_id is `<public origin>/api/v1` + this path, and a remote Authorization Server
+// fetches that URL through this gateway.
+const CIMD_ROUTE_PATH = '/.well-known/evenfire-mcp-client'
 
 function rawQueryOf(req: Request): string {
   const queryStart = req.originalUrl.indexOf('?')
@@ -21,9 +26,9 @@ function rawQueryOf(req: Request): string {
  * untouched so the signed `state` and `code` are never re-encoded — and relay its
  * response, including the HTML success page that bounces to clerum://oauth-completed.
  *
- * This is the only public, unauthenticated route in this gateway, so it MUST stay a
- * thin passthrough: never read or trust anything beyond the validated path segments
- * and the opaque query string.
+ * These, together with the CIMD document below, are the only public, unauthenticated
+ * routes in this gateway, so they MUST stay thin passthroughs: never read or trust
+ * anything beyond the validated path segments and the opaque query string.
  */
 export function createOauthCallbackRouter(): Router {
   const router = Router()
@@ -60,6 +65,19 @@ export function createOauthCallbackRouter(): Router {
         `/oauth-callback/${encodeURIComponent(String(req.params.oauthClientId))}`,
         rawQueryOf(req)
       )
+      res.status(result.status).type(result.contentType).send(result.body)
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // PUBLIC CIMD document: a remote Authorization Server fetches our OAuth client
+  // identity here. Fixed path, no caller-controlled segment and no query string are
+  // forwarded (the forward carries this gateway's service token). Express answers
+  // HEAD through this GET handler.
+  router.get(CIMD_ROUTE_PATH, async (_req, res, next) => {
+    try {
+      const result = await controlApiPassthroughGet(CIMD_ROUTE_PATH, '')
       res.status(result.status).type(result.contentType).send(result.body)
     } catch (err) {
       next(err)

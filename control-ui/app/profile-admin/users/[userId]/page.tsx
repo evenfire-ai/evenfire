@@ -30,7 +30,6 @@ import { UserApprovalMediumsPanel } from '../../../../components/UserApprovalMed
 import { IconRefresh, IconX } from '../../../../components/icons'
 import {
   AdminUserChannels,
-  ContextResource,
   DeleteAdminUserRequest,
   HostResource,
   addAdminTeamMember,
@@ -131,7 +130,6 @@ export default function UserDetailsPage() {
   const [newTelegramId, setNewTelegramId] = useState('')
 
   const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
-  const [contextResources, setContextResources] = useState<ContextResource[]>([])
   const [assignedContextIds, setAssignedContextIds] = useState<string[]>([])
   const [deletedContextIds, setDeletedContextIds] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
@@ -169,10 +167,9 @@ export default function UserDetailsPage() {
       effectiveAgentNamesForAccess({
         assignedAgentNames,
         assignedContextIds,
-        contexts: contextResources,
         hosts,
       }),
-    [assignedAgentNames, assignedContextIds, contextResources, hosts]
+    [assignedAgentNames, assignedContextIds, hosts]
   )
   const availableTeamOptions = useMemo(
     () =>
@@ -271,11 +268,9 @@ export default function UserDetailsPage() {
     setNewTelegramId('')
   }
 
-  function contextIdFromResource(item: {
-    metadata?: { name?: string }
-    spec?: { contextId?: string }
-  }) {
-    return String(item.spec?.contextId || item.metadata?.name || '').trim()
+  // Membership tables store the Context name; spec.contextId is only an alias.
+  function contextIdFromResource(item: { metadata?: { name?: string } }) {
+    return item.metadata?.name ?? ''
   }
 
   async function loadData() {
@@ -313,9 +308,6 @@ export default function UserDetailsPage() {
         .map(item => contextIdFromResource(item as never))
         .filter(Boolean)
         .sort((a, b) => a.localeCompare(b))
-      setContextResources(
-        Array.isArray(contexts.items) ? (contexts.items as ContextResource[]) : []
-      )
       const hostNames = Array.from(
         new Set(
           (hostsData.items || [])
@@ -485,7 +477,6 @@ export default function UserDetailsPage() {
     try {
       const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
       const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate({
-        contexts: contextResources,
         hosts,
         loadCurrentContextIds: async () => {
           const current = await getAdminUserContexts(userId)

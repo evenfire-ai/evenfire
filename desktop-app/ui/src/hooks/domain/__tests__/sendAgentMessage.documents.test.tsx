@@ -7,7 +7,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
 import { createHash } from 'node:crypto'
-import { getComposerDraft, setComposerDraft } from '@lib/composerDraftStore'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { HostModelsResult } from '../../../../../src/types'
 import { renderController } from './__fixtures__/controllerHarness'
@@ -39,6 +43,7 @@ const DROPPED =
 
 beforeEach(() => {
   uuidCounter = 0
+  resetComposerDraftStore()
   vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(
     () => `uuid-${++uuidCounter}` as `${string}-${string}-${string}-${string}-${string}`
   )
@@ -369,11 +374,10 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
       acceptedAttachmentIds: [],
     })
 
-    const send = act(async () => {
+    await act(async () => {
       await rendered.result.current.handleSendAgentMessage('Summarize this')
     })
-    await waitFor(() => expect(clerum.hasProgressHandler('task-doc')).toBe(true))
-    await send
+    expect(clerum.hasProgressHandler('task-doc')).toBe(true)
 
     // The sent bubble lists the document by name.
     const sent = rendered.result.current.chatMessages.find(message => message.role === 'user')
@@ -417,11 +421,10 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
       taskId: 'task-doc',
       acceptedAttachmentIds: [],
     })
-    const send = act(async () => {
+    await act(async () => {
       await rendered.result.current.handleSendAgentMessage('Summarize this')
     })
-    await waitFor(() => expect(clerum.hasProgressHandler('task-doc')).toBe(true))
-    await send
+    expect(clerum.hasProgressHandler('task-doc')).toBe(true)
     // Witness: the drop was recorded first, as a files-only recovery.
     expect(rendered.result.current.failedAgentSend?.answeredWithoutFiles).toBe(true)
     const chat = rendered.result.current.activeChatId

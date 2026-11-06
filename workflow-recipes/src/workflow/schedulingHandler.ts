@@ -19,6 +19,9 @@
  *     whatever the worker has already advanced it to.
  *   • `enabled = NOT suspend` so the worker's `enabled = TRUE` filter keeps
  *     suspended schedules dormant without deleting the row.
+ *   • `concurrency_policy` mirrors `concurrencyPolicy` (default `Forbid`, the
+ *     CRD default; unknown values also map to `Forbid`). The control-api
+ *     worker enforces Forbid; Replace is not implemented and behaves as Allow.
  *   • All UPDATEs explicitly set `updated_at = now()` — the codebase does not
  *     use auto-update triggers (see control-api db.ts convention).
  */
@@ -28,6 +31,18 @@ import type { SchedulingSpec } from './types'
 
 export const WORKFLOW_TEAM_ID_LABEL = 'clerum.io/workflow-team-id'
 export const MAX_TTL_SECONDS_AFTER_FINISHED = 30 * 24 * 60 * 60
+
+/** Mirrors the CRD enum on `schedule.concurrencyPolicy` and the DB CHECK. */
+export type ScheduleConcurrencyPolicy = 'Forbid' | 'Replace' | 'Allow'
+export const DEFAULT_SCHEDULE_CONCURRENCY_POLICY: ScheduleConcurrencyPolicy = 'Forbid'
+const SCHEDULE_CONCURRENCY_POLICIES: ReadonlySet<string> = new Set(['Forbid', 'Replace', 'Allow'])
+
+/** Omitted or unknown values resolve to the CRD default, `Forbid`. */
+export function resolveScheduleConcurrencyPolicy(value: unknown): ScheduleConcurrencyPolicy {
+  return typeof value === 'string' && SCHEDULE_CONCURRENCY_POLICIES.has(value)
+    ? (value as ScheduleConcurrencyPolicy)
+    : DEFAULT_SCHEDULE_CONCURRENCY_POLICY
+}
 
 /** Actor types that may trigger a run. Mirrors the check constraint on `workflow_runs.actor_type`. */
 export type TriggerAllowedActor = 'user' | 'autonomous' | 'scheduled'
@@ -119,6 +134,7 @@ export async function reconcileScheduling(
   const ttlSecondsAfterFinished = resolveTtlSecondsAfterFinished(
     recipe.spec.runRetention?.ttlSecondsAfterFinished ?? null
   )
+  const concurrencyPolicy = resolveScheduleConcurrencyPolicy(sched.concurrencyPolicy)
 
   // Fetch current row so we can emit semantic actions (created/updated/…) and
   // decide whether to reset next_fire_at. One SELECT + one UPSERT per tick.
@@ -130,9 +146,11 @@ export async function reconcileScheduling(
     allowed_actors: TriggerAllowedActor[] | null
     max_duration_seconds: number | null
     ttl_seconds_after_finished: number | null
+    concurrency_policy: string | null
   }>(
     `SELECT cron_expression, timezone, enabled, team_id::text AS team_id,
-            allowed_actors, max_duration_seconds, ttl_seconds_after_finished
+            allowed_actors, max_duration_seconds, ttl_seconds_after_finished,
+            concurrency_policy
        FROM workflow_schedules
       WHERE recipe_namespace = $1 AND recipe_name = $2`,
     [ns, name]
@@ -146,8 +164,8 @@ export async function reconcileScheduling(
       `INSERT INTO workflow_schedules
          (recipe_namespace, recipe_name, team_id, cron_expression, timezone,
           next_fire_at, enabled, allowed_actors, max_duration_seconds,
-          ttl_seconds_after_finished, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, now(), now())`,
+          ttl_seconds_after_finished, concurrency_policy, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, now(), now())`,
       [
         ns,
         name,
@@ -159,6 +177,7 @@ export async function reconcileScheduling(
         allowedActors,
         maxDurationSeconds,
         ttlSecondsAfterFinished,
+        concurrencyPolicy,
       ]
     )
     return { action: 'created' }
@@ -171,6 +190,7 @@ export async function reconcileScheduling(
   const actorsChanged = !sameActorList(prev.allowed_actors, recipe.spec.allowedActors ?? null)
   const durationChanged = prev.max_duration_seconds !== maxDurationSeconds
   const ttlChanged = prev.ttl_seconds_after_finished !== ttlSecondsAfterFinished
+  const policyChanged = prev.concurrency_policy !== concurrencyPolicy
 
   // Reset next_fire_at only when the schedule itself shifted or we're waking
   // a suspended schedule — the worker's advancement of next_fire_at is the
@@ -186,8 +206,9 @@ export async function reconcileScheduling(
              allowed_actors = $6::jsonb,
              max_duration_seconds = $7,
              ttl_seconds_after_finished = $8,
+             concurrency_policy = $9,
              updated_at = now()
-       WHERE recipe_namespace = $9 AND recipe_name = $10`,
+       WHERE recipe_namespace = $10 AND recipe_name = $11`,
       [
         sched.cron,
         timezone,
@@ -197,6 +218,7 @@ export async function reconcileScheduling(
         allowedActors,
         maxDurationSeconds,
         ttlSecondsAfterFinished,
+        concurrencyPolicy,
         ns,
         name,
       ]
@@ -207,7 +229,8 @@ export async function reconcileScheduling(
     teamChanged ||
     actorsChanged ||
     durationChanged ||
-    ttlChanged
+    ttlChanged ||
+    policyChanged
   ) {
     await pool.query(
       `UPDATE workflow_schedules
@@ -216,9 +239,19 @@ export async function reconcileScheduling(
              allowed_actors = $3::jsonb,
              max_duration_seconds = $4,
              ttl_seconds_after_finished = $5,
+             concurrency_policy = $6,
              updated_at = now()
-       WHERE recipe_namespace = $6 AND recipe_name = $7`,
-      [enabled, teamId, allowedActors, maxDurationSeconds, ttlSecondsAfterFinished, ns, name]
+       WHERE recipe_namespace = $7 AND recipe_name = $8`,
+      [
+        enabled,
+        teamId,
+        allowedActors,
+        maxDurationSeconds,
+        ttlSecondsAfterFinished,
+        concurrencyPolicy,
+        ns,
+        name,
+      ]
     )
   } else {
     return { action: 'skipped' }

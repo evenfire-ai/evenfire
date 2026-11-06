@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
 import type { PinnedTransport } from '../src/http/pinnedFetch.js'
 import { discoverAuthorizationServerMetadata } from '../src/oauth/discovery.js'
 import {
@@ -113,7 +114,7 @@ describe('POST /admin/oauth/discover (E-19.5)', () => {
     expect(res.body.suggested.supportsRefresh).toBe(true)
   })
 
-  it('maps a transport failure to 502 (discoveryHttpStatus)', async () => {
+  it('maps a transport failure to 424 (discoveryHttpStatus)', async () => {
     const discover: AdminOauthProvidersDeps['discover'] = async () => ({
       ok: false,
       error: { kind: 'fetch_failed', url: 'https://mcp.notion.com', detail: 'boom' },
@@ -121,7 +122,7 @@ describe('POST /admin/oauth/discover (E-19.5)', () => {
     const res = await request(makeApp({ discover }))
       .post('/admin/oauth/discover')
       .send({ url: 'https://mcp.notion.com' })
-      .expect(502)
+      .expect(424)
     expect(res.body.error).toBe('discovery_failed')
     expect(res.body.detail.kind).toBe('fetch_failed')
   })
@@ -135,5 +136,46 @@ describe('POST /admin/oauth/discover (E-19.5)', () => {
       .post('/admin/oauth/discover')
       .send({ url: 'https://mcp.notion.com' })
       .expect(400)
+  })
+})
+
+// The Marketplace OAuth install form used to read its callback base from a build-time
+// NEXT_PUBLIC_* mirror that no image sets. control-api owns the value, so the form now
+// reads it at runtime from this admin endpoint. `configured` mirrors the install gate in
+// routes/admin/registry.ts (a blank/whitespace base is NOT configured), and the endpoint
+// never falls back to the request Host the way buildPublicCallbackUrl does for dev.
+describe('GET /admin/oauth/callback', () => {
+  let savedBaseUrl: string
+
+  beforeEach(() => {
+    savedBaseUrl = config.oauthCallbackBaseUrl
+  })
+
+  afterEach(() => {
+    config.oauthCallbackBaseUrl = savedBaseUrl
+  })
+
+  it('returns the exact redirect-URI template for the configured public base', async () => {
+    config.oauthCallbackBaseUrl = 'https://oauth.example.com/'
+    const res = await request(makeApp()).get('/admin/oauth/callback').expect(200)
+    expect(res.body).toEqual({
+      configured: true,
+      redirectUriTemplate: 'https://oauth.example.com/api/v1/oauth-callback/{oauthClientId}',
+    })
+  })
+
+  it('reports not configured (and no URI) when the base is unset', async () => {
+    config.oauthCallbackBaseUrl = ''
+    const res = await request(makeApp())
+      .get('/admin/oauth/callback')
+      .set('Host', 'internal-proxy.svc')
+      .expect(200)
+    expect(res.body).toEqual({ configured: false })
+  })
+
+  it('treats a whitespace-only base as not configured, matching the install gate', async () => {
+    config.oauthCallbackBaseUrl = '   '
+    const res = await request(makeApp()).get('/admin/oauth/callback').expect(200)
+    expect(res.body).toEqual({ configured: false })
   })
 })
