@@ -834,7 +834,7 @@ read_count="$(printf '%s\n' "$reads" | sed '/^$/d' | wc -l | tr -d ' ')"
 [[ "$read_count" == "25" ]] || fail "the census expected 25 Secret reads, saw $read_count"
 for site in "profiles/external-rest-api-secrets/EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN#2" \
             "control-plane/control-api-internal-tokens/CONTROL_API_INTERNAL_SERVICE_TOKENS#1"; do
-  printf '%s\n' "$reads" | grep -qxF "$site" || fail "the census misses $site"
+  grep -qxF "$site" <<<"$reads" || fail "the census misses $site"
 done
 while IFS= read -r spec; do
   rollout="$TMP/rollout-read-flake.log"
@@ -1122,6 +1122,28 @@ run_tokens gke-dev "$rollout" "" env CHANNEL_READER_HANDOFF_TOKEN="$ROTATED"
 assert_restarted_exactly "$rollout" \
   channels/clerum-workflow-approval-request-reader channels/channel-reader-stubhost \
   channels/channel-reader-stubhost-b
+assert_loaded_matches_secrets
+
+# Out-of-band edit of the member-registration HMAC: the run preserves it, so only
+# control-api's stamp can tell that its pods run another value.
+store_set control-plane control-api-internal-tokens CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET "$WRC_NEW"
+rollout="$TMP/rollout-member-hmac-out-of-band.log"
+run_tokens gke-dev "$rollout" "" env
+assert_restarted_exactly "$rollout" control-plane/control-api
+[[ "$(store_get control-plane control-api-internal-tokens CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET)" == "$WRC_NEW" ]] \
+  || fail "the out-of-band member-registration HMAC was not preserved"
+assert_loaded_matches_secrets
+
+# Out-of-band edit of the handoff token: the run preserves it, so only the stamps
+# of the reader and the channel-readers can tell that their pods run another value.
+store_set channels workflow-approval-request-reader-credentials channel-reader-handoff-token "$HCC_NEW"
+rollout="$TMP/rollout-handoff-out-of-band.log"
+run_tokens gke-dev "$rollout" "" env
+assert_restarted_exactly "$rollout" \
+  channels/clerum-workflow-approval-request-reader channels/channel-reader-stubhost \
+  channels/channel-reader-stubhost-b
+[[ "$(store_get channels workflow-approval-request-reader-credentials channel-reader-handoff-token)" == "$HCC_NEW" ]] \
+  || fail "the out-of-band handoff token was not preserved"
 assert_loaded_matches_secrets
 
 # A legacy `replace-with-*` placeholder counts as absent: regenerated, restarted.
