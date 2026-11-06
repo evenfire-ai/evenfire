@@ -25,7 +25,7 @@ describe('0056_llm_allowed_models migration', () => {
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('creates both tables, the (provider, model) unique index, and seeds the 25 static models', async () => {
+  it('creates both tables and the (provider, model) unique index', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
@@ -39,68 +39,28 @@ describe('0056_llm_allowed_models migration', () => {
     expect(sqls.some(sql => /idx_llm_allowed_models_pm[\s\S]*\(provider, model\)/.test(sql))).toBe(
       true
     )
-
-    const seed = sqls.find(
-      sql =>
-        sql.includes('INSERT INTO llm_allowed_models') && sql.includes('ON CONFLICT DO NOTHING')
-    )
-    expect(seed).toBeDefined()
-    // 25 seed rows = 25 value tuples of the shape ('provider', 'model', 'Vendor')
-    const tupleCount = (seed!.match(/\(\s*'[^']+',\s*'[^']+',\s*'[^']+'\s*\)/g) || []).length
-    expect(tupleCount).toBe(25)
-    // Vendor coverage per the spec mapping
-    expect(seed).toContain("('claude', 'claude-haiku-4-5', 'Anthropic')")
-    expect(seed).toContain("('zai', 'glm-4.7', 'Zhipu')")
-    expect(seed).toContain("('bailian', 'MiniMax-M2.5', 'MiniMax')")
-    expect(seed).toContain("('bailian', 'kimi-k2.5', 'Moonshot')")
-    expect(seed).toContain("('bailian', 'qwen3-coder-plus', 'Alibaba')")
-    expect(seed).toContain("('bailian', 'glm-4.7', 'Zhipu')")
   })
 
-  it('0057 seeds the Vertex/Bedrock rows (R4) idempotently', async () => {
-    const { initDb } = await import('../src/db.js')
+  it('0056/0057/0058/0100 seed nothing: a new installation gets its catalog from the sync', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     await initDb()
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
 
-    // The R4 seed is a distinct INSERT that carries the vertex/bedrock rows.
-    const seed = sqls.find(
-      sql =>
-        sql.includes('INSERT INTO llm_allowed_models') &&
-        sql.includes('ON CONFLICT DO NOTHING') &&
-        sql.includes('vertex')
+    // Liveness witness: the seed migrations are still in the list (installations
+    // that applied them have them recorded) and initDb ran the list.
+    const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
+    for (const v of [
+      '0056_llm_allowed_models',
+      '0057_llm_allowed_models_vertex_bedrock',
+      '0058_llm_allowed_models_new_providers',
+      '0100_seed_minimax_allowed_model',
+    ]) {
+      expect(versions).toContain(v)
+    }
+    expect(sqls).toContainEqual(
+      expect.stringContaining('CREATE TABLE IF NOT EXISTS llm_allowed_models')
     )
-    expect(seed).toBeDefined()
-    expect(seed).toContain("('vertex', 'gemini-2.5-pro', 'Google')")
-    expect(seed).toContain("('vertex', 'gemini-2.5-flash', 'Google')")
-    // Bedrock model ids are runtime-specific (distinct from native `claude` ids).
-    expect(seed).toContain("('bedrock', 'anthropic.claude-sonnet-4-6-v1:0', 'Anthropic')")
-    expect(seed).toContain("('bedrock', 'anthropic.claude-haiku-4-5-v1:0', 'Anthropic')")
-  })
-
-  it('0058 seeds the 14 new single-key providers and skips azure', async () => {
-    const { initDb } = await import('../src/db.js')
-    await initDb()
-    const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
-
-    // The new-providers seed is the distinct INSERT that carries e.g. groq.
-    const seed = sqls.find(
-      sql =>
-        sql.includes('INSERT INTO llm_allowed_models') &&
-        sql.includes('ON CONFLICT DO NOTHING') &&
-        sql.includes("('groq',")
-    )
-    expect(seed).toBeDefined()
-    // 14 seed rows = 14 value tuples (azure excluded — deployment-name models).
-    const tupleCount = (seed!.match(/\(\s*'[^']+',\s*'[^']+',\s*'[^']+'\s*\)/g) || []).length
-    expect(tupleCount).toBe(14)
-    expect(seed).toContain("('openrouter', 'anthropic/claude-sonnet-latest', 'OpenRouter')")
-    expect(seed).toContain("('gemini', 'gemini-2.5-flash', 'Google')")
-    expect(seed).toContain("('groq', 'llama-3.3-70b-versatile', 'Meta')")
-    // Slash-bearing model strings are stored verbatim as data.
-    expect(seed).toContain("('together', 'meta-llama/Llama-3.3-70B-Instruct-Turbo', 'Meta')")
-    expect(seed).toContain("('nebius', 'Qwen/Qwen3-235B-A22B-Instruct-2507', 'Alibaba')")
-    // azure is never seeded — its models are per-deployment names.
-    expect(seed).not.toContain("('azure',")
+    expect(sqls.filter(sql => /INSERT INTO llm_allowed_models\b/.test(sql))).toEqual([])
   })
 
   it('0059 adds the catalog lifecycle columns idempotently with a manual default', async () => {
@@ -120,7 +80,13 @@ describe('0056_llm_allowed_models migration', () => {
     // ADDITIVE only: F1 must NOT rename/drop columns or add discovery logic.
     expect(joined).not.toMatch(/DROP COLUMN/)
     // Backfill of existing rows is via the DEFAULT ('manual'), not a data UPDATE.
-    expect(sqls.some(sql => /UPDATE llm_allowed_models[\s\S]*source/.test(sql))).toBe(false)
+    // The only statement that rewrites `source` is 0135's reclassification, and
+    // it is bound to an explicit pair list.
+    const sourceUpdates = sqls.filter(sql => /UPDATE llm_allowed_models[\s\S]*source/.test(sql))
+    expect(sourceUpdates).toHaveLength(1)
+    expect(sourceUpdates[0]).toMatch(
+      /FROM unnest\(\$1::text\[\], \$2::text\[\]\) AS s\(provider, model\)/
+    )
   })
 
   it('0060 creates the llm_catalog_sync_runs summary table (F2, additive)', async () => {
