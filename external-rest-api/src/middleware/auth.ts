@@ -35,8 +35,8 @@ export function requireAuth(req: AuthedRequest, res: Response, next: NextFunctio
 
 /**
  * `requireAuth` for the session probe (`GET /me`): a missing, malformed, expired or
- * badly signed token ends the session, so it is answered with the `invalid_session`
- * envelope that clients treat as the only proof of a session end.
+ * badly signed token ends the session, so this edge answers it with a 401 and the
+ * `invalid_session` envelope. Clients decide by the status, not by the envelope.
  */
 export function requireSessionAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
   const claims = authenticateRequest(req)

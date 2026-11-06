@@ -63,7 +63,7 @@ function authenticated() {
       issuedAt: 1_700_000_000,
       authGeneration: 1,
     },
-    policy: { issueV1: true, issueV2: true, acceptV1: true, acceptV2: true },
+    policy: { issueV1: true, issueV2: false, acceptV1: true, acceptV2: true },
   }
 }
 

@@ -48,12 +48,11 @@ Before step 1:
   `403 forbidden` "The browser request origin is not allowed." After step 2, a
   Profile UI password login must not answer that 403.
 
-  Checked read-only on 2026-11-05: clerum-dev has
-  `https://app.dev.evenfire.ai,https://profile.dev.evenfire.ai` and production
-  (`clerum`) has `https://app.prod.evenfire.ai,https://profile.prod.evenfire.ai`;
-  in both, cloudflared routes the Profile UI host to
-  `profile-ui.profiles:3001`. The value lives in the infra repository, so check
-  it again before each deploy.
+  Checked read-only on 2026-11-05: on clerum-dev and on production (`clerum`)
+  the list holds the environment's app origin and its Profile UI origin; in
+  both, cloudflared routes the Profile UI host to `profile-ui.profiles:3001`.
+  The value lives in the infra repository, so check it again before each
+  deploy.
 
 - Ship the new Desktop build only after step 3.
 

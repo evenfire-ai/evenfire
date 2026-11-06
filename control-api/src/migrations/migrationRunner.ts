@@ -9,6 +9,11 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
 
 // Every migration up to and including dev's last migration runs in initDb's
 // single dev batch; this runner owns only the PR1 versions that follow it.
+// Until this change merges, a dev merge that brings new migrations moves this
+// bound (and the dev-batch bound in initDb) to dev's last version and renumbers
+// PR1_MIGRATION_VERSIONS above it. After it merges the bound stays: a later
+// migration adds its version to the list this runner applies, or initDb throws
+// "Unclassified post-dev migrations".
 const LAST_DEV_MIGRATION_VERSION = '0130_password_login_success_admission'
 
 // Migration names that earlier heads of this change recorded under other
@@ -85,6 +90,18 @@ async function runBoundedTransaction(db: DbClient, work: () => Promise<void>): P
  * Rejects a database that ran an earlier head of this change. Such a database
  * holds triggers whose writers no longer take the matching pre-locks, so it is
  * cleaned up by an operator (the referenced SQL), never automatically.
+ *
+ * Retirement: earlier heads ran only on branch profiles and local databases
+ * (docs/deploy/user-access-foundation-upgrade.md). Remove this guard, the two
+ * EARLIER_PR1_* lists, the cleanup SQL, that doc section and their tests in one
+ * commit once both hold: this release's migration Job has completed on
+ * clerum-dev and production, and no branch registers an
+ * EARLIER_PR1_MIGRATION_NAMES migration other than PR1_MIGRATION_VERSIONS
+ * (today #594, until it is reconciled with this change). Remove it sooner, in
+ * the same commit, if a migration creates a function or table this probe
+ * matches: the guard runs on every initDb and would stop every later Job.
+ * If PR1_MIGRATION_VERSIONS are renumbered after a shared database recorded
+ * them, keep the old versions as legacyVersions, or this guard rejects it.
  */
 async function assertNoEarlierPr1Head(
   db: DbClient,

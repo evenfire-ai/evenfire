@@ -27,7 +27,7 @@ export function handleExternalSessionBackendFailure(
     next(error)
     return
   }
-  rootLogger.warn(
+  ;(req.log ?? rootLogger).warn(
     { event: 'external_session_backend_unavailable', err: error.cause },
     'external session validation could not reach PostgreSQL'
   )
@@ -44,8 +44,13 @@ export function handleExternalSessionBackendFailure(
  * sets `Retry-After` and `Cache-Control: no-store` and logs the failure's
  * cause under `event`. The caller still sends its own response body.
  */
-export function markAuthorityUnavailable(res: Response, error: Error, event: string): void {
-  rootLogger.warn({ event, err: error.cause }, 'external authority is unavailable')
+export function markAuthorityUnavailable(
+  req: Request,
+  res: Response,
+  error: Error,
+  event: string
+): void {
+  ;(req.log ?? rootLogger).warn({ event, err: error.cause }, 'external authority is unavailable')
   res.setHeader('Retry-After', String(SESSION_BACKEND_RETRY_AFTER_SECONDS))
   res.setHeader('Cache-Control', 'no-store')
 }
@@ -204,7 +209,7 @@ export function requireExternalTeamParamMatch(paramName = 'teamId') {
         next(error)
         return
       }
-      markAuthorityUnavailable(res, error, 'external_team_authority_unavailable')
+      markAuthorityUnavailable(req, res, error, 'external_team_authority_unavailable')
       res.status(503).json({ error: 'authority_unavailable' })
     }
   }

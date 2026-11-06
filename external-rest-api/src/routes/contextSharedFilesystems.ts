@@ -98,6 +98,14 @@ export function createContextSharedFilesystemsRouter(): Router {
           const value = upstreamRes.headers.get(name)
           if (value) res.setHeader(name, value)
         }
+        // throwOnHttpError is off, so the generic relay of an outage's no-store
+        // (app.ts) never sees this response.
+        if (
+          upstreamRes.status === 503 &&
+          upstreamRes.headers.get('cache-control')?.trim().toLowerCase() === 'no-store'
+        ) {
+          res.setHeader('cache-control', 'no-store')
+        }
         const ct = upstreamRes.headers.get('content-type')
         if (ct) res.setHeader('content-type', ct)
         const cd = upstreamRes.headers.get('content-disposition')

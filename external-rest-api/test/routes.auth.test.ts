@@ -89,10 +89,10 @@ describe('routes/auth password-login', () => {
     expect(JSON.stringify(res.body)).not.toContain('private upstream detail')
   })
 
-  it('answers a Google identity refused by control-api like a retired account', async () => {
+  it('answers a control-api 403 on Google login with membership_not_found', async () => {
     authServiceMock.loginWithGoogle.mockReset()
     authServiceMock.loginWithGoogle.mockRejectedValueOnce(
-      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+      new ControlApiError('private upstream detail', 403, { error: 'private upstream code' })
     )
 
     const res = await request(buildApp())
@@ -100,8 +100,8 @@ describe('routes/auth password-login', () => {
       .send({ idToken: 'validly-shaped-test-token' })
 
     expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
-    expect(res.status).toBe(401)
-    expect(res.body).toEqual({ error: 'Unauthorized' })
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'membership_not_found' })
   })
 
   it('forwards any other Google login 401 body verbatim', async () => {

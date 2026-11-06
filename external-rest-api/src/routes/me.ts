@@ -82,8 +82,9 @@ export function createMeRouter(): Router {
     }
   })
 
-  // The session probe: only the `invalid_session` envelope (from this edge's token
-  // check or forwarded from control-api) declares the session ended.
+  // The session probe: an ended session leaves this route as a 401 with the
+  // `invalid_session` envelope, from this edge's token check or forwarded from
+  // control-api. Clients decide by the status, not by the envelope.
   router.get('/me', requireSessionAuth, async (req: AuthedRequest, res, next) => {
     try {
       const auth = req.auth!

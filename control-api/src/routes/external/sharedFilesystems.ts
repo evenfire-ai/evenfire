@@ -143,6 +143,7 @@ async function resolveAccessibleContextIdsForRequest(
   } catch (err) {
     if (err instanceof ContextAccessReconciliationError) {
       markAuthorityUnavailable(
+        req,
         res,
         err,
         'external_shared_filesystems_context_reconciliation_failed'
@@ -151,7 +152,7 @@ async function resolveAccessibleContextIdsForRequest(
       return null
     }
     if (!(err instanceof ContextAuthorizationUnavailableError)) throw err
-    markAuthorityUnavailable(res, err, 'external_shared_filesystems_authority_unavailable')
+    markAuthorityUnavailable(req, res, err, 'external_shared_filesystems_authority_unavailable')
     res.status(503).json({ error: 'authority_unavailable' })
     return null
   }
