@@ -35,7 +35,10 @@ sync does not replace them: it never writes a price for a pair that already
 has a price row, enabled or disabled. If you use `cost` budgets or the
 per-task cost brake, review them under **Cost → LLM prices** after the
 upgrade and correct the ones you serve. Until then, `cost` budgets keep
-counting their usage at the placeholder rate.
+counting their usage at the placeholder rate, but only while that price is
+enabled: a pair whose price is disabled or deleted, with no other enabled
+price, is unpriced (budgets count its usage as $0 and the per-task cost brake
+has no price for it) until an admin prices it.
 
 ### 28 seeded pairs become catalog-managed
 
