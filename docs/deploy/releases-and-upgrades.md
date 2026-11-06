@@ -237,6 +237,7 @@ Read the notes for every release you skip over, not only the target release.
 | [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap.          |
 | [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor) | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`. |
 | [HCC Deployment watch RBAC](#hcc-deployment-watch-rbac) | Every cluster. Apply the updated Role before you roll the new host-context-controller image. |
+| [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.  |
 
 #### Snippet runner Node permissions
 

@@ -1513,7 +1513,7 @@ assert_control_api_runtime_access_contract_is_exact() {
   sequence_duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$sequence_profile_file")"
   sequence_invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_rw|consume|none)$/) { count++ } END { print count + 0 }' "$sequence_profile_file")"
 
-  if [[ "$relation_count" == "101" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
+  if [[ "$relation_count" == "103" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
      grep -qx $'dynamic_clients\tlegacy_dml' "$profile_file" && \
      grep -qx $'entity_change_feed\tnone' "$profile_file" && \
      grep -qx $'entity_change_outbox\tnone' "$profile_file" && \
@@ -1525,6 +1525,8 @@ assert_control_api_runtime_access_contract_is_exact() {
      grep -qx $'mcp_secret_rollback_permits\tlegacy_dml' "$profile_file" && \
      grep -qx $'llm_allowed_models_audit\tappend' "$profile_file" && \
      grep -qx $'llm_catalog_sync_runs\tappend' "$profile_file" && \
+     grep -qx $'llm_catalog_dismissed\tappend' "$profile_file" && \
+     grep -qx $'llm_provider_catalog_settings\tupsert' "$profile_file" && \
      grep -qx $'plugin_workload_sdk_spend_outcomes\tappend' "$profile_file" && \
      grep -qx $'gfs_desktop_operator_links\tlink_lifecycle' "$profile_file" && \
      grep -qx $'desktop_user_retirement_operations\tlink_lifecycle' "$profile_file" && \
