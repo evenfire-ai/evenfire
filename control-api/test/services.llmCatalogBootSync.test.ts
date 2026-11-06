@@ -59,6 +59,14 @@ function modelsDev(answers: Array<() => Promise<ModelsDevCatalogResult>>) {
   }
 }
 
+/** Advances fake time in small steps until `done()` holds, at most `limitMs`. */
+async function advanceUntil(done: () => boolean, limitMs = 10_000, stepMs = 50): Promise<void> {
+  for (let waited = 0; !done(); waited += stepMs) {
+    if (waited >= limitMs) throw new Error(`condition not met within ${limitMs}ms of fake time`)
+    await vi.advanceTimersByTimeAsync(stepMs)
+  }
+}
+
 let db: FakeDb
 let retry: AllowlistPublishRetry
 
@@ -305,12 +313,19 @@ describe('boot catalog sync', () => {
   })
 
   it('an undecidable boot run whose publish failed is still probed again', async () => {
-    db.cluster.failNextWrites(1)
+    // Every write fails: the writer retries a failed write itself, so failing
+    // fewer writes than its attempts lets the publish succeed.
+    db.cluster.failNextWrites(1000)
     const probe = modelsDev([LIVE])
     // A vendored run with an OFF provider inserts rows, so it has something to publish.
     startLlmCatalogBootSync(deps(VENDORED_WITH_OFF_PROVIDER, probe.load))
     await vi.advanceTimersByTimeAsync(LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS)
+    // The writer sleeps between its attempts, so the boot tick can end past the
+    // jitter window; the probe is due one base delay after it ends, not after
+    // the window.
+    await advanceUntil(() => retry.isPending())
     expect(sources()).toEqual(['vendored'])
+    expect(db.cluster.data).toBeUndefined()
     await vi.advanceTimersByTimeAsync(LLM_CATALOG_BOOT_SYNC_RETRY_BASE_DELAY_MS)
     expect(probe.askedAt).toHaveLength(1)
     expect(sources()).toEqual(['vendored', 'live'])
