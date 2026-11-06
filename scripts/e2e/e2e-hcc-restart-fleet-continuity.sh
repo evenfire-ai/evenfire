@@ -220,17 +220,27 @@ hcc_image_id() {
     -o jsonpath='{.status.containerStatuses[?(@.name=="host-context-controller")].imageID}'
 }
 
-# 200 when the request lane serves the v1 inventory, else 503.
+# 200 when the HCC request lane serves the v1 inventory to its real consumer,
+# else 503. The probe runs in the mcp-proxy pod with that pod's own
+# HCC_API_URL, so it takes the consumer's path: the API gateway, then HCC.
+# HCC's direct port admits only the gateway, and HCC evaluates the request
+# lane per request, so a live request is the witness, not a past log line.
 request_lane_status() {
-  local pod=$1
-  kctl exec "pod/$pod" -n "$HCC_NS" -c host-context-controller -- \
-    wget -T 10 -t 1 -qO- http://127.0.0.1:8081/api/v1/mcpservers >/dev/null 2>&1 && echo 200 || echo 503
+  kctl exec "deployment/${MCP_PROXY_DEPLOY}" -n "$MCP_NS" -c mcp-proxy -- \
+    sh -c 'wget -T 10 -t 1 -qO- "${HCC_API_URL}/api/v1/mcpservers"' >/dev/null 2>&1 && echo 200 || echo 503
+}
+
+# The probe above reads a 503 for any failure, so prove once that its
+# configuration exists; otherwise every wait would time out as "not ready".
+assert_request_lane_probe_configured() {
+  kctl exec "deployment/${MCP_PROXY_DEPLOY}" -n "$MCP_NS" -c mcp-proxy -- \
+    sh -c '[ -n "${HCC_API_URL:-}" ]' ||
+    die "the mcp-proxy pod has no HCC_API_URL, so the HCC request lane cannot be probed"
 }
 
 request_lane_ready_now() {
-  local pod
-  pod="$(hcc_pod)" || return 1
-  [ "$(request_lane_status "$pod")" = 200 ]
+  hcc_pod >/dev/null || return 1
+  [ "$(request_lane_status)" = 200 ]
 }
 
 # hcc_restarted_past <pod> <count>: the HCC container restarted more than <count> times.
@@ -1281,7 +1291,8 @@ image_id="$(hcc_image_id "$HCC_POD")"
 [[ "$image_id" == *"$EXPECTED_IMAGE_ID"* ]] ||
   die "running HCC image ${image_id} does not match expected ${EXPECTED_IMAGE_ID}"
 ok "HCC runs the expected image (${EXPECTED_IMAGE_ID:0:12})"
-[ "$(request_lane_status "$HCC_POD")" = 200 ] || die "HCC request lane is not ready before the run"
+assert_request_lane_probe_configured
+[ "$(request_lane_status)" = 200 ] || die "HCC request lane is not ready before the run"
 staleness_ms="$(kctl get configmap mcp-host-config -n "$HOST_NS" \
   -o jsonpath='{.data.HCC_AUTHORITY_MAX_STALENESS_MS}')" ||
   die "could not read HCC_AUTHORITY_MAX_STALENESS_MS from ${HOST_NS}/mcp-host-config"
