@@ -146,7 +146,10 @@ export type RemoteTransportProbe =
 export interface RemoteCatalogInstallTarget {
   entry: RemoteCatalogEntryRef
   grantScope: RemoteGrantScope
-  /** The entry's URL, shown read-only. Never sent: control-api reads it from the entry. */
+  /**
+   * The entry's URL, shown read-only. Sent with the install only as a precondition:
+   * control-api still installs the entry's own URL and refuses when they differ.
+   */
   baseUrl: string
   block: RegistryRemoteOAuthBlock
   /** Curator entry: its verification badge and setup guide are trusted. */
@@ -225,13 +228,16 @@ export interface InstallRemoteRequest {
 }
 
 /**
- * Catalog-mode install. `serverName` and `baseUrl` are never sent: control-api
- * derives the name from the slot and takes the URL from the entry, so a crafted link
- * cannot install another URL as if it came from the Marketplace.
+ * Catalog-mode install. `serverName` is never sent: control-api derives it from the
+ * slot. `baseUrl` is the entry URL the operator was shown, never one from the link;
+ * control-api installs the entry's own URL and refuses the install when the entry
+ * now names another, so a registry change after the wizard opened is not installed
+ * unseen.
  */
 export interface InstallCatalogRemoteRequest {
   catalogEntry: RemoteCatalogEntryRef
   grantScope: RemoteGrantScope
+  baseUrl: string
   mode: RemoteInstallMode
   clientId?: string
   clientSecret?: string

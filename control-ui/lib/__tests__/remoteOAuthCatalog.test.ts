@@ -12,7 +12,11 @@ import {
   getRemoteOAuthSlots,
   remoteOAuthProvenanceBadge,
 } from '../oauthInstall'
-import { buildCatalogRemoteInstallRequest, parseRemoteWizardQuery } from '../remoteMcp'
+import {
+  buildCatalogRemoteInstallRequest,
+  parseRemoteWizardQuery,
+  resolveRemoteCatalogTarget,
+} from '../remoteMcp'
 import { safeHttpsHref } from '../vanillaMarkdown'
 
 function withOAuth(entry: RegistryEntry, oauth: Record<string, unknown>): RegistryEntry {
@@ -134,17 +138,24 @@ describe('catalog-mode wizard inputs', () => {
     )
   })
 
-  it('builds a catalog install body with neither a server name nor a URL', () => {
+  it('builds a catalog install body with the entry URL the wizard showed and no server name', () => {
+    const resolved = resolveRemoteCatalogTarget(CURATOR_CIMD_ENTRY, 'user')
+    if (!resolved.ok) throw new Error(resolved.message)
     const body = buildCatalogRemoteInstallRequest({
-      target: { entry: { name: '@a/b', version: '1.0.0' }, grantScope: 'context' },
+      target: resolved.target,
       mode: 'dcr',
       clientId: 'ignored',
       clientSecret: 'ignored',
     })
+    const entryUrl = (
+      CURATOR_CIMD_ENTRY.mcp_server_meta as { remoteEndpoints: Array<{ url: string }> }
+    ).remoteEndpoints[0].url
     expect(body).toEqual({
-      catalogEntry: { name: '@a/b', version: '1.0.0' },
-      grantScope: 'context',
+      catalogEntry: { name: CURATOR_CIMD_ENTRY.name, version: CURATOR_CIMD_ENTRY.version },
+      grantScope: 'user',
+      baseUrl: entryUrl,
       mode: 'dcr',
     })
+    expect(body).not.toHaveProperty('serverName')
   })
 })

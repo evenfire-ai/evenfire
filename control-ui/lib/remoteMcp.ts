@@ -786,11 +786,12 @@ export function buildRemoteInstallRequest(input: {
 type RemoteGrantScopeInput = InstallRemoteRequest['grantScope']
 
 /**
- * Catalog-mode install body. It has no `serverName` and no `baseUrl` field to fill:
- * the slot name and the URL are control-api's, taken from the entry.
+ * Catalog-mode install body. It has no `serverName`: the slot name is control-api's.
+ * `baseUrl` echoes the entry URL shown in the wizard so control-api can refuse the
+ * install if the entry it resolves now names another one.
  */
 export function buildCatalogRemoteInstallRequest(input: {
-  target: Pick<RemoteCatalogInstallTarget, 'entry' | 'grantScope'>
+  target: Pick<RemoteCatalogInstallTarget, 'entry' | 'grantScope' | 'baseUrl'>
   mode: RemoteInstallMode
   clientId?: string
   clientSecret?: string
@@ -801,6 +802,7 @@ export function buildCatalogRemoteInstallRequest(input: {
   const body: InstallCatalogRemoteRequest = {
     catalogEntry: { name: input.target.entry.name, version: input.target.entry.version },
     grantScope: input.target.grantScope,
+    baseUrl: input.target.baseUrl,
     mode: input.mode,
   }
   if (input.mode === 'pre-registered') {

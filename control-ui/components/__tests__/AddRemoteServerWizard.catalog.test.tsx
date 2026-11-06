@@ -117,12 +117,17 @@ function catalogQuery(entry: RegistryEntry, scope: 'user' | 'context', extra = '
 const urlField = () => screen.getByLabelText(/Remote server URL/) as HTMLInputElement
 const nameField = () => screen.getByLabelText(/Server name/) as HTMLInputElement
 
+function entryUrl(entry: RegistryEntry): string {
+  return (entry.mcp_server_meta as { remoteEndpoints: Array<{ url: string }> }).remoteEndpoints[0]
+    .url
+}
+
 async function continueTo(stepButton = 'Continue') {
   fireEvent.click(await screen.findByRole('button', { name: stepButton }))
 }
 
 describe('AddRemoteServerWizard — Marketplace catalog mode', () => {
-  it('detects on open, shows the entry URL and the assigned name read-only, and never sends a URL or a name', async () => {
+  it('detects on open, shows the entry URL and the assigned name read-only, and installs only that URL', async () => {
     serveApi({
       discover: [{ resolve: CATALOG_CIMD_DISCOVER }],
       install: [{ resolve: CATALOG_CIMD_INSTALLED }],
@@ -166,11 +171,11 @@ describe('AddRemoteServerWizard — Marketplace catalog mode', () => {
     expect(installBody).toEqual({
       catalogEntry: { name: '@evenfire/linear-remote', version: '1.0.0' },
       grantScope: 'user',
+      baseUrl: entryUrl(CURATOR_CIMD_ENTRY),
       mode: 'cimd',
       scopes: ['read'],
     })
     expect(installBody).not.toHaveProperty('serverName')
-    expect(installBody).not.toHaveProperty('baseUrl')
   })
 
   it('names the publisher of an org entry instead of any badge it claimed', async () => {
@@ -335,6 +340,7 @@ describe('AddRemoteServerWizard — Marketplace catalog mode', () => {
     expect(bodiesSentTo(REMOTE_MCP_BASE)[0]).toEqual({
       catalogEntry: { name: '@acme/linear-pre', version: '1.0.0' },
       grantScope: 'user',
+      baseUrl: entryUrl(ORG_PRE_REGISTERED_ENTRY),
       mode: 'pre-registered',
       clientId: 'acme-user-app',
       clientSecret: 'acme-secret',
@@ -549,11 +555,11 @@ describe('AddRemoteServerWizard — Marketplace catalog mode', () => {
     expect(retry).toMatchObject({
       catalogEntry: { name: '@evenfire/workiq-remote', version: '1.0.0' },
       grantScope: 'user',
+      baseUrl: entryUrl(CURATOR_WORKIQ_ENTRY),
       mode: 'pre-registered',
       confirmedUnverifiedScopes: ['11111111-2222-3333-4444-555555555555/Tools.Read'],
     })
     expect(retry).not.toHaveProperty('serverName')
-    expect(retry).not.toHaveProperty('baseUrl')
   })
 })
 
