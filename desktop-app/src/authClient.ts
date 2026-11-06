@@ -358,9 +358,23 @@ export class AuthClient {
   }
 
   async passwordLogin(email: string, password: string): Promise<LoginResult> {
-    return requestJson<LoginResult>('POST', url('/api/v1/auth/password-login'), {
-      body: { email, password },
-    })
+    try {
+      return await requestJson<LoginResult>('POST', url('/api/v1/auth/password-login'), {
+        body: { email, password },
+      })
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 429) throw error
+      // Only the message crosses IPC to the sign-in screen. The transport's status and
+      // Retry-After go at its end, where text from the response body cannot imitate them.
+      const seconds = Number(error.retryAfter)
+      const wait = Number.isInteger(seconds) && seconds > 0 ? ` retryAfterSeconds=${seconds}` : ''
+      throw new ApiError(
+        `${error.message} httpStatus=429${wait}`,
+        error.status,
+        error.bodyText,
+        error.retryAfter
+      )
+    }
   }
 
   async getMe(sessionToken: string): Promise<SessionMe> {

@@ -45,6 +45,27 @@ function isUnauthorizedError(error: unknown) {
   return /\b401\s+unauthorized\b/.test(message) || /:\s*401\s/.test(message)
 }
 
+function describeLoginWait(seconds: number): string {
+  if (seconds <= 1) return 'in about a second'
+  if (seconds <= 90) return `in about ${seconds} seconds`
+  const minutes = Math.ceil(seconds / 60)
+  return `in about ${minutes} minutes`
+}
+
+/**
+ * The sign-in text for a rate-limited login, or null for any other failure. authClient
+ * appends `httpStatus=429` and the wait to the end of the message, because only the
+ * message crosses IPC. The server did not verify the password on this path, so the text
+ * must not suggest that the password is wrong.
+ */
+function rateLimitedLoginMessage(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error)
+  const match = message.match(/(?:^|\s)httpStatus=429(?: retryAfterSeconds=(\d+))?$/)
+  if (!match) return null
+  const wait = match[1] ? describeLoginWait(Number.parseInt(match[1], 10)) : 'in a little while'
+  return `There have been too many sign-in attempts, so sign-in is paused for now. Your password was not checked. Please try again ${wait}.`
+}
+
 function getDesktopSetupErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
   if (message.includes('auth_transition_in_progress')) {
@@ -254,6 +275,16 @@ export function useAuthController({
       setStatus('Signed in.', 'success')
       await onSessionNeedsLoad({ preserveNav: true })
     } catch (error) {
+      // First: the wait is digits in the message, and the two invitation checks below
+      // match `410` and `404` anywhere in it.
+      const rateLimitedMessage = rateLimitedLoginMessage(error)
+      if (rateLimitedMessage) {
+        // The backend answered, so no switch to another backend is offered.
+        setStatus(rateLimitedMessage, 'error', undefined, {
+          toastDurationMs: DEFAULT_TOAST_DURATION_MS,
+        })
+        return
+      }
       const invitationExpired = isInvitationExpiredError(error)
       const missingInvitationConfig = isMissingInvitationConfigError(error)
       const unauthorized = isUnauthorizedError(error)

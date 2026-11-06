@@ -232,6 +232,70 @@ describe('useWorkspaceController', () => {
     )
   })
 
+  it.each([
+    ['17', 'Please try again in about 17 seconds.'],
+    // 404 and 410 must not read as the invitation failures, which match those digits.
+    ['404', 'Please try again in about 7 minutes.'],
+    ['410', 'Please try again in about 7 minutes.'],
+    ['900', 'Please try again in about 15 minutes.'],
+  ])(
+    'explains a rate-limited login without blaming the password (wait %s s)',
+    async (seconds, retryText) => {
+      const clerum = installClerumHarness({
+        passwordLoginError: new Error(
+          `Error invoking remote method 'auth:passwordLogin': ApiError: 429 Too Many Requests: rate_limited httpStatus=429 retryAfterSeconds=${seconds}`
+        ),
+      })
+      const diagnoseLoginBackend = vi.fn(async () => null)
+      Object.assign(window.clerum.auth, { diagnoseLoginBackend })
+
+      renderControllerHarness()
+
+      await waitFor(() => expect(screen.getByTestId('booting').textContent).toBe('false'))
+
+      fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Login' }))
+
+      await waitFor(() =>
+        expect(clerum.passwordLogin).toHaveBeenCalledWith('test@clerum.io', 'test')
+      )
+      await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(retryText))
+      const alert = screen.getByRole('alert').textContent
+      expect(alert).toContain('too many sign-in attempts')
+      expect(alert).toContain('Your password was not checked.')
+      expect(alert).not.toContain('Check your email and password')
+      expect(screen.getByRole('alert').getAttribute('data-duration-ms')).toBe(
+        String(DEFAULT_TOAST_DURATION_MS)
+      )
+      expect(diagnoseLoginBackend).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not read rate-limit text inside the body as a rate-limited login', async () => {
+    const clerum = installClerumHarness({
+      passwordLoginError: new Error(
+        "Error invoking remote method 'auth:passwordLogin': ApiError: 500 Internal Server Error: upstream said httpStatus=429 then failed"
+      ),
+    })
+    const diagnoseLoginBackend = vi.fn(async () => null)
+    Object.assign(window.clerum.auth, { diagnoseLoginBackend })
+
+    renderControllerHarness()
+
+    await waitFor(() => expect(screen.getByTestId('booting').textContent).toBe('false'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Login' }))
+
+    await waitFor(() => expect(clerum.passwordLogin).toHaveBeenCalledWith('test@clerum.io', 'test'))
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain(
+        'Login failed. Check your email and password.'
+      )
+    )
+    await waitFor(() => expect(diagnoseLoginBackend).toHaveBeenCalledTimes(1))
+  })
+
   it('does not treat unrelated messages containing 401 as unauthorized login failures', async () => {
     const clerum = installClerumHarness({
       passwordLoginError: new Error(
