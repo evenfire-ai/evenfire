@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { lookup } from 'node:dns/promises'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import type { DbClient, DbTransactionClient } from '../src/db.js'
@@ -527,6 +528,59 @@ describe('catalog mode: the entry decides what can be installed', () => {
       expect(res.status).toBe(400)
       expect(res.body).toEqual({ error: 'catalog_entry_invalid', reason })
       expect(spy.discoveredUrls).toEqual([])
+    }
+  )
+})
+
+// ── Endpoint policy on the entry URL ─────────────────────────────────────────
+
+describe('catalog mode: the entry URL passes the same endpoint policy as a typed one', () => {
+  // A publicly-named host that resolves into a private range: the registry cannot vouch
+  // for where a name points, so only the DNS answer at install time can reject it.
+  const REBOUND_URL = 'https://mcp.rebound.example.net/mcp'
+  const REBOUND_HOST = new URL(REBOUND_URL).hostname
+
+  beforeEach(() => {
+    vi.mocked(lookup).mockImplementation((async (hostname: string) =>
+      hostname === REBOUND_HOST
+        ? [{ address: '10.0.0.1', family: 4 }]
+        : [{ address: '93.184.216.34', family: 4 }]) as unknown as typeof lookup)
+  })
+  afterEach(() => {
+    vi.mocked(lookup).mockImplementation((async () => [
+      { address: '93.184.216.34', family: 4 },
+    ]) as unknown as typeof lookup)
+  })
+
+  it.each([
+    ['install', ROUTE, catalogBody()],
+    [
+      '/discover',
+      DISCOVER_ROUTE,
+      { catalogEntry: { name: ENTRY, version: VERSION }, grantScope: 'user' },
+    ],
+  ])(
+    '%s: an entry whose host resolves to a private IP → 400 on baseUrl, no discovery, no probe, nothing written',
+    async (_label, route, body) => {
+      serveEntry(remoteOAuthRow({ url: REBOUND_URL }))
+      const gw = new MockGateway(NS)
+      const spy: AppSpy = { discoveredUrls: [], probedUrls: [] }
+      const res = await request(makeApp(gw, cimdResult, {}, spy))
+        .post(route)
+        .send(body)
+
+      expect(res.status).toBe(400)
+      expect(res.body.errors).toHaveLength(1)
+      expect(res.body.errors[0].field).toBe('baseUrl')
+      expect(res.body.errors[0].message).toContain(
+        `host "${REBOUND_HOST}" resolved to blocked IPv4 address(es): 10.0.0.1`
+      )
+      expect(res.body.error).toBe(res.body.errors[0].message)
+      expect(getEntryVersion).toHaveBeenCalledTimes(1)
+      expect(spy.discoveredUrls).toEqual([])
+      expect(spy.probedUrls).toEqual([])
+      expect(await gw.listResource('mcpservers', NS)).toEqual([])
+      expect(reportInstallDouble.calls).not.toHaveBeenCalled()
     }
   )
 })
