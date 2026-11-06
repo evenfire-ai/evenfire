@@ -19,8 +19,9 @@ import {
   normalizeImageInputCapability,
   parseImageInputCapability,
 } from '@clerum/llm-providers'
-import type { DbClient } from '../db.js'
+import type { DbClient, DbTransactionClient } from '../db.js'
 import { pool } from '../db.js'
+import { PROVIDER_KEY_MAP } from './modelsDevClient.js'
 
 /** Catalog provenance (spec 09 §2.2). 'manual' = operator/seed; 'discovery' =
  *  auto-discovered (F2). The admin API only ever creates 'manual' rows. */
@@ -302,6 +303,46 @@ export async function listStaleAllowedModels(db: DbClient = pool): Promise<LlmAl
   return (result.rows as Record<string, unknown>[]).map(rowToModel)
 }
 
+/**
+ * Enabled rows the attention feed flags regardless of who references them:
+ * the catalog calls them deprecated, or a discovered model vanished from the
+ * catalog while still served. Shared with `llmAttention.ts`, which reads it.
+ */
+export interface CatalogAttentionRow {
+  provider: string
+  model: string
+  display_name: string | null
+  deprecated: boolean
+  stale_discovery: boolean
+}
+
+const CATALOG_PROVIDERS: string[] = Object.keys(PROVIDER_KEY_MAP)
+
+export async function listCatalogAttentionModels(
+  db: DbClient = pool
+): Promise<CatalogAttentionRow[]> {
+  const result = await db.query(
+    `SELECT provider, model, display_name,
+            (catalog_status = 'deprecated') IS TRUE AS deprecated,
+            (stale AND source = 'discovery') AS stale_discovery
+       FROM llm_allowed_models
+      WHERE enabled
+        AND provider = ANY($1::text[])
+        AND (catalog_status = 'deprecated' OR (stale AND source = 'discovery'))
+      ORDER BY provider ASC, model ASC`,
+    // Only providers fed by the public catalog: the subscription providers keep
+    // their own catalogs and their own `stale` semantics.
+    [CATALOG_PROVIDERS]
+  )
+  return (result.rows as Record<string, unknown>[]).map(row => ({
+    provider: String(row.provider),
+    model: String(row.model),
+    display_name: toNullableString(row.display_name),
+    deprecated: row.deprecated === true,
+    stale_discovery: row.stale_discovery === true,
+  }))
+}
+
 export async function getAllowedModel(
   id: string,
   db: DbClient = pool
@@ -350,16 +391,38 @@ export async function createAllowedModel(
   }
 }
 
+type ModelPair = { provider: string; model: string }
+
+// The pair is recorded in the same transaction as the DELETE or rename that
+// removed it: committed apart, a catalog sync landing between both statements
+// (or a crash) would leave the pair free to be re-inserted enabled.
+async function dismissCatalogPair(db: DbTransactionClient, pair: ModelPair): Promise<void> {
+  await db.query(
+    `INSERT INTO llm_catalog_dismissed (provider, model)
+     VALUES ($1, $2)
+     ON CONFLICT (provider, model) DO NOTHING`,
+    [pair.provider, pair.model]
+  )
+}
+
+// Requires a transaction: the rename decision and the tombstone of the old pair
+// must come from the row as locked here, not from a read a concurrent rename
+// can overtake.
 export async function updateAllowedModel(
   id: string,
   input: UpdateLlmAllowedModelInput,
   actor: string,
-  db: DbClient = pool
+  db: DbTransactionClient
 ): Promise<LlmAllowedModel | null> {
-  // Read the existing row first: we need its (provider, model) for the audit
-  // row and its `enabled` to classify a disable vs a plain update.
-  const existing = await getAllowedModel(id, db)
-  if (!existing) return null
+  // Its (provider, model) feeds the rename decision and the audit row, and its
+  // `enabled` classifies a disable vs a plain update.
+  const lockedResult = await db.query(
+    `SELECT ${MODEL_COLUMNS} FROM llm_allowed_models WHERE id = $1 FOR UPDATE`,
+    [id]
+  )
+  const lockedRow = lockedResult.rows[0] as Record<string, unknown> | undefined
+  if (!lockedRow) return null
+  const existing = rowToModel(lockedRow)
 
   // Build the SET list dynamically from whichever fields were provided. Keys
   // come from the zod-validated, `.strict()` schema — never raw request input —
@@ -396,6 +459,22 @@ export async function updateAllowedModel(
     params.push(field === 'image_input' ? imageInputToColumn(input.image_input) : value)
   }
   if (renamed && input.image_input === undefined) sets.push('image_input = NULL')
+  // The catalog's lifecycle tag is about the old pair too.
+  if (renamed) sets.push('catalog_status = NULL')
+  // A renamed discovered row now names a pair the operator chose, which the
+  // public catalog may not list (a Bedrock inference profile, an Azure
+  // deployment): left as `discovery`, every live sync would mark it stale and
+  // the attention feed would flag it forever. It becomes manual, like a pair
+  // added by hand, and drops the old pair's liveness: the sync never clears
+  // `stale` on a manual row. Subscription providers are left alone: their rows
+  // are rebuilt from their own catalogs by provider, whatever the source.
+  if (
+    renamed &&
+    existing.source === 'discovery' &&
+    CATALOG_PROVIDERS.includes(input.provider ?? existing.provider)
+  ) {
+    sets.push(`source = 'manual'`, 'stale = false', 'last_seen_at = NULL')
+  }
   if (sets.length === 0) return existing
 
   sets.push(`updated_at = NOW()`)
@@ -417,6 +496,9 @@ export async function updateAllowedModel(
     throw error
   }
   if (!updated) return null
+  if (renamed) {
+    await dismissCatalogPair(db, { provider: existing.provider, model: existing.model })
+  }
 
   const action: LlmAllowedModelAuditAction =
     input.enabled === false && existing.enabled ? 'disable' : 'update'
@@ -430,27 +512,29 @@ export async function updateAllowedModel(
   return updated
 }
 
+// Requires a transaction so the removal and its tombstone commit together. The
+// pair comes from the DELETE itself: a pre-read could be overtaken by a
+// concurrent rename and tombstone a pair that was never removed.
 export async function deleteAllowedModel(
   id: string,
   actor: string,
-  db: DbClient = pool
+  db: DbTransactionClient
 ): Promise<boolean> {
-  // Read the (provider, model) first so the audit row records what was removed;
-  // a missing row is a no-op (route 404s).
-  const existing = await getAllowedModel(id, db)
-  if (!existing) return false
-  const result = await db.query(`DELETE FROM llm_allowed_models WHERE id = $1`, [id])
-  const deleted = (result.rowCount ?? 0) > 0
-  if (deleted) {
-    await writeAudit(db, {
-      actor,
-      action: 'delete',
-      provider: existing.provider,
-      model: existing.model,
-      detail: { id },
-    })
-  }
-  return deleted
+  const result = await db.query(
+    `DELETE FROM llm_allowed_models WHERE id = $1 RETURNING provider, model`,
+    [id]
+  )
+  const removed = result.rows[0] as ModelPair | undefined
+  if (!removed) return false
+  await dismissCatalogPair(db, removed)
+  await writeAudit(db, {
+    actor,
+    action: 'delete',
+    provider: removed.provider,
+    model: removed.model,
+    detail: { id },
+  })
+  return true
 }
 
 /**
