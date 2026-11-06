@@ -49,7 +49,11 @@ export function registry(): ToolRegistry {
   }
 }
 
-export async function runLoop(port: LlmPort, observe?: (result: RespondResult) => void) {
+export async function runLoop(
+  port: LlmPort,
+  observe?: (result: RespondResult) => void,
+  options: { abortSignal?: AbortSignal; toolRegistry?: ToolRegistry } = {}
+) {
   const reasoning = new DefaultReasoningPort(
     port,
     new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
@@ -68,11 +72,12 @@ export async function runLoop(port: LlmPort, observe?: (result: RespondResult) =
   }
   const config = buildLoopConfig({
     reasoning: observed,
-    toolRegistry: registry(),
+    toolRegistry: options.toolRegistry ?? registry(),
     safety: new BasicSafety(),
     events: new SimpleEventEmitter(),
     conversation: makeFakeConversation(),
   })
+  if (options.abortSignal) config.abortSignal = options.abortSignal
   return runToolUseLoop(config, [{ role: 'user', content: 'Which city, and its weather?' }])
 }
 

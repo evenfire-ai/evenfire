@@ -8,7 +8,6 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ToolCompletionResponse } from '../../../core/types'
 import { OpenAIProvider } from '../../openai'
-import { officialOpenAIProfile } from '../endpointProfiles'
 import { responsesProtocol } from '../protocols/responses'
 import type { DriverIdentity } from '../protocols/types'
 
@@ -48,14 +47,12 @@ export function decodedResponse(
 }
 
 /**
- * A Responses-profile OpenAI driver whose SDK client answers each
- * `responses.create` with the next recorded response, in order.
+ * An official OpenAI driver (default profile, which speaks Responses) whose
+ * SDK client answers each `responses.create` with the next recorded response,
+ * in order.
  */
 export function responsesDriver(fixtureNames: string[]) {
-  const provider = new OpenAIProvider('unit-key', RESPONSES_MODEL, {
-    ...officialOpenAIProfile(),
-    protocol: 'openai-responses',
-  })
+  const provider = new OpenAIProvider('unit-key', RESPONSES_MODEL)
   const queue = fixtureNames.map(recordedResponse)
   const create = vi.fn(async (_payload: unknown) => {
     const next = queue.shift()

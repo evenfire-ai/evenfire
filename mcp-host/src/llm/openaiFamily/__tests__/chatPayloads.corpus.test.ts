@@ -14,6 +14,12 @@
  * error classification. Responses fed back are recorded API outputs; decode
  * variants mutate a single field of a recorded response.
  *
+ * The official endpoint now speaks Responses, so its `call|openai|…` rows run
+ * against the official profile pinned to Chat (same parameter rows, identity
+ * and visual limits): the recorded corpus keeps guarding the Chat serializer
+ * byte for byte. Its identity, classification and credential rows still come
+ * from the real factory.
+ *
  * Serialization keeps key order and marks `undefined`-valued keys, so a
  * refactor that reorders fields or drops an explicit `undefined` shows up here
  * even though JSON on the wire would hide it.
@@ -25,6 +31,7 @@ import { join } from 'node:path'
 import OpenAI from 'openai'
 import type { ChatMessage, ToolDefinition } from '../../../core/types'
 import type { ImageTransportOperation } from '../../imageInput'
+import { OpenAIProvider } from '../../openai'
 import { makeProvider } from '../../registry'
 import { type LlmProvider, isLlmProvider } from '../../registryCore'
 import type { SingleTurnProvider } from '../../types'
@@ -34,6 +41,7 @@ import {
   RECORDED_TEXT_RESPONSE,
   RECORDED_TOOLS_RESPONSE,
   buildFamilyProvider,
+  officialChatProfile,
 } from './familyHarness'
 
 const FIXTURES = join(__dirname, '__fixtures__')
@@ -372,7 +380,10 @@ async function runCase(
   c: Case,
   result: 'full' | 'digest'
 ) {
-  const provider = buildFamilyProvider(id, model)
+  const provider =
+    id === 'openai'
+      ? new OpenAIProvider(`unit-${id}-key`, model, officialChatProfile())
+      : buildFamilyProvider(id, model)
   const recording = installRecorder(provider, c.response)
   let outcome: unknown
   try {

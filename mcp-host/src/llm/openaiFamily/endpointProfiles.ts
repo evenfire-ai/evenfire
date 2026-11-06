@@ -28,7 +28,7 @@ function ownClient(keyOrClient: string | OpenAI, build: (apiKey: string) => Open
 export function officialOpenAIProfile(): EndpointProfile {
   return {
     id: 'openai',
-    protocol: 'openai-chat',
+    protocol: 'openai-responses',
     createClient: officialClient,
     options: null,
     reasoningContent: false,

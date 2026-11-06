@@ -7,6 +7,8 @@ import { join } from 'node:path'
 import { makeProvider } from '../../registry'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, primarySlot } from '../../registryCore'
 import type { SingleTurnProvider } from '../../types'
+import type { EndpointProfile } from '../endpointProfile'
+import { officialOpenAIProfile } from '../endpointProfiles'
 
 const FIXTURES = join(__dirname, '__fixtures__')
 
@@ -62,4 +64,14 @@ export function buildFamilyProvider(
   return makeProvider(id, { [primarySlot(d).dataKey]: `unit-${id}-key` }, model, {
     env: azureEnv(env),
   })
+}
+
+/**
+ * The official profile pinned to Chat Completions. No production instance
+ * builds it since the official endpoint moved to Responses, but Azure still
+ * runs this protocol with the same parameter rows, so it keeps the Chat
+ * serializer under regression with the official identity and visual limits.
+ */
+export function officialChatProfile(): EndpointProfile {
+  return { ...officialOpenAIProfile(), protocol: 'openai-chat' }
 }
