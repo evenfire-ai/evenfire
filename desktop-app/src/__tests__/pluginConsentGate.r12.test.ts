@@ -7,10 +7,18 @@ import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests, unbindChatStore } from '../chatStoreBinding.js'
 import { CONSENT_PROMPT_COOLDOWN_MS, PluginConsentGate } from '../pluginConsentGate.js'
 import type { ConsentStore } from '../pluginConsentStore.js'
-import { PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL } from '../pluginSdkProtocol.js'
+import { getCapability } from '../pluginSdkCapabilities.js'
+import {
+  PLUGIN_SDK_CONSENT_CANCELLED_CHANNEL,
+  PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL,
+} from '../pluginSdkProtocol.js'
 import { _resetPluginSdkRuntimeForTests, initPluginSdkRuntime } from '../pluginSdkRuntime.js'
 import type { PinnedPluginSurface } from '../pluginSurfaceRegistry.js'
-import { _resetPluginSurfacesForTests, resolvePluginSurface } from '../pluginSurfaceRegistry.js'
+import {
+  _resetPluginSurfacesForTests,
+  resolvePluginSurface,
+  unpinPluginSurface,
+} from '../pluginSurfaceRegistry.js'
 import { getActiveSandboxUi, unmountSandboxUiView } from '../sandboxUiDriver.js'
 import { _resetSandboxUiRefreshForTests } from '../sandboxUiSessionRefresh.js'
 import { FakeParentWindow, electronMocks } from './__fixtures__/sandboxUiElectronFakes.js'
@@ -293,6 +301,258 @@ function initialMount() {
 }
 
 describe('PluginConsentGate mount-bound lifecycle', () => {
+  it('denies a stale mount before reading grants or presenting consent', async () => {
+    const { service, parentWindow, runtime, mainWindow, firstWebContentsId } =
+      await setupWithLiveFirstApp()
+    const mount = resolvePluginSurface(firstWebContentsId)!
+    const getGrant = vi.spyOn(runtime.store, 'get')
+    const sendStart = mainWindow.webContents.send.mock.calls.length
+
+    await service.openSandboxUi(openArgs('second-app', parentWindow))
+    const outcome = await runtime.gate.ensure({
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId: mount.pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: ['identity.read'],
+    })
+
+    expect(outcome).toEqual({
+      granted: { 'identity.read': false },
+      source: { 'identity.read': 'prompt_denied' },
+    })
+    expect(getGrant).not.toHaveBeenCalled()
+    expect(
+      mainWindow.webContents.send.mock.calls
+        .slice(sendStart)
+        .some(([channel]) => channel === PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL)
+    ).toBe(false)
+  })
+
+  it('denies a grant read that resolves after the request mount is unpinned', async () => {
+    const { runtime } = await setupWithLiveFirstApp()
+    const mount = initialMount()
+    const capability = 'identity.read'
+    const descriptor = getCapability(capability)!
+    const grant = {
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId: mount.pluginId,
+      capability,
+      grantedAt: '2026-11-06T00:00:00.000Z',
+      lastUsedAt: null,
+      descriptorVersion: descriptor.descriptorVersion,
+      revision: 0,
+    }
+    let releaseRead!: () => void
+    let readStarted!: () => void
+    const readStartedPromise = new Promise<void>(resolve => {
+      readStarted = resolve
+    })
+    const readBlocked = new Promise<void>(resolve => {
+      releaseRead = resolve
+    })
+    const getGrant = vi.spyOn(runtime.store, 'get').mockImplementation(async () => {
+      readStarted()
+      await readBlocked
+      return grant
+    })
+
+    const pending = runtime.gate.ensure({
+      envKey: grant.envKey,
+      userId: grant.userId,
+      pluginId: mount.pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: [capability],
+    })
+    await readStartedPromise
+    unpinPluginSurface(mount.webContentsId)
+    releaseRead()
+    const outcome = await pending
+
+    expect(outcome.granted[capability]).toBe(false)
+    expect(outcome.source[capability]).toBe('prompt_denied')
+    expect(getGrant).toHaveBeenCalledOnce()
+    expect(runtime.gate.hasPendingPrompt()).toBe(false)
+  })
+
+  it('stops the queued grant recheck loop after its mount is unpinned', async () => {
+    const { runtime } = await setupWithLiveFirstApp()
+    const mount = initialMount()
+    const originalGet = runtime.store.get.bind(runtime.store)
+    const reads = new Map<string, number>()
+    let releaseRead!: () => void
+    let readStarted!: () => void
+    const readStartedPromise = new Promise<void>(resolve => {
+      readStarted = resolve
+    })
+    const readBlocked = new Promise<void>(resolve => {
+      releaseRead = resolve
+    })
+    const getGrant = vi.spyOn(runtime.store, 'get').mockImplementation(async key => {
+      const count = (reads.get(key.capability) ?? 0) + 1
+      reads.set(key.capability, count)
+      if (key.capability === 'identity.read' && count === 5) {
+        readStarted()
+        await readBlocked
+      }
+      return originalGet(key)
+    })
+
+    const first = runtime.gate.ensure({
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId: mount.pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: ['identity.read', 'org.read'],
+    })
+    await flushUntil(() => runtime.gate.hasPendingPrompt())
+    const queued = runtime.gate.ensure({
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId: mount.pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: ['identity.read', 'org.read'],
+    })
+    await flushUntil(() => reads.get('org.read') === 2)
+    const firstPromptId = pendingPromptId(runtime.gate as unknown as { pending: unknown })
+    expect(runtime.gate.resolvePrompt(firstPromptId, ['identity.read', 'org.read'])).toBe(true)
+    await readStartedPromise
+    unpinPluginSurface(mount.webContentsId)
+    releaseRead()
+    const [firstOutcome, queuedOutcome] = await Promise.all([first, queued])
+
+    expect(firstOutcome.granted).toEqual({ 'identity.read': true, 'org.read': true })
+    expect(queuedOutcome.granted).toEqual({ 'identity.read': false, 'org.read': false })
+    expect(reads.get('org.read')).toBe(4)
+    expect(getGrant).toHaveBeenCalledTimes(9)
+    expect(runtime.gate.hasPendingPrompt()).toBe(false)
+  })
+
+  it('cancels without presenting when hiding the current mount resolves false', async () => {
+    const { service, runtime, mainWindow, firstWebContentsId } = await setupWithLiveFirstApp()
+    const mount = resolvePluginSurface(firstWebContentsId)!
+    expect(resolvePluginSurface(mount.webContentsId)).toBe(mount)
+    vi.spyOn(service, 'hideSandboxUiForPluginMount').mockResolvedValue(false)
+    const putGrant = vi.spyOn(runtime.store, 'put')
+    const send = mainWindow.webContents.send
+    send.mockImplementation((channel, payload) => {
+      if (channel === PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL) {
+        runtime.gate.resolvePrompt((payload as { promptId: string }).promptId, [])
+      }
+    })
+
+    const outcome = await runtime.gate.ensure({
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId: mount.pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: ['identity.read'],
+    })
+    const cancellations = send.mock.calls.filter(
+      ([channel]) => channel === PLUGIN_SDK_CONSENT_CANCELLED_CHANNEL
+    )
+    const prompts = send.mock.calls.filter(
+      ([channel]) => channel === PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL
+    )
+
+    expect(prompts).toHaveLength(0)
+    expect(cancellations).toHaveLength(1)
+    expect(outcome).toEqual({
+      granted: { 'identity.read': false },
+      source: { 'identity.read': 'prompt_denied' },
+    })
+    expect(runtime.gate.hasPendingPrompt()).toBe(false)
+    expect(putGrant).not.toHaveBeenCalled()
+  })
+
+  it('does not present after the mount is unpinned during the visibility await', async () => {
+    const { service, runtime, mainWindow } = await setupWithLiveFirstApp()
+    const mount = initialMount()
+    const hide = vi.spyOn(service, 'hideSandboxUiForPluginMount').mockImplementation(async () => {
+      unpinPluginSurface(mount.webContentsId)
+      return true
+    })
+    const send = mainWindow.webContents.send
+    send.mockImplementation((channel, payload) => {
+      if (channel === PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL) {
+        runtime.gate.resolvePrompt((payload as { promptId: string }).promptId, [])
+      }
+    })
+
+    const outcome = await runtime.gate.ensure({
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId: mount.pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: ['identity.read'],
+    })
+    const prompts = send.mock.calls.filter(
+      ([channel]) => channel === PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL
+    )
+    const cancellations = send.mock.calls.filter(
+      ([channel]) => channel === PLUGIN_SDK_CONSENT_CANCELLED_CHANNEL
+    )
+
+    expect(hide).toHaveBeenCalledOnce()
+    expect(prompts).toHaveLength(0)
+    expect(cancellations).toHaveLength(1)
+    expect(outcome.granted['identity.read']).toBe(false)
+    expect(runtime.gate.hasPendingPrompt()).toBe(false)
+  })
+
+  it('does not persist a grant answered after its mount is unpinned', async () => {
+    const { runtime, mainWindow } = await setupWithLiveFirstApp()
+    const mount = initialMount()
+    const putGrant = vi.spyOn(runtime.store, 'put').mockResolvedValue()
+    const sendStart = mainWindow.webContents.send.mock.calls.length
+    const pending = runtime.gate.ensure({
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId: mount.pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: ['identity.read'],
+    })
+    await flushUntil(() =>
+      mainWindow.webContents.send.mock.calls
+        .slice(sendStart)
+        .some(([channel]) => channel === PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL)
+    )
+    const prompt = mainWindow.webContents.send.mock.calls
+      .slice(sendStart)
+      .find(([channel]) => channel === PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL)?.[1] as {
+      promptId: string
+    }
+    unpinPluginSurface(mount.webContentsId)
+    expect(runtime.gate.resolvePrompt(prompt.promptId, ['identity.read'])).toBe(true)
+    const outcome = await pending
+
+    expect(outcome.granted['identity.read']).toBe(false)
+    expect(putGrant).not.toHaveBeenCalled()
+    expect(runtime.gate.hasPendingPrompt()).toBe(false)
+  })
+
+  it('does not forward an unpinned mount to the native visibility driver', async () => {
+    const { service } = await setupWithLiveFirstApp()
+    const mount = initialMount()
+    const setVisibleForMount = vi.spyOn(
+      await import('../sandboxUiDriver.js'),
+      'setSandboxUiVisibleForWebContents'
+    )
+    const hiding = service.hideSandboxUiForPluginMount(mount)
+    unpinPluginSurface(mount.webContentsId)
+
+    await expect(hiding).resolves.toBe(false)
+    expect(setVisibleForMount).not.toHaveBeenCalled()
+  })
+
   it('does not present or hide a replacement after release during initial grant lookup', async () => {
     const { service, parentWindow, runtime, mainWindow, firstWebContentsId } =
       await setupWithLiveFirstApp()
@@ -1006,6 +1266,7 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
       }
     )
     await vi.advanceTimersByTimeAsync(CONSENT_PROMPT_COOLDOWN_MS)
+    expect(scheduled.mock.calls.some(([, delay]) => delay === 500)).toBe(false)
     await flushUntil(() => secondSettled)
     await Promise.all([first, second])
 
