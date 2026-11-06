@@ -160,7 +160,10 @@ cannot decide (see "Offline installations"). Whether an inserted row starts
 - **Eligibility.** The catalog must list text output and `tool_call: true`, the
   model must carry no `status` at all (`deprecated`, `alpha`, `beta`, or any
   value models.dev introduces later), and the id must be one the runtime can
-  execute. A model that fails any rule is inserted disabled.
+  execute. A model that fails any rule is inserted disabled, and it stays
+  disabled if it later qualifies (for example a `beta` model that reaches
+  general availability): these rules only decide when the row is inserted.
+  Enable such a model by hand under `/llm-models`.
 - **A live, plausible run.** Only a successful fetch of models.dev can enable a
   model; see "Offline installations" below.
 - **No earlier removal.** A model an operator deleted (or renamed away) comes
