@@ -514,6 +514,37 @@ else
   fail 'unsafe-not-exported (check ran for an unsafe name or a reserved name was exported)'
 fi
 
+# --- unsafe name without an env entry is never exported -------------------
+# The unsafe screen guards names that would be exported into a local
+# process. A referenced name with no container env entry is left
+# undefined, exactly as the pod's envsubst leaves it, so it must not be
+# reported unsafe. Both twins use the same name (LANG) and the same
+# template; the reference is unbraced because the checker reports an
+# undefined braced reference, which would test a different rule.
+reset_fixture
+add_server langnoentry 'https://example.com/mcp' \
+  'proxy_set_header X-Key "${API_KEY}"; proxy_set_header X-Lang "$LANG";' \
+  "$(literal API_KEY 'TESTKEY-CLEAN-9482')"
+run_case lang-no-entry 0 'server=fixture-namespace/langnoentry verdict=OK'
+expect_output lang-no-entry-summary \
+  'VERDICT=CLEAN checked=1 ok=1 rejected=0 inconclusive=0'
+expect_absent lang-no-entry-not-unsafe 'unsafe-env-name'
+if [ "$(check_ran_with API_KEY)" = yes ]; then
+  pass lang-no-entry-resolution
+else
+  fail 'lang-no-entry-resolution (no single check run saw API_KEY)'
+fi
+
+reset_fixture
+envs=$(jq -cn '[{name:"API_KEY",value:"TESTKEY-CLEAN-9482"},
+  {name:"LANG",value:"TESTKEY-LANG1"}]')
+add_server langwithentry 'https://example.com/mcp' \
+  'proxy_set_header X-Key "${API_KEY}"; proxy_set_header X-Lang "$LANG";' "$envs"
+run_case lang-with-entry 3 \
+  'server=fixture-namespace/langwithentry verdict=INCONCLUSIVE reason=unsafe-env-name name=LANG'
+expect_output lang-with-entry-summary \
+  'VERDICT=INCONCLUSIVE checked=1 ok=0 rejected=0 inconclusive=1'
+
 # --- dependent-env-reference ---------------------------------------------
 # `$` belongs to neither value class, so the literal itself is refused, not
 # left unjudged; the remediation advice stays.

@@ -419,7 +419,10 @@ while IFS= read -r epvp_name; do
   epvp_reject=
   while IFS= read -r epvp_ref; do
     [ -n "$epvp_ref" ] || continue
-    if ! epvp_valid_name "$epvp_ref" || epvp_unsafe_name "$epvp_ref"; then
+    # Validity first. The reference scan above only extracts valid
+    # identifiers, so this branch is defensive rather than reachable from
+    # a live template.
+    if ! epvp_valid_name "$epvp_ref"; then
       epvp_name_inconclusive "$epvp_ref" unsafe-env-name
       continue
     fi
@@ -433,8 +436,14 @@ while IFS= read -r epvp_name; do
       | select(.name == $n)] | .[-1] // empty' 2>/dev/null) ||
       epvp_die "invalid-deployment-json $NAMESPACE/$epvp_name"
     # Not in the container env: left undefined, as the pod's envsubst would
-    # leave it; the check reports an undefined braced reference.
+    # leave it; the check reports an undefined braced reference. Existence
+    # comes before the unsafe screen: a name with no entry is never
+    # exported into a local process, so it cannot be unsafe for one.
     [ -n "$epvp_entry" ] || continue
+    if epvp_unsafe_name "$epvp_ref"; then
+      epvp_name_inconclusive "$epvp_ref" unsafe-env-name
+      continue
+    fi
     epvp_source=$(printf '%s' "$epvp_entry" | jq -jr 'if has("valueFrom")
       then (if (.valueFrom.secretKeyRef | type) == "object" then "secret" else "unsupported" end)
       else "literal" end') || epvp_die "invalid-deployment-json $NAMESPACE/$epvp_name"
