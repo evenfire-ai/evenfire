@@ -56,7 +56,9 @@ export const migrationSessionBoundsSql = (local: boolean): string[] => {
     `${scope} idle_in_transaction_session_timeout = '${MIGRATION_EXECUTION_POLICY.idleInTransactionTimeoutMs}ms'`,
     // A Job pod killed during a long statement would otherwise leave its
     // backend running, and holding the session advisory lock, until the
-    // statement ends. PostgreSQL >= 14 checks the client socket every second.
+    // statement ends. The server checks the client socket every second; that
+    // needs PostgreSQL 14+ on Linux or 15+ on macOS, illumos or BSD, and other
+    // servers reject the setting, so initDb fails there.
     `${scope} client_connection_check_interval = '1s'`,
   ]
 }

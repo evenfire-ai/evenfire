@@ -108,9 +108,10 @@ before this release.
   [Databases that ran an earlier head of this change](#databases-that-ran-an-earlier-head-of-this-change)).
   The release adds `0131_user_access_foundation` and
   `0132_legacy_password_security_epoch_backfill`.
-- PostgreSQL 14 or later. The migration session sets
-  `client_connection_check_interval`, so that a killed Job pod does not leave
-  its backend holding the migration advisory lock.
+- PostgreSQL 14 or later on Linux, or 15 or later on macOS, illumos or BSD (not
+  Windows). The migration session sets `client_connection_check_interval`,
+  which the server rejects on other platforms, so that a killed Job pod does
+  not leave its backend holding the migration advisory lock.
 - For a database already at `0130`, every statement of `0131` and `0132`
   waits at most 10 s for a lock (`lock_timeout`), and ordinary statements are
   bounded at 15 s (`statement_timeout`); the online index builds have their own
@@ -135,10 +136,14 @@ before this release.
   took 0.1–0.3 s each at measured sizes. It then creates the three session
   tables, with foreign keys to `users`, and their four indexes inside its
   bounded transaction.
-- `CREATE INDEX CONCURRENTLY` waits for every transaction older than itself. A
-  long transaction anywhere in the database (for example `pg_dump`) can hold
-  every build until its 120 s bound and make the Job fail on every attempt. Do
-  not run the migration during backups or other long transactions.
+- `CREATE INDEX CONCURRENTLY` waits for every transaction older than itself.
+  Each of those waits is a lock wait bounded by the 10 s `lock_timeout`; the
+  120 s bound applies to the whole build statement. A transaction that stays
+  open longer than 10 s (for example `pg_dump`) therefore makes each build
+  attempt fail after about 10 s, and the Job fails on every attempt while that
+  transaction lasts. Several overlapping shorter transactions can still keep a
+  build waiting up to its 120 s bound. Do not run the migration during backups
+  or other long transactions.
 - The foreign keys to `users` take `SHARE ROW EXCLUSIVE` on `users` until
   `0131`'s transaction commits. Writes to `users` are blocked for that time.
   The wait for that lock is bounded at 10 s.
@@ -181,7 +186,8 @@ before this release.
 ## Databases that ran an earlier head of this change
 
 Earlier heads of this change recorded other migration versions (under several
-four-digit prefixes, some below `0130`, and the same
+four-character prefixes, decimal or hexadecimal such as `010a`, some below
+`0130`, and the same
 `0131_user_access_foundation` version with a larger body)
 and created revision tables, catalog tables and `authorization_*` trigger
 functions. The current migration runner does not drop them. Their triggers
@@ -198,7 +204,7 @@ schema first in `search_path`):
 ```sql
 SELECT 'version' AS kind, version AS name
   FROM schema_migrations
- WHERE substring(version from '^\d{4}_(.+)$') = ANY (ARRAY[
+ WHERE substring(version from '^[0-9a-f]{4}_(.+)$') = ANY (ARRAY[
          'user_access_foundation',
          'invitation_delivery_commands',
          'catalog_utf8_ordering',

@@ -12,8 +12,9 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
 const LAST_DEV_MIGRATION_VERSION = '0130_password_login_success_admission'
 
 // Migration names that earlier heads of this change recorded under other
-// four-digit prefixes (some below 0130, and the same 0131 version with a
-// larger body). The name after the prefix is the identity.
+// four-character prefixes (decimal such as `0126` or hexadecimal such as
+// `010a`; some below 0130, and the same 0131 version with a larger body). The
+// name after the prefix is the identity.
 const EARLIER_PR1_MIGRATION_NAMES: readonly string[] = Object.freeze([
   'user_access_foundation',
   'invitation_delivery_commands',
@@ -92,7 +93,7 @@ async function assertNoEarlierPr1Head(
 ): Promise<void> {
   const versions = [...appliedVersions]
     .filter(version => {
-      const name = /^\d{4}_(.+)$/.exec(version)?.[1]
+      const name = /^[0-9a-f]{4}_(.+)$/.exec(version)?.[1]
       return (
         name !== undefined &&
         EARLIER_PR1_MIGRATION_NAMES.includes(name) &&

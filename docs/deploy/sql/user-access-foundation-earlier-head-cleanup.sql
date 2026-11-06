@@ -80,7 +80,7 @@ DROP INDEX IF EXISTS
   workflow_runs_usage_team_catalog_idx;
 
 DELETE FROM schema_migrations
- WHERE substring(version from '^\d{4}_(.+)$') = ANY (ARRAY[
+ WHERE substring(version from '^[0-9a-f]{4}_(.+)$') = ANY (ARRAY[
          'user_access_foundation',
          'invitation_delivery_commands',
          'catalog_utf8_ordering',

@@ -438,7 +438,7 @@ describe('PR1 earlier-head guard', () => {
     }))
   }
 
-  it('rejects recorded earlier-head versions, including prefixes below 0130, before any PR1 work', async () => {
+  it('rejects recorded earlier-head versions, including prefixes below 0130 and hexadecimal prefixes, before any PR1 work', async () => {
     const { db, queries } = guardedDb([])
     const migrations = pr1Migrations()
     const recordMigration = vi.fn()
@@ -452,12 +452,18 @@ describe('PR1 earlier-head guard', () => {
         '0126_user_access_foundation',
         '0133_catalog_utf8_ordering',
         '0131_user_access_foundation',
+        // Earlier heads also recorded hexadecimal prefixes.
+        '010a_invitation_delivery_commands',
+        '012b_user_access_foundation_definer_temp_shadow_hardening',
+        // A dev receipt with a hexadecimal prefix whose name is not an
+        // earlier-head name: the exact message below proves it is not named.
+        '00a0_codex_subscription_connections',
       ]),
       recordMigration,
     })
 
     await expect(rejection).rejects.toThrow(
-      'recorded versions [0126_user_access_foundation, 0133_catalog_utf8_ordering]; functions []; tables []; ' +
+      'recorded versions [010a_invitation_delivery_commands, 0126_user_access_foundation, 012b_user_access_foundation_definer_temp_shadow_hardening, 0133_catalog_utf8_ordering]; functions []; tables []; ' +
         EARLIER_HEAD_DOC_REFERENCE
     )
     // Liveness witness: the guard ran its catalog probe once, with the table list.

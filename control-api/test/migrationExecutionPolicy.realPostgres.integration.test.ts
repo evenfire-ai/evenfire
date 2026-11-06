@@ -762,7 +762,11 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
   it('rejects a database that recorded an earlier-head migration version', async () => {
     await withFreshHeadDatabase(async pool => {
-      for (const earlierVersion of ['0133_catalog_utf8_ordering', '0126_user_access_foundation']) {
+      for (const earlierVersion of [
+        '0133_catalog_utf8_ordering',
+        '0126_user_access_foundation',
+        '010a_invitation_delivery_commands',
+      ]) {
         await pool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [earlierVersion])
         const rejection = initDb({ connect: () => pool.connect() })
         await expect(rejection).rejects.toThrow(earlierVersion)
@@ -776,6 +780,14 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
   it('rejects earlier-head objects, and accepts the database after the cleanup SQL', async () => {
     await withFreshHeadDatabase(async pool => {
+      // Witness that the baseline is a real HEAD database, not an empty table.
+      const freshReceipts = await versions(pool)
+      expect(freshReceipts).toEqual(
+        expect.arrayContaining([
+          '0131_user_access_foundation',
+          '0132_legacy_password_security_epoch_backfill',
+        ])
+      )
       await pool.query(`
         CREATE FUNCTION authorization_bump_user_row_revision() RETURNS trigger
           LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
@@ -785,7 +797,10 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         CREATE FUNCTION authorization_bump_user_revision(target_user_id uuid) RETURNS void
           LANGUAGE plpgsql AS $$ BEGIN NULL; END $$;
         CREATE TABLE authorization_catalog_writer_components(component text PRIMARY KEY);
-        INSERT INTO schema_migrations(version) VALUES ('0131_invitation_delivery_commands');
+        INSERT INTO schema_migrations(version) VALUES
+          ('0131_invitation_delivery_commands'),
+          ('010a_invitation_delivery_commands'),
+          ('012b_user_access_foundation_definer_temp_shadow_hardening');
       `)
 
       const rejection = initDb({ connect: () => pool.connect() })
@@ -794,10 +809,41 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         'authorization_bump_user_revision(uuid)',
         'authorization_catalog_writer_components',
         '0131_invitation_delivery_commands',
+        '010a_invitation_delivery_commands',
+        '012b_user_access_foundation_definer_temp_shadow_hardening',
         EARLIER_HEAD_DOC_REFERENCE,
       ]) {
         await expect(rejection, named).rejects.toThrow(named)
       }
+
+      // The operator's check query, exactly as the upgrade doc prints it.
+      const upgradeDoc = readFileSync(
+        new URL('../../docs/deploy/user-access-foundation-upgrade.md', import.meta.url),
+        'utf8'
+      )
+      const section = upgradeDoc
+        .split('\n## Databases that ran an earlier head of this change\n')[1]
+        ?.split('\n## ')[0]
+      const sqlBlocks = [...(section ?? '').matchAll(/```sql\n([\s\S]+?)```/g)]
+      if (sqlBlocks.length !== 1) {
+        throw new Error(
+          `expected exactly one sql block in the upgrade doc's earlier-head section, found ${sqlBlocks.length}`
+        )
+      }
+      const checkQuery = sqlBlocks[0]![1]!
+      const found = (await pool.query<{ kind: string; name: string }>(checkQuery)).rows
+        .map(row => `${row.kind}:${row.name}`)
+        .sort()
+      expect(found).toEqual(
+        [
+          'function:authorization_bump_user_revision(uuid)',
+          'function:authorization_bump_user_row_revision()',
+          'table:authorization_catalog_writer_components',
+          'version:010a_invitation_delivery_commands',
+          'version:0131_invitation_delivery_commands',
+          'version:012b_user_access_foundation_definer_temp_shadow_hardening',
+        ].sort()
+      )
 
       const cleanupSql = readFileSync(
         new URL(
@@ -813,7 +859,6 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         argument_function: string | null
         trigger_count: number
         writer_components: string | null
-        earlier_receipts: number
       }>(
         `SELECT to_regprocedure('authorization_bump_user_row_revision()')::text
                   AS row_trigger_function,
@@ -822,9 +867,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
                 (SELECT count(*)::int FROM pg_trigger
                   WHERE tgname = 'users_authorization_revision') AS trigger_count,
                 to_regclass('authorization_catalog_writer_components')::text
-                  AS writer_components,
-                (SELECT count(*)::int FROM schema_migrations
-                  WHERE version = '0131_invitation_delivery_commands') AS earlier_receipts`
+                  AS writer_components`
       )
       expect(remaining.rows).toEqual([
         {
@@ -832,9 +875,11 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
           argument_function: null,
           trigger_count: 0,
           writer_components: null,
-          earlier_receipts: 0,
         },
       ])
+      // Zero earlier-head receipts remain, independent of the regex under test.
+      expect(await versions(pool)).toEqual(freshReceipts)
+      expect((await pool.query(checkQuery)).rows).toEqual([])
 
       await initDb({ connect: () => pool.connect() })
       const sessionTableNames = [
