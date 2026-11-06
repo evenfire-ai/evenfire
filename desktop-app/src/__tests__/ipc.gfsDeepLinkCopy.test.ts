@@ -58,6 +58,17 @@ describe('gfs:copyDeepLink trusted clipboard handoff', () => {
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })
 
+  it('propagates a clipboard write failure instead of reporting success', async () => {
+    electron.writeText.mockRejectedValueOnce(new Error('clipboard unavailable'))
+
+    await expect(copyHandler()(trusted, { uri })).rejects.toThrow('clipboard unavailable')
+
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
+    expect(electron.writeText).toHaveBeenCalledOnce()
+    expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
+  })
+
   it('rejects untrusted renderer senders before creating or copying a link', async () => {
     await expect(
       copyHandler()({ senderFrame: { url: 'https://untrusted.example' } }, { uri })
