@@ -192,6 +192,10 @@ describe('egress-proxy value preflight (PF)', () => {
 
     await reconciler.reconcile(API_KEY_SERVER)
 
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledWith({
+      name: SECRET_NAME,
+      namespace: API_KEY_SERVER.namespace,
+    })
     expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledOnce()
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalledOnce()
     expect(allPatchedConditions(customApi)).toEqual(
@@ -213,6 +217,10 @@ describe('egress-proxy value preflight (PF)', () => {
 
     // Witness: the reconcile reached the preflight (it read the Secret).
     expect(coreApi.readNamespacedSecret).toHaveBeenCalledOnce()
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledWith({
+      name: SECRET_NAME,
+      namespace: API_KEY_SERVER.namespace,
+    })
     expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
     expect(coreApi.replaceNamespacedConfigMap).not.toHaveBeenCalled()
     expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
@@ -394,10 +402,10 @@ describe('egress-proxy value preflight (PF)', () => {
     expect(valid.message).not.toContain('collides')
   })
 
-  it('PF-6: two violations are both listed and sorted by context and placeholder', async () => {
+  it('PF-6: violations are sorted by context and placeholder, not insertion order', async () => {
     const server = cloneServer(API_KEY_SERVER, {
       remote: {
-        baseUrl: 'https://api.example.com/mcp?apikey=' + '$' + '{ZED_KEY}',
+        baseUrl: 'https://api.example.com/mcp?z=' + '$' + '{ZED_KEY}' + '&a=' + '$' + '{AAA_KEY}',
         authHeaders: [{ header: 'X-Api-Key', valueTemplate: 'Bearer ' + '$' + '{TOKEN}' }],
       },
       envSecret: {
@@ -405,10 +413,13 @@ describe('egress-proxy value preflight (PF)', () => {
         keys: [
           { secretKey: 'z', envVar: 'ZED_KEY' },
           { secretKey: 'token', envVar: 'TOKEN' },
+          { secretKey: 'aaa', envVar: 'AAA_KEY' },
         ],
       },
     })
-    coreApi.readNamespacedSecret.mockResolvedValue(encodedSecret({ z: 'a+b', token: 'tok\n' }))
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ z: 'a+b', token: 'tok\n', aaa: 'c+d' })
+    )
 
     await reconciler.reconcile(server)
 
@@ -417,10 +428,16 @@ describe('egress-proxy value preflight (PF)', () => {
     const valid = allPatchedConditions(customApi).find(
       condition => condition.type === 'EgressProxyValuesValid'
     )
-    expect(valid.message).toContain('2 value(s)')
+    expect(valid.message).toContain('3 value(s)')
+    expect(valid.message).toContain('query placeholder ${AAA_KEY}')
     expect(valid.message).toContain('query placeholder ${ZED_KEY}')
     expect(valid.message).toContain('authHeader X-Api-Key placeholder ${TOKEN}')
-    expect(valid.message.indexOf('query placeholder')).toBeLessThan(
+    // AAA_KEY is inserted after ZED_KEY but must list first (placeholder
+    // sort within the query context), and query entries precede quoted ones.
+    expect(valid.message.indexOf('query placeholder ${AAA_KEY}')).toBeLessThan(
+      valid.message.indexOf('query placeholder ${ZED_KEY}')
+    )
+    expect(valid.message.indexOf('query placeholder ${ZED_KEY}')).toBeLessThan(
       valid.message.indexOf('authHeader X-Api-Key')
     )
   })
@@ -448,6 +465,162 @@ describe('egress-proxy value preflight (PF)', () => {
     expect(valid.message).toContain('12 value(s)')
     expect(valid.message).toContain('and 2 more')
     expect(valid.message.match(/query placeholder/g)).toHaveLength(10)
+  })
+
+  it('PF-27: a duplicated env name is judged by its last value across channels', async () => {
+    const server = cloneServer(API_KEY_SERVER, {
+      env: [{ name: 'API_KEY', value: 'abc/def%2Bgh==' }],
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(encodedSecret({ [API_KEY_SECRET_KEY]: 'a+b' }))
+
+    await reconciler.reconcile(server)
+
+    // Witness: the Secret read proves the preflight path ran.
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledWith({
+      name: SECRET_NAME,
+      namespace: API_KEY_SERVER.namespace,
+    })
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    const valid = allPatchedConditions(customApi).find(
+      condition => condition.type === 'EgressProxyValuesValid'
+    )
+    expect(valid.status).toBe('False')
+    expect(valid.message).toContain('query placeholder ${API_KEY}')
+    expect(valid.message).toContain(`Secret "${SECRET_NAME}"`)
+  })
+
+  it('PF-27b: a duplicated env name passes when its last value is within class', async () => {
+    const server = cloneServer(API_KEY_SERVER, {
+      env: [{ name: 'API_KEY', value: 'a+b' }],
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'abc/def%2Bgh==' })
+    )
+    forceCreates(appsApi, coreApi)
+
+    await reconciler.reconcile(server)
+
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledOnce()
+    expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledOnce()
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(allPatchedConditions(customApi)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'EgressProxyValuesValid',
+          status: 'True',
+          reason: 'ValuesWithinClass',
+        }),
+      ])
+    )
+  })
+
+  it('PF-28: a bare authHeader reference is judged in quoted position', async () => {
+    const value = 'tok\n'
+    const server = cloneServer(API_KEY_SERVER, {
+      remote: {
+        baseUrl: 'https://api.example.com/mcp',
+        authHeaders: [{ header: 'X-Api-Key', valueTemplate: 'Bearer $TOKEN' }],
+      },
+      envSecret: {
+        name: SECRET_NAME,
+        keys: [{ secretKey: 'token', envVar: 'TOKEN' }],
+      },
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(encodedSecret({ token: value }))
+
+    await reconciler.reconcile(server)
+
+    // Witness: the Secret read proves the preflight path ran.
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledOnce()
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    const valid = allPatchedConditions(customApi).find(
+      condition => condition.type === 'EgressProxyValuesValid'
+    )
+    expect(valid.status).toBe('False')
+    expect(valid.message).toContain('authHeader X-Api-Key placeholder ${TOKEN}')
+    expect(valid.message).toContain('quoted')
+    expectNoValueFragment(valid.message, value)
+  })
+
+  it('PF-28b: an in-class bare authHeader reference reconciles', async () => {
+    const server = cloneServer(API_KEY_SERVER, {
+      remote: {
+        baseUrl: 'https://api.example.com/mcp',
+        authHeaders: [{ header: 'X-Api-Key', valueTemplate: 'Bearer $TOKEN' }],
+      },
+      envSecret: {
+        name: SECRET_NAME,
+        keys: [{ secretKey: 'token', envVar: 'TOKEN' }],
+      },
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(encodedSecret({ token: 'abc123' }))
+    forceCreates(appsApi, coreApi)
+
+    await reconciler.reconcile(server)
+
+    const template = (reconciler as any).buildNginxConfigMap(server).data[
+      'default.conf.template'
+    ] as string
+    expect(template).toContain('proxy_set_header X-Api-Key "Bearer $TOKEN";')
+    expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledOnce()
+    expect(allPatchedConditions(customApi)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'EgressProxyValuesValid',
+          status: 'True',
+          reason: 'ValuesWithinClass',
+        }),
+      ])
+    )
+  })
+
+  it('PF-29: two identical authHeader lines claim distinct template spans', async () => {
+    const entry = { header: 'X-Api-Key', valueTemplate: 'Bearer ' + '$' + '{API_KEY}' }
+    const server = cloneServer(API_KEY_SERVER, {
+      remote: {
+        baseUrl: 'https://api.example.com/mcp?apikey=' + '$' + '{API_KEY}',
+        authHeaders: [entry, { ...entry }],
+      },
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'abc123' })
+    )
+    forceCreates(appsApi, coreApi)
+
+    await reconciler.reconcile(server)
+
+    // Life witness: the render carries the identical line twice, so the
+    // second occurrence needs its own span or it would count as fixed.
+    const template = (reconciler as any).buildNginxConfigMap(server).data[
+      'default.conf.template'
+    ] as string
+    expect(template.split('proxy_set_header X-Api-Key "Bearer ${API_KEY}";').length - 1).toBe(2)
+    expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledOnce()
+    expect(allPatchedConditions(customApi)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'EgressProxyValuesValid',
+          status: 'True',
+          reason: 'ValuesWithinClass',
+        }),
+      ])
+    )
+  })
+
+  it('PF-30: a local server keeps a CRD-supplied resolver pair value', () => {
+    const server = cloneServer(LOCAL_SERVER, {
+      env: [{ name: 'NGINX_LOCAL_RESOLVERS', value: '10.0.0.53' }],
+    })
+
+    const deployment = (reconciler as any).buildDeployment(server)
+    const env = deployment.spec.template.spec.containers.flatMap(
+      (container: any) => container.env ?? []
+    )
+    expect(env).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'NGINX_LOCAL_RESOLVERS', value: '10.0.0.53' }),
+      ])
+    )
   })
 
   it('PF-7: an identical repeated block keeps the message and restamps the refusal', async () => {
@@ -1138,6 +1311,27 @@ describe('egress-proxy value preflight (PF)', () => {
     // Life witness: ensureConfigMap ran before the failing Service sync.
     expect(coreApi.createNamespacedConfigMap).toHaveBeenCalled()
     expect(reconciler.getStatus(API_KEY_SERVER).message).toContain('service read boom')
+    expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.length).toBe(0)
+    expect(persisted.get()).toEqual(TRUE_VERDICT_CONDITIONS)
+  })
+
+  it('PF-21d: a post-verdict ConfigMap failure leaves a valid verdict untouched', async () => {
+    const persisted = persistedHarness(structuredClone(TRUE_VERDICT_CONDITIONS))
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'abc/def%2Bgh==' })
+    )
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce(error500('configmap read boom'))
+
+    await reconciler.reconcile(API_KEY_SERVER)
+
+    // Witness: the Secret read and the ConfigMap read both happened, so the
+    // reconcile reached the first post-verdict resource sync.
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledWith({
+      name: SECRET_NAME,
+      namespace: API_KEY_SERVER.namespace,
+    })
+    expect(coreApi.readNamespacedConfigMap).toHaveBeenCalledOnce()
+    expect(reconciler.getStatus(API_KEY_SERVER).message).toContain('configmap read boom')
     expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.length).toBe(0)
     expect(persisted.get()).toEqual(TRUE_VERDICT_CONDITIONS)
   })
