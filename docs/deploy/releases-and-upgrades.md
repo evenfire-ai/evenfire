@@ -34,7 +34,10 @@ every pull request:
 - `update-desktop-release-manifest.mjs --validate-only` fails if the manifest
   disagrees with the package versions.
 - `validate-release-version-bumps.mjs` fails if code under `external-rest-api/`
-  or `rpc-proxy/` changed but that package's version did not.
+  or `rpc-proxy/` changed but that package's version did not. On pull requests into
+  `dev`, its `--all-services` mode checks the shipped code of the other services the
+  same way against the merge result, so a version line that merged cleanly into the
+  same number on both sides fails. Bump that package's version to fix it.
 
 `desktop-app` is not a hook package root, so the hook never bumps it. See
 [CONTRIBUTING.md](../../CONTRIBUTING.md#the-pre-commit-hook-may-edit-your-commit)

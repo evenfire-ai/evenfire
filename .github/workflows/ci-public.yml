@@ -911,6 +911,15 @@ jobs:
       - name: Validate service version bumps
         run: node scripts/release/validate-release-version-bumps.mjs --previous "${{ github.event.pull_request.base.sha || github.event.before }}"
 
+      # HEAD is the pull request's merge result and HEAD^1 the base it merged with, so this
+      # also sees a version line that merged cleanly into the same number on both sides.
+      - name: Validate every service's version against its base (pull requests into dev)
+        if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+        run: node scripts/release/validate-release-version-bumps.mjs --previous HEAD^1 --all-services
+
+      - name: Test the service version bump validator
+        run: bash scripts/tests/test-validate-release-version-bumps.sh
+
       - name: Test the image manifest
         run: bash scripts/tests/test-images-manifest.sh
 
