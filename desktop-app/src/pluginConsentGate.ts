@@ -179,12 +179,10 @@ export class PluginConsentGate {
         continue
       }
       if (await this.isGranted({ ...input, capability })) {
-        if (!this.mountIsCurrent(input.mount)) return this.deniedOutcome(input.capabilities)
         granted[capability] = true
         source[capability] = 'existing_grant'
         continue
       }
-      if (!this.mountIsCurrent(input.mount)) return this.deniedOutcome(input.capabilities)
       if (session.denials.has(capability)) {
         // Session-sticky: one refusal buys silence for the rest of the mount.
         granted[capability] = false
@@ -280,7 +278,7 @@ export class PluginConsentGate {
     }
 
     const ready = await this.waitForWindow()
-    if (!ready || !this.mountIsCurrent(input.mount)) return new Set()
+    if (!ready) return new Set()
 
     const rows: PluginConsentRow[] = sortCapabilitiesForPrompt(stillNeeded).flatMap(capability => {
       const descriptor = getCapability(capability)

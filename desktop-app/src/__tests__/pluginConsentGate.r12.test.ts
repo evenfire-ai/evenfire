@@ -7,9 +7,11 @@ import path from 'node:path'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests, unbindChatStore } from '../chatStoreBinding.js'
 import { wireMainWindowRendererReadiness } from '../mainWindowReadiness.js'
-import { CONSENT_PROMPT_COOLDOWN_MS } from '../pluginConsentGate.js'
+import { CONSENT_PROMPT_COOLDOWN_MS, PluginConsentGate } from '../pluginConsentGate.js'
+import type { ConsentStore } from '../pluginConsentStore.js'
 import { PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL } from '../pluginSdkProtocol.js'
 import { _resetPluginSdkRuntimeForTests, initPluginSdkRuntime } from '../pluginSdkRuntime.js'
+import type { PinnedPluginSurface } from '../pluginSurfaceRegistry.js'
 import { _resetPluginSurfacesForTests, resolvePluginSurface } from '../pluginSurfaceRegistry.js'
 import { SANDBOX_UI_MINT_TIMEOUT_MS } from '../rpcProxyClient.js'
 import {
@@ -375,6 +377,7 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
       .slice(sendStart)
       .some(([channel]) => channel === PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL)
     expect(outcome.granted['identity.read']).toBe(false)
+    expect(grantReads).toBe(1)
     expect(stalePrompt).toBe(false)
     expect(runtime.gate.hasPendingPrompt()).toBe(false)
     expect(replacementView.setVisible).not.toHaveBeenCalledWith(false)
@@ -563,11 +566,21 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
     expect(runtime.gate.resolvePrompt(firstPromptId, ['identity.read'])).toBe(true)
     await recheckStartedPromise
     const sendStart = mainWindow.webContents.send.mock.calls.length
+    let secondSettled = false
+    void second.then(
+      () => {
+        secondSettled = true
+      },
+      () => {
+        secondSettled = true
+      }
+    )
 
     await service.openSandboxUi(openArgs('first-app', parentWindow))
     const replacementView = electronMocks.views[1]!
     const replacementCallStart = replacementView.setVisible.mock.calls.length
     releaseRecheck()
+    await flushUntil(() => secondSettled)
     await Promise.all([first, second])
 
     const stalePending = runtime.gate.hasPendingPrompt()
@@ -586,6 +599,52 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
       stalePromptPresented: false,
       staleHide: false,
     })
+  })
+
+  it('does not recheck a queued request after its mount is replaced before dequeue', async () => {
+    const { service, parentWindow, runtime, mainWindow } = await setupWithLiveFirstApp()
+    const pluginId = 'sandbox-recipes/first-app'
+    const mount = initialMount()
+    let orgGrantReads = 0
+    const originalGet = runtime.store.get.bind(runtime.store)
+    vi.spyOn(runtime.store, 'get').mockImplementation(async key => {
+      if (key.capability === 'org.read') {
+        orgGrantReads += 1
+        if (orgGrantReads > 1) throw new Error('released queued mount reached dequeue recheck')
+      }
+      return originalGet(key)
+    })
+
+    const first = runtime.gate.ensure({
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: ['identity.read'],
+    })
+    await flushUntil(() => runtime.gate.hasPendingPrompt())
+    const second = runtime.gate.ensure({
+      envKey: 'testenv-0123456789ab',
+      userId: 'user-a',
+      pluginId,
+      pluginTitle: 'First app',
+      mount,
+      capabilities: ['org.read'],
+    })
+    await flushUntil(() => orgGrantReads === 1)
+    const sendStart = mainWindow.webContents.send.mock.calls.length
+    await service.openSandboxUi(openArgs('first-app', parentWindow))
+    expect(resolvePluginSurface(mount.webContentsId)).not.toBe(mount)
+    await Promise.all([first, second])
+
+    expect(orgGrantReads).toBe(1)
+    expect(runtime.gate.hasPendingPrompt()).toBe(false)
+    expect(
+      mainWindow.webContents.send.mock.calls
+        .slice(sendStart)
+        .some(([channel]) => channel === PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL)
+    ).toBe(false)
   })
 
   it('does not let a released queued request reach the consent store after dequeue', async () => {
@@ -652,7 +711,7 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
     expect(secondOutcome.granted['org.read']).toBe(false)
   })
 
-  it('fast-check command model keeps queued consent bound to its released mount', async () => {
+  it('deterministically replays the queued-consent replacement trace', async () => {
     type Model = {
       phase: 'idle' | 'active' | 'queued' | 'rechecking' | 'replaced' | 'settled'
     }
@@ -788,6 +847,158 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
     }
   })
 
+  it('generated release and settlement commands keep consent effects mount-bound', async () => {
+    type Model = {
+      started: boolean
+      released: boolean
+      settled: boolean
+      promptsAtRelease: number | null
+    }
+    type Real = {
+      gate: PluginConsentGate
+      oldMount: PinnedPluginSurface
+      replacement: PinnedPluginSurface
+      scheduler: Awaited<ReturnType<typeof fc.scheduler>>
+      activeMount: PinnedPluginSurface
+      storeReads: number
+      staleStoreReads: number
+      prompts: Array<{ promptId: string }>
+      hiddenWebContentsIds: number[]
+      request?: Promise<unknown>
+      requestSettled: boolean
+    }
+    const observedOrders = new Set<string>()
+
+    const releaseMount: fc.AsyncCommand<Model, Real> = {
+      check: model => model.started && !model.released,
+      run: async (model, real) => {
+        observedOrders.add(model.settled ? 'settle-before-release' : 'release-before-settle')
+        real.activeMount = real.replacement
+        real.gate.resetPlugin(real.oldMount.pluginId)
+        model.released = true
+        model.promptsAtRelease = real.prompts.length
+      },
+      toString: () => 'release the request mount and install a same-plugin replacement',
+    }
+    const settle: fc.AsyncCommand<Model, Real> = {
+      check: model => model.started && !model.settled,
+      run: async (model, real) => {
+        observedOrders.add(model.released ? 'release-before-settle' : 'settle-before-release')
+        for (let turn = 0; turn < 8 && !real.requestSettled; turn += 1) {
+          await real.scheduler.waitAll()
+          await new Promise<void>(resolve => setImmediate(resolve))
+          if (real.gate.hasPendingPrompt()) {
+            const prompt = real.prompts.at(-1)
+            if (prompt) real.gate.resolvePrompt(prompt.promptId, [])
+          }
+        }
+        expect(real.requestSettled).toBe(true)
+        await real.request
+        model.settled = true
+      },
+      toString: () => 'resolve scheduled store work and settle the consent request',
+    }
+    const generatedCommands = fc.commands([fc.constant(releaseMount), fc.constant(settle)], {
+      maxCommands: 6,
+      size: '+1',
+    })
+
+    await fc.assert(
+      fc.asyncProperty(fc.scheduler(), generatedCommands, async (scheduler, commands) => {
+        const pluginId = 'sandbox-recipes/model-app'
+        const oldMount: PinnedPluginSurface = {
+          pluginId,
+          pluginTitle: 'Model app',
+          surface: 'sandbox-ui-embed',
+          webContentsId: 701,
+          generation: 1,
+        }
+        const replacement: PinnedPluginSurface = { ...oldMount, webContentsId: 702, generation: 2 }
+        const model: Model = {
+          started: false,
+          released: false,
+          settled: false,
+          promptsAtRelease: null,
+        }
+        const real: Real = {
+          gate: undefined as unknown as PluginConsentGate,
+          oldMount,
+          replacement,
+          scheduler,
+          activeMount: oldMount,
+          storeReads: 0,
+          staleStoreReads: 0,
+          prompts: [],
+          hiddenWebContentsIds: [],
+          requestSettled: false,
+        }
+        const store = {
+          get: async () => {
+            real.storeReads += 1
+            if (real.activeMount !== oldMount) real.staleStoreReads += 1
+            return scheduler.schedule(Promise.resolve(null), 'consent grant lookup')
+          },
+          put: async () => undefined,
+          list: async () => [],
+          touch: async () => undefined,
+          revoke: async () => undefined,
+          revokeAllForPlugin: async () => undefined,
+        } as ConsentStore
+        real.gate = new PluginConsentGate({
+          store,
+          isMountCurrent: mount => real.activeMount === mount,
+          setSurfaceVisible: async (_visible, mount) => {
+            if (real.activeMount !== mount) return false
+            real.hiddenWebContentsIds.push(mount.webContentsId)
+            return true
+          },
+          presentPrompt: request => real.prompts.push({ promptId: request.promptId }),
+          cancelPrompt: () => undefined,
+          isWindowReady: () => true,
+          sleep: async () => undefined,
+        })
+
+        const start: fc.AsyncCommand<Model, Real> = {
+          check: state => !state.started,
+          run: async (state, system) => {
+            system.request = system.gate.ensure({
+              envKey: 'testenv-0123456789ab',
+              userId: 'user-a',
+              pluginId,
+              pluginTitle: 'Model app',
+              mount: oldMount,
+              capabilities: ['identity.read'],
+            })
+            void system.request.then(
+              () => {
+                system.requestSettled = true
+              },
+              () => {
+                system.requestSettled = true
+              }
+            )
+            await flushUntil(() => system.storeReads >= 1)
+            state.started = true
+          },
+          toString: () => 'start a consent request on the original mount',
+        }
+
+        const scenario = [start, ...commands, settle]
+        await fc.asyncModelRun(() => ({ model, real }), scenario)
+        await scheduler.waitAll()
+        expect(real.requestSettled).toBe(true)
+        expect(real.gate.hasPendingPrompt()).toBe(false)
+        expect(real.hiddenWebContentsIds).not.toContain(replacement.webContentsId)
+        expect(real.staleStoreReads).toBe(0)
+        if (model.released) {
+          expect(real.prompts).toHaveLength(model.promptsAtRelease)
+        }
+      }),
+      { numRuns: 16, seed: 11062026 }
+    )
+    expect(observedOrders).toEqual(new Set(['release-before-settle', 'settle-before-release']))
+  })
+
   it('does not revive a queued request released during cooldown', async () => {
     const { service, parentWindow, runtime, mainWindow, setWindowReady } =
       await setupWithLiveFirstApp()
@@ -892,6 +1103,7 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
     const sendStart = mainWindow.webContents.send.mock.calls.length
     await service.openSandboxUi(openArgs('first-app', parentWindow))
     const replacementView = electronMocks.views[1]!
+    const hideMount = vi.spyOn(service, 'hideSandboxUiForPluginMount')
     const replacementCallStart = replacementView.setVisible.mock.calls.length
     await vi.advanceTimersByTimeAsync(500)
     await Promise.all([first, second])
@@ -912,5 +1124,6 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
       stalePromptPresented: false,
       staleHide: false,
     })
+    expect(hideMount).not.toHaveBeenCalled()
   })
 })
