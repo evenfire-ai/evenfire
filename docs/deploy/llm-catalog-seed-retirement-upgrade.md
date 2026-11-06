@@ -32,10 +32,10 @@ They are approximations, not reviewed prices, and some are below the vendor's
 list price (for example `openai/gpt-5.4-mini` is seeded at 0.15/0.60 USD per
 1M input/output tokens, while models.dev lists it at 0.75/4.50). The catalog
 sync does not replace them: it never writes a price for a pair that already
-has a price row, enabled or disabled. If you use `cost` budgets or the per-task cost brake, review
-them under **Cost → LLM prices** after the upgrade and correct the ones you
-serve. Until then, `cost` budgets keep counting their usage at the placeholder
-rate.
+has a price row, enabled or disabled. If you use `cost` budgets or the
+per-task cost brake, review them under **Cost → LLM prices** after the
+upgrade and correct the ones you serve. Until then, `cost` budgets keep
+counting their usage at the placeholder rate.
 
 ### 28 seeded pairs become catalog-managed
 

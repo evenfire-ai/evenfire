@@ -435,7 +435,7 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
     })
   })
 
-  describe('placeholder prices outside the admin API survive 0135', () => {
+  describe('0135 keeps placeholder prices, untouched or disabled out of band', () => {
     const pk = (p: { provider: string; model: string }) => key(p.provider, p.model)
     // Disabled outside the API: `updated_at` does not move, only `enabled`.
     const DISABLED = { provider: 'bailian', model: 'qwen3-coder-plus' } as const

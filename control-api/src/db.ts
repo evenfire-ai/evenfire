@@ -6404,10 +6404,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
  *   approximate price keeps it counting until an admin reviews it under
  *   Cost -> LLM prices.
  *
- * Retiring the seeds is the one place where shipped migrations were edited
- * (0044's price seed, the allowlist seeds of 0056, 0057, 0058 and 0100) instead
- * of adding a fix-forward migration, which is otherwise the rule so that
- * existing and fresh installations end up with the same data. A migration added
+ * Retiring the seeds is an exception to the fix-forward rule (which keeps
+ * existing and fresh installations on the same data): the shipped migrations
+ * were edited in place (0044's price seed, the allowlist seeds of 0056, 0057,
+ * 0058 and 0100). A migration added
  * after the seeds cannot make a fresh install empty without also deleting rows
  * that Hosts on upgraded installs may be serving. So the two differ by design:
  * a fresh install starts with no seeded rows and no prices, an upgraded one
