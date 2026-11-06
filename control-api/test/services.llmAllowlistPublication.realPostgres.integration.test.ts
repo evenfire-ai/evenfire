@@ -20,7 +20,11 @@ import {
   buildConfigMapData,
 } from '../src/services/llmAllowedModelsConfigMap.js'
 import { AllowlistPublishRetry } from '../src/services/llmAllowlistPublishRetry.js'
-import { syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
+import {
+  CatalogPublishAfterCommitError,
+  type SyncConnector,
+  syncDiscoveredModels,
+} from '../src/services/llmCatalogSync.js'
 import { FakeConfigMapApi } from './helpers/fakeAllowlistCluster.js'
 import { loadStub, trimSnapshot, withModalities } from './helpers/modelsDevFixtures.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
@@ -58,6 +62,9 @@ const oldDiscovery: ImageInputCapability = {
 }
 const CATALOG = withModalities(trimSnapshot({ anthropic: ['claude-opus-4-6'] }), {
   'claude-opus-4-6': ['text', 'image'],
+})
+const TEXT_ONLY_CATALOG = withModalities(trimSnapshot({ anthropic: ['claude-opus-4-6'] }), {
+  'claude-opus-4-6': ['text'],
 })
 
 type Phase = 'read' | 'create' | 'replace'
@@ -229,6 +236,76 @@ describeRealPostgres('allowlist ConfigMap publication on real PostgreSQL', () =>
       imageInput?: ImageInputCapability
     }>
     expect(served.find(e => e.model === 'claude-opus-4-6')?.imageInput?.state).toBe('supported')
+  })
+
+  it('a retry that publishes while a sync is still uncommitted does not settle that sync', async () => {
+    const retry = new AllowlistPublishRetry({ baseDelayMs: 400, maxDelayMs: 400 })
+    const syncWith = (catalog: typeof CATALOG, connector: SyncConnector = dbPool) =>
+      syncDiscoveredModels(
+        {
+          materializer: writer(),
+          publishRetry: retry,
+          loadCatalog: loadStub(catalog, 'live', CAPTURED_AT),
+          minPlausibleLiveTotal: 1,
+        },
+        connector
+      )
+    try {
+      // An earlier run committed and failed to publish: a retry is owed.
+      cluster.failNextWrites(3)
+      await expect(syncWith(TEXT_ONLY_CATALOG)).rejects.toBeInstanceOf(
+        CatalogPublishAfterCommitError
+      )
+      expect(retry.isPending()).toBe(true)
+      const writesBefore = cluster.writes
+
+      // Run A changes what is served and is held right before its COMMIT.
+      const atCommit = deferred()
+      const releaseCommit = deferred()
+      const parkedAtCommit: SyncConnector = {
+        connect: async () => {
+          const client = await dbPool.connect()
+          return {
+            query: async (sql: string, params?: unknown[]) => {
+              if (sql === 'COMMIT') {
+                atCommit.resolve()
+                await releaseCommit.promise
+              }
+              return client.query(sql, params)
+            },
+            release: () => client.release(),
+          }
+        },
+      }
+      const runA = syncWith(CATALOG, parkedAtCommit).catch(err => err)
+      await atCommit.promise
+      // Setup witness: the retry had not fired yet when A reached its COMMIT.
+      expect(cluster.writes).toBe(writesBefore)
+
+      // The retry fires, reads Postgres without A's rows, and succeeds.
+      await waitFor(async () => !retry.isPending(), 'the owed retry to publish')
+      expect(cluster.writes).toBe(writesBefore + 1)
+
+      // A commits and its own publication fails.
+      cluster.failNextWrites(3)
+      releaseCommit.resolve()
+      expect(await runA).toBeInstanceOf(CatalogPublishAfterCommitError)
+
+      // A's commit is still owed, so the next retry publishes it.
+      const want = await expected()
+      await waitFor(
+        async () => cluster.annotations?.[CONTENT_HASH_ANNOTATION] === want.contentHash,
+        'the CM to hold run A'
+      ).catch(() => undefined)
+      await expectConfigMapMatchesDb()
+      const served = JSON.parse(cluster.data!.claude) as Array<{
+        model: string
+        imageInput?: ImageInputCapability
+      }>
+      expect(served.find(e => e.model === 'claude-opus-4-6')?.imageInput?.state).toBe('supported')
+    } finally {
+      retry.stop()
+    }
   })
 
   it('T-H3: two concurrent publications serialize on the lock', async () => {
