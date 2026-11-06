@@ -94,6 +94,14 @@
 # shellcheck disable=SC2016 # awk and env -i child programs are literal: $0, $1
 # and $@ inside those single-quoted programs are the child's own fields.
 
+# Disable xtrace before anything else runs: under `bash -x`, or with an
+# imported SHELLOPTS=xtrace, bash echoes every assignment and would print
+# resolved Secret values, breaking the value-handling contract above.
+# BASH_XTRACEFD is unset as hygiene so no child that re-enables xtrace
+# inherits a trace descriptor; the name means nothing to bash 3.2.
+set +x
+unset BASH_XTRACEFD
+
 set -u
 set -o pipefail
 

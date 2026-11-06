@@ -816,6 +816,41 @@ else
   fi
 fi
 
+# --- xtrace must not echo resolved values ---------------------------------
+# Under `bash -x` (or an imported SHELLOPTS=xtrace) bash echoes every
+# assignment, which would print the resolved Secret value. The script
+# disables xtrace as its first statement; the `+ set +x` line is the life
+# witness that xtrace really was on when the script started, and the
+# verdict proves the value was resolved during the run. "$BASH" is the
+# interpreter running this suite, so the case exercises bash 3.2 and
+# bash 5 alike.
+reset_fixture
+add_server xtracecase 'https://example.com/mcp' 'proxy_set_header X-Key "${API_KEY}";' \
+  "$(secret_ref API_KEY)"
+secret_bytes 'TESTKEY-XTRACE-77'
+"$BASH" -x "$SCRIPT" >"$TEST_DIR/output" 2>&1
+xtrace_rc=$?
+cat "$TEST_DIR/output" >>"$all_output"
+if [ "$xtrace_rc" -eq 0 ] &&
+  grep -Fq 'server=fixture-namespace/xtracecase verdict=OK' "$TEST_DIR/output"; then
+  pass xtrace-verdict
+else
+  fail "xtrace-verdict (exit=$xtrace_rc)"
+fi
+expect_output xtrace-was-on '+ set +x'
+expect_absent xtrace-no-value 'TESTKEY-XTRACE-77'
+env SHELLOPTS=xtrace "$BASH" "$SCRIPT" >"$TEST_DIR/output" 2>&1
+xtrace_rc=$?
+cat "$TEST_DIR/output" >>"$all_output"
+if [ "$xtrace_rc" -eq 0 ] &&
+  grep -Fq 'server=fixture-namespace/xtracecase verdict=OK' "$TEST_DIR/output"; then
+  pass xtrace-shellopts-verdict
+else
+  fail "xtrace-shellopts-verdict (exit=$xtrace_rc)"
+fi
+expect_output xtrace-shellopts-was-on '+ set +x'
+expect_absent xtrace-shellopts-no-value 'TESTKEY-XTRACE-77'
+
 # --- query value class (spec §3.1 row 2, §3.4) ---------------------------
 # The new query class accepts / = : @ and complete %XX; the rejection names the
 # query context.
