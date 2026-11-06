@@ -392,9 +392,28 @@ inside the parentheses, after the source. Entries are sorted by context, placeho
 the context. It never includes value bytes, the value's length, or the
 offending character. When `spec.envSecret` is set and the Secret exists with
 its keys, `SecretResolved` stays `True` with reason `SecretFound`: the Secret
-is present, and the refusal is the value class, not a missing Secret. The
-condition is removed when `spec.remote` is removed or the server is disabled.
-A non-remote server and a `managed: false` server never have it.
+is present, and the refusal is the value class, not a missing Secret. A
+non-remote server and a `managed: false` server never have it.
+
+If rendering the template or running the preflight fails before a verdict
+exists for the current spec (for example an undeclared query placeholder),
+HCC writes `Ready=False` with reason `ResourceSyncFailed` and the fixed
+message `Resource sync failed`, and removes `EgressProxyValuesValid`. The
+underlying error is never copied into the condition; read the
+host-context-controller log for the `Resource sync failed` entry and its
+`errorCode` field. If the failure happens after the preflight has passed
+(for example a transient API error while syncing the Deployment), HCC
+writes no condition at all: the existing verdict still describes the
+current values, and the next reconcile retries the sync.
+
+`EgressProxyValuesValid` is removed whenever the runtime it judged stops
+being this server's managed remote runtime: `spec.remote` is removed, the
+server is disabled, a pre-verdict `ResourceSyncFailed` lands, a fail-closed
+Secret failure withdraws the runtime, any WRC-owned (`managed: false`)
+`Ready` write lands (success or Secret failure), or the plugin image
+allowlist blocks the build (`Ready=False`, reason `ImageNotAllowed`). A
+transient Secret read failure keeps the condition, because the runtime
+keeps serving the values the verdict already judged.
 
 ## Additional Printer Columns
 
