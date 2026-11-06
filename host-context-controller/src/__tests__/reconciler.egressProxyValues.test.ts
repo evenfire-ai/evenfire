@@ -274,7 +274,7 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
     // Witness: the same CRD renders its template, so the block is about the
     // value and not about the placeholder position.
     expect((reconciler as any).buildNginxConfigMap(server).data['default.conf.template']).toContain(
-      'proxy_pass https://api.example.com/mcp?apikey=${API_KEY};'
+      'proxy_pass https://remote_upstream/mcp?apikey=${API_KEY};'
     )
     expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
     expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
@@ -310,6 +310,88 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
     expect(valid.status).toBe('False')
     expect(valid.message).toContain('env var ${scheme} collides with an NGINX variable')
     expect(valid.message).toContain('collides')
+  })
+
+  it('PF-5b: a query placeholder rendered twice (proxy_pass and proxy_redirect) still reconciles', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'abc/def%2Bgh==' })
+    )
+    forceCreates(appsApi, coreApi)
+
+    await reconciler.reconcile(API_KEY_SERVER)
+
+    // Life witness: the rendered template really carries the placeholder
+    // twice, so a positional count is required; subtracting one query
+    // occurrence would report a false fixed reference.
+    const template = (reconciler as any).buildNginxConfigMap(API_KEY_SERVER).data[
+      'default.conf.template'
+    ] as string
+    expect(template.split('${API_KEY}').length - 1).toBe(2)
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledOnce()
+    expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledOnce()
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(allPatchedConditions(customApi)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'EgressProxyValuesValid',
+          status: 'True',
+          reason: 'ValuesWithinClass',
+        }),
+      ])
+    )
+  })
+
+  it('PF-5c: a fixed NGINX variable used as a query placeholder still collides', async () => {
+    const server = cloneServer(API_KEY_SERVER, {
+      remote: { baseUrl: 'https://api.example.com/mcp?proto=' + '$' + '{scheme}' },
+      envSecret: undefined,
+      env: [{ name: 'scheme', value: 'https' }],
+    })
+
+    await reconciler.reconcile(server)
+
+    // Life witness: the render carries the placeholder in query position
+    // twice and the bare fixed variable once; only the fixed one collides.
+    const template = (reconciler as any).buildNginxConfigMap(server).data[
+      'default.conf.template'
+    ] as string
+    expect(template.split('${scheme}').length - 1).toBe(2)
+    expect(template).toContain('proxy_set_header X-Forwarded-Proto $scheme;')
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    const valid = allPatchedConditions(customApi).find(
+      condition => condition.type === 'EgressProxyValuesValid'
+    )
+    expect(valid.status).toBe('False')
+    expect(valid.message).toContain('env var ${scheme} collides with an NGINX variable')
+  })
+
+  it('PF-5d: the same name in query and authHeader positions does not collide', async () => {
+    const server = cloneServer(API_KEY_SERVER, {
+      remote: {
+        baseUrl: 'https://api.example.com/mcp?apikey=' + '$' + '{API_KEY}',
+        authHeaders: [{ header: 'X-Api-Key', valueTemplate: 'Bearer ' + '$' + '{API_KEY}' }],
+      },
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'abc/def%2Bgh==' })
+    )
+    forceCreates(appsApi, coreApi)
+
+    await reconciler.reconcile(server)
+
+    // Life witness: the Secret was read and both positions rendered.
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledOnce()
+    const template = (reconciler as any).buildNginxConfigMap(server).data[
+      'default.conf.template'
+    ] as string
+    expect(template).toContain('proxy_set_header X-Api-Key "Bearer ${API_KEY}";')
+    expect(template.split('${API_KEY}').length - 1).toBe(3)
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledOnce()
+    const valid = allPatchedConditions(customApi).find(
+      condition => condition.type === 'EgressProxyValuesValid'
+    )
+    expect(valid.status).toBe('True')
+    expect(valid.message).not.toContain('collides')
   })
 
   it('PF-6: two violations are both listed and sorted by context and placeholder', async () => {

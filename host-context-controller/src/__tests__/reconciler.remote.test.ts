@@ -3286,7 +3286,7 @@ describe('reserved egress-proxy env (RS for #1240)', () => {
       })
 
       expect(remoteConfig(reconciler, withoutPlaceholder)).toContain(
-        'proxy_pass https://mcp.sentry.io/sse;'
+        'proxy_pass https://remote_upstream/sse;'
       )
       expect(() => remoteConfig(reconciler, server)).toThrow('reserved egress-proxy env var')
     }

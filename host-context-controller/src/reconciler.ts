@@ -447,6 +447,55 @@ interface ReadinessPollState {
   retirementEpoch: number
 }
 
+/**
+ * Count env references that sit in the fixed template text, positionally.
+ *
+ * A reference is fixed when its offset in the rendered template falls
+ * outside every dynamic span: every verbatim occurrence of the parsed
+ * query (`parsedSearch`, rendered once in `proxy_pass` and once in
+ * `proxy_redirect`) and the quoted value of every rendered
+ * `proxy_set_header` line of a kept authHeader (located in order with a
+ * cursor, so identical lines each claim their own span). Subtracting
+ * per-name totals cannot express this once a placeholder renders twice.
+ * Exported so the template golden test classifies references with the
+ * same spans instead of a second copy of the rule.
+ */
+export function countFixedTemplateReferences(
+  template: string,
+  parsedSearch: string,
+  authHeaders: ReadonlyArray<{ header: string; valueTemplate: string }>
+): Map<string, number> {
+  const spans: Array<readonly [number, number]> = []
+  if (parsedSearch.length > 0) {
+    let from = 0
+    for (;;) {
+      const start = template.indexOf(parsedSearch, from)
+      if (start === -1) break
+      spans.push([start, start + parsedSearch.length])
+      from = start + parsedSearch.length
+    }
+  }
+  let cursor = 0
+  for (const authHeader of authHeaders) {
+    const line = `        proxy_set_header ${authHeader.header} ` + `"${authHeader.valueTemplate}";`
+    const start = template.indexOf(line, cursor)
+    if (start === -1) continue
+    const valueStart = start + line.indexOf('"') + 1
+    spans.push([valueStart, valueStart + authHeader.valueTemplate.length])
+    cursor = start + line.length
+  }
+  const counts = new Map<string, number>()
+  const pattern = new RegExp(AUTH_HEADER_ENV_REF_RE.source, 'g')
+  for (const match of template.matchAll(pattern)) {
+    const name = match[1] ?? match[2] ?? ''
+    if (name === '') continue
+    const index = match.index ?? 0
+    if (spans.some(([start, end]) => index >= start && index < end)) continue
+    counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  return counts
+}
+
 export class McpServerReconciler {
   private readonly appsApi: k8s.AppsV1Api
   private readonly coreApi: k8s.CoreV1Api
@@ -1518,9 +1567,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * The positions come from the same render that goes to the ConfigMap: a
    * `${NAME}` in `parsed.search` is query position, a `$NAME`/`${NAME}` in an
    * authHeader that sanitizeAuthHeader kept is quoted position, and a reference
-   * that appears more often in the template than in those two positions also
-   * sits in the fixed template text (an argument start, where the image refuses
-   * any value). Values are bytes: a Secret key is base64 in the snapshot and a
+   * whose offset falls outside both dynamic spans sits in the fixed template
+   * text (an argument start, where the image refuses any value); see
+   * countFixedTemplateReferences. Values are bytes: a Secret key is base64 in the snapshot and a
    * CRD literal is UTF-8, the bytes the kubelet puts in the container env.
    *
    * Never logs or returns a value byte.
@@ -1550,10 +1599,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     const queryOccurrences = countOccurrences(rendered.parsedSearch, QUERY_PLACEHOLDER_RE)
-    const templateOccurrences = countOccurrences(template, AUTH_HEADER_ENV_REF_RE)
-    const headerOccurrences = countOccurrences(
-      rendered.authHeaders.map(header => header.valueTemplate).join('\n'),
-      AUTH_HEADER_ENV_REF_RE
+    const fixedReferenceCounts = countFixedTemplateReferences(
+      template,
+      rendered.parsedSearch,
+      rendered.authHeaders
     )
 
     // Every (header, name) pair the kept headers reference, so a rejection
@@ -1571,20 +1620,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       }
     }
 
-    // Invariant the fixed-occurrence subtraction below depends on: each query
-    // placeholder and each kept authHeader reference appears exactly once in
-    // the rendered template today (the query rides the single proxy_pass line
-    // and each header its single proxy_set_header line). Only then does
-    // template - query - header count exactly the references that sit in the
-    // fixed template text. Rendering a placeholder twice would break the
-    // subtraction and this counting would have to become positional.
     const violations: EgressProxyValueViolation[] = []
     for (const [name, entry] of effective) {
       const source = this.describeEnvSource(entry)
-      const fixedOccurrences =
-        (templateOccurrences.get(name) ?? 0) -
-        (queryOccurrences.get(name) ?? 0) -
-        (headerOccurrences.get(name) ?? 0)
+      const fixedOccurrences = fixedReferenceCounts.get(name) ?? 0
       if (fixedOccurrences > 0) {
         violations.push({ context: 'collision', kind: 'class', placeholder: name, source })
         continue

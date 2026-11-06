@@ -13,17 +13,18 @@ import {
   createMockCoreApi,
   createMockCustomApi,
 } from '../../test/__fixtures__/testMocks'
-import { McpServerReconciler } from '../reconciler'
+import { McpServerReconciler, countFixedTemplateReferences } from '../reconciler'
 import { McpServerCRD } from '../types'
 
 /**
  * Golden tests for the rendered egress-proxy NGINX template.
  *
  * Three deterministic remote shapes (plain, query-header, oauth) pin the
- * exact bytes the renderer emits, the fixed env references that remain
- * after the query and authHeader references are subtracted, and the env
- * of the single egress-proxy container. A new fixed reference therefore
- * fails here instead of reaching a rendered template unnoticed.
+ * exact bytes the renderer emits, the fixed env references (classified
+ * positionally by countFixedTemplateReferences, the same spans the
+ * preflight uses), and the env of the single egress-proxy container. A
+ * new fixed reference therefore fails here instead of reaching a rendered
+ * template unnoticed.
  *
  * Regenerate the golden files after an intentional template change with,
  * from host-context-controller/:
@@ -57,10 +58,10 @@ vi.mock('../config', () => ({
   },
 }))
 
-// Copied from production (reconciler.ts) so the subtraction below counts
-// references exactly as checkEgressProxyValues does.
+// Copied from production (reconciler.ts) for the total-reference life
+// witness; the fixed classification itself comes from production's
+// countFixedTemplateReferences.
 const AUTH_HEADER_ENV_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
-const QUERY_PLACEHOLDER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
 
 const GOLDEN_DIR = join(__dirname, 'fixtures', 'egress-proxy-template')
 
@@ -113,8 +114,13 @@ const SHAPES: GoldenShape[] = [
     label: 'plain',
     file: 'plain.default.conf.template',
     server: goldenServer({ baseUrl: 'https://upstream.example/mcp' }),
-    expectedFixedRefs: { proxy_add_x_forwarded_for: 1, remote_addr: 1, scheme: 1 },
-    contextWitnesses: ['proxy_pass https://upstream.example/mcp;'],
+    expectedFixedRefs: {
+      NGINX_LOCAL_RESOLVERS: 1,
+      proxy_add_x_forwarded_for: 1,
+      remote_addr: 1,
+      scheme: 1,
+    },
+    contextWitnesses: ['proxy_pass https://remote_upstream/mcp;'],
   },
   {
     label: 'query-header',
@@ -123,7 +129,12 @@ const SHAPES: GoldenShape[] = [
       baseUrl: 'https://upstream.example/mcp?apikey=${API_KEY}',
       authHeaders: [{ header: 'Authorization', valueTemplate: 'Bearer ${UPSTREAM_TOKEN}' }],
     }),
-    expectedFixedRefs: { proxy_add_x_forwarded_for: 1, remote_addr: 1, scheme: 1 },
+    expectedFixedRefs: {
+      NGINX_LOCAL_RESOLVERS: 1,
+      proxy_add_x_forwarded_for: 1,
+      remote_addr: 1,
+      scheme: 1,
+    },
     contextWitnesses: ['?apikey=${API_KEY};', '"Bearer ${UPSTREAM_TOKEN}"'],
   },
   {
@@ -137,6 +148,7 @@ const SHAPES: GoldenShape[] = [
       { type: 'oauth' }
     ),
     expectedFixedRefs: {
+      NGINX_LOCAL_RESOLVERS: 1,
       http_authorization: 1,
       proxy_add_x_forwarded_for: 1,
       remote_addr: 1,
@@ -198,7 +210,7 @@ describe('egress-proxy template golden', () => {
         const golden = readFileSync(goldenPath, 'utf8')
         // Life witness: the golden is a real render, not an empty fixture.
         expect(golden.length).toBeGreaterThan(0)
-        expect(golden).toContain('proxy_pass https://upstream.example')
+        expect(golden).toContain('proxy_pass https://remote_upstream')
         if (template !== golden) {
           throw new Error(
             `rendered template differs from golden ${shape.file} at line ${firstDifferingLine(template, golden)}`
@@ -211,7 +223,7 @@ describe('egress-proxy template golden', () => {
         const template: string = rendered.configMap.data['default.conf.template']
 
         // Life and context witnesses: the render ran and each dynamic
-        // reference sits in the position the subtraction assumes.
+        // reference sits in the position the positional spans assume.
         const templateOccurrences = countOccurrences(template, AUTH_HEADER_ENV_REF_RE)
         let templateTotal = 0
         for (const count of templateOccurrences.values()) templateTotal += count
@@ -220,22 +232,12 @@ describe('egress-proxy template golden', () => {
           expect(template).toContain(witness)
         }
 
-        const queryOccurrences = countOccurrences(rendered.parsedSearch, QUERY_PLACEHOLDER_RE)
-        const headerOccurrences = countOccurrences(
-          rendered.authHeaders.map((header: any) => header.valueTemplate).join('\n'),
-          AUTH_HEADER_ENV_REF_RE
-        )
-        const names = new Set<string>([
-          ...templateOccurrences.keys(),
-          ...queryOccurrences.keys(),
-          ...headerOccurrences.keys(),
-        ])
         const fixedRefs: Record<string, number> = {}
-        for (const name of names) {
-          const fixed =
-            (templateOccurrences.get(name) ?? 0) -
-            (queryOccurrences.get(name) ?? 0) -
-            (headerOccurrences.get(name) ?? 0)
+        for (const [name, fixed] of countFixedTemplateReferences(
+          template,
+          rendered.parsedSearch,
+          rendered.authHeaders
+        )) {
           if (fixed !== 0) fixedRefs[name] = fixed
         }
         expect(fixedRefs).toEqual(shape.expectedFixedRefs)
@@ -251,6 +253,7 @@ describe('egress-proxy template golden', () => {
         expect((containers[0].env ?? []).map((entry: any) => entry.name)).toEqual([
           'API_KEY',
           'UPSTREAM_TOKEN',
+          'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
           'NGINX_ENVSUBST_FILTER',
         ])
         expect(containers[0].envFrom).toBeUndefined()
