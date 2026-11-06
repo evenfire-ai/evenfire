@@ -17596,6 +17596,79 @@ pre {
   width: 14px;
 }
 
+/* Structural hooks for the Ant Design workspace tab bar. AntD Buttons own
+   the visible control treatment; these rules only establish native scrolling
+   and the keyed tab layout required by useWorkspaceTabOverflow. */
+.ant-tabs .chat-view-tabs {
+  padding: 0;
+  z-index: auto;
+}
+
+.ant-tabs .chat-view-tabs__scroller {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.ant-tabs .chat-view-tabs__list {
+  display: flex;
+  gap: var(--space-1);
+  min-width: 100%;
+  position: relative;
+  width: max-content;
+}
+
+.ant-tabs .chat-view-tab {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  display: flex;
+  flex: 0 0 auto;
+  max-width: none;
+  min-width: 0;
+  position: static;
+  transition: none;
+}
+
+.ant-tabs .chat-view-tab:not(.is-active) {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.ant-tabs .chat-view-tab.is-active,
+.ant-tabs .chat-view-tab.is-active:hover {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  flex-shrink: 0;
+}
+
+.ant-tabs .chat-view-tab:has([data-workspace-dragging='true']) {
+  opacity: 0.55;
+}
+
+.ant-tabs .chat-view-tab:has([data-workspace-drop-side='before']) {
+  box-shadow: inset 2px 0 0 rgba(var(--accent-rgb), 0.72);
+}
+
+.ant-tabs .chat-view-tab:has([data-workspace-drop-side='after']) {
+  box-shadow: inset -2px 0 0 rgba(var(--accent-rgb), 0.72);
+}
+
+.ant-tabs .chat-view-tab__select {
+  flex: 0 1 auto;
+  max-width: var(--chat-tab-max);
+  min-width: var(--chat-tab-min);
+}
+
+.ant-tabs .chat-view-tab__label {
+  max-width: var(--chat-tab-max);
+}
+
 .chat-view-tabs__list {
   display: flex;
   gap: var(--space-1);

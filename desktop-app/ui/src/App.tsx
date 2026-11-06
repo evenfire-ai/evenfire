@@ -1755,9 +1755,7 @@ export function App() {
       setChatDrawerContentTop(null)
       return
     }
-    const strip = contentPanelRef.current?.querySelector(
-      '[role="toolbar"][aria-label="Workspace tabs"] .ant-tabs'
-    )
+    const strip = contentPanelRef.current?.querySelector('.chat-view-tabs')
     if (!strip) {
       setChatDrawerContentTop(null)
       return

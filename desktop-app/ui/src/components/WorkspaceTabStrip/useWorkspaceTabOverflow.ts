@@ -189,11 +189,26 @@ export function useWorkspaceTabOverflow({
     if (scrollTabIntoView(activeTab)) activeTabToRevealRef.current = null
   }, [getTabNodes, scrollTabIntoView, stripRef])
 
+  const requestFocusReveal = useCallback(
+    (tabId: string) => {
+      activeTabToRevealRef.current = tabId
+      revealPendingTab()
+    },
+    [revealPendingTab]
+  )
+
   useLayoutEffect(() => {
     if (previousActiveTabIdRef.current === activeTabId) return
     previousActiveTabIdRef.current = activeTabId
     activeTabToRevealRef.current = activeTabId
   }, [activeTabId])
+
+  useLayoutEffect(() => {
+    const targetId = activeTabToRevealRef.current
+    if (targetId && !tabs.some(tab => tab.id === targetId)) {
+      activeTabToRevealRef.current = null
+    }
+  }, [tabs])
 
   useLayoutEffect(() => {
     const scroller = scrollerRef.current
@@ -239,7 +254,10 @@ export function useWorkspaceTabOverflow({
     const activeTab = strip?.querySelector<HTMLElement>(
       '.chat-view-tab.is-active .chat-view-tab__select'
     )
-    ;(activeTab ?? strip)?.focus({ preventScroll: true })
+    const rovingTab = strip?.querySelector<HTMLElement>(
+      '.chat-view-tabs__list [role="tab"][tabindex="0"]'
+    )
+    ;(activeTab ?? rovingTab ?? strip)?.focus({ preventScroll: true })
   }, [scrollState.hasOverflow, stripRef])
 
   const focusProps = {
@@ -260,6 +278,7 @@ export function useWorkspaceTabOverflow({
   return {
     scrollerRef,
     hasOverflow: scrollState.hasOverflow,
+    requestFocusReveal,
     leftButtonProps: {
       ...focusProps,
       ref: leftButtonRef,
