@@ -540,14 +540,13 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
   })
 
   it('does not forward an unpinned mount to the native visibility driver', async () => {
-    const { service } = await setupWithLiveFirstApp()
+    const { service, runtime } = await setupWithLiveFirstApp()
     const mount = initialMount()
-    const setVisibleForMount = vi.spyOn(
-      await import('../sandboxUiDriver.js'),
-      'setSandboxUiVisibleForWebContents'
-    )
+    const setVisibleForMount = vi
+      .spyOn(await import('../sandboxUiDriver.js'), 'setSandboxUiVisibleForWebContents')
+      .mockResolvedValue(true)
     const hiding = service.hideSandboxUiForPluginMount(mount)
-    unpinPluginSurface(mount.webContentsId)
+    runtime.unpinSandboxUiSurface(mount.webContentsId)
 
     await expect(hiding).resolves.toBe(false)
     expect(setVisibleForMount).not.toHaveBeenCalled()
