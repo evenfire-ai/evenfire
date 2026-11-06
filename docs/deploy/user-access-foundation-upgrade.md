@@ -194,8 +194,11 @@ would keep running for writers that no longer take the matching locks, so the
 migration Job stops before `0131` when it finds any of them. Its error names
 the versions, functions and tables it found.
 
-The shared clusters (`clerum-dev` and production) never ran an earlier head.
-Branch profiles and local databases may have.
+The shared clusters (`clerum-dev` and production) never ran an earlier head:
+the check query below returned no rows on both on 2026-11-06, with
+`schema_migrations` at `0130_password_login_success_admission` and
+`0129_workflow_schedules_concurrency_policy`. Branch profiles and local
+databases may have.
 
 Check query (read-only; run it as the control-api schema owner, with that
 schema first in `search_path`):
