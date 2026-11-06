@@ -224,15 +224,3 @@ describe('clerumErrorHandler — K8s status forwarding (UT-2a)', () => {
     expect(logged).not.toContain(err.message)
   })
 })
-
-describe('clerumErrorHandler — a committed catalog sync whose publish failed', () => {
-  it('never puts the publish error text in the 500 body', async () => {
-    const { CatalogPublishAfterCommitError } = await import('../src/services/llmCatalogSync.js')
-    const cause = new Error('HTTP-Code: 500\nHeaders: {"audit-id":"secret-audit-id"}')
-    const res = await request(appThrowing(new CatalogPublishAfterCommitError(cause, true))).get(
-      '/boom'
-    )
-    expect(res.status).toBe(500)
-    expect(JSON.stringify(res.body)).not.toContain('secret-audit-id')
-  })
-})

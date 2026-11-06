@@ -216,15 +216,18 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   // `llm_allowed_models` as `source='discovery'` rows for operator curation,
   // disabled unless auto-enable allows them on insert (llmCatalogSync.ts header). The fixed two-segment `discovery/*` paths cannot be captured by
   // the single-segment `/:id` param route regardless of order, but they are
-  // registered before it anyway for clarity. No scheduler yet (F2 is on-demand
-  // only; a scheduled trigger is a follow-up). These routes inherit the same
+  // registered before it anyway for clarity. The cron and the boot sync run the
+  // same service (llmCatalogSyncCron.ts). These routes inherit the same
   // control-ui admin auth gate as the rest of `/admin/*` (app.ts).
   //
   // The sync owns the publication decision: after its commit it compares the
   // ConfigMap with what Postgres projects and writes only on a difference. The
-  // route hands it the same gateway writer every mutation route uses; a failed
-  // write is reported by the service and surfaces here as a 500 (the DB commit
-  // is already durable, and the sync's publish retry converges).
+  // route hands it the same gateway writer every mutation route uses. A failed
+  // write comes back wrapped in CatalogPublishAfterCommitError; the route throws
+  // the K8s error itself, so the error handler answers as for any K8s write: a
+  // 4xx is forwarded with the apiserver's status message, anything else is a
+  // 500. The DB commit is already durable either way, and the sync's publish
+  // retry converges.
   router.post(
     '/admin/llm-models/discovery/sync',
     asyncHandler(async (_req: Request, res: Response) => {

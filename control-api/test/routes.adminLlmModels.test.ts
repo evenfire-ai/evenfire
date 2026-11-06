@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
+import { AllowlistPublishRetry } from '../src/services/llmAllowlistPublishRetry.js'
+import { makeFakeDb } from './helpers/llmCatalogSyncFakeDb.js'
+import { loadStub, trimSnapshot } from './helpers/modelsDevFixtures.js'
 import { MockGateway } from './mockGateway.js'
 
 const mockPoolQuery = vi.fn()
@@ -162,6 +166,50 @@ describe('admin llm-models routes', () => {
       expect(res.status).toBe(expected)
     }
   )
+
+  it('POST /admin/llm-models/discovery/sync forwards a K8s 4xx from the post-commit publish as the apiserver status', async () => {
+    // What the real sync throws when the real writer's replace is refused by
+    // the apiserver: the error the route receives, not a hand-built one.
+    const statusMessage = 'configmaps "clerum-llm-allowed-models" is forbidden'
+    const headerSecret = 'audit-id-5e1f-secret'
+    const actual = await vi.importActual<typeof import('../src/services/llmCatalogSync.js')>(
+      '../src/services/llmCatalogSync.js'
+    )
+    const db = makeFakeDb()
+    db.cluster.failNextWrites(
+      3,
+      new ApiException(
+        403,
+        'Forbidden',
+        JSON.stringify({ kind: 'Status', status: 'Failure', message: statusMessage, code: 403 }),
+        { 'audit-id': headerSecret }
+      )
+    )
+    const retry = new AllowlistPublishRetry()
+    const thrown = await actual
+      .syncDiscoveredModels(
+        {
+          materializer: db.materializer,
+          publishRetry: retry,
+          loadCatalog: loadStub(trimSnapshot({ anthropic: 1 }), 'live'),
+          minPlausibleLiveTotal: 1,
+        },
+        db.connector
+      )
+      .catch(err => err)
+    retry.stop()
+    expect(thrown).toBeInstanceOf(actual.CatalogPublishAfterCommitError)
+    mockSyncDiscoveredModels.mockRejectedValueOnce(thrown)
+
+    const res = await authed(
+      'post',
+      '/api/v1/admin/llm-models/discovery/sync',
+      new MockGateway('mcp-server')
+    )
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe(statusMessage)
+    expect(JSON.stringify(res.body)).not.toContain(headerSecret)
+  })
 
   it('POST /admin/llm-models/discovery/sync requires admin auth (401 unauthenticated)', async () => {
     await request(app()).post('/api/v1/admin/llm-models/discovery/sync').expect(401)
