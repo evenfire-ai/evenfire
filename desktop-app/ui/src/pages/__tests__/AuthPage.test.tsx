@@ -520,7 +520,7 @@ describe('AuthPage', () => {
     renderAuthPage({ email: ' Person@Example.COM ', setStatus })
 
     const forgotPasswordButton = screen.getByRole('button', { name: 'Forgot password' })
-    expect(forgotPasswordButton.classList.contains('ant-btn-variant-text')).toBe(true)
+    expect(forgotPasswordButton.classList.contains('ant-btn-variant-link')).toBe(true)
     expect(forgotPasswordButton.querySelector('.ant-typography-secondary')).not.toBeNull()
 
     await user.click(forgotPasswordButton)

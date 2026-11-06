@@ -23,7 +23,10 @@ function renderDropdown(onChange = vi.fn()) {
 }
 
 describe('DropdownSelect', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    document.getElementById('dropdown-select-overflow-fixture-styles')?.remove()
+  })
 
   it('supports open, roving keyboard focus, Escape, Home, and End', async () => {
     renderDropdown()
@@ -61,8 +64,13 @@ describe('DropdownSelect', () => {
 
   it('can portal its menu outside an overflow ancestor', async () => {
     const onChange = vi.fn()
+    const fixtureStyles = document.createElement('style')
+    fixtureStyles.id = 'dropdown-select-overflow-fixture-styles'
+    fixtureStyles.textContent = '.dropdown-select-overflow-fixture { overflow: auto; }'
+    document.head.append(fixtureStyles)
+
     render(
-      <div style={{ overflow: 'auto' }}>
+      <div className="dropdown-select-overflow-fixture">
         <DropdownSelect
           ariaLabel="Access role"
           className="access-role"
@@ -75,6 +83,9 @@ describe('DropdownSelect', () => {
       </div>
     )
     const trigger = screen.getByRole('button', { name: 'Access role' })
+    expect(getComputedStyle(trigger.closest('.dropdown-select-overflow-fixture')!).overflow).toBe(
+      'auto'
+    )
     vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
       bottom: 140,
       height: 32,

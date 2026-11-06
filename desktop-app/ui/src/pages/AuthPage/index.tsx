@@ -226,8 +226,7 @@ export function AuthPage() {
                         htmlType="button"
                         onClick={() => void handleForgotPasswordClick()}
                         size="middle"
-                        style={{ paddingInline: 0 }}
-                        type="text"
+                        type="link"
                       >
                         <Typography.Text type="secondary">Forgot password</Typography.Text>
                       </Button>
