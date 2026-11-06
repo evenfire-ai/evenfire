@@ -541,6 +541,24 @@ describe('read-after-write', () => {
     assert.equal(run.exitCode, 1)
     assert.ok(run.lines.some(l => /differs from the catalog; publish a new version/.test(l)))
   })
+
+  test('an already published version with another endpoint URL fails instead of passing as skipped', async () => {
+    const item = byName('clickup-remote')
+    const older = { ...item, url: 'https://mcp-old.clickup.com/mcp' }
+    const preload = [await storedRow(buildPublishBody(older))]
+    const run = await seedAgainst({
+      items: [item],
+      discover: matching([item]),
+      registry: { preload },
+    })
+    assert.equal(run.exitCode, 1)
+    assert.ok(
+      run.lines.some(l =>
+        /already published, skipped, but stored remote endpoint differs from the catalog/.test(l)
+      ),
+      run.lines.join('\n')
+    )
+  })
 })
 
 describe('unparseable answers', () => {
