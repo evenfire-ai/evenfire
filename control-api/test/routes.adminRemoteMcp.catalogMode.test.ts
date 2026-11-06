@@ -19,7 +19,11 @@ import {
   type AdminRemoteMcpDeps,
   createAdminRemoteMcpRouter,
 } from '../src/routes/admin/remoteMcp.js'
-import { type RegistryEntry, getEntryVersion } from '../src/services/registryClient.js'
+import {
+  type RegistryEntry,
+  RegistryUnavailableError,
+  getEntryVersion,
+} from '../src/services/registryClient.js'
 import { exactRegistryFetch } from './fixtures/exactRegistry.js'
 import { WORKIQ_GUID_SCOPE, discoverPilot, withRfc9207 } from './fixtures/perServerInstall.js'
 import { malformedRow, registryEntryRow } from './fixtures/registryEntryRow.js'
@@ -813,6 +817,41 @@ describe('catalog mode cost: one registry read, one install report, no Context l
     } finally {
       process.off('unhandledRejection', onUnhandled)
     }
+  })
+
+  it('a failing report is logged as a warning on the request logger, and the install still answers 201', async () => {
+    serveEntry(remoteOAuthRow())
+    const failure = new RegistryUnavailableError()
+    reportInstallDouble.outcome = () => Promise.reject(failure)
+    const warn = vi.fn()
+    const noop = () => {}
+    const reqLog = { warn, info: noop, error: noop, debug: noop }
+    const app = express()
+    app.use((req, _res, next) => {
+      req.log = reqLog as unknown as NonNullable<typeof req.log>
+      next()
+    })
+    app.use(makeApp(new MockGateway(NS), cimdResult))
+
+    const res = await request(app).post(ROUTE).send(catalogBody())
+    expect(res.status).toBe(201)
+    expect(res.body.serverName).toBe(canonical('user'))
+    await new Promise(resolve => setImmediate(resolve))
+
+    const reported = warn.mock.calls.filter(
+      ([obj]) => (obj as { event?: unknown })?.event === 'registry_report_install_failed'
+    )
+    expect(reported).toHaveLength(1)
+    const [fields] = reported[0] as [Record<string, unknown>]
+    expect(fields).toEqual({
+      event: 'registry_report_install_failed',
+      entryName: ENTRY,
+      entryVersion: VERSION,
+      errName: 'RegistryUnavailableError',
+      errMessage: failure.message,
+      errStatus: 503,
+      errCode: 'registry_unavailable',
+    })
   })
 
   it('a failed install is not reported', async () => {

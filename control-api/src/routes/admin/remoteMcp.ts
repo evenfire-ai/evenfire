@@ -1904,10 +1904,25 @@ export function createAdminRemoteMcpRouter(
       }
 
       if (catalogTarget) {
-        // Best-effort install count for the registry; it never affects the install.
-        reportInstall(catalogTarget.entryName, randomUUID(), catalogTarget.entryVersion).catch(
-          () => {}
-        )
+        // Best-effort install count for the registry; it never affects the install. Only
+        // the error's identity fields are logged, never the object: its `cause` chain comes
+        // from the HTTP stack and is outside what the redact paths cover.
+        const { entryName, entryVersion } = catalogTarget
+        reportInstall(entryName, randomUUID(), entryVersion).catch((err: unknown) => {
+          const e = err as { name?: unknown; message?: unknown; status?: unknown; code?: unknown }
+          reqLog.warn(
+            {
+              event: 'registry_report_install_failed',
+              entryName,
+              entryVersion,
+              errName: e?.name,
+              errMessage: e?.message,
+              errStatus: e?.status,
+              errCode: e?.code,
+            },
+            'registry install report failed'
+          )
+        })
       }
 
       log.info(
