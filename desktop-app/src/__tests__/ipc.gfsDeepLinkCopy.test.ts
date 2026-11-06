@@ -6,7 +6,7 @@ type Handler = (event: unknown, payload: unknown) => Promise<unknown>
 
 const electron = vi.hoisted(() => ({
   handlers: new Map<string, Handler>(),
-  writeText: vi.fn(),
+  writeText: vi.fn(async () => undefined),
 }))
 
 vi.mock('electron', () => ({
@@ -55,6 +55,32 @@ describe('gfs:copyDeepLink trusted clipboard handoff', () => {
     expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
     expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
     expect(electron.writeText).toHaveBeenCalledOnce()
+    expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
+  })
+
+  it('does not report success until a pending clipboard write settles', async () => {
+    let settleWrite: (() => void) | undefined
+    electron.writeText.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          settleWrite = () => resolve()
+        })
+    )
+
+    let settled = false
+    const result = copyHandler()(trusted, { uri }).then(value => {
+      settled = true
+      return value
+    })
+
+    await vi.waitFor(() => expect(electron.writeText).toHaveBeenCalledOnce())
+    expect(settled).toBe(false)
+    if (!settleWrite) throw new Error('clipboard write did not start')
+    settleWrite()
+    await expect(result).resolves.toEqual({ url: sharedUrl })
+    expect(settled).toBe(true)
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })
 
