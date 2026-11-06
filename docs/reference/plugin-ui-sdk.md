@@ -126,7 +126,7 @@ Settings for capabilities that need consent. Your app cannot change it.
 | `gfs.read`             | `as: 'text'`: `{ gfsUri, name, bytes, as, mimeType: 'text/plain', text }`. `as: 'dataUrl'`: `{ gfsUri, name, bytes, as, mimeType, dataUrl }`.                                           | Yes     | Open shared files you have access to. _It will be able to read the contents of any file you can read._                |
 | `gfs.open`             | `{ opened: boolean }`. Opens the file in the Desktop App's own viewer, over the plugin. The plugin never sees the file.                                                                 | No      | Open a shared file in the Evenfire viewer. _Shows you a file you already have access to. The plugin does not see it._ |
 | `theme.read`           | `{ theme: 'light' \| 'dark' }`. Default `'dark'`.                                                                                                                                       | No      | See the app appearance. _Whether the desktop app is in light or dark mode._                                           |
-| `notifications.notify` | `{ delivered: boolean, reason?: 'suppressed' \| 'unsupported' }`.                                                                                                                       | Yes     | Send you notifications. _It will be able to get your attention while you work elsewhere._                             |
+| `notifications.notify` | `{ delivered: boolean, reason?: 'suppressed' \| 'unsupported' \| 'failed' }`.                                                                                                            | Yes     | Send you notifications. _It will be able to get your attention while you work elsewhere._                             |
 
 ### Parameters and limits per capability
 
@@ -150,7 +150,7 @@ Settings for capabilities that need consent. Your app cannot change it.
   spaces. The Desktop App always prefixes the title with your app's title
   (`<app title> — <title>`), so a notification cannot pose as Evenfire or as
   another plugin. It is not shown (`delivered: false, reason: 'suppressed'`)
-  when the user is already looking at your app. When the user clicks it, the
+  when the user is already looking at your app. The host waits for the operating system's first displayed or failed outcome before replying; if the OS rejects creation or display (for example, an unsigned macOS build), the result is `delivered: false, reason: 'failed'`. When the user clicks it, the
   Desktop App comes to the front and your app gets a `notification.clicked`
   event carrying your `ref`.
 
