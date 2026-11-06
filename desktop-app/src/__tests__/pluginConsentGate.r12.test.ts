@@ -1266,7 +1266,12 @@ describe('PluginConsentGate mount-bound lifecycle', () => {
       }
     )
     await vi.advanceTimersByTimeAsync(CONSENT_PROMPT_COOLDOWN_MS)
-    expect(scheduled.mock.calls.some(([, delay]) => delay === 500)).toBe(false)
+    const readinessWaitStarted = scheduled.mock.calls.some(([, delay]) => delay === 500)
+    if (readinessWaitStarted) {
+      setWindowReady(true)
+      await vi.advanceTimersByTimeAsync(500)
+    }
+    expect(readinessWaitStarted).toBe(false)
     await flushUntil(() => secondSettled)
     await Promise.all([first, second])
 
