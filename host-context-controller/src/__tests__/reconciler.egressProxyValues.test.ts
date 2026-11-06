@@ -707,12 +707,15 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
     ).toEqual([])
     // Witness: the failure still reaches the CRD as Ready=False, the write a
     // stale verdict would be retired on (PF-19 covers the retirement itself).
+    // The persisted message is the fixed literal; the raw error detail stays
+    // in memory and in the HCC log only.
     expect(allPatchedConditions(customApi)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: 'Ready',
           status: 'False',
           reason: 'ResourceSyncFailed',
+          message: 'Resource sync failed',
         }),
       ])
     )
@@ -999,6 +1002,7 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
           type: 'Ready',
           status: 'False',
           reason: 'ResourceSyncFailed',
+          message: 'Resource sync failed',
         }),
       ])
     )
@@ -1054,5 +1058,197 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
       ])
     )
     expect(persisted.map(condition => condition.type)).not.toContain('EgressProxyValuesValid')
+  })
+
+  function persistedHarness(initial: any[]): { get: () => any[] } {
+    let persisted = initial
+    customApi.getNamespacedCustomObjectStatus.mockImplementation(async () => ({
+      metadata: { resourceVersion: '21' },
+      status: { conditions: persisted },
+    }))
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }: any) => {
+      persisted = conditionsFromStatusPatch(body)
+      return {}
+    })
+    return { get: () => persisted }
+  }
+
+  const TRUE_VERDICT_CONDITIONS: any[] = [
+    {
+      type: 'Ready',
+      status: 'True',
+      reason: 'ReconcileSuccess',
+      message: 'Deployment created',
+      lastTransitionTime: '2026-01-01T00:00:00.000Z',
+    },
+    {
+      type: 'DeploymentReady',
+      status: 'True',
+      reason: 'DeploymentReady',
+      message: 'Deployment ready',
+      lastTransitionTime: '2026-01-01T00:00:00.000Z',
+    },
+    {
+      type: 'EgressProxyValuesValid',
+      status: 'True',
+      reason: 'ValuesWithinClass',
+      message: 'Every value the egress-proxy template substitutes is within its class',
+      lastTransitionTime: '2026-01-01T00:00:00.000Z',
+    },
+  ]
+
+  function error500(label: string): Error & { code: number } {
+    const err = new Error(label) as Error & { code: number }
+    err.code = 500
+    return err
+  }
+
+  it('PF-21: a post-verdict Deployment failure leaves a valid verdict untouched', async () => {
+    const persisted = persistedHarness(structuredClone(TRUE_VERDICT_CONDITIONS))
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'abc/def%2Bgh==' })
+    )
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce(error500('deployment read boom'))
+
+    await reconciler.reconcile(API_KEY_SERVER)
+
+    // Life witnesses: the reconcile passed the preflight and reached the
+    // resource sync (Secret read, Service read on the way to Deployment).
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+    expect(coreApi.createNamespacedService).toHaveBeenCalled()
+    expect(reconciler.getStatus(API_KEY_SERVER).message).toContain('Resource sync failed')
+    expect(reconciler.getStatus(API_KEY_SERVER).message).toContain('deployment read boom')
+    // The catch writes nothing: the valid verdict for this spec stands.
+    expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.length).toBe(0)
+    expect(persisted.get()).toEqual(TRUE_VERDICT_CONDITIONS)
+  })
+
+  it('PF-21b: a post-verdict Service failure leaves a valid verdict untouched', async () => {
+    const persisted = persistedHarness(structuredClone(TRUE_VERDICT_CONDITIONS))
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'abc/def%2Bgh==' })
+    )
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce(error500('service read boom'))
+
+    await reconciler.reconcile(API_KEY_SERVER)
+
+    // Life witness: ensureConfigMap ran before the failing Service sync.
+    expect(coreApi.createNamespacedConfigMap).toHaveBeenCalled()
+    expect(reconciler.getStatus(API_KEY_SERVER).message).toContain('service read boom')
+    expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.length).toBe(0)
+    expect(persisted.get()).toEqual(TRUE_VERDICT_CONDITIONS)
+  })
+
+  it('PF-21c: a local resource-sync failure writes no status condition', async () => {
+    coreApi.readNamespacedService.mockRejectedValueOnce(error500('local service boom'))
+
+    await reconciler.reconcile(LOCAL_SERVER)
+
+    // Life witness: the local sync ran and failed in memory only.
+    expect(coreApi.readNamespacedService).toHaveBeenCalled()
+    expect(reconciler.getStatus(LOCAL_SERVER).message).toContain('local service boom')
+    expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.length).toBe(0)
+  })
+
+  it('PF-11c: a tick in flight cannot publish Ready=True after a pre-verdict sync failure', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'abc/def%2Bgh==' })
+    )
+    forceCreates(appsApi, coreApi)
+    await reconciler.reconcile(API_KEY_SERVER)
+    appsApi.readNamespacedDeployment.mockResolvedValue(convergedDeployment(API_KEY_SERVER.name))
+
+    let releaseHeld: () => void = () => {}
+    const heldWrite = new Promise<void>(resolve => {
+      releaseHeld = resolve
+    })
+    let heldReached = false
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }: any) => {
+      const conditions = conditionsFromStatusPatch(body)
+      const isTickWrite = conditions.some(
+        condition => condition.type === 'DeploymentReady' && condition.status === 'True'
+      )
+      if (isTickWrite && !heldReached) {
+        heldReached = true
+        await heldWrite
+      }
+      return {}
+    })
+    vi.advanceTimersByTime(5000)
+    await flushMicrotasks()
+    expect(heldReached, 'the tick did not reach its status write').toBe(true)
+
+    // Pre-verdict trigger (never an ensure* failure): the render throws on
+    // an undeclared placeholder, same uid as PF-19.
+    const broken = cloneServer(API_KEY_SERVER, {
+      remote: { baseUrl: 'https://api.example.com/mcp?apikey=' + '$' + '{UNDECLARED_KEY}' },
+    })
+    await reconciler.reconcile(broken)
+    const patchesAtFailure = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
+    // Witness: the pre-verdict failure persisted its fixed-message Ready.
+    expect(allPatchedConditions(customApi)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'Ready',
+          status: 'False',
+          reason: 'ResourceSyncFailed',
+          message: 'Resource sync failed',
+        }),
+      ])
+    )
+
+    releaseHeld()
+    await flushMicrotasks()
+
+    const writesAfterFailure = customApi.patchNamespacedCustomObjectStatus.mock.calls
+      .slice(patchesAtFailure)
+      .flatMap(call => conditionsFromStatusPatch(call[0]?.body))
+    expect(
+      writesAfterFailure.filter(
+        condition => condition.type === 'Ready' && condition.status === 'True'
+      )
+    ).toEqual([])
+    expect(reconciler.getStatus(API_KEY_SERVER).ready).toBe(false)
+  })
+
+  it('PF-26: a retract that throws leaves the verdict and writes no status', async () => {
+    const persisted = persistedHarness(structuredClone(TRUE_VERDICT_CONDITIONS))
+    // The default mock Deployment carries HCC-owned labels, so the delete
+    // is attempted (a foreign Deployment would take the retiring path).
+    appsApi.deleteNamespacedDeployment.mockRejectedValue(error500('delete boom'))
+    const disabled = cloneServer(API_KEY_SERVER, { enabled: false })
+
+    await expect(reconciler.reconcile(disabled)).rejects.toBeInstanceOf(AggregateError)
+
+    // Life witness: the HCC-owned delete was attempted and failed.
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.length).toBe(0)
+    expect(persisted.get()).toEqual(TRUE_VERDICT_CONDITIONS)
+  })
+
+  it('PF-26b: a retract that throws still retires the readiness window', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      encodedSecret({ [API_KEY_SECRET_KEY]: 'abc/def%2Bgh==' })
+    )
+    forceCreates(appsApi, coreApi)
+    await reconciler.reconcile(API_KEY_SERVER)
+    // Witness: the first reconcile armed the window.
+    expect((reconciler as any).readinessPolls.size).toBe(1)
+
+    appsApi.deleteNamespacedDeployment.mockRejectedValue(error500('delete boom'))
+    const disabled = cloneServer(API_KEY_SERVER, { enabled: false })
+    await expect(reconciler.reconcile(disabled)).rejects.toBeInstanceOf(AggregateError)
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledOnce()
+
+    // The fence at the start of the retract retired the window even though
+    // the delete threw: no tick can publish after it.
+    expect((reconciler as any).readinessPolls.size).toBe(0)
+    const patchesAtThrow = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
+    await vi.advanceTimersByTimeAsync(60000)
+    await flushMicrotasks()
+    expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.length).toBe(patchesAtThrow)
   })
 })

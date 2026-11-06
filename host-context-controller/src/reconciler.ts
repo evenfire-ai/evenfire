@@ -2702,7 +2702,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * retract. Retire before the retract write so an in-flight tick cannot
    * republish True after the retract PATCH commits but before the epoch
    * bumps. A foreign (WRC-owned) Deployment retires the window without
-   * writing RuntimeNotDesired.
+   * writing RuntimeNotDesired. The window is also retired up front: if the
+   * delete itself throws, this reconcile writes no status at all, and the
+   * fence is the only thing keeping an in-flight tick from republishing
+   * Ready=True behind the failure. Retiring twice only bumps the epoch
+   * again, so the later retire on the gone/foreign paths stays harmless.
    */
   private async retractManagedRuntime(
     server: McpServerCRD,
@@ -2711,6 +2715,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   ): Promise<RetractManagedRuntimeResult> {
     const name = server.name
     const namespace = server.namespace
+    this.retireReadinessWindow(name)
     const deleteAllowed = async (): Promise<boolean> => isCurrent()
     let cleanupComplete = true
     const gatedDeleteAllowed = async (): Promise<boolean> => {
@@ -3442,7 +3447,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       return withdrawRuntime && cleanupComplete && isCurrent()
     }
 
-    // Ensure resources exist and are up to date
+    // Ensure resources exist and are up to date. The catch below serves two
+    // phases with opposite contracts for EgressProxyValuesValid, told apart
+    // by this flag: before the preflight verdict this spec has no verdict,
+    // after it the verdict already judged the current values.
+    let egressVerdictPassed = false
     try {
       // Remote egress proxy: create nginx ConfigMap before Deployment
       let nginxConfigRevision = ''
@@ -3463,6 +3472,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           const blocked = await this.blockEgressProxyValues(server, verdict, isCurrent)
           return blocked
         }
+        egressVerdictPassed = true
         nginxConfigRevision = await this.ensureConfigMap(server, isCurrent, rendered.configMap)
       } else {
         // Phase 2.3: plugin image-host allowlist. Audit mode (default) logs a
@@ -3515,26 +3525,38 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     } catch (err) {
       if (!isCurrent()) return false
       const message = `Resource sync failed: ${err instanceof Error ? err.message : String(err)}`
+      // The detail (which can carry a raw provider body) belongs in memory
+      // and in this log only, never in a persisted condition. The logger
+      // drops the provider code, so it rides its own field.
+      hccLogger.error('Resource sync failed', {
+        scope: '[Reconciler]',
+        name: server.name,
+        err,
+        errorCode: getErrorCode(err),
+      })
       this.setStatus(server.name, {
         deployed: false,
         ready: false,
         message,
       })
-      if (this.isRemote(server)) {
+      if (this.isRemote(server) && !egressVerdictPassed) {
         // This spec produced no egress-proxy verdict (its render or preflight
-        // is what failed, or the sync stopped before either could vouch for
-        // the current values), so an EgressProxyValuesValid=True persisted by
-        // an earlier spec no longer describes this server. Retire it on the
+        // is what failed), so an EgressProxyValuesValid=True persisted by an
+        // earlier spec no longer describes this server. Retire it on the
         // Ready write, the same pattern the disabled and non-remote success
         // writes use: a condition this reconcile no longer owns is removed,
-        // never parked at Unknown.
+        // never parked at Unknown. The persisted message is a fixed literal;
+        // the detail stays in the log above. A post-verdict failure takes
+        // neither branch: the verdict already judged these values, so the
+        // catch writes nothing and the next reconcile retries the sync.
+        this.retireReadinessWindow(server.name)
         await this.writeStatusCondition(
           server,
           {
             type: 'Ready',
             status: 'False',
             reason: 'ResourceSyncFailed',
-            message,
+            message: 'Resource sync failed',
           },
           isCurrent,
           undefined,
