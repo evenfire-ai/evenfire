@@ -6399,6 +6399,18 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
  *   placeholder would stay unpriced and cost budgets would count its usage as
  *   $0, opening the spend control. An approximate price keeps it counting
  *   until an admin reviews it under Cost -> LLM prices.
+ *
+ * Retiring the seeds is the one place where shipped migrations were edited
+ * (0044's price seed, the allowlist seeds of 0056, 0057, 0058 and 0100) instead
+ * of adding a fix-forward migration, which is otherwise the rule so that
+ * existing and fresh installations end up with the same data. A migration added
+ * after the seeds cannot make a fresh install empty without also deleting rows
+ * that Hosts on upgraded installs may be serving. So the two differ by design:
+ * a fresh install starts with no seeded rows and no prices, an upgraded one
+ * keeps the seeded rows (the ones models.dev lists handed to the sync, the rest
+ * left manual) and the placeholder prices. `schema_migrations` records only
+ * version names, so editing the bodies does not make an upgraded install run
+ * them again.
  */
 async function applyRetireSeededLlmCatalog(db: DbClient): Promise<void> {
   await db.query(

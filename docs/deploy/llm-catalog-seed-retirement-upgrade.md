@@ -74,6 +74,13 @@ you had renamed away and disable or delete them.
 
 A new installation starts with an empty allowlist and no prices.
 
+New and upgraded installations intentionally end up with different data. The
+release removes the seeds from the migrations that wrote them instead of
+adding a migration that deletes them, because such a migration would also
+delete rows that Hosts on upgraded installations may be serving. An upgraded
+installation therefore keeps the seeded pairs and the placeholder prices
+described above, while a new one never gets them.
+
 - The allowlist comes only from the boot catalog sync. It needs egress to
   models.dev. Without it, the sync falls back to the vendored snapshot, which
   enables nothing on policy-ON providers (they get no rows until a live run
