@@ -221,6 +221,9 @@ export function evaluateDiscover(item, response, { allowDrift = false } = {}, ru
     const error = typeof body?.error === 'string' ? `: ${body.error}` : ''
     return { ok: false, reason: `discover answered HTTP ${status}${error}${kind}` }
   }
+  if (response.unparseable) {
+    return { ok: false, reason: 'discover answered HTTP 200 with an unparseable response body' }
+  }
   const transport = body?.transport
   if (transport?.status !== 'alive') {
     const http = transport?.httpStatus ? ` HTTP ${transport.httpStatus}` : ''
@@ -285,13 +288,13 @@ async function requestJson(fetchImpl, url, init) {
     redirect: 'error',
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   })
-  let body = null
+  // A body that does not parse is flagged rather than left as a bare null, so a
+  // 2xx answer with a broken body is not reported as a missing field.
   try {
-    body = await res.json()
+    return { status: res.status, body: await res.json(), unparseable: false }
   } catch {
-    body = null
+    return { status: res.status, body: null, unparseable: true }
   }
-  return { status: res.status, body }
 }
 
 /**
@@ -424,8 +427,9 @@ export async function runSeed({
     })
     const token = res.body?.access_token
     if (res.status !== 200 || typeof token !== 'string' || token === '') {
+      const unparseable = res.unparseable ? ', unparseable response body' : ''
       throw new StopRunError(
-        `could not mint the curator token at ${new URL(registry).origin}/oauth/token (HTTP ${res.status}); nothing else can be published`
+        `could not mint the curator token at ${new URL(registry).origin}/oauth/token (HTTP ${res.status}${unparseable}); nothing else can be published`
       )
     }
     return token
@@ -515,6 +519,11 @@ export async function runSeed({
       if (reread.status !== 200) {
         throw new VerifyError(
           `${outcome}, but rereading it failed: ${registryError(reread.status, reread.body)}; the version is already published and immutable`
+        )
+      }
+      if (reread.unparseable) {
+        throw new VerifyError(
+          `${outcome}, but rereading it answered an unparseable response body; the version is already published and immutable`
         )
       }
       const stored = verifyStoredEntry(body, reread.body)

@@ -43,6 +43,7 @@ async function seedAgainst({
   discoverAnswer,
   registry: registryOpts,
   extraEnv = {},
+  fetchImpl,
 }) {
   const registry = await startFakeRegistry(registryOpts)
   const controlApi = await startFakeControlApi(
@@ -63,6 +64,7 @@ async function seedAgainst({
       },
       rules,
       log: line => lines.push(line),
+      ...(fetchImpl ? { fetchImpl } : {}),
     })
     return { exitCode, lines, registry, controlApi }
   } finally {
@@ -511,6 +513,64 @@ describe('read-after-write', () => {
     })
     assert.equal(run.exitCode, 1)
     assert.ok(run.lines.some(l => /differs from the catalog; publish a new version/.test(l)))
+  })
+})
+
+describe('unparseable answers', () => {
+  /** Real fetch, except that requests whose path ends with `suffix` get a 200 HTML page. */
+  const htmlFor = suffix => (url, init) =>
+    new URL(url).pathname.endsWith(suffix)
+      ? Promise.resolve(
+          new Response('<html>gateway</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          })
+        )
+      : fetch(url, init)
+
+  test('a 200 discover answer that does not parse is reported as such', async () => {
+    const items = [byName('clickup-remote')]
+    const run = await seedAgainst({
+      items,
+      discover: matching(items),
+      fetchImpl: htmlFor('/remote/discover'),
+    })
+    assert.equal(run.exitCode, 1)
+    assert.equal(run.registry.publishes(), 0)
+    assert.ok(
+      run.lines.some(l => /discover answered HTTP 200 with an unparseable response body/.test(l)),
+      run.lines.join('\n')
+    )
+  })
+
+  test('a reread that does not parse is reported as such and stops after a fresh publish', async () => {
+    const items = [byName('clickup-remote'), byName('vercel-remote')]
+    const run = await seedAgainst({
+      items,
+      discover: matching(items),
+      fetchImpl: htmlFor('/versions/1.0.0'),
+    })
+    assert.equal(run.exitCode, 1)
+    assert.equal(run.registry.publishes(), 1)
+    assert.ok(
+      run.lines.some(l => /published .*rereading it answered an unparseable response body/.test(l)),
+      run.lines.join('\n')
+    )
+    assert.ok(run.lines.some(l => /0 succeeded, 1 failed, 1 not attempted/.test(l)))
+  })
+
+  test('a token answer that does not parse says so', async () => {
+    const items = [byName('clickup-remote')]
+    const run = await seedAgainst({
+      items,
+      discover: matching(items),
+      fetchImpl: htmlFor('/oauth/token'),
+    })
+    assert.equal(run.exitCode, 1)
+    assert.ok(
+      run.lines.some(l => /HTTP 200, unparseable response body/.test(l)),
+      run.lines.join('\n')
+    )
   })
 })
 
