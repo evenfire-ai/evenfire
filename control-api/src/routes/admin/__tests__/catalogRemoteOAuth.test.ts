@@ -10,6 +10,7 @@
  */
 import { beforeAll, describe, expect, it } from 'vitest'
 import fc from 'fast-check'
+import { createHash } from 'node:crypto'
 import {
   type PushRemoteOAuthMeta,
   type RegistryPublisher,
@@ -655,27 +656,50 @@ describe('deriveCatalogRemoteServerName', () => {
 
   it('golden names (a change here renames every installed slot)', () => {
     expect(deriveCatalogRemoteServerName('@evenfire/notion-remote', 'user')).toBe(
-      'mcp-evenfire-notion-remote-u-51704373'
+      'mcp-evenfire-notion-remote-u-51704373b465'
     )
     expect(deriveCatalogRemoteServerName('@evenfire/notion-remote', 'context')).toBe(
-      'mcp-evenfire-notion-remote-c-65156605'
+      'mcp-evenfire-notion-remote-c-65156605398d'
     )
   })
 
   it('matches the documented formula', () => {
     expect(deriveCatalogRemoteServerName('@evenfire/notion-remote', 'user')).toMatch(
-      /^mcp-evenfire-notion-remote-u-[0-9a-f]{8}$/
+      /^mcp-evenfire-notion-remote-u-[0-9a-f]{12}$/
     )
     expect(deriveCatalogRemoteServerName('@evenfire/notion-remote', 'context')).toMatch(
-      /^mcp-evenfire-notion-remote-c-[0-9a-f]{8}$/
+      /^mcp-evenfire-notion-remote-c-[0-9a-f]{12}$/
     )
   })
 
   it('keeps the hash when the catalog id is longer than the name budget', () => {
     const id = `@evenfire/${'a'.repeat(62)}`
     const name = deriveCatalogRemoteServerName(id, 'user')
-    expect(name).toMatch(/-u-[0-9a-f]{8}$/)
+    expect(name).toMatch(/-u-[0-9a-f]{12}$/)
     expect(name.length).toBeLessThanOrEqual(63)
+  })
+
+  // The name is also the LLM tool-name prefix, so its budget is 55, not the
+  // 63-character label limit: `mcp-` + 36 slug + `-c-` + 12 hex.
+  it('caps the name at 55 with a 12-hex hash however long the catalog id is', () => {
+    const name = deriveCatalogRemoteServerName(`@evenfire/${'a'.repeat(120)}`, 'context')
+    expect(name).toBe(`mcp-${'evenfire-'.padEnd(36, 'a')}-c-${name.slice(-12)}`)
+    expect(name.length).toBe(55)
+    expect(name).toMatch(/-c-[0-9a-f]{12}$/)
+  })
+
+  // Two ids whose slugs truncate to the same prefix and whose SHA-256 agree on the
+  // first 32 bits, found by grinding ~10^5 names: an org can produce such a pair at
+  // will, so the hash must be wide enough that the slot names still differ.
+  it('separates catalog ids that collide on a 32-bit hash', () => {
+    const a = `@grind/${'a'.repeat(40)}-6b5`
+    const b = `@grind/${'a'.repeat(40)}-23ai`
+    const prefix32 = (id: string) =>
+      createHash('sha256').update(`${id}:user`).digest('hex').slice(0, 8)
+    expect(prefix32(a)).toBe(prefix32(b))
+    expect(deriveCatalogRemoteServerName(a, 'user')).not.toBe(
+      deriveCatalogRemoteServerName(b, 'user')
+    )
   })
 
   it('distinguishes names the slug collapses', () => {
@@ -684,13 +708,13 @@ describe('deriveCatalogRemoteServerName', () => {
     )
   })
 
-  it('is RFC 1123, at most 63 chars and deterministic', () => {
+  it('is RFC 1123, at most 55 chars and deterministic', () => {
     fc.assert(
       fc.property(catalogIdArb, scopeArb, (id, scope) => {
         const name = deriveCatalogRemoteServerName(id, scope)
-        expect(name.length).toBeLessThanOrEqual(63)
+        expect(name.length).toBeLessThanOrEqual(55)
         expect(name).toMatch(RFC1123)
-        expect(name).toMatch(/-[uc]-[0-9a-f]{8}$/)
+        expect(name).toMatch(/-[uc]-[0-9a-f]{12}$/)
         expect(deriveCatalogRemoteServerName(id, scope)).toBe(name)
       }),
       { numRuns: 5000 }

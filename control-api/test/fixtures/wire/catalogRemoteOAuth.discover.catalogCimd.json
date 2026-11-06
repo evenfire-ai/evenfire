@@ -12,7 +12,7 @@
       "variant": "shared",
       "redirectUriTemplate": "https://control.example.com/api/v1/oauth-callback/remote"
     },
-    "serverName": "mcp-evenfire-linear-remote-u-4ef7a4af",
+    "serverName": "mcp-evenfire-linear-remote-u-4ef7a4af403c",
     "detected": {
       "registrationMode": "cimd",
       "endpoints": {

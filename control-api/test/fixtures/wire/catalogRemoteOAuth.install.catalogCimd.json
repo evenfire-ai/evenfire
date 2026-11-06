@@ -1,7 +1,7 @@
 {
   "status": 201,
   "body": {
-    "serverName": "mcp-evenfire-linear-remote-u-4ef7a4af",
+    "serverName": "mcp-evenfire-linear-remote-u-4ef7a4af403c",
     "namespace": "mcp-server",
     "clientMode": "public",
     "registrationMode": "cimd",

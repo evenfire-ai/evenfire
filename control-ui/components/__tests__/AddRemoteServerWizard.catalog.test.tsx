@@ -347,7 +347,7 @@ describe('AddRemoteServerWizard — Marketplace catalog mode', () => {
     apiSendMock.mockRejectedValueOnce(apiErrorFrom(CATALOG_SLOT_RESIDUE_FAILURE))
     fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('mcp-acme-linear-pre-u-64164363-oauth-client')
+    expect(alert).toHaveTextContent('mcp-acme-linear-pre-u-64164363945f-oauth-client')
     expect(alert).toHaveTextContent('Freeing it is a manual repair')
   })
 

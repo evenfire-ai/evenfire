@@ -12,7 +12,7 @@
       "variant": "per-server",
       "redirectUriTemplate": "https://control.example.com/api/v1/oauth-callback/remote/{serverName}/{installId}"
     },
-    "serverName": "mcp-evenfire-vercel-remote-u-8256b649",
+    "serverName": "mcp-evenfire-vercel-remote-u-8256b649ac2d",
     "detected": {
       "registrationMode": "dcr",
       "dcr": {

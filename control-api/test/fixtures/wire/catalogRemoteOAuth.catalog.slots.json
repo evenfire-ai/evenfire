@@ -439,9 +439,9 @@
       "serverNames": [
         "hand-named-linear",
         "manual-notion",
-        "mcp-acme-linear-pre-c-610fdec3",
-        "mcp-acme-linear-pre-u-64164363",
-        "mcp-evenfire-linear-remote-u-4ef7a4af"
+        "mcp-acme-linear-pre-c-610fdec359b9",
+        "mcp-acme-linear-pre-u-64164363945f",
+        "mcp-evenfire-linear-remote-u-4ef7a4af403c"
       ],
       "recipeKeys": [],
       "hookKeys": [],
@@ -458,20 +458,20 @@
         "@acme/linear-pre": {
           "user": {
             "kind": "instance",
-            "serverName": "mcp-acme-linear-pre-u-64164363",
+            "serverName": "mcp-acme-linear-pre-u-64164363945f",
             "version": "1.0.0",
             "canonical": true,
             "terminating": true
           },
           "context": {
             "kind": "foreign",
-            "serverName": "mcp-acme-linear-pre-c-610fdec3"
+            "serverName": "mcp-acme-linear-pre-c-610fdec359b9"
           }
         },
         "@evenfire/linear-remote": {
           "user": {
             "kind": "instance",
-            "serverName": "mcp-evenfire-linear-remote-u-4ef7a4af",
+            "serverName": "mcp-evenfire-linear-remote-u-4ef7a4af403c",
             "version": "1.0.0",
             "canonical": true,
             "terminating": false
@@ -485,7 +485,7 @@
           "grantScope": "user"
         },
         {
-          "serverName": "mcp-acme-linear-pre-c-610fdec3",
+          "serverName": "mcp-acme-linear-pre-c-610fdec359b9",
           "baseUrl": "https://mcp.notion.com/mcp",
           "grantScope": "context"
         }

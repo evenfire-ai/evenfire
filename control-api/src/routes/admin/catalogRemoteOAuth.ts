@@ -449,14 +449,23 @@ export function resolveRemoteOAuthEntry<T extends CatalogEntryInput>(
 /** Alias under the name the routes describe the operation by. */
 export const stripUntrustedRemoteOAuthMetadata = resolveRemoteOAuthEntry
 
+const CATALOG_SLOT_SLUG_MAX = 36
+const CATALOG_SLOT_HASH_HEX = 12
+
 /**
  * Canonical McpServer name of a catalog install slot. It never depends on the
  * entry version, so a new version never opens a second slot, and two installs of
  * the same slot race for one name that the K8s create arbitrates. The hash is
  * required because distinct names collapse under the slug (`@acme/x` and
- * `acme-x` both slug to `acme-x`). The slug is capped at
- * 40 characters, which keeps the name at 55 at most, so the 63-character trim can
- * never cut into the hash.
+ * `acme-x` both slug to `acme-x`).
+ *
+ * The hash is 48 bits because any org can publish entries under names it picks:
+ * with 32 bits, grinding a name whose hash matches another org's slot is cheap,
+ * and the colliding install would leave that slot occupied by a foreign
+ * server. The name is also the prefix of every LLM tool name the server
+ * exposes (`<server>__<tool>`), so it cannot grow freely; the slug is capped at
+ * 36 characters to pay for the wider hash, which keeps the name at 55 at most,
+ * so the 63-character trim can never cut into the hash.
  */
 export function deriveCatalogRemoteServerName(
   catalogId: string,
@@ -465,9 +474,12 @@ export function deriveCatalogRemoteServerName(
   if (grantScope !== 'user' && grantScope !== 'context') {
     throw new Error(`invalid grant scope: ${String(grantScope)}`)
   }
-  const slug = registryNameSlug(catalogId)
+  const slug = registryNameSlug(catalogId).slice(0, CATALOG_SLOT_SLUG_MAX)
   const scopeTag = grantScope === 'user' ? 'u' : 'c'
-  const hash = createHash('sha256').update(`${catalogId}:${grantScope}`).digest('hex').slice(0, 8)
+  const hash = createHash('sha256')
+    .update(`${catalogId}:${grantScope}`)
+    .digest('hex')
+    .slice(0, CATALOG_SLOT_HASH_HEX)
   return `mcp-${slug}-${scopeTag}-${hash}`.slice(0, 63).replace(/-$/, '')
 }
 

@@ -67,7 +67,7 @@ describe('Marketplace entry detail of a remote-OAuth entry', () => {
 
     const slots = await screen.findByRole('list', { name: 'Install slots' })
     expect(
-      within(slots).getByText('Installed · v1.0.0 · mcp-evenfire-linear-remote-u-4ef7a4af')
+      within(slots).getByText('Installed · v1.0.0 · mcp-evenfire-linear-remote-u-4ef7a4af403c')
     ).toBeInTheDocument()
     expect(within(slots).getByText('Not installed')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Installed' })).toBeNull()
@@ -82,7 +82,9 @@ describe('Marketplace entry detail of a remote-OAuth entry', () => {
       })
     )
     expect(
-      within(slots).getByRole('button', { name: 'Uninstall mcp-evenfire-linear-remote-u-4ef7a4af' })
+      within(slots).getByRole('button', {
+        name: 'Uninstall mcp-evenfire-linear-remote-u-4ef7a4af403c',
+      })
     ).toBeInTheDocument()
   })
 
@@ -92,8 +94,10 @@ describe('Marketplace entry detail of a remote-OAuth entry', () => {
     render(<RegistryEntryDetailPage />)
 
     const slots = await screen.findByRole('list', { name: 'Install slots' })
-    expect(within(slots).getByText('Uninstalling mcp-acme-linear-pre-u-64164363…')).toBeVisible()
-    expect(within(slots).getByText('Occupied by mcp-acme-linear-pre-c-610fdec3')).toBeVisible()
+    expect(
+      within(slots).getByText('Uninstalling mcp-acme-linear-pre-u-64164363945f…')
+    ).toBeVisible()
+    expect(within(slots).getByText('Occupied by mcp-acme-linear-pre-c-610fdec359b9')).toBeVisible()
     expect(within(slots).queryAllByRole('button')).toEqual([])
     expect(screen.getByText('Unverified · published by @acme')).toBeInTheDocument()
   })
@@ -122,7 +126,7 @@ describe('Marketplace entry detail of a remote-OAuth entry', () => {
         status: 200,
         statusText: 'OK',
         headers: new Headers({ 'content-type': 'application/json' }),
-        text: async () => JSON.stringify({ name: 'mcp-evenfire-linear-remote-u-4ef7a4af' }),
+        text: async () => JSON.stringify({ name: 'mcp-evenfire-linear-remote-u-4ef7a4af403c' }),
       }))
     )
     try {
@@ -130,7 +134,7 @@ describe('Marketplace entry detail of a remote-OAuth entry', () => {
       const slots = await screen.findByRole('list', { name: 'Install slots' })
       fireEvent.click(
         within(slots).getByRole('button', {
-          name: 'Uninstall mcp-evenfire-linear-remote-u-4ef7a4af',
+          name: 'Uninstall mcp-evenfire-linear-remote-u-4ef7a4af403c',
         })
       )
       fireEvent.click(await screen.findByRole('button', { name: 'Uninstall' }))
@@ -156,14 +160,14 @@ describe('Marketplace entry detail of a remote-OAuth entry', () => {
         status: 200,
         statusText: 'OK',
         headers: new Headers({ 'content-type': 'application/json' }),
-        text: async () => JSON.stringify({ name: 'mcp-evenfire-linear-remote-u-4ef7a4af' }),
+        text: async () => JSON.stringify({ name: 'mcp-evenfire-linear-remote-u-4ef7a4af403c' }),
       }))
     )
     async function uninstall() {
       const slots = await screen.findByRole('list', { name: 'Install slots' })
       fireEvent.click(
         within(slots).getByRole('button', {
-          name: 'Uninstall mcp-evenfire-linear-remote-u-4ef7a4af',
+          name: 'Uninstall mcp-evenfire-linear-remote-u-4ef7a4af403c',
         })
       )
       fireEvent.click(await screen.findByRole('button', { name: 'Uninstall' }))

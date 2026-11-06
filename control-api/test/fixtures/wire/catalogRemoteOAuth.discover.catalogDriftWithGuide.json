@@ -12,7 +12,7 @@
       "variant": "per-server",
       "redirectUriTemplate": "https://control.example.com/api/v1/oauth-callback/remote/{serverName}"
     },
-    "serverName": "mcp-evenfire-linear-dcr-guided-u-a7cd2c0e",
+    "serverName": "mcp-evenfire-linear-dcr-guided-u-a7cd2c0e03fd",
     "catalogDrift": {
       "expected": "dcr",
       "detected": "manual"

@@ -50,8 +50,8 @@ describe('remoteOAuthSlotRows', () => {
         CATALOG_SLOTS.installed
       ).map(row => row.status)
     ).toEqual([
-      { kind: 'uninstalling', serverName: 'mcp-acme-linear-pre-u-64164363' },
-      { kind: 'occupied', serverName: 'mcp-acme-linear-pre-c-610fdec3' },
+      { kind: 'uninstalling', serverName: 'mcp-acme-linear-pre-u-64164363945f' },
+      { kind: 'occupied', serverName: 'mcp-acme-linear-pre-c-610fdec359b9' },
     ])
   })
 
