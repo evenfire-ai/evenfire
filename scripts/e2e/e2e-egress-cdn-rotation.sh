@@ -104,14 +104,14 @@
 #
 #     Observation                                            State   Action
 #     -----------------------------------------------------  ------  ------------
-#     Non-empty answer that is NOT "address set ⊆ test     GONE    Restore HCC
-#       sets A/B and every ttl <= 5" — including real A/B
-#       answers with some ttl > 5
+#     Non-empty answer that is NOT "address set ⊆ A ∪ B    GONE    Restore HCC
+#       and every ttl <= 5" — including real A/B answers
+#       with some ttl > 5
 #     ENOTFOUND, ENODATA or ESERVFAIL                      GONE    Restore HCC
 #     ok answer with records: []                           GONE    Restore HCC
 #       (belt row: Node normally reports NODATA by code)
-#     Test A/B address set with every ttl <= 5             PRESENT Wait; do not
-#                                                                    restore
+#     Non-empty subset of A ∪ B — either set, part of      PRESENT Wait; do not
+#       one, or a mix of both — with every ttl <= 5                restore
 #     exec ≠ 0, ETIMEOUT, any other DNS code, malformed    UNKNOWN Do not restore;
 #       or sentinel-less answer, non-numeric ttl                   warn "could
 #                                                                    not ask"
@@ -122,8 +122,8 @@
 #   hosts block is loaded it does answer. So once the restored Corefile is
 #   read back, a SERVFAIL can only come from the forwarded upstream — the
 #   test rows are no longer what CoreDNS serves. A real upstream that
-#   happened to serve exactly the A/B addresses with ttl <= 5 would read as
-#   PRESENT and merely delay the HCC restore until the bounded wait ends:
+#   happened to serve only addresses drawn from A ∪ B with ttl <= 5 would
+#   read as PRESENT and merely delay the HCC restore until the bounded wait ends:
 #   a declared fail-safe residual, not a guaranteed self-heal. Restoring
 #   HCC on UNKNOWN is forbidden. The last classification is recorded in
 #   `dns-override-witness.txt` in the evidence directory.
@@ -397,8 +397,9 @@ dns_actual_set() { # prints the sorted address CSV, or fails
 
 # The cleanup witness, implementing the header contract literally. One query
 # is classified as GONE (CoreDNS authoritatively no longer serves the test
-# rows), PRESENT (it still serves a test A/B set with every ttl <= 5) or
-# UNKNOWN (the question could not be asked or the answer cannot be trusted).
+# rows), PRESENT (it still serves a non-empty subset of A ∪ B — either set,
+# part of one, or a mix of both — with every ttl <= 5) or UNKNOWN (the
+# question could not be asked or the answer cannot be trusted).
 # The classification always succeeds — UNKNOWN is a result, not an error —
 # and the last state/detail are kept in DNS_WITNESS_* and in
 # `dns-override-witness.txt` so cleanup can warn truthfully after a timeout.
@@ -465,6 +466,21 @@ dns_is() { # <expected-csv>
   local actual
   actual="$(dns_actual_set)" || return 1
   [ "$actual" = "$1" ]
+}
+
+# Phase-2 timeout diagnostic only: never a verdict input. Records the raw
+# structured resolver line so the DNS error code survives in the evidence —
+# the filtered dns_actual_set prints nothing exactly when DNS is broken,
+# which is when that code is the only useful clue. A transport failure is
+# recorded as itself, never as an empty file. Always succeeds.
+record_dns_witness() {
+  local raw
+  if raw="$(dns_exec_raw)"; then
+    printf '%s\n' "$raw" >>"${EVIDENCE_DIR}/dns-witness.txt" || :
+  else
+    printf 'transport: kubectl exec failed\n' >>"${EVIDENCE_DIR}/dns-witness.txt" || :
+  fi
+  return 0
 }
 
 observed_at() { # <ips-json> <from-ms> -> first lastObservedAt of a target address
@@ -1358,7 +1374,7 @@ phase2() {
   if ! wait_until "$DNS_VISIBLE_TIMEOUT" "HCC's resolver to answer set B" dns_is "$CSV_B"; then
     fail "HCC did not see set B within ${DNS_VISIBLE_TIMEOUT}s"
     capture_coredns_reload_errors
-    dns_actual_set >>"${EVIDENCE_DIR}/dns-witness.txt" 2>&1 || :
+    record_dns_witness
     finish 3 phase2-dns-set-b-not-visible
   fi
   ok "HCC resolves ${CDN_HOST} to exactly set B (ttl <= 5)"

@@ -12,6 +12,11 @@
 # Covered contracts (docs/testing/egress-cdn-rotation.md):
 #   - the pod-side resolver snippet prints one structured JSON line and
 #     exits 0 even when DNS itself errors, so the DNS code survives;
+#   - the real c-ares error codes (ENODATA/ESERVFAIL/ENOTFOUND on the GONE
+#     side, EREFUSED on the UNKNOWN side) against an in-process DNS server,
+#     not a stub (§1b);
+#   - record_dns_witness keeps the raw structured line for phase-2 failure
+#     diagnosis, never an empty file (§2b);
 #   - the served-DNS witness classifies GONE / PRESENT / UNKNOWN exactly as
 #     the literal matrix says, and records the last state in
 #     dns-override-witness.txt;
@@ -275,6 +280,125 @@ assert_eq "snippet preserves the DNS error code" \
   '{"ok":false,"code":"ESERVFAIL"}' "$CAP_OUT"
 unset STUB_DNS_ERROR STUB_DNS_RECORDS
 
+# ── 1b. Real c-ares error codes (in-process DNS server, no stub) ───────
+# §1 proves the snippet preserves whatever code `dns` hands it; the cleanup
+# contract then trusts three exact code strings — ENODATA, ESERVFAIL,
+# ENOTFOUND — as GONE and every other code as UNKNOWN. A stub cannot prove
+# those strings are what real c-ares produces, so this probe runs an
+# in-process `dgram` DNS server that answers by rcode (NOERROR with no
+# answers, SERVFAIL, NXDOMAIN, REFUSED) and points the real resolver at it
+# with `dns.setServers`. A positive control pins the {address, ttl} shape
+# of a real answer. ETIMEOUT is deliberately not probed: an unresponsive
+# server costs ~27 s of c-ares retries and the SERVFAIL/REFUSED pair
+# already pins one code per side of the contract. Codes asserted as
+# observed on Node 24 (the repository CI/runtime major); if the runner
+# major ever changes, re-verify these c-ares mappings first.
+cat >"$TMP_DIR/cares-probe.cjs" <<'PROBEEOF'
+'use strict';
+const dgram = require('node:dgram');
+const dns = require('node:dns');
+
+const RCODE_BY_LABEL = { nodata: 0, servfail: 2, nxdomain: 3, refused: 5, ok: 0 };
+
+function buildResponse(query) {
+  const qEnd = query.indexOf(0, 12);
+  const question = query.subarray(12, qEnd + 1 + 4);
+  const labelLen = query[12];
+  const label = query.subarray(13, 13 + labelLen).toString('ascii');
+  const rcode = RCODE_BY_LABEL[label];
+  if (rcode === undefined) return null;
+  const isOk = label === 'ok';
+  const header = Buffer.alloc(12);
+  query.copy(header, 0, 0, 2);
+  const flags = 0x8000 | 0x0400 | (query.readUInt16BE(2) & 0x0100) | 0x0080 | rcode;
+  header.writeUInt16BE(flags, 2);
+  header.writeUInt16BE(1, 4);
+  header.writeUInt16BE(isOk ? 1 : 0, 6);
+  header.writeUInt16BE(0, 8);
+  header.writeUInt16BE(0, 10);
+  if (!isOk) return Buffer.concat([header, question]);
+  const answer = Buffer.alloc(16);
+  answer.writeUInt16BE(0xc00c, 0);
+  answer.writeUInt16BE(1, 2);
+  answer.writeUInt16BE(1, 4);
+  answer.writeUInt32BE(5, 6);
+  answer.writeUInt16BE(4, 10);
+  Buffer.from([1, 2, 3, 4]).copy(answer, 12);
+  return Buffer.concat([header, question, answer]);
+}
+
+async function main() {
+  const server = dgram.createSocket('udp4');
+  server.on('message', (msg, rinfo) => {
+    const resp = buildResponse(msg);
+    if (resp) server.send(resp, rinfo.port, rinfo.address);
+  });
+  await new Promise((resolve) => server.bind(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  console.log('node ' + process.version + ' server 127.0.0.1:' + port);
+  dns.setServers(['127.0.0.1:' + port]);
+  let allOk = true;
+  const cases = [
+    ['nodata.test', 'ENODATA'],
+    ['servfail.test', 'ESERVFAIL'],
+    ['nxdomain.test', 'ENOTFOUND'],
+    ['refused.test', 'EREFUSED'],
+  ];
+  for (const [host, expected] of cases) {
+    try {
+      const records = await dns.promises.resolve4(host, { ttl: true });
+      console.log('MISMATCH ' + host + ' resolved ' + JSON.stringify(records) + ' expected ' + expected);
+      allOk = false;
+    } catch (err) {
+      const code = (err && err.code) || 'ERR';
+      if (code === expected) {
+        console.log('OK ' + host + ' ' + code);
+      } else {
+        console.log('MISMATCH ' + host + ' got ' + code + ' expected ' + expected);
+        allOk = false;
+      }
+    }
+  }
+  try {
+    const records = await dns.promises.resolve4('ok.test', { ttl: true });
+    if (records.length === 1 && records[0].address === '1.2.3.4' && records[0].ttl === 5) {
+      console.log('OK ok.test ' + JSON.stringify(records));
+    } else {
+      console.log('MISMATCH ok.test got ' + JSON.stringify(records));
+      allOk = false;
+    }
+  } catch (err) {
+    console.log('MISMATCH ok.test threw ' + ((err && err.code) || err));
+    allOk = false;
+  }
+  server.close();
+  process.exitCode = allOk ? 0 : 1;
+}
+main();
+PROBEEOF
+run_capture node "$TMP_DIR/cares-probe.cjs"
+printf '%s\n' "$CAP_OUT" >"$TMP_DIR/cares-probe.out"
+assert_eq "c-ares probe exits 0 (every rcode mapped as expected)" 0 "$CAP_RC"
+CARES_OK_LINES="$(grep -c '^OK ' "$TMP_DIR/cares-probe.out" || true)"
+if [ "$CARES_OK_LINES" -ge 3 ]; then
+  note_pass "c-ares probe reported at least 3 OK lines (got $CARES_OK_LINES)"
+else
+  note_fail "c-ares probe reported at least 3 OK lines (got $CARES_OK_LINES)"
+  printf '%s\n' "$CAP_OUT" >&2
+fi
+assert_contains "real c-ares maps NOERROR/no-answers to ENODATA" \
+  "$TMP_DIR/cares-probe.out" "OK nodata.test ENODATA"
+assert_contains "real c-ares maps SERVFAIL to ESERVFAIL" \
+  "$TMP_DIR/cares-probe.out" "OK servfail.test ESERVFAIL"
+assert_contains "real c-ares maps NXDOMAIN to ENOTFOUND" \
+  "$TMP_DIR/cares-probe.out" "OK nxdomain.test ENOTFOUND"
+assert_contains "real c-ares maps REFUSED to EREFUSED (the UNKNOWN class)" \
+  "$TMP_DIR/cares-probe.out" "OK refused.test EREFUSED"
+assert_contains "c-ares probe life: a real A answer round-tripped with its ttl" \
+  "$TMP_DIR/cares-probe.out" 'OK ok.test [{"address":"1.2.3.4","ttl":5}]'
+assert_not_contains "c-ares probe reported no mismatches" \
+  "$TMP_DIR/cares-probe.out" "MISMATCH"
+
 # ── 2. The tri-state witness matrix (literal) ──────────────────────────
 expect_state() { # <name> <want-state>
   local got
@@ -372,6 +496,28 @@ else
 fi
 assert_contains "dns_is life: exec witnessed (error case)" "$FAKE_KUBECTL_LOG" \
   "exec deployment/${HCC_DEPLOY}"
+: >"$FAKE_KUBECTL_LOG"
+
+# ── 2b. record_dns_witness: raw line, never an empty diagnostic ────────
+# Phase 2's failure branch records the raw structured answer: the DNS error
+# code is the whole point of the file, so it must survive verbatim. The old
+# dns_actual_set diagnostic printed nothing on exactly this input.
+setup_case record-witness
+set_dns_response '{"ok":false,"code":"ENOTFOUND"}'
+record_dns_witness
+assert_contains "record_dns_witness keeps the raw structured error line" \
+  "${EVIDENCE_DIR}/dns-witness.txt" '{"ok":false,"code":"ENOTFOUND"}'
+assert_contains "record_dns_witness life: exec witnessed" "$FAKE_KUBECTL_LOG" \
+  "exec deployment/${HCC_DEPLOY} -n ${HCC_NS}"
+: >"$FAKE_KUBECTL_LOG"
+rm -f "${EVIDENCE_DIR}/dns-witness.txt"
+FAKE_DNS_EXEC_RC=1
+record_dns_witness
+assert_contains "record_dns_witness records transport instead of an empty file" \
+  "${EVIDENCE_DIR}/dns-witness.txt" "transport: kubectl exec failed"
+assert_contains "record_dns_witness life: exec attempted (transport case)" \
+  "$FAKE_KUBECTL_LOG" "exec deployment/${HCC_DEPLOY} -n ${HCC_NS}"
+FAKE_DNS_EXEC_RC=0
 : >"$FAKE_KUBECTL_LOG"
 
 # ── 3. cleanup() obeys the contract: HCC restored iff GONE ─────────────

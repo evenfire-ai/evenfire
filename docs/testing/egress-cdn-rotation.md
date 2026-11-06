@@ -241,10 +241,10 @@ transport, never a DNS answer) and is classified into three states:
 
 | Observation | State | Action |
 | ----------- | ----- | ------ |
-| Non-empty answer that is not "address set ⊆ test sets A/B and every `ttl <= 5`" — including real A/B answers with some `ttl > 5` | `GONE` | Restore HCC |
+| Non-empty answer that is not "address set ⊆ A ∪ B and every `ttl <= 5`" — including real A/B answers with some `ttl > 5` | `GONE` | Restore HCC |
 | `ENOTFOUND`, `ENODATA` or `ESERVFAIL` | `GONE` | Restore HCC |
 | `ok` answer with `records: []` (belt row; Node normally reports NODATA by code) | `GONE` | Restore HCC |
-| Test A/B address set with every `ttl <= 5` | `PRESENT` | Keep waiting; do not restore |
+| Non-empty subset of A ∪ B — either set, part of one, or a mix of both — with every `ttl <= 5` | `PRESENT` | Keep waiting; do not restore |
 | Exec ≠ 0, `ETIMEOUT`, any other DNS code, malformed or sentinel-less answer, non-numeric TTL | `UNKNOWN` | Do not restore; warn "could not ask" |
 
 `SERVFAIL` counts as `GONE` because of CoreDNS plugin order, not Corefile text
@@ -252,8 +252,8 @@ order: the authoritative `hosts` plugin answers before `forward`, and the
 positive witnesses of phases 2/4 prove that when the hosts block is loaded it
 does answer. Once the restored Corefile has been read back, a `SERVFAIL` can
 only come from the forwarded upstream — the test rows are no longer what
-CoreDNS serves. A real upstream that happened to serve exactly the A/B
-addresses with `ttl <= 5` would read as `PRESENT` and merely delay the HCC
+CoreDNS serves. A real upstream that happened to serve only addresses drawn
+from A ∪ B with `ttl <= 5` would read as `PRESENT` and merely delay the HCC
 restore until the bounded wait ends: a declared fail-safe residual, not a
 guaranteed self-heal. Restoring HCC on `UNKNOWN` is forbidden. The last
 classification is recorded in `dns-override-witness.txt` in the evidence
