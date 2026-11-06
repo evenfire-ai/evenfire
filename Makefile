@@ -309,6 +309,7 @@ minikube-build-image-capabilities-fixture-body:
 
 .PHONY: minikube-run-image-capabilities minikube-restore-image-capabilities
 minikube-run-image-capabilities: ## Run the visible image journey with an isolated external-provider fixture and restore the Host
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		IMAGE_CAPABILITIES_LANE=image \
@@ -316,6 +317,7 @@ minikube-run-image-capabilities: ## Run the visible image journey with an isolat
 
 .PHONY: minikube-run-document-upload
 minikube-run-document-upload: ## Run the visible Desktop document-upload journey (issue #678) with the isolated external-provider fixture and restore the Host
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		IMAGE_CAPABILITIES_LANE=document-upload \
@@ -323,6 +325,7 @@ minikube-run-document-upload: ## Run the visible Desktop document-upload journey
 
 .PHONY: minikube-run-attachment-gfs-save
 minikube-run-attachment-gfs-save: ## Run the visible Desktop attachment GFS-save journey with the isolated external-provider fixture and restore the Host
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		IMAGE_CAPABILITIES_LANE=attachment-gfs-save \
@@ -354,11 +357,13 @@ minikube-build-codex-approved-tools-fixtures-body:
 
 .PHONY: minikube-prepare-codex-approved-tools minikube-run-codex-approved-tools minikube-restore-codex-approved-tools
 minikube-prepare-codex-approved-tools: ## Prepare isolated deterministic tools fixtures; requires prior image acquisition and fresh run directory
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs prepare
 
 minikube-run-codex-approved-tools: ## Prepare, run visible deterministic E2E and restore production proxy image in owned Minikube
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
