@@ -135,7 +135,7 @@ export function safeErrorLogMessage(err: unknown): string {
  * Log-safe stack: a K8s ApiException's `.stack` begins with its `.message`, so it
  * leaks the same headers — drop it for K8s exceptions and keep it otherwise.
  */
-function safeErrorLogStack(err: unknown): string | undefined {
+export function safeErrorLogStack(err: unknown): string | undefined {
   if (isK8sApiException(err)) return undefined
   return err instanceof Error ? err.stack : undefined
 }

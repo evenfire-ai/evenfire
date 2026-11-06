@@ -124,8 +124,41 @@ describe('allowlist publication failure logs', () => {
     ]
     expect(logged).toHaveLength(2)
     for (const record of logged) expect(record.err).toBe(STATUS_MESSAGE)
+    expect(records('llm_allowlist_publish_retry_failed')[0].stack).toBeUndefined()
     const wire = logCapture.lines.join('')
     expect(wire).not.toContain(HEADER_SECRET)
     expect(wire).not.toContain(BODY_SECRET)
+  })
+
+  it('the retry keeps the stack of an error that is not from the apiserver', async () => {
+    const db = makeFakeDb([
+      {
+        provider: 'claude',
+        model: 'claude-opus-4-6',
+        source: 'discovery',
+        enabled: true,
+        image_input: oldDiscovery,
+      },
+    ])
+    await db.materializer.materialize()
+    // A committed change the ConfigMap does not carry yet, so the retry writes.
+    db.get('claude', 'claude-opus-4-6')!.enabled = false
+    const retry = new AllowlistPublishRetry({ baseDelayMs: 10, maxDelayMs: 10 })
+    try {
+      // A publish that already failed hands its ticket to the retry; the retry's
+      // own write then fails with a non-apiserver error.
+      retry.failed(retry.begin(), db.materializer)
+      // The writer makes three attempts per publication.
+      db.cluster.failNextWrites(3, new TypeError('socket hang up'))
+      await vi.waitFor(
+        () => expect(records('llm_allowlist_publish_retry_failed')).toHaveLength(1),
+        { timeout: 5_000 }
+      )
+    } finally {
+      retry.stop()
+    }
+    const [record] = records('llm_allowlist_publish_retry_failed')
+    expect(record.err).toBe('socket hang up')
+    expect(String(record.stack)).toMatch(/^TypeError: socket hang up\n\s+at /)
   })
 })
