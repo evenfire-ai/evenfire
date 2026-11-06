@@ -48,7 +48,9 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
   const [policies, setPolicies] = useState<LlmProviderCatalogPolicy[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
-  const [saveError, setSaveError] = useState('')
+  // Keyed by provider: saves run concurrently per row, so one provider's save
+  // must not clear or overwrite another provider's unresolved failure.
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({})
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [focusAfterReset, setFocusAfterReset] = useState<string | null>(null)
   // Each open (and each retry) starts a new generation so a slow read from an
@@ -79,7 +81,7 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
   useEffect(() => {
     if (!open) return
     setPolicies(null)
-    setSaveError('')
+    setSaveErrors({})
     void load()
   }, [open])
 
@@ -101,13 +103,39 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
     [policies]
   )
 
+  // Ordered by provider label like the table; the label is derived from the
+  // provider key so a message survives while the rows are reloading.
+  const saveErrorEntries = useMemo(
+    () =>
+      Object.entries(saveErrors)
+        .map(([provider, message]) => ({
+          provider,
+          message,
+          label: getProviderDisplayLabel(provider),
+        }))
+        .sort((left, right) => left.label.localeCompare(right.label)),
+    [saveErrors]
+  )
+
+  function setProviderSaveError(provider: string, message: string | null) {
+    setSaveErrors(current => {
+      if (message === null) {
+        if (!(provider in current)) return current
+        const next = { ...current }
+        delete next[provider]
+        return next
+      }
+      return { ...current, [provider]: message }
+    })
+  }
+
   // The toggle and the reset share this path so they get the same lock, error
   // and reopen handling. The row is only ever replaced by the server's
   // response: a failed save leaves the last confirmed state on screen, so there
   // is nothing to roll back. `null` clears the override.
   async function save(policy: LlmProviderCatalogPolicy, label: string, value: boolean | null) {
     setPending(current => new Set(current).add(policy.provider))
-    setSaveError('')
+    setProviderSaveError(policy.provider, null)
     try {
       const saved = await setLlmProviderCatalogAutoEnable(policy.provider, value)
       setPolicies(current =>
@@ -117,7 +145,7 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
       showToast(savedMessage(saved, label), { tone: 'success' })
     } catch (caught) {
       if (isSilentApiError(caught)) return
-      setSaveError(saveErrorMessage(caught, label))
+      setProviderSaveError(policy.provider, saveErrorMessage(caught, label))
     } finally {
       setPending(current => {
         const next = new Set(current)
@@ -135,7 +163,11 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
       onDismiss={() => onDismiss()}
       title="Auto-enable new models"
       description="Choose, per provider, whether eligible new models (text output, tool calling, stable release, runnable model id) start enabled. It applies from the next live catalog sync: models already in the catalog keep their current state, and this setting never disables a model. Each sync enables a limited number of models, so a large catalog can take several syncs."
-      error={saveError || undefined}
+      error={
+        saveErrorEntries.length > 0
+          ? saveErrorEntries.map(({ provider, message }) => <div key={provider}>{message}</div>)
+          : undefined
+      }
       busy={busy}
       size="large"
       footer={

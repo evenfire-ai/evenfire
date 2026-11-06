@@ -46,10 +46,12 @@ function changedBy(policy: LlmProviderCatalogPolicy) {
 
 function deferred<T>() {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>(settle => {
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((settle, fail) => {
     resolve = settle
+    reject = fail
   })
-  return { promise, resolve }
+  return { promise, resolve, reject }
 }
 
 function render(children: ReactNode) {
@@ -187,6 +189,54 @@ describe('LlmCatalogAutoEnableDialog', () => {
     expect(screen.queryByText(/catalog sync is running/)).toBeNull()
     expect(checkbox('Groq')).toBeChecked()
     expect(rowOf('Groq')).toHaveTextContent(changedBy(groqCustomOn))
+  })
+
+  it("keeps a provider's failure on screen while another provider saves", async () => {
+    vi.mocked(api.setLlmProviderCatalogAutoEnable)
+      .mockRejectedValueOnce(apiError({ error: 'internal_error' }, 500, 'Internal Server Error'))
+      .mockResolvedValueOnce(openaiCustomOff)
+      .mockResolvedValueOnce(catalogPolicyCase('groq.override_same'))
+    render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
+    await waitFor(() => expect(checkbox('Groq')).toBeInTheDocument())
+
+    fireEvent.click(checkbox('Groq'))
+    expect(await screen.findByText(/The Groq setting was not saved: 500/)).toBeInTheDocument()
+
+    fireEvent.click(checkbox('OpenAI'))
+    await waitFor(() => expect(checkbox('OpenAI')).not.toBeChecked())
+    expect(checkbox('OpenAI')).toBeEnabled()
+    expect(screen.getByText(/The Groq setting was not saved: 500/)).toBeInTheDocument()
+
+    fireEvent.click(checkbox('Groq'))
+    await waitFor(() => expect(checkbox('Groq')).not.toBeChecked())
+    expect(screen.queryByText(/The Groq setting was not saved/)).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows concurrent failures of different providers together, in label order', async () => {
+    const groqSave = deferred<LlmProviderCatalogPolicy>()
+    vi.mocked(api.setLlmProviderCatalogAutoEnable)
+      .mockReturnValueOnce(groqSave.promise)
+      .mockRejectedValueOnce(syncInProgressError())
+    render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
+    await waitFor(() => expect(checkbox('Groq')).toBeInTheDocument())
+
+    fireEvent.click(checkbox('Groq'))
+    fireEvent.click(checkbox('OpenAI'))
+    const openaiMessage =
+      'A catalog sync is running, so the OpenAI setting was not saved. Try again in a moment.'
+    expect(await screen.findByText(openaiMessage)).toBeInTheDocument()
+
+    // Groq's late failure must not overwrite OpenAI's message.
+    await act(async () =>
+      groqSave.reject(apiError({ error: 'internal_error' }, 500, 'Internal Server Error'))
+    )
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent(openaiMessage)
+    expect(alert).toHaveTextContent(/The Groq setting was not saved: 500/)
+    expect(alert.textContent?.indexOf('Groq')).toBeLessThan(
+      alert.textContent?.indexOf('OpenAI') ?? -1
+    )
   })
 
   it('shows a load failure with a retry that re-reads the policy', async () => {
