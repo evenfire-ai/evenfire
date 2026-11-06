@@ -150,7 +150,7 @@ Settings for capabilities that need consent. Your app cannot change it.
   spaces. The Desktop App always prefixes the title with your app's title
   (`<app title> — <title>`), so a notification cannot pose as Evenfire or as
   another plugin. It is not shown (`delivered: false, reason: 'suppressed'`)
-  when the user is already looking at your app. The host waits for the operating system's first displayed or failed outcome before replying; if the OS rejects creation or display (for example, an unsigned macOS build), the result is `delivered: false, reason: 'failed'`. When the user clicks it, the
+  when the user is already looking at your app. The host waits for the operating system to accept or reject the notification before replying — accepted can still be kept off screen by Focus/Do Not Disturb; if the OS rejects creation or display (for example, an unsigned macOS build), the result is `delivered: false, reason: 'failed'`. When the user clicks it, the
   Desktop App comes to the front and your app gets a `notification.clicked`
   event carrying your `ref`.
 

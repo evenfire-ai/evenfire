@@ -42,11 +42,18 @@ type RuntimeDeps = {
   userDataDir?: string
 }
 
+const NOTIFICATION_DELIVERY_TIMEOUT_MS = 10_000
+const pendingPluginNotifications = new Set<Notification>()
+
 export async function showNotificationAndAwaitDelivery(
   notification: Notification
 ): Promise<boolean> {
+  pendingPluginNotifications.add(notification)
   return new Promise<boolean>(resolve => {
+    let timer: ReturnType<typeof setTimeout>
     const finish = (delivered: boolean) => {
+      clearTimeout(timer)
+      pendingPluginNotifications.delete(notification)
       notification.removeListener('show', onShown)
       notification.removeListener('failed', onFailed)
       resolve(delivered)
@@ -59,6 +66,7 @@ export async function showNotificationAndAwaitDelivery(
     }
     notification.once('show', onShown)
     notification.once('failed', onFailed)
+    timer = setTimeout(() => finish(false), NOTIFICATION_DELIVERY_TIMEOUT_MS)
     try {
       notification.show()
     } catch {
