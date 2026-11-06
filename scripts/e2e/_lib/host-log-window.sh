@@ -10,12 +10,18 @@
 # The witness is therefore coverage: the log read is the complete log of the
 # only process that could have logged anything in the window.
 #
+# <since_epoch> comes from the host's clock, while container start times and
+# --since-time use the node's. HOST_LOG_CLOCK_MARGIN_SEC absorbs that skew and
+# fails closed: coverage requires a start that much earlier, and the read starts
+# that much earlier.
+#
 # read_host_log_window <host> <since_epoch> <out>
 #   Succeeds only when the Host Deployment selects exactly one pod, that pod is
-#   Running and not terminating, and every container (status.containerStatuses
-#   plus native sidecars: init containers with restartPolicy Always) has been
-#   running since before <since_epoch>. It then writes that pod's log since
-#   <since_epoch> to <out> and prints
+#   Running and not terminating, every container (status.containerStatuses plus
+#   native sidecars: init containers with restartPolicy Always) has been running
+#   since before <since_epoch> minus the margin, and none of that changed while
+#   the log was read. It then writes that pod's log since <since_epoch> minus the
+#   margin to <out> and prints
 #     covered: pod <pod>, containers started <times>, <n> lines
 #   Otherwise it returns 1 with the reason on stderr and never exits, so a
 #   caller can `die` (a precondition) or `fail` and continue (a verdict check).
@@ -27,10 +33,29 @@
 #   EVIDENCE_DIR  directory for saved previous-container logs
 #   kctl          context-pinned kubectl wrapper (from e2e-lib.sh)
 
+HOST_LOG_CLOCK_MARGIN_SEC=30
+
+# epoch_to_utc <epoch>: an ISO-8601 UTC timestamp, on GNU and BSD alike.
+epoch_to_utc() {
+  jq -nr --argjson epoch "$1" '$epoch | todate'
+}
+
+# The identity of the pod and each of its container processes.
+host_pod_fingerprint() {
+  jq -er '.items[0]
+    | [.metadata.uid,
+       ((.status.containerStatuses // []) + (.status.initContainerStatuses // [])
+        | map([.name, .restartCount, .state.running.startedAt]))]
+    | tojson' <<<"$1"
+}
+
 read_host_log_window() {
   local host="$1" since_epoch="$2" out="$3"
   local deployment_json selector pods_json pod_count pod since_iso containers_json
-  local late container restarts started_list lines
+  local late container restarts started_list lines covered_since
+  local fingerprint_before pods_after fingerprint_after
+
+  covered_since=$((since_epoch - HOST_LOG_CLOCK_MARGIN_SEC))
 
   if ! deployment_json="$(kctl get "deployment/${host}" -n "$HOST_NS" -o json)"; then
     echo "host-log-window: could not read deployment ${host}" >&2
@@ -76,7 +101,7 @@ read_host_log_window() {
   fi
 
   # The first container not running since before the window, if any.
-  late="$(jq -r --argjson since "$since_epoch" '
+  late="$(jq -r --argjson since "$covered_since" '
       [.[] | select((.state.running.startedAt // null) == null
                     or (.state.running.startedAt | fromdateiso8601) > $since)]
       | first // empty | "\(.name) \(.restartCount // 0)"' <<<"$containers_json")" || {
@@ -99,12 +124,25 @@ read_host_log_window() {
     return 1
   fi
 
-  since_iso="$(jq -nr --argjson since "$since_epoch" '$since | todate')" || {
+  since_iso="$(epoch_to_utc "$covered_since")" || {
     echo "host-log-window: invalid window start ${since_epoch}" >&2
+    return 1
+  }
+  fingerprint_before="$(host_pod_fingerprint "$pods_json")" || {
+    echo "host-log-window: could not fingerprint the pod of ${host}" >&2
     return 1
   }
   if ! kctl logs "pod/${pod}" -n "$HOST_NS" --all-containers=true --since-time="$since_iso" >"$out"; then
     echo "host-log-window: could not read the log of ${pod} (${host})" >&2
+    return 1
+  fi
+  if ! pods_after="$(kctl get pods -n "$HOST_NS" -l "$selector" -o json)" ||
+      ! fingerprint_after="$(host_pod_fingerprint "$pods_after")"; then
+    echo "host-log-window: could not re-read the pod of ${host} after its log" >&2
+    return 1
+  fi
+  if [ "$fingerprint_after" != "$fingerprint_before" ]; then
+    echo "host-log-window: the pod of ${host} changed while its log was read" >&2
     return 1
   fi
   started_list="$(jq -r 'map("\(.name)=\(.state.running.startedAt)") | join(" ")' <<<"$containers_json")"

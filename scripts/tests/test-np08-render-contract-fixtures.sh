@@ -200,6 +200,16 @@ when 'authority-staleness-60s', 'poll-interval-60s'
   data = host_config.fetch('data')
   abort("fixture source mcp-host-config has no #{key}") unless data.key?(key)
   data[key] = '60000'
+when 'poll-interval-not-digits'
+  host_config = documents.find do |document|
+    document['kind'] == 'ConfigMap' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host-config'
+  end
+  abort('fixture source is missing mcp-host/mcp-host-config') unless host_config
+  data = host_config.fetch('data')
+  abort('fixture source mcp-host-config has no CLERUM_CONTEXT_MAPPER_POLL_INTERVAL') unless data.key?('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL')
+  data['CLERUM_CONTEXT_MAPPER_POLL_INTERVAL'] = '30s'
 when 'authority-staleness-below-rule'
   host_config = documents.find do |document|
     document['kind'] == 'ConfigMap' &&
@@ -347,3 +357,38 @@ NP08_MCP_HOST_CONFIG_SOURCE="${slow_request_source}" assert_rejected \
   "${SOURCE_RENDER}" \
   '+ 60000 + 1000 = 211000ms; got HCC_AUTHORITY_MAX_STALENESS_MS=180000 and CLERUM_CONTEXT_MAPPER_POLL_INTERVAL=30000' \
   'the shipped authority pair under a 60000ms request timeout'
+
+poll_interval_not_digits="${tmpdir}/poll-interval-not-digits.yaml"
+mutate_render poll-interval-not-digits "${poll_interval_not_digits}"
+assert_rejected \
+  "${poll_interval_not_digits}" \
+  'must be positive safe integers' \
+  'a mcp-host context mapper poll interval that is not plain digits'
+
+# A source the extractor cannot read must stop the contract, not pass it.
+source_without_timeout="${tmpdir}/config-without-request-timeout.ts"
+RUBYOPT=--disable=gems ruby -e '
+  source, destination = ARGV
+  text = File.read(source, encoding: "UTF-8")
+  pattern = /^export const CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = [0-9_]+$/
+  abort("fixture: expected exactly one CONTEXT_MAPPER_REQUEST_TIMEOUT_MS in #{source}") unless text.scan(pattern).length == 1
+  File.write(destination, text.sub(pattern, "const contextMapperRequestTimeoutRenamed = 10_000"))
+' "${ROOT}/mcp-host/src/config.ts" "${source_without_timeout}"
+NP08_MCP_HOST_CONFIG_SOURCE="${source_without_timeout}" assert_rejected \
+  "${SOURCE_RENDER}" \
+  'expected exactly one CONTEXT_MAPPER_REQUEST_TIMEOUT_MS' \
+  'an mcp-host source without the request timeout constant'
+
+# The overlay pin must follow the source default.
+source_default_45s="${tmpdir}/config-default-interval-45s.ts"
+RUBYOPT=--disable=gems ruby -e '
+  source, destination = ARGV
+  text = File.read(source, encoding: "UTF-8")
+  literal = "getEnv(\x27CLERUM_CONTEXT_MAPPER_POLL_INTERVAL\x27, \x2730000\x27)"
+  abort("fixture: expected exactly one poll interval default in #{source}") unless text.scan(literal).length == 1
+  File.write(destination, text.sub(literal, "getEnv(\x27CLERUM_CONTEXT_MAPPER_POLL_INTERVAL\x27, \x2745000\x27)"))
+' "${ROOT}/mcp-host/src/config.ts" "${source_default_45s}"
+NP08_MCP_HOST_CONFIG_SOURCE="${source_default_45s}" assert_rejected \
+  "${SOURCE_RENDER}" \
+  'must equal the mcp-host source defaults' \
+  'an overlay pin that differs from the source default'

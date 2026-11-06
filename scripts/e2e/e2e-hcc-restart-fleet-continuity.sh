@@ -4,8 +4,12 @@
 #
 # The NetworkPolicy pass watchdog ends the controller with process.exit(1)
 # when a pass outlives HCC_NETPOL_PASS_HARD_LIMIT_MS. This lane proves that
-# such an exit, at rest or in the middle of a pass, leaves every workload the
-# controller manages untouched and every consumer of its API in sync:
+# such an exit, at rest or in the middle of a pass, leaves alone the workloads
+# it has fixtures for (a managed McpServer, stateless Hosts and NetworkPolicies)
+# and keeps every consumer of the controller's API in sync. It has no Codex or
+# Grok Host and no SharedFileSystem-consumer Host fixture; #1340 and #1341
+# describe how those Hosts can roll on an HCC restart.
+#
 #
 #   C1 no pod outside HCC is replaced or restarted (uid, restartCount);
 #      new pods owned by a ReplicaSet are a rollout and fail too;
@@ -1299,6 +1303,8 @@ staleness_ms="$(kctl get configmap mcp-host-config -n "$HOST_NS" \
 [[ "$staleness_ms" =~ ^[1-9][0-9]*$ ]] ||
   die "HCC_AUTHORITY_MAX_STALENESS_MS in ${HOST_NS}/mcp-host-config is '${staleness_ms}', not a positive integer"
 AUTHORITY_STALENESS_SEC=$((staleness_ms / 1000))
+[ "$SETTLE_SEC" -ge "$AUTHORITY_STALENESS_SEC" ] ||
+  die "E2E_CONTINUITY_SETTLE_SEC (${SETTLE_SEC}) must be at least the mcp-host authority staleness bound (${AUTHORITY_STALENESS_SEC} s), or the lane ends before a revocation could show"
 ok "mcp-host authority staleness bound on this cluster: ${AUTHORITY_STALENESS_SEC} s"
 PROXY_SELECTOR="$(selector_of "$MCP_PROXY_DEPLOY" "$MCP_NS")"
 [ -n "$PROXY_SELECTOR" ] || die "could not read the mcp-proxy selector"
@@ -1334,6 +1340,8 @@ ok "stateless fixture ${ACTIVE_HOST} active and holding ${MCP_FIXTURE}"
 wait_until 180 "HCC request lane after cadence restore" request_lane_ready_now ||
   die "HCC request lane not ready after cadence restore"
 HCC_POD="$(hcc_pod)" || die "no running HCC pod after cadence restore"
+# The Host log coverage needs a start at least this long before the window.
+sleep "$HOST_LOG_CLOCK_MARGIN_SEC"
 CADENCE_RESTORED_EPOCH="$(date +%s)"
 
 # Settle the fleet so snapshot A holds only state the kill can disturb.
@@ -1358,7 +1366,7 @@ PRE_SNAPSHOT_SETTLE_SEC=$((AUTHORITY_STALENESS_SEC + 30))
 settle_until=$((CADENCE_RESTORED_EPOCH + PRE_SNAPSHOT_SETTLE_SEC))
 now="$(date +%s)"
 [ "$now" -ge "$settle_until" ] || sleep $((settle_until - now))
-since_restore="$(date -u -r "$CADENCE_RESTORED_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
+since_restore="$(epoch_to_utc "$CADENCE_RESTORED_EPOCH")"
 for host in "$SOURCE_HOST" "$ACTIVE_HOST"; do
   # A failed or incomplete read must abort, never count as zero revocations (the
   # same rule as C7): the read must cover the only Host process of the window.
@@ -1546,7 +1554,7 @@ while IFS= read -r line; do
 done <"${EVIDENCE_DIR}/compare.log"
 
 # C7: Host fleets. Hosts with a running pod: the seeded Host and the active fixture.
-since="$(date -u -r "$KILL_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
+since="$(epoch_to_utc "$KILL_EPOCH")"
 for host in "$SOURCE_HOST" "$ACTIVE_HOST"; do
   host_log="${EVIDENCE_DIR}/host-${host}.log"
   read_host_log_window "$host" "$KILL_EPOCH" "$host_log" ||

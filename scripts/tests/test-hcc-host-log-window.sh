@@ -27,6 +27,7 @@ AFTER='2026-01-01T00:05:00Z'
 
 DEPLOYMENT='{"spec":{"selector":{"matchLabels":{"app":"host-a"}}}}'
 MOCK_PODS=''
+MOCK_PODS_AFTER_LOGS=''
 MOCK_FAIL_LIST=0
 MOCK_FAIL_LOGS=0
 MOCK_LOG_LINES=0
@@ -38,7 +39,11 @@ kctl() {
     "get deployment/host-a") printf '%s\n' "$DEPLOYMENT" ;;
     "get pods")
       [ "$MOCK_FAIL_LIST" = 1 ] && return 1
-      printf '%s\n' "$MOCK_PODS"
+      if [ -n "$MOCK_PODS_AFTER_LOGS" ] && grep -q "^logs pod/" "$CALLS"; then
+        printf '%s\n' "$MOCK_PODS_AFTER_LOGS"
+      else
+        printf '%s\n' "$MOCK_PODS"
+      fi
       ;;
     "logs pod/"*)
       case "$*" in
@@ -74,7 +79,7 @@ MOCK_PODS="{\"items\":[$(pod host-a-1 "$BEFORE" 0)]}"
 run_case
 if [ "$STATUS" = 0 ] && [[ "$STDOUT" == "covered: pod host-a-1, containers started mcp-host=${BEFORE}, 0 lines" ]] &&
    [ -f "$OUT" ] && [ ! -s "$OUT" ] &&
-   grep -q "^logs pod/host-a-1 -n mcp-host --all-containers=true --since-time=2026-01-01T00:00:00Z$" "$CALLS"; then
+   grep -q "^logs pod/host-a-1 -n mcp-host --all-containers=true --since-time=2025-12-31T23:59:30Z$" "$CALLS"; then
   pass "(a) a quiet Host whose only process ran across the window is covered, and its log was read"
 else
   fail "(a) quiet covered Host: status=${STATUS} stdout='${STDOUT}' calls=$(tr '\n' ';' <"$CALLS")"
@@ -152,8 +157,44 @@ else
   fail "(h) terminating pod: status=${STATUS} stderr=$(cat "${WORK}/stderr")"
 fi
 
-if [ "$TOTAL" -lt 9 ]; then
-  echo "FAIL: expected at least 9 checks, ran ${TOTAL}"
+# (i) a start less than the clock margin before the window is not covered.
+MOCK_PODS="{\"items\":[$(pod host-a-1 '2025-12-31T23:59:50Z' 0)]}"
+run_case
+if [ "$STATUS" != 0 ] && grep -q "started inside the window" "${WORK}/stderr" && grep -q "^get pods" "$CALLS" &&
+   ! grep -q "^logs" "$CALLS"; then
+  pass "(i) a start 10 s before the window is not covered: the clocks may differ by the margin"
+else
+  fail "(i) start inside the margin: status=${STATUS} calls=$(tr '\n' ';' <"$CALLS") stderr=$(cat "${WORK}/stderr")"
+fi
+
+# (j) a container restarts while the log is read: fails.
+MOCK_PODS="{\"items\":[$(pod host-a-1 "$BEFORE" 0)]}"
+MOCK_PODS_AFTER_LOGS="{\"items\":[$(pod host-a-1 "$AFTER" 1)]}"
+run_case
+MOCK_PODS_AFTER_LOGS=''
+if [ "$STATUS" != 0 ] && grep -q "changed while its log was read" "${WORK}/stderr" &&
+   grep -q "^logs pod/host-a-1" "$CALLS" && [ "$(grep -c "^get pods" "$CALLS")" = 2 ]; then
+  pass "(j) a pod that changed while its log was read fails, and it was read again after the log"
+else
+  fail "(j) changed during the read: status=${STATUS} calls=$(tr '\n' ';' <"$CALLS") stderr=$(cat "${WORK}/stderr")"
+fi
+
+# (k) the epoch formatter works without a BSD-only date flag.
+if [ "$(epoch_to_utc 1767225600)" = "2026-01-01T00:00:00Z" ]; then
+  pass "(k) epoch_to_utc formats an epoch in UTC"
+else
+  fail "(k) epoch_to_utc 1767225600 gave '$(epoch_to_utc 1767225600)'"
+fi
+
+# (l) no BSD-only date call is left in the lane or the helper.
+if ! grep -nE 'date .*-r ' "${ROOT}/scripts/e2e/e2e-hcc-restart-fleet-continuity.sh" "$HELPER" >"${WORK}/date-r"; then
+  pass "(l) the lane and the helper use no BSD-only date flag"
+else
+  fail "(l) BSD-only date flag: $(cat "${WORK}/date-r")"
+fi
+
+if [ "$TOTAL" -lt 13 ]; then
+  echo "FAIL: expected at least 13 checks, ran ${TOTAL}"
   exit 1
 fi
 if [ "$FAIL" != 0 ]; then
