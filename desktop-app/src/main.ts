@@ -30,6 +30,7 @@ import {
   registerDeepLinkAcknowledgmentHandlers,
   registerIpcHandlers,
 } from './ipc.js'
+import { mainWindowRoundedCorners } from './mainWindowChrome.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
@@ -555,6 +556,7 @@ async function createWindow(): Promise<void> {
     height: 860,
     show: false,
     frame: false,
+    roundedCorners: mainWindowRoundedCorners(),
     title:
       devIsolationPolicy.windowTitle ??
       (config.appName === EVENFIRE_APP_NAME

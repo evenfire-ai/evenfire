@@ -23,10 +23,11 @@ const harness = vi.hoisted(() => {
     sessionCleared: null as null | (() => void),
     parseSandboxUiDeepLink: vi.fn(() => null),
     registeredLogout: null as null | (() => Promise<unknown>),
-    createWindow: null as null | (() => Record<string, any>),
+    createWindow: null as null | ((options?: Record<string, unknown>) => Record<string, any>),
   }
-  state.createWindow = () => {
+  state.createWindow = (options: Record<string, unknown> = {}) => {
     const window = {
+      options,
       webContents: {
         id: 41,
         on: vi.fn(),
@@ -61,8 +62,8 @@ const harness = vi.hoisted(() => {
 
 vi.mock('electron', () => ({
   BrowserWindow: class {
-    constructor() {
-      return harness.createWindow?.()
+    constructor(options?: Record<string, unknown>) {
+      return harness.createWindow?.(options)
     }
     static getAllWindows() {
       return harness.windows
@@ -191,6 +192,15 @@ describe('main.ts GFS navigation-generation composition', () => {
       expect(harness.registeredLogout).toBeTypeOf('function')
       expect(harness.windows).toHaveLength(1)
     })
+  })
+
+  it('keeps the frameless custom chrome square on Linux only', () => {
+    expect(harness.windows[0]?.options).toEqual(
+      expect.objectContaining({
+        frame: false,
+        roundedCorners: process.platform !== 'linux',
+      })
+    )
   })
 
   it('returns null for denied sync IPC without changing the generation', () => {
