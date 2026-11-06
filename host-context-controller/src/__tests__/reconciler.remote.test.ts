@@ -429,7 +429,10 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(message).not.toContain('?m=')
     })
 
-    it.each([['PATH'], ['KUBERNETES_SERVICE_HOST'], ['KUBECONFIG']])(
+    // KUBERNETES_SERVICE_HOST is covered by the KUBERNETES_* family tests
+    // below: that family is rejected outright with its own message before the
+    // declared-name check this matrix pins.
+    it.each([['PATH'], ['KUBECONFIG']])(
       'rejects a query placeholder declared only by an exact platform-owned envSecret name (%s)',
       name => {
         // buildDeployment emits every envSecret key as a secretKeyRef today
@@ -557,7 +560,9 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(conf).toContain(`proxy_pass https://remote_upstream/mcp?key=${placeholder};`)
     })
 
-    it.each([['KUBERNETES_SERVICE_HOST'], ['PATH'], ['KUBECONFIG'], ['kubernetes_service_host']])(
+    // The exact-case KUBERNETES_* family, KUBERNETES_SERVICE_HOST included,
+    // is rejected outright by the family tests below, so it has no row here.
+    it.each([['PATH'], ['KUBECONFIG'], ['kubernetes_service_host']])(
       'rejects a query placeholder whose spec.env declaration HCC strips (%s)',
       name => {
         // The entry is stripped from the container, so envsubst would fill the
@@ -615,6 +620,130 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(remoteConfig(reconciler, controlServer)).toContain(
         `proxy_pass https://remote_upstream/mcp?r=${controlPlaceholder};`
       )
+    })
+
+    // Kubelet injects service env under the exact-case KUBERNETES_ prefix
+    // (KUBERNETES_SERVICE_HOST, KUBERNETES_PORT, KUBERNETES_PORT_443_TCP_ADDR,
+    // ...). Only two members are enumerated in the strip set, so the family
+    // is reserved by prefix: no rendered query may reference such a name
+    // directly, however it is declared. The arbitrary suffix row pins the
+    // prefix itself rather than an enumeration of known members.
+    it.each([
+      ['KUBERNETES_SERVICE_HOST'],
+      ['KUBERNETES_SERVICE_PORT'],
+      ['KUBERNETES_PORT'],
+      ['KUBERNETES_PORT_443_TCP_ADDR'],
+      ['KUBERNETES_ARBITRARY_SUFFIX'],
+    ])('rejects a KUBERNETES_* query placeholder declared by envSecret (%s)', name => {
+      const marker = 'zz-kubernetes-marker'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: {
+          baseUrl: `https://api.example.com/mcp?m=${marker}&h=` + '$' + `{${name}}`,
+        },
+        envSecret: { name: 'remote-creds', keys: [{ secretKey: 'k', envVar: name }] },
+      })
+
+      let error: unknown
+      try {
+        remoteConfig(reconciler, server)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain(
+        `query placeholder \$` + `{${name}} names a reserved Kubernetes service variable`
+      )
+      // The error names the placeholder only; it never echoes the query.
+      expect(message).not.toContain(marker)
+      expect(message).not.toContain('?m=')
+
+      // Life witness in the same test: an ordinary envSecret declaration on
+      // the same channel renders.
+      const controlPlaceholder = '$' + '{ALPHA_KEY}'
+      const controlServer = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?h=${controlPlaceholder}` },
+        envSecret: {
+          name: 'remote-creds',
+          keys: [{ secretKey: 'k', envVar: 'ALPHA_KEY' }],
+        },
+      })
+      expect(remoteConfig(reconciler, controlServer)).toContain(
+        `proxy_pass https://remote_upstream/mcp?h=${controlPlaceholder};`
+      )
+    })
+
+    it.each([
+      ['KUBERNETES_SERVICE_HOST'],
+      ['KUBERNETES_SERVICE_PORT'],
+      ['KUBERNETES_PORT'],
+      ['KUBERNETES_PORT_443_TCP_ADDR'],
+      ['KUBERNETES_ARBITRARY_SUFFIX'],
+    ])('rejects a KUBERNETES_* query placeholder declared by a spec.env literal (%s)', name => {
+      // Family members outside the enumerated strip set survive sanitizeCrdSpec
+      // and would count as declared; only the unconditional prefix pre-check
+      // rejects them, without resting on whether an explicit entry shadows a
+      // kubelet-injected value.
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?h=` + '$' + `{${name}}` },
+        env: [{ name, value: 'decoy' }],
+      })
+
+      expect(() => remoteConfig(reconciler, server)).toThrow(
+        `query placeholder \$` + `{${name}} names a reserved Kubernetes service variable`
+      )
+
+      // Life witness in the same test: an ordinary spec.env declaration on
+      // the same channel renders.
+      const controlPlaceholder = '$' + '{ALPHA_KEY}'
+      const controlServer = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?h=${controlPlaceholder}` },
+        env: [{ name: 'ALPHA_KEY', value: '' }],
+      })
+      expect(remoteConfig(reconciler, controlServer)).toContain(
+        `proxy_pass https://remote_upstream/mcp?h=${controlPlaceholder};`
+      )
+    })
+
+    it('rejects an undeclared KUBERNETES_* query placeholder as reserved, not merely undeclared', () => {
+      const name = 'KUBERNETES_PORT_443_TCP_ADDR'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?h=` + '$' + `{${name}}` },
+      })
+
+      expect(() => remoteConfig(reconciler, server)).toThrow(
+        `query placeholder \$` + `{${name}} names a reserved Kubernetes service variable`
+      )
+
+      // Life witness in the same test: a declared ordinary placeholder renders.
+      const controlPlaceholder = '$' + '{ALPHA_KEY}'
+      const controlServer = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?h=${controlPlaceholder}` },
+        env: [{ name: 'ALPHA_KEY', value: '' }],
+      })
+      expect(remoteConfig(reconciler, controlServer)).toContain(
+        `proxy_pass https://remote_upstream/mcp?h=${controlPlaceholder};`
+      )
+    })
+
+    it.each([
+      ['kubernetes_port_443_tcp_addr'],
+      ['Kubernetes_Port'],
+      ['MY_KUBERNETES_PORT'],
+      ['KUBERNETESPORT'],
+    ])('renders a query placeholder outside the exact-case KUBERNETES_ prefix (%s)', name => {
+      // The reservation is an anchored, exact-case prefix: a distinct-case
+      // spelling, a name that merely contains the prefix, and the word
+      // without its underscore all name ordinary variables.
+      const placeholder = '$' + `{${name}}`
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/mcp?h=${placeholder}` },
+        envSecret: { name: 'remote-creds', keys: [{ secretKey: 'k', envVar: name }] },
+      })
+      const conf = remoteConfig(reconciler, server)
+
+      expect(conf).toContain(`proxy_pass https://remote_upstream/mcp?h=${placeholder};`)
     })
 
     it('should listen on the transport port', () => {
@@ -973,23 +1102,25 @@ describe('McpServerReconciler remote egress proxy', () => {
       })
 
       it('allows a valueTemplate referencing a distinct-case env name', () => {
-        // Platform ownership is exact: `${Path}` and `$kubeconfig` name
+        // Platform ownership is exact: `${Path}` and `${kubeconfig}` name
         // different variables from PATH and KUBECONFIG, so they render. The
-        // exact `${PATH}` control in the same batch is still dropped.
+        // exact `${PATH}` control in the same batch is still dropped. The
+        // distinct-case references use the braced form on purpose: it is the
+        // form the Deployment backfill defines (asserted below), while a bare
+        // `$kubeconfig` would render here yet get no env entry to fill it.
         const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
-        const cm = (reconciler as any).buildNginxConfigMap(
-          buildWithAuth([
-            { header: 'X-Path-Distinct', valueTemplate: 'Bearer ' + '$' + '{Path}' },
-            { header: 'X-Kube-Distinct', valueTemplate: '$kubeconfig' },
-            { header: 'X-Host-Distinct', valueTemplate: '$' + '{kubernetes_service_host}' },
-            { header: 'X-Path-Exact', valueTemplate: '$' + '{PATH}' },
-            { header: 'X-Good', valueTemplate: 'Bearer ${SENTRY_AUTH_TOKEN}' },
-          ])
-        )
+        const server = buildWithAuth([
+          { header: 'X-Path-Distinct', valueTemplate: 'Bearer ' + '$' + '{Path}' },
+          { header: 'X-Kube-Distinct', valueTemplate: '$' + '{kubeconfig}' },
+          { header: 'X-Host-Distinct', valueTemplate: '$' + '{kubernetes_service_host}' },
+          { header: 'X-Path-Exact', valueTemplate: '$' + '{PATH}' },
+          { header: 'X-Good', valueTemplate: 'Bearer ${SENTRY_AUTH_TOKEN}' },
+        ])
+        const cm = (reconciler as any).buildNginxConfigMap(server)
         const conf = cm.data['default.conf.template']
 
         expect(conf).toContain('proxy_set_header X-Path-Distinct "Bearer ${Path}";')
-        expect(conf).toContain('proxy_set_header X-Kube-Distinct "$kubeconfig";')
+        expect(conf).toContain('proxy_set_header X-Kube-Distinct "${kubeconfig}";')
         expect(conf).toContain('proxy_set_header X-Host-Distinct "${kubernetes_service_host}";')
         expect(conf).toContain('proxy_set_header X-Good "Bearer ${SENTRY_AUTH_TOKEN}";')
         expect(conf).not.toContain('X-Path-Exact')
@@ -997,6 +1128,108 @@ describe('McpServerReconciler remote egress proxy', () => {
         expect(warn).toHaveBeenCalledWith(
           'Rejecting authHeader that references a platform-owned variable',
           { scope: '[HCC]', header: 'X-Path-Exact', envVar: 'PATH' }
+        )
+        warn.mockRestore()
+
+        // Rendering is not loadability: envsubst can only fill a distinct-case
+        // name the Deployment defines. The backfill scans braced references,
+        // so each braced distinct-case name above gets an empty entry and the
+        // exact PATH never does.
+        const deployment = (reconciler as any).buildDeployment(server)
+        const egressContainer = deployment.spec.template.spec.containers.find(
+          (c: any) => c.name === 'egress-proxy'
+        )
+        expect(egressContainer.env.filter((e: any) => e.name === 'Path')).toEqual([
+          { name: 'Path', value: '' },
+        ])
+        expect(egressContainer.env.filter((e: any) => e.name === 'kubeconfig')).toEqual([
+          { name: 'kubeconfig', value: '' },
+        ])
+        expect(
+          egressContainer.env.filter((e: any) => e.name === 'kubernetes_service_host')
+        ).toEqual([{ name: 'kubernetes_service_host', value: '' }])
+        expect(egressContainer.env.map((e: any) => e.name)).not.toContain('PATH')
+      })
+
+      it('rejects valueTemplates referencing the KUBERNETES_* family in braced and bare form', () => {
+        // The whole exact-case family is platform-owned, not just the two
+        // enumerated members: `${KUBERNETES_PORT_443_TCP_ADDR}` would be
+        // filled by envsubst and bare `$KUBERNETES_PORT_443_TCP_ADDR` read as
+        // a variable, either way from the proxy container's own environment
+        // rather than from spec.envSecret. The arbitrary suffix pins the
+        // prefix itself.
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
+        const cm = (reconciler as any).buildNginxConfigMap(
+          buildWithAuth([
+            { header: 'X-KSvcHost', valueTemplate: 'Bearer ' + '$' + '{KUBERNETES_SERVICE_HOST}' },
+            { header: 'X-KSvcPort', valueTemplate: 'Bearer ' + '$' + '{KUBERNETES_SERVICE_PORT}' },
+            { header: 'X-KPort', valueTemplate: 'Bearer ' + '$' + '{KUBERNETES_PORT}' },
+            {
+              header: 'X-KAddr',
+              valueTemplate: 'Bearer ' + '$' + '{KUBERNETES_PORT_443_TCP_ADDR}',
+            },
+            { header: 'X-KAny', valueTemplate: 'Bearer ' + '$' + '{KUBERNETES_ARBITRARY_SUFFIX}' },
+            { header: 'X-KBare', valueTemplate: 'Bearer $KUBERNETES_PORT_443_TCP_ADDR' },
+            { header: 'X-Good', valueTemplate: 'Bearer ${SENTRY_AUTH_TOKEN}' },
+          ])
+        )
+        const conf = cm.data['default.conf.template']
+
+        expect(conf).not.toContain('X-KSvcHost')
+        expect(conf).not.toContain('X-KSvcPort')
+        expect(conf).not.toContain('X-KPort')
+        expect(conf).not.toContain('X-KAddr')
+        expect(conf).not.toContain('X-KAny')
+        expect(conf).not.toContain('X-KBare')
+        // No rendered line references the family at all.
+        expect(conf).not.toContain('KUBERNETES_')
+        // Life witness in the same test: the ordinary header renders.
+        expect(conf).toContain('proxy_set_header X-Good "Bearer ${SENTRY_AUTH_TOKEN}";')
+        expect(warn).toHaveBeenCalledTimes(6)
+        expect(warn).toHaveBeenCalledWith(
+          'Rejecting authHeader that references a platform-owned variable',
+          { scope: '[HCC]', header: 'X-KAddr', envVar: 'KUBERNETES_PORT_443_TCP_ADDR' }
+        )
+        expect(warn).toHaveBeenCalledWith(
+          'Rejecting authHeader that references a platform-owned variable',
+          { scope: '[HCC]', header: 'X-KBare', envVar: 'KUBERNETES_PORT_443_TCP_ADDR' }
+        )
+        // The warnings never carry the template value.
+        expect(JSON.stringify(warn.mock.calls)).not.toContain('Bearer')
+        warn.mockRestore()
+      })
+
+      it('allows KUBERNETES-like names outside the exact-case prefix in a valueTemplate', () => {
+        // Anchored and exact-case like the rest of the ownership check: a
+        // lowercase spelling, a name that merely contains the prefix, and
+        // the word without its underscore are ordinary variables. The exact
+        // family control in the same batch is still dropped.
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
+        const cm = (reconciler as any).buildNginxConfigMap(
+          buildWithAuth([
+            {
+              header: 'X-KLower',
+              valueTemplate: 'Bearer ' + '$' + '{kubernetes_port_443_tcp_addr}',
+            },
+            { header: 'X-KEmbedded', valueTemplate: 'Bearer ' + '$' + '{MY_KUBERNETES_PORT}' },
+            { header: 'X-KJoined', valueTemplate: 'Bearer ' + '$' + '{KUBERNETESPORT}' },
+            { header: 'X-KExact', valueTemplate: 'Bearer ' + '$' + '{KUBERNETES_PORT}' },
+            { header: 'X-Good', valueTemplate: 'Bearer ${SENTRY_AUTH_TOKEN}' },
+          ])
+        )
+        const conf = cm.data['default.conf.template']
+
+        expect(conf).toContain(
+          'proxy_set_header X-KLower "Bearer ${kubernetes_port_443_tcp_addr}";'
+        )
+        expect(conf).toContain('proxy_set_header X-KEmbedded "Bearer ${MY_KUBERNETES_PORT}";')
+        expect(conf).toContain('proxy_set_header X-KJoined "Bearer ${KUBERNETESPORT}";')
+        expect(conf).toContain('proxy_set_header X-Good "Bearer ${SENTRY_AUTH_TOKEN}";')
+        expect(conf).not.toContain('X-KExact')
+        expect(warn).toHaveBeenCalledTimes(1)
+        expect(warn).toHaveBeenCalledWith(
+          'Rejecting authHeader that references a platform-owned variable',
+          { scope: '[HCC]', header: 'X-KExact', envVar: 'KUBERNETES_PORT' }
         )
         warn.mockRestore()
       })
@@ -1277,6 +1510,7 @@ describe('McpServerReconciler remote egress proxy', () => {
             baseUrl: 'https://api.example.com/v1',
             authHeaders: [
               { header: 'X-Path-Distinct', valueTemplate: '$' + '{Path}' },
+              { header: 'X-Kube-Distinct', valueTemplate: '$' + '{kubeconfig}' },
               { header: 'X-Host-Distinct', valueTemplate: '$' + '{kubernetes_service_host}' },
               { header: 'X-Path-Exact', valueTemplate: '$' + '{PATH}' },
               { header: 'X-Good', valueTemplate: 'Bearer ' + '$' + '{OPTIONAL_TOKEN}' },
@@ -1293,6 +1527,9 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(egressContainer.env.filter((e: any) => e.name === 'Path')).toEqual([
         { name: 'Path', value: '' },
       ])
+      expect(egressContainer.env.filter((e: any) => e.name === 'kubeconfig')).toEqual([
+        { name: 'kubeconfig', value: '' },
+      ])
       expect(egressContainer.env.filter((e: any) => e.name === 'kubernetes_service_host')).toEqual([
         { name: 'kubernetes_service_host', value: '' },
       ])
@@ -1300,6 +1537,112 @@ describe('McpServerReconciler remote egress proxy', () => {
         { name: 'OPTIONAL_TOKEN', value: '' },
       ])
       expect(egressContainer.env.map((e: any) => e.name)).not.toContain('PATH')
+    })
+
+    it('does not backfill KUBERNETES_* env names for authHeaders', () => {
+      // A dropped family header must not claim the name either: no
+      // KUBERNETES_* entry may appear in the container env, while the
+      // ordinary sibling placeholder still backfills.
+      const { envSecret: _envSecret, ...specWithoutSecret } = REMOTE_SERVER.spec
+      const server: McpServerCRD = {
+        ...REMOTE_SERVER,
+        spec: {
+          ...specWithoutSecret,
+          remote: {
+            baseUrl: 'https://api.example.com/v1',
+            authHeaders: [
+              { header: 'X-KAddr', valueTemplate: '$' + '{KUBERNETES_PORT_443_TCP_ADDR}' },
+              { header: 'X-KPort', valueTemplate: '$' + '{KUBERNETES_PORT}' },
+              { header: 'X-Good', valueTemplate: 'Bearer ' + '$' + '{OPTIONAL_TOKEN}' },
+            ],
+          },
+        },
+      }
+
+      const deployment = (reconciler as any).buildDeployment(server)
+      const egressContainer = deployment.spec.template.spec.containers.find(
+        (c: any) => c.name === 'egress-proxy'
+      )
+      const names = egressContainer.env.map((e: any) => e.name)
+
+      expect(names.filter((n: string) => n.startsWith('KUBERNETES_'))).toEqual([])
+      expect(egressContainer.env.filter((e: any) => e.name === 'OPTIONAL_TOKEN')).toEqual([
+        { name: 'OPTIONAL_TOKEN', value: '' },
+      ])
+      // The platform appends its two entries last, as before.
+      expect(egressContainer.env.at(-2)).toEqual({
+        name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
+        value: '1',
+      })
+      expect(egressContainer.env.at(-1)).toEqual({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
+    })
+
+    it('characterizes the Path round-trip: a stripped spec.env value renders empty while an envSecret value survives', () => {
+      // Characterization only — this pins today's asymmetry, it does not ask
+      // for a behavior change. Template ownership is exact, so `${Path}`
+      // renders; but the spec.env strip compares in uppercase, so a
+      // spec.env `Path` entry never reaches the container and the backfill
+      // defines `Path` empty instead. The same name declared by envSecret
+      // is emitted as a secretKeyRef today and does fill the header.
+      const { envSecret: _envSecret, ...specWithoutSecret } = REMOTE_SERVER.spec
+      const authHeaders = [
+        { header: 'X-Path-Value', valueTemplate: 'Bearer ' + '$' + '{Path}' },
+        { header: 'X-Good', valueTemplate: 'Bearer ' + '$' + '{OPTIONAL_TOKEN}' },
+      ]
+      const specEnvServer: McpServerCRD = {
+        ...REMOTE_SERVER,
+        spec: {
+          ...specWithoutSecret,
+          env: [{ name: 'Path', value: 'operator-path-value' }],
+          remote: { baseUrl: 'https://api.example.com/v1', authHeaders },
+        },
+      }
+      const envSecretServer: McpServerCRD = {
+        ...REMOTE_SERVER,
+        spec: {
+          ...specWithoutSecret,
+          envSecret: {
+            name: 'remote-creds',
+            keys: [{ secretKey: 'path-key', envVar: 'Path' }],
+          },
+          remote: { baseUrl: 'https://api.example.com/v1', authHeaders },
+        },
+      }
+
+      // Both twins render the same header lines.
+      for (const server of [specEnvServer, envSecretServer]) {
+        const conf = remoteConfig(reconciler, server)
+        expect(conf).toContain('proxy_set_header X-Path-Value "Bearer ${Path}";')
+        expect(conf).toContain('proxy_set_header X-Good "Bearer ${OPTIONAL_TOKEN}";')
+      }
+
+      const specEnvContainer = (reconciler as any)
+        .buildDeployment(specEnvServer)
+        .spec.template.spec.containers.find((c: any) => c.name === 'egress-proxy')
+      // The operator's spec.env value is stripped; only the empty backfill
+      // remains, so the rendered header substitutes to empty.
+      expect(specEnvContainer.env.filter((e: any) => e.name === 'Path')).toEqual([
+        { name: 'Path', value: '' },
+      ])
+      expect(JSON.stringify(specEnvContainer.env)).not.toContain('operator-path-value')
+      // Life witness in the same test: the ordinary placeholder backfills.
+      expect(specEnvContainer.env.filter((e: any) => e.name === 'OPTIONAL_TOKEN')).toEqual([
+        { name: 'OPTIONAL_TOKEN', value: '' },
+      ])
+
+      const envSecretContainer = (reconciler as any)
+        .buildDeployment(envSecretServer)
+        .spec.template.spec.containers.find((c: any) => c.name === 'egress-proxy')
+      // The envSecret twin keeps its Secret-backed value: no empty backfill.
+      expect(envSecretContainer.env.filter((e: any) => e.name === 'Path')).toEqual([
+        {
+          name: 'Path',
+          valueFrom: { secretKeyRef: { name: 'remote-creds', key: 'path-key' } },
+        },
+      ])
+      expect(envSecretContainer.env.filter((e: any) => e.name === 'OPTIONAL_TOKEN')).toEqual([
+        { name: 'OPTIONAL_TOKEN', value: '' },
+      ])
     })
   })
 
@@ -1997,8 +2340,10 @@ describe('McpServerReconciler remote egress proxy', () => {
         // IPv4 address, so the URL hostname setter ignores the assignment and
         // the re-read name still ends in a dot. Rendering it would only 502;
         // the guard rejects it with its own message, distinct from the
-        // IP-literal (H1) rejection, and never echoes the hostname. Life
-        // witness: an ordinary dotted host still canonicalizes (U10 shape).
+        // IP-literal (H1) rejection, and never echoes the hostname in any
+        // dotted spelling: the assertion below uses the dot-stripped stem,
+        // so echoing the single-dot form fails too. Life witness: an
+        // ordinary dotted host still canonicalizes (U10 shape).
         expect((reconciler as any).sanitizeRemoteUrl('https://api.example.com./mcp').hostname).toBe(
           'api.example.com'
         )
@@ -2014,7 +2359,7 @@ describe('McpServerReconciler remote egress proxy', () => {
         const message = (error as Error).message
         expect(message).toContain('remote.baseUrl hostname must not end with a trailing dot')
         expect(message).not.toContain('not an IP address')
-        expect(message).not.toContain(host)
+        expect(message).not.toContain(host.replace(/\.+$/, ''))
       }
     )
 

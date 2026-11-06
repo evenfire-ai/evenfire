@@ -49,7 +49,12 @@ For each remote McpServer, host-context-controller:
    currently still carries their `secretKeyRef`. The proxy env the platform
    sets (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS`, `NGINX_ENVSUBST_FILTER`,
    `NGINX_LOCAL_RESOLVERS`, `LC_ALL`) cannot be used: envsubst would otherwise
-   fill them from the container's own environment. Matching is exact, so a
+   fill them from the container's own environment. An exact-case
+   `KUBERNETES_*` name — the family kubelet uses for injected service env — is
+   rejected outright as a direct placeholder reference, whether it is declared
+   by `spec.env`, by `spec.envSecret` or not at all; only two family members
+   are in the enumerated strip set, so declaration alone never makes one
+   usable. Matching is exact, so a
    distinct-case spelling (`Path`, `kubernetes_service_host`) is a different
    variable and a Secret-backed declaration of it does count. The
    URL parser runs first: it strips TAB/CR/LF and percent-encodes spaces and
@@ -70,14 +75,18 @@ For each remote McpServer, host-context-controller:
    header names restricted to `[A-Za-z0-9-]`, values capped at 2048 chars,
    CR/LF/NUL rejected (HTTP request smuggling / nginx directive-injection
    defense), backslashes and quotes escaped for nginx's quoted-string context.
-   A value that references a platform-owned proxy variable
+   A value that directly references a platform-owned proxy variable
    (`NGINX_LOCAL_RESOLVERS`, `NGINX_ENTRYPOINT_LOCAL_RESOLVERS`,
    `NGINX_ENVSUBST_FILTER`, `LC_ALL`) or a container env name the platform
-   reserves (`PATH`, `KUBERNETES_SERVICE_HOST`, ...) is rejected in both
-   `${NAME}` and `$NAME` form: either would be read from the proxy container's
-   own environment, not from `spec.envSecret`. Matching is exact: a
-   distinct-case reference names a different variable and is allowed. A
-   rejected entry renders no header and adds no env entry.
+   reserves (`PATH`, ...) — including any exact-case `KUBERNETES_*` service
+   name — is rejected in both `${NAME}` and `$NAME` form: either direct
+   reference would be read from the proxy container's own environment, not
+   from `spec.envSecret`. Matching is exact and anchored: a distinct-case
+   reference, or a longer name that merely contains a reserved one, names a
+   different variable and is allowed. A rejected entry renders no header and
+   adds no env entry. Only direct references in the template are covered
+   here; a `$(VAR)` expansion inside a declared value is a separate residual
+   (see Residuals below).
 4. **Deploys this image as the only container** (`egress-proxy`) of the
    per-server Deployment. The ConfigMap mounts at `/etc/nginx/templates`, so
    `envsubst` resolves `${VAR}` placeholders in auth headers and in the baseUrl

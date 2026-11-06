@@ -195,12 +195,29 @@ function isRetiredStatusConditionType(type: string): boolean {
  * True when NAME is a container env name the platform owns, compared exactly.
  * envsubst, Kubernetes env names and Linux all treat case as significant, so a
  * distinct-case spelling (`Path`, `kubernetes_service_host`) names a different
- * variable and is not platform-owned. The `spec.env` strip in sanitizeCrdSpec
- * keeps its own uppercase comparison; callers that mirror that strip compare
- * in uppercase separately and do not go through this helper.
+ * variable and is not platform-owned. An exact-case `KUBERNETES_` prefix is
+ * platform-owned as a family: it is the prefix kubelet uses for injected
+ * service env (`KUBERNETES_SERVICE_HOST`, `KUBERNETES_PORT_443_TCP_ADDR`,
+ * ...), so no rendered template may reference such a name directly, whatever
+ * declares it. The prefix lives only in this predicate, never enumerated in
+ * the sets above. A name that merely contains the prefix
+ * (`MY_KUBERNETES_PORT`) or spells it in a different case is ordinary here.
+ *
+ * The `spec.env` strip in sanitizeCrdSpec keeps its own uppercase comparison
+ * against the enumerated set; callers that mirror that strip compare in
+ * uppercase separately and do not go through this helper. The two rules are
+ * deliberately asymmetric: a `spec.env` entry spelled `Path` is stripped by
+ * the uppercase strip even though `Path` is an ordinary template name here,
+ * so only an `envSecret` declaration can fill `${Path}` (otherwise the
+ * backfill defines it empty); conversely a `KUBERNETES_*` name outside the
+ * enumerated set survives the strip but still may not be referenced.
  */
 function isPlatformOwnedTemplateName(name: string): boolean {
-  return FORBIDDEN_CONTAINER_ENV.has(name) || PLATFORM_OWNED_PROXY_ENV.has(name)
+  return (
+    name.startsWith('KUBERNETES_') ||
+    FORBIDDEN_CONTAINER_ENV.has(name) ||
+    PLATFORM_OWNED_PROXY_ENV.has(name)
+  )
 }
 
 type StatusWriteDecline = 'record-obligation' | 'silent'
@@ -1199,6 +1216,8 @@ export class McpServerReconciler {
     // check cannot rely on a producer strip: it excludes exact platform-owned
     // envSecret names here instead. Matching is exact, like envsubst's: a
     // distinct-case envSecret name is a different variable and does count.
+    // Exact-case KUBERNETES_* names never reach this check: the loop below
+    // rejects them outright before declared-ness is consulted.
     const declaredEnvNames = new Set([
       ...(server.spec.env ?? [])
         .map(entry => entry.name)
@@ -1208,6 +1227,17 @@ export class McpServerReconciler {
         .filter(name => !isPlatformOwnedTemplateName(name)),
     ])
     for (const match of upstreamSearch.matchAll(QUERY_PLACEHOLDER_RE)) {
+      // An exact-case KUBERNETES_* name is rejected outright, however it was
+      // declared: the spec.env strip enumerates only two family members, so
+      // a surviving literal would otherwise count as declared above, and
+      // whether an explicit entry shadows a kubelet-injected value must not
+      // decide what envsubst sends upstream. The error names the
+      // placeholder only; it never echoes the query.
+      if (match[1].startsWith('KUBERNETES_')) {
+        throw new Error(
+          `remote.baseUrl query placeholder \${${match[1]}} names a reserved Kubernetes service variable`
+        )
+      }
       if (PLATFORM_OWNED_PROXY_ENV.has(match[1])) {
         throw new Error(
           `remote.baseUrl query placeholder \${${match[1]}} names an egress proxy variable the platform sets`
@@ -1604,7 +1634,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           const varName = m.slice(2, -1)
           // A header dropped by sanitizeAuthHeader must not still add an entry
           // for a name the platform owns: a backfilled PATH='' would replace the
-          // container PATH, and no CRD entry may claim a platform-owned name.
+          // container PATH, and no CRD entry may claim a platform-owned name,
+          // including an exact-case KUBERNETES_* service name. Only braced
+          // references are scanned here; a bare $NAME gets no entry.
+          // Distinct-case names are ordinary and do backfill: note a spec.env
+          // `Path` entry was already stripped above by the uppercase strip,
+          // so its backfilled empty value is what the header renders unless
+          // envSecret declares `Path`.
           if (isPlatformOwnedTemplateName(varName)) continue
           if (!definedVars.has(varName)) {
             env.push({ name: varName, value: '' })
