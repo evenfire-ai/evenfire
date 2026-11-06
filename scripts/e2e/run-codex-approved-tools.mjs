@@ -178,7 +178,7 @@ function main() {
     }
     // Run the repository invariant; a dependency install exit code is insufficient.
     // --check-only: this phase is time-bounded and must never pay the Electron
-    // runtime download; setup materializes it via plain verify:electron first.
+    // runtime download; the Make entry targets materialize it before the lease.
     const electronCheck = spawnSync('npm', ['run', 'verify:electron', '--', '--check-only'], {
       cwd: path.join(repo, 'desktop-app'),
       env,

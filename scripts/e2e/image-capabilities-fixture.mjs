@@ -307,6 +307,8 @@ async function main() {
     return `http://127.0.0.1:${port}`
   }
   command('make', ['-f', branchMake, 'branch-profile-health'])
+  if (action === 'run')
+    command('npm', ['--prefix', 'desktop-app', 'run', 'verify:electron', '--', '--check-only'])
   const api = `${urlFor('control-api')}/api/v1`
   const kc = (args, input) =>
     command(

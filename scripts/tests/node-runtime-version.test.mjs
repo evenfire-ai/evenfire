@@ -200,6 +200,12 @@ test('the staged Desktop verifier --check-only never executes electron or downlo
     assert.match(cold.stderr, /not materialized and --check-only never downloads/)
     assert.equal(existsSync(marker), false)
     assert.equal(existsSync(dist), false)
+    rmSync(path.join(electron, 'path.txt'))
+    const coldWithoutPath = runCheckOnly()
+    assert.equal(coldWithoutPath.status, 1)
+    assert.match(coldWithoutPath.stderr, /not materialized and --check-only never downloads/)
+    assert.equal(existsSync(marker), false)
+    assert.equal(existsSync(dist), false)
   } finally {
     rmSync(context, { recursive: true, force: true })
   }
