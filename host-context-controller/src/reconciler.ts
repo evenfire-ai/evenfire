@@ -168,7 +168,7 @@ const MAX_AUTH_HEADER_VALUE_LENGTH = 2048
 // Env refs envsubst resolves in an authHeader value: braced `${NAME}` or bare
 // `$NAME`, exact case like envsubst. Extracted only to reject names the CRD
 // does not control; the value itself is never logged.
-const AUTH_HEADER_ENV_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
+export const AUTH_HEADER_ENV_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
 // Query placeholders are expanded by the image entrypoint after HCC has built
 // the ConfigMap. Restrict them to environment-variable names; a name must also
 // be declared by the CRD and survive into the proxy container (see

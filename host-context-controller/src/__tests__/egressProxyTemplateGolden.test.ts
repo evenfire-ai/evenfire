@@ -13,7 +13,11 @@ import {
   createMockCoreApi,
   createMockCustomApi,
 } from '../../test/__fixtures__/testMocks'
-import { McpServerReconciler, countFixedTemplateReferences } from '../reconciler'
+import {
+  AUTH_HEADER_ENV_REF_RE,
+  McpServerReconciler,
+  countFixedTemplateReferences,
+} from '../reconciler'
 import { McpServerCRD } from '../types'
 
 /**
@@ -57,11 +61,6 @@ vi.mock('../config', () => ({
     enforcePluginImageAllowlist: false,
   },
 }))
-
-// Copied from production (reconciler.ts) for the total-reference life
-// witness; the fixed classification itself comes from production's
-// countFixedTemplateReferences.
-const AUTH_HEADER_ENV_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
 
 const GOLDEN_DIR = join(__dirname, 'fixtures', 'egress-proxy-template')
 
