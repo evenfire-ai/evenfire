@@ -339,6 +339,7 @@ export type RespondResult =
       calls: ToolCall[]
       content?: string
       reasoning_content?: string | null
+      provider_continuation?: ProviderContinuation
       usage?: TokenUsage
     }
   | { type: 'need_approval'; approval: PendingApproval }
