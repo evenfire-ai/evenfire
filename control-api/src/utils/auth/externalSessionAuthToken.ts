@@ -12,7 +12,7 @@ const sessionJwtPublicKey = createPublicKey(config.sessionJwtPrivateKey).export(
 
 export function signExternalSessionToken(
   claims: Omit<AuthClaims, 'exp'>,
-  ttlSeconds = 60 * 60 * 12
+  ttlSeconds = 60 * 60 * 24 * 7
 ): string {
   const authGeneration = claims.authGeneration
   if (
