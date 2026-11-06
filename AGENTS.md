@@ -304,25 +304,25 @@ generated ports, profile metadata, logs, and evidence belong under the ignored
 
 ## Desktop Electron installation invariant
 
-Electron's `postinstall` downloads the runtime used by Desktop tests and the
-local T2 gate. When that script does not run, `npm ci` still exits 0 and the
-missing runtime only surfaces later as a test failure that looks like a product
-bug. Nothing in `package.json` can force the script to run, so the invariant is
-enforced by verification rather than by configuration: `npm run verify:electron`
-resolves `require('electron')` and fails when the runtime is absent. Desktop
-validation must use Node 24, which is the CI and runtime contract. Do not
-install `desktop-app` with `--ignore-scripts`, and do not count a Desktop
-test/build result until these checks succeed from `desktop-app`:
+Electron 42 and later download the runtime when the package is first resolved,
+not during `postinstall`. `npm ci` can therefore succeed before the runtime is
+materialized. `npm run verify:electron` resolves Electron and materializes the
+runtime in an unbounded setup phase; `npm run verify:electron -- --check-only`
+checks that an earlier setup phase already materialized it without triggering a
+download. Desktop validation must use Node 24, which is the CI and runtime
+contract. Do not install `desktop-app` with `--ignore-scripts`, and do not count a
+Desktop test/build result until these checks succeed from `desktop-app`:
 
 ```bash
 node --version  # must report v24.x
 npm run verify:electron
 ```
 
-If it fails with `Electron failed to install correctly`, the dependency install
-is incomplete, not a product failure. Stop the gate, switch to Node 24, remove
-only the generated `desktop-app/node_modules/electron` directory, rerun `npm
-ci` with lifecycle scripts enabled, and rerun the checks. Do not set
+If runtime resolution fails, the dependency install or download is incomplete,
+not a product failure. Stop the gate, switch to Node 24, remove only the
+generated `desktop-app/node_modules/electron` directory, rerun `npm ci`, then
+run `npm run verify:electron` without `--check-only` in an unbounded setup phase
+and rerun the checks. Do not set
 `ELECTRON_SKIP_BINARY_DOWNLOAD`, point
 `ELECTRON_OVERRIDE_DIST_PATH` at an unverified binary, or report green evidence
 from a missing runtime. A verified local cache may be used only when its
