@@ -135,10 +135,8 @@ function without(catalog: RawModelsDevCatalog, rawIds: string[]): RawModelsDevCa
 
 describeRealPostgres('attention wire contract (real PostgreSQL)', () => {
   const database = `control_api_attention_wire_${randomBytes(6).toString('hex')}`
-  const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
-    database
-  )
+  // describe.skip still runs this factory, so it must not build a URL without the env.
+  const connectionString = adminUrl ? databaseUrl(adminUrl, database) : ''
   const previousPgEnv = process.env.CONTROL_API_PG_CONNECTION_STRING
 
   let adminPool: Pool
