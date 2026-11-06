@@ -225,6 +225,23 @@ describe('Context writes refuse an added server with no live McpServer', () => {
     expect(allowlistOf(api, 'ctx')).toEqual([])
   })
 
+  it('accepts exactly as many added names as it will verify, and stores them all', async () => {
+    const api = setup()
+    const ctx = await seedContext(api, 'ctx', [])
+    const names = Array.from({ length: 256 }, (_, i) => `srv-${String(i).padStart(3, '0')}`)
+    for (const name of names) await seedServer(api, name)
+    api.customApi.getNamespacedCustomObject.mockClear()
+
+    const res = await put(api, 'ctx', names, ctx.metadata.resourceVersion)
+
+    expect(res.status).toBe(200)
+    const serverReads = api.customApi.getNamespacedCustomObject.mock.calls.filter(
+      ([args]) => args.plural === 'mcpservers'
+    )
+    expect(serverReads).toHaveLength(256)
+    expect(allowlistOf(api, 'ctx')).toEqual(names)
+  })
+
   it('stops reading McpServers once one read fails', async () => {
     const api = setup()
     const ctx = await seedContext(api, 'ctx', [])
