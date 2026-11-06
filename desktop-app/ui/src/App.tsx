@@ -344,6 +344,7 @@ export function App() {
   const compactSidebarWasOpenRef = React.useRef(false)
   const compactSidebarCloseFocusRef = React.useRef<CompactMenuCloseFocus | null>(null)
   const compactNavigationControlOwnedFocusRef = React.useRef(false)
+  const compactNavigationWasCompactRef = React.useRef(compactNavigation)
   const compactNavigationRef = React.useRef(compactNavigation)
   const compactSidebarOpenRef = React.useRef(compactSidebarOpen)
   compactNavigationRef.current = compactNavigation
@@ -1763,6 +1764,32 @@ export function App() {
   }, [])
 
   React.useEffect(() => {
+    const enteredDesktopMode = compactNavigationWasCompactRef.current && !compactNavigation
+    const focusDesktopNavigationOwner = () => {
+      const sidebar = document.getElementById('desktop-sidebar-navigation')
+      const currentRouteItem = sidebar?.querySelector<HTMLElement>(
+        '.nav-link.active .nav-link-main, .nav-available-app.active'
+      )
+      const navigationLandmark = sidebar?.querySelector<HTMLElement>('.nav-links')
+      const isVisibleOwner = (element: HTMLElement | null | undefined): element is HTMLElement =>
+        Boolean(
+          element &&
+          element.isConnected &&
+          element.getClientRects().length > 0 &&
+          getComputedStyle(element).visibility !== 'hidden' &&
+          !element.closest('[inert], [aria-hidden="true"]')
+        )
+      if (isVisibleOwner(currentRouteItem)) {
+        currentRouteItem.setAttribute('data-compact-navigation-focus-owner', 'true')
+        currentRouteItem.focus()
+      } else if (isVisibleOwner(navigationLandmark)) {
+        if (!navigationLandmark.hasAttribute('tabindex')) {
+          navigationLandmark.setAttribute('tabindex', '-1')
+        }
+        navigationLandmark.setAttribute('data-compact-navigation-focus-owner', 'true')
+        navigationLandmark.focus()
+      }
+    }
     if (compactSidebarWasOpenRef.current && !compactSidebarOpen) {
       if (compactNavigation) {
         const activeElement = document.activeElement
@@ -1775,36 +1802,18 @@ export function App() {
           !sidebar?.contains(activeElement)
         if (!destinationOwnsFocus) compactSidebarTriggerRef.current?.focus()
       } else if (compactNavigationControlOwnedFocusRef.current) {
-        const sidebar = document.getElementById('desktop-sidebar-navigation')
-        const currentRouteItem = sidebar?.querySelector<HTMLElement>(
-          '.nav-link.active .nav-link-main, .nav-available-app.active'
-        )
-        const navigationLandmark = sidebar?.querySelector<HTMLElement>('.nav-links')
-        const isVisibleOwner = (element: HTMLElement | null | undefined): element is HTMLElement =>
-          Boolean(
-            element &&
-            element.isConnected &&
-            element.getClientRects().length > 0 &&
-            getComputedStyle(element).visibility !== 'hidden' &&
-            !element.closest('[inert], [aria-hidden="true"]')
-          )
-        if (isVisibleOwner(currentRouteItem)) {
-          currentRouteItem.setAttribute('data-compact-navigation-focus-owner', 'true')
-          currentRouteItem.focus()
-        } else if (isVisibleOwner(navigationLandmark)) {
-          if (!navigationLandmark.hasAttribute('tabindex')) {
-            navigationLandmark.setAttribute('tabindex', '-1')
-          }
-          navigationLandmark.setAttribute('data-compact-navigation-focus-owner', 'true')
-          navigationLandmark.focus()
-        }
+        focusDesktopNavigationOwner()
       }
+    }
+    if (enteredDesktopMode && document.activeElement === compactSidebarTriggerRef.current) {
+      focusDesktopNavigationOwner()
     }
     if (!compactSidebarOpen) {
       compactSidebarCloseFocusRef.current = null
       compactNavigationControlOwnedFocusRef.current = false
     }
     compactSidebarWasOpenRef.current = compactSidebarOpen
+    compactNavigationWasCompactRef.current = compactNavigation
   }, [compactNavigation, compactSidebarOpen])
 
   React.useEffect(() => {

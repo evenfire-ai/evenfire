@@ -1324,6 +1324,63 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     sidebarHarness.renderActual = false
   })
 
+  it('transfers settled compact-trigger focus to desktop navigation after mode entry', async () => {
+    let modeChange: ((event: MediaQueryListEvent) => void) | null = null
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => {
+        modeChange = listener as (event: MediaQueryListEvent) => void
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({
+      length: 1,
+      item: () => null,
+      [Symbol.iterator]: function* () {
+        yield {} as DOMRect
+      },
+    } as DOMRectList)
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+
+    const close = document.querySelector('.sidebar-compact-close') as HTMLElement
+    const trigger = screen.getByTestId('compact-navigation-toggle')
+    expect(close).toBeTruthy()
+    close.focus()
+    fireEvent.click(close)
+    await waitFor(() => {
+      expect(sidebarHarness.props?.compactMenuOpen).toBe(false)
+      expect(document.activeElement).toBe(trigger)
+    })
+
+    act(() => {
+      media.matches = false
+      modeChange?.({ matches: false } as MediaQueryListEvent)
+    })
+
+    const routeItem = screen.getByTestId('nav-chat')
+    await waitFor(() => {
+      expect(document.activeElement).toBe(routeItem)
+      expect(routeItem.closest('[inert], [aria-hidden="true"]')).toBeNull()
+      expect(document.querySelector('.left-nav.compact-open')).toBeNull()
+    })
+    expect(routeItem.isConnected).toBe(true)
+    expect(routeItem.getAttribute('data-compact-navigation-focus-owner')).toBe('true')
+    sidebarHarness.renderActual = false
+  })
+
   it('clears compact Settings before revealing native content on desktop entry', async () => {
     let modeChange: ((event: MediaQueryListEvent) => void) | null = null
     const media = {
