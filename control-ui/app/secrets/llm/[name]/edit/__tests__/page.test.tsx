@@ -7,6 +7,7 @@ import {
   render as rtlRender,
   screen,
   waitFor,
+  waitForElementToBeRemoved,
   within,
 } from '@testing-library/react'
 import { ToastProvider } from '@components/Toast'
@@ -91,7 +92,11 @@ async function renderEditor() {
       <EditLlmSecretPage />
     </ToastProvider>
   )
-  await screen.findByRole('button', { name: 'Update secret' })
+  // The loading skeleton also renders "Update secret", disabled, so only its
+  // removal proves that the secret and Host reads finished.
+  await waitForElementToBeRemoved(() =>
+    screen.queryByRole('status', { name: 'LLM secret loading' })
+  )
   return view
 }
 
