@@ -30,3 +30,23 @@ export function registryNameSlug(entryName: string): string {
     .replace(/^-|-$/g, '')
     .slice(0, 40)
 }
+
+/**
+ * Whether upgrading by `requestedName` could land on the entry a resource was
+ * installed from (`installedCatalogId`), before asking the registry. A scoped name
+ * is canonical; only an unscoped name may come back under a scope, and then only
+ * with the same name. Anything else is a different entry whatever the registry
+ * answers, so the caller can refuse it without fetching a target that may not exist.
+ */
+export function mayResolveToInstalledEntry(
+  installedCatalogId: string,
+  requestedName: string
+): boolean {
+  if (installedCatalogId === requestedName) return true
+  const installedScope = entryNameScope(installedCatalogId)
+  return (
+    installedScope !== null &&
+    entryNameScope(requestedName) === null &&
+    installedCatalogId === `${installedScope}/${requestedName}`
+  )
+}

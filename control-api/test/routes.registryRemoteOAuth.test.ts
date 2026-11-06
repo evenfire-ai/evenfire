@@ -558,4 +558,44 @@ describe('registry install/upgrade stamp the catalog identity the registry retur
       expect(await gw.getSecret('x-srv-credentials', NS)).toEqual(beforeSecret)
     }
   )
+
+  it.each([
+    // [installed via, v1 resolved as, upgrade requested]
+    ['scoped install, other scoped entry', '@clerum/x-mcp', '@clerum/x-mcp', '@acme/gone-mcp'],
+    [
+      'scoped install, same name under another scope',
+      '@clerum/x-mcp',
+      '@clerum/x-mcp',
+      '@acme/x-mcp',
+    ],
+    ['alias install, other alias', 'x-mcp', '@clerum/x-mcp', 'gone-mcp'],
+    ['legacy alias annotation, its scoped form', 'x-mcp', 'x-mcp', '@clerum/x-mcp'],
+  ])(
+    '%s that the registry does not have ⇒ 409 mcp_server_entry_identity_mismatch, not the registry 404',
+    async (_label, installName, v1Name, upgradeName) => {
+      const gw = new MockGateway(NS)
+      const app = makeApp(gw)
+      await installVia(app, installName, plainRemoteRow(v1Name))
+      const writes = spyWrites(gw)
+      vi.mocked(getEntryVersion).mockRejectedValueOnce(
+        Object.assign(new Error('Registry 404'), { status: 404 })
+      )
+
+      const res = await request(app)
+        .post('/admin/registry/upgrade')
+        .send({
+          serverName: 'x-srv',
+          registryEntryName: upgradeName,
+          registryEntryVersion: '2.0.0',
+          credentials: { API_KEY: 'k2' },
+        })
+
+      expect(res.status).toBe(409)
+      expect(res.body).toEqual({
+        error: 'mcp_server_entry_identity_mismatch',
+        reason: `McpServer "x-srv" was installed from "${v1Name}", not "${upgradeName}" — uninstall and install to change entry`,
+      })
+      for (const write of writes) expect(write).not.toHaveBeenCalled()
+    }
+  )
 })

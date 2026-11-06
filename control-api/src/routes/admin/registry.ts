@@ -104,7 +104,12 @@ import {
   shouldAttachEvenfirePullSecret,
 } from './registryImagePullSecret.js'
 import { checkEvenfireImageRefMatchesEntry } from './registryImageRefIdentity.js'
-import { OFFICIAL_EVENFIRE_SCOPES, entryNameScope, registryNameSlug } from './registryNaming.js'
+import {
+  OFFICIAL_EVENFIRE_SCOPES,
+  entryNameScope,
+  mayResolveToInstalledEntry,
+  registryNameSlug,
+} from './registryNaming.js'
 import {
   pullSecretErrorResponse,
   recipeReferencesPlatformImage,
@@ -4168,6 +4173,21 @@ export function createAdminRegistryRouter(
           spec: existingServer.spec ?? {},
         }
 
+        const installedCatalogId = getCatalogId(existingServer.metadata)
+        const identityMismatch = (requested: string) => {
+          res.status(409).json({
+            error: 'mcp_server_entry_identity_mismatch',
+            reason: `McpServer "${body.serverName}" was installed from "${installedCatalogId}", not "${requested}" — uninstall and install to change entry`,
+          })
+        }
+        if (
+          installedCatalogId &&
+          !mayResolveToInstalledEntry(installedCatalogId, body.registryEntryName)
+        ) {
+          identityMismatch(body.registryEntryName)
+          return
+        }
+
         // 2. Fetch new version metadata
         const entry = await getEntryVersion(body.registryEntryName, body.registryEntryVersion)
 
@@ -4175,16 +4195,12 @@ export function createAdminRegistryRouter(
         // resolves to its @clerum name), so comparing only the requested name would
         // refuse upgrading through the same alias it was installed with. CRs written
         // before that carry the requested name, which still has to match them.
-        const installedCatalogId = getCatalogId(existingServer.metadata)
         if (
           installedCatalogId &&
           installedCatalogId !== entry.name &&
           installedCatalogId !== body.registryEntryName
         ) {
-          res.status(409).json({
-            error: 'mcp_server_entry_identity_mismatch',
-            reason: `McpServer "${body.serverName}" was installed from "${installedCatalogId}", not "${entry.name}" — uninstall and install to change entry`,
-          })
+          identityMismatch(entry.name)
           return
         }
         // Same reason from the other side: a CR that is not remote-OAuth would get the
