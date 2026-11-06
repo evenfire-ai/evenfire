@@ -328,6 +328,13 @@ ci` with lifecycle scripts enabled, and rerun the checks. Do not set
 from a missing runtime. A verified local cache may be used only when its
 version and checksum are recorded in the run evidence.
 
+## Authenticated Desktop services
+
+For authenticated service or transport work under `desktop-app/**`, read and
+apply the canonical
+[Authenticated Service Integration](desktop-app/README.md#authenticated-service-integration)
+contract before inspecting implementation details.
+
 ## Branch naming
 
 Do not create new branches with agent/vendor prefixes such as `codex/*`,

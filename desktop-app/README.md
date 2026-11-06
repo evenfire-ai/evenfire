@@ -75,6 +75,38 @@ The app now auto-populates default RPC `hostRefs` from authorized agent names re
 
 Same-team mutations keep the native auth/environment owner from their initial session check until the server request completes. This lets an already-dispatched mutation commit before a queued logout or environment switch, so those transitions may wait through the request deadline (`REQUEST_TIMEOUT_MS`, 60 seconds by default). Operations configured for one transient retry can hold the owner through a second bounded attempt. Same-team reads release the owner while waiting on the server and validate the captured session and environment before accepting the result.
 
+## Authenticated Service Integration
+
+Every new or materially changed Desktop service, authenticated client, or transport must use the
+existing main-process `SessionAuthorityCoordinator`, its accepted-owner lease, and the approved
+`AppService` / authenticated-client boundary. A service may classify and report its own operation
+result; it must not own global logout policy, a session token, an accepted-session generation, or a
+parallel authentication authority.
+
+Before dispatch, capture the exact current owner (environment, stable principal, accepted lease and
+generation) and the credential kind used by the operation. Revalidate that owner at final dispatch
+and before publishing any success, error, callback, `catch`, `finally`, cache write, IPC event, or
+renderer state. Cancel owner-bound work on retirement or replacement when its transport supports
+cancellation. A late result from an old owner must not mutate or publish into a replacement owner's
+state.
+
+Only producer-attested expiration or invalidation of the current accepted **main-session**
+credential, or the coordinator's existing absolute M-lease deadline at a protected demand, may
+request the centralized retirement transition. An HTTP 401/403 status, error text, proxy response,
+or service-authentication failure alone is not proof. Resource authorization denial, internal service
+credentials, expiration of a derived RPC token or its derived RPC cookie, network loss, aborts,
+timeouts, and 429/5xx failures remain local to their operation and credential scope. RPC recovery
+remains the existing bounded one-retry flow and never refreshes or extends the main session. If a
+producer cannot provide trusted rejection provenance, fail locally and leave the accepted owner
+intact; resolve the producer contract before connecting it to global retirement.
+
+For each service and transport, document its credential and owner source, credential scope, trusted
+main-session rejection producer, dispatch and result guards, cancellation/deadline/retry policy,
+background and restart behavior, and producer-backed positive and negative tests. Inventory direct
+HTTP, SSE, WebSocket, cookie-based, IPC, and other authenticated entry points. A raw transport does
+not inherit coverage merely because another client uses the approved boundary. Do not add timer
+polling, silent main-session renewal, a service-owned logout, or a second authority.
+
 ## Architecture
 
 - `src/` (main/preload/services): privileged Electron process code and secure IPC handlers.
