@@ -75,6 +75,16 @@ the model is eligible. Only models the catalog lists for the first time after
 the upgrade can start enabled. Review the disabled discovered models under
 `/llm-models` and enable the ones you want to serve.
 
+### Models removed before the upgrade
+
+Migration `0136_llm_catalog_dismissed_backfill` marks every model deleted
+through `/llm-models` before the upgrade as removed, from the allowlist audit,
+so the sync re-adds it disabled rather than enabled. A model renamed before the
+upgrade is different: the audit records only its new name, so the old name is
+not marked, and the sync may re-add it, enabled if its provider's policy is ON
+and it is eligible. After the first live sync, review `/llm-models` for models
+you had renamed away and disable or delete them.
+
 ## New installations
 
 A new installation starts with an empty allowlist and no prices.

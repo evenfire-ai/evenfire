@@ -6360,6 +6360,27 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0135_llm_retire_seeded_catalog',
     apply: applyRetireSeededLlmCatalog,
   },
+  {
+    version: '0136_llm_catalog_dismissed_backfill',
+    apply: async db => {
+      // A pair an operator deleted before llm_catalog_dismissed existed has no
+      // tombstone, so the first catalog sync with its provider's auto-enable on
+      // would insert it enabled again. Every DELETE through the admin API has
+      // always written an audit row with action 'delete', so those removals are
+      // recovered from it. A pair renamed away before the upgrade cannot be:
+      // the audit row of a rename names only the new pair. No filter on the
+      // pair being present again: the runtime keeps a tombstone after a later
+      // CREATE too, and it only gates enabling a pair the sync inserts.
+      await db.query(`
+        INSERT INTO llm_catalog_dismissed (provider, model, dismissed_at)
+        SELECT provider, model, MIN(created_at)
+          FROM llm_allowed_models_audit
+         WHERE action = 'delete'
+         GROUP BY provider, model
+        ON CONFLICT (provider, model) DO NOTHING;
+      `)
+    },
+  },
 ]
 
 /**

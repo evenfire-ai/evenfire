@@ -7,7 +7,12 @@ import {
   LEGACY_SEEDED_MODEL_PRICES,
 } from '../src/data/llmCatalogLegacySeeds.js'
 import { initDb, withTransaction } from '../src/db.js'
-import { createAllowedModel, updateAllowedModel } from '../src/services/llmAllowedModels.js'
+import {
+  createAllowedModel,
+  deleteAllowedModel,
+  listEnabledGroupedByProvider,
+  updateAllowedModel,
+} from '../src/services/llmAllowedModels.js'
 import { LlmAllowedModelsConfigMapWriter } from '../src/services/llmAllowedModelsConfigMap.js'
 import { syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
 import { listLlmPrices, updateLlmPrice } from '../src/services/llmPrices.js'
@@ -359,6 +364,65 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
       expect(rows.get(k)!.stale).toBe(true)
       expect(rows.get(k)!.enabled).toBe(true)
       for (const s of UNLISTED_SEEDS) expect(rows.get(key(s.provider, s.model))!.stale).toBe(false)
+    })
+  })
+
+  describe('0136: a pair deleted before the upgrade stays dismissed', () => {
+    // A listed seed of a provider whose auto-enable defaults ON.
+    const DELETED_SEED = { provider: 'claude', model: 'claude-haiku-4-5' } as const
+    const BACKFILL = '0136_llm_catalog_dismissed_backfill'
+    let pool: Pool
+
+    const tombstones = async () =>
+      (
+        await pool.query<{ provider: string; model: string }>(
+          'SELECT provider, model FROM llm_catalog_dismissed ORDER BY provider, model'
+        )
+      ).rows.map(r => key(r.provider, r.model))
+
+    beforeAll(async () => {
+      pool = await freshDatabase('control_api_dismissed_backfill')
+      await applyLegacyCatalogSeeds(pool)
+      const { rows } = await pool.query<{ id: string }>(
+        'SELECT id FROM llm_allowed_models WHERE provider = $1 AND model = $2',
+        [DELETED_SEED.provider, DELETED_SEED.model]
+      )
+      expect(rows).toHaveLength(1)
+      // The real delete writes the audit row the pre-upgrade delete wrote
+      // (same writeAudit call); the tombstone it also writes did not exist
+      // before the upgrade, so the table goes with it and the runner is
+      // rewound to before 0132.
+      await withTransaction(tx => deleteAllowedModel(rows[0].id, 'test-admin', tx), pool)
+      await pool.query('DROP TABLE llm_catalog_dismissed')
+      await pool.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [
+        ['0132_llm_catalog_dismissed', MIGRATION, BACKFILL],
+      ])
+      await initDb({ connect: () => pool.connect() })
+    })
+
+    it('backfills the tombstone from the audit, and the sync does not enable the pair', async () => {
+      const k = key(DELETED_SEED.provider, DELETED_SEED.model)
+      expect(LISTED.has(k)).toBe(true)
+      expect(await tombstones()).toEqual([k])
+
+      await sync(pool, CATALOG)
+      const rows = await allowed(pool)
+      // Auto-enable is on for the provider: other new claude pairs are enabled.
+      expect(
+        [...rows.values()].some(
+          r => r.provider === 'claude' && !SEED_KEYS.has(key(r.provider, r.model)) && r.enabled
+        )
+      ).toBe(true)
+      expect(rows.get(k)?.enabled ?? false).toBe(false)
+      const served = await listEnabledGroupedByProvider(pool)
+      expect((served.claude ?? []).map(m => m.model)).not.toContain(DELETED_SEED.model)
+    })
+
+    it('is idempotent: running it again adds nothing', async () => {
+      const before = await tombstones()
+      await pool.query('DELETE FROM schema_migrations WHERE version = $1', [BACKFILL])
+      await initDb({ connect: () => pool.connect() })
+      expect(await tombstones()).toEqual(before)
     })
   })
 

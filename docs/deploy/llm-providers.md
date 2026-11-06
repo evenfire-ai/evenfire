@@ -167,7 +167,9 @@ cannot decide (see "Offline installations"). Whether an inserted row starts
 - **A live, plausible run.** Only a successful fetch of models.dev can enable a
   model; see "Offline installations" below.
 - **No earlier removal.** A model an operator deleted (or renamed away) comes
-  back disabled.
+  back disabled. Deletions made before this release are recovered from the
+  allowlist audit on upgrade; a model renamed away before it is not (see
+  [the upgrade note](llm-catalog-seed-retirement-upgrade.md#models-removed-before-the-upgrade)).
 - **Per-run caps.** One run enables at most
   `LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` models per provider
   (default 100) and `LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` in total (default
