@@ -213,6 +213,36 @@ describe('PR1087 App-root native visibility owners', () => {
     await cleanupNativeCommitTestHarness()
   })
 
+  it('keeps real Composer focus after compact New Chat settles', async () => {
+    renderApp()
+    expect(await screen.findByTestId('nav-files')).toBeTruthy()
+
+    const trigger = screen.getByTestId('compact-navigation-toggle')
+    fireEvent.click(trigger)
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+
+    fireEvent.click(screen.getByTestId('nav-new-chat'))
+    await flushFrames()
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const composer = await screen.findByTestId('chat-input')
+    await waitFor(() => expect(document.activeElement).toBe(composer))
+    expect(composer.isConnected).toBe(true)
+    const composerBounds = composer.getBoundingClientRect()
+    expect(composerBounds.width).toBeGreaterThan(0)
+    expect(composerBounds.height).toBeGreaterThan(0)
+    expect(getComputedStyle(composer).visibility).not.toBe('hidden')
+
+    fireEvent.click(trigger)
+    const backdrop = document.querySelector('.sidebar-mobile-backdrop')
+    expect(backdrop).toBeTruthy()
+    fireEvent.click(backdrop!)
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+  })
+
   it('joins the real release-status producer and App-root dialog with a mounted SandboxUiPage', async () => {
     compactMedia(false)
     let resolveReleaseStatus!: (status: {
