@@ -76,7 +76,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
-  vi.clearAllMocks()
+  // resetAllMocks, not clearAllMocks: a test that fails mid-way must not leave
+  // queued *Once responses for the next test.
+  vi.resetAllMocks()
 })
 
 describe('LlmCatalogAutoEnableDialog', () => {
