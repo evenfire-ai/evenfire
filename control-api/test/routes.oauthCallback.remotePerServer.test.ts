@@ -339,6 +339,82 @@ describe('GET /api/v1/oauth-callback/remote/:serverName/:installNonce?', () => {
   })
 })
 
+/**
+ * A same-name reinstall between the mint and the callback, on the remote callback
+ * URIs. The CR is recreated from the bytes the real install wrote, so only its uid
+ * changes, which is exactly what a pre-registered reinstall with the same app keeps.
+ */
+describe('remote callbacks refuse a consent started on a previous installation (crUid)', () => {
+  async function reinstallSameName(name: string): Promise<void> {
+    const cr = (await gateway.getResource('mcpservers', name, NS)) as {
+      metadata: Record<string, unknown> & { uid?: string }
+      spec: unknown
+    }
+    const { uid: _uid, resourceVersion: _rv, creationTimestamp: _ts, ...metadata } = cr.metadata
+    await gateway.deleteResource('mcpservers', name, NS)
+    await gateway.createResource('mcpservers', { metadata, spec: cr.spec }, NS)
+    const after = (await gateway.getResource('mcpservers', name, NS)) as {
+      metadata: { uid?: string }
+    }
+    expect(after.metadata.uid).toBeTruthy()
+    expect(after.metadata.uid).not.toBe(cr.metadata.uid)
+  }
+
+  const variants = [
+    ['per-server', () => notion, (redirectUri: string) => new URL(redirectUri).pathname],
+    ['shared', () => notionWithIss, () => '/api/v1/oauth-callback/remote'],
+  ] as const
+
+  async function callback(name: string, path: string, state: string) {
+    const oauth = await oauthOf(name)
+    return request(app)
+      .get(path)
+      .query({
+        code: 'CODE',
+        state,
+        ...(oauth.issForCallback ? { iss: String(oauth.issForCallback) } : {}),
+      })
+  }
+
+  it.each(variants)(
+    '%s: the installation the consent started on → 200, one exchange',
+    async (_label, discovery, path) => {
+      const redirectUri = await install(
+        'hubspot',
+        'pre-registered',
+        discovery(),
+        PILOTS.notion.mcpUrl
+      )
+      const state = await stateFor('hubspot')
+
+      const res = await callback('hubspot', path(redirectUri), state)
+
+      expect(res.status).toBe(200)
+      expect(tokenEndpoint.posts).toHaveLength(1)
+    }
+  )
+
+  it.each(variants)(
+    '%s: a same-name reinstall between mint and callback → 400 oauth_state_outdated, no exchange',
+    async (_label, discovery, path) => {
+      const redirectUri = await install(
+        'hubspot',
+        'pre-registered',
+        discovery(),
+        PILOTS.notion.mcpUrl
+      )
+      const state = await stateFor('hubspot')
+      await reinstallSameName('hubspot')
+
+      const res = await callback('hubspot', path(redirectUri), state)
+
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'oauth_state_outdated' })
+      expect(tokenEndpoint.posts).toHaveLength(0)
+    }
+  )
+})
+
 describe('POST /api/v1/internal/mcp-oauth/authorize-url — remote redirect URI', () => {
   it('per-server DCR: the authorize redirect_uri is the URI the install registered', async () => {
     const registered = await install('atlassian', 'dcr', atlassian, ATLASSIAN_V2_PILOT.mcpUrl)
