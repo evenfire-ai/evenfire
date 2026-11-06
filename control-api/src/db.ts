@@ -6412,9 +6412,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
  * that Hosts on upgraded installs may be serving. So the two differ by design:
  * a fresh install starts with no seeded rows and no prices, an upgraded one
  * keeps the seeded rows (the ones models.dev lists handed to the sync, the rest
- * left manual) and the placeholder prices. `schema_migrations` records only
- * version names, so editing the bodies does not make an upgraded install run
- * them again.
+ * left manual) and the placeholder prices. `schema_migrations` keys each
+ * applied migration by version name, with no checksum of its body, so editing
+ * the bodies does not make an upgraded install run them again.
  */
 async function applyRetireSeededLlmCatalog(db: DbClient): Promise<void> {
   await db.query(
