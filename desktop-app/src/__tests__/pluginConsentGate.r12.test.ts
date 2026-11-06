@@ -1,28 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { app, shell } from 'electron'
 import fc from 'fast-check'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests, unbindChatStore } from '../chatStoreBinding.js'
-import { wireMainWindowRendererReadiness } from '../mainWindowReadiness.js'
 import { CONSENT_PROMPT_COOLDOWN_MS, PluginConsentGate } from '../pluginConsentGate.js'
 import type { ConsentStore } from '../pluginConsentStore.js'
 import { PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL } from '../pluginSdkProtocol.js'
 import { _resetPluginSdkRuntimeForTests, initPluginSdkRuntime } from '../pluginSdkRuntime.js'
 import type { PinnedPluginSurface } from '../pluginSurfaceRegistry.js'
 import { _resetPluginSurfacesForTests, resolvePluginSurface } from '../pluginSurfaceRegistry.js'
-import { SANDBOX_UI_MINT_TIMEOUT_MS } from '../rpcProxyClient.js'
-import {
-  getActiveSandboxUi,
-  getActiveSandboxUiLocation,
-  unmountSandboxUiView,
-} from '../sandboxUiDriver.js'
-import {
-  SANDBOX_UI_REFRESH_INTERVAL_MS,
-  _resetSandboxUiRefreshForTests,
-} from '../sandboxUiSessionRefresh.js'
+import { getActiveSandboxUi, unmountSandboxUiView } from '../sandboxUiDriver.js'
+import { _resetSandboxUiRefreshForTests } from '../sandboxUiSessionRefresh.js'
 import { FakeParentWindow, electronMocks } from './__fixtures__/sandboxUiElectronFakes.js'
 
 // The open/close lifecycle is exercised end to end through the REAL AppService,
@@ -151,8 +141,7 @@ vi.mock('../tokenStore.js', () => ({
 
 type Listener = (...args: unknown[]) => void
 
-// rpc-proxy's mint contract: 204 + a Path-scoped Set-Cookie on success, any
-// other status with a text body on failure.
+// rpc-proxy's mint success contract: 204 + a Path-scoped Set-Cookie.
 function mintOk(recipeName: string): Response {
   return new Response(null, {
     status: 204,
@@ -162,29 +151,6 @@ function mintOk(recipeName: string): Response {
         `Path=/api/v1/sandbox-ui/sandbox-recipes/${recipeName}/; HttpOnly`,
     },
   })
-}
-
-function mintFails(status: number, body: string): Response {
-  return new Response(body, { status })
-}
-
-// rpc-proxy accepted the mint and never answers: it settles only if the client
-// aborts it.
-function mintHangs(init?: RequestInit): Promise<Response> {
-  return new Promise<Response>((_resolve, reject) => {
-    const signal = init?.signal
-    signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
-  })
-}
-
-// `AbortSignal.timeout` runs on the runtime's own timers, which fake timers do
-// not drive. The mint bound is shrunk to a few ms instead, keyed on its exact
-// value so the app-wide 60 s default is left untouched.
-function shrinkMintBound(toMs = 25) {
-  const realTimeout = AbortSignal.timeout.bind(AbortSignal)
-  vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms =>
-    realTimeout(ms === SANDBOX_UI_MINT_TIMEOUT_MS ? toMs : ms)
-  )
 }
 
 const mintResponders = new Map<string, (init?: RequestInit) => Response | Promise<Response>>()
@@ -207,12 +173,6 @@ const fetchMock = vi.fn(
     return respond ? respond(init) : mintOk(recipeName)
   }
 )
-
-function mintCallsFor(recipeName: string): number {
-  return fetchMock.mock.calls.filter(([input]) =>
-    String(input).includes(`/sandbox-recipes/${recipeName}/session`)
-  ).length
-}
 
 function makeService(): AppService {
   const svc = new AppService()
