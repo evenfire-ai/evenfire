@@ -170,7 +170,9 @@ export function useRemoteOAuthSlotActions({
         try {
           setAgentAccess(await loadAgentAccess(server.name))
         } catch {
-          // The failure message below already asks for a reload.
+          // Without a fresh read the dialog would keep stale resource versions and bound
+          // agents, so a retry could only conflict; it closes and the error stays on the page.
+          setAgentAccess(null)
         }
         setError(message)
         return false

@@ -14,6 +14,7 @@ import type { ContextResource, HostResource } from '../../lib/api'
 import { __resetRegistryCapabilityCacheForTests } from '../../lib/hooks/useRegistryCapability'
 import { CATALOG_SLOTS } from '../../test/fixtures/catalogRemoteOAuthWire'
 import {
+  TOO_MANY_MCP_SERVERS_BODY,
   contextRejectionResponse,
   okJsonResponse,
   unknownMcpServerBody,
@@ -295,6 +296,40 @@ describe('Marketplace slot actions', () => {
       ).toBeNull()
     )
     expect(api.getRegistryCatalog).toHaveBeenCalledTimes(2)
+  })
+
+  it('closes Agents… when the re-read after a refused write fails, keeping the error', async () => {
+    const contexts: ContextResource[] = [
+      {
+        metadata: { name: 'ctx-support', namespace: 'default', resourceVersion: '11' },
+        spec: { contextId: 'ctx-support', mcpServers: [] },
+      } as ContextResource,
+    ]
+    const hosts: HostResource[] = [
+      { metadata: { name: 'support' }, spec: { host: 'Support', contextRef: 'ctx-support' } },
+    ] as HostResource[]
+    vi.mocked(api.getContexts)
+      .mockResolvedValueOnce({ items: contexts })
+      .mockRejectedValueOnce(new Error('contexts unavailable'))
+    vi.mocked(api.getHosts).mockResolvedValue({ items: hosts })
+    fetchMock.mockResolvedValueOnce(contextRejectionResponse(TOO_MANY_MCP_SERVERS_BODY))
+
+    render(<RegistryCatalog />)
+    await openMenu('@evenfire/linear-remote')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Agents… (per user)' }))
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Give agents access to this connector',
+    })
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /Support/ }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add to agent' }))
+
+    expect(await screen.findByText(/add fewer at once and try again/)).toBeInTheDocument()
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', { name: 'Give agents access to this connector' })
+      ).toBeNull()
+    )
+    expect(api.getContexts).toHaveBeenCalledTimes(2)
   })
 
   it('keeps each uninstalling connector busy until its own delete settles', async () => {
