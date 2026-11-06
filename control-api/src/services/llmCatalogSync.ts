@@ -669,8 +669,12 @@ async function reconcileProviderRows(
         autoEnabled: providerCount.autoEnabled,
         maxPerProvider: decision.maxPerProvider,
         maxPerRun: decision.maxPerRun,
+        // The cron is off by default: without it, only a manual sync or a
+        // restart (boot sync) runs again, so the operator needs to know which.
+        cronEnabled: config.llmCatalogSyncCronEnabled,
+        bootSyncEnabled: config.llmCatalogBootSyncEnabled,
       },
-      'auto-enable cap reached: the remaining new models of this provider are not inserted and will be enabled by the next runs; switching the provider to OFF now would insert them disabled for good'
+      'auto-enable cap reached: the remaining new models of this provider are not inserted yet; a later sync run (the cron when enabled, a manual sync, or the boot sync on restart) inserts them, enabled if the provider is still ON; switching the provider to OFF before then inserts them disabled for good'
     )
   }
 

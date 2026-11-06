@@ -144,7 +144,8 @@ type Config = {
   // in total. They bound what a single run adds to the allowlist ConfigMap,
   // whose 1 MiB limit makes every later publication fail once crossed. Models
   // over the cap are not inserted at all, so a later run can still enable them;
-  // a large legitimate catalog completes over several runs.
+  // a large legitimate catalog completes over several runs. With the cron off
+  // (the code default) a later run is only a manual sync or a boot sync.
   llmCatalogAutoEnableMaxPerProviderPerRun: number
   llmCatalogAutoEnableMaxPerRun: number
   // Default OFF. Codex subscription management/admission stays dark until

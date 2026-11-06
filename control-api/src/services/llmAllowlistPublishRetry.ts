@@ -5,9 +5,10 @@
  * Postgres under the publish lock, so a retry can never publish an older state
  * and is a no-op when the CM already matches.
  *
- * Without it, a failed publish stays unrepaired until the next sync run (24 h by
- * default), a boot or an admin mutation, while control-api already accepts the
- * new models and mcp-host still rejects them.
+ * Without it, a failed publish stays unrepaired until the next sync run (a cron
+ * tick, 24 h apart when the cron is on, or a manual sync), a boot or an admin
+ * mutation, while control-api already accepts the new models and mcp-host still
+ * rejects them.
  *
  * The state is per process and in memory: a replica that dies with a retry
  * pending loses it, and the next sync, boot or mutation converges instead.

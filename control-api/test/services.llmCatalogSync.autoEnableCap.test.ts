@@ -5,6 +5,7 @@
  * live catalog; only the fields under test are altered.
  */
 import { describe, expect, it, vi } from 'vitest'
+import { config } from '../src/config.js'
 import { syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
 import {
   type RawModelsDevCatalog,
@@ -109,8 +110,13 @@ describe('catalog sync auto-enable cap', () => {
         autoEnabled: 2,
         maxPerProvider: 2,
         maxPerRun: 300,
+        cronEnabled: config.llmCatalogSyncCronEnabled,
+        bootSyncEnabled: config.llmCatalogBootSyncEnabled,
       })
-      expect(String(message)).toMatch(/next runs/)
+      // Accurate whether or not the cron runs: no promise of a "next run".
+      expect(String(message)).not.toMatch(/next run/)
+      expect(String(message)).toMatch(/manual sync/)
+      expect(String(message)).toMatch(/boot sync/)
       expect(String(message)).toMatch(/OFF/)
       for (const m of discovered[provider]) {
         expect(JSON.stringify([payload, message])).not.toContain(m.model_id)
