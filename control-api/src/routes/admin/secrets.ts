@@ -870,7 +870,7 @@ export function createAdminSecretsRouter(
       // Rotation targets a Secret that already exists — creating one is POST's
       // job. Read it first so a missing Secret is a 404 instead of a silent
       // upsert, and so the ownership guard below sees the stored labels.
-      // A 401/403 (control-api's Role lacks the verb) throws a SecretReadError
+      // A 403 (control-api's Role lacks the verb) or a 401 throws a SecretReadError
       // 502; any other non-404 HTTP status or a failed connection a 503; any
       // other error is rethrown (500). Answering 404 for them would tell the
       // operator the credential does not exist when the API server refused or

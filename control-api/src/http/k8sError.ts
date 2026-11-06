@@ -62,31 +62,33 @@ export function statusMessageOf(err: unknown): string | null {
   return typeof statusMessage === 'string' && statusMessage.length > 0 ? statusMessage : null
 }
 
-// The apiserver's wording for a request denied by admission control, as opposed
-// to the RBAC authorizer ("<resource> is forbidden: User \"…\" cannot <verb> …"),
+// The apiserver's wording for a request denied by a policy author's rule,
 // anchored at the start of the Status message: a ValidatingAdmissionPolicy
 // (`<resource> "<name>" is forbidden: ValidatingAdmissionPolicy '<p>' with
 // binding '<b>' denied request: <message>`) or a validating webhook
 // (`admission webhook "<w>" denied the request: <message>`, optionally after the
 // same `is forbidden:` prefix). Both answer 403 when the policy sets reason
-// Forbidden (deploy/base/cluster-wide/workflowrecipe-admission.yaml).
-const ADMISSION_DENIAL =
+// Forbidden (deploy/base/cluster-wide/workflowrecipe-admission.yaml). The RBAC
+// authorizer ("<resource> is forbidden: User \"…\" cannot <verb> …") and other
+// admission plugins (ResourceQuota, NamespaceLifecycle) do not match.
+const POLICY_DENIAL =
   /^(?:[^"]+ "[^"]*" is forbidden: )?(?:ValidatingAdmissionPolicy '[^']*' with binding '[^']*' denied request|admission webhook "[^"]*" denied the request): /
 const SERVICE_ACCOUNT_SUBJECT = 'system:serviceaccount:'
 
 /**
- * The Status message of a 403 that admission control (not RBAC) returned, or
- * null for any other error. That message is the policy's own explanation of
- * why the object was rejected, so it is the caller's to read; an RBAC 403 names
- * control-api's ServiceAccount and is never returned here. A policy message that
- * names any ServiceAccount (e.g. through a messageExpression on
- * request.userInfo) is not returned either, and the 403 is treated as RBAC.
+ * The Status message of a 403 denial written by a policy author (a
+ * ValidatingAdmissionPolicy or webhook), or null for any other error. That
+ * message is the policy's own explanation of why the object was rejected, so it
+ * is the caller's to read. Every other 403 returns null: RBAC, other admission
+ * plugins, a webhook denial without explanation, and a policy message that names
+ * a ServiceAccount (e.g. through a messageExpression on request.userInfo). The
+ * callers fail closed on null, with no single known cause.
  */
-export function admissionDenialMessage(err: unknown): string | null {
+export function policyDenialMessage(err: unknown): string | null {
   if (extractK8sError(err)?.status !== 403) return null
   const message = statusMessageOf(err)
   if (message === null || message.includes(SERVICE_ACCOUNT_SUBJECT)) return null
-  return ADMISSION_DENIAL.test(message) ? message : null
+  return POLICY_DENIAL.test(message) ? message : null
 }
 
 /**

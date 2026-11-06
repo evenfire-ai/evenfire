@@ -14,7 +14,11 @@ import {
   getEntryVersion,
   reportInstall,
 } from '../src/services/registryClient.js'
-import { apiserverError, expectNoApiserverText } from './helpers/apiserverErrors.js'
+import {
+  TEST_CORRELATION_ID,
+  apiserverError,
+  expectNoApiserverText,
+} from './helpers/apiserverErrors.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
@@ -61,6 +65,10 @@ const emptyUninstallDb = { query: async () => ({ rows: [], rowCount: 0 }) }
 function makeApp(gateway: MockGateway) {
   const app = express()
   app.use(express.json())
+  app.use((req, _res, next) => {
+    req.correlationId = TEST_CORRELATION_ID
+    next()
+  })
   app.use(
     createAdminRegistryRouter(gateway as unknown as import('../src/k8s.js').K8sGateway, {
       uninstallDb: emptyUninstallDb,
@@ -248,7 +256,8 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       message:
         'control-api could not create Secret "my-gmail-oauth-client" in namespace "mcp-server": ' +
         "the Kubernetes API server rejected the request from control-api's own ServiceAccount " +
-        '(HTTP 403): an RBAC rule or an admission policy denied it. Your session is not the cause.',
+        '(HTTP 403): RBAC or admission control denied it. Your session is not the cause; see ' +
+        `correlation id ${TEST_CORRELATION_ID} in the control-api log.`,
       resourceType: 'secret',
       resourceName: 'my-gmail-oauth-client',
       namespace: 'mcp-server',

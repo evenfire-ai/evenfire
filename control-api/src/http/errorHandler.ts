@@ -8,7 +8,7 @@ import {
   passwordMutationCauseKind,
 } from '../services/auth/passwordAdmissionError.js'
 import { memberRegistrationErrorResponse } from '../services/memberRegistrationErrors.js'
-import { admissionDenialMessage } from './k8sError.js'
+import { policyDenialMessage } from './k8sError.js'
 
 // Only errors we construct with these codes are ever forwarded verbatim by the
 // global handler. Keeps the blast radius tight: every other status-less or
@@ -153,8 +153,9 @@ function safeErrorLogStack(err: unknown): string | undefined {
  * Exported (rather than an inline closure in createApp) so it can be unit-tested
  * in isolation. Behavior:
  *   - typed member-registration failures → their mapped status (spec §8.6);
- *   - a raw K8s ApiException 401/403 → 502 `kubernetes_access_denied` with a
- *     fixed message (the apiserver refused control-api, not the caller);
+ *   - a raw K8s ApiException 401, or a 403 not written by a policy author → 502
+ *     `kubernetes_access_denied` with fixed text plus the correlation id (the
+ *     apiserver refused control-api, not the caller);
  *   - any other error carrying a 4xx status (via `.status` / `.statusCode` /
  *     `.code` / `.response.*`) is FORWARDED with a sanitized message — this is
  *     FIX-B: raw K8s 400/404/409/422 no longer collapse to 500;
@@ -217,13 +218,17 @@ export function clerumErrorHandler(
   // ServiceAccount, never the caller's session: control-api calls Kubernetes
   // with its own credentials. Forwarding it would log the Control UI operator
   // out (401) or show them a Status message naming that ServiceAccount (403).
-  // A 403 from admission control is different: the policy rejected the object
-  // the request asked for, so it keeps the 4xx branch below with the policy's
-  // message. Service-layer errors that set their own 401/403 are not
-  // ApiExceptions and also take the 4xx branch.
+  // The only forwarded 403 is a denial written by a policy author (a
+  // ValidatingAdmissionPolicy or webhook): the policy rejected the object the
+  // request asked for, so it keeps the 4xx branch below with the policy's
+  // message. Every other 403, including other admission plugins such as
+  // ResourceQuota and NamespaceLifecycle, fails closed here with no single known
+  // cause, so the response names none and the log carries the Status text.
+  // Service-layer errors that set their own 401/403 are not ApiExceptions and
+  // also take the 4xx branch.
   if (
     isK8sApiException(err) &&
-    (errStatus === 401 || (errStatus === 403 && admissionDenialMessage(err) === null))
+    (errStatus === 401 || (errStatus === 403 && policyDenialMessage(err) === null))
   ) {
     log.warn(
       {
@@ -232,13 +237,17 @@ export function clerumErrorHandler(
         upstreamStatus: errStatus,
         err: safeErrorLogMessage(err),
       },
-      'Kubernetes API server refused control-api credentials'
+      'Kubernetes API server refused a control-api request'
     )
     res.status(502).json({
       error: 'kubernetes_access_denied',
       message:
-        `The Kubernetes API server refused control-api's own credentials (HTTP ${errStatus}). ` +
-        'Your session is not the cause; check the control-api RBAC.',
+        errStatus === 401
+          ? "The Kubernetes API server refused control-api's own credentials (HTTP 401). " +
+            'Your session is not the cause; check the control-api ServiceAccount token.'
+          : 'The Kubernetes API server refused a request from control-api (HTTP 403): RBAC or ' +
+            'admission control denied it. Your session is not the cause; see correlation id ' +
+            `${correlationId} in the control-api log.`,
       correlationId,
     })
     return

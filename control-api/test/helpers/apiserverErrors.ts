@@ -49,6 +49,33 @@ export function apiserverError(
   })
 }
 
+/** A UUID, the only shape the correlation-id middleware lets through. */
+export const TEST_CORRELATION_ID = '3f2b8c1e-7a4d-4e9b-8c21-5d6f0a1b2c3d'
+
+/** A real ApiException shaped as the client raises a 403: a string metav1.Status body. */
+export function statusForbidden(message: string): ApiException<string> {
+  const body = JSON.stringify({
+    kind: 'Status',
+    apiVersion: 'v1',
+    status: 'Failure',
+    message,
+    reason: 'Forbidden',
+    code: 403,
+  })
+  return new ApiException(403, 'Unknown API Status Code!', body, {
+    [APISERVER_LEAK_MARKERS.auditHeader]: APISERVER_LEAK_MARKERS.auditId,
+  })
+}
+
+/** The global handler's message for a 403 not written by a policy author. */
+export function handlerRefused403(correlationId: string): string {
+  return (
+    'The Kubernetes API server refused a request from control-api (HTTP 403): RBAC or ' +
+    'admission control denied it. Your session is not the cause; see correlation id ' +
+    `${correlationId} in the control-api log.`
+  )
+}
+
 /** node-fetch's shape for a refused connection (no HTTP response at all). */
 export function connectionRefused(): Error {
   return Object.assign(new Error('request to https://10.96.0.1/api failed, reason: connect'), {

@@ -22,12 +22,22 @@ function describeReadFailure(
   upstreamStatus: number | null
 ): { status: 502 | 503; message: string } {
   const prefix = `control-api could not ${subject} in namespace "${namespace}"`
-  if (upstreamStatus === 401 || upstreamStatus === 403) {
+  if (upstreamStatus === 401) {
+    return {
+      status: 502,
+      message:
+        `${prefix}: the Kubernetes API server refused control-api's own credentials (HTTP 401). ` +
+        `Your session is not the cause; check the control-api ServiceAccount token.`,
+    }
+  }
+  // Every error built here is a read, and admission control does not run on
+  // reads, so RBAC is the cause a 403 can name.
+  if (upstreamStatus === 403) {
     return {
       status: 502,
       message:
         `${prefix}: the Kubernetes API server rejected control-api's own access ` +
-        `(HTTP ${upstreamStatus}). Your session is not the cause; check the control-api ` +
+        `(HTTP 403). Your session is not the cause; check the control-api ` +
         `RBAC for that namespace.`,
     }
   }

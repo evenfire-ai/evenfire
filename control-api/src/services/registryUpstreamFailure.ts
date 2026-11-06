@@ -1,4 +1,4 @@
-import { admissionDenialMessage } from '../http/k8sError.js'
+import { policyDenialMessage } from '../http/k8sError.js'
 import { isTransportError, upstreamReason, upstreamStatusOrRethrow } from './secretRead.js'
 
 /**
@@ -11,11 +11,12 @@ import { isTransportError, upstreamReason, upstreamStatusOrRethrow } from './sec
  * its text names `system:serviceaccount:<ns>:control-api`. A raw ApiException
  * message also embeds every response header. The message here is built from
  * the step (verb, kind, name, namespace, registry entry@version), the numeric
- * upstream status and the filtered field paths of a 422 only. The name and
- * entry can be request input; the response goes back to the same caller as
- * JSON. The apiserver's own text goes to the server log, never the response;
- * the one exception is an admission-control denial, whose message is the
- * policy's explanation of why the object was rejected.
+ * upstream status, the filtered field paths of a 422 and, on a fail-closed 403,
+ * the request's correlation id only. The name and entry can be request input;
+ * the response goes back to the same caller as JSON. The apiserver's own text
+ * goes to the server log, never the response; the one exception is a denial
+ * written by a policy author (a ValidatingAdmissionPolicy or webhook), whose
+ * message is the policy's explanation of why the object was rejected.
  */
 
 export type RegistryUpstreamKind = 'Secret' | 'McpServer' | 'LlmHook' | 'WorkflowRecipe' | 'Host'
@@ -106,9 +107,11 @@ function isSyntheticError(err: unknown): boolean {
 /**
  * Classify a failed Kubernetes call of a registry step.
  *
- * - 403 from admission control (a ValidatingAdmissionPolicy or webhook denial)
- *   → 403 `registry_upstream_rejected` with the policy's message.
- * - any other 401/403 → 502 `registry_upstream_failed`.
+ * - 403 written by a policy author (a ValidatingAdmissionPolicy or webhook
+ *   denial) → 403 `registry_upstream_rejected` with the policy's message.
+ * - any other 401/403, including other admission plugins such as ResourceQuota
+ *   → 502 `registry_upstream_failed`. The cause of such a 403 is not known here,
+ *   so its message points to `correlationId` in the control-api log.
  * - 409 → 409 on a create or update; 422 → 422 on a create or update, naming
  *   the registry entry when control-api built the spec; 413 → 413 for
  *   operator content only.
@@ -121,7 +124,8 @@ function isSyntheticError(err: unknown): boolean {
  */
 export function classifyRegistryUpstreamFailure(
   err: unknown,
-  step: RegistryUpstreamStep
+  step: RegistryUpstreamStep,
+  correlationId: string | undefined
 ): RegistryUpstreamFailure {
   if (isSyntheticError(err)) throw err
   const upstreamStatus = upstreamStatusOrRethrow(err)
@@ -166,18 +170,26 @@ export function classifyRegistryUpstreamFailure(
       'error'
     )
   }
-  // Admission control rejected the object itself: the policy's message says
+  // A policy author's rule rejected the object itself: the policy's message says
   // why, and retrying the same request cannot succeed.
-  const admissionDenial = admissionDenialMessage(err)
-  if (admissionDenial !== null) {
-    return result(403, `${target} was rejected by admission control: ${admissionDenial}`, 'warn')
+  const policyDenial = policyDenialMessage(err)
+  if (policyDenial !== null) {
+    return result(403, `${target} was rejected by admission control: ${policyDenial}`, 'warn')
   }
-  if (upstreamStatus === 401 || upstreamStatus === 403) {
+  if (upstreamStatus === 401) {
+    return result(
+      502,
+      `${prefix}: the Kubernetes API server refused control-api's own credentials (HTTP 401). ` +
+        `Your session is not the cause; check the control-api ServiceAccount token.`,
+      'error'
+    )
+  }
+  if (upstreamStatus === 403) {
     return result(
       502,
       `${prefix}: the Kubernetes API server rejected the request from control-api's own ` +
-        `ServiceAccount (HTTP ${upstreamStatus}): an RBAC rule or an admission policy denied ` +
-        `it. Your session is not the cause.`,
+        `ServiceAccount (HTTP 403): RBAC or admission control denied it. Your session is not ` +
+        `the cause; see correlation id ${correlationId} in the control-api log.`,
       'error'
     )
   }

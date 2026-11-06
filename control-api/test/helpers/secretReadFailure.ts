@@ -24,11 +24,14 @@ export function controlApiForbiddenRead(name: string, namespace: string): ApiExc
 
 /** The exact message SecretReadError carries for a 401/403 on a Secret read. */
 export function rejectedAccessMessage(name: string, namespace: string, status: 401 | 403): string {
-  return (
-    `control-api could not read Secret "${name}" in namespace "${namespace}": ` +
-    `the Kubernetes API server rejected control-api's own access (HTTP ${status}). ` +
-    `Your session is not the cause; check the control-api RBAC for that namespace.`
-  )
+  const prefix = `control-api could not read Secret "${name}" in namespace "${namespace}": `
+  return status === 401
+    ? prefix +
+        "the Kubernetes API server refused control-api's own credentials (HTTP 401). " +
+        'Your session is not the cause; check the control-api ServiceAccount token.'
+    : prefix +
+        "the Kubernetes API server rejected control-api's own access (HTTP 403). " +
+        'Your session is not the cause; check the control-api RBAC for that namespace.'
 }
 
 /**

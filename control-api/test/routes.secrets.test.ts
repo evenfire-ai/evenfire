@@ -4,6 +4,7 @@ import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
+import { handlerRefused403, statusForbidden } from './helpers/apiserverErrors.js'
 import { controlApiForbiddenRead, expectRejectedSecretRead } from './helpers/secretReadFailure.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -81,6 +82,39 @@ describe('routes/secrets', () => {
     expect(gateway.createSecret).toHaveBeenCalled()
     expect(gateway.updateSecret).toHaveBeenCalled()
     expect(gateway.deleteSecret).toHaveBeenCalledWith('new-secret', 'mcp-host')
+  })
+
+  it('answers a ResourceQuota 403 on a Secret create with the fail-closed 502', async () => {
+    const quota =
+      'secrets "new-secret" is forbidden: exceeded quota: q1, requested: secrets=1, used: secrets=5, limited: secrets=5'
+    const gateway = createGateway()
+    gateway.createSecret.mockRejectedValue(statusForbidden(quota))
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminSecretsRouter(gateway as never))
+    app.use(clerumErrorHandler)
+
+    try {
+      const res = await request(app)
+        .post('/admin/secrets')
+        .send({ name: 'new-secret', namespace: 'ns1', stringData: { token: 'abc' } })
+
+      // Witness: the write reached the gateway and its rejection reached the handler.
+      expect(gateway.createSecret).toHaveBeenCalledOnce()
+      expect(res.status).toBe(502)
+      expect(res.body.error).toBe('kubernetes_access_denied')
+      expect(res.body.message).toBe(handlerRefused403(res.body.correlationId))
+      expect(warn.mock.calls[0][0]).toMatchObject({
+        event: 'kubernetes_access_denied',
+        correlationId: res.body.correlationId,
+        err: quota,
+      })
+      expect(JSON.stringify(res.body)).not.toContain('exceeded quota')
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 
   it('returns 500 when gateway fails (edge case)', async () => {

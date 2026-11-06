@@ -1340,7 +1340,7 @@ function sendRegistryUpstreamFailure(
   err: unknown,
   step: RegistryUpstreamStep
 ): void {
-  const failure = classifyRegistryUpstreamFailure(err, step)
+  const failure = classifyRegistryUpstreamFailure(err, step, req.correlationId)
   log[failure.severity](
     {
       correlationId: req.correlationId,

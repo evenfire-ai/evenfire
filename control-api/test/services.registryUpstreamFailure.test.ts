@@ -6,9 +6,11 @@ import {
 } from '../src/services/registryUpstreamFailure.js'
 import {
   APISERVER_LEAK_MARKERS,
+  TEST_CORRELATION_ID,
   apiserverError,
   connectionRefused,
   expectNoApiserverText,
+  statusForbidden,
 } from './helpers/apiserverErrors.js'
 
 const registryContent = { source: 'registry', entry: '@acme/weather', version: '1.4.0' } as const
@@ -43,24 +45,34 @@ const hostRead: RegistryUpstreamStep = {
 }
 
 function classify(err: unknown, step: RegistryUpstreamStep) {
-  const failure = classifyRegistryUpstreamFailure(err, step)
+  const failure = classifyRegistryUpstreamFailure(err, step, TEST_CORRELATION_ID)
   expectNoApiserverText(failure.body)
   return failure
 }
 
 describe('classifyRegistryUpstreamFailure', () => {
   it.each([
-    [403, mcpServerCreate, 'create McpServer "mcp-weather" in namespace "mcp-host"'],
-    [401, hostRead, 'read Host "host-a" in namespace "hosts"'],
-  ] as const)('maps a %i to a 502 naming control-api access', (status, step, subject) => {
+    [
+      403,
+      mcpServerCreate,
+      'control-api could not create McpServer "mcp-weather" in namespace "mcp-host": the ' +
+        "Kubernetes API server rejected the request from control-api's own ServiceAccount " +
+        '(HTTP 403): RBAC or admission control denied it. Your session is not the cause; see ' +
+        `correlation id ${TEST_CORRELATION_ID} in the control-api log.`,
+    ],
+    [
+      401,
+      hostRead,
+      'control-api could not read Host "host-a" in namespace "hosts": the Kubernetes API ' +
+        "server refused control-api's own credentials (HTTP 401). Your session is not the " +
+        'cause; check the control-api ServiceAccount token.',
+    ],
+  ] as const)('maps a %i to a 502 naming control-api access', (status, step, message) => {
     const failure = classify(apiserverError(status), step)
     expect(failure.status).toBe(502)
     expect(failure.body).toEqual({
       error: 'registry_upstream_failed',
-      message:
-        `control-api could not ${subject}: the Kubernetes API server rejected the request ` +
-        `from control-api's own ServiceAccount (HTTP ${status}): an RBAC rule or an ` +
-        `admission policy denied it. Your session is not the cause.`,
+      message,
       resourceType: step.kind === 'Host' ? 'host' : 'mcp-server',
       resourceName: step.name,
       namespace: step.namespace,
@@ -71,7 +83,30 @@ describe('classifyRegistryUpstreamFailure', () => {
     expect(failure.upstreamReason).toContain(APISERVER_LEAK_MARKERS.statusMessage)
   })
 
-  it('maps an admission-control 403 to a 403 carrying the policy message', () => {
+  it('maps a ResourceQuota 403 to the fail-closed 502 and keeps the reason in the log', () => {
+    const quota =
+      'secrets "mcp-weather-creds" is forbidden: exceeded quota: q1, requested: secrets=1, used: secrets=5, limited: secrets=5'
+
+    const failure = classify(statusForbidden(quota), secretCreate)
+
+    expect(failure.status).toBe(502)
+    expect(failure.body).toEqual({
+      error: 'registry_upstream_failed',
+      message:
+        'control-api could not create Secret "mcp-weather-creds" in namespace "mcp-host": the ' +
+        "Kubernetes API server rejected the request from control-api's own ServiceAccount " +
+        '(HTTP 403): RBAC or admission control denied it. Your session is not the cause; see ' +
+        `correlation id ${TEST_CORRELATION_ID} in the control-api log.`,
+      resourceType: 'secret',
+      resourceName: 'mcp-weather-creds',
+      namespace: 'mcp-host',
+    })
+    // Witness: the Status body was parsed and its text went to the log field only.
+    expect(failure.upstreamReason).toBe(quota)
+    expect(JSON.stringify(failure.body)).not.toContain('exceeded quota')
+  })
+
+  it('maps a policy 403 to a 403 carrying the policy message', () => {
     const policyMessage =
       "workflowrecipes.clerum.io \"r1\" is forbidden: ValidatingAdmissionPolicy 'workflowrecipe-namespace-allowlist' with binding 'workflowrecipe-namespace-allowlist' denied request: Only the workflow-recipes controller may set WorkflowRecipe ownerReferences."
     const err = new ApiException(
@@ -274,7 +309,9 @@ describe('classifyRegistryUpstreamFailure', () => {
 
   it('rethrows an error that is not an apiserver or transport failure unchanged', () => {
     const plain = new Error('bug in control-api')
-    expect(() => classifyRegistryUpstreamFailure(plain, secretCreate)).toThrow(plain)
+    expect(() => classifyRegistryUpstreamFailure(plain, secretCreate, TEST_CORRELATION_ID)).toThrow(
+      plain
+    )
   })
 
   it('rethrows control-api synthetic errors that carry a status and a string code', () => {
@@ -284,7 +321,7 @@ describe('classifyRegistryUpstreamFailure', () => {
     })
     let thrown: unknown
     try {
-      classifyRegistryUpstreamFailure(synthetic, hostUpdate)
+      classifyRegistryUpstreamFailure(synthetic, hostUpdate, TEST_CORRELATION_ID)
     } catch (err) {
       thrown = err
     }

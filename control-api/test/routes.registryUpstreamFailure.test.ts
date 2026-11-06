@@ -15,6 +15,7 @@ import {
 } from '../src/services/registryClient.js'
 import {
   APISERVER_LEAK_MARKERS,
+  TEST_CORRELATION_ID,
   apiserverError,
   connectionRefused,
   expectNoApiserverText,
@@ -58,6 +59,7 @@ vi.mock('../src/services/registryClient.js', () => ({
 
 type UpstreamFailureRecord = {
   level: number
+  correlationId: string
   step: { verb: string; kind: string; name: string; namespace: string }
   status: number
   upstreamStatus: number | null
@@ -83,20 +85,27 @@ function expectOneUpstreamFailureLog(
   expect(records[0].step).toMatchObject(step)
   expect(records[0].status).toBe(status)
   expect(records[0].upstreamStatus).toBe(upstreamStatus)
+  // The id a fail-closed 403 message tells the operator to look for.
+  expect(records[0].correlationId).toBe(TEST_CORRELATION_ID)
   return records[0]
 }
 
-function accessMessage(subject: string, status: 401 | 403): string {
+function accessMessage(subject: string, status: 403): string {
   return (
     `control-api could not ${subject}: the Kubernetes API server rejected the request from ` +
-    `control-api's own ServiceAccount (HTTP ${status}): an RBAC rule or an admission policy ` +
-    `denied it. Your session is not the cause.`
+    `control-api's own ServiceAccount (HTTP ${status}): RBAC or admission control denied it. ` +
+    `Your session is not the cause; see correlation id ${TEST_CORRELATION_ID} in the ` +
+    `control-api log.`
   )
 }
 
 function makeApp(gateway: MockGateway) {
   const app = express()
   app.use(express.json())
+  app.use((req, _res, next) => {
+    req.correlationId = TEST_CORRELATION_ID
+    next()
+  })
   app.use(createAdminRegistryRouter(gateway as unknown as K8sGateway))
   app.use(clerumErrorHandler)
   return app

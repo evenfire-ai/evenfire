@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ApiException } from '@kubernetes/client-node'
 import pino from 'pino'
-import { admissionDenialMessage } from '../src/http/k8sError.js'
+import { policyDenialMessage } from '../src/http/k8sError.js'
 import { rootLogger, serializeLogError } from '../src/observability/logger.js'
 import { captureSecretForCleanup } from '../src/services/secretCleanup.js'
 import { SecretReadError } from '../src/services/secretRead.js'
+import { statusForbidden } from './helpers/apiserverErrors.js'
 import { controlApiForbiddenRead } from './helpers/secretReadFailure.js'
 
 const status = (code: number, message: string) =>
@@ -21,9 +22,9 @@ const vapDenial = () =>
     { 'audit-id': 'a1b2' }
   )
 
-describe('admissionDenialMessage', () => {
+describe('policyDenialMessage', () => {
   it('returns the Status message of a ValidatingAdmissionPolicy denial', () => {
-    expect(admissionDenialMessage(vapDenial())).toContain(
+    expect(policyDenialMessage(vapDenial())).toContain(
       'Only the workflow-recipes controller may set WorkflowRecipe ownerReferences.'
     )
   })
@@ -35,7 +36,7 @@ describe('admissionDenialMessage', () => {
       status(403, 'admission webhook "validate.example.io" denied the request: bad label'),
       {}
     )
-    expect(admissionDenialMessage(err)).toBe(
+    expect(policyDenialMessage(err)).toBe(
       'admission webhook "validate.example.io" denied the request: bad label'
     )
   })
@@ -50,7 +51,7 @@ describe('admissionDenialMessage', () => {
       ),
       {}
     )
-    expect(admissionDenialMessage(err)).toBeNull()
+    expect(policyDenialMessage(err)).toBeNull()
   })
 
   it('returns null for an admission denial whose message names a ServiceAccount', () => {
@@ -63,11 +64,30 @@ describe('admissionDenialMessage', () => {
       ),
       {}
     )
-    expect(admissionDenialMessage(err)).toBeNull()
+    expect(policyDenialMessage(err)).toBeNull()
   })
 
   it('returns null for an RBAC 403, which names the ServiceAccount', () => {
-    expect(admissionDenialMessage(controlApiForbiddenRead('s1', 'mcp-host'))).toBeNull()
+    expect(policyDenialMessage(controlApiForbiddenRead('s1', 'mcp-host'))).toBeNull()
+  })
+
+  it.each([
+    [
+      'a ResourceQuota denial',
+      'secrets "s1" is forbidden: exceeded quota: q1, requested: secrets=1, used: secrets=5, limited: secrets=5',
+    ],
+    [
+      'a terminating namespace',
+      'secrets "s1" is forbidden: unable to create new content in namespace mcp-server because it is being terminated',
+    ],
+  ])('returns null for %s, which no policy author wrote', (_label, message) => {
+    expect(policyDenialMessage(statusForbidden(message))).toBeNull()
+  })
+
+  it('returns the Status message of a policy denial on an object with no name', () => {
+    const message =
+      "workflowrecipes.clerum.io \"Unknown\" is forbidden: ValidatingAdmissionPolicy 'p' with binding 'b' denied request: not allowed"
+    expect(policyDenialMessage(statusForbidden(message))).toBe(message)
   })
 
   it('returns null for an admission-shaped message on a status other than 403', () => {
@@ -77,7 +97,7 @@ describe('admissionDenialMessage', () => {
       status(422, "ValidatingAdmissionPolicy 'p' with binding 'b' denied request: invalid"),
       {}
     )
-    expect(admissionDenialMessage(err)).toBeNull()
+    expect(policyDenialMessage(err)).toBeNull()
   })
 })
 
