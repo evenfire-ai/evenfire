@@ -14,24 +14,18 @@
  * parse-guard) as defense-in-depth. No auth header is sent (the catalog is
  * public) and the response body is never logged.
  */
-import { isIP } from 'node:net'
-import { type LlmProviderId, PROVIDER_IDS } from '@clerum/llm-providers'
+import { type LlmProviderId, PROVIDER_IDS, isRunnableLlmModelId } from '@clerum/llm-providers'
 import {
   VENDORED_MODELS_DEV_SNAPSHOT,
   VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT,
 } from '../data/modelsDevSnapshot.js'
+import { rootLogger } from '../observability/logger.js'
+import { assertSafeCatalogUrl, resolveModelsDevApiUrl } from './modelsDevCatalogUrl.js'
 
-/**
- * The catalog URL. Defaults to the fixed, trusted public endpoint. It is NOT
- * an operator/tenant-input surface (no SSRF vector — see the module header), but
- * `MODELS_DEV_API_URL` may override it via env so a non-prod plane (e.g. a test
- * cluster with the periodic sync enabled) can be pointed at a local stub instead
- * of hammering the real models.dev host. Trimmed; a blank env falls back to the
- * default. The `fetchImpl`/`loadCatalog` DI seam remains the mechanism tests use.
- */
-const DEFAULT_MODELS_DEV_API_URL = 'https://models.dev/api.json'
-export const MODELS_DEV_API_URL =
-  process.env.MODELS_DEV_API_URL?.trim() || DEFAULT_MODELS_DEV_API_URL
+const log = rootLogger.child({ module: 'models-dev-client' })
+
+/** The resolved catalog URL (see `modelsDevCatalogUrl.ts`). */
+export const MODELS_DEV_API_URL = resolveModelsDevApiUrl()
 
 /** Fetch guards (defense-in-depth; the URL is fixed/trusted). */
 const FETCH_TIMEOUT_MS = 10_000
@@ -40,24 +34,35 @@ const MAX_RESPONSE_BYTES = 15 * 1024 * 1024 // ~15MB — api.json is ~3MB today.
 /**
  * One model entry as it appears in the (normalized) catalog. This is a subset
  * of the models.dev per-model object — only the fields discovery consumes. The
- * live api.json carries many more fields; only `id`, `name`, `limit.context`
- * and `modalities.input` are parsed.
+ * live api.json carries many more fields; only `id`, `name`, `limit.context`,
+ * `modalities.{input,output}`, `tool_call`, `status`, `cost` and
+ * `release_date` are parsed. The vendored snapshot carries only the first four,
+ * so a vendored catalog never reads as tool-capable, priced or status-tagged.
+ *
+ * The newer fields are typed `unknown` for the same reason as
+ * `modalities.input`: untrusted data at an API boundary, narrowed only by the
+ * sanitizers below.
  */
 export interface RawModelsDevModel {
   id?: string
   name?: string
   limit?: { context?: number }
   /**
-   * models.dev per-model input modalities (e.g. `["text","image"]`). Only
-   * `input` is read; `attachment` ("accepts file attachments") is a DIFFERENT
-   * capability — today's catalog has 47 models where the two disagree,
-   * including audio-only models with `attachment: true` and vision models with
+   * models.dev per-model modalities (e.g. `input: ["text","image"]`).
+   * `attachment` ("accepts file attachments") is a DIFFERENT capability from
+   * `input` — today's catalog has 47 models where the two disagree, including
+   * audio-only models with `attachment: true` and vision models with
    * `attachment: false` — so it is deliberately not consulted.
-   *
-   * Typed `unknown` on purpose: this is untrusted data at an API boundary and
-   * `imageInputStateFromModalities` is the only place allowed to narrow it.
    */
-  modalities?: { input?: unknown }
+  modalities?: { input?: unknown; output?: unknown }
+  tool_call?: unknown
+  status?: unknown
+  /**
+   * USD per 1M tokens. Only the four flat components are read; tiered pricing
+   * (`context_over_200k`, `tiers`) and audio/reasoning components are ignored.
+   */
+  cost?: unknown
+  release_date?: unknown
 }
 
 /** One provider entry in the (normalized) catalog: a map of model id → entry. */
@@ -99,8 +104,9 @@ export type RawModelsDevCatalog = Record<string, RawModelsDevProvider>
  *
  * NOTE: Azure/Bedrock ids in models.dev are generic model ids, NOT the Azure
  * deployment names / regional inference-profile ids a real deployment uses.
- * Discovery inserts them as `enabled=false, source='discovery'`, so they are
- * only ever review candidates — the operator's hand-added `source='manual'`
+ * Discovery inserts them as `source='discovery'` and their providers' auto-enable
+ * policy defaults to off, so they are only review candidates unless an operator
+ * turns that policy on — the operator's hand-added `source='manual'`
  * rows (deployment names, `us.anthropic.*` profiles) are never touched (§11.2).
  */
 export type ModelsDevMappedProviderId = Exclude<
@@ -133,7 +139,25 @@ export const PROVIDER_KEY_MAP: Readonly<Record<ModelsDevMappedProviderId, string
   azure: 'azure',
 }
 
-/** One discovered model, mapped to our columns (spec 09 §2.2 reconciliation). */
+/** Lifecycle tags models.dev puts on a model; anything else is stored as `null`. */
+export type CatalogStatus = 'deprecated' | 'alpha' | 'beta'
+
+/** Per-1M-token prices shaped for `llm_model_prices` (each fits `NUMERIC(20,8)`). */
+export interface ModelCost {
+  input: number
+  output: number
+  cache_read: number
+  cache_write: number
+}
+
+/**
+ * One discovered model, mapped to our columns (spec 09 §2.2 reconciliation).
+ *
+ * Every catalog-derived value here is already sanitized to what its target
+ * column accepts. The sync writes all providers in one transaction, so a single
+ * out-of-domain upstream value that reached SQL would roll back every
+ * provider's run — and every following run, for as long as models.dev kept it.
+ */
 export interface DiscoveredModel {
   model_id: string
   context_window_tokens?: number
@@ -141,6 +165,28 @@ export interface DiscoveredModel {
   display_name?: string
   /** Tri-state derived from `modalities.input`; see `imageInputStateFromModalities`. */
   image_input_state: ImageInputState
+  /** `modalities.output` is a string array containing `text`; see `textOutputFromModalities`. */
+  text_output: boolean
+  /** True only when the catalog says literally `tool_call: true`. */
+  tool_call: boolean
+  /** The lifecycle tag when it is one we store; any other value is `null` here. */
+  catalog_status: CatalogStatus | null
+  /**
+   * Whether the entry carries ANY `status`, known or not. An unknown tag is
+   * stored as `null` above but still blocks auto-enable: a tag models.dev
+   * starts using is far more likely to mark something not generally available
+   * than the opposite, and a model enabled by mistake stays enabled, because
+   * the sync never changes `enabled` on an existing row.
+   */
+  status_present: boolean
+  /** `null` = unpriced. Never a fabricated zero; see `sanitizeModelCost`. */
+  cost: ModelCost | null
+  /**
+   * Catalog text bounded to the shape `YYYY-MM-DD` or `YYYY-MM`, NOT a validated
+   * date: `2025-13-45` passes, and `YYYY-MM` is not a valid Postgres DATE. Do
+   * not write it to a DATE column as-is.
+   */
+  release_date?: string
 }
 
 /** Image-input state derived from a models.dev entry — fail-closed. */
@@ -160,6 +206,100 @@ export function imageInputStateFromModalities(model: RawModelsDevModel): ImageIn
   if (!Array.isArray(input) || input.length === 0) return 'unknown'
   if (!input.every(value => typeof value === 'string')) return 'unknown'
   return input.includes('image') ? 'supported' : 'unsupported'
+}
+
+/**
+ * Whether the entry states text output. Same fail-closed reading as the input
+ * side: only an array made entirely of strings, containing the exact token
+ * `text`, counts.
+ */
+export function textOutputFromModalities(model: RawModelsDevModel): boolean {
+  const output = model.modalities?.output
+  if (!Array.isArray(output)) return false
+  if (!output.every(value => typeof value === 'string')) return false
+  return output.includes('text')
+}
+
+const CATALOG_STATUSES: ReadonlySet<string> = new Set<CatalogStatus>([
+  'deprecated',
+  'alpha',
+  'beta',
+])
+
+export function catalogStatusFrom(model: RawModelsDevModel): CatalogStatus | null {
+  const status = model.status
+  return typeof status === 'string' && CATALOG_STATUSES.has(status)
+    ? (status as CatalogStatus)
+    : null
+}
+
+// `llm_model_prices` columns are NUMERIC(20,8) with CHECK (>= 0): 12 integer
+// digits and 8 decimals.
+const PRICE_SCALE = 8
+const PRICE_UPPER_BOUND_EXCLUSIVE = 1e12
+
+/** A price component rounded to the column's scale, or `undefined` if the column would reject it. */
+function sanitizePriceComponent(value: unknown): number | undefined {
+  // The range test also rejects NaN and ±Infinity: every comparison with NaN is false.
+  if (typeof value !== 'number' || !(value >= 0 && value < PRICE_UPPER_BOUND_EXCLUSIVE)) {
+    return undefined
+  }
+  return Number(value.toFixed(PRICE_SCALE))
+}
+
+/**
+ * The entry's flat price, or `null` when it cannot be stored faithfully.
+ *
+ * `input` and `output` are mandatory; missing cache components default to 0,
+ * which is the column default. Any malformed component voids the WHOLE price
+ * rather than being replaced by 0: an invented $0 would make the model look
+ * priced, while `null` keeps it on the admin's unpriced list.
+ */
+export function sanitizeModelCost(model: RawModelsDevModel): ModelCost | null {
+  const cost = model.cost
+  if (!cost || typeof cost !== 'object' || Array.isArray(cost)) return null
+  const raw = cost as Record<string, unknown>
+  const input = sanitizePriceComponent(raw.input)
+  const output = sanitizePriceComponent(raw.output)
+  const cacheRead = raw.cache_read === undefined ? 0 : sanitizePriceComponent(raw.cache_read)
+  const cacheWrite = raw.cache_write === undefined ? 0 : sanitizePriceComponent(raw.cache_write)
+  if (
+    input === undefined ||
+    output === undefined ||
+    cacheRead === undefined ||
+    cacheWrite === undefined
+  ) {
+    return null
+  }
+  return { input, output, cache_read: cacheRead, cache_write: cacheWrite }
+}
+
+const RELEASE_DATE_SHAPE = /^\d{4}-\d{2}(?:-\d{2})?$/
+
+export function releaseDateFrom(model: RawModelsDevModel): string | undefined {
+  const value = model.release_date
+  return typeof value === 'string' && RELEASE_DATE_SHAPE.test(value) ? value : undefined
+}
+
+/** The first auto-enable rule a discovered model fails, in rule order. */
+export type AutoEnableRejection = 'no_text_output' | 'no_tool_call' | 'status' | 'not_runnable'
+
+/**
+ * Which rule keeps a model from being enabled automatically on insert, or
+ * `null` if none does. `tool_call` is a default policy, not a hard runtime
+ * requirement: some paths run without tools, so an operator may still enable a
+ * rejected model by hand.
+ */
+export function autoEnableRejection(m: DiscoveredModel): AutoEnableRejection | null {
+  if (!m.text_output) return 'no_text_output'
+  if (!m.tool_call) return 'no_tool_call'
+  if (m.status_present) return 'status'
+  if (!isRunnableLlmModelId(m.model_id)) return 'not_runnable'
+  return null
+}
+
+export function isAutoEnableEligible(m: DiscoveredModel): boolean {
+  return autoEnableRejection(m) === null
 }
 
 /** Result of loading the catalog: which source served it, when, and the data. */
@@ -252,115 +392,6 @@ function isRawCatalog(value: unknown): value is RawModelsDevCatalog {
 }
 
 /**
- * Hostname suffixes that only ever resolve inside a cluster / private network.
- * `.svc.cluster.local` ends with `.local` (and `.svc`), so the shorter suffixes
- * already cover it — it is listed for documentation, not because it is needed.
- */
-const INTERNAL_HOST_SUFFIXES = ['.internal', '.local', '.svc', '.svc.cluster.local'] as const
-
-/**
- * Classify an IPv4 literal as a private / loopback / link-local / "this host"
- * target that egress must never reach. Ranges (not a single address each):
- *   - 127.0.0.0/8   loopback (all of it, not just 127.0.0.1)
- *   - 0.0.0.0/8     "this host" / unspecified
- *   - 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16   RFC1918 private
- *   - 169.254.0.0/16   link-local (incl. 169.254.169.254 cloud metadata)
- */
-function isBlockedV4(ip: string): boolean {
-  const parts = ip.split('.').map(p => Number(p))
-  if (parts.length !== 4 || parts.some(p => !Number.isInteger(p) || p < 0 || p > 255)) {
-    // isIP() said v4, so this should not happen; fail closed (treat as blocked).
-    return true
-  }
-  const [a, b] = parts
-  if (a === 127 || a === 0) return true
-  if (a === 10) return true
-  if (a === 172 && b >= 16 && b <= 31) return true
-  if (a === 192 && b === 168) return true
-  if (a === 169 && b === 254) return true
-  return false
-}
-
-/**
- * Classify an IPv6 literal (brackets already stripped) as loopback / unspecified
- * / IPv4-mapped-private / link-local / unique-local. `URL.hostname` yields IPv6
- * *with* brackets (e.g. `[::1]`), so callers strip them before this. The
- * IPv4-mapped case is re-classified through isBlockedV4 so every private v4
- * tunneled as v6 is caught too — in BOTH the dotted-quad tail (`::ffff:127.0.0.1`)
- * and the hex form the WHATWG `URL` parser normalizes it to (`::ffff:7f00:1`).
- */
-function isBlockedV6(ip: string): boolean {
-  const h = ip.toLowerCase()
-  if (h === '::1' || h === '::') return true
-  // IPv4-mapped tail written in dotted-quad form (`::ffff:127.0.0.1`).
-  const dotted = /:((?:\d{1,3}\.){3}\d{1,3})$/.exec(h)
-  if (dotted && isBlockedV4(dotted[1])) return true
-  // IPv4-mapped tail in the hex form `URL` normalizes to (`::ffff:7f00:1`): the
-  // last two 16-bit groups carry the v4 (high octets, low octets).
-  const hex = /:ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h)
-  if (hex) {
-    const hi = parseInt(hex[1], 16)
-    const lo = parseInt(hex[2], 16)
-    const v4 = `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`
-    if (isBlockedV4(v4)) return true
-  }
-  if (/^fe[89ab]/.test(h)) return true // fe80::/10 link-local
-  if (/^f[cd]/.test(h)) return true // fc00::/7 unique-local
-  return false
-}
-
-/** Classify a (non-IP) hostname as an internal / bare cluster egress target. */
-function isBlockedHostname(host: string): boolean {
-  if (host === 'localhost') return true
-  // A bare, dot-less name only resolves inside a cluster's search domain
-  // (`kubernetes`, `myservice`), never on the public internet.
-  if (!host.includes('.')) return true
-  return INTERNAL_HOST_SUFFIXES.some(suffix => host.endsWith(suffix))
-}
-
-/**
- * Assert the resolved catalog URL is a safe egress target BEFORE any fetch. The
- * module header promises an https-only guard; with the `MODELS_DEV_API_URL` env
- * override in play, a misconfigured deploy could otherwise resolve to `http://`
- * or an internal host — cloud metadata (169.254.169.254), loopback (127.0.0.1,
- * [::1]), an RFC1918 address (10/8, 172.16/12, 192.168/16), or a cluster Service
- * (`.internal`, `.svc`, a bare `kubernetes`). This is a deploy-time input, not
- * operator/tenant-facing, but the boundary is real — so a bad URL is a hard
- * error, not a silent vendored-fallback that would hide the misconfiguration
- * forever.
- *
- * Approach: RANGE/suffix CLASSIFICATION, not a `models.dev`-only allowlist. The
- * documented purpose of the override is to point a non-prod plane at a local
- * stub (a host that is by definition NOT models.dev); a strict allowlist would
- * nullify the override entirely, so classification is used and every block is
- * driven by the target being internal, not by it not being models.dev.
- */
-function assertSafeCatalogUrl(rawUrl: string): void {
-  let parsed: URL
-  try {
-    parsed = new URL(rawUrl)
-  } catch {
-    throw new Error(`models.dev catalog URL is not a valid URL: ${rawUrl}`)
-  }
-  if (parsed.protocol !== 'https:') {
-    throw new Error(`models.dev catalog URL must be https:// (got "${parsed.protocol}//")`)
-  }
-  // `URL.hostname` keeps IPv6 literals wrapped in brackets ("[::1]"); strip them
-  // so both the bracketed form and net.isIP() see the bare address.
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '')
-  const ipVersion = isIP(host)
-  const blocked =
-    ipVersion === 4
-      ? isBlockedV4(host)
-      : ipVersion === 6
-        ? isBlockedV6(host)
-        : isBlockedHostname(host)
-  if (blocked) {
-    throw new Error(`models.dev catalog URL host is not an allowed egress target: ${host}`)
-  }
-}
-
-/**
  * Fetch the LIVE catalog from the resolved URL with all guards, or fall back to
  * the vendored snapshot on ANY fetch/parse failure (network error, timeout,
  * non-2xx, redirect, over-cap body, parse/shape failure) — so the sync always
@@ -396,9 +427,9 @@ export async function loadModelsDevCatalog(
     return { source: 'live', fetchedAt, capturedAt: fetchedAt, catalog: parsed }
   } catch (err) {
     // Do NOT log the body. A short reason is enough for operators.
-    console.warn(
-      '[Discovery] models.dev live fetch failed; using vendored snapshot:',
-      err instanceof Error ? err.message : String(err)
+    log.warn(
+      { reason: err instanceof Error ? err.message : String(err) },
+      'models.dev live fetch failed; using vendored snapshot'
     )
     return {
       source: 'vendored',
@@ -411,7 +442,7 @@ export async function loadModelsDevCatalog(
   }
 }
 
-// Mirror the manual admin path's zod caps (createLlmAllowedModelSchema:
+// Stay within the manual admin path's zod caps (createLlmAllowedModelSchema:
 // `model` .max(400), `display_name` .max(400)) so NO external-source (models.dev)
 // field can be stored larger than what the operator API itself accepts. The
 // target columns are unbounded TEXT and the operator "enable" flow
@@ -421,10 +452,33 @@ export async function loadModelsDevCatalog(
 // push the CM past etcd's ~1MB limit and 503 every subsequent materialization
 // (allowlist DoS seeded from external data). Clamp/skip here at ingest.
 const MAX_MODEL_ID_LEN = 400
-const MAX_DISPLAY_NAME_LEN = 400
+// Tighter than the operator API's 400 characters, and in bytes of the JSON the
+// ConfigMap stores: 400 BMP characters can weigh 1200 bytes of UTF-8, and a run
+// may auto-enable hundreds of discovered models at once, each serialized into
+// the same ConfigMap.
+const MAX_DISPLAY_NAME_BYTES = 256
 // A model id with a control/newline char is never valid; reject rather than
 // truncate (a truncated id is a different, wrong id).
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
+
+/**
+ * The longest prefix of `s` whose JSON string literal (without its quotes) fits
+ * in `maxBytes` of UTF-8, cut between code points so a multibyte character or a
+ * surrogate pair is never split. The bound is on the serialized form because
+ * that is what the allowlist ConfigMap stores: `"` and `\` take 2 bytes there,
+ * and a lone surrogate the 6 of its `\uXXXX` escape.
+ */
+export function truncateSerializedUtf8(s: string, maxBytes: number): string {
+  let bytes = 0
+  let end = 0
+  for (const ch of s) {
+    const size = Buffer.byteLength(JSON.stringify(ch), 'utf8') - 2
+    if (bytes + size > maxBytes) break
+    bytes += size
+    end += ch.length
+  }
+  return s.slice(0, end)
+}
 
 /**
  * Normalize a catalog model id to what our runtime addresses. models.dev keys a
@@ -470,21 +524,33 @@ export function mapCatalogToProviders(
       if (!modelId || seen.has(modelId)) continue
       if (modelId.length > MAX_MODEL_ID_LEN || CONTROL_CHARS.test(modelId)) continue
       seen.add(modelId)
+      const raw = m ?? {}
       const discovered: DiscoveredModel = {
         model_id: modelId,
-        image_input_state: imageInputStateFromModalities(m ?? {}),
+        image_input_state: imageInputStateFromModalities(raw),
+        text_output: textOutputFromModalities(raw),
+        tool_call: raw.tool_call === true,
+        catalog_status: catalogStatusFrom(raw),
+        status_present: raw.status !== undefined,
+        cost: sanitizeModelCost(raw),
       }
       const ctx = m?.limit?.context
       if (typeof ctx === 'number' && Number.isInteger(ctx) && ctx > 0) {
         discovered.context_window_tokens = ctx
       }
-      // display_name is non-load-bearing metadata → clamp (truncate) to the
-      // operator-API cap rather than skip the whole model over a long label.
-      const displayName = (typeof m?.name === 'string' ? m.name.trim() : '').slice(
-        0,
-        MAX_DISPLAY_NAME_LEN
-      )
-      if (displayName) discovered.display_name = displayName
+      // display_name is non-load-bearing metadata → clamp (truncate) rather
+      // than skip the whole model over a long label. A label with a control
+      // char is dropped instead: Postgres rejects `\u0000` in TEXT, which would
+      // fail the whole sync transaction.
+      const displayName = truncateSerializedUtf8(
+        typeof m?.name === 'string' ? m.name.trim() : '',
+        MAX_DISPLAY_NAME_BYTES
+      ).trimEnd()
+      if (displayName && !CONTROL_CHARS.test(displayName)) {
+        discovered.display_name = displayName
+      }
+      const releaseDate = releaseDateFrom(raw)
+      if (releaseDate) discovered.release_date = releaseDate
       models.push(discovered)
     }
     // Deterministic order keeps sync output/tests stable.

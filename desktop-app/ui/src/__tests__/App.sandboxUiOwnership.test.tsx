@@ -4,6 +4,7 @@ import { flushSync } from 'react-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import fc from 'fast-check'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import type { EmbedEvent, Launch } from '@lib/embedOwnership.types'
@@ -26,6 +27,9 @@ import { mapKindToRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
 import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 import { openGfsResourcePayload, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { PluginConsentGate } from '../../../src/pluginConsentGate'
+import type { PluginConsentRequest } from '../../../src/pluginSdkProtocol'
+import type { PinnedPluginSurface } from '../../../src/pluginSurfaceRegistry'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
 // The sandbox-ui main fake runs the real main process; these are the
@@ -127,8 +131,13 @@ type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
 type AppController = ReturnType<typeof useAppController>
 
 const sidebarHarness = vi.hoisted(() => ({
+  renderActual: false,
   props: null as null | {
     activeSandboxUiApp?: { appRef: string } | null
+    compactMode?: boolean
+    compactMenuOpen?: boolean
+    onCompactMenuOpenChange?: (open: boolean, closeFocus?: string) => void
+    onSettingsMenuOpenChange?: (open: boolean) => void
     onSelect?: (item: string) => void
     onOpenSandboxUiApp?: (app: {
       appRef: string
@@ -140,6 +149,18 @@ const sidebarHarness = vi.hoisted(() => ({
 }))
 const confirmDialogHarness = vi.hoisted(() => ({
   props: null as null | { title?: string; onConfirm: () => void },
+}))
+const gfsPreviewHarness = vi.hoisted(() => ({
+  props: null as null | { onClose: () => void },
+}))
+const consentHarness = vi.hoisted(() => ({
+  props: null as null | { request: { promptId: string } },
+}))
+const sandboxUiPageHarness = vi.hoisted(() => ({
+  props: null as null | {
+    sidebarShellOverlayOpen?: boolean
+    appRootOverlayOpen?: boolean
+  },
 }))
 
 vi.mock('@hooks/useAppController', () => ({ useAppController: vi.fn() }))
@@ -154,14 +175,28 @@ vi.mock('@components/ConfirmDialog', () => ({
     return null
   },
 }))
-vi.mock('@components/GfsImagePreview', () => ({ GfsImagePreview: () => null }))
-vi.mock('@components/PluginConsentModal', () => ({ PluginConsentModal: () => null }))
-vi.mock('@components/SidebarNav', () => ({
-  SidebarNav: (props: NonNullable<typeof sidebarHarness.props>) => {
-    sidebarHarness.props = props
+vi.mock('@components/GfsImagePreview', () => ({
+  GfsImagePreview: (props: NonNullable<typeof gfsPreviewHarness.props>) => {
+    gfsPreviewHarness.props = props
     return null
   },
 }))
+vi.mock('@components/PluginConsentModal', () => ({
+  PluginConsentModal: (props: NonNullable<typeof consentHarness.props>) => {
+    consentHarness.props = props
+    return <div data-testid="plugin-consent-modal" data-prompt-id={props.request.promptId} />
+  },
+}))
+vi.mock('@components/SidebarNav', async importOriginal => {
+  const actual = await importOriginal<typeof import('@components/SidebarNav')>()
+  return {
+    ...actual,
+    SidebarNav: (props: Parameters<typeof actual.SidebarNav>[0]) => {
+      sidebarHarness.props = props as NonNullable<typeof sidebarHarness.props>
+      return sidebarHarness.renderActual ? <actual.SidebarNav {...props} /> : null
+    },
+  }
+})
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
@@ -171,6 +206,16 @@ vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
 vi.mock('@pages/FilePreviewPage', () => ({ FilePreviewPage: () => null }))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
 vi.mock('@pages/SettingsPage', () => ({ SettingsPage: () => null }))
+vi.mock('@pages/SandboxUiPage', async importOriginal => {
+  const actual = await importOriginal<typeof import('@pages/SandboxUiPage')>()
+  return {
+    ...actual,
+    SandboxUiPage: (props: Parameters<typeof actual.SandboxUiPage>[0]) => {
+      sandboxUiPageHarness.props = props
+      return <actual.SandboxUiPage {...props} />
+    },
+  }
+})
 vi.mock('@pages/TeamDetailsPage', () => ({ TeamDetailsPage: () => null }))
 vi.mock('@pages/TeamsPage', () => ({ TeamsPage: () => null }))
 vi.mock('@pages/UnavailablePage', () => ({ UnavailablePage: () => null }))
@@ -401,6 +446,8 @@ function flushMacrotask() {
 describe('App wires gestures and main events to the embed ownership machine', () => {
   let controller: AppController
   let openGfsResourceCb: ((resource: OpenGfsPayload) => void) | null
+  let consentRequestedCb: ((request: PluginConsentRequest) => void) | null
+  let consentCancelledCb: ((event: { promptId: string }) => void) | null
   let shortcutCommandCb: ((commandId: string, source: string) => void) | null
   let sandboxUi: ReturnType<typeof makeSandboxUiBridge>
   let main: SandboxUiMainFake
@@ -411,12 +458,18 @@ describe('App wires gestures and main events to the embed ownership machine', ()
   beforeEach(() => {
     vi.clearAllMocks()
     sidebarHarness.props = null
+    sidebarHarness.renderActual = false
     confirmDialogHarness.props = null
+    gfsPreviewHarness.props = null
+    consentHarness.props = null
+    sandboxUiPageHarness.props = null
     machineHarness.machine = null
     machineHarness.launches = []
     machineHarness.events = []
     machineHarness.afterDispatch = null
     openGfsResourceCb = null
+    consentRequestedCb = null
+    consentCancelledCb = null
     shortcutCommandCb = null
     flushSyncErrors = []
     const consoleError = console.error.bind(console)
@@ -457,6 +510,14 @@ describe('App wires gestures and main events to the embed ownership machine', ()
         pluginSdk: {
           onOpenGfsResource: vi.fn((cb: (resource: OpenGfsPayload) => void) => {
             openGfsResourceCb = cb
+            return vi.fn()
+          }),
+          onConsentRequested: vi.fn((cb: (request: PluginConsentRequest) => void) => {
+            consentRequestedCb = cb
+            return vi.fn()
+          }),
+          onConsentCancelled: vi.fn((cb: (event: { promptId: string }) => void) => {
+            consentCancelledCb = cb
             return vi.fn()
           }),
         },
@@ -1217,6 +1278,846 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
     expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
+  })
+
+  it('transfers compact-close focus to the visible current route after desktop entry', async () => {
+    let modeChange: ((event: MediaQueryListEvent) => void) | null = null
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => {
+        modeChange = listener as (event: MediaQueryListEvent) => void
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({
+      length: 1,
+      item: () => null,
+      [Symbol.iterator]: function* () {
+        yield {} as DOMRect
+      },
+    } as DOMRectList)
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    const trigger = screen.getByTestId('compact-navigation-toggle')
+    expect(sidebarHarness.props?.compactMode).toBe(true)
+    fireEvent.click(trigger)
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+    expect(document.querySelector('#desktop-sidebar-navigation')).toBeTruthy()
+    const close = document.querySelector('.sidebar-compact-close') as HTMLElement
+    expect(close).toBeTruthy()
+    close.focus()
+    expect(document.activeElement).toBe(close)
+
+    act(() => {
+      media.matches = false
+      modeChange?.({ matches: false } as MediaQueryListEvent)
+    })
+
+    const routeItem = screen.getByTestId('nav-chat')
+    await waitFor(() => {
+      expect(document.activeElement).toBe(routeItem)
+      expect(routeItem.closest('[inert], [aria-hidden="true"]')).toBeNull()
+      expect(document.querySelector('.left-nav.compact-open')).toBeNull()
+    })
+    expect(routeItem.isConnected).toBe(true)
+    expect(routeItem.getAttribute('data-compact-navigation-focus-owner')).toBe('true')
+    sidebarHarness.renderActual = false
+  })
+
+  it('transfers settled compact-trigger focus to desktop navigation after mode entry', async () => {
+    let modeChange: ((event: MediaQueryListEvent) => void) | null = null
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => {
+        modeChange = listener as (event: MediaQueryListEvent) => void
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({
+      length: 1,
+      item: () => null,
+      [Symbol.iterator]: function* () {
+        yield {} as DOMRect
+      },
+    } as DOMRectList)
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+
+    const close = document.querySelector('.sidebar-compact-close') as HTMLElement
+    const trigger = screen.getByTestId('compact-navigation-toggle')
+    expect(close).toBeTruthy()
+    close.focus()
+    fireEvent.click(close)
+    await waitFor(() => {
+      expect(sidebarHarness.props?.compactMenuOpen).toBe(false)
+      expect(document.activeElement).toBe(trigger)
+    })
+
+    act(() => {
+      media.matches = false
+      modeChange?.({ matches: false } as MediaQueryListEvent)
+    })
+
+    const routeItem = screen.getByTestId('nav-chat')
+    await waitFor(() => {
+      expect(document.activeElement).toBe(routeItem)
+      expect(routeItem.closest('[inert], [aria-hidden="true"]')).toBeNull()
+      expect(document.querySelector('.left-nav.compact-open')).toBeNull()
+    })
+    expect(routeItem.isConnected).toBe(true)
+    expect(routeItem.getAttribute('data-compact-navigation-focus-owner')).toBe('true')
+    sidebarHarness.renderActual = false
+  })
+
+  it('transfers settled dismissal focus when desktop CSS already cleared trigger focus', async () => {
+    let modeChange: ((event: MediaQueryListEvent) => void) | null = null
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => {
+        modeChange = listener as (event: MediaQueryListEvent) => void
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({
+      length: 1,
+      item: () => null,
+      [Symbol.iterator]: function* () {
+        yield {} as DOMRect
+      },
+    } as DOMRectList)
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    const trigger = screen.getByTestId('compact-navigation-toggle')
+    fireEvent.click(trigger)
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+
+    const close = document.querySelector('.sidebar-compact-close') as HTMLElement
+    close.focus()
+    fireEvent.click(close)
+    await waitFor(() => {
+      expect(sidebarHarness.props?.compactMenuOpen).toBe(false)
+      expect(document.activeElement).toBe(trigger)
+    })
+
+    // The media-query CSS hides this control before React's mode commit. Model
+    // the browser clearing its focus while the trigger becomes display:none.
+    trigger.blur()
+    expect(document.activeElement).toBe(document.body)
+    act(() => {
+      media.matches = false
+      modeChange?.({ matches: false } as MediaQueryListEvent)
+    })
+
+    const routeItem = screen.getByTestId('nav-chat')
+    await waitFor(() => {
+      expect(document.activeElement).toBe(routeItem)
+      expect(routeItem.closest('[inert], [aria-hidden="true"]')).toBeNull()
+      expect(document.querySelector('.left-nav.compact-open')).toBeNull()
+    })
+    expect(routeItem.isConnected).toBe(true)
+    expect(routeItem.getAttribute('data-compact-navigation-focus-owner')).toBe('true')
+    sidebarHarness.renderActual = false
+  })
+
+  it('preserves a later desktop control focus after settled compact dismissal', async () => {
+    let modeChange: ((event: MediaQueryListEvent) => void) | null = null
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => {
+        modeChange = listener as (event: MediaQueryListEvent) => void
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({
+      length: 1,
+      item: () => null,
+      [Symbol.iterator]: function* () {
+        yield {} as DOMRect
+      },
+    } as DOMRectList)
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    const trigger = screen.getByTestId('compact-navigation-toggle')
+    fireEvent.click(trigger)
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+    const close = document.querySelector('.sidebar-compact-close') as HTMLElement
+    close.focus()
+    fireEvent.click(close)
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+
+    const windowControl = screen.getByRole('button', { name: 'Minimize window' })
+    windowControl.focus()
+    expect(document.activeElement).toBe(windowControl)
+    act(() => {
+      media.matches = false
+      modeChange?.({ matches: false } as MediaQueryListEvent)
+    })
+
+    await waitFor(() => expect(document.querySelector('.left-nav.compact-open')).toBeNull())
+    expect(document.activeElement).toBe(windowControl)
+    sidebarHarness.renderActual = false
+  })
+
+  it('clears compact Settings before revealing native content on desktop entry', async () => {
+    let modeChange: ((event: MediaQueryListEvent) => void) | null = null
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => {
+        modeChange = listener as (event: MediaQueryListEvent) => void
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({
+      length: 1,
+      item: () => null,
+      [Symbol.iterator]: function* () {
+        yield {} as DOMRect
+      },
+    } as DOMRectList)
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    await waitFor(() => expect(sidebarHarness.props?.compactMode).toBe(true))
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    await flushMacrotask()
+
+    fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+    const settings = screen.getByTestId('nav-settings-menu')
+    fireEvent.click(settings)
+    expect(settings.getAttribute('aria-expanded')).toBe('true')
+    const focusedSettingsItem = document.querySelector(
+      '.sidebar-settings-menu [role="menuitem"]'
+    ) as HTMLElement
+    focusedSettingsItem.focus()
+    expect(document.activeElement).toBe(focusedSettingsItem)
+    await waitFor(() => expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(true))
+    expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false)
+
+    act(() => {
+      media.matches = false
+      modeChange?.({ matches: false } as MediaQueryListEvent)
+    })
+
+    await waitFor(() => {
+      expect(sidebarHarness.props?.compactMenuOpen).toBe(false)
+      expect(document.querySelector('.sidebar-settings-menu')).toBeNull()
+      expect(settings.getAttribute('aria-expanded')).toBe('false')
+      expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(false)
+    })
+    const routeItem = screen.getByTestId('nav-sandbox-ui')
+    await waitFor(() => expect(document.activeElement).toBe(routeItem))
+    expect(routeItem.isConnected).toBe(true)
+    expect(routeItem.closest('[inert], [aria-hidden="true"]')).toBeNull()
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    const finalVisibleCall = sandboxUi.setVisible.mock.invocationCallOrder.at(-1)
+    const finalBoundsCall = sandboxUi.setBounds.mock.invocationCallOrder.at(-1)
+    expect(finalBoundsCall).toBeDefined()
+    expect(finalVisibleCall).toBeGreaterThan(finalBoundsCall!)
+    sidebarHarness.renderActual = false
+  })
+
+  it('keeps the native view hidden while compact navigation alone is open', async () => {
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal('innerWidth', 700)
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    await flushMacrotask()
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    sandboxUi.setVisible.mockClear()
+
+    fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+    expect(screen.queryByRole('menu', { name: 'Settings' })).toBeNull()
+    expect(screen.getByTestId('nav-settings-menu').getAttribute('aria-expanded')).toBe('false')
+    await waitFor(() => expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(true))
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false))
+    expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(false)
+
+    fireEvent.click(document.querySelector('.sidebar-compact-close') as HTMLElement)
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(false))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(false))
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    sidebarHarness.renderActual = false
+  })
+
+  it('cancels a live resize in the App breakpoint event before React commits compact mode', async () => {
+    let modeChange: ((event: MediaQueryListEvent) => void) | null = null
+    const media = {
+      matches: false,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => {
+        modeChange = listener as (event: MediaQueryListEvent) => void
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal('innerWidth', 1200)
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    vi.stubGlobal(
+      'PointerEvent',
+      class extends MouseEvent {
+        pointerId: number
+        isPrimary: boolean
+
+        constructor(type: string, init: PointerEventInit = {}) {
+          super(type, init)
+          this.pointerId = init.pointerId ?? 0
+          this.isPrimary = init.isPrimary ?? true
+        }
+      }
+    )
+    Object.defineProperty(window, 'PointerEvent', {
+      configurable: true,
+      value: (globalThis as { PointerEvent?: unknown }).PointerEvent,
+    })
+    window.localStorage.setItem('clerum.ui.sidebarWidth', '460')
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    const separator = document.querySelector('.sidebar-resize-handle') as HTMLElement
+    expect(separator).toBeTruthy()
+    fireEvent.pointerDown(separator, { button: 0, clientX: 460, pointerId: 73 })
+    fireEvent.pointerMove(separator, { clientX: 450, pointerId: 73 })
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('460')
+    expect(document.body.classList.contains('sidebar-resizing')).toBe(true)
+
+    act(() => {
+      media.matches = true
+      modeChange?.({ matches: true } as MediaQueryListEvent)
+      fireEvent.pointerUp(separator, { clientX: 450, pointerId: 73 })
+    })
+
+    await waitFor(() => expect(sidebarHarness.props?.compactMode).toBe(true))
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('460')
+    expect(document.body.classList.contains('sidebar-resizing')).toBe(false)
+
+    act(() => {
+      media.matches = false
+      modeChange?.({ matches: false } as MediaQueryListEvent)
+    })
+    await waitFor(() => expect(sidebarHarness.props?.compactMode).toBe(false))
+    expect(document.querySelector('.sidebar-resize-handle')?.getAttribute('aria-valuenow')).toBe(
+      '460'
+    )
+    sidebarHarness.renderActual = false
+  })
+
+  it('keeps the native view hidden after compact Settings closes while a GFS preview remains open', async () => {
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal('innerWidth', 700)
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    await flushMacrotask()
+    sandboxUi.setVisible.mockClear()
+    sandboxUi.setBounds.mockClear()
+
+    fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+    const settings = screen.getByTestId('nav-settings-menu')
+    fireEvent.click(settings)
+    expect(settings.getAttribute('aria-expanded')).toBe('true')
+    expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(true)
+
+    const payload = await openGfsResourcePayload(
+      resolvedFile('img1', 'image.png', {
+        gfsUri: 'gfs://main/img1.png',
+      })
+    )
+    act(() => openGfsResourceCb?.(payload))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(true))
+
+    fireEvent.click(document.querySelector('.sidebar-compact-close') as HTMLElement)
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(false))
+    expect(document.querySelector('.sidebar-settings-menu')).toBeNull()
+    expect(settings.getAttribute('aria-expanded')).toBe('false')
+    expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(false)
+    expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(true)
+    expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(false)
+
+    act(() => gfsPreviewHarness.props?.onClose())
+    await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(false))
+    await waitFor(() =>
+      expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(true)
+    )
+    const finalVisibleCall = sandboxUi.setVisible.mock.calls
+      .map(([visible]) => visible)
+      .lastIndexOf(true)
+    const finalBoundsCall = sandboxUi.setBounds.mock.invocationCallOrder.at(-1)
+    const visibleCallOrder = sandboxUi.setVisible.mock.invocationCallOrder[finalVisibleCall]
+    expect(finalBoundsCall).toBeDefined()
+    expect(visibleCallOrder).toBeGreaterThan(finalBoundsCall!)
+    sidebarHarness.renderActual = false
+  })
+
+  it('clears the App Settings owner on the real sidebar shortcut while GFS still blocks reveal', async () => {
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal('innerWidth', 700)
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    await flushMacrotask()
+    sandboxUi.setVisible.mockClear()
+
+    fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+    const settings = screen.getByTestId('nav-settings-menu')
+    fireEvent.click(settings)
+    expect(settings.getAttribute('aria-expanded')).toBe('true')
+    expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(true)
+
+    const payload = await openGfsResourcePayload(
+      resolvedFile('img5', 'fifth.png', { gfsUri: 'gfs://main/img5.png' })
+    )
+    act(() => openGfsResourceCb?.(payload))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(true))
+
+    act(() => shortcutCommandCb?.('sidebar.toggle', 'host'))
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(false))
+    expect(document.querySelector('.sidebar-settings-menu')).toBeNull()
+    expect(settings.getAttribute('aria-expanded')).toBe('false')
+    expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(false)
+    expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(true)
+    expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(false)
+    sidebarHarness.renderActual = false
+  })
+
+  it('keeps a GFS preview blocking native reveal after the consent prompt is cancelled', async () => {
+    await renderApp()
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    await flushMacrotask()
+    sandboxUi.setVisible.mockClear()
+    sandboxUi.setBounds.mockClear()
+
+    const mount: PinnedPluginSurface = {
+      pluginId: 'plugin-1',
+      pluginTitle: 'Plugin',
+      surface: 'sandbox-ui-embed',
+      webContentsId: 101,
+      generation: 1,
+    }
+    const consentGate = new PluginConsentGate({
+      store: {
+        list: async () => [],
+        get: async () => null,
+        put: async () => undefined,
+        touch: async () => undefined,
+        revoke: async () => undefined,
+        revokeAllForPlugin: async () => undefined,
+      },
+      isMountCurrent: candidate => candidate === mount,
+      presentPrompt: request => consentRequestedCb?.(request),
+      cancelPrompt: promptId => consentCancelledCb?.({ promptId }),
+      setSurfaceVisible: async (visible, requestedMount) => {
+        if (requestedMount !== mount) return false
+        sandboxUi.setVisible(visible)
+        return true
+      },
+      isWindowReady: () => true,
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+    })
+    const pendingConsent = consentGate.ensure({
+      envKey: 'testenv_0123456789ab',
+      userId: 'user-1',
+      pluginId: 'plugin-1',
+      pluginTitle: 'Plugin',
+      mount,
+      capabilities: ['identity.read'],
+    })
+    await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(true))
+    expect(screen.getByTestId('plugin-consent-modal').getAttribute('data-prompt-id')).toEqual(
+      expect.any(String)
+    )
+
+    const payload = await openGfsResourcePayload(
+      resolvedFile('img2', 'second.png', {
+        gfsUri: 'gfs://main/img2.png',
+      })
+    )
+    act(() => openGfsResourceCb?.(payload))
+    await waitFor(() => expect(gfsPreviewHarness.props).not.toBeNull())
+
+    act(() => consentGate.resetPlugin('plugin-1'))
+    await pendingConsent
+    await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(true))
+    expect(screen.queryByTestId('plugin-consent-modal')).toBeNull()
+    expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(false)
+
+    act(() => gfsPreviewHarness.props?.onClose())
+    await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(false))
+    await waitFor(() =>
+      expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(true)
+    )
+    const finalVisibleCall = sandboxUi.setVisible.mock.calls
+      .map(([visible]) => visible)
+      .lastIndexOf(true)
+    const finalBoundsCall = sandboxUi.setBounds.mock.invocationCallOrder.at(-1)
+    expect(finalBoundsCall).toBeDefined()
+    expect(sandboxUi.setVisible.mock.invocationCallOrder[finalVisibleCall]).toBeGreaterThan(
+      finalBoundsCall!
+    )
+  })
+
+  it('keeps a GFS preview close from revealing while Settings remains active', async () => {
+    await renderApp()
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    await flushMacrotask()
+    sandboxUi.setVisible.mockClear()
+    sandboxUi.setBounds.mockClear()
+
+    const payload = await openGfsResourcePayload(
+      resolvedFile('img3', 'third.png', { gfsUri: 'gfs://main/img3.png' })
+    )
+    act(() => openGfsResourceCb?.(payload))
+    await waitFor(() => expect(gfsPreviewHarness.props).not.toBeNull())
+
+    act(() => sidebarHarness.props?.onSettingsMenuOpenChange?.(true))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(true))
+    expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(true)
+
+    act(() => gfsPreviewHarness.props?.onClose())
+    await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(false))
+    expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(true)
+    expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(false)
+
+    act(() => sidebarHarness.props?.onSettingsMenuOpenChange?.(false))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(false))
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+  })
+
+  it('models GFS preview and Settings owner orderings through the real App/Page boundary', async () => {
+    type Model = { preview: boolean; settings: boolean }
+    type Real = { payload: OpenGfsPayload }
+
+    const openPreview: fc.AsyncCommand<Model, Real> = {
+      check: model => !model.preview,
+      run: async (model, real) => {
+        sandboxUi.setVisible.mockClear()
+        act(() => openGfsResourceCb?.(real.payload))
+        await waitFor(() => expect(gfsPreviewHarness.props).not.toBeNull())
+        model.preview = true
+        expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(true)
+        expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(false)
+      },
+      toString: () => 'open GFS preview through the registered App event',
+    }
+    const closePreview: fc.AsyncCommand<Model, Real> = {
+      check: model => model.preview,
+      run: async (model, _real) => {
+        sandboxUi.setVisible.mockClear()
+        act(() => gfsPreviewHarness.props?.onClose())
+        await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(false))
+        model.preview = false
+        if (model.settings) {
+          expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(false)
+        }
+      },
+      toString: () => 'close GFS preview while retaining any Settings owner',
+    }
+    const openSettings: fc.AsyncCommand<Model, Real> = {
+      check: model => !model.settings,
+      run: async model => {
+        sandboxUi.setVisible.mockClear()
+        act(() => sidebarHarness.props?.onSettingsMenuOpenChange?.(true))
+        await waitFor(() => expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(true))
+        model.settings = true
+        expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(false)
+      },
+      toString: () => 'open the App-mirrored Settings visibility owner',
+    }
+    const closeSettings: fc.AsyncCommand<Model, Real> = {
+      check: model => model.settings,
+      run: async model => {
+        sandboxUi.setVisible.mockClear()
+        act(() => sidebarHarness.props?.onSettingsMenuOpenChange?.(false))
+        await waitFor(() => expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(false))
+        model.settings = false
+        if (model.preview) {
+          expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(false)
+        } else {
+          await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+        }
+      },
+      toString: () => 'close Settings while retaining any GFS preview owner',
+    }
+    const commands = fc.commands(
+      [
+        fc.constant(openPreview),
+        fc.constant(closePreview),
+        fc.constant(openSettings),
+        fc.constant(closeSettings),
+      ],
+      { maxCommands: 8, size: '+1' }
+    )
+
+    await renderApp()
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    await flushMacrotask()
+    const payload = await openGfsResourcePayload(
+      resolvedFile('img4', 'fourth.png', { gfsUri: 'gfs://main/img4.png' })
+    )
+
+    const generated = fc.sample(commands, { seed: 11052026, numRuns: 12 })
+    const sequences = generated
+      .map(candidate => [...candidate])
+      .filter(sequence => sequence.length > 0)
+    expect(sequences.length).toBeGreaterThan(0)
+    for (const sequence of sequences) {
+      const model: Model = { preview: false, settings: false }
+      await fc.asyncModelRun(() => ({ model, real: { payload } }), [...sequence])
+      if (model.preview) act(() => gfsPreviewHarness.props?.onClose())
+      if (model.settings) act(() => sidebarHarness.props?.onSettingsMenuOpenChange?.(false))
+      if (model.preview || model.settings) {
+        await waitFor(() => expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(false))
+      }
+      await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    }
+  })
+
+  it.each([
+    {
+      label: 'Desktop Update Required',
+      open: (state: AppController) => {
+        ;(state as unknown as { desktopReleaseStatus: unknown }).desktopReleaseStatus = {
+          updateRequired: true,
+          currentVersion: '1.0.0',
+          latestVersion: '2.0.0',
+        }
+      },
+      close: (state: AppController) => {
+        ;(state as unknown as { desktopReleaseStatus: unknown }).desktopReleaseStatus = null
+      },
+    },
+    {
+      label: 'environment setup confirmation',
+      open: (state: AppController) => {
+        ;(
+          state as unknown as { pendingDesktopEnvironmentSetup: unknown }
+        ).pendingDesktopEnvironmentSetup = {
+          appName: 'QA',
+          externalRestApiBaseUrl: 'https://api.example.test',
+        }
+      },
+      close: (state: AppController) => {
+        ;(
+          state as unknown as { pendingDesktopEnvironmentSetup: unknown }
+        ).pendingDesktopEnvironmentSetup = null
+      },
+    },
+    {
+      label: 'environment switch confirmation',
+      open: (state: AppController) => {
+        ;(
+          state as unknown as { pendingDesktopEnvironmentSwitchConfirmation: unknown }
+        ).pendingDesktopEnvironmentSwitchConfirmation = {
+          targetEnvironmentName: 'QA',
+          targetExternalRestApiBaseUrl: 'https://qa.example.test',
+          activeExternalRestApiBaseUrl: 'https://api.example.test',
+        }
+      },
+      close: (state: AppController) => {
+        ;(
+          state as unknown as { pendingDesktopEnvironmentSwitchConfirmation: unknown }
+        ).pendingDesktopEnvironmentSwitchConfirmation = null
+      },
+    },
+    {
+      label: 'environment setup success',
+      open: (state: AppController) => {
+        ;(
+          state as unknown as { desktopEnvironmentSetupComplete: boolean }
+        ).desktopEnvironmentSetupComplete = true
+      },
+      close: (state: AppController) => {
+        ;(
+          state as unknown as { desktopEnvironmentSetupComplete: boolean }
+        ).desktopEnvironmentSetupComplete = false
+      },
+    },
+  ])('keeps the native view hidden while $label is open', async ({ open, close }) => {
+    await renderApp()
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    await flushMacrotask()
+    sandboxUi.setVisible.mockClear()
+    sandboxUi.setBounds.mockClear()
+
+    act(() => {
+      open(controller)
+      forceControllerRender()
+    })
+    await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(true))
+    expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(false)
+
+    act(() => {
+      close(controller)
+      forceControllerRender()
+    })
+    await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(false))
+    await waitFor(() =>
+      expect(sandboxUi.setVisible.mock.calls.some(([visible]) => visible === true)).toBe(true)
+    )
+    const finalVisibleCall = sandboxUi.setVisible.mock.calls
+      .map(([visible]) => visible)
+      .lastIndexOf(true)
+    const finalBoundsCall = sandboxUi.setBounds.mock.invocationCallOrder.at(-1)
+    const visibleCallOrder = sandboxUi.setVisible.mock.invocationCallOrder[finalVisibleCall]
+    expect(finalBoundsCall).toBeDefined()
+    expect(visibleCallOrder).toBeGreaterThan(finalBoundsCall!)
+  })
+
+  it('returns focus from the real compact backdrop to its App trigger', async () => {
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({
+      length: 1,
+      item: () => null,
+      [Symbol.iterator]: function* () {
+        yield {} as DOMRect
+      },
+    } as DOMRectList)
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    const trigger = screen.getByTestId('compact-navigation-toggle')
+    fireEvent.click(trigger)
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+
+    const close = document.querySelector('.sidebar-compact-close') as HTMLElement
+    const backdrop = document.querySelector('.sidebar-mobile-backdrop') as HTMLElement
+    expect(close).toBeTruthy()
+    expect(backdrop).toBeTruthy()
+    close.focus()
+    expect(document.activeElement).toBe(close)
+    fireEvent.click(backdrop)
+
+    await waitFor(() => {
+      expect(sidebarHarness.props?.compactMenuOpen).toBe(false)
+      expect(document.activeElement).toBe(trigger)
+    })
+    expect(trigger.isConnected).toBe(true)
+    sidebarHarness.renderActual = false
   })
 
   it('fails the suite on a flushSync issued from inside an effect', () => {
