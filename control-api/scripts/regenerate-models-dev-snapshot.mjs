@@ -17,6 +17,15 @@
  *   node scripts/regenerate-models-dev-snapshot.mjs \
  *     --input ./api.json --captured-at 2026-09-18T16:16:10.000Z
  *
+ * `--live-fixture` writes the TEST fixture `test/fixtures/modelsDevLiveCatalog.json`
+ * instead of the snapshot. It keeps the fields the vendored snapshot deliberately
+ * omits (`modalities.output`, `tool_call`, `status`, `cost`, `release_date`), which
+ * the auto-enable rules read. Those fields must never reach the vendored snapshot:
+ * an offline fallback is stale evidence and must not be able to enable a model.
+ *
+ *   node scripts/regenerate-models-dev-snapshot.mjs --live-fixture \
+ *     --input ./api.json --captured-at 2026-10-30T15:57:00.000Z
+ *
  * Every failure throws and exits non-zero: a snapshot regenerated from partial
  * data is worse than no regeneration at all.
  */
@@ -29,12 +38,17 @@ import { PROVIDER_KEY_MAP } from '../dist/services/modelsDevClient.js'
 const CATALOG_URL = 'https://models.dev/api.json'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const OUTPUT_PATH = join(HERE, '..', 'src', 'data', 'modelsDevSnapshot.ts')
+const LIVE_FIXTURE_PATH = join(HERE, '..', 'test', 'fixtures', 'modelsDevLiveCatalog.json')
 
-/** Minimal flag parser — `--input <path>` and `--captured-at <iso>` only. */
+/** Minimal flag parser — `--input <path>`, `--captured-at <iso>` and `--live-fixture`. */
 function parseArgs(argv) {
-  const out = {}
+  const out = { liveFixture: false }
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i]
+    if (flag === '--live-fixture') {
+      out.liveFixture = true
+      continue
+    }
     if (flag !== '--input' && flag !== '--captured-at') {
       throw new Error(`Unknown argument: ${flag}`)
     }
@@ -99,22 +113,86 @@ function trimModel(raw) {
   return trimmed
 }
 
-function buildSnapshot(payload) {
-  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error('models.dev payload is not an object')
+const isPlainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+
+/** The mapped provider entry for `key`; a missing key is a mapping bug, never skipped. */
+function requireProvider(payload, key) {
+  const provider = payload[key]
+  if (!isPlainObject(provider)) {
+    throw new Error(
+      `models.dev has no provider "${key}". PROVIDER_KEY_MAP must be corrected, not skipped: ` +
+        'silently dropping the key would make that provider look like it has no models.'
+    )
   }
+  return provider
+}
+
+function requireCatalogObject(payload) {
+  if (!isPlainObject(payload)) throw new Error('models.dev payload is not an object')
+}
+
+const LIVE_COST_KEYS = ['input', 'output', 'cache_read', 'cache_write']
+
+/**
+ * Trims one entry for the live test fixture. Unlike `trimModel`, values are
+ * copied VERBATIM whatever their type: the fixture exists to exercise the
+ * client's sanitizers against what models.dev really sends, so it must not
+ * pre-clean anything.
+ */
+function trimLiveModel(raw) {
+  const trimmed = {}
+  for (const field of ['id', 'name', 'tool_call', 'status', 'release_date']) {
+    if (raw[field] !== undefined) trimmed[field] = raw[field]
+  }
+  if (isPlainObject(raw.limit) && raw.limit.context !== undefined) {
+    trimmed.limit = { context: raw.limit.context }
+  }
+  if (isPlainObject(raw.modalities)) {
+    const modalities = {}
+    if (raw.modalities.input !== undefined) modalities.input = raw.modalities.input
+    if (raw.modalities.output !== undefined) modalities.output = raw.modalities.output
+    trimmed.modalities = modalities
+  }
+  if (isPlainObject(raw.cost)) {
+    const cost = {}
+    for (const key of LIVE_COST_KEYS) if (raw.cost[key] !== undefined) cost[key] = raw.cost[key]
+    trimmed.cost = cost
+  } else if (raw.cost !== undefined) {
+    trimmed.cost = raw.cost
+  }
+  return trimmed
+}
+
+function buildLiveFixture(payload, capturedAt) {
+  requireCatalogObject(payload)
+  const catalog = {}
+  let models = 0
+  for (const key of Object.values(PROVIDER_KEY_MAP)) {
+    const provider = requireProvider(payload, key)
+    const entry = {}
+    if (typeof provider.name === 'string') entry.name = provider.name
+    entry.models = {}
+    // Keys are kept as the payload has them: the client reads both the key and `id`.
+    for (const [modelKey, raw] of Object.entries(provider.models ?? {})) {
+      entry.models[modelKey] = isPlainObject(raw) ? trimLiveModel(raw) : raw
+      models += 1
+    }
+    catalog[key] = entry
+  }
+  return {
+    fixture: { capturedAt, catalog },
+    stats: { providers: Object.keys(catalog).length, models },
+  }
+}
+
+function buildSnapshot(payload) {
+  requireCatalogObject(payload)
   const catalog = {}
   let models = 0
   let withImage = 0
   let droppedIds = 0
   for (const key of Object.values(PROVIDER_KEY_MAP)) {
-    const provider = payload[key]
-    if (provider === null || typeof provider !== 'object' || Array.isArray(provider)) {
-      throw new Error(
-        `models.dev has no provider "${key}". PROVIDER_KEY_MAP must be corrected, not skipped: ` +
-          'silently dropping the key would make that provider look like it has no models.'
-      )
-    }
+    const provider = requireProvider(payload, key)
     const entry = {}
     if (typeof provider.name === 'string') entry.name = provider.name
     entry.models = {}
@@ -169,6 +247,21 @@ export const VENDORED_MODELS_DEV_SNAPSHOT: RawModelsDevCatalog = ${JSON.stringif
 
 const args = parseArgs(process.argv.slice(2))
 const { payload, capturedAt } = await loadCatalog(args)
+
+if (args.liveFixture) {
+  const { fixture, stats } = buildLiveFixture(payload, capturedAt)
+  writeFileSync(LIVE_FIXTURE_PATH, `${JSON.stringify(fixture, null, 2)}\n`, 'utf8')
+  console.log(
+    [
+      `providers: ${stats.providers}`,
+      `models:    ${stats.models}`,
+      `bytes:     ${statSync(LIVE_FIXTURE_PATH).size}`,
+      `capturedAt: ${capturedAt}`,
+    ].join('\n')
+  )
+  process.exit(0)
+}
+
 const { catalog, stats } = buildSnapshot(payload)
 writeFileSync(OUTPUT_PATH, render(catalog, capturedAt), 'utf8')
 execFileSync('npx', ['prettier', '--write', OUTPUT_PATH], {

@@ -302,7 +302,8 @@ export async function runSeedCompanion(actions: { prepareGfsImages?: (input: any
       connection: require('./dist/services/grokSubscriptionConnection.js'), codexConnection: require('./dist/services/codexSubscriptionConnection.js'),
       encryption: require('./dist/oauth/encryption.js'), gateway: new (require('./dist/k8s.js').K8sGateway)() }
     seedAssert(prod.config.hostsNamespace === options.hostNamespace && prod.config.grokSubscriptionEnabled && prod.config.codexSubscriptionEnabled &&
-      prod.config.subscriptionCatalogSyncCronEnabled === false && prod.config.llmCatalogSyncCronEnabled === false, 'SEED_RESUME_RUNTIME_INVALID')
+      prod.config.subscriptionCatalogSyncCronEnabled === false && prod.config.llmCatalogSyncCronEnabled === false &&
+      prod.config.llmCatalogBootSyncEnabled === false, 'SEED_RESUME_RUNTIME_INVALID')
     session = new PrivateCookieSession(prod.config, prod.db, options)
     const operator = await session.authenticate()
     options.operatorPassword = undefined; options.cookie = undefined
@@ -315,7 +316,8 @@ export async function runSeedCompanion(actions: { prepareGfsImages?: (input: any
       codexConnection: require('./dist/services/codexSubscriptionConnection.js'), encryption: require('./dist/oauth/encryption.js'),
       gateway: new (require('./dist/k8s.js').K8sGateway)() }
     seedAssert(prod.config.hostsNamespace === options.hostNamespace && prod.config.grokSubscriptionEnabled && prod.config.codexSubscriptionEnabled, 'SEED_PROVIDER_OR_NAMESPACE_MISMATCH')
-    seedAssert(prod.config.subscriptionCatalogSyncCronEnabled === false && prod.config.llmCatalogSyncCronEnabled === false, 'SEED_VENDOR_CRON_MUST_BE_DISABLED')
+    seedAssert(prod.config.subscriptionCatalogSyncCronEnabled === false && prod.config.llmCatalogSyncCronEnabled === false &&
+      prod.config.llmCatalogBootSyncEnabled === false, 'SEED_VENDOR_CRON_MUST_BE_DISABLED')
     phase = 'operator-session'
     session = new PrivateCookieSession(prod.config, prod.db, options)
     const operator = await session.authenticate()
