@@ -866,6 +866,9 @@ jobs:
       - name: Test Minikube mutation and WRC recovery admission (hermetic, cluster-free)
         run: bash scripts/tests/test-minikube-mutation-boundary.sh
 
+      - name: Test egress CDN rotation cleanup witness (hermetic, cluster-free)
+        run: bash scripts/tests/test-egress-cdn-rotation-cleanup.sh
+
       - name: Test minikube sandbox-ui NetworkPolicy lint (static-policy ownership + DNS)
         run: bash scripts/tests/test-lint-networkpolicies.sh
 

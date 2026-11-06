@@ -186,6 +186,47 @@ const CREDENTIALS_REVISION_ANNOTATION = 'clerum.io/credentials-revision'
 const HEADER_NAME_RE = /^[A-Za-z0-9-]+$/
 // Bound the value length so a pathological CRD cannot blow up the ConfigMap.
 const MAX_AUTH_HEADER_VALUE_LENGTH = 2048
+// Query placeholders are expanded by the image entrypoint after HCC has built
+// the ConfigMap. Restrict them to environment-variable names; a name must also
+// be declared by the CRD and survive into the proxy container (see
+// buildNginxConfigMap), so an unresolved name cannot become an NGINX variable.
+// envsubst and Kubernetes env names are case-sensitive and accept lowercase.
+const QUERY_PLACEHOLDER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
+// The URL parser lowercases ASCII hostnames and converts IDNs to punycode, but
+// it keeps `;`, `$` and braces. The hostname is rendered unquoted into NGINX
+// directives, so it must stay within the CRD schema's host character class.
+const REMOTE_HOSTNAME_RE = /^[a-z0-9._-]+$/
+// Env names a CRD may not set on a workload container (sanitizeCrdSpec strips
+// them from spec.env, compared in uppercase).
+const FORBIDDEN_CONTAINER_ENV = new Set([
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'PATH',
+  'NODE_OPTIONS',
+  'PYTHONPATH',
+  'JAVA_TOOL_OPTIONS',
+  'KUBECONFIG',
+  'KUBERNETES_SERVICE_HOST',
+  'KUBERNETES_SERVICE_PORT',
+])
+// Egress proxy env whose container value the platform sets after every CRD env
+// source (buildDeployment) or the image entrypoint sets itself before envsubst
+// runs (15-local-resolvers.envsh is sourced ahead of
+// 20-envsubst-on-templates.sh). A CRD declaration does not control their value.
+// LC_ALL belongs here: the pinned image's envsh assigns LC_ALL=C, which
+// overwrites any exported CRD value before envsubst substitutes the template.
+const PLATFORM_OWNED_PROXY_ENV = new Set([
+  'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
+  'NGINX_ENVSUBST_FILTER',
+  'NGINX_LOCAL_RESOLVERS',
+  'LC_ALL',
+])
+// An authHeaders valueTemplate reference to an environment name, in either form
+// the container reads: envsubst resolves `${NAME}` and NGINX reads bare `$NAME`.
+// The name is captured whole, so a longer name that merely contains a reserved
+// one is not affected. Both forms are exact-match on the captured name.
+const TEMPLATE_ENV_REFERENCE_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
+
 const WRC_OWNED_RUNTIME_READY_REASON = 'WrcOwnedRuntimeRegistered'
 // Keep fleet admission aligned with the external-egress convergence lane:
 // enough parallelism for independent servers without allocating one pending
@@ -203,6 +244,35 @@ export const RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE =
 
 function isRetiredStatusConditionType(type: string): boolean {
   return (RETIRED_STATUS_CONDITION_TYPES as readonly string[]).includes(type)
+}
+
+/**
+ * True when NAME is a container env name the platform owns, compared exactly.
+ * envsubst, Kubernetes env names and Linux all treat case as significant, so a
+ * distinct-case spelling (`Path`, `kubernetes_service_host`) names a different
+ * variable and is not platform-owned. An exact-case `KUBERNETES_` prefix is
+ * platform-owned as a family: it is the prefix kubelet uses for injected
+ * service env (`KUBERNETES_SERVICE_HOST`, `KUBERNETES_PORT_443_TCP_ADDR`,
+ * ...), so no rendered template may reference such a name directly, whatever
+ * declares it. The prefix lives only in this predicate, never enumerated in
+ * the sets above. A name that merely contains the prefix
+ * (`MY_KUBERNETES_PORT`) or spells it in a different case is ordinary here.
+ *
+ * The `spec.env` strip in sanitizeCrdSpec keeps its own uppercase comparison
+ * against the enumerated set; callers that mirror that strip compare in
+ * uppercase separately and do not go through this helper. The two rules are
+ * deliberately asymmetric: a `spec.env` entry spelled `Path` is stripped by
+ * the uppercase strip even though `Path` is an ordinary template name here,
+ * so only an `envSecret` declaration can fill `${Path}` (otherwise the
+ * backfill defines it empty); conversely a `KUBERNETES_*` name outside the
+ * enumerated set survives the strip but still may not be referenced.
+ */
+function isPlatformOwnedTemplateName(name: string): boolean {
+  return (
+    name.startsWith('KUBERNETES_') ||
+    FORBIDDEN_CONTAINER_ENV.has(name) ||
+    PLATFORM_OWNED_PROXY_ENV.has(name)
+  )
 }
 
 type StatusWriteDecline = 'record-obligation' | 'silent'
@@ -600,9 +670,10 @@ export class McpServerReconciler {
     if (this.assumeInventoryAuthorityWhenUnconfigured) return true
     if (!this.warnedUnconfiguredAuthority) {
       this.warnedUnconfiguredAuthority = true
-      console.error(
-        '[Reconciler] inventory authority not configured — mutation fences fail closed. ' +
-          'Wire setInventoryAuthority() and setResolveCurrentServer() before reconciling.'
+      hccLogger.error(
+        'inventory authority not configured — mutation fences fail closed. ' +
+          'Wire setInventoryAuthority() and setResolveCurrentServer() before reconciling.',
+        { scope: '[Reconciler]' }
       )
     }
     return false
@@ -922,10 +993,11 @@ export class McpServerReconciler {
         state.ticking = false
         this.setStatus(name, { deployed: true, ready: true, message: 'Running' })
         this.readinessPolls.delete(name)
-        hccLogger.info(
-          `[Reconciler] McpServer ${name} is now ready (after ${state.attempts} poll(s))`,
-          { serverName: name }
-        )
+        hccLogger.info('McpServer is now ready after poll(s)', {
+          scope: '[Reconciler]',
+          name,
+          attempts: state.attempts,
+        })
         // The poll MUST write the CRD, not just in-memory status (issue #223).
         // With generation-aware readiness the check right after a replace is
         // always false, so this is the ONLY place a converged rollout is ever
@@ -967,10 +1039,12 @@ export class McpServerReconciler {
         state.ticking = false
         state.exhausted = true
         state.detail = rollout.detail
-        hccLogger.warn(
-          `[Reconciler] McpServer ${name} not ready after ${maxAttempts} polls — giving up (${rollout.detail})`,
-          { serverName: name }
-        )
+        hccLogger.warn('McpServer not ready after polls — giving up', {
+          scope: '[Reconciler]',
+          name,
+          maxAttempts,
+          detail: rollout.detail,
+        })
         // Give up loudly, on the CRD: a stuck rollout must be visible to the
         // operator with the numbers that prove it, never left as a stale
         // condition or a silent Unknown.
@@ -1024,8 +1098,13 @@ export class McpServerReconciler {
       if (code === 404) {
         const message = `Secret "${secretName}" not found in namespace "${server.namespace}"`
         hccLogger.error(
-          `[Reconciler] ${message}. McpServer ${server.name} will NOT be deployed. Create the secret first.`,
-          { serverName: server.name }
+          'Secret not found in namespace. McpServer will NOT be deployed. Create the secret first.',
+          {
+            scope: '[Reconciler]',
+            resourceName: secretName,
+            namespace: server.namespace,
+            name: server.name,
+          }
         )
         return { ok: false, reason: 'SecretNotFound', message }
       }
@@ -1034,16 +1113,21 @@ export class McpServerReconciler {
           `Access denied reading Secret "${secretName}" in namespace "${server.namespace}" ` +
           `(K8s API ${code})`
         hccLogger.error(
-          `[Reconciler] ${message}. McpServer ${server.name} will be failed closed.`,
+          'Access denied reading Secret in namespace (K8s API). McpServer will be failed closed.',
           {
-            serverName: server.name,
+            scope: '[Reconciler]',
+            resourceName: secretName,
+            namespace: server.namespace,
+            code,
+            name: server.name,
           }
         )
         return { ok: false, reason: 'SecretAccessDenied', message }
       }
       const errMsg = error instanceof Error ? error.message : String(error)
-      hccLogger.error(`[Reconciler] Failed to read Secret "${secretName}"`, {
-        serverName: server.name,
+      hccLogger.error('Failed to read secret', {
+        scope: '[Reconciler]',
+        resourceName: secretName,
         err: error,
       })
       return {
@@ -1096,17 +1180,66 @@ export class McpServerReconciler {
    * Validate and sanitize remote baseUrl to prevent SSRF and nginx.conf injection.
    * Returns safe URL reconstructed from parsed components.
    */
-  private sanitizeRemoteUrl(rawUrl: string): { safeUrl: string; host: string; path: string } {
+  private sanitizeRemoteUrl(rawUrl: string): {
+    safeUrl: string
+    host: string
+    hostname: string
+    port: string
+    path: string
+    search: string
+  } {
     const parsed = new URL(rawUrl) // throws on malformed — no silent fallback
     if (parsed.protocol !== 'https:') {
       throw new Error(`remote.baseUrl must use HTTPS (got ${parsed.protocol})`)
     }
+    // A trailing dot is the DNS root form of the same name: `svc.cluster.local.`
+    // resolves exactly like `svc.cluster.local`. Every check below compares
+    // strings (`endsWith`, `===`, the private-range prefix test), so the dotted
+    // form would otherwise slip past the internal-service and private-range
+    // guards. Canonicalize before any check, and write the canonical name back
+    // into the parsed URL so `host`, `origin`, `safeUrl` and the rendered
+    // `server` / `proxy_ssl_name` / Host header all use it.
+    const parsedHostname = parsed.hostname
+    const hostWithoutTrailingDots = parsedHostname.replace(/\.+$/, '')
+    if (hostWithoutTrailingDots !== parsedHostname && hostWithoutTrailingDots !== '') {
+      parsed.hostname = hostWithoutTrailingDots
+    }
+    // The WHATWG hostname setter re-parses its input: writing a numeric IPv4
+    // spelling such as `0x7f.0.0.1` back into the URL can yield `127.0.0.1`.
+    // Re-read the hostname after canonicalization so every check and every
+    // rendered component use the same final value; the pre-setter string could
+    // validate one host while the URL renders another.
     const host = parsed.hostname
+    if (host === '') {
+      throw new Error('remote.baseUrl must include a hostname')
+    }
+    // The setter is ignored when the dot-stripped name has a numeric last label
+    // that is not a valid IPv4 address (`foo.0x10`, `example.123`): the re-read
+    // hostname then still ends in a dot and would render a `server` name NGINX
+    // cannot resolve (a 502 at runtime, not a bypass — this class cannot spell
+    // `.svc`, `.local` or `kubernetes.default`). Reject it rather than render
+    // it. Comparing against the stripped string instead would also fire on the
+    // legitimate canonicalization (`0x7f.0.0.1..` reads back as `127.0.0.1`),
+    // so the guard is the surviving dot itself. The error does not echo the
+    // hostname.
+    if (host.endsWith('.')) {
+      throw new Error('remote.baseUrl hostname must not end with a trailing dot')
+    }
     // Block IP-literal URLs entirely (IPv4 and IPv6) — require DNS hostnames only
     // This prevents IPv6 SSRF bypasses (::1, ::ffff:7f00:1, fd00::, etc.)
     const bareHost = host.replace(/^\[|\]$/g, '')
     if (/^[\d.:[\]]+$/.test(bareHost) || bareHost.includes(':')) {
       throw new Error(`remote.baseUrl must use a DNS hostname, not an IP address: ${host}`)
+    }
+    // The hostname is rendered unquoted in `server`, `proxy_ssl_name`,
+    // `proxy_redirect` and the Host header, where `;` ends the directive and
+    // `$name` is an NGINX variable. The CRD schema already limits it to
+    // [a-zA-Z0-9._-]; repeat that here so the renderer does not depend on
+    // admission. The error does not echo the hostname.
+    if (!REMOTE_HOSTNAME_RE.test(host)) {
+      throw new Error(
+        'remote.baseUrl hostname contains a forbidden character (allowed: a-z, 0-9, ".", "-", "_")'
+      )
     }
     // Block internal cluster services (SSRF prevention)
     if (
@@ -1121,10 +1254,41 @@ export class McpServerReconciler {
     if (PRIVATE_IP.test(host)) {
       throw new Error(`remote.baseUrl must not point to private/reserved IP ranges: ${host}`)
     }
+    // Defense in depth for the generated NGINX directive: the query is rendered
+    // unquoted in `proxy_pass`/`proxy_redirect`, so only complete placeholders
+    // with environment-variable names may remain dynamic. The URL parser strips TAB/CR/LF and
+    // percent-encodes spaces and other control characters, so in practice this
+    // rejects `$`, braces, `\` and `;` outside a complete placeholder; undeclared
+    // names are rejected below. The error does not echo the query.
+    const queryWithoutPlaceholders = parsed.search.replace(QUERY_PLACEHOLDER_RE, '')
+    if (/[\\;{}$\u0000-\u0020]/.test(queryWithoutPlaceholders)) {
+      throw new Error(
+        'remote.baseUrl query contains an invalid placeholder or forbidden character; ' +
+          'query placeholders must use ${NAME} with NAME matching [A-Za-z_][A-Za-z0-9_]*'
+      )
+    }
+    // The path is rendered unquoted in `location`, `proxy_pass` and
+    // `proxy_redirect`, where NGINX expands `$name` as a variable and a `;`
+    // ends the directive. The URL parser percent-encodes spaces and braces in
+    // the path and turns `\` into `/`, so in practice this rejects `$` and `;`;
+    // the rest of the class matches the query check. The error does not echo
+    // the path.
+    if (/[\\;{}$\u0000-\u0020]/.test(parsed.pathname)) {
+      throw new Error(
+        'remote.baseUrl path contains a forbidden character ($, ;, \\, braces or whitespace)'
+      )
+    }
     // Reconstruct safe URL from parsed components (strips injected chars like newlines)
     const path = parsed.pathname
     const safeUrl = parsed.origin + path + parsed.search
-    return { safeUrl, host: parsed.host, path }
+    return {
+      safeUrl,
+      host: parsed.host,
+      hostname: parsed.hostname,
+      port: parsed.port || '443',
+      path,
+      search: parsed.search,
+    }
   }
 
   /**
@@ -1134,7 +1298,7 @@ export class McpServerReconciler {
    *
    * Returns a safe { header, valueTemplate } tuple with the valueTemplate already
    * escaped for nginx double-quoted string context, or null if the entry is
-   * rejected (a console.warn is emitted describing why).
+   * rejected (a warning is emitted describing why).
    */
   private sanitizeAuthHeader(h: {
     header: string
@@ -1142,18 +1306,44 @@ export class McpServerReconciler {
   }): { header: string; valueTemplate: string } | null {
     // Validate header name — HTTP token chars only (RFC 7230 subset we allow).
     if (!HEADER_NAME_RE.test(h.header)) {
-      console.warn(`[HCC] Rejecting authHeader with invalid name: ${h.header.slice(0, 32)}`)
+      hccLogger.warn('Rejecting authHeader with invalid name', {
+        scope: '[HCC]',
+        header: h.header.slice(0, 32),
+      })
       return null
     }
     // Bound the value length so a pathological CRD cannot blow up the ConfigMap.
     if (h.valueTemplate.length > MAX_AUTH_HEADER_VALUE_LENGTH) {
-      console.warn(`[HCC] Rejecting authHeader value too long for header: ${h.header}`)
+      hccLogger.warn('Rejecting authHeader value too long for header', {
+        scope: '[HCC]',
+        header: h.header,
+      })
       return null
     }
     // CR/LF/NUL allow HTTP request smuggling and nginx directive injection.
     if (/[\r\n\0]/.test(h.valueTemplate)) {
-      console.warn(`[HCC] Rejecting authHeader with CR/LF/NUL in value for header: ${h.header}`)
+      hccLogger.warn('Rejecting authHeader with CR/LF/NUL in value for header', {
+        scope: '[HCC]',
+        header: h.header,
+      })
       return null
+    }
+    // A valueTemplate must not read a variable the platform owns.
+    // `${NAME}` is resolved by envsubst from the proxy container's own
+    // environment and bare `$NAME` is read by NGINX as its own variable, so
+    // either form would send the container's PATH or a platform resolver value
+    // upstream instead of the operator's Secret. Warn with the header and the
+    // placeholder name only: the template value may be the credential.
+    for (const match of h.valueTemplate.matchAll(TEMPLATE_ENV_REFERENCE_RE)) {
+      const name = match[1] ?? match[2]
+      if (isPlatformOwnedTemplateName(name)) {
+        hccLogger.warn('Rejecting authHeader that references a platform-owned variable', {
+          scope: '[HCC]',
+          header: h.header,
+          envVar: name,
+        })
+        return null
+      }
     }
     // Escape backslashes (first, to avoid double-escaping) then double quotes so
     // the value is safe inside nginx's `"..."` string context.
@@ -1163,10 +1353,62 @@ export class McpServerReconciler {
 
   private buildNginxConfigMap(server: McpServerCRD): k8s.V1ConfigMap {
     const {
-      safeUrl,
       host: upstreamHost,
+      hostname: upstreamHostname,
+      port: upstreamPort,
       path: upstreamPath,
+      search: upstreamSearch,
     } = this.sanitizeRemoteUrl(server.spec.remote!.baseUrl)
+    // A declared query placeholder is the only dynamic name envsubst can fill.
+    // An undeclared name survives into the rendered config, where NGINX resolves
+    // it case-insensitively as one of its own variables (for example
+    // ${HTTP_AUTHORIZATION}); reject it here, with an error that never echoes the
+    // query. The comparison is exact and case-sensitive, like envsubst's.
+    //
+    // Only names whose container value the CRD controls count as declared. A
+    // spec.env entry sanitizeCrdSpec strips (compared in uppercase, like that
+    // strip) would otherwise pass this check and be filled by envsubst from the
+    // container's own environment, sending that value (for example the cluster
+    // API address) to the external upstream. buildDeployment does not filter
+    // envSecret today — it emits every key as a secretKeyRef, and the producer
+    // filter is tracked separately (#1281, subset of #1246) — so this consumer
+    // check cannot rely on a producer strip: it excludes exact platform-owned
+    // envSecret names here instead. Matching is exact, like envsubst's: a
+    // distinct-case envSecret name is a different variable and does count.
+    // Exact-case KUBERNETES_* names never reach this check: the loop below
+    // rejects them outright before declared-ness is consulted.
+    const declaredEnvNames = new Set([
+      ...(server.spec.env ?? [])
+        .map(entry => entry.name)
+        .filter(name => !FORBIDDEN_CONTAINER_ENV.has(name.toUpperCase())),
+      ...(server.spec.envSecret?.keys ?? [])
+        .map(key => key.envVar)
+        .filter(name => !isPlatformOwnedTemplateName(name)),
+    ])
+    for (const match of upstreamSearch.matchAll(QUERY_PLACEHOLDER_RE)) {
+      // An exact-case KUBERNETES_* name is rejected outright, however it was
+      // declared: the spec.env strip enumerates only two family members, so
+      // a surviving literal would otherwise count as declared above, and
+      // whether an explicit entry shadows a kubelet-injected value must not
+      // decide what envsubst sends upstream. The error names the
+      // placeholder only; it never echoes the query.
+      if (match[1].startsWith('KUBERNETES_')) {
+        throw new Error(
+          `remote.baseUrl query placeholder \${${match[1]}} names a reserved Kubernetes service variable`
+        )
+      }
+      if (PLATFORM_OWNED_PROXY_ENV.has(match[1])) {
+        throw new Error(
+          `remote.baseUrl query placeholder \${${match[1]}} names an egress proxy variable the platform sets`
+        )
+      }
+      if (!declaredEnvNames.has(match[1])) {
+        throw new Error(
+          `remote.baseUrl query placeholder \${${match[1]}} is not declared in spec.env or spec.envSecret` +
+            ' (spec.env names HCC strips as forbidden and envSecret names the platform owns do not count)'
+        )
+      }
+    }
     const transportPort = server.spec.transport.port || 3000
 
     // Codex P1 fix (PR #101): forward credential secrets as upstream auth headers.
@@ -1205,8 +1447,9 @@ export class McpServerReconciler {
     //     drop — otherwise the reject could be bypassed by injecting a bad value.
     //   - The clear-vs-operator-wins decision is keyed on the SANITIZED/EMITTED set:
     //     if the operator's Authorization entry was dropped by sanitizeAuthHeader (bad
-    //     name/length/CR-LF-NUL), no static line is rendered, so we must still CLEAR —
-    //     keying this on the raw list would leave the incoming Authorization forwarded.
+    //     name/length/CR-LF-NUL/platform-owned reference), no static line is
+    //     rendered, so we must still CLEAR — keying this on the raw list would leave
+    //     the incoming Authorization forwarded.
     const isOAuth = server.spec.auth?.type === 'oauth'
     const rawDeclaresAuthorizationHeader = (server.spec.remote!.authHeaders ?? []).some(
       h => h.header.toLowerCase() === 'authorization'
@@ -1244,13 +1487,23 @@ export class McpServerReconciler {
 
     const nginxConf = `# Auto-generated by Clerum HCC for remote MCP server: ${server.name}
 # Stored as .conf.template; Clerum's nginx egress proxy runs envsubst at startup.
+# The resolver name is deliberately bare (unbraced): the image exports
+# NGINX_LOCAL_RESOLVERS from 15-local-resolvers.envsh, and envsubst substitutes
+# the bare form with the same value.
+resolver $NGINX_LOCAL_RESOLVERS ipv6=off;
+upstream remote_upstream {
+    zone remote_upstream 64k;
+    server ${upstreamHostname}:${upstreamPort} resolve;
+}
+
 server {
     listen ${transportPort};
 
     # Mirror the upstream endpoint path locally so nginx URI replacement keeps
     # the remote endpoint path exactly once.
     location ${upstreamPath} {
-        proxy_pass ${safeUrl};
+        proxy_pass https://remote_upstream${upstreamPath}${upstreamSearch};
+        proxy_redirect https://${upstreamHost}${upstreamPath}${upstreamSearch} ${upstreamPath};
         proxy_set_header Host ${upstreamHost};
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -1267,6 +1520,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         # TLS to upstream
         proxy_ssl_verify on;
         proxy_ssl_server_name on;
+        proxy_ssl_name ${upstreamHostname};
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
         # nginx defaults proxy_ssl_verify_depth to 1, which only admits a chain
         # with a single untrusted intermediate. CAs mid-root-rollover serve a
@@ -1387,21 +1641,27 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // ── CRITICAL: prevent root execution ──
     if (server.spec.security) {
       if (server.spec.security.runAsUser !== undefined && server.spec.security.runAsUser < 1) {
-        console.warn(
-          `[Security] McpServer "${server.name}": runAsUser=${server.spec.security.runAsUser} rejected (must be >= 1)`
-        )
+        hccLogger.warn('McpServer: runAsUser rejected (must be >= 1)', {
+          scope: '[Security]',
+          name: server.name,
+          runAsUser: server.spec.security.runAsUser,
+        })
         server.spec.security.runAsUser = 1000
       }
       if (server.spec.security.runAsGroup !== undefined && server.spec.security.runAsGroup < 1) {
-        console.warn(
-          `[Security] McpServer "${server.name}": runAsGroup=${server.spec.security.runAsGroup} rejected (must be >= 1)`
-        )
+        hccLogger.warn('McpServer: runAsGroup rejected (must be >= 1)', {
+          scope: '[Security]',
+          name: server.name,
+          runAsGroup: server.spec.security.runAsGroup,
+        })
         server.spec.security.runAsGroup = 1000
       }
       if (server.spec.security.fsGroup !== undefined && server.spec.security.fsGroup < 1) {
-        console.warn(
-          `[Security] McpServer "${server.name}": fsGroup=${server.spec.security.fsGroup} rejected (must be >= 1)`
-        )
+        hccLogger.warn('McpServer: fsGroup rejected (must be >= 1)', {
+          scope: '[Security]',
+          name: server.name,
+          fsGroup: server.spec.security.fsGroup,
+        })
         server.spec.security.fsGroup = 1000
       }
 
@@ -1410,9 +1670,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         const original = server.spec.security.addCapabilities
         server.spec.security.addCapabilities = original.filter(cap => {
           if (!isWorkflowRecipeDefaultAllowedCapability(cap)) {
-            console.warn(
-              `[Security] McpServer "${server.name}": capability "${cap}" stripped (forbidden)`
-            )
+            hccLogger.warn('McpServer: capability stripped (forbidden)', {
+              scope: '[Security]',
+              name: server.name,
+              capability: cap,
+            })
             return false
           }
           return true
@@ -1421,23 +1683,14 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     // ── HIGH: sanitize env vars — block dangerous names ──
-    const FORBIDDEN_ENV = new Set([
-      'LD_PRELOAD',
-      'LD_LIBRARY_PATH',
-      'PATH',
-      'NODE_OPTIONS',
-      'PYTHONPATH',
-      'JAVA_TOOL_OPTIONS',
-      'KUBECONFIG',
-      'KUBERNETES_SERVICE_HOST',
-      'KUBERNETES_SERVICE_PORT',
-    ])
     if (server.spec.env) {
       server.spec.env = server.spec.env.filter(e => {
-        if (FORBIDDEN_ENV.has(e.name.toUpperCase())) {
-          console.warn(
-            `[Security] McpServer "${server.name}": env "${e.name}" stripped (forbidden)`
-          )
+        if (FORBIDDEN_CONTAINER_ENV.has(e.name.toUpperCase())) {
+          hccLogger.warn('McpServer: env stripped (forbidden)', {
+            scope: '[Security]',
+            name: server.name,
+            envVar: e.name,
+          })
           return false
         }
         return true
@@ -1543,12 +1796,32 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (!matches) continue
         for (const m of matches) {
           const varName = m.slice(2, -1)
+          // A header dropped by sanitizeAuthHeader must not still add an entry
+          // for a name the platform owns: a backfilled PATH='' would replace the
+          // container PATH, and no CRD entry may claim a platform-owned name,
+          // including an exact-case KUBERNETES_* service name. Only braced
+          // references are scanned here; a bare $NAME gets no entry.
+          // Distinct-case names are ordinary and do backfill: note a spec.env
+          // `Path` entry was already stripped above by the uppercase strip,
+          // so its backfilled empty value is what the header renders unless
+          // envSecret declares `Path`.
+          if (isPlatformOwnedTemplateName(varName)) continue
           if (!definedVars.has(varName)) {
             env.push({ name: varName, value: '' })
             definedVars.add(varName)
           }
         }
       }
+    }
+
+    if (isRemote) {
+      env.push({ name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS', value: '1' })
+      // 20-envsubst-on-templates.sh substitutes only the names matching
+      // NGINX_ENVSUBST_FILTER. A CRD- or Secret-supplied filter that excludes a
+      // declared placeholder would leave ${NAME} in the rendered config, where
+      // NGINX resolves it as one of its own variables. An empty filter means
+      // every defined name, and appending it last wins over every env source.
+      env.push({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
     }
 
     // --- Ports ---
@@ -2183,28 +2456,39 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       configMap = await this.coreApi.readNamespacedConfigMap({ name: configMapName, namespace })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[Reconciler] ConfigMap "${configMapName}" already gone`)
+        hccLogger.info('ConfigMap already gone', { scope: '[Reconciler]', name: configMapName })
       } else {
-        console.error(`[Reconciler] Failed to read ConfigMap "${configMapName}" ownership:`, error)
+        hccLogger.error('Failed to read ConfigMap ownership', {
+          scope: '[Reconciler]',
+          name: configMapName,
+          err: error,
+        })
         throw error
       }
       return
     }
 
     if (!this.isHccOwnedMcpResource(configMap, serverName)) {
-      console.warn(`[Reconciler] Skipping ConfigMap "${configMapName}" delete — not HCC-owned`)
+      hccLogger.warn('Skipping ConfigMap delete — not HCC-owned', {
+        scope: '[Reconciler]',
+        name: configMapName,
+      })
       return
     }
     if (deleteAllowed && !(await deleteAllowed())) return
 
     try {
       await this.coreApi.deleteNamespacedConfigMap({ name: configMapName, namespace })
-      console.log(`[Reconciler] Deleted nginx ConfigMap "${configMapName}"`)
+      hccLogger.info('Deleted nginx ConfigMap', { scope: '[Reconciler]', name: configMapName })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[Reconciler] ConfigMap "${configMapName}" already gone`)
+        hccLogger.info('ConfigMap already gone', { scope: '[Reconciler]', name: configMapName })
       } else {
-        console.error(`[Reconciler] Failed to delete ConfigMap "${configMapName}":`, error)
+        hccLogger.error('Failed to delete ConfigMap', {
+          scope: '[Reconciler]',
+          name: configMapName,
+          err: error,
+        })
         throw error
       }
     }
@@ -2220,28 +2504,32 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       service = await this.coreApi.readNamespacedService({ name, namespace })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[Reconciler] Service "${name}" already gone`)
+        hccLogger.info('Service already gone', { scope: '[Reconciler]', name })
       } else {
-        console.error(`[Reconciler] Failed to read Service "${name}" ownership:`, error)
+        hccLogger.error('Failed to read Service ownership', {
+          scope: '[Reconciler]',
+          name,
+          err: error,
+        })
         throw error
       }
       return
     }
 
     if (!this.isHccOwnedMcpResource(service, name)) {
-      console.warn(`[Reconciler] Skipping Service "${name}" delete — not HCC-owned`)
+      hccLogger.warn('Skipping Service delete — not HCC-owned', { scope: '[Reconciler]', name })
       return
     }
     if (deleteAllowed && !(await deleteAllowed())) return
 
     try {
       await this.coreApi.deleteNamespacedService({ name, namespace })
-      console.log(`[Reconciler] Deleted Service "${name}"`)
+      hccLogger.info('Deleted Service', { scope: '[Reconciler]', name })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[Reconciler] Service "${name}" already gone`)
+        hccLogger.info('Service already gone', { scope: '[Reconciler]', name })
       } else {
-        console.error(`[Reconciler] Failed to delete Service "${name}":`, error)
+        hccLogger.error('Failed to delete Service', { scope: '[Reconciler]', name, err: error })
         throw error
       }
     }
@@ -2449,14 +2737,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         resourceVersion = current.metadata?.resourceVersion
       } catch (error) {
         if (getErrorCode(error) === 404) {
-          console.warn(
-            `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — skipping status update`
-          )
+          hccLogger.warn('McpServer deleted mid-reconcile — skipping status update', {
+            scope: '[Reconciler]',
+            name: server.name,
+          })
           return decline()
         }
-        console.warn(
-          `[Reconciler] Failed to read status for "${server.name}" — skipping status update for type "${condition.type}" to avoid clobbering other status fields:`,
-          error
+        hccLogger.warn(
+          'Failed to read status — skipping status update for type to avoid clobbering other status fields',
+          { scope: '[Reconciler]', name: server.name, type: condition.type, err: error }
         )
         return decline()
       }
@@ -2557,9 +2846,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       } catch (error) {
         const errorCode = getErrorCode(error)
         if (errorCode === 404) {
-          console.warn(
-            `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — status patch skipped`
-          )
+          hccLogger.warn('McpServer deleted mid-reconcile — status patch skipped', {
+            scope: '[Reconciler]',
+            name: server.name,
+          })
           return decline()
         }
         // 409 (Conflict) or 422 (a `test` op failed) mean a concurrent writer
@@ -2572,10 +2862,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         ) {
           continue
         }
-        console.warn(
-          `[Reconciler] Failed to write status condition ${condition.type}=${condition.status} on "${server.name}" (attempt ${attempt}/${STATUS_CONDITION_WRITE_MAX_ATTEMPTS}):`,
-          error
-        )
+        hccLogger.warn('Failed to write status condition', {
+          scope: '[Reconciler]',
+          name: server.name,
+          type: condition.type,
+          status: condition.status,
+          attempt,
+          maxAttempts: STATUS_CONDITION_WRITE_MAX_ATTEMPTS,
+          err: error,
+        })
         return decline()
       }
     }
@@ -2736,9 +3031,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const previousManaged = this.managedSnapshot.get(server.name)
     if (previousManaged !== undefined && previousManaged !== currentManaged) {
       hccLogger.error(
-        `[Reconciler] McpServer ${server.name}: managed field changed from ${previousManaged} to ${currentManaged}. ` +
-          `This is not allowed — delete and recreate the McpServer to change ownership.`,
-        { serverName: server.name }
+        'McpServer: managed field changed. This is not allowed — delete and recreate the McpServer to change ownership.',
+        { scope: '[Reconciler]', name: server.name, previousManaged, currentManaged }
       )
       if (!isCurrent()) return false
       this.setStatus(server.name, {
@@ -2757,17 +3051,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       let cleanupComplete = true
       let retract: RetractManagedRuntimeResult | undefined
       if (currentManaged) {
-        hccLogger.info('[Reconciler] McpServer is disabled — removing HCC-owned resources', {
-          serverName: server.name,
+        hccLogger.info('McpServer is disabled — removing HCC-owned resources', {
+          scope: '[Reconciler]',
+          name: server.name,
         })
         retract = await this.retractManagedRuntime(server, 'disabled', isCurrent)
         if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
         cleanupComplete = retract.cleanupComplete
       } else {
-        hccLogger.info(
-          '[Reconciler] McpServer is disabled but WRC-owned; skipping runtime cleanup',
-          { serverName: server.name }
-        )
+        hccLogger.info('McpServer is disabled but WRC-owned; skipping runtime cleanup', {
+          scope: '[Reconciler]',
+          name: server.name,
+        })
       }
       if (!isCurrent()) return false
       this.setStatus(server.name, { deployed: false, ready: false, message: 'Disabled' })
@@ -2803,8 +3098,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       ) {
         return false
       }
-      hccLogger.error('[Reconciler] Skipping deployment — secret validation failed', {
-        serverName: server.name,
+      hccLogger.error('Skipping deployment — secret validation failed', {
+        scope: '[Reconciler]',
+        name: server.name,
       })
       const withdrawRuntime = shouldFailClosedForSecretFailure(secretResult.reason)
       let cleanupComplete = true
@@ -2825,8 +3121,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
         cleanupComplete = retract.cleanupComplete
       } else {
-        hccLogger.warn('[Reconciler] Preserving existing runtime after a Secret read failure', {
-          serverName: server.name,
+        hccLogger.warn('Preserving existing runtime after a Secret read failure', {
+          scope: '[Reconciler]',
+          name: server.name,
           transient: secretResult.transient === true,
         })
       }
@@ -2891,9 +3188,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (!decision.ok) {
           const message = `Image "${server.spec.image}" is not permitted by the plugin image allowlist (${decision.reason})`
           if (config.enforcePluginImageAllowlist) {
-            hccLogger.warn(`[Reconciler] ${message} — blocking (enforce mode)`, {
-              serverName: server.name,
-            })
+            hccLogger.warn(
+              'Image is not permitted by the plugin image allowlist — blocking (enforce mode)',
+              {
+                scope: '[Reconciler]',
+                image: server.spec.image,
+                reason: decision.reason,
+                name: server.name,
+              }
+            )
             await this.writeStatusCondition(
               server,
               {
@@ -2909,8 +3212,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
             return isCurrent()
           }
           hccLogger.warn(
-            `[Reconciler] ${message} — audit mode, allowing (set CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true to block)`,
-            { serverName: server.name }
+            'Image is not permitted by the plugin image allowlist — audit mode, allowing (set CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true to block)',
+            {
+              scope: '[Reconciler]',
+              image: server.spec.image,
+              reason: decision.reason,
+              name: server.name,
+            }
           )
         }
       }
@@ -3063,9 +3371,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   ): Promise<boolean> {
     if (!isCurrent()) return false
     hccLogger.info(
-      `[Reconciler] McpServer ${server.name} is WRC-owned (managed:false); ` +
-        'skipping HCC runtime creation/deletion and updating discovery status.',
-      { serverName: server.name }
+      'McpServer is WRC-owned (managed:false); skipping HCC runtime creation/deletion and updating discovery status.',
+      { scope: '[Reconciler]', name: server.name }
     )
 
     const secretResult = await this.validateSecret(server)
@@ -3157,7 +3464,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     namespace: string,
     owner: { fleetPassOwned: boolean }
   ): Promise<void> {
-    hccLogger.info('[Reconciler] McpServer deleted — cleaning up resources', { serverName: name })
+    hccLogger.info('McpServer deleted — cleaning up resources', { scope: '[Reconciler]', name })
     const capturedAuthority = this.inventoryAuthority()
     const obligation = { namespace }
     this.pendingReconciliations.set(name, obligation)
@@ -3219,8 +3526,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     desiredServers: McpServerCRD[],
     options: McpServerFullReconcileOptions = {}
   ): Promise<void> {
-    hccLogger.info('[Reconciler] Running full reconciliation', {
-      servers: desiredServers.length,
+    hccLogger.info('Running full reconciliation for McpServer(s)', {
+      scope: '[Reconciler]',
+      count: desiredServers.length,
     })
     const capturedAuthority = this.inventoryAuthority()
 
@@ -3291,18 +3599,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         await runEffect(name, async () => {
           if (!(await this.orphanDeleteAllowed(name, namespace, capturedAuthority))) {
             hccLogger.warn(
-              '[Reconciler] Deferring orphan cleanup: McpServer exists or inventory authority is unknown or changed',
-              { serverName: name }
+              'Deferring orphan cleanup: McpServer exists or inventory authority is unknown or changed',
+              { scope: '[Reconciler]', name }
             )
             return
           }
-          hccLogger.info('[Reconciler] Removing orphaned resources', { serverName: name })
+          hccLogger.info('Removing orphaned resources', { scope: '[Reconciler]', name })
           await this.deleteMcpServerRuntime(name, namespace, { fleetPassOwned: true })
         })
       }
     }
 
-    hccLogger.info('[Reconciler] Full reconciliation complete')
+    hccLogger.info('Full reconciliation complete', { scope: '[Reconciler]' })
   }
 
   /**
@@ -3316,7 +3624,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       })
       return response.items || []
     } catch (error) {
-      console.error('[Reconciler] Failed to list managed deployments:', error)
+      hccLogger.error('Failed to list managed deployments', { scope: '[Reconciler]', err: error })
       throw error
     }
   }
