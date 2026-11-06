@@ -66,6 +66,15 @@ warnings. Nothing is disabled automatically.
 The seeded pairs models.dev does not list (for example `zai/glm-5.1` or the
 Bedrock Claude ids) stay `manual`, and the sync leaves them alone.
 
+### Models discovered before the upgrade stay as they are
+
+Earlier catalog syncs inserted every discovered model disabled. Those rows
+already exist, and auto-enable only decides when a row is inserted, so they
+stay disabled after the upgrade even when their provider's policy is ON and
+the model is eligible. Only models the catalog lists for the first time after
+the upgrade can start enabled. Review the disabled discovered models under
+`/llm-models` and enable the ones you want to serve.
+
 ## New installations
 
 A new installation starts with an empty allowlist and no prices.
