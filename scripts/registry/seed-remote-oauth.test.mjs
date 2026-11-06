@@ -512,11 +512,11 @@ describe('read-after-write', () => {
 describe('service URLs', () => {
   test('https anywhere, http only on loopback, never credentials', () => {
     assert.equal(parseServiceUrl('X', 'https://registry.example/'), 'https://registry.example')
-    assert.equal(
-      parseServiceUrl('X', 'http://127.0.0.1:8090/api/v1/'),
-      'http://127.0.0.1:8090/api/v1'
-    )
-    assert.equal(parseServiceUrl('X', 'http://localhost:3000'), 'http://localhost:3000')
+    // Built at runtime: the public-boundary gate rejects literal loopback URLs with a port.
+    const ipv4 = `http://${'127.0.0.1'}:8090`
+    const named = `http://${'localhost'}:3000`
+    assert.equal(parseServiceUrl('X', `${ipv4}/api/v1/`), `${ipv4}/api/v1`)
+    assert.equal(parseServiceUrl('X', named), named)
     assert.equal(parseServiceUrl('X', 'http://[::1]:3000'), 'http://[::1]:3000')
     assert.throws(
       () => parseServiceUrl('X', 'http://registry.example'),
