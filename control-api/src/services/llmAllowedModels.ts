@@ -459,9 +459,22 @@ export async function updateAllowedModel(
     params.push(field === 'image_input' ? imageInputToColumn(input.image_input) : value)
   }
   if (renamed && input.image_input === undefined) sets.push('image_input = NULL')
-  // The catalog's lifecycle tag is about the old pair too; the next live sync
-  // fills it again if the new pair is in the catalog.
+  // The catalog's lifecycle tag is about the old pair too.
   if (renamed) sets.push('catalog_status = NULL')
+  // A renamed discovered row now names a pair the operator chose, which the
+  // public catalog may not list (a Bedrock inference profile, an Azure
+  // deployment): left as `discovery`, every live sync would mark it stale and
+  // the attention feed would flag it forever. It becomes manual, like a pair
+  // added by hand, and drops the old pair's liveness: the sync never clears
+  // `stale` on a manual row. Subscription providers are left alone: their rows
+  // are rebuilt from their own catalogs by provider, whatever the source.
+  if (
+    renamed &&
+    existing.source === 'discovery' &&
+    CATALOG_PROVIDERS.includes(input.provider ?? existing.provider)
+  ) {
+    sets.push(`source = 'manual'`, 'stale = false', 'last_seen_at = NULL')
+  }
   if (sets.length === 0) return existing
 
   sets.push(`updated_at = NOW()`)

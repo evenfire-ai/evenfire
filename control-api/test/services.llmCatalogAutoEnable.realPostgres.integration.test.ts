@@ -1003,6 +1003,44 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
       )
       expect(staleDiscovery.map(i => i.model)).toEqual([target.model_id])
     })
+
+    it('a discovered model renamed by the operator is not flagged stale by the next live run', async () => {
+      const base = wholeLiveProviders(['claude'])
+      const [live, vanished] = discoveredOf(base, 'claude').filter(isAutoEnableEligible)
+      await sync(base)
+      // `vanished` is already stale when the operator renames it.
+      await sync(withoutEntries(base, 'claude', [rawIdOf(base, 'claude', vanished.model_id)]))
+      expect((await rowOf('claude', vanished.model_id))!.stale).toBe(true)
+
+      // Pairs models.dev does not list, like a regional inference profile.
+      const renames = [live, vanished].map(m => ({
+        id: m.model_id,
+        to: `us.${m.model_id}-${randomBytes(3).toString('hex')}`,
+      }))
+      for (const r of renames) {
+        const row = (await rowOf('claude', r.id))!
+        expect(row.source).toBe('discovery')
+        expect(row.enabled).toBe(true)
+        await request(app())
+          .put(`${MODELS_PATH}/${row.id}?force=true`)
+          .set('Cookie', COOKIE)
+          .send({ model: r.to })
+          .expect(200)
+      }
+      await sync(base)
+
+      const res = await request(app())
+        .get('/api/v1/admin/attention')
+        .set('Cookie', COOKIE)
+        .expect(200)
+      expect(res.body.items).toEqual([])
+      for (const r of renames) {
+        const row = (await rowOf('claude', r.to))!
+        expect(row.enabled, r.to).toBe(true)
+        expect(row.stale, r.to).toBe(false)
+        expect(row.source, r.to).toBe('manual')
+      }
+    })
   })
 
   describe('T-H24 · per-run caps on auto-enabled inserts', () => {

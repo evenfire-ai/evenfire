@@ -995,6 +995,9 @@ export function makeFakeDb(
       }
       if (item === 'image_input = NULL') next.image_input = null
       else if (item === 'catalog_status = NULL') next.catalog_status = null
+      else if (item === "source = 'manual'") next.source = 'manual'
+      else if (item === 'stale = false') next.stale = false
+      else if (item === 'last_seen_at = NULL') next.last_seen_at = null
       else if (item === 'updated_at = NOW()') next.updated_at = now()
       else throw new Error(`llmCatalogSyncFakeDb: unrecognized SET item in admin UPDATE: ${item}`)
     }
