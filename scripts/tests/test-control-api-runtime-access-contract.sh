@@ -24,6 +24,8 @@ sentinels=(
   $'mcp_secret_rollback_permits\tlegacy_dml'
   $'gfs_desktop_operator_links\tlink_lifecycle'
   $'desktop_user_retirement_operations\tlink_lifecycle'
+  $'llm_provider_catalog_settings\tupsert'
+  $'llm_catalog_dismissed\tappend'
   $'password_identifier_state\tlegacy_dml'
   $'password_verification_pace\tlegacy_dml'
   $'password_verification_work\tinsert_delete'

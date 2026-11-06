@@ -6,9 +6,9 @@
 --
 -- Run it once, as the owner of the control-api schema, with that schema first
 -- in search_path, while no control-api, migration Job or trace-maintenance
--- process is running. It keeps the current 0131_user_access_foundation and
--- 0132_legacy_password_security_epoch_backfill receipts: the session-table DDL
--- is identical in every head, and 0132 is idempotent if it runs again.
+-- process is running. It keeps the current 0137_user_access_foundation and
+-- 0138_legacy_password_security_epoch_backfill receipts: the session-table DDL
+-- is identical in every head, and 0138 is idempotent if it runs again.
 --
 -- See docs/deploy/user-access-foundation-upgrade.md#databases-that-ran-an-earlier-head-of-this-change
 
@@ -91,8 +91,8 @@ DELETE FROM schema_migrations
          'authorization_revision_delete_compatibility'
        ])
    AND version <> ALL (ARRAY[
-         '0131_user_access_foundation',
-         '0132_legacy_password_security_epoch_backfill'
+         '0137_user_access_foundation',
+         '0138_legacy_password_security_epoch_backfill'
        ]);
 
 COMMIT;

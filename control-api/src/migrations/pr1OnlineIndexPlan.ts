@@ -2,7 +2,7 @@ import type { DbClient } from '../db.js'
 import { MIGRATION_EXECUTION_POLICY } from './migrationExecutionPolicy.js'
 
 export type OnlineIndexDefinition = Readonly<{
-  migrationVersion: '0131_user_access_foundation'
+  migrationVersion: '0137_user_access_foundation'
   name: string
   table: string
   unique?: boolean
@@ -58,32 +58,32 @@ export function expectedIndexDefinition(entry: OnlineIndexDefinition, schema: st
 
 export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
   onlineIndex({
-    migrationVersion: '0131_user_access_foundation',
+    migrationVersion: '0137_user_access_foundation',
     name: 'team_members_user_active_idx',
     table: 'team_members',
     keys: ['user_id', 'status', 'team_id'],
     include: ['role', 'updated_at'],
   }),
   onlineIndex({
-    migrationVersion: '0131_user_access_foundation',
+    migrationVersion: '0137_user_access_foundation',
     name: 'user_contexts_context_user_idx',
     table: 'user_contexts',
     keys: ['context_id', 'user_id'],
   }),
   onlineIndex({
-    migrationVersion: '0131_user_access_foundation',
+    migrationVersion: '0137_user_access_foundation',
     name: 'team_contexts_context_team_idx',
     table: 'team_contexts',
     keys: ['context_id', 'team_id'],
   }),
   onlineIndex({
-    migrationVersion: '0131_user_access_foundation',
+    migrationVersion: '0137_user_access_foundation',
     name: 'user_agents_agent_user_idx',
     table: 'user_agents',
     keys: ['agent_name', 'user_id'],
   }),
   onlineIndex({
-    migrationVersion: '0131_user_access_foundation',
+    migrationVersion: '0137_user_access_foundation',
     name: 'team_agents_agent_team_idx',
     table: 'team_agents',
     keys: ['agent_name', 'team_id'],

@@ -105,29 +105,29 @@ before this release.
 - The target database has no migration version and no object from an earlier
   head of this change; the migration Job stops otherwise (see
   [Databases that ran an earlier head of this change](#databases-that-ran-an-earlier-head-of-this-change)).
-  The release adds `0131_user_access_foundation` and
-  `0132_legacy_password_security_epoch_backfill`.
+  The release adds `0137_user_access_foundation` and
+  `0138_legacy_password_security_epoch_backfill`.
 - PostgreSQL 14 or later on Linux, or 15 or later on macOS, illumos or BSD (not
   Windows). The migration session sets `client_connection_check_interval`,
   which the server rejects on other platforms, so that a killed Job pod does
   not leave its backend holding the migration advisory lock.
-- For a database already at `0130`, every statement of `0131` and `0132`
+- For a database already at `0136`, every statement of `0137` and `0138`
   waits at most 10 s for a lock (`lock_timeout`), and ordinary statements are
   bounded at 15 s (`statement_timeout`); the online index builds have their own
   120 s bound (below). The whole Job is bounded at 300 s
   (`activeDeadlineSeconds`).
 - An existing database below `0130` must already have `0126` to `0128`; the
   Job stops with an error otherwise. For such a database the 10 s lock bound
-  does not hold before `0131`. The Job first sets the `0130` password-login
+  does not hold before `0137`. The Job first sets the `0130` password-login
   fence, which waits up to 60 s for a lock and allows 60 s per statement
   (`dev` capped the statement at the pool's 15 s). It
   then waits, with no limit of its own, until password checks already in
-  progress finish. It then applies `0129` (when missing) and `0130` in one
+  progress finish. It then applies `0129` (when missing) through `0136` in one
   transaction. `0129` raises `lock_timeout` to 60 s and then sets it to 0 (no
   limit) for the rest of that transaction, so a lock wait there is bounded only
   by the 15 s statement timeout. In that case the only bound on the whole
   catch-up is the Job's 300 s deadline; plan the maintenance window for it.
-- `0131_user_access_foundation` first builds five indexes online
+- `0137_user_access_foundation` first builds five indexes online
   (`CREATE INDEX CONCURRENTLY`, which takes `ShareUpdateExclusiveLock`) on
   the existing tables `team_members`, `user_contexts`, `team_contexts`,
   `user_agents` and `team_agents`. Each build scans its table, and each runs
@@ -144,9 +144,9 @@ before this release.
   build waiting up to its 120 s bound. Do not run the migration during backups
   or other long transactions.
 - The foreign keys to `users` take `SHARE ROW EXCLUSIVE` on `users` until
-  `0131`'s transaction commits. Writes to `users` are blocked for that time.
+  `0137`'s transaction commits. Writes to `users` are blocked for that time.
   The wait for that lock is bounded at 10 s.
-- `0132_legacy_password_security_epoch_backfill` copies `password_set_at` of
+- `0138_legacy_password_security_epoch_backfill` copies `password_set_at` of
   every user that has one into the password epochs, in one `INSERT … SELECT`
   over `users`. It takes `AccessShareLock` on `users`, which does not block
   ordinary reads and writes but does conflict with operations that need
@@ -154,7 +154,7 @@ before this release.
   `ALTER TABLE` forms. It must finish within the 15 s statement timeout.
   Measured at about 6 µs per row on one laptop, it reaches that timeout near
   2.4 million users and then fails without a partial write.
-- `0132` treats every V1 session issued at or before the second of a user's
+- `0138` treats every V1 session issued at or before the second of a user's
   `password_set_at` as issued before that password event, and rejects it. The
   previous release kept existing sessions when a password was set or changed,
   and a V1 session lasts 7 days (604800 s). So a user whose password was set or
@@ -170,8 +170,8 @@ before this release.
   `deploy/scripts/workflow-recipes-runtime-access-profiles.tsv` (104 relation
   rows; `dev` had 7) and
   `deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv` (6
-  column rows; new in this release). A mismatch stops the deploy after `0131`
-  and `0132` have committed, while the old control-api keeps serving. Compare
+  column rows; new in this release). A mismatch stops the deploy after `0137`
+  and `0138` have committed, while the old control-api keeps serving. Compare
   the target database's grants with both files before step 1.
 - `deploy/scripts/run-control-api-db-migration.sh` requires `--timeout` (or
   `TIMEOUT`) to be a number with a unit (`s`, `m` or `h`) and at least `360s`;
@@ -191,7 +191,7 @@ four-character prefixes, decimal or hexadecimal such as `010a`, some below
 and created revision tables, catalog tables and `authorization_*` trigger
 functions. The current migration runner does not drop them. Their triggers
 would keep running for writers that no longer take the matching locks, so the
-migration Job stops before `0131` when it finds any of them. Its error names
+migration Job stops before `0137` when it finds any of them. Its error names
 the versions, functions and tables it found.
 
 The shared clusters (`clerum-dev` and production) never ran an earlier head:
@@ -217,8 +217,8 @@ SELECT 'version' AS kind, version AS name
          'authorization_revision_delete_compatibility'
        ])
    AND version <> ALL (ARRAY[
-         '0131_user_access_foundation',
-         '0132_legacy_password_security_epoch_backfill'
+         '0137_user_access_foundation',
+         '0138_legacy_password_security_epoch_backfill'
        ])
 UNION ALL
 SELECT 'function', fn.oid::regprocedure::text
@@ -258,7 +258,7 @@ No rows means the database is ready for step 1. If it returns rows:
   once, as the schema owner. It runs in one transaction. It drops the
   functions (with their triggers), the tables and the earlier-head indexes on
   existing tables, and deletes the earlier-head migration versions. It keeps
-  `0131_user_access_foundation` and `0132_legacy_password_security_epoch_backfill`
+  `0137_user_access_foundation` and `0138_legacy_password_security_epoch_backfill`
   when they are present. Run the check query again (no rows), then run the
   migration Job.
 
@@ -269,7 +269,7 @@ No rows means the database is ready for step 1. If it returns rows:
 - A Google user who has only a pending invitation gets a session without a team
   until they accept the invitation.
 - Users who set or changed their password in the 7 days before the migration
-  must sign in again (see the `0132` bullet above).
+  must sign in again (see the `0138` bullet above).
 
 ## Variables this release does not read
 

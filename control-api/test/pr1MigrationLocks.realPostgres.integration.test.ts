@@ -30,7 +30,7 @@ const runtimeRoles = [
 const PR1_VERSIONS = new Set<string>(PR1_MIGRATION_VERSIONS)
 const ACCESS_FOUNDATION_MARKER = 'CREATE TABLE IF NOT EXISTS external_user_sessions'
 // Online indexes the removed catalog migration (0133) and the removed
-// catalog rows of 0131 used to build; none of them may exist.
+// catalog rows of 0137 used to build; none of them may exist.
 const REMOVED_CATALOG_INDEXES = [
   'user_workflow_triggers_recipe_user_idx',
   'team_workflow_triggers_recipe_team_idx',
@@ -129,7 +129,7 @@ async function migrate(pool: Pool, observer: Pool): Promise<MigrationRun> {
         query: async (text: string, values?: unknown[]) => {
           if (!accessFoundationSeen && text.includes(ACCESS_FOUNDATION_MARKER)) {
             accessFoundationSeen = true
-            // The 0131 transaction has not created anything yet, so the
+            // The 0137 transaction has not created anything yet, so the
             // committed catalog holds exactly the tables that predate PR1.
             run.preExistingTables = await committedTables(observer)
           }
@@ -235,7 +235,7 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
 
   it('installs no revision, catalog, operational or invitation-delivery object', async () => {
     // Witness: the fresh database holds the PR1 session tables and every
-    // planned online index, so the absence queries below ran after 0131.
+    // planned online index, so the absence queries below ran after 0137.
     const sessionTables = await freshPool.query<{ name: string }>(
       `SELECT c.relname AS name
          FROM pg_class c

@@ -43,10 +43,12 @@ invitation_teams	none
 invitations	none
 llm_allowed_models	none
 llm_allowed_models_audit	none
+llm_catalog_dismissed	none
 llm_catalog_sync_runs	none
 llm_model_prices	none
 llm_provider_attempt_tickets	none
 llm_provider_attempts	none
+llm_provider_catalog_settings	none
 member_registration_credentials	none
 mcp_secret_rollback_permits	none
 notification_deliveries	none

@@ -1,0 +1,37 @@
+{
+  "items": [
+    {
+      "kind": "stale_model_referenced",
+      "provider": "claude",
+      "model": "claude-fable-5-1",
+      "hostsAffected": [
+        {
+          "namespace": "mcp-host",
+          "name": "agent-a",
+          "roles": ["primary"]
+        }
+      ],
+      "grantsAffected": [],
+      "displayName": "Claude Fable 5.1"
+    },
+    {
+      "kind": "deprecated_model_enabled",
+      "provider": "claude",
+      "model": "claude-fable-5",
+      "displayName": "Claude Fable 5"
+    },
+    {
+      "kind": "stale_discovery_enabled",
+      "provider": "claude",
+      "model": "claude-fable-5-1",
+      "displayName": "Claude Fable 5.1"
+    },
+    {
+      "kind": "stale_discovery_enabled",
+      "provider": "claude",
+      "model": "claude-haiku-4-5",
+      "displayName": "Claude Haiku 4.5 (latest)"
+    }
+  ],
+  "generatedAt": "2026-11-01T00:00:00.000Z"
+}

@@ -42,13 +42,13 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'external_v1_session_revocations_expiry_idx',
 ])
 
-const USER_ACCESS_FOUNDATION_VERSION = '0131_user_access_foundation'
+const USER_ACCESS_FOUNDATION_VERSION = '0137_user_access_foundation'
 
 describe('D34 migration execution policy', () => {
   it('classifies the two PR1 migrations that follow the dev batch', () => {
     expect(PR1_MIGRATION_VERSIONS).toEqual([
-      '0131_user_access_foundation',
-      '0132_legacy_password_security_epoch_backfill',
+      '0137_user_access_foundation',
+      '0138_legacy_password_security_epoch_backfill',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -86,7 +86,7 @@ describe('D34 migration execution policy', () => {
     expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(5)
     expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(5)
     expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0131'))
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0137'))
     ).toHaveLength(5)
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
@@ -97,11 +97,11 @@ describe('D34 migration execution policy', () => {
   })
 
   it('pins the reviewed PR1 migration bodies byte-for-byte', async () => {
-    // PR1 occupies slots 0131-0132, after dev's 0130, and no shared
-    // environment holds a receipt for either. 0131 creates the user-session
+    // PR1 occupies slots 0137-0138, after dev's 0136, and no shared
+    // environment holds a receipt for either. 0137 creates the user-session
     // tables (sessions, security epochs, the v1 revocation ledger) and their
     // runtime grants; the indexes it needs on pre-existing tables are built
-    // online by PR1_ONLINE_INDEX_PLAN. 0132 backfills the security epochs from
+    // online by PR1_ONLINE_INDEX_PLAN. 0138 backfills the security epochs from
     // historical password events. PR1 installs no trigger and no function.
     const files = [
       [
@@ -451,7 +451,7 @@ describe('PR1 earlier-head guard', () => {
         '0130_password_login_success_admission',
         '0126_user_access_foundation',
         '0133_catalog_utf8_ordering',
-        '0131_user_access_foundation',
+        '0137_user_access_foundation',
         // Earlier heads also recorded hexadecimal prefixes.
         '010a_invitation_delivery_commands',
         '012b_user_access_foundation_definer_temp_shadow_hardening',
@@ -502,7 +502,7 @@ describe('PR1 earlier-head guard', () => {
     const { db, queries } = guardedDb([])
     const recorded: string[] = []
     const migrations = pr1Migrations({
-      '0132_legacy_password_security_epoch_backfill': [
+      '0138_legacy_password_security_epoch_backfill': [
         '0134_legacy_password_security_epoch_backfill',
       ],
     })
@@ -511,7 +511,7 @@ describe('PR1 earlier-head guard', () => {
       db,
       migrations,
       appliedVersions: new Set([
-        '0131_user_access_foundation',
+        '0137_user_access_foundation',
         '0134_legacy_password_security_epoch_backfill',
       ]),
       recordMigration: async (_db, version) => {
@@ -520,7 +520,7 @@ describe('PR1 earlier-head guard', () => {
     })
 
     expect(queries.filter(({ sql }) => sql.includes(EARLIER_HEAD_GUARD_MARKER))).toHaveLength(1)
-    expect(recorded).toEqual(['0132_legacy_password_security_epoch_backfill'])
+    expect(recorded).toEqual(['0138_legacy_password_security_epoch_backfill'])
   })
 })
 

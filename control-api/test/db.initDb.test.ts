@@ -68,7 +68,7 @@ describe('db.initDb', () => {
     expect(sqls.some(sql => sql.includes('DROP TABLE IF EXISTS workflow_run_outputs'))).toBe(false)
     expect(sqls).not.toContain('ROLLBACK')
     // The committed password-admission rollout fence, one dev batch through
-    // 0130_password_login_success_admission (as in dev), then two PR1 versions.
+    // 0136_llm_catalog_dismissed_backfill (as in dev), then two PR1 versions.
     expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(4)
     expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(4)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
@@ -89,12 +89,13 @@ describe('db.initDb', () => {
     for (const version of [
       '0107_llm_provider_attempts_sdk_link',
       '0130_password_login_success_admission',
+      '0136_llm_catalog_dismissed_backfill',
     ]) {
       const index = receiptIndex(version)
       expect(index, version).toBeGreaterThan(devBatchBegin)
       expect(index, version).toBeLessThan(devBatchCommit)
     }
-    expect(receiptIndex('0131_user_access_foundation')).toBeGreaterThan(devBatchCommit)
+    expect(receiptIndex('0137_user_access_foundation')).toBeGreaterThan(devBatchCommit)
   })
 
   it('applies the triggered_at audit index migration on top of an already-migrated baseline', async () => {

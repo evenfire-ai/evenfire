@@ -369,12 +369,12 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       ).rows
     const before = await oids()
     expect(before).toHaveLength(PR1_ONLINE_INDEX_PLAN.length)
-    await removeMigrationReceiptForReplay(databasePool, '0131_user_access_foundation')
+    await removeMigrationReceiptForReplay(databasePool, '0137_user_access_foundation')
 
     await initDb({ connect: () => databasePool.connect() })
 
     expect(await oids()).toEqual(before)
-    expect(await versions(databasePool)).toContain('0131_user_access_foundation')
+    expect(await versions(databasePool)).toContain('0137_user_access_foundation')
   })
 
   it('rejects same-name indexes with changed order, predicate, expression, uniqueness or table', async () => {
@@ -394,7 +394,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     await databasePool.query(`CREATE TABLE ${otherTable} (userid text)`)
     const structural = (name: string, keys: string[], extra: { include?: string[] } = {}) =>
       onlineIndex({
-        migrationVersion: '0131_user_access_foundation',
+        migrationVersion: '0137_user_access_foundation',
         name,
         table,
         keys,
@@ -456,7 +456,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       ensureOnlineIndex(
         databasePool,
         onlineIndex({
-          migrationVersion: '0131_user_access_foundation',
+          migrationVersion: '0137_user_access_foundation',
           name: uniqueName,
           table,
           unique: true,
@@ -469,7 +469,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   it('repairs an equivalent interrupted index and enforces the online bound', async () => {
     const name = `d34_interrupted_${randomBytes(4).toString('hex')}`
     const entry = onlineIndex({
-      migrationVersion: '0131_user_access_foundation',
+      migrationVersion: '0137_user_access_foundation',
       name,
       table: 'd34_interrupted_index',
       unique: true,
@@ -524,7 +524,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const suffix = randomBytes(4).toString('hex')
     const table = `d34_slow_index_${suffix}`
     const entry = onlineIndex({
-      migrationVersion: '0131_user_access_foundation',
+      migrationVersion: '0137_user_access_foundation',
       name: `d34_slow_index_${suffix}_idx`,
       table,
       keys: ['value'],
@@ -681,13 +681,13 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
   it('bounds ordinary DDL lock acquisition and never runs the later version', async () => {
     const locker = await databasePool.connect()
-    // 0131 replays without touching users (its CREATE TABLE IF NOT EXISTS
-    // skips existing tables); 0132's SELECT FROM users is the first statement
+    // 0137 replays without touching users (its CREATE TABLE IF NOT EXISTS
+    // skips existing tables); 0138's SELECT FROM users is the first statement
     // that waits on the lock.
-    await removeMigrationReceiptForReplay(databasePool, '0131_user_access_foundation')
+    await removeMigrationReceiptForReplay(databasePool, '0137_user_access_foundation')
     await removeMigrationReceiptForReplay(
       databasePool,
-      '0132_legacy_password_security_epoch_backfill'
+      '0138_legacy_password_security_epoch_backfill'
     )
     await locker.query('BEGIN')
     await locker.query('LOCK TABLE users IN ACCESS EXCLUSIVE MODE')
@@ -703,8 +703,8 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(9_000)
     expect(Date.now() - started).toBeLessThan(15_000)
     const failedVersions = await versions(databasePool)
-    expect(failedVersions).toContain('0131_user_access_foundation')
-    expect(failedVersions).not.toContain('0132_legacy_password_security_epoch_backfill')
+    expect(failedVersions).toContain('0137_user_access_foundation')
+    expect(failedVersions).not.toContain('0138_legacy_password_security_epoch_backfill')
     await initDb({ connect: () => databasePool.connect() })
   }, 20_000)
 
@@ -717,7 +717,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       ...PR1_MIGRATION_VERSIONS.map(version => ({
         version,
         apply: async (db: DbClient) => {
-          if (version === '0132_legacy_password_security_epoch_backfill') {
+          if (version === '0138_legacy_password_security_epoch_backfill') {
             await db.query('SELECT pg_sleep(20)')
           }
         },
@@ -741,7 +741,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         `SELECT version FROM ${recordTable} ORDER BY version`
       )
       expect(recorded.rows).toEqual([])
-      expect(appliedVersions).not.toContain('0132_legacy_password_security_epoch_backfill')
+      expect(appliedVersions).not.toContain('0138_legacy_password_security_epoch_backfill')
     } finally {
       client.release(true)
     }
@@ -784,8 +784,8 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       const freshReceipts = await versions(pool)
       expect(freshReceipts).toEqual(
         expect.arrayContaining([
-          '0131_user_access_foundation',
-          '0132_legacy_password_security_epoch_backfill',
+          '0137_user_access_foundation',
+          '0138_legacy_password_security_epoch_backfill',
         ])
       )
       await pool.query(`
@@ -897,8 +897,8 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         [...sessionTableNames].sort()
       )
       const receipts = await versions(pool)
-      expect(receipts).toContain('0131_user_access_foundation')
-      expect(receipts).toContain('0132_legacy_password_security_epoch_backfill')
+      expect(receipts).toContain('0137_user_access_foundation')
+      expect(receipts).toContain('0138_legacy_password_security_epoch_backfill')
     })
   })
 
@@ -973,14 +973,14 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         'latest DEV migration body replay'
       ).toBe(0)
       expect(upgrade.applyCounts.get(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)).toBe(1)
-      const foundationIndex = upgrade.applyOrder.indexOf('0131_user_access_foundation')
+      const foundationIndex = upgrade.applyOrder.indexOf('0137_user_access_foundation')
       const passwordAdmissionIndex = upgrade.applyOrder.indexOf(
         DEV_PASSWORD_SUCCESS_ADMISSION_VERSION
       )
       expect(passwordAdmissionIndex).toBeGreaterThanOrEqual(0)
       expect(passwordAdmissionIndex).toBeLessThan(foundationIndex)
       expect(upgrade.applyOrder[foundationIndex + 1]).toBe(
-        '0132_legacy_password_security_epoch_backfill'
+        '0138_legacy_password_security_epoch_backfill'
       )
       await assertDbReady(isolatedPool)
 
@@ -1065,7 +1065,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         'new latest DEV migration applies exactly once from the observed DEV state'
       ).toBe(1)
       expect(firstRun.applyCounts.get(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)).toBe(1)
-      const foundationIndex = firstRun.applyOrder.indexOf('0131_user_access_foundation')
+      const foundationIndex = firstRun.applyOrder.indexOf('0137_user_access_foundation')
       const scheduleIndex = firstRun.applyOrder.indexOf(
         '0129_workflow_schedules_concurrency_policy'
       )
@@ -1076,7 +1076,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       expect(scheduleIndex).toBeLessThan(passwordAdmissionIndex)
       expect(passwordAdmissionIndex).toBeLessThan(foundationIndex)
       expect(firstRun.applyOrder[foundationIndex + 1]).toBe(
-        '0132_legacy_password_security_epoch_backfill'
+        '0138_legacy_password_security_epoch_backfill'
       )
       await assertDbReady(isolatedPool)
 

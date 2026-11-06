@@ -632,6 +632,20 @@ ensure_seed_user_and_team() {
   ok "Team  id=${ENSURE_TEAM_ID:0:8}…"
 }
 
+# ─── Step 1b: LLM models the install and the E2E lanes need ────────────
+# A fresh DB's allowlist comes only from the catalog sync, which does not list
+# some of these models or leaves them disabled. Enable them now, with the admin
+# session above, before anything below grants or runs them. Minikube only.
+# shellcheck source=scripts/e2e/llm-model-ensure.sh
+source "${SCRIPT_DIR}/llm-model-ensure.sh"
+LLM_ENSURE_EXTRA_PAIRS=()
+if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
+  LLM_ENSURE_EXTRA_PAIRS+=("${PLUGIN_SDK_DEMO_PROVIDER}/${PLUGIN_SDK_DEMO_MODEL_NAME}")
+fi
+# The guarded expansion keeps an empty array legal under set -u on bash 3.2.
+ensure_seed_llm_models ${LLM_ENSURE_EXTRA_PAIRS[@]+"${LLM_ENSURE_EXTRA_PAIRS[@]}"} \
+  || die "Could not enable the LLM models this install needs (see LLM_MODEL_ENSURE_* above)"
+
 # ─── Step 2: Persist users + teams through admin control-api ───────────
 log "Ensuring seeded users through admin control-api"
 ensure_seed_user_and_team "$DEV_EMAIL" "$DEV_NAME"
