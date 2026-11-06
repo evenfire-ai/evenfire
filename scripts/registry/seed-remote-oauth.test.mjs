@@ -382,7 +382,7 @@ describe('read-after-write', () => {
     assert.ok(run.lines.some(l => /0 succeeded, 1 failed, 2 not attempted/.test(l)))
   })
 
-  test('a skipped version stored without oauth does not stop the run', async () => {
+  test('a skipped version stored without oauth stops the run before the next entry', async () => {
     const first = byName('clickup-remote')
     const second = byName('vercel-remote')
     const preload = [await storedRow(buildPublishBody(first), { dropOAuth: true })]
@@ -392,8 +392,13 @@ describe('read-after-write', () => {
       registry: { preload },
     })
     assert.equal(run.exitCode, 1)
-    assert.ok(run.registry.rows.has('@evenfire/vercel-remote@1.0.0'))
-    assert.ok(run.lines.some(l => /1 succeeded, 1 failed, 0 not attempted/.test(l)))
+    assert.ok(!run.registry.rows.has('@evenfire/vercel-remote@1.0.0'))
+    assert.ok(
+      run.lines.some(l => /may be discarding the oauth block.*--only/.test(l)),
+      run.lines.join('\n')
+    )
+    assert.ok(run.lines.some(l => /Stopping/.test(l)))
+    assert.ok(run.lines.some(l => /0 succeeded, 1 failed, 1 not attempted/.test(l)))
   })
 
   test('a reread that throws after a fresh publish stops the run and says the version exists', async () => {

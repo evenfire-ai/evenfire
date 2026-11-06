@@ -255,6 +255,7 @@ export function verifyStoredEntry(body, row) {
   if (!meta || typeof meta !== 'object' || meta.oauth === undefined || meta.oauth === null) {
     return {
       ok: false,
+      oauthMissing: true,
       reason:
         'the registry did not store mcp_server_meta.oauth (registry without remote-OAuth support?)',
     }
@@ -496,7 +497,8 @@ export async function runSeed({
       // A version this run just created and cannot verify points at the registry
       // itself (e.g. one that drops the oauth block): every further publish would
       // leave another immutable broken version, so the run stops. A skipped version
-      // that fails only concerns that old version.
+      // that fails only concerns that old version, except when its oauth block is
+      // missing altogether (see below).
       const VerifyError = fresh ? StopRunError : Error
       let reread
       try {
@@ -516,6 +518,16 @@ export async function runSeed({
         )
       }
       const stored = verifyStoredEntry(body, reread.body)
+      if (!stored.ok && stored.oauthMissing && !fresh) {
+        // An existing version without any oauth block is what a registry that
+        // discards the block leaves behind, so publishing the next entry would
+        // likely leave one more immutable broken version. A version legitimately
+        // published before the block existed stops the run too; it is skipped with
+        // --only.
+        throw new StopRunError(
+          `${outcome}, but ${stored.reason}; the registry may be discarding the oauth block, so nothing else is published (publish the remaining entries with --only if this version predates the block)`
+        )
+      }
       if (!stored.ok) throw new VerifyError(`${outcome}, but ${stored.reason}`)
       succeeded++
       log(`[ok] ${label}: ${outcome}; stored oauth block verified`)
