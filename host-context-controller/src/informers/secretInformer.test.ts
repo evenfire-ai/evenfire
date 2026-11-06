@@ -355,6 +355,8 @@ describe('SecretInformer resume mode (#1338)', () => {
     await vi.advanceTimersByTimeAsync(2000)
     expect(api.list).toHaveBeenCalledTimes(2)
     const watchesBefore = api.watchFn.mock.calls.length
+    // The held list now returns a changed Secret, so only the stop prevents an event.
+    api.modify('alpha')
 
     informer.stop()
     releaseList()
