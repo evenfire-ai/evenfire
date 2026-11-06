@@ -8,6 +8,7 @@ import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { RegistryEntryDetailSkeleton } from '@components/RegistryEntryDetailSkeleton'
+import { RemoteOAuthProvenanceBadge } from '@components/RemoteOAuthProvenanceBadge'
 import {
   RemoteOAuthEntryBadges,
   RemoteOAuthNotInstallable,
@@ -437,27 +438,43 @@ function RegistryEntryDetailContent() {
                         : entry.recipe_type || '—'}
                     </span>
                   </div>
-                  <div className="cu-detail-field">
-                    <span className="cu-detail-field__label">Trust</span>
-                    <span
-                      className="cu-registry-chip"
-                      style={{
-                        color: trustColor(entry.trust_level),
-                        backgroundColor: trustBgColor(entry.trust_level),
-                        borderColor: trustColor(entry.trust_level),
-                      }}
-                    >
-                      {entry.trust_level.toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="cu-detail-field">
-                    <span className="cu-detail-field__label">Verification</span>
-                    <span
-                      className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
-                    >
-                      {entry.quality_tier}
-                    </span>
-                  </div>
+                  {/* For a remote-OAuth entry the registry's quality tier turns verified on the
+                      first install report and the trust level is publisher-influenced, so only the
+                      provenance the catalog list shows is offered. */}
+                  {remoteOAuth?.valid === true ? (
+                    <div className="cu-detail-field">
+                      <span className="cu-detail-field__label">Verification</span>
+                      <RemoteOAuthProvenanceBadge
+                        block={remoteOAuth.block}
+                        publisher={remoteOAuth.publisher}
+                        trusted={remoteOAuth.trusted}
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <div className="cu-detail-field">
+                        <span className="cu-detail-field__label">Trust</span>
+                        <span
+                          className="cu-registry-chip"
+                          style={{
+                            color: trustColor(entry.trust_level),
+                            backgroundColor: trustBgColor(entry.trust_level),
+                            borderColor: trustColor(entry.trust_level),
+                          }}
+                        >
+                          {entry.trust_level.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="cu-detail-field">
+                        <span className="cu-detail-field__label">Verification</span>
+                        <span
+                          className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
+                        >
+                          {entry.quality_tier}
+                        </span>
+                      </div>
+                    </>
+                  )}
                   {entry.tags.length > 0 && (
                     <div className="cu-detail-field">
                       <span className="cu-detail-field__label">Tags</span>
@@ -478,7 +495,7 @@ function RegistryEntryDetailContent() {
                   <h3 className="cu-marketplace-detail__section-title">Install slots</h3>
                   {remoteOAuth.valid === true ? (
                     <>
-                      <RemoteOAuthEntryBadges view={remoteOAuth} showProvenance />
+                      <RemoteOAuthEntryBadges view={remoteOAuth} />
                       {entry.status === 'published' ? (
                         <RemoteOAuthSlotList rows={slotRows} renderActions={renderSlotActions} />
                       ) : null}

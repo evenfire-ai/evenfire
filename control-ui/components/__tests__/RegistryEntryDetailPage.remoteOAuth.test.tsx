@@ -98,6 +98,33 @@ describe('Marketplace entry detail of a remote-OAuth entry', () => {
     expect(screen.getByText('Unverified · published by @acme')).toBeInTheDocument()
   })
 
+  it('shows the provenance badge as its verification and no registry trust or tier', async () => {
+    navigationState.params = { name: '@acme/linear-pre', version: '1.0.0' }
+    vi.mocked(getRegistryCatalog).mockResolvedValue(CATALOG_SLOTS)
+    render(<RegistryEntryDetailPage />)
+
+    await screen.findByRole('list', { name: 'Install slots' })
+    const entry = CATALOG_SLOTS.data.find(item => item.name === '@acme/linear-pre')!
+    const verification = screen.getByText('Verification').parentElement as HTMLElement
+    expect(within(verification).getByText('Unverified · published by @acme')).toBeVisible()
+    expect(screen.getAllByText('Unverified · published by @acme')).toHaveLength(1)
+    expect(screen.queryByText('Trust')).toBeNull()
+    expect(screen.queryByText(entry.trust_level.toUpperCase())).toBeNull()
+    expect(screen.queryByText(entry.quality_tier)).toBeNull()
+  })
+
+  it('keeps the registry trust and tier for an entry without remote OAuth', async () => {
+    navigationState.params = { name: '@evenfire/plain-remote', version: '1.0.0' }
+    vi.mocked(getRegistryCatalog).mockResolvedValue(CATALOG_SLOTS)
+    render(<RegistryEntryDetailPage />)
+
+    const entry = CATALOG_SLOTS.data.find(item => item.name === '@evenfire/plain-remote')!
+    const trust = (await screen.findByText('Trust')).parentElement as HTMLElement
+    expect(within(trust).getByText(entry.trust_level.toUpperCase())).toBeVisible()
+    const verification = screen.getByText('Verification').parentElement as HTMLElement
+    expect(within(verification).getByText(entry.quality_tier)).toBeVisible()
+  })
+
   it('shows a refused entry as not installable', async () => {
     navigationState.params = { name: '@evenfire/broken-remote', version: '1.0.0' }
     vi.mocked(getRegistryCatalog).mockResolvedValue(CATALOG_SLOTS)

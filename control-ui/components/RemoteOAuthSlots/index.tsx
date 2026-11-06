@@ -1,7 +1,6 @@
 'use client'
 
 import React from 'react'
-import { RemoteOAuthProvenanceBadge } from '@components/RemoteOAuthProvenanceBadge'
 import {
   remoteOAuthManualNotice,
   remoteOAuthSlotNotice,
@@ -54,10 +53,7 @@ export function RemoteOAuthSlotList({ rows, renderActions }: RemoteOAuthSlotList
  * registration chip. The provider console link is a registry value, so it renders only
  * when it is an absolute https URL; a non-curator entry never carries one.
  */
-export function RemoteOAuthEntryBadges({
-  view,
-  showProvenance = false,
-}: RemoteOAuthEntryBadgesProps) {
+export function RemoteOAuthEntryBadges({ view }: RemoteOAuthEntryBadgesProps) {
   // Only the curator's console is linked: control-api strips it from other entries, and
   // the UI does not rely on that alone to send an operator to an org-supplied page.
   const consoleHref =
@@ -69,13 +65,6 @@ export function RemoteOAuthEntryBadges({
   return (
     <span className="cu-remote-oauth-badges">
       <span className="cu-registry-chip cu-registry-chip--remote-oauth">Remote OAuth</span>
-      {showProvenance ? (
-        <RemoteOAuthProvenanceBadge
-          block={view.block}
-          publisher={view.publisher}
-          trusted={view.trusted}
-        />
-      ) : null}
       {view.block.expectedRegistration === 'pre-registered' ? (
         <span className="cu-registry-chip cu-registry-chip--quality-unverified">
           Requires your OAuth app

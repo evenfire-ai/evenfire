@@ -13,8 +13,6 @@ export type RemoteOAuthSlotListProps = {
 
 export type RemoteOAuthEntryBadgesProps = {
   view: ValidRemoteOAuthCatalogView
-  /** Adds the verification / provenance chip; the catalog shows it in its own column. */
-  showProvenance?: boolean
 }
 
 export type RemoteOAuthNotInstallableProps = {
