@@ -344,6 +344,7 @@ export function App() {
   const compactSidebarWasOpenRef = React.useRef(false)
   const compactSidebarCloseFocusRef = React.useRef<CompactMenuCloseFocus | null>(null)
   const compactNavigationControlOwnedFocusRef = React.useRef(false)
+  const settledCompactDismissalOwnsFocusRef = React.useRef(false)
   const compactNavigationWasCompactRef = React.useRef(compactNavigation)
   const compactNavigationRef = React.useRef(compactNavigation)
   const compactSidebarOpenRef = React.useRef(compactSidebarOpen)
@@ -1757,6 +1758,7 @@ export function App() {
         compactNavigationControlOwnedFocusRef.current = true
       } else if (target !== document.body) {
         compactNavigationControlOwnedFocusRef.current = false
+        settledCompactDismissalOwnsFocusRef.current = false
       }
     }
     document.addEventListener('focusin', handleFocusIn)
@@ -1800,13 +1802,17 @@ export function App() {
           activeElement.isConnected &&
           activeElement !== document.body &&
           !sidebar?.contains(activeElement)
-        if (!destinationOwnsFocus) compactSidebarTriggerRef.current?.focus()
+        if (!destinationOwnsFocus) {
+          compactSidebarTriggerRef.current?.focus()
+          settledCompactDismissalOwnsFocusRef.current = true
+        }
       } else if (compactNavigationControlOwnedFocusRef.current) {
         focusDesktopNavigationOwner()
       }
     }
-    if (enteredDesktopMode && document.activeElement === compactSidebarTriggerRef.current) {
+    if (enteredDesktopMode && settledCompactDismissalOwnsFocusRef.current) {
       focusDesktopNavigationOwner()
+      settledCompactDismissalOwnsFocusRef.current = false
     }
     if (!compactSidebarOpen) {
       compactSidebarCloseFocusRef.current = null
