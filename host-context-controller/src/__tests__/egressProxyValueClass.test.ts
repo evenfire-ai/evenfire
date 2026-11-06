@@ -114,6 +114,21 @@ describe('egress-proxy value classes against the shared corpus (VC-1)', () => {
     expect(isQuotedValueAllowed(printable)).toBe(true)
   })
 
+  it('rejects the 0x1F boundary byte in both classes (TS-only pin)', () => {
+    const boundary = Buffer.from([0x61, 0x1f, 0x62])
+    expect(isQueryValueAllowed(boundary)).toBe(false)
+    expect(isQuotedValueAllowed(boundary)).toBe(false)
+    // Life witness: the next byte up (space) is legal in quoted position.
+    const space = Buffer.from('a b', 'utf8')
+    expect(isQuotedValueAllowed(space)).toBe(true)
+    expect(isQueryValueAllowed(space)).toBe(false)
+  })
+
+  it('accepts lowercase percent escapes in query position', () => {
+    expect(isQueryValueAllowed(Buffer.from('a%2bb', 'utf8'))).toBe(true)
+    expect(isQueryValueAllowed(Buffer.from('a%2Bb', 'utf8'))).toBe(true)
+  })
+
   it('applies one non-overlapping %XX pass, as the image gsub does', () => {
     // pct-double / pct-split are corpus rows; this pins the semantics that make
     // them REJECT and proves an iterative strip would differ.

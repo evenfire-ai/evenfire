@@ -417,6 +417,18 @@ else
   fail "check-faithful-delegation (exit=$faithful_rc expected=$faithful_want verdict=$expected)"
 fi
 
+# --- control-byte boundary of the live check ------------------------------
+# 0x1F is the largest rejected control byte in both classes; a space stays
+# legal in quoted position (life witness that the checker actually ran).
+quoted_template='proxy_set_header X-Key "${API_KEY}";'
+if [ "$(direct_verdict "$quoted_template" 'a\037b')" = REJECT ] &&
+  [ "$(direct_verdict "$faithful_template" 'a\037b')" = REJECT ] &&
+  [ "$(direct_verdict "$quoted_template" 'a b')" = OK ]; then
+  pass 'control-byte boundary 0x1F rejected, space served quoted'
+else
+  fail 'control-byte boundary 0x1F rejected, space served quoted'
+fi
+
 # --- static S1 ------------------------------------------------------------
 reset_fixture
 add_server static 'https://mcp.example.com/mcp?q=TESTKEY-QLIT\c' 'return 200 ok;' '[]'
