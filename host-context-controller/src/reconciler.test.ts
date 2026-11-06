@@ -4479,6 +4479,98 @@ describe('#1338 H3 N1 — transient failures of the other managed reconcile call
     }
   )
 
+  const rotatedSecret = {
+    metadata: { name: 'h3-input', resourceVersion: '2' },
+    data: { password: storedSecret('rotated-fixture-input-value') },
+  }
+
+  it('O1 a restored ready verdict with a failing read has no maximum age: it is still kept at +1 h', async () => {
+    vi.useFakeTimers()
+    const f = h3Cluster()
+    const server = persistReadySeed(h3Server())
+    const keptBefore = await reconcileCallFailures('secret_read', 'verdict_kept')
+    f.coreApi.readNamespacedSecret.mockRejectedValue(h3Timeout())
+
+    await f.reconciler.reconcile(server)
+    await vi.advanceTimersByTimeAsync(3_600_000)
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(2)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true, authoritative: true })
+    expect(await reconcileCallFailures('secret_read', 'verdict_kept')).toBe(keptBefore + 2)
+    expect(f.patches()).toBe(0)
+  })
+
+  it('O1 a confirmed ready verdict with a failing read is kept at +1 h', async () => {
+    vi.useFakeTimers()
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const keptBefore = await reconcileCallFailures('secret_read', 'verdict_kept')
+    f.coreApi.readNamespacedSecret.mockRejectedValue(h3Timeout())
+
+    await vi.advanceTimersByTimeAsync(3_600_000)
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(2)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+    expect(await reconcileCallFailures('secret_read', 'verdict_kept')).toBe(keptBefore + 1)
+  })
+
+  it('O1 a Secret revision other than the applied one publishes not-ready when a later call times out', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    f.coreApi.readNamespacedSecret.mockResolvedValueOnce(rotatedSecret)
+    const serviceReadsBefore = f.coreApi.readNamespacedService.mock.calls.length
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    const publishedBefore = await reconcileCallFailures('resource_sync', 'not_ready_published')
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.coreApi.readNamespacedService.mock.calls.length).toBe(serviceReadsBefore + 1)
+    expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
+    expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(
+      publishedBefore + 1
+    )
+  })
+
+  it('O1 an ensureDeployment that applied nothing records no revision', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const ensureDeployment = vi
+      .spyOn(f.reconciler as any, 'ensureDeployment')
+      .mockResolvedValueOnce('not_allowed')
+    f.coreApi.readNamespacedSecret.mockResolvedValueOnce(rotatedSecret)
+    await f.reconciler.reconcile(server)
+    expect(ensureDeployment).toHaveBeenCalledTimes(1)
+    const keptBefore = await reconcileCallFailures('resource_sync', 'verdict_kept')
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+
+    // The original revision is the one still applied, so nothing differs.
+    await f.reconciler.reconcile(server)
+
+    expect(await reconcileCallFailures('resource_sync', 'verdict_kept')).toBe(keptBefore + 1)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+  })
+
+  it.each(SITES)(
+    'N1 publishes not-ready when the %s call times out with a Secret change pending',
+    async (site, failingCalls, message) => {
+      const server = handshakeServer()
+      const f = await h3ReadyCluster(server)
+      f.reconciler.recordSecretChangeEvidence('h3-server')
+      const publishedBefore = await reconcileCallFailures(site, 'not_ready_published')
+      const calls = failSite(f, site)
+
+      await f.reconciler.reconcile(server)
+
+      expect(calls()).toBe(failingCalls)
+      expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+      expect(f.reconciler.getStatus(server).message).toContain(message)
+      expect(await reconcileCallFailures(site, 'not_ready_published')).toBe(publishedBefore + 1)
+    }
+  )
+
   it('N1 publishes not-ready when this reconcile had to write the runtime before the call failed', async () => {
     const server = h3Server()
     const f = await h3ReadyCluster(server)

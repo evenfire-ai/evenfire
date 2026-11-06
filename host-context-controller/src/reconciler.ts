@@ -471,6 +471,10 @@ export class McpServerReconciler {
   // independently of discovery readiness and the per-name promise queue.
   private readonly pendingReconciliations = new Map<string, { namespace: string }>()
 
+  // The Secret revision this process last applied to each server's Deployment,
+  // so a read of another revision proves the runtime differs from the Secret.
+  private readonly appliedSecretRevisions = new Map<string, string>()
+
   /**
    * Published verdicts that HCC cannot finish by retrying. They are not
    * unfinished work, so they stay out of pendingReconciliations: they do not
@@ -821,6 +825,7 @@ export class McpServerReconciler {
     this.statusIdentities.delete(name)
     this.managedSnapshot.delete(name)
     this.verdictsAwaitingExternalChange.delete(name)
+    this.appliedSecretRevisions.delete(name)
     const poll = this.readinessPolls.get(name)
     if (poll) {
       if (poll.timer !== undefined) clearTimeout(poll.timer)
@@ -2942,20 +2947,22 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * runtime, so an authoritative ready verdict is kept. The verdict is
    * published as today whenever the runtime is known to differ from it: this
    * reconcile attempted a ConfigMap, Service or Deployment write (the live
-   * object differed from desired, or was absent), or the caller saw the
+   * object differed from desired, or was absent), the Secret revision it read
+   * differs from the one this process last applied, or the caller saw the
    * envSecret change. Not-ready verdicts, first deploys and new generations
-   * are published as today.
+   * are published as today. A ready verdict has no maximum age while reads keep
+   * failing: this process only knows of Secret changes it observed or read.
    */
   private keepReadyVerdictOverTransientFailure(
     server: McpServerCRD,
     site: Exclude<VerdictCallSite, 'secret_read'>,
     error: unknown,
-    runtime: { writeAttempted: boolean }
+    runtime: { differs: boolean }
   ): boolean {
     const published = this.getStatus(server)
     const keep =
       isTransientKubernetesFailure(error) &&
-      !runtime.writeAttempted &&
+      !runtime.differs &&
       !this.secretChangeObserved(server.name) &&
       published.authoritative === true &&
       published.ready
@@ -3181,13 +3188,14 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       return withdrawRuntime && cleanupComplete && isCurrent()
     }
 
-    // Ensure resources exist and are up to date. A create or replace attempt
-    // means the live runtime differed from desired (or was absent), so a
-    // later transient failure in this reconcile must not keep the published
-    // verdict (#1338 H3, N1).
-    let runtimeWriteAttempted = false
+    // Ensure resources exist and are up to date. A create or replace attempt, or
+    // a Secret revision other than the one this process last applied, means the
+    // live runtime differed from desired (or was absent), so a later transient
+    // failure in this reconcile must not keep the published verdict (#1338 H3, N1).
+    const knownRevision = this.appliedSecretRevisions.get(server.name)
+    let runtimeDiffers = knownRevision !== undefined && knownRevision !== secretResult.revision
     const noteRuntimeWrite = (): void => {
-      runtimeWriteAttempted = true
+      runtimeDiffers = true
     }
     let deploymentApply: ResourceApplyResult | undefined
     try {
@@ -3251,11 +3259,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         isCurrent,
         noteRuntimeWrite
       )
+      if (
+        deploymentApply === 'created' ||
+        deploymentApply === 'replaced' ||
+        deploymentApply === 'up_to_date'
+      ) {
+        this.appliedSecretRevisions.set(server.name, secretResult.revision)
+      }
     } catch (err) {
       if (!isCurrent()) return false
       if (
         this.keepReadyVerdictOverTransientFailure(server, 'resource_sync', err, {
-          writeAttempted: runtimeWriteAttempted,
+          differs: runtimeDiffers,
         })
       ) {
         return false
@@ -3285,7 +3300,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         if (!isCurrent()) return false
         if (
           this.keepReadyVerdictOverTransientFailure(server, 'pre_deploy_handshake', err, {
-            writeAttempted: runtimeWriteAttempted,
+            differs: runtimeDiffers,
           })
         ) {
           return false
@@ -3314,7 +3329,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       'readFailure' in rollout &&
       pollState?.exhausted === true &&
       !pollLive() &&
-      !runtimeWriteAttempted &&
+      !runtimeDiffers &&
       isTransientKubernetesFailure(rollout.readFailure)
     ) {
       this.reportVerdictKept(server, 'rollout_read', rollout.detail)
@@ -3323,7 +3338,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     if (
       'readFailure' in rollout &&
       this.keepReadyVerdictOverTransientFailure(server, 'rollout_read', rollout.readFailure, {
-        writeAttempted: runtimeWriteAttempted,
+        differs: runtimeDiffers,
       })
     ) {
       return false
