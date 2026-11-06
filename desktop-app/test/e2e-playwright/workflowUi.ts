@@ -396,12 +396,14 @@ export function seedDesktopPasswordLogin(
 }
 
 // control-api admits one password verification per PASSWORD_ADMISSION_POLICY.paceMs
-// (7.5 s) for the whole server, and charges the identity's 5-per-15-minutes budget
-// before the pace check, so a paced 429 still spends an attempt. Space every password
-// attempt from this worker (API and Desktop sign-in) by the pace. The worker loads after
-// global setup's preflight login, so module load is a safe bound for that attempt.
-const PASSWORD_PACE_MS = 8_000
-// One paced retry at most; a longer Retry-After means the identity budget is spent.
+// (7.5 s) for the whole server and five attempts per source in each clock minute
+// (sourceAttemptsPerMinute), and the source limit counts correct passwords too. Space every
+// password attempt from this worker (API and Desktop sign-in) so a clock minute holds at
+// most five. The worker loads after global setup's preflight login, so module load is a
+// safe bound for that attempt.
+const PASSWORD_PACE_MS = 13_000
+// One paced retry at most; a longer Retry-After means another client spent the source's
+// minute, or the identity is in its failure cooldown.
 const MAX_PACE_RETRY_SECONDS = 15
 let lastPasswordAttemptAt = Date.now()
 
@@ -433,7 +435,7 @@ async function pacedPasswordLogin(
   }
   if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds > MAX_PACE_RETRY_SECONDS) {
     throw new Error(
-      `password-login for ${email} is rate limited beyond the pace (identity budget spent?): HTTP 429 ${first.body}`
+      `password-login for ${email} is rate limited beyond the pace (source limit or failure cooldown?): HTTP 429 ${first.body}`
     )
   }
   lastPasswordAttemptAt = Date.now() + retryAfterSeconds * 1000 - PASSWORD_PACE_MS
@@ -545,6 +547,9 @@ export async function launchAndLogin(
   try {
     app = await electron.launch({
       args: [`--user-data-dir=${isolatedPaths.userDataDir}`, path.join(compiledAppPath, 'main.js')],
+      ...(process.env.E2E_DESKTOP_VIDEO_DIR
+        ? { recordVideo: { dir: process.env.E2E_DESKTOP_VIDEO_DIR } }
+        : {}),
       env: {
         ...process.env,
         EVENFIRE_DEV_ISOLATION: '1',
