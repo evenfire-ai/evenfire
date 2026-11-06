@@ -173,16 +173,29 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (two sessions)',
     return {
       name: 'postgres',
       pool: corePool,
-      // Postgres blocks a waiter until the holder ends; 300 ms is far longer
-      // than any of these statements takes unblocked.
+      // 'pending' only once a session of this database is seen waiting on a
+      // lock: a statement that is merely slow must not pass for a blocked one.
+      // The check is per database, not per session, so a test with two
+      // waiters in flight cannot tell which one is blocked.
       stillPending: async p => {
         let settled = false
         void p.then(
           () => (settled = true),
           () => (settled = true)
         )
-        await new Promise(resolve => setTimeout(resolve, 300))
-        return settled ? 'settled' : 'pending'
+        const deadline = Date.now() + 5_000
+        while (Date.now() < deadline) {
+          if (settled) return 'settled'
+          const { rows } = await adminPool.query<{ waiting: number }>(
+            `SELECT count(*)::int AS waiting FROM pg_stat_activity
+              WHERE datname = $1 AND wait_event_type = 'Lock'`,
+            [database]
+          )
+          if (settled) return 'settled'
+          if (rows[0].waiting > 0) return 'pending'
+          await new Promise(resolve => setTimeout(resolve, 20))
+        }
+        throw new Error('neither settled nor waiting on a lock after 5 s')
       },
       state: async () => {
         const q = (sql: string) => corePool.query(sql).then(r => r.rows as Row[])
