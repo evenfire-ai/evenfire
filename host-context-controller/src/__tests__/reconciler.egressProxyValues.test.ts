@@ -898,10 +898,8 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
       'PYTHONPATH',
       'JAVA_TOOL_OPTIONS',
       'KUBECONFIG',
-      'KUBERNETES_SERVICE_HOST',
-      'KUBERNETES_SERVICE_PORT',
     ]
-    expect(forbiddenNames).toHaveLength(9)
+    expect(forbiddenNames).toHaveLength(7)
     for (const name of forbiddenNames) {
       const server = cloneServer(API_KEY_SERVER, {
         remote: { baseUrl: 'https://api.example.com/mcp?q=' + '$' + `{${name}}` },
@@ -920,7 +918,29 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
     // not from the envSecret declaration channel.
     expect(
       (reconciler as any).buildNginxConfigMap(API_KEY_SERVER).data['default.conf.template']
-    ).toContain('proxy_pass https://api.example.com/mcp?apikey=${API_KEY};')
+    ).toContain('proxy_pass https://remote_upstream/mcp?apikey=${API_KEY};')
+  })
+
+  it('PF-18b: the enumerated KUBERNETES_* names get the reserved-Kubernetes message', () => {
+    const kubernetesNames = ['KUBERNETES_SERVICE_HOST', 'KUBERNETES_SERVICE_PORT']
+    expect(kubernetesNames).toHaveLength(2)
+    for (const name of kubernetesNames) {
+      const server = cloneServer(API_KEY_SERVER, {
+        remote: { baseUrl: 'https://api.example.com/mcp?q=' + '$' + `{${name}}` },
+        envSecret: {
+          name: SECRET_NAME,
+          keys: [{ secretKey: 'k', envVar: name }],
+        },
+      })
+      expect(
+        () => (reconciler as any).buildNginxConfigMap(server),
+        `${name} declared via envSecret must still be rejected`
+      ).toThrow(`query placeholder \${${name}} names a reserved Kubernetes service variable`)
+    }
+    // Life witness: the same envSecret channel renders an ordinary name.
+    expect(
+      (reconciler as any).buildNginxConfigMap(API_KEY_SERVER).data['default.conf.template']
+    ).toContain('proxy_pass https://remote_upstream/mcp?apikey=${API_KEY};')
   })
 
   it('PF-19: a render failure retires a stale True through the Ready write', async () => {
