@@ -1251,4 +1251,97 @@ describe('egress-proxy value preflight (PF for #1240)', () => {
     await flushMicrotasks()
     expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.length).toBe(patchesAtThrow)
   })
+
+  it('PF-22: a fail-closed Secret failure retires the verdict with the runtime', async () => {
+    const persisted = persistedHarness(structuredClone(TRUE_VERDICT_CONDITIONS))
+    coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+
+    await reconciler.reconcile(API_KEY_SERVER)
+
+    // Life witness: the runtime was withdrawn (Deployment deleted,
+    // RuntimeNotDesired persisted), not merely left running.
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(persisted.get()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'DeploymentReady',
+          status: 'False',
+          reason: 'RuntimeNotDesired',
+        }),
+        expect.objectContaining({ type: 'Ready', status: 'False' }),
+      ])
+    )
+    expect(persisted.get().map(condition => condition.type)).not.toContain('EgressProxyValuesValid')
+  })
+
+  it('PF-23: a transient Secret read failure keeps the verdict and the runtime', async () => {
+    const persisted = persistedHarness(structuredClone(TRUE_VERDICT_CONDITIONS))
+    coreApi.readNamespacedSecret.mockRejectedValue(error500('secret read boom'))
+
+    await reconciler.reconcile(API_KEY_SERVER)
+
+    // Life witness: the failure was persisted as Ready=False while the
+    // runtime (still serving the judged values) was left alone.
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    expect(persisted.get()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'Ready',
+          status: 'False',
+          reason: 'SecretValidationFailed',
+        }),
+        expect.objectContaining({ type: 'EgressProxyValuesValid', status: 'True' }),
+      ])
+    )
+  })
+
+  it('PF-24: a WRC-owned Secret failure retires the verdict', async () => {
+    const persisted = persistedHarness(structuredClone(TRUE_VERDICT_CONDITIONS))
+    coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+    const server = cloneServer(API_KEY_SERVER, { managed: false })
+
+    await reconciler.reconcile(server)
+
+    // Life witness: the WRC path persisted its Secret failure and created
+    // no HCC runtime.
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(persisted.get()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'Ready',
+          status: 'False',
+          reason: 'SecretValidationFailed',
+        }),
+      ])
+    )
+    expect(persisted.get().map(condition => condition.type)).not.toContain('EgressProxyValuesValid')
+  })
+
+  it('PF-25: an ImageNotAllowed exit retires the verdict without building', async () => {
+    const persisted = persistedHarness(structuredClone(TRUE_VERDICT_CONDITIONS))
+    const cfg = (await import('../config')).config as { enforcePluginImageAllowlist: boolean }
+    cfg.enforcePluginImageAllowlist = true
+    try {
+      const server = cloneServer(LOCAL_SERVER, { image: 'docker.io/evil/x:1' })
+      await reconciler.reconcile(server)
+
+      // Life witness: the allowlist blocked the build and persisted its
+      // own Ready reason.
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(persisted.get()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'Ready',
+            status: 'False',
+            reason: 'ImageNotAllowed',
+          }),
+        ])
+      )
+      expect(persisted.get().map(condition => condition.type)).not.toContain(
+        'EgressProxyValuesValid'
+      )
+    } finally {
+      cfg.enforcePluginImageAllowlist = false
+    }
+  })
 })

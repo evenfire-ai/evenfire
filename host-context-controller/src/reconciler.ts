@@ -3441,7 +3441,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           reason: 'SecretValidationFailed',
           message: secretResult.message,
         },
-        isCurrent
+        isCurrent,
+        undefined,
+        // A fail-closed withdrawal removes the runtime the verdict judged,
+        // so the verdict goes with it. A transient read failure preserves
+        // that runtime and its still-accurate verdict.
+        withdrawRuntime ? ['EgressProxyValuesValid'] : []
       )
       if (retract && !retract.retracted && !retract.foreignRuntime) return false
       return withdrawRuntime && cleanupComplete && isCurrent()
@@ -3501,7 +3506,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
                 reason: 'ImageNotAllowed',
                 message,
               },
-              isCurrent
+              isCurrent,
+              undefined,
+              // No runtime is built on this exit, so no egress verdict
+              // describes this server (an ex-remote keeps none either).
+              ['EgressProxyValuesValid']
             )
             if (!isCurrent()) return false
             this.setStatus(server.name, { deployed: false, ready: false, message })
@@ -3726,7 +3735,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           reason: 'SecretValidationFailed',
           message: secretResult.message,
         },
-        isCurrent
+        isCurrent,
+        undefined,
+        // Same retire list as the WRC success write below: HCC never runs
+        // the egress-proxy preflight for a WRC-owned server.
+        ['EgressProxyValuesValid']
       )
       return shouldFailClosedForSecretFailure(secretResult.reason) && isCurrent()
     }
