@@ -44,7 +44,8 @@ export class ControlApiError extends Error {
 
 /**
  * control-api sends the public `401 {error:{code:'invalid_session'}}` envelope from
- * `/external/users/:id/me` and the `/external/auth/*` session routes. Every route behind
+ * `/external/users/:id/me` and the `/external/auth/*` session routes; `/external/auth/verify`
+ * is the exception and answers a bare 401. Every route behind
  * its `requireValidExternalSessionToken` (`/external/users/*` except `/me`,
  * `/external/teams/*`, `/external/members/*` and the other session-plane routes) answers
  * an ended session with a bare 401, the same body its service-credential guard sends when

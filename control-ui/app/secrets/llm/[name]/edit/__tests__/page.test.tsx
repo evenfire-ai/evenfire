@@ -411,7 +411,9 @@ describe('Edit LLM secret page — update payload', () => {
         <EditLlmSecretPage />
       </ToastProvider>
     )
-    await screen.findByRole('button', { name: 'Update secret' })
+    await waitForElementToBeRemoved(() =>
+      screen.queryByRole('status', { name: 'LLM secret loading' })
+    )
     removeExtraSlotIn('Anthropic')
     first.unmount()
     cleanup()

@@ -10,8 +10,10 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
 // Every migration up to and including dev's last migration runs in initDb's
 // single dev batch; this runner owns only the PR1 versions that follow it.
 // Until this change merges, a dev merge that brings new migrations moves this
-// bound (and the dev-batch bound in initDb) to dev's last version and renumbers
-// PR1_MIGRATION_VERSIONS above it. After it merges the bound stays: a later
+// bound and the dev-batch bound in applyPendingLegacyMigrations (db.ts) to dev's
+// last version, and renumbers PR1_MIGRATION_VERSIONS above it. That batch bound is
+// PASSWORD_SUCCESS_ADMISSION_MIGRATION today, which also identifies the password
+// rollout: give the batch its own constant then. After it merges the bound stays: a later
 // migration adds its version to the list this runner applies, or initDb throws
 // "Unclassified post-dev migrations".
 const LAST_DEV_MIGRATION_VERSION = '0130_password_login_success_admission'

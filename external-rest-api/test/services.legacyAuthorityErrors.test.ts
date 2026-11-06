@@ -38,7 +38,7 @@ function upstream(status: number): ControlApiError {
 }
 
 // The body control-api sends with every bare 401: requireValidExternalSessionToken for a
-// missing or ended session (control-api/src/middleware/externalSessionAuth.ts:144,158) and
+// missing or ended session (control-api/src/middleware/externalSessionAuth.ts) and
 // its service-credential guard (control-api/src/middleware/internalServiceAuth.ts) when it
 // refuses this edge's credential. The two cannot be told apart.
 const BARE_UNAUTHORIZED_BODY = { error: 'Unauthorized' }
