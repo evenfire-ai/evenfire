@@ -14,7 +14,7 @@ import { LlmPortAdapter } from '../../adapters/llmPortAdapter'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { estimateTokens } from '../../conversation/compaction'
 import type { ChatMessage } from '../../types'
-import { PressureContextManager } from '../contextManager'
+import { PressureContextManager, type PressureContextManagerOptions } from '../contextManager'
 
 function conversationOf(turns: number): ChatMessage[] {
   const msgs: ChatMessage[] = [{ role: 'system', content: 'You are a helpful assistant.' }]
@@ -38,7 +38,25 @@ function outputText(raw: RecordedResponse): string {
   return message.content.map(part => part.text).join('')
 }
 
-async function compactWith(model: string, fixture: string) {
+function fakeWorkspace(): WorkspaceService {
+  return {
+    appendDailyLog: vi.fn().mockResolvedValue(undefined),
+    read: vi.fn().mockResolvedValue(null),
+    write: vi.fn().mockResolvedValue(undefined),
+    append: vi.fn().mockResolvedValue(undefined),
+  } as unknown as WorkspaceService
+}
+
+/** The summarize tier: between 85% and 95% of the window. */
+function summarizeTierWindow(msgs: ChatMessage[]): number {
+  return Math.ceil(estimateTokens(msgs) / 0.9)
+}
+
+async function compactWith(
+  model: string,
+  fixture: string,
+  options: PressureContextManagerOptions = {}
+) {
   const create = vi.fn(async (_payload: Record<string, unknown>) => recordedResponse(fixture))
   const chatCreate = vi.fn()
   const provider = new OpenAIProvider(
@@ -56,19 +74,32 @@ async function compactWith(model: string, fixture: string) {
     undefined,
     recordedUsage
   )
-  const workspace = {
-    appendDailyLog: vi.fn().mockResolvedValue(undefined),
-    read: vi.fn().mockResolvedValue(null),
-    write: vi.fn().mockResolvedValue(undefined),
-    append: vi.fn().mockResolvedValue(undefined),
-  } as unknown as WorkspaceService
+  const workspace = fakeWorkspace()
   const msgs = conversationOf(20)
-  // The summarize tier: between 85% and 95% of the window.
-  const manager = new PressureContextManager(Math.ceil(estimateTokens(msgs) / 0.9), workspace, port)
+  const manager = new PressureContextManager(
+    summarizeTierWindow(msgs),
+    workspace,
+    port,
+    undefined,
+    options
+  )
 
   const result = await manager.manage(msgs, makeFakeConversation())
 
-  return { create, chatCreate, recordedUsage, workspace, result }
+  return { create, chatCreate, recordedUsage, workspace, result, manager }
+}
+
+/**
+ * What MoveToWorkspace produces for the same conversation, taken from the real
+ * manager: without an LLM port the summarize tier archives the turns verbatim.
+ */
+async function archivedVerbatim() {
+  const workspace = fakeWorkspace()
+  const msgs = conversationOf(20)
+  const manager = new PressureContextManager(summarizeTierWindow(msgs), workspace)
+  const result = await manager.manage(msgs, makeFakeConversation())
+  const logs = vi.mocked(workspace.appendDailyLog).mock.calls.map(call => call[0] as string)
+  return { result, logs }
 }
 
 describe('T-R2 compaction summarizes over Responses', () => {
@@ -111,5 +142,59 @@ describe('T-R2 compaction summarizes over Responses', () => {
 
     expect(reasoning.create.mock.calls[0]![0]).not.toHaveProperty('temperature')
     expect(plain.create.mock.calls[0]![0]).toHaveProperty('temperature', 0.3)
+  })
+})
+
+// A reasoning model can spend the whole output budget thinking: the call
+// succeeds with an empty or cut-off body. Persisting it would replace the
+// archived turns with nothing, so the turns are archived verbatim instead.
+describe('T-R2 compaction falls back to MoveToWorkspace on an unusable summary', () => {
+  it.each([
+    // T-R2b: reasoning only, no message item.
+    ['gpt-6.1-terra', 'v1-incomplete-gpt-6.1-terra'],
+    // T-R2c: partial output text cut by max_output_tokens.
+    ['gpt-5.4-mini', 'v1-incomplete-gpt-5.4-mini'],
+  ])('%s (%s): the archived turns reach the daily log in full', async (model, fixture) => {
+    const { create, workspace, result } = await compactWith(model, fixture)
+    const expected = await archivedVerbatim()
+
+    expect(create).toHaveBeenCalledTimes(1)
+    const logs = vi.mocked(workspace.appendDailyLog).mock.calls.map(call => call[0] as string)
+    expect(logs).toEqual(expected.logs)
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).toMatch(/^### Context Compacted \(\d+ turns archived\)/)
+    expect(logs[0]).toContain('Turn 1:')
+    expect(logs[0]).toContain('Answer 1:')
+    expect(logs.join('')).not.toContain('### Context Summary')
+    expect(result).toEqual(expected.result)
+  })
+
+  it('gpt-5.4-mini: the truncated text is not persisted', async () => {
+    const { workspace } = await compactWith('gpt-5.4-mini', 'v1-incomplete-gpt-5.4-mini')
+    const truncated = outputText(recordedResponse('v1-incomplete-gpt-5.4-mini'))
+
+    expect(truncated.length).toBeGreaterThan(0)
+    const logs = vi.mocked(workspace.appendDailyLog).mock.calls.map(call => call[0] as string)
+    expect(logs.join('')).not.toContain(truncated)
+  })
+
+  it('structured mode: a completed summary becomes the previous summary', async () => {
+    const { manager } = await compactWith('gpt-6.1-terra', 'v1-text-gpt-6.1-terra', {
+      structuredSummaryEnabled: true,
+    })
+
+    expect(manager.getPreviousSummary()).toBeTruthy()
+  })
+
+  it('structured mode: an empty summary does not become the previous summary', async () => {
+    const { manager, workspace } = await compactWith(
+      'gpt-6.1-terra',
+      'v1-incomplete-gpt-6.1-terra',
+      { structuredSummaryEnabled: true }
+    )
+
+    expect(manager.getPreviousSummary()).toBeNull()
+    const logs = vi.mocked(workspace.appendDailyLog).mock.calls.map(call => call[0] as string)
+    expect(logs.join('')).not.toContain('### Context Summary')
   })
 })
