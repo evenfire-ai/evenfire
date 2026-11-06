@@ -1,0 +1,10 @@
+---
+description: Route Desktop auth work to its canonical security contract
+globs:
+  - desktop-app/**
+alwaysApply: false
+---
+
+For authenticated service or transport work under `desktop-app/**`, read and apply the canonical
+@desktop-app/README.md#authenticated-service-integration contract before inspecting implementation
+details. The README owns the semantics; this file is only a path-scoped routing adapter.

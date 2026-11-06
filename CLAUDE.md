@@ -84,3 +84,10 @@ Node 24, repair the generated dependency directory, and rerun the install.
 Never bypass the postinstall with `ELECTRON_SKIP_BINARY_DOWNLOAD`, use an
 unverified override, or treat the resulting test failure as a product
 regression.
+
+## Authenticated Desktop services
+
+For authenticated service or transport work under `desktop-app/**`, read and
+apply the canonical
+[Authenticated Service Integration](desktop-app/README.md#authenticated-service-integration)
+contract before inspecting implementation details.
