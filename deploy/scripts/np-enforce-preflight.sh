@@ -77,7 +77,7 @@ if [ -n "$OVERLAY" ]; then
     exit 2
   fi
   DERIVED="$(
-    kubectl kustomize "$OVERLAY_DIR" 2>/dev/null | RUBYOPT=--disable=gems ruby -ryaml "$REPO_ROOT/deploy/scripts/np-preflight-inventory.rb"
+    kubectl kustomize "$OVERLAY_DIR" | RUBYOPT=--disable=gems ruby -ryaml "$REPO_ROOT/deploy/scripts/np-preflight-inventory.rb"
   )"
   if [ -z "$DERIVED" ]; then
     echo "ERROR: failed to derive namespace inventory from overlay $OVERLAY" >&2

@@ -15,6 +15,10 @@ const {
   deploymentReady,
   policyObservation,
   acceptPolicyIntentChange,
+  GATE_RECOVERY_CAP_MS,
+  GATE_RECOVERY_SLACK_MS,
+  DNS_FIXTURE_TTL_SECONDS,
+  maxSupportedExternalEgressOverlapSeconds,
 } = require('../e2e/_lib/wrc-egress-gate.cjs')
 const {
   Journal,
@@ -277,6 +281,15 @@ function uiFixture(t, { assigned = true, children = true } = {}) {
   journal.save()
   return { ...fixtureState, parent, parentObject, physicalName, uiObjects }
 }
+
+test('the supported overlap is the largest one whose recovery budget fits the cap', () => {
+  const max = maxSupportedExternalEgressOverlapSeconds()
+  // deploy/overlays/minikube/patches/wrc-external-egress-overlap.yaml names this bound.
+  assert.equal(max, 505)
+  const budgetMs = overlap => (overlap + DNS_FIXTURE_TTL_SECONDS) * 1000 + GATE_RECOVERY_SLACK_MS
+  assert.ok(budgetMs(max) <= GATE_RECOVERY_CAP_MS)
+  assert.ok(budgetMs(max + 1) > GATE_RECOVERY_CAP_MS)
+})
 
 test('foreground recipe deletion cannot leave UI children after its finalizer swallows DELETE503', async t => {
   const { kube, journal, objects, hooks, file, events, parent, physicalName, uiObjects } =

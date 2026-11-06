@@ -28,6 +28,7 @@ HCC_NAME = 'host-context-controller'
 
 def derive_inventory(rendered)
   docs = YAML.load_stream(rendered).select { |doc| doc.is_a?(Hash) }
+  abort("np-preflight-inventory: the render is empty; cannot derive") if docs.empty?
   quote = lambda { |value| "'" + value.gsub("'", "'\\\\''") + "'" }
   namespaces = docs
     .select { |doc| doc["kind"] == "Namespace" && (doc.dig("metadata", "labels") || {})["app.kubernetes.io/part-of"] == "clerum" }

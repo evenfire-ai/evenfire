@@ -12,12 +12,16 @@
 #
 # Case g compares the helper's default constants with the literals in
 # host-context-controller/src/config.ts, so the two copies cannot drift apart.
+#
+# Cases m and n run np-enforce-preflight.sh itself against a stub kubectl placed
+# first on PATH. The stub serves `kustomize` and refuses everything else, so the
+# wrapper stops at its cluster check and no real kubectl runs.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 INV="$ROOT/deploy/scripts/np-preflight-inventory.rb"
 HCC_CONFIG="$ROOT/host-context-controller/src/config.ts"
-EXPECTED_PASSES=10
+EXPECTED_PASSES=14
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -198,6 +202,53 @@ fixture "$TMP/j.yaml" hcc "$RUNTIME_SHADOWED" "$RUNTIME_BASE" "$MINIMAL_BASE"
 derive "$TMP/j.yaml"
 expect_inventory "j. a duplicated env entry resolves to the last one, as Kubernetes does" \
   "$DEFAULT_RUNTIME" "$DEFAULT_K8S"
+
+sed 's/- name: host-context-controller$/- name: renamed-container/' "$TMP/a.yaml" >"$TMP/k.yaml"
+derive "$TMP/k.yaml"
+expect_refusal "k. a Deployment without the HCC container is refused" \
+  "has no container host-context-controller"
+
+: >"$TMP/l.yaml"
+derive "$TMP/l.yaml"
+expect_refusal "l. an empty render is refused as empty, not as a missing Deployment" \
+  "the render is empty"
+
+STUB="$TMP/stub"
+mkdir -p "$STUB"
+cat >"$STUB/kubectl" <<'SH'
+#!/bin/sh
+if [ "$1" = "kustomize" ] && [ -n "${STUB_RENDER:-}" ]; then
+  cat "$STUB_RENDER"
+  exit 0
+fi
+echo "stub kubectl refused: $*" >&2
+exit 1
+SH
+chmod +x "$STUB/kubectl"
+
+# wrapper [render]: sets OUT, ERR and RC from one run of np-enforce-preflight.sh.
+wrapper() {
+  OUT="$(CONTEXT=stub-context OVERLAY=minikube STUB_RENDER="${1:-}" PATH="$STUB:$PATH" \
+    bash "$ROOT/deploy/scripts/np-enforce-preflight.sh" 2>"$TMP/stderr")"
+  RC=$?
+  ERR="$(cat "$TMP/stderr")"
+}
+
+wrapper
+if [ "$RC" -eq 2 ] && [[ "$ERR" == *"stub kubectl refused: kustomize"* ]] &&
+  [[ "$ERR" == *"failed to derive namespace inventory"* ]] && [[ "$ERR" != *"has no Deployment"* ]]; then
+  pass "m. a failed render shows its own error and stops the wrapper"
+else
+  fail "m. failed render: exit $RC, stderr: $ERR"
+fi
+
+wrapper "$TMP/b.yaml"
+if [[ "$OUT" == *"[static] Rendered NetworkPolicy lint"* ]] && [ "$RC" -eq 2 ] &&
+  [[ "$ERR" == *"cannot reach cluster for context 'stub-context'"* ]]; then
+  pass "n. the wrapper derives the inventory through the helper and goes on"
+else
+  fail "n. good render: exit $RC, stdout: $OUT, stderr: $ERR"
+fi
 
 # shellcheck disable=SC2016 # Ruby source; $PROGRAM_NAME is a Ruby global.
 if drift="$(RUBYOPT=--disable=gems ruby -ryaml -e '
