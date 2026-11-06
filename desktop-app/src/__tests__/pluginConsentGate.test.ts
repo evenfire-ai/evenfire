@@ -12,7 +12,19 @@ import { LocalConsentStore } from '../pluginConsentStore.js'
 import type { PluginConsentRequest } from '../pluginSdkProtocol.js'
 
 const ENV_KEY = 'testenv-0123456789ab'
-const BASE = { envKey: ENV_KEY, userId: 'user-1', pluginId: 'ns/plugin', pluginTitle: 'Plugin' }
+const BASE = {
+  envKey: ENV_KEY,
+  userId: 'user-1',
+  pluginId: 'ns/plugin',
+  pluginTitle: 'Plugin',
+  mount: {
+    pluginId: 'ns/plugin',
+    pluginTitle: 'Plugin',
+    surface: 'sandbox-ui-embed' as const,
+    webContentsId: 91,
+    generation: 1,
+  },
+}
 
 let tmpDir: string
 let store: LocalConsentStore
@@ -25,7 +37,7 @@ let clock: number
 type GateOptions = {
   decide?: (request: PluginConsentRequest) => string[] | null
   windowReady?: () => boolean
-  setSurfaceVisible?: (visible: boolean) => Promise<void>
+  setSurfaceVisible?: (visible: false) => Promise<boolean>
 }
 
 /** Spin the macrotask queue until `pred` holds — deterministic, no fixed sleep. */
@@ -41,6 +53,7 @@ async function flushUntil(pred: () => boolean, maxTicks = 1000): Promise<void> {
 function makeGate(options: GateOptions = {}): PluginConsentGate {
   const gate = new PluginConsentGate({
     store,
+    isMountCurrent: () => true,
     presentPrompt: request => {
       prompts.push(request)
       const decision = options.decide
@@ -56,6 +69,7 @@ function makeGate(options: GateOptions = {}): PluginConsentGate {
       options.setSurfaceVisible ??
       (async visible => {
         visibility.push(visible)
+        return true
       }),
     isWindowReady: options.windowReady ?? (() => true),
     now: () => clock,
@@ -198,6 +212,7 @@ describe('PluginConsentGate', () => {
       setSurfaceVisible: async visible => {
         visibility.push(visible)
         if (visible === false) await hideBlocked
+        return true
       },
     })
     const pending = gate.ensure({ ...BASE, capabilities: ['identity.read'] })
@@ -219,6 +234,7 @@ describe('PluginConsentGate', () => {
       setSurfaceVisible: async visible => {
         visibility.push(visible)
         if (visible === false) throw new Error('view destroyed mid-flip')
+        return true
       },
     })
     await expect(gate.ensure({ ...BASE, capabilities: ['identity.read'] })).rejects.toThrow(

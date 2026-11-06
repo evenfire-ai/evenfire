@@ -67,7 +67,8 @@ export class PluginSdkRuntime {
       presentPrompt: request => this.sendToRenderer(PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL, request),
       cancelPrompt: promptId =>
         this.sendToRenderer(PLUGIN_SDK_CONSENT_CANCELLED_CHANNEL, { promptId }),
-      setSurfaceVisible: visible => this.deps.service.setSandboxUiVisible(visible),
+      isMountCurrent: mount => resolvePluginSurface(mount.webContentsId) === mount,
+      setSurfaceVisible: (_visible, mount) => this.deps.service.hideSandboxUiForPluginMount(mount),
       isWindowReady: () => {
         const win = this.deps.getMainWindow()
         if (!win || win.isDestroyed()) return false
