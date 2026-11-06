@@ -29,6 +29,7 @@ import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 import { openGfsResourcePayload, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { PluginConsentGate } from '../../../src/pluginConsentGate'
 import type { PluginConsentRequest } from '../../../src/pluginSdkProtocol'
+import type { PinnedPluginSurface } from '../../../src/pluginSurfaceRegistry'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
 // The sandbox-ui main fake runs the real main process; these are the
@@ -1785,6 +1786,13 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     sandboxUi.setVisible.mockClear()
     sandboxUi.setBounds.mockClear()
 
+    const mount: PinnedPluginSurface = {
+      pluginId: 'plugin-1',
+      pluginTitle: 'Plugin',
+      surface: 'sandbox-ui-embed',
+      webContentsId: 101,
+      generation: 1,
+    }
     const consentGate = new PluginConsentGate({
       store: {
         list: async () => [],
@@ -1794,9 +1802,14 @@ describe('App wires gestures and main events to the embed ownership machine', ()
         revoke: async () => undefined,
         revokeAllForPlugin: async () => undefined,
       },
+      isMountCurrent: candidate => candidate === mount,
       presentPrompt: request => consentRequestedCb?.(request),
       cancelPrompt: promptId => consentCancelledCb?.({ promptId }),
-      setSurfaceVisible: async visible => sandboxUi.setVisible(visible),
+      setSurfaceVisible: async (visible, requestedMount) => {
+        if (requestedMount !== mount) return false
+        sandboxUi.setVisible(visible)
+        return true
+      },
       isWindowReady: () => true,
       now: () => 1_700_000_000_000,
       sleep: async () => undefined,
@@ -1806,6 +1819,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
       userId: 'user-1',
       pluginId: 'plugin-1',
       pluginTitle: 'Plugin',
+      mount,
       capabilities: ['identity.read'],
     })
     await waitFor(() => expect(sandboxUiPageHarness.props?.appRootOverlayOpen).toBe(true))
