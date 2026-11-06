@@ -1897,10 +1897,14 @@ expect_echo() {
 # through the image's own filter program: no proxy, no network. S1-S3 (P2-P4,
 # the invalid Content-Length, the unknown Transfer-Encoding and the invalid
 # header messages) moved to the quoted-live case, where a raw TCP upstream
-# produces them for real. What stays synthetic is the two shapes NGINX cannot
-# produce from any upstream: S5, a quoting message with no context field at all,
-# which pins the branch that must not reprint the tail next to REDACTED, and S6,
-# a non-quoting message that must not be over-redacted.
+# produces them for real. What stays synthetic is S5, a quoting message with
+# no context field at all, which NGINX cannot produce from any upstream (it
+# always appends ", client: ") and which pins the branch that must not
+# reprint the tail next to REDACTED, and S6, an accepted synthetic control:
+# a non-quoting message that must not be over-redacted. S6 is producible
+# live (an upstream response header larger than proxy_buffer_size), but it
+# stays a fixed line here so the rule stays pinned with no proxy or
+# network.
 expect_filter_lines() {
   local case_name="filter-lines" found rc out_lines in_lines m scanned=0 failures_before=$failures
   local s_in="$WORK/filter-lines.in" s_want="$WORK/filter-lines.want" s_out="$WORK/filter-lines.out"
