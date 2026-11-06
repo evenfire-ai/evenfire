@@ -104,6 +104,9 @@ export function SidebarNav({
     if (compactMode && !previousCompactModeRef.current && !compactMenuOpen) {
       updateSettingsMenuOpen(false)
     }
+    if (!compactMode && previousCompactModeRef.current) {
+      updateSettingsMenuOpen(false)
+    }
     previousCompactModeRef.current = compactMode
   }, [compactMenuOpen, compactMode, updateSettingsMenuOpen])
 

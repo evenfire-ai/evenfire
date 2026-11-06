@@ -1324,6 +1324,59 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     sidebarHarness.renderActual = false
   })
 
+  it('clears compact Settings before revealing native content on desktop entry', async () => {
+    let modeChange: ((event: MediaQueryListEvent) => void) | null = null
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => {
+        modeChange = listener as (event: MediaQueryListEvent) => void
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    sidebarHarness.renderActual = true
+
+    await renderApp()
+    await waitFor(() => expect(sidebarHarness.props?.compactMode).toBe(true))
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    await flushMacrotask()
+
+    fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+    await waitFor(() => expect(sidebarHarness.props?.compactMenuOpen).toBe(true))
+    const settings = screen.getByTestId('nav-settings-menu')
+    fireEvent.click(settings)
+    expect(settings.getAttribute('aria-expanded')).toBe('true')
+    await waitFor(() => expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(true))
+    expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false)
+
+    act(() => {
+      media.matches = false
+      modeChange?.({ matches: false } as MediaQueryListEvent)
+    })
+
+    await waitFor(() => {
+      expect(sidebarHarness.props?.compactMenuOpen).toBe(false)
+      expect(document.querySelector('.sidebar-settings-menu')).toBeNull()
+      expect(settings.getAttribute('aria-expanded')).toBe('false')
+      expect(sandboxUiPageHarness.props?.sidebarShellOverlayOpen).toBe(false)
+    })
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    const finalVisibleCall = sandboxUi.setVisible.mock.invocationCallOrder.at(-1)
+    const finalBoundsCall = sandboxUi.setBounds.mock.invocationCallOrder.at(-1)
+    expect(finalBoundsCall).toBeDefined()
+    expect(finalVisibleCall).toBeGreaterThan(finalBoundsCall!)
+    sidebarHarness.renderActual = false
+  })
+
   it('keeps the native view hidden while compact navigation alone is open', async () => {
     const media = {
       matches: true,
