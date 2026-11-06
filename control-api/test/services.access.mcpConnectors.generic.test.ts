@@ -62,7 +62,11 @@ const host = (name: string, contextRef: string) => ({
   metadata: { name, namespace: HOSTS_NS },
   spec: { contextRef },
 })
-const ctx = (contextId: string, servers: string[]) => ({ spec: { contextId, mcpServers: servers } })
+// Shape the apiserver returns: a Context always carries its metadata.name.
+const ctx = (name: string, servers: string[]) => ({
+  metadata: { name },
+  spec: { contextId: name, mcpServers: servers },
+})
 
 // A generic self-hosted oauth server: auth.type oauth, oauth.source generic,
 // oauth.id present, NO provider.
@@ -95,7 +99,13 @@ beforeEach(() => grantExists.mockReset())
 async function connectorsFor(g: K8sGateway, agentNames: string[]) {
   return resolveConnectorsForAgents(
     g,
-    { mcpServersNamespace: NS, hostsNamespace: HOSTS_NS, agentNames, userId: USER },
+    {
+      mcpServersNamespace: NS,
+      contextsNamespace: NS,
+      hostsNamespace: HOSTS_NS,
+      agentNames,
+      userId: USER,
+    },
     DB
   )
 }

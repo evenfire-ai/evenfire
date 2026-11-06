@@ -55,7 +55,7 @@ function open(payload: Record<string, unknown>) {
 
 beforeAll(async () => {
   const { registerIpcHandlers } = await import('../ipc.js')
-  registerIpcHandlers(service as unknown as AppService)
+  registerIpcHandlers(service as unknown as AppService, async () => 0)
 })
 
 afterEach(() => {

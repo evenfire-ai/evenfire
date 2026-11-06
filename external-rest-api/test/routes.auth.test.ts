@@ -87,9 +87,10 @@ describe('routes/auth password-login', () => {
     expect(res.body.me.email).toBe('user@example.invalid')
     expect(String(res.headers['set-cookie'])).toContain('profile_session=profile-session-jwt')
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
-    expect(String(res.headers['set-cookie'])).toContain('Max-Age=43200')
+    expect(String(res.headers['set-cookie'])).toContain('Max-Age=604800')
     expect(String(res.headers['set-cookie'])).toContain('Secure')
     expect(String(res.headers['set-cookie'])).toContain('SameSite=Lax')
+    expect(String(res.headers['set-cookie'])).toContain('Path=/')
   })
 
   it('returns the bearer token body for non-browser Desktop App login', async () => {

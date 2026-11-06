@@ -182,14 +182,14 @@ describe('MCP Delegation E2E (Phase 6)', () => {
       }
       spec: {
         managed: boolean
-        contextRef: string
         transport: { type: string; url: string; port: number }
       }
     }>(`get mcpservers.clerum.io ${MCP_SERVER_NAME} -n ${MCP_SERVER_NAMESPACE}`)
 
     // Managed: false — HCC discovery-only, no Deployment creation
     expect(mcpServer.spec.managed).toBe(false)
-    expect(mcpServer.spec.contextRef).toBe(CONTEXT_REF)
+    // The server-context relation lives only in the Context allowlist (E6.5).
+    expect(mcpServer.spec).not.toHaveProperty('contextRef')
 
     // Transport URL matches Service DNS
     const expectedUrl = `http://${MCP_SERVER_NAME}.${MCP_SERVER_NAMESPACE}.svc.cluster.local:3000/mcp`

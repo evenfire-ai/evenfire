@@ -574,11 +574,6 @@ describe('POST /admin/registry/install', () => {
 
   function makeInstallApp() {
     const gw = new MockGateway('mcp-server')
-    // Seed a context for the allowlist update step
-    gw.createResource('contexts', {
-      metadata: { name: 'default-context' },
-      spec: { contextId: 'default-context', mcpServers: [] },
-    })
     return { app: makeApp(gw), gw }
   }
 
@@ -594,7 +589,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-airtable',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
@@ -603,54 +597,11 @@ describe('POST /admin/registry/install', () => {
 
     expect(res.body.serverName).toBe('my-airtable')
     expect(res.body.namespace).toBe('mcp-server')
-    expect(res.body.contextRef).toBe('default-context')
-    expect(res.body.contextUpdated).toBe(true)
+    expect(res.body).not.toHaveProperty('contextRef')
+    expect(res.body).not.toHaveProperty('contextUpdated')
     expect(res.body.correlationId).toBeDefined()
     expect(getEntryVersion).toHaveBeenCalledWith('airtable-mcp', '1.0.0')
     expect(getCredentialSchema).toHaveBeenCalledWith('airtable-mcp', '1.0.0')
-  })
-
-  // Contexts live in `config.contextsNamespace`, never in the McpServer's
-  // target namespace. The Context read and write relied on the gateway default
-  // while the snapshot and readback were addressed to `targetNs`, so an install
-  // carrying an explicit `namespace` fenced against a different object than it
-  // wrote and could never recover a committed association. The two defaults are
-  // both 'mcp-server', which is why every other install test misses this.
-  it('recovers a committed Context association when the install targets another namespace', async () => {
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
-    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
-    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
-    const { app, gw } = makeInstallApp()
-
-    // The Context update commits and then loses its response, which is the only
-    // path that exercises the readback.
-    const updateSpy = vi.spyOn(gw, 'updateResource')
-    updateSpy.mockImplementation(async (plural, name, body, ns) => {
-      const result = await MockGateway.prototype.updateResource.call(gw, plural, name, body, ns)
-      if (plural === 'contexts') {
-        throw Object.assign(new Error('connection reset'), { statusCode: 500 })
-      }
-      return result
-    })
-
-    const res = await request(app)
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'ns-scoped',
-        namespace: 'sandbox-recipes',
-        contextRef: 'default-context',
-        registryEntryName: 'airtable-mcp',
-        registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
-      })
-      .expect(201)
-
-    expect(res.body.contextUpdated).toBe(true)
-    // Witness that the write actually happened, and that it was addressed to
-    // the contexts namespace rather than to the install target.
-    const contextCall = updateSpy.mock.calls.find(call => call[0] === 'contexts')
-    expect(contextCall).toBeDefined()
-    expect(contextCall?.[3]).toBe('mcp-server')
   })
 
   it('requires repair when a credential create response is lost after commit', async () => {
@@ -668,7 +619,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'recovered-install',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: ['install', 'value'].join('-') },
@@ -704,7 +654,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'recovered-resource',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -761,7 +710,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'recovered-replacement',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -808,7 +756,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'unproven-create-readback',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -839,7 +786,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'uncommitted-resource',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: ['install', 'value'].join('-') },
@@ -872,14 +818,12 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'mock-server',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
       })
       .expect(201)
 
     expect(res.body.serverName).toBe('mock-server')
-    expect(res.body.contextUpdated).toBe(true)
     const mcp = (await gw.getResource('mcpservers', 'mock-server', 'mcp-server')) as {
       spec: { egressBindings?: unknown[] }
     }
@@ -908,7 +852,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'airtable-egress',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -944,7 +887,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'mcp-whois',
-        contextRef: 'default-context',
         registryEntryName: 'mcp-whois',
         registryEntryVersion: '1.0.0',
       })
@@ -976,7 +918,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'airtable-no-egress',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         egressBindings: [],
@@ -1012,7 +953,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'web-research',
-        contextRef: 'default-context',
         registryEntryName: 'mcp-web-research',
         registryEntryVersion: '1.0.0',
       })
@@ -1091,7 +1031,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: `bad-${variant.name}`,
-        contextRef: 'default-context',
         registryEntryName: 'bad-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -1123,7 +1062,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'bad-egress',
-        contextRef: 'default-context',
         registryEntryName: 'bad-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -1177,7 +1115,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-airtable',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
@@ -1229,7 +1166,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-airtable',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'api-key-test-token' },
@@ -1246,339 +1182,6 @@ describe('POST /admin/registry/install', () => {
     })
   })
 
-  it('preserves the Secret when Context rollback cannot atomically prove dependency safety', async () => {
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
-    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
-
-    const gw = new MockGateway('mcp-server')
-    await gw.createResource('contexts', {
-      metadata: { name: 'default-context' },
-      spec: { contextId: 'default-context', mcpServers: [] },
-    })
-
-    const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret')
-    const deleteResourceSpy = vi.spyOn(gw, 'deleteResource')
-    const getResourceSpy = vi.spyOn(gw, 'getResource')
-    const updateResourceSpy = vi.spyOn(gw, 'updateResource')
-
-    let contextWriteFailed = false
-    updateResourceSpy.mockImplementation(async (plural, name, body, ns) => {
-      if (plural === 'contexts' && !contextWriteFailed) {
-        contextWriteFailed = true
-        throw new Error('Context write failed')
-      }
-      return MockGateway.prototype.updateResource.call(gw, plural, name, body, ns)
-    })
-
-    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
-
-    const res = await request(app)
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'my-airtable',
-        contextRef: 'default-context',
-        registryEntryName: 'airtable-mcp',
-        registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
-      })
-      .expect(500)
-
-    expect(res.body).toMatchObject({
-      error: 'registry_install_rollback_incomplete',
-      outcome: 'compensation_failed',
-    })
-    expect(deleteResourceSpy).toHaveBeenCalledWith(
-      'mcpservers',
-      'my-airtable',
-      'mcp-server',
-      expect.objectContaining({ uid: expect.any(String), resourceVersion: expect.any(String) })
-    )
-    expect(deleteSecretSpy).not.toHaveBeenCalled()
-    expect(getResourceSpy).toHaveBeenCalledWith('mcpservers', 'my-airtable', 'mcp-server')
-    await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).rejects.toThrow(
-      /not found/i
-    )
-    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
-      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
-    })
-  })
-
-  it('keeps the install when Context association committed before response loss', async () => {
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
-    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
-    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
-    const gw = new MockGateway('mcp-server')
-    await gw.createResource('contexts', {
-      metadata: { name: 'default-context' },
-      spec: { contextId: 'default-context', mcpServers: [] },
-    })
-    gw.setResourceUpdateFault(async ({ plural }) => {
-      if (plural !== 'contexts') return
-      gw.setResourceUpdateFault(null)
-      throw Object.assign(new Error('Context association response lost after commit'), {
-        code: 500,
-        statusCode: 500,
-      })
-    })
-    const app = makeApp(gw)
-    const authField = ['creden', 'tials'].join('')
-    const res = await request(app)
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'context-loss-install',
-        contextRef: 'default-context',
-        registryEntryName: 'airtable-mcp',
-        registryEntryVersion: '1.0.0',
-        [authField]: { AIRTABLE_API_KEY: ['context', 'value'].join('-') },
-      })
-      .expect(201)
-
-    expect(res.body.serverName).toBe('context-loss-install')
-    await expect(
-      gw.getResource('mcpservers', 'context-loss-install', 'mcp-server')
-    ).resolves.toBeDefined()
-    await expect(
-      gw.getSecret('context-loss-install-credentials', 'mcp-server')
-    ).resolves.toBeDefined()
-    await expect(
-      gw.getResource('contexts', 'default-context', 'mcp-server')
-    ).resolves.toMatchObject({
-      spec: { mcpServers: ['context-loss-install'] },
-    })
-  })
-
-  it('preserves dependencies when a same-name McpServer replacement wins compensation', async () => {
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
-    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
-
-    const gw = new MockGateway('mcp-server')
-    await gw.createResource('contexts', {
-      metadata: { name: 'default-context' },
-      spec: { contextId: 'default-context', mcpServers: [] },
-    })
-    const updateResourceSpy = vi.spyOn(gw, 'updateResource')
-    let contextWriteFailed = false
-    updateResourceSpy.mockImplementation(async (plural, name, body, ns) => {
-      if (plural === 'contexts' && !contextWriteFailed) {
-        contextWriteFailed = true
-        await gw.deleteResource('mcpservers', 'my-airtable', 'mcp-server')
-        await gw.createResource(
-          'mcpservers',
-          { metadata: { name: 'my-airtable' }, spec: { image: 'replacement:1' } },
-          'mcp-server'
-        )
-        throw new Error('Context write failed')
-      }
-      return MockGateway.prototype.updateResource.call(gw, plural, name, body, ns)
-    })
-
-    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
-    const res = await request(app)
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'my-airtable',
-        contextRef: 'default-context',
-        registryEntryName: 'airtable-mcp',
-        registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: ['replacement', 'test'].join('-') },
-      })
-      .expect(500)
-
-    expect(res.body).toMatchObject({
-      error: 'registry_install_rollback_incomplete',
-      outcome: 'compensation_failed',
-    })
-    await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
-      spec: { image: 'replacement:1' },
-    })
-    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
-      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
-    })
-  })
-
-  it('keeps the created Secret when CR compensation loses its CAS race', async () => {
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
-    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
-
-    const gw = new MockGateway('mcp-server')
-    await gw.createResource('contexts', {
-      metadata: { name: 'default-context' },
-      spec: { contextId: 'default-context', mcpServers: [] },
-    })
-    const originalUpdate = gw.updateResource.bind(gw)
-    let contextWriteFailed = false
-    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, ns) => {
-      if (plural === 'contexts' && name === 'default-context' && !contextWriteFailed) {
-        contextWriteFailed = true
-        const current = (await gw.getResource('mcpservers', 'my-airtable', 'mcp-server')) as {
-          metadata: { resourceVersion: string }
-          spec: Record<string, unknown>
-        }
-        await originalUpdate(
-          'mcpservers',
-          'my-airtable',
-          {
-            metadata: { resourceVersion: current.metadata.resourceVersion },
-            spec: { ...current.spec, image: 'replacement:after-create' },
-          },
-          'mcp-server'
-        )
-        throw new Error(
-          'Context write failed before commit after another CR writer changed the object'
-        )
-      }
-      return originalUpdate(plural, name, body, ns)
-    })
-
-    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
-    const res = await request(app)
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'my-airtable',
-        contextRef: 'default-context',
-        registryEntryName: 'airtable-mcp',
-        registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: ['cas', 'race'].join('-') },
-      })
-      .expect(500)
-
-    expect(res.body.error).toBe('registry_install_rollback_incomplete')
-    await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
-      spec: { image: 'replacement:after-create' },
-    })
-    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
-      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
-    })
-  })
-
-  // A concurrent Context writer moves the resourceVersion between the attach's read
-  // and its write. The attach re-reads and re-applies its edit to the fresh list
-  // instead of replaying the stale one (which would drop the other writer's change)
-  // or failing the install.
-  it('merges into a concurrently changed Context allowlist instead of replaying a stale one', async () => {
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
-    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
-    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
-
-    const gw = new MockGateway('mcp-server')
-    await gw.createResource('contexts', {
-      metadata: { name: 'default-context' },
-      spec: { contextId: 'default-context', mcpServers: [] },
-    })
-    const originalUpdate = gw.updateResource.bind(gw)
-    let raced = false
-    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, ns) => {
-      if (plural === 'contexts' && !raced) {
-        raced = true
-        const current = (await gw.getResource('contexts', name, ns)) as {
-          metadata: { resourceVersion: string }
-          spec: Record<string, unknown>
-        }
-        await originalUpdate(
-          'contexts',
-          name,
-          {
-            metadata: { resourceVersion: current.metadata.resourceVersion },
-            spec: { ...current.spec, mcpServers: ['concurrent-writer'] },
-          },
-          ns
-        )
-      }
-      return originalUpdate(plural, name, body, ns)
-    })
-
-    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
-    const res = await request(app)
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'my-airtable',
-        contextRef: 'default-context',
-        registryEntryName: 'airtable-mcp',
-        registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: ['context', 'race'].join('-') },
-      })
-      .expect(201)
-
-    expect(res.body.contextUpdated).toBe(true)
-    await expect(gw.getResource('contexts', 'default-context')).resolves.toMatchObject({
-      spec: { mcpServers: ['concurrent-writer', 'my-airtable'] },
-    })
-    await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
-      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
-    })
-    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
-      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
-    })
-  })
-
-  // Sibling of the merge above: the Context is rewritten before EVERY attach write, so
-  // the bounded retry runs out. The install must not guess — the CR and its Secret stay
-  // for repair and the other writers' entries are not clobbered.
-  it('gives up after the bounded attach retries when the Context keeps changing', async () => {
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
-    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
-
-    const gw = new MockGateway('mcp-server')
-    await gw.createResource('contexts', {
-      metadata: { name: 'default-context' },
-      spec: { contextId: 'default-context', mcpServers: [] },
-    })
-    const originalUpdate = gw.updateResource.bind(gw)
-    let attachWrites = 0
-    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, ns) => {
-      // Only the attach writes carry the new server; the ambiguous-outcome fence
-      // rewrites the pre-attach snapshot and must reach the gateway untouched.
-      const servers = (body.spec as { mcpServers?: string[] }).mcpServers ?? []
-      if (plural === 'contexts' && servers.includes('my-airtable')) {
-        attachWrites += 1
-        const current = (await gw.getResource('contexts', name, ns)) as {
-          metadata: { resourceVersion: string }
-          spec: { mcpServers?: string[] }
-        }
-        await originalUpdate(
-          'contexts',
-          name,
-          {
-            metadata: { resourceVersion: current.metadata.resourceVersion },
-            spec: {
-              ...current.spec,
-              mcpServers: [...(current.spec.mcpServers ?? []), `writer-${attachWrites}`],
-            },
-          },
-          ns
-        )
-      }
-      return originalUpdate(plural, name, body, ns)
-    })
-
-    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
-    const res = await request(app)
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'my-airtable',
-        contextRef: 'default-context',
-        registryEntryName: 'airtable-mcp',
-        registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: ['context', 'storm'].join('-') },
-      })
-      .expect(503)
-
-    expect(res.body).toMatchObject({
-      error: 'registry_install_outcome_ambiguous',
-      outcome: 'repair_required',
-    })
-    expect(attachWrites).toBe(3)
-    await expect(gw.getResource('contexts', 'default-context')).resolves.toMatchObject({
-      spec: { mcpServers: ['writer-1', 'writer-2', 'writer-3'] },
-    })
-    await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
-      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
-    })
-    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
-      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
-    })
-  })
-
   // ── Validation errors ──────────────────────────────────────────────────
 
   it('auto-generates serverName when omitted (spec naming convention)', async () => {
@@ -1590,7 +1193,6 @@ describe('POST /admin/registry/install', () => {
     const res = await request(app)
       .post('/admin/registry/install')
       .send({
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
@@ -1613,7 +1215,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-custom-name',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
@@ -1636,7 +1237,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'labeled-server',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
@@ -1686,7 +1286,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'digest-test',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
@@ -1707,7 +1306,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'no-digest',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
@@ -1738,28 +1336,12 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'INVALID_NAME',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
       })
       .expect(400)
 
     expect(res.body.error).toContain('Invalid serverName')
-  })
-
-  it('returns 400 when contextRef is missing', async () => {
-    const { app } = makeInstallApp()
-
-    const res = await request(app)
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'my-server',
-        registryEntryName: 'airtable-mcp',
-        registryEntryVersion: '1.0.0',
-      })
-      .expect(400)
-
-    expect(res.body.error).toBe('contextRef is required')
   })
 
   it('returns 400 when registryEntryName is missing', async () => {
@@ -1769,7 +1351,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-server',
-        contextRef: 'default-context',
         registryEntryVersion: '1.0.0',
       })
       .expect(400)
@@ -1784,7 +1365,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-server',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
       })
       .expect(400)
@@ -1803,7 +1383,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-airtable',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -1837,7 +1416,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-airtable',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: 'not-an-object',
@@ -1861,7 +1439,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-airtable',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: '   ' },
@@ -1891,7 +1468,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-airtable',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'sk-test-token-123', AIRTABLE_BASE_ID: '   ' },
@@ -1917,7 +1493,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-airtable',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: '${AIRTABLE_API_KEY}' },
@@ -1960,7 +1535,6 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         // No serverName: rely on generateRegistryName to sanitize the scoped name.
-        contextRef: 'default-context',
         registryEntryName: scopedName,
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
@@ -2040,45 +1614,10 @@ describe('POST /admin/registry/install', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-server',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
       })
       .expect(404)
-  })
-
-  it('installing an McpServer preserves spec.displayName on the target context (R4-B4)', async () => {
-    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
-    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_NONE)
-    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
-
-    const gw = new MockGateway('mcp-server')
-    // Seed a context that ALREADY carries displayName plus an existing allowlist
-    // entry — displayName is the additive field the allowlist update must not
-    // drop when it rebuilds the context spec.
-    await gw.createResource('contexts', {
-      metadata: { name: 'ctx-keep' },
-      spec: { contextId: 'ctx-keep', mcpServers: ['srv-other'], displayName: 'Keep Me' },
-    })
-    const app = makeApp(gw)
-
-    await request(app)
-      .post('/admin/registry/install')
-      .send({
-        serverName: 'my-airtable',
-        contextRef: 'ctx-keep',
-        registryEntryName: 'airtable-mcp',
-        registryEntryVersion: '1.0.0',
-      })
-      .expect(201)
-
-    // Observable result (T4): re-read the persisted context. displayName survived
-    // and the new server joined the allowlist alongside the pre-existing one.
-    const ctx = (await gw.getResource('contexts', 'ctx-keep', 'mcp-server')) as {
-      spec: { displayName?: string; mcpServers?: string[] }
-    }
-    expect(ctx.spec.displayName).toBe('Keep Me')
-    expect(ctx.spec.mcpServers).toEqual(['srv-other', 'my-airtable'])
   })
 })
 
@@ -2120,7 +1659,6 @@ describe('POST /admin/registry/install — image allowlist enforce (2.3)', () =>
 
     const res = await request(app).post('/admin/registry/install').send({
       serverName: 'x',
-      contextRef: 'default-context',
       registryEntryName: 'x',
       registryEntryVersion: '1.0.0',
     })
@@ -2174,7 +1712,6 @@ describe('POST /admin/registry/install — evenfire imagePullSecrets attach', ()
       .post('/admin/registry/install')
       .send({
         serverName: 'forecast',
-        contextRef: 'default-context',
         registryEntryName: 'forecast',
         registryEntryVersion: '1.0.0',
       })
@@ -2207,7 +1744,6 @@ describe('POST /admin/registry/install — evenfire imagePullSecrets attach', ()
       .post('/admin/registry/install')
       .send({
         serverName: 'airtable',
-        contextRef: 'default-context',
         registryEntryName: 'forecast',
         registryEntryVersion: '1.0.0',
       })
@@ -2241,7 +1777,6 @@ describe('POST /admin/registry/install — evenfire imagePullSecrets attach', ()
       .post('/admin/registry/install')
       .send({
         serverName: 'forecast-remote',
-        contextRef: 'default-context',
         registryEntryName: 'forecast',
         registryEntryVersion: '1.0.0',
       })
@@ -2295,7 +1830,6 @@ describe('POST /admin/registry/install — evenfire imageRef identity (2.5)', ()
     const { app } = makeInstallApp()
     const res = await request(app).post('/admin/registry/install').send({
       serverName: 'forecast',
-      contextRef: 'default-context',
       registryEntryName: '@acme/forecast',
       registryEntryVersion: '1.0.0',
     })
@@ -2320,7 +1854,6 @@ describe('POST /admin/registry/install — evenfire imageRef identity (2.5)', ()
       .post('/admin/registry/install')
       .send({
         serverName: 'forecast',
-        contextRef: 'default-context',
         registryEntryName: '@acme/forecast',
         registryEntryVersion: '1.0.0',
       })
@@ -2346,7 +1879,6 @@ describe('POST /admin/registry/install — evenfire imageRef identity (2.5)', ()
       .post('/admin/registry/install')
       .send({
         serverName: 'airtable',
-        contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -2938,7 +2470,6 @@ describe('Credential schema validation', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'test-srv',
-        contextRef: 'ctx1',
         registryEntryName: 'test-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -2961,7 +2492,6 @@ describe('Credential schema validation', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'test-srv',
-        contextRef: 'ctx1',
         registryEntryName: 'test-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -2998,7 +2528,6 @@ describe('Credential schema validation', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'test-srv',
-        contextRef: 'ctx1',
         registryEntryName: 'test-mcp',
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: ' ' },
@@ -3137,7 +2666,6 @@ describe('SSRF remote URL validation', () => {
 
     const res = await request(app).post('/admin/registry/install').send({
       serverName: 'ssrf-test',
-      contextRef: 'ctx1',
       registryEntryName: 'ssrf-test',
       registryEntryVersion: '1.0.0',
     })
@@ -3166,7 +2694,6 @@ describe('SSRF remote URL validation', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'ssrf-test',
-        contextRef: 'ctx1',
         registryEntryName: 'ssrf-test',
         registryEntryVersion: '1.0.0',
       })
@@ -3194,7 +2721,6 @@ describe('SSRF remote URL validation', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'ssrf-k8s',
-        contextRef: 'ctx1',
         registryEntryName: 'ssrf-test',
         registryEntryVersion: '1.0.0',
       })
@@ -3288,7 +2814,6 @@ describe('SSRF remote URL validation', () => {
 
     const res = await request(app).post('/admin/registry/install').send({
       serverName: 'crlf-test',
-      contextRef: 'ctx1',
       registryEntryName: 'ssrf-test',
       registryEntryVersion: '1.0.0',
     })
@@ -3319,7 +2844,6 @@ describe('SSRF remote URL validation', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'accept-path',
-        contextRef: 'ctx1',
         registryEntryName: 'ssrf-test',
         registryEntryVersion: '1.0.0',
       })
@@ -3343,7 +2867,6 @@ describe('SSRF remote URL validation', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'accept-port',
-        contextRef: 'ctx1',
         registryEntryName: 'ssrf-test',
         registryEntryVersion: '1.0.0',
       })
@@ -5574,7 +5097,6 @@ describe('authHeaders template on remote installs', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'sentry-remote',
-        contextRef: 'ctx1',
         registryEntryName: 'sentry-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -5604,7 +5126,6 @@ describe('authHeaders template on remote installs', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'sentry-with-headers',
-        contextRef: 'ctx1',
         registryEntryName: 'sentry-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -5666,7 +5187,6 @@ describe('authHeaders template on remote installs', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'sentry-separation',
-        contextRef: 'ctx1',
         registryEntryName: 'sentry-mcp',
         registryEntryVersion: '1.0.0',
         credentials: {
@@ -5703,7 +5223,8 @@ describe('authHeaders template on remote installs', () => {
 
     // 3. The actual secret values landed in the K8s Secret only.
     const secretCall = secretSpy.mock.calls[0]?.[0] as
-      { name?: string; stringData?: Record<string, string> } | undefined
+      | { name?: string; stringData?: Record<string, string> }
+      | undefined
     expect(secretCall?.name).toBe('sentry-separation-credentials')
     expect(secretCall?.stringData).toEqual({
       SENTRY_AUTH_TOKEN: 'super-secret-token-value',
@@ -5731,7 +5252,6 @@ describe('authHeaders template on remote installs', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'bad-header',
-        contextRef: 'ctx1',
         registryEntryName: 'sentry-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -5760,7 +5280,6 @@ describe('authHeaders template on remote installs', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'oversize-val',
-        contextRef: 'ctx1',
         registryEntryName: 'sentry-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -5792,7 +5311,6 @@ describe('authHeaders template on remote installs', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'too-many',
-        contextRef: 'ctx1',
         registryEntryName: 'sentry-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -6343,7 +5861,6 @@ describe('transport.url path derivation for remote installs', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-srv',
-        contextRef: 'ctx1',
         registryEntryName: 'remote-mcp',
         registryEntryVersion: '1.0.0',
       })

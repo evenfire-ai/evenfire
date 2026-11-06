@@ -374,11 +374,10 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
       acceptedAttachmentIds: [],
     })
 
-    const send = act(async () => {
+    await act(async () => {
       await rendered.result.current.handleSendAgentMessage('Summarize this')
     })
-    await waitFor(() => expect(clerum.hasProgressHandler('task-doc')).toBe(true))
-    await send
+    expect(clerum.hasProgressHandler('task-doc')).toBe(true)
 
     // The sent bubble lists the document by name.
     const sent = rendered.result.current.chatMessages.find(message => message.role === 'user')
@@ -422,11 +421,10 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
       taskId: 'task-doc',
       acceptedAttachmentIds: [],
     })
-    const send = act(async () => {
+    await act(async () => {
       await rendered.result.current.handleSendAgentMessage('Summarize this')
     })
-    await waitFor(() => expect(clerum.hasProgressHandler('task-doc')).toBe(true))
-    await send
+    expect(clerum.hasProgressHandler('task-doc')).toBe(true)
     // Witness: the drop was recorded first, as a files-only recovery.
     expect(rendered.result.current.failedAgentSend?.answeredWithoutFiles).toBe(true)
     const chat = rendered.result.current.activeChatId

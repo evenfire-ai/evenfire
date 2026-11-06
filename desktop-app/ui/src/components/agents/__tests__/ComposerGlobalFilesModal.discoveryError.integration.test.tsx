@@ -15,9 +15,11 @@ import { GfsClient, type GfsTransport } from '../../../../../src/gfs/uriHandler.
 import { ComposerGlobalFilesModal } from '../ComposerGlobalFilesModal'
 
 const SESSION_SCOPE = ':user-a:team-a'
+const SESSION_GENERATION = 1
 const SESSION_TOKEN = 'fixture-session-token'
 const authValue = {
   isAuthenticated: true,
+  sessionGeneration: SESSION_GENERATION,
   me: {
     id: 'user-a',
     email: 'a@example.test',
@@ -105,7 +107,7 @@ describe('ComposerGlobalFilesModal discovery errors', () => {
     const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
     renderPicker(queryClient)
 
-    const accessibleKey = desktopQueryKeys.gfsAccessible(SESSION_SCOPE, 'main')
+    const accessibleKey = desktopQueryKeys.gfsAccessible(SESSION_SCOPE, 'main', SESSION_GENERATION)
     await waitFor(() => {
       expect(queryClient.getQueryState(accessibleKey)?.status).toBe('error')
       expect((queryClient.getQueryState(accessibleKey)?.error as Error).message).toBe('')

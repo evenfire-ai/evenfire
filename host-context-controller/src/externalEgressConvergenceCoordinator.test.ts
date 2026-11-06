@@ -28,7 +28,6 @@ function server(
     uid: `${name}-uid`,
     generation,
     spec: {
-      contextRef: 'default',
       image: `clerum/${name}:v${generation}`,
       transport: { type: 'streamableHttp', port: 3000 },
       egressBindings:

@@ -52,11 +52,27 @@ function makeServer(): McpServerCRD {
     namespace: 'mcp-server',
     uid: 'uid-test-1234',
     spec: {
-      contextRef: 'ctx1',
       image: 'my-mcp-server:v1',
       transport: { type: 'streamableHttp', port: 3000, url: 'http://test.mcp-server.svc:3000/mcp' },
       envSecret: {
         name: 'test-mcp-credentials',
+        keys: [{ secretKey: 'api-key', envVar: 'API_KEY' }],
+      },
+    },
+  }
+}
+
+function makeRemoteServer(): McpServerCRD {
+  return {
+    name: 'test-remote-mcp',
+    namespace: 'mcp-server',
+    uid: 'uid-remote-test-1234',
+    spec: {
+      image: 'my-mcp-server:v1',
+      transport: { type: 'streamableHttp', port: 3000 },
+      remote: { baseUrl: 'https://mcp.example.com/mcp' },
+      envSecret: {
+        name: 'test-remote-mcp-credentials',
         keys: [{ secretKey: 'api-key', envVar: 'API_KEY' }],
       },
     },
@@ -69,7 +85,6 @@ function makeStdioServer(): McpServerCRD {
     namespace: 'mcp-server',
     uid: 'uid-test-1234',
     spec: {
-      contextRef: 'ctx1',
       image: 'my-mcp-server:v1',
       transport: { type: 'stdio', port: 3000 },
       command: ['/mcp-bin/mcp-server'],
@@ -152,6 +167,54 @@ describe('McpServer ensureDeployment no-op gate', () => {
     } finally {
       log.mockRestore()
     }
+  })
+
+  it('NOOP-MCPDEP-REMOTE-1: equivalent remote Deployment skips replace across reconciles', async () => {
+    const remoteServer = makeRemoteServer()
+    const desired = (reconciler as any).buildDeployment(remoteServer, 'rev-1') as k8s.V1Deployment
+    const egressProxy = desired.spec?.template?.spec?.containers?.find(
+      container => container.name === 'egress-proxy'
+    )
+
+    expect(egressProxy).toBeDefined()
+    expect(egressProxy?.env).toContainEqual({
+      name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
+      value: '1',
+    })
+    expect(egressProxy?.livenessProbe).toEqual({
+      httpGet: { path: '/health', port: 3000 },
+      initialDelaySeconds: 5,
+      periodSeconds: 15,
+    })
+
+    const existing = asApiserverDeployment(desired)
+    appsApi.readNamespacedDeployment.mockResolvedValue(existing)
+
+    await (reconciler as any).ensureDeployment(remoteServer, 'rev-1')
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledOnce()
+
+    await (reconciler as any).ensureDeployment(remoteServer, 'rev-1')
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
+  })
+
+  it('McpServer remote mutation sweep: every desired leaf is detectable', () => {
+    const desired = (reconciler as any).buildDeployment(
+      makeRemoteServer(),
+      'rev-1'
+    ) as k8s.V1Deployment
+    const existing = asApiserverDeployment(desired)
+    const undetectable: string[] = []
+
+    for (const path of collectLeafPaths(desired)) {
+      const mutated = cloneAndMutateLeaf(desired, path) as k8s.V1Deployment
+      if (deploymentMatchesDesired(mergedForCompare(mutated, existing), existing)) {
+        undetectable.push(formatLeafPath(path))
+      }
+    }
+
+    expect(undetectable, `undetectable leaf path(s): ${undetectable.join(', ')}`).toEqual([])
   })
 
   it('ROTATE-MCPDEP-1: credentials revision change replaces once with the new annotation', async () => {

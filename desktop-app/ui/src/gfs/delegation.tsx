@@ -53,6 +53,8 @@ export function GfsDelegationPanel({
   subjectOptions,
   subjectOptionsLoading = false,
   subjectOptionsError = null,
+  permissionPending = false,
+  permissionError = null,
   permissionCheckPending = false,
   permissionCheckFailed = false,
   isDirectory,
@@ -75,10 +77,24 @@ export function GfsDelegationPanel({
   const canOfferEditor = (hasHost ? ['write'] : ['write', 'delete', 'manage_acl']).some(bit =>
     grantableBits.includes(bit)
   )
-  const roleOptions = canOfferEditor ? ROLE_OPTIONS : ROLE_OPTIONS.slice(0, 1)
+  const checkPending = permissionPending || permissionCheckPending
+  const checkFailed = Boolean(permissionError) || permissionCheckFailed
+  const permissionUnavailable = checkPending || checkFailed || !affordances.canDelegate
+  const roleOptions =
+    canOfferEditor || ((checkPending || checkFailed) && role === 'editor')
+      ? ROLE_OPTIONS
+      : ROLE_OPTIONS.slice(0, 1)
+  const permissionMessage = checkPending
+    ? 'Checking permissions…'
+    : permissionError
+      ? `Could not verify sharing permissions: ${permissionError}`
+      : permissionCheckFailed
+        ? null
+        : !affordances.canDelegate && subjectKeys.length > 0
+          ? 'Your sharing permission changed. Your edits are preserved, but cannot be submitted.'
+          : null
 
-  const permissionDenied =
-    !affordances.canDelegate && !permissionCheckPending && !permissionCheckFailed
+  const permissionDenied = !affordances.canDelegate && !checkPending && !checkFailed
   const draftGenerationRef = useRef(0)
   const wasPermissionDeniedRef = useRef(permissionDenied)
 
@@ -91,13 +107,7 @@ export function GfsDelegationPanel({
 
   useLayoutEffect(() => {
     const roleStillOffered = role === 'read' || (role === 'editor' && canOfferEditor)
-    if (
-      role !== null &&
-      !roleStillOffered &&
-      !permissionDenied &&
-      !permissionCheckPending &&
-      !permissionCheckFailed
-    ) {
+    if (role !== null && !roleStillOffered && !permissionDenied && !checkPending && !checkFailed) {
       // Retire only the unavailable role choice. Keep the recipients and scope
       // inputs, but prevent any in-flight completion from owning this draft.
       draftGenerationRef.current += 1
@@ -105,7 +115,7 @@ export function GfsDelegationPanel({
       setRoleNeedsSelection(true)
       setError(null)
     }
-  }, [canOfferEditor, permissionCheckFailed, permissionCheckPending, permissionDenied, role])
+  }, [canOfferEditor, checkFailed, checkPending, permissionDenied, role])
 
   useLayoutEffect(
     () => () => {
@@ -161,15 +171,7 @@ export function GfsDelegationPanel({
   }
 
   // A Leader without manage_acl (canDelegate=false) sees no controls.
-  if (!affordances.canDelegate) {
-    if (permissionCheckPending) {
-      return (
-        <p className="muted" role="status">
-          Checking permissions…
-        </p>
-      )
-    }
-    if (permissionCheckFailed) return null
+  if (permissionDenied) {
     return (
       <div className="da-gfs-delegation__empty" role="note">
         <strong>Read-only access</strong>
@@ -215,10 +217,12 @@ export function GfsDelegationPanel({
         </p>
       ) : null}
       {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
-      {permissionCheckPending ? (
+      {checkPending ? (
         <p className="muted" role="status">
-          Checking permissions…
+          {permissionMessage}
         </p>
+      ) : permissionMessage ? (
+        <StatusBanner tone="error" text={permissionMessage} />
       ) : null}
       {subjectKeys.length > 0 ? (
         <div className="da-gfs-delegation__scope-actions">
@@ -251,8 +255,7 @@ export function GfsDelegationPanel({
               loading={busy}
               disabled={
                 busy ||
-                permissionCheckPending ||
-                permissionCheckFailed ||
+                permissionUnavailable ||
                 role === null ||
                 !roleOptions.some(option => option.value === role) ||
                 bits.length === 0

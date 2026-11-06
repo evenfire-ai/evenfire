@@ -72,7 +72,6 @@ metadata:
 spec:
   image: clerum/mock-mcp-server:test
   imagePullPolicy: Always
-  contextRef: context1
   transport:
     type: streamableHttp
     port: 3000
@@ -106,7 +105,6 @@ metadata:
     clerum.io/e2e-security: "true"
 spec:
   image: clerum/mock-mcp-server:test
-  contextRef: context1
   transport:
     type: streamableHttp
     port: 3000
@@ -138,7 +136,6 @@ metadata:
     clerum.io/e2e-security: "true"
 spec:
   image: clerum/mock-mcp-server:test
-  contextRef: context1
   transport:
     type: streamableHttp
     port: 3000
@@ -176,7 +173,6 @@ metadata:
     clerum.io/e2e-security: "true"
 spec:
   image: clerum/mock-mcp-server:test
-  contextRef: context1
   transport:
     type: streamableHttp
     port: 3000
@@ -223,7 +219,6 @@ metadata:
     clerum.io/e2e-security: "true"
 spec:
   image: clerum/mock-mcp-server:test
-  contextRef: context1
   transport:
     type: streamableHttp
     port: 3000
@@ -269,7 +264,6 @@ metadata:
     clerum.io/e2e-security: "true"
 spec:
   image: clerum/mock-mcp-server:test
-  contextRef: context1
   transport:
     type: streamableHttp
     port: 3000

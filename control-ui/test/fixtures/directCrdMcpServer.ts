@@ -32,7 +32,6 @@ export function buildDirectCrdMcpServerReference(options: {
     },
     spec: {
       image: 'ghcr.io/acme/linear-mcp:1.4.0',
-      contextRef: 'default',
       enabled: true,
       managed: true,
       transport: { type: 'streamableHttp', port: 3000 },

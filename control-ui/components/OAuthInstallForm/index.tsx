@@ -41,7 +41,6 @@ import type {
   OAuthInstallSubmit,
   OAuthSecretInput,
 } from '@lib/oauthInstall.types'
-import { createPrivateContext } from '@lib/privateContext'
 import { GenericEndpointsStep } from './GenericEndpointsStep'
 import type { OAuthInstallFormProps } from './types'
 
@@ -369,16 +368,8 @@ export function OAuthInstallForm({
     setInstalling(true)
     setSubmitError('')
     try {
-      const contextRef = await createPrivateContext(
-        {
-          subject: serverName || entry.name,
-          description: `Connector access scope for ${serverName || entry.name}`,
-        },
-        'We couldn’t prepare this connector’s access — please try again.'
-      )
       await installFromRegistry({
         serverName: serverName || undefined,
-        contextRef,
         registryEntryName: entry.name,
         registryEntryVersion: entry.version,
         oauth: buildOAuthSubmit(),

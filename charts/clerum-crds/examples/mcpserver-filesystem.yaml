@@ -5,7 +5,6 @@ kind: McpServer
 metadata:
   name: filesystem-server
 spec:
-  contextRef: context1
   description: Provides file system operations (read, write, list files)
   image: mcp/filesystem:latest
   transport:

@@ -188,6 +188,62 @@ cd desktop-app
 npm run test          # vitest — IPC handler unit tests
 ```
 
+### Workspace Tab Overflow Verification
+
+Use Node 24.22.1 or later in the Node 24 line. From the repository root:
+
+```bash
+cd desktop-app
+node --version
+npm ci
+npm run verify:electron
+npx playwright install chromium
+
+# Component and synthetic geometry tests (jsdom)
+npm test -- ui/src/components/WorkspaceTabStrip
+
+# Real Chromium component tests
+npm test -- test/browser/workspaceTabOverflow
+
+# Both groups together
+npm test -- ui/src/components/WorkspaceTabStrip test/browser/workspaceTabOverflow
+```
+
+Install dependencies with lifecycle scripts enabled; do not use `--ignore-scripts`
+or `ELECTRON_SKIP_BINARY_DOWNLOAD`. Electron verification must pass before test
+results count. Playwright installs a separate Chromium binary for the browser
+suites; these tests do not launch the packaged Electron application. Linux hosts
+may need Playwright's system dependencies (`npx playwright install --with-deps chromium`).
+No cluster, port-forward, account or application build is needed for these selections.
+
+The component tests are in
+`ui/src/components/WorkspaceTabStrip/WorkspaceTabStrip.test.tsx` and
+`WorkspaceTabStrip.observer.test.tsx` in the same directory. They cover navigation,
+wheel normalization, delayed identity reveals, manual scrolling, observer wiring
+and cleanup. `__fixtures__/tabStripLayout.ts` supplies synthetic jsdom geometry,
+including arbitrary widths for stress tests. It does not run the browser's CSS
+flex layout or establish that every assigned rectangle is reachable in Chromium.
+
+`test/browser/workspaceTabOverflow*.browser.test.ts` mounts the real component with
+store-produced tabs and renderer CSS. The Geometry, Boundary and FixtureContract
+suites check actual flex dimensions, full-width fit, stable arrow presence and
+live viewport bounds. Focus and FocusTransitions cover keyboard/pointer focus
+and intentional external focus. ScrollCost checks scrolling results alongside
+full-measurement work; Operations checks retained measurement and identity
+operations. Some operation assertions count DOM commands or exercise defensive
+style input; they do not establish an additional visible benefit for every line.
+
+The observation harness in ScrollCost transforms exact hook source text, so hook
+formatting changes can require test maintenance or fail bundle setup. Existing
+observer wiring assertions do not establish a separately discriminating native
+list-only resize case: current chat badges can change without resizing the list.
+
+These checked-in suites are reproducible from this repository. Supplementary
+model-based and mutation validation whose executable source is absent from the
+checkout is separate evidence, not an additional repository test command.
+These suites do not establish authenticated full-app behavior or full Electron
+visual QA.
+
 ### E2E Tests (Phase 1 — IPC Harness)
 
 Runs real IPC handlers against a live cluster via port-forwards. No Electron window needed.

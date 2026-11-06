@@ -28,10 +28,17 @@ import type { TeamDirectoryResult } from '../../../../src/types'
 import { FilesPage } from '../FilesPage'
 
 const SESSION_SCOPE = ':user-a:team-a'
+const SESSION_GENERATION = 1
 const SESSION_TOKEN = 'fixture-session-token'
-const AFFORDANCES_KEY = desktopQueryKeys.gfsAffordances(SESSION_SCOPE, 'folder-a', 'main')
+const AFFORDANCES_KEY = desktopQueryKeys.gfsAffordances(
+  SESSION_SCOPE,
+  'folder-a',
+  'main',
+  SESSION_GENERATION
+)
 const authValue = {
   isAuthenticated: true,
+  sessionGeneration: SESSION_GENERATION,
   me: {
     id: 'user-a',
     email: 'a@example.test',
