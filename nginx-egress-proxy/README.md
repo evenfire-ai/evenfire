@@ -31,9 +31,7 @@ For each remote McpServer, host-context-controller:
    HTTPS only; DNS hostnames only (IPv4/IPv6 literals rejected); the hostname
    must stay within `[a-z0-9._-]` (the CRD schema enforces the same class at
    admission; the URL parser lowercases ASCII names and converts IDNs to
-   punycode), and trailing root-label dots are removed before the host checks,
-   so `sentry.svc.cluster.local.` is still rejected as internal while
-   `api.example.com.` renders as `api.example.com`. The hostname is rendered
+   punycode). The hostname is rendered
    unquoted, where `;` would end a directive and `$name` would be an NGINX
    variable. Internal cluster hosts
    (`*.svc`, `*.svc.cluster.local`, `kubernetes.default`) and
@@ -49,16 +47,25 @@ For each remote McpServer, host-context-controller:
    `[A-Za-z_][A-Za-z0-9_]*` (exact case); bare dollars, malformed braces,
    backslashes, and semicolons are rejected. The URL parser strips TAB/CR/LF
    and percent-encodes other control characters and spaces before that check.
-   A placeholder name is set in the egress-proxy container env (`spec.env`,
-   except the names HCC strips as forbidden; `spec.envSecret`; `envMapping`;
-   or a placeholder of `spec.remote.authHeaders`); an undeclared name is
-   rejected, because it would otherwise survive into the rendered config,
-   where NGINX resolves it as one of its own variables. A `spec.env` name HCC
-   strips as forbidden (`KUBERNETES_SERVICE_HOST`, `PATH`, ...) does not count
-   as declared; neither does an `envSecret` mapping whose name is exactly one
-   the platform owns (the same forbidden names in exact case, plus the proxy
-   env below) — HCC filters those declarations when checking placeholders
-   even though the Deployment currently still carries their `secretKeyRef`.
+   Declared means present in the effective egress-proxy container env HCC
+   builds for the Deployment: `envMapping`, then `spec.env` after its
+   forbidden-name strip, then `spec.envSecret`; the six pinned names below
+   are then stripped, the `authHeaders` backfill is added, and the platform
+   entries are appended last. A query placeholder is judged in a fixed order and the
+   declared check comes last: an exact-case `KUBERNETES_*` name is rejected
+   first, then an exact forbidden name, then a reserved name or `LC_ALL`;
+   only a name that passes those three is looked up in that effective env,
+   and an absent name is rejected as undeclared, because it would otherwise
+   survive into the rendered config, where NGINX resolves it as one of its
+   own variables. HCC does not filter an `envSecret` declaration out of the
+   effective env to make it undeclared. Except for the six pinned names,
+   which are stripped from every source, the Deployment still carries the
+   `secretKeyRef` of an `envSecret` entry named, for example, `PATH`,
+   `LC_ALL`, a resolver-pair name or a `KUBERNETES_*` name, and that name is
+   in the effective env; its placeholder is refused by an earlier step
+   above, not for being undeclared. A `spec.env` entry is different: a
+   forbidden name there is stripped before the env is built (compared in
+   uppercase, so `Path` goes too) and never enters the effective env.
    The reserved egress-proxy names cannot be query placeholders or authHeader
    references. The reserved set is eight enumerated names, plus `LC_ALL`,
    plus any exact-case `KUBERNETES_*` name (below). Six of the enumerated
@@ -238,7 +245,7 @@ HCC and this image ship together. The image reference is HCC configuration
 | --- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | old | old   | Previous behavior.                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | old | new   | Deployments keep the old shape: `httpGet` liveness, so a dead stderr filter does not restart the pod; no template-digest annotation, so a ConfigMap-only change does not roll; no reserved-name strip; no value preflight. The new image pins the six envsubst knobs and applies the classes below at every container start, so an out-of-class value makes that pod refuse to start, with the pod log and `RolloutIncomplete` above and no `EgressProxyValuesValid` condition. |
-| new | old   | The exec liveness binary is absent, so the probe fails and the kubelet restarts the container about every 45 s (failure threshold 3 × period 15 s). The preflight and the strip apply. The old image substitutes values without the template check. The template also carries the `resolver` line and upstream `resolve`, which need the image requirements under "Rollout and image requirements" below.                                                                                                                                                                                                                             |
+| new | old   | The exec liveness binary is absent, so the probe fails and the kubelet restarts the container about every 45 s (failure threshold 3 × period 15 s). The preflight and the strip apply. The old image substitutes values without the template check. The old image uses the same pinned `nginx:1.30.6-alpine` base, so upstream `resolve` and `15-local-resolvers.envsh` are already there and the template's `resolver` line is not what fails in this pairing; the failures in this row come from the egress-proxy layer the old image does not carry.                                                                                                                                                                                                                             |
 | new | new   | Intended.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 Old HCC with the new image leaves an out-of-class value as a pod that never
@@ -413,9 +420,13 @@ Residuals:
   (service env vars also count), so the value `envsubst` sees can differ from
   the CRD literal. HCC emits `spec.env` before `spec.envSecret`, so a literal
   `spec.env` value cannot reference a name declared only later through
-  `envSecret`: the reference stays literal. HCC validates env names and
-  `${NAME}` placeholders; it does not model kubelet `$(VAR)` expansion of
-  values. Use the documented `$$(VAR)` escape when a literal `$(VAR)` is
+  `envSecret`: the reference stays literal. Direct values are checked: the
+  HCC preflight and the image template check reject a referenced value
+  outside its class, including `;`, a newline, `"`, `\` or `$` where that
+  class forbids it. What remains open is only this indirect channel: HCC
+  judges a literal as written, does not expand `$(VAR)` itself, and refuses
+  a referenced literal containing `$(` for its `$` instead. Store the final
+  value, or use the documented `$$(VAR)` escape when a literal `$(VAR)` is
   intended.
 
 There is deliberately no short-value, percent-encoding or whitespace-trimming
@@ -478,7 +489,7 @@ HCC and this image are upgraded together. The same four pairings are in
 | --- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | old | old   | Previous behavior.                                                                                                                                                                                                                                                                                                                             |
 | old | new   | The new image applies the value classes and the six envsubst pins at every start. An out-of-class value refuses the pod. There is no `EgressProxyValuesValid` condition; the pod log names the variable and the context, and the rollout ends `RolloutIncomplete`. Liveness stays `httpGet`, so a dead stderr filter does not restart the pod. |
-| new | old   | The exec liveness binary is absent, so the kubelet restarts the container about every 45 s (failure threshold 3 × period 15 s). The preflight and the strip apply. The old image substitutes values without the template check. The template also carries the `resolver` line and upstream `resolve`, which need the image requirements above.                                                                                                                |
+| new | old   | The exec liveness binary is absent, so the kubelet restarts the container about every 45 s (failure threshold 3 × period 15 s). The preflight and the strip apply. The old image substitutes values without the template check. The old image uses the same pinned `nginx:1.30.6-alpine` base, so upstream `resolve` and `15-local-resolvers.envsh` are already there and the template's `resolver` line is not what fails in this pairing; the failures in this row come from the egress-proxy layer the old image does not carry.                                                                                                                |
 | new | new   | Intended.                                                                                                                                                                                                                                                                                                                                      |
 
 Rollback is the previous HCC with its previous image reference, together.
