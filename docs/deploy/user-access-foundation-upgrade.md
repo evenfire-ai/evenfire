@@ -186,8 +186,8 @@ before this release.
 
 Earlier heads of this change recorded other migration versions (under several
 four-character prefixes, decimal or hexadecimal such as `010a`, some below
-`0130`, and the same
-`0131_user_access_foundation` version with a larger body)
+`0130`, and `user_access_foundation` under the prefix `0131`, in some heads with
+a larger body)
 and created revision tables, catalog tables and `authorization_*` trigger
 functions. The current migration runner does not drop them. Their triggers
 would keep running for writers that no longer take the matching locks, so the
