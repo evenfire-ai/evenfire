@@ -103,18 +103,22 @@ validators run in CI and will catch what the hook would have.
 
 ## Desktop App (Electron)
 
-If Electron's `postinstall` is skipped, `npm ci` still exits successfully but
-the Electron runtime is never downloaded. The failure then shows up later as a
-test error that looks like a product bug. For any `desktop-app` work:
+Electron 42 and later do not download the runtime in a `postinstall` script.
+`npm ci` installs only the `electron` package; the runtime is downloaded the
+first time `require('electron')` resolves. A missing or failed download then
+shows up later as a test error that looks like a product bug. For any
+`desktop-app` work:
 
 1. Use Node 24.
-2. Run `npm ci` **without** `--ignore-scripts`.
+2. Run `npm ci` **without** `--ignore-scripts` (keytar, esbuild and the macOS
+   DMG tooling still build in lifecycle scripts).
 3. Run `npm run verify:electron` and confirm it passes before you trust any
-   test or build result.
+   test or build result. It downloads the runtime if it is missing and fails
+   unless `electron` resolves to an executable.
 
 If the check reports `Electron failed to install correctly`, switch to Node 24,
-repair `node_modules`, and reinstall. Do not set
-`ELECTRON_SKIP_BINARY_DOWNLOAD` or point Electron at an unverified binary.
+delete `desktop-app/node_modules/electron`, rerun `npm ci`, and rerun the
+check. Do not point `ELECTRON_OVERRIDE_DIST_PATH` at an unverified binary.
 
 ## Validating against a cluster
 
