@@ -43,6 +43,17 @@ const FIXTURE: RawModelsDevCatalog = {
   openai: { name: 'OpenAI', models: {} },
 }
 
+// What the mapper emits for an entry that carries none of the auto-enable
+// fields (as these older-shape entries don't): no tools, no text output, no
+// status, unpriced.
+const NO_AUTO_ENABLE_FIELDS = {
+  text_output: false,
+  tool_call: false,
+  catalog_status: null,
+  status_present: false,
+  cost: null,
+} as const
+
 describe('modelsDevClient — PROVIDER_KEY_MAP', () => {
   it('maps every static provider to a models.dev key and excludes oauth-broker ids', () => {
     const staticIds = PROVIDER_IDS.filter(
@@ -80,12 +91,14 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
         model_id: 'claude-haiku-4-5',
         display_name: 'Claude Haiku 4.5',
         image_input_state: 'unsupported',
+        ...NO_AUTO_ENABLE_FIELDS,
       },
       {
         model_id: 'claude-opus-4-5',
         display_name: 'Claude Opus 4.5',
         context_window_tokens: 200000,
         image_input_state: 'supported',
+        ...NO_AUTO_ENABLE_FIELDS,
       },
     ])
     // vendor is never derived from models.dev (no reliable per-model field).
@@ -101,6 +114,7 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
         context_window_tokens: 1000000,
         // No `modalities` in the fixture — the catalog said nothing, so neither do we.
         image_input_state: 'unknown',
+        ...NO_AUTO_ENABLE_FIELDS,
       },
     ])
   })
@@ -131,18 +145,83 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
     }
     const claude = mapCatalogToProviders(catalog).claude
     // Only the well-formed id survives; the three malformed ones are dropped.
-    expect(claude).toEqual([{ model_id: 'good', display_name: 'ok', image_input_state: 'unknown' }])
+    expect(claude).toEqual([
+      {
+        model_id: 'good',
+        display_name: 'ok',
+        image_input_state: 'unknown',
+        ...NO_AUTO_ENABLE_FIELDS,
+      },
+    ])
   })
 
-  it('CLAMPs an over-long display_name to 400 chars (keeps the model)', () => {
-    const longName = 'n'.repeat(401)
-    const catalog: RawModelsDevCatalog = {
-      anthropic: { name: 'Anthropic', models: { 'm-1': { id: 'm-1', name: longName } } },
+  describe('display_name is bounded to 256 bytes of UTF-8 as serialized to JSON, at ingest', () => {
+    // What the allowlist ConfigMap stores for the name, without the quotes.
+    const servedBytes = (s: string) => Buffer.byteLength(JSON.stringify(s), 'utf8') - 2
+
+    function displayNameOf(name: string): string | undefined {
+      const catalog: RawModelsDevCatalog = {
+        anthropic: { name: 'Anthropic', models: { 'm-1': { id: 'm-1', name } } },
+      }
+      const [model] = mapCatalogToProviders(catalog).claude
+      expect(model.model_id).toBe('m-1')
+      return model.display_name
     }
-    const [model] = mapCatalogToProviders(catalog).claude
-    expect(model.model_id).toBe('m-1')
-    expect(model.display_name).toBe('n'.repeat(400))
-    expect(model.display_name!.length).toBe(400)
+
+    // A lone surrogate is what a UTF-16 cut leaves behind; `encodeURIComponent`
+    // refuses exactly those.
+    function isWellFormed(s: string): boolean {
+      try {
+        encodeURIComponent(s)
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    it('keeps an ASCII name of exactly 256 bytes and clamps one byte more (keeps the model)', () => {
+      expect(displayNameOf('n'.repeat(256))).toBe('n'.repeat(256))
+      expect(displayNameOf('n'.repeat(401))).toBe('n'.repeat(256))
+    })
+
+    it('never splits a 3-byte character: 400 × "€" keeps 85 whole characters (255 bytes)', () => {
+      const name = displayNameOf('€'.repeat(400))!
+      expect(name).toBe('€'.repeat(85))
+      expect(Buffer.byteLength(name, 'utf8')).toBe(255)
+    })
+
+    it('never leaves half a surrogate pair: a 4-byte character that does not fit is dropped whole', () => {
+      // 1 + 63 × 4 = 253 bytes; the 64th emoji would reach 257. A cut at 400
+      // UTF-16 units would also have split the 200th pair.
+      const raw = `a${'😀'.repeat(399)}`
+      const name = displayNameOf(raw)!
+      expect(name).toBe(`a${'😀'.repeat(63)}`)
+      expect(Buffer.byteLength(name, 'utf8')).toBe(253)
+      expect(isWellFormed(name)).toBe(true)
+      expect(raw.startsWith(name)).toBe(true)
+    })
+
+    it('counts a quote and a backslash as the 2 bytes JSON escapes them to', () => {
+      const name = displayNameOf('"\\'.repeat(200))!
+      expect(name).toBe('"\\'.repeat(64))
+      expect(servedBytes(name)).toBe(256)
+      expect(Buffer.byteLength(name, 'utf8')).toBe(128)
+    })
+
+    it('mixes escapes and multibyte characters without splitting either', () => {
+      const raw = `"${'😀\\€'.repeat(100)}`
+      const name = displayNameOf(raw)!
+      expect(servedBytes(name)).toBeLessThanOrEqual(256)
+      expect(servedBytes(name)).toBeGreaterThan(256 - 4)
+      expect(isWellFormed(name)).toBe(true)
+      expect(raw.startsWith(name)).toBe(true)
+    })
+
+    it('counts a lone surrogate from the source as the 6-byte escape JSON writes for it', () => {
+      const name = displayNameOf('\uD83D'.repeat(100))!
+      expect(name.length).toBe(42)
+      expect(servedBytes(name)).toBe(252)
+    })
   })
 
   it('keeps a 400-char id (boundary) — only >400 is rejected', () => {
@@ -151,7 +230,7 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
       anthropic: { name: 'Anthropic', models: { [id400]: { id: id400 } } },
     }
     expect(mapCatalogToProviders(catalog).claude).toEqual([
-      { model_id: id400, image_input_state: 'unknown' },
+      { model_id: id400, image_input_state: 'unknown', ...NO_AUTO_ENABLE_FIELDS },
     ])
   })
 

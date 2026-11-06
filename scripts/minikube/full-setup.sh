@@ -241,8 +241,12 @@ Environment:
   CLERUM_MODEL_NAME or that provider's default. CLERUM_MODEL_NAME without
   CLERUM_MODEL_PROVIDER is refused. Otherwise the first key present, in the
   order above, picks the provider; with no key the Host gets
-  openai/gpt-5.4-mini and the agent does not reply. The pair must be an
-  enabled llm_allowed_models row, or setup exits 1 before applying the Host.
+  openai/gpt-5.4-mini and the agent does not reply. Setup waits for
+  control-api's first LLM catalog sync (CLERUM_CATALOG_WAIT_SECONDS, default
+  180), and Step 10 adds or enables the Host model through the admin API when
+  the catalog did not (on a reused DB it leaves a row that was already disabled,
+  or a pair an operator removed, alone). The pair must then be an enabled
+  llm_allowed_models row, or setup exits 1.
 
 Examples:
   $(basename "$0")                       # Full setup from scratch
@@ -531,6 +535,7 @@ validate_setup_deadline MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS "${MINIKUBE_SETUP_
 # status/start/delete operation can touch Minikube.
 SETUP_LOCK_CLEANUP_DONE=false
 K8S_API_POLICY_TMP_DIR=""
+SEED_OUTPUT_FILE=""
 cleanup_setup_lock() {
   local status="${1:-$?}" cleanup_status=0
   if [ "$SETUP_LOCK_CLEANUP_DONE" = true ]; then
@@ -541,6 +546,9 @@ cleanup_setup_lock() {
   trap '' INT TERM
   if [ -n "${K8S_API_POLICY_TMP_DIR:-}" ] && [ -d "${K8S_API_POLICY_TMP_DIR}" ]; then
     rm -rf -- "${K8S_API_POLICY_TMP_DIR}" || cleanup_status=1
+  fi
+  if [ -n "${SEED_OUTPUT_FILE:-}" ] && [ -f "${SEED_OUTPUT_FILE}" ]; then
+    rm -f -- "${SEED_OUTPUT_FILE}" || cleanup_status=1
   fi
   t2_lock_release "$status" || cleanup_status=$?
   if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
@@ -1167,6 +1175,24 @@ if [ "$RESET_DB" = true ]; then
     && [[ "$RESET_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]] \
     || { err "Reset replica recovery state is invalid"; exit 1; }
   ok "Postgres PVCs deleted"
+fi
+
+# Whether this run starts the control DB empty: it was just reset, or no volume
+# existed. Step 10 may then re-enable a disabled LLM model row (on an empty DB
+# only the catalog sync can have disabled it); on a reused DB a disabled row may
+# be an operator's choice and is left alone.
+CONTROL_DB_CREATED_BY_RUN=false
+if [ "$RESET_DB" = true ]; then
+  CONTROL_DB_CREATED_BY_RUN=true
+else
+  # A failed lookup must not read as "no volume": that would re-enable rows on
+  # a reused DB.
+  EXISTING_CONTROL_DB_PVC="$($KC -n control-plane get pvc control-postgres-data \
+    -o name --ignore-not-found)" \
+    || { err "Could not check for the control-postgres-data PVC"; exit 1; }
+  if [ -z "$EXISTING_CONTROL_DB_PVC" ]; then
+    CONTROL_DB_CREATED_BY_RUN=true
+  fi
 fi
 
 # 6b. Deploy via kustomize
@@ -1933,14 +1959,42 @@ fi
 # The rule lives in scripts/minikube/host-model.sh: an explicit
 # CLERUM_MODEL_PROVIDER wins, CLERUM_MODEL_NAME without it is refused, and
 # otherwise the provider follows the first key present (openai/gpt-5.4-mini,
-# with a warning, when there is none). The pair must then be an enabled
-# llm_allowed_models row in this profile's control-postgres, which the
-# migrations above created; a refusal stops setup before the Host is applied.
-# A no-key run still comes up fully: docs/get-started/quickstart.md documents
-# that the agent does not reply until a key is added.
+# with a warning, when there is none). A no-key run still comes up fully:
+# docs/get-started/quickstart.md documents that the agent does not reply until
+# a key is added.
+#
+# A fresh DB's allowlist comes only from control-api's catalog sync, so wait for
+# it, then classify the pair. Nothing is written here: no admin exists yet, and
+# logging in before Step 10 stamps last_login_at, which makes the one-shot
+# /admin/auth/setup reject the bootstrap. Step 10 provisions the pair through
+# the admin API with the seed's own session, and the hard check follows it.
 resolve_host_model || exit 1
+log "Waiting for control-api's first LLM catalog sync (up to ${CLERUM_CATALOG_WAIT_SECONDS:-180}s)..."
+wait_for_catalog_decision || exit 1
+log "LLM catalog sync: ${CATALOG_DECISION}"
 log "Checking Host model ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} against llm_allowed_models..."
-assert_host_model_allowed "$RESOLVED_PROVIDER" "$RESOLVED_MODEL" || exit 1
+host_model_state "$RESOLVED_PROVIDER" "$RESOLVED_MODEL" || exit 1
+# Setup only ever targets this minikube profile; the seed trusts that signal
+# when it names the context it writes to.
+LLM_ENSURE_MINIKUBE_PROFILE="${PROFILE}"
+if [ "$HOST_MODEL_STATE" = enabled ]; then
+  ok "Host model ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} is enabled"
+elif [ "$DEFER_BOOTSTRAP_SEED" = true ]; then
+  warn "HOST_MODEL_PENDING: ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} is ${HOST_MODEL_STATE} in llm_allowed_models and Step 10 is deferred, so setup does not provision it. After the browser setup, add or enable it in the Control UI (LLM models); the agent does not reply until then."
+elif [ "$HOST_MODEL_STATE" = disabled ] && [ "$CONTROL_DB_CREATED_BY_RUN" != true ]; then
+  # A reused DB keeps an operator's disable; Step 10 would not undo it.
+  assert_host_model_allowed "$RESOLVED_PROVIDER" "$RESOLVED_MODEL" || exit 1
+else
+  if [ "$CONTROL_DB_CREATED_BY_RUN" != true ]; then
+    # Nor would it re-create a pair an operator removed.
+    host_model_dismissed "$RESOLVED_PROVIDER" "$RESOLVED_MODEL" || exit 1
+    if [ "$HOST_MODEL_DISMISSED" = true ]; then
+      err "HOST_MODEL_DISMISSED: ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} was removed from llm_allowed_models by an operator on this reused DB, and setup does not re-create it. Add it back in the Control UI (LLM models), choose another model with CLERUM_MODEL_PROVIDER/CLERUM_MODEL_NAME, or rebuild the DB (run without REUSE_DB)."
+      exit 1
+    fi
+  fi
+  log "Host model ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} is ${HOST_MODEL_STATE}; Step 10 provisions it through the admin API"
+fi
 log "Applying Host model ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} (source: ${CLERUM_MODEL_PROVIDER:+CLERUM_MODEL_PROVIDER}${CLERUM_MODEL_PROVIDER:-auto-detected from .env})..."
 cat <<HOSTEOF | $KC apply -f -
 apiVersion: clerum.io/v1alpha1
@@ -2265,12 +2319,30 @@ else
   fi
   log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
   SEED_USER_OK=true
+  SEED_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/clerum-setup-seed.XXXXXX")"
   if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
      SEED_PROFILE="${SEED_PROFILE}" \
      ADMIN_EMAIL="${ADMIN_EMAIL:-}" \
+     LLM_ENSURE_HOST_MODEL="${RESOLVED_PROVIDER}/${RESOLVED_MODEL}" \
+     LLM_ENSURE_DB_FRESH="${CONTROL_DB_CREATED_BY_RUN}" \
+     LLM_ENSURE_MINIKUBE_PROFILE="${LLM_ENSURE_MINIKUBE_PROFILE}" \
+     LLM_ENSURE_CATALOG_DECISION="${CATALOG_DECISION}" \
      E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
      E2E_DEV_LOGIN_NAME="${SEED_USER_NAME}" \
-     bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
+     bash "${SCRIPT_DIR}/seed-test-data.sh" >"$SEED_OUTPUT_FILE" 2>&1; then
+    SEED_RC=0
+  else
+    SEED_RC=$?
+  fi
+  tail -15 "$SEED_OUTPUT_FILE"
+  # The model lines can sit above the last 15; show them all.
+  if grep -q 'LLM_MODEL_ENSURE' "$SEED_OUTPUT_FILE"; then
+    log "LLM model provisioning:"
+    grep 'LLM_MODEL_ENSURE' "$SEED_OUTPUT_FILE" || true
+  fi
+  rm -f "$SEED_OUTPUT_FILE"
+  SEED_OUTPUT_FILE=""
+  if [ "$SEED_RC" -eq 0 ]; then
     ok "Test user seeded"
   else
     SEED_USER_OK=false
@@ -2296,6 +2368,10 @@ else
       warn "Test user seed encountered errors — check output above"
     fi
   fi
+  # The seed provisioned the Host model when the catalog did not; prove it.
+  log "Checking Host model ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} against llm_allowed_models..."
+  assert_host_model_allowed "$RESOLVED_PROVIDER" "$RESOLVED_MODEL" || exit 1
+  ok "Host model ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} is enabled"
 fi
 
 # ======================================================================

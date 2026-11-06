@@ -7,14 +7,23 @@
  * non-destructive default is only safe if the operator is told to act. This
  * module produces that persistent alert: the set of ACTIONABLE attention items.
  *
- * TODAY there is exactly one item kind — a `stale` AND `enabled` model that is
- * STILL referenced by some Host/grant, so the operator must decide to disable it
- * (through the Fase 3 impact-gated PUT). Two cases produce NO item: a `stale`
- * model that nobody references (nothing to act on), and a `stale` model that is
- * ALREADY disabled (its suggested action is already done — the enabled filter
- * lives in `listStaleAllowedModels`, so those rows never reach this module). A
- * disabled-but-still-referenced model is a distinct diagnostic concern (a future
- * `dangling_reference` kind), not an actionable attention item.
+ * `stale_model_referenced` — a `stale` AND `enabled` model that is STILL
+ * referenced by some Host/grant, so the operator must decide to disable it
+ * (through the Fase 3 impact-gated PUT). Two cases produce NO item of this kind:
+ * a `stale` model that nobody references (nothing to act on), and a `stale` model
+ * that is ALREADY disabled (its suggested action is already done — the enabled
+ * filter lives in `listStaleAllowedModels`, so those rows never reach this
+ * module). A disabled-but-still-referenced model is a distinct diagnostic concern
+ * (a future `dangling_reference` kind), not an actionable attention item.
+ *
+ * Two kinds are emitted for EVERY enabled row that matches, referenced or not,
+ * because the catalog sync can enable models on its own and an unreferenced one
+ * is still served:
+ *   - `deprecated_model_enabled` — models.dev now tags the model deprecated.
+ *   - `stale_discovery_enabled` — a discovered model vanished from the catalog
+ *     (a transient or mistaken upstream id) and is still enabled. A discovery
+ *     row that is also referenced yields this item AND `stale_model_referenced`.
+ * Both only inform; nothing here disables a model.
  *
  * The `kind` discriminator is an OPEN string union on purpose: future phases add
  * item kinds (e.g. a re-appeared model, a pricing gap) without breaking the
@@ -41,6 +50,7 @@
  * a rejected LIST promise is cached and re-thrown on the next await, so the loop
  * still aborts on the first namespace that fails.
  */
+import type { CatalogAttentionRow } from './llmAllowedModels.js'
 import {
   type GrantModelReference,
   type HostModelReference,
@@ -49,8 +59,9 @@ import {
   modelImpactHasReferences,
 } from './llmModelImpact.js'
 
-/** The only attention kind today; the union is open for future kinds. */
 export const ATTENTION_KIND_STALE_MODEL_REFERENCED = 'stale_model_referenced'
+export const ATTENTION_KIND_DEPRECATED_MODEL_ENABLED = 'deprecated_model_enabled'
+export const ATTENTION_KIND_STALE_DISCOVERY_ENABLED = 'stale_discovery_enabled'
 
 /**
  * A `stale` AND `enabled` catalog model that is still referenced by a live
@@ -69,8 +80,18 @@ export interface StaleModelReferencedItem {
   grantsAffected: GrantModelReference[]
 }
 
-/** Extensible union — one member today, more kinds in later phases. */
-export type AttentionItem = StaleModelReferencedItem
+/** An enabled row flagged from its own columns, with no reference lookup. */
+export interface CatalogModelAttentionItem {
+  kind:
+    | typeof ATTENTION_KIND_DEPRECATED_MODEL_ENABLED
+    | typeof ATTENTION_KIND_STALE_DISCOVERY_ENABLED
+  provider: string
+  model: string
+  displayName?: string
+}
+
+/** Extensible union: consumers must ignore kinds they do not know. */
+export type AttentionItem = StaleModelReferencedItem | CatalogModelAttentionItem
 
 /** The `GET /admin/attention` response contract consumed by the UI banner. */
 export interface AttentionReport {
@@ -84,6 +105,18 @@ export interface StaleModelInput {
   provider: string
   model: string
   display_name: string | null
+}
+
+function catalogItems(
+  rows: CatalogAttentionRow[],
+  kind: CatalogModelAttentionItem['kind'],
+  matches: (row: CatalogAttentionRow) => boolean
+): CatalogModelAttentionItem[] {
+  return rows.filter(matches).map(row => {
+    const item: CatalogModelAttentionItem = { kind, provider: row.provider, model: row.model }
+    if (row.display_name) item.displayName = row.display_name
+    return item
+  })
 }
 
 /**
@@ -115,7 +148,8 @@ function memoizeHostLists(sources: ModelImpactSources): ModelImpactSources {
  */
 export async function computeAttention(
   staleModels: StaleModelInput[],
-  sources: ModelImpactSources
+  sources: ModelImpactSources,
+  catalogRows: CatalogAttentionRow[] = []
 ): Promise<AttentionReport> {
   const memoizedSources = memoizeHostLists(sources)
   const items: AttentionItem[] = []
@@ -134,5 +168,9 @@ export async function computeAttention(
     if (staleModel.display_name) item.displayName = staleModel.display_name
     items.push(item)
   }
+  items.push(
+    ...catalogItems(catalogRows, ATTENTION_KIND_DEPRECATED_MODEL_ENABLED, row => row.deprecated),
+    ...catalogItems(catalogRows, ATTENTION_KIND_STALE_DISCOVERY_ENABLED, row => row.stale_discovery)
+  )
   return { items, generatedAt: new Date().toISOString() }
 }
