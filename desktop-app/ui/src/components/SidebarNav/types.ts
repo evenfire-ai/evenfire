@@ -11,7 +11,7 @@ export type SidebarNavProps = {
   compactMenuOpen: boolean
   /** Preserve focus when this action's destination explicitly owns focus. */
   onCompactMenuOpenChange: (open: boolean, closeFocus?: CompactMenuCloseFocus) => void
-  resize: SidebarResizeControls
+  resize?: SidebarResizeControls
   activeSandboxUiApp: ActiveSandboxUiApp | null
   availableSandboxUiApps: ActiveSandboxUiApp[]
   onCollapsedChange: (collapsed: boolean) => void

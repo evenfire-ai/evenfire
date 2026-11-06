@@ -12,8 +12,17 @@ import {
   useSidebarResize,
 } from '../useSidebarResize'
 
-function SidebarResizeHandle({ compactMode = false, mounted = true } = {}) {
+function SidebarResizeHandle({
+  compactMode = false,
+  mounted = true,
+  onResizeReady,
+}: {
+  compactMode?: boolean
+  mounted?: boolean
+  onResizeReady?: (value: ReturnType<typeof useSidebarResize>) => void
+} = {}) {
   const resize = useSidebarResize(compactMode)
+  onResizeReady?.(resize)
   return (
     <>
       <output data-testid="sidebar-width">{resize.width}</output>
@@ -138,6 +147,30 @@ describe('useSidebarResize', () => {
     expect(container.querySelector('[role="separator"]')).toBe(reopenedHandle)
   })
 
+  it('cancels synchronously at the compact breakpoint before a queued commit', () => {
+    window.localStorage.setItem('clerum.ui.sidebarWidth', '460')
+    let controls: ReturnType<typeof useSidebarResize> | undefined
+    const { container } = render(
+      <SidebarResizeHandle onResizeReady={value => (controls = value)} />
+    )
+    const handle = container.querySelector('[role="separator"]') as HTMLElement
+    const releasePointerCapture = vi.fn()
+    Object.defineProperty(handle, 'setPointerCapture', { value: vi.fn() })
+    Object.defineProperty(handle, 'hasPointerCapture', { value: () => true })
+    Object.defineProperty(handle, 'releasePointerCapture', { value: releasePointerCapture })
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 460, pointerId: 42 })
+    fireEvent.pointerMove(handle, { clientX: 450, pointerId: 42 })
+    expect(screen.getByTestId('sidebar-width').textContent).toBe('450')
+
+    controls!.cancelActiveDrag()
+    fireEvent.pointerUp(handle, { clientX: 450, pointerId: 42 })
+
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('460')
+    expect(document.body.classList.contains('sidebar-resizing')).toBe(false)
+    expect(releasePointerCapture).toHaveBeenCalledWith(42)
+  })
+
   it('cancels an active drag if the separator is removed outside a breakpoint change', async () => {
     const { rerender } = render(<SidebarResizeHandle />)
     const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
@@ -216,7 +249,7 @@ describe('useSidebarResize', () => {
     expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('440')
   })
 
-  it('clamps and persists pointer input that exceeds the live maximum', () => {
+  it('preserves eligible pointer intent above the live maximum', () => {
     vi.stubGlobal('innerWidth', 900)
     window.localStorage.setItem('clerum.ui.sidebarWidth', '420')
     render(<SidebarResizeHandle />)
@@ -229,7 +262,7 @@ describe('useSidebarResize', () => {
     fireEvent.pointerUp(handle, { clientX: 140, pointerId: 6 })
 
     expect(handle.getAttribute('aria-valuenow')).toBe('440')
-    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('440')
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('460')
   })
 
   it('preserves a wider preference when keyboard resize is blocked at the maximum', () => {
@@ -265,6 +298,50 @@ describe('useSidebarResize', () => {
     vi.stubGlobal('innerWidth', 1200)
     fireEvent(window, new Event('resize'))
     expect(handle.getAttribute('aria-valuenow')).toBe('460')
+  })
+
+  it('persists the last effective pointer intent after a later capped move', async () => {
+    window.localStorage.setItem('clerum.ui.sidebarWidth', '460')
+    const { container } = render(<SidebarResizeHandle />)
+    let handle = container.querySelector('[role="separator"]') as HTMLElement
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 460, pointerId: 41 })
+    fireEvent.pointerMove(handle, { clientX: 450, pointerId: 41 })
+    expect(screen.getByTestId('sidebar-width').textContent).toBe('450')
+
+    vi.stubGlobal('innerWidth', 800)
+    fireEvent(window, new Event('resize'))
+    await waitFor(() => expect(screen.getByTestId('sidebar-width').textContent).toBe('340'))
+
+    handle = container.querySelector('[role="separator"]') as HTMLElement
+    fireEvent.pointerMove(handle, { clientX: 430, pointerId: 41 })
+    expect(screen.getByTestId('sidebar-width').textContent).toBe('340')
+    fireEvent.pointerUp(handle, { clientX: 430, pointerId: 41 })
+
+    vi.stubGlobal('innerWidth', 1200)
+    fireEvent(window, new Event('resize'))
+    await waitFor(() => expect(screen.getByTestId('sidebar-width').textContent).toBe('450'))
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('450')
+  })
+
+  it('persists a visible return-to-cap movement as the last eligible pointer intent', () => {
+    vi.stubGlobal('innerWidth', 760)
+    window.localStorage.setItem('clerum.ui.sidebarWidth', '460')
+    const { container } = render(<SidebarResizeHandle />)
+    const handle = container.querySelector('[role="separator"]') as HTMLElement
+    expect(screen.getByTestId('sidebar-width').textContent).toBe('300')
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 300, pointerId: 43 })
+    fireEvent.pointerMove(handle, { clientX: 292, pointerId: 43 })
+    expect(screen.getByTestId('sidebar-width').textContent).toBe('292')
+    fireEvent.pointerMove(handle, { clientX: 320, pointerId: 43 })
+    expect(screen.getByTestId('sidebar-width').textContent).toBe('300')
+    fireEvent.pointerUp(handle, { clientX: 320, pointerId: 43 })
+
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('320')
+    vi.stubGlobal('innerWidth', 1200)
+    fireEvent(window, new Event('resize'))
+    expect(screen.getByTestId('sidebar-width').textContent).toBe('320')
   })
 
   it('uses a valid stored preference and ignores malformed storage', () => {

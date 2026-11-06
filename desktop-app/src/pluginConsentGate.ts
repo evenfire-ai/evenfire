@@ -44,7 +44,7 @@ export type ConsentGateDeps = {
   presentPrompt: (request: PluginConsentRequest) => void
   /** Withdraw a prompt the user never answered (timeout, embed died). */
   cancelPrompt: (promptId: string) => void
-  /** Hide/show the active plugin surface around the modal. */
+  /** Hide the active plugin surface before presenting the modal. */
   setSurfaceVisible: (visible: boolean) => Promise<void>
   /** True when a Desktop window is visible and focused. */
   isWindowReady: () => boolean
@@ -307,8 +307,6 @@ export class PluginConsentGate {
         this.deps.cancelPrompt(promptId)
       }
       throw err
-    } finally {
-      await this.deps.setSurfaceVisible(true).catch(() => undefined)
     }
 
     const grantedNow = new Set<string>()

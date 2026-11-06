@@ -37,7 +37,8 @@ type ActiveDrag = {
   pointerId: number
   startX: number
   startWidth: number
-  candidate: number | null
+  requestedWidth: number
+  eligibleIntentWidth: number | null
   captureTarget: HTMLElement
   removalObserver: MutationObserver | null
 }
@@ -88,9 +89,11 @@ export function useSidebarResize(compactMode = false) {
   }, [compactMode])
 
   const commitWidth = React.useCallback(
-    (nextWidth: number, unchangedWidth: number) => {
+    (nextWidth: number, unchangedWidth: number, constrainToViewport = true) => {
       if (compactMode) return
-      const next = clampSidebarWidth(Math.min(nextWidth, maxWidthRef.current))
+      const next = clampSidebarWidth(
+        constrainToViewport ? Math.min(nextWidth, maxWidthRef.current) : nextWidth
+      )
       if (next === unchangedWidth) return
       setPreferredWidth(next)
       try {
@@ -109,6 +112,8 @@ export function useSidebarResize(compactMode = false) {
     setDragWidth(null)
     document.body.classList.remove('sidebar-resizing')
   }, [])
+
+  const cancelActiveDrag = clearDrag
 
   React.useLayoutEffect(() => {
     if (compactMode) clearDrag()
@@ -138,7 +143,8 @@ export function useSidebarResize(compactMode = false) {
         pointerId: event.pointerId,
         startX: event.clientX,
         startWidth: widthRef.current,
-        candidate: null,
+        requestedWidth: widthRef.current,
+        eligibleIntentWidth: null,
         captureTarget: target,
         removalObserver: null,
       }
@@ -162,11 +168,15 @@ export function useSidebarResize(compactMode = false) {
         clearDrag()
         return
       }
-      const candidate = clampSidebarWidth(
-        Math.min(maxWidthRef.current, drag.startWidth + event.clientX - drag.startX)
-      )
-      drag.candidate = candidate
-      setDragWidth(candidate)
+      const requestedWidth = clampSidebarWidth(drag.startWidth + event.clientX - drag.startX)
+      const eventViewportWidth = window.innerWidth
+      const previousEffectiveWidth = getVisibleSidebarWidth(drag.requestedWidth, eventViewportWidth)
+      const nextEffectiveWidth = getVisibleSidebarWidth(requestedWidth, eventViewportWidth)
+      if (previousEffectiveWidth !== nextEffectiveWidth) {
+        drag.eligibleIntentWidth = requestedWidth
+      }
+      drag.requestedWidth = requestedWidth
+      setDragWidth(requestedWidth)
     },
     [clearDrag, compactMode]
   )
@@ -179,7 +189,9 @@ export function useSidebarResize(compactMode = false) {
         clearDrag()
         return
       }
-      if (drag.candidate !== null) commitWidth(drag.candidate, drag.startWidth)
+      if (drag.eligibleIntentWidth !== null) {
+        commitWidth(drag.eligibleIntentWidth, drag.startWidth, false)
+      }
       clearDrag()
     },
     [clearDrag, commitWidth, compactMode]
@@ -229,6 +241,7 @@ export function useSidebarResize(compactMode = false) {
   return {
     width,
     maxWidth,
+    cancelActiveDrag,
     onPointerDown,
     onPointerMove,
     onPointerUp,

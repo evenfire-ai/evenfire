@@ -82,12 +82,12 @@ afterEach(async () => {
 })
 
 describe('PluginConsentGate', () => {
-  it('hides the plugin surface for the duration of the prompt and restores it after', async () => {
+  it('hides the plugin surface and leaves visibility restoration to the app reconciler', async () => {
     const gate = makeGate()
     await gate.ensure({ ...BASE, capabilities: ['identity.read'] })
-    // False before the modal, true after — the plugin cannot paint while the
-    // user is deciding (spec §9.4).
-    expect(visibility).toEqual([false, true])
+    // The main-process gate hides before the modal. App's single owner-aware
+    // reconciler decides whether the native surface may become visible again.
+    expect(visibility).toEqual([false])
   })
 
   it('persists a grant that survives a new gate instance', async () => {

@@ -91,6 +91,21 @@ export function SidebarNav({
     },
     [onSettingsMenuOpenChange]
   )
+  const closeCompactMenu = React.useCallback(
+    (closeFocus?: 'preserve-destination-focus') => {
+      updateSettingsMenuOpen(false)
+      onCompactMenuOpenChange(false, closeFocus)
+    },
+    [onCompactMenuOpenChange, updateSettingsMenuOpen]
+  )
+  const previousCompactModeRef = useRef(compactMode)
+
+  useEffect(() => {
+    if (compactMode && !previousCompactModeRef.current && !compactMenuOpen) {
+      updateSettingsMenuOpen(false)
+    }
+    previousCompactModeRef.current = compactMode
+  }, [compactMenuOpen, compactMode, updateSettingsMenuOpen])
 
   const requestDeleteSession = React.useCallback(
     async (session: { agentRef: string; id: string; title: string }) => {
@@ -118,12 +133,14 @@ export function SidebarNav({
   useEffect(() => {
     if (toggleRequestId <= lastToggleRequestIdRef.current) return
     lastToggleRequestIdRef.current = toggleRequestId
-    if (compactMode) onCompactMenuOpenChange(!compactMenuOpen)
+    if (compactMode && compactMenuOpen) closeCompactMenu()
+    else if (compactMode) onCompactMenuOpenChange(true)
     else onCollapsedChange(!collapsed)
   }, [
     collapsed,
     compactMenuOpen,
     compactMode,
+    closeCompactMenu,
     onCollapsedChange,
     onCompactMenuOpenChange,
     toggleRequestId,
@@ -169,11 +186,11 @@ export function SidebarNav({
       if (event.key !== 'Escape') return
       event.preventDefault()
       event.stopPropagation()
-      onCompactMenuOpenChange(false)
+      closeCompactMenu()
     }
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [compactMenuOpen, onCompactMenuOpenChange])
+  }, [closeCompactMenu, compactMenuOpen])
 
   const primaryItems: Array<{ id: NavItem; label: string; testId: string; icon: React.ReactNode }> =
     useMemo(
@@ -233,8 +250,7 @@ export function SidebarNav({
 
   const handleSelect = (item: NavItem) => {
     onSelect(item)
-    onCompactMenuOpenChange(false)
-    updateSettingsMenuOpen(false)
+    closeCompactMenu()
     setSessionMenuId(null)
   }
 
@@ -310,8 +326,7 @@ export function SidebarNav({
           className="sidebar-mobile-backdrop"
           aria-label="Close navigation menu"
           onClick={() => {
-            onCompactMenuOpenChange(false)
-            updateSettingsMenuOpen(false)
+            closeCompactMenu()
           }}
         />
         <div className="sidebar-logo">
@@ -340,7 +355,7 @@ export function SidebarNav({
             className="sidebar-compact-close"
             label="Close navigation menu"
             title="Close navigation menu"
-            onClick={() => onCompactMenuOpenChange(false)}
+            onClick={() => closeCompactMenu()}
             variant="ghost"
           >
             <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -365,7 +380,7 @@ export function SidebarNav({
           </IconButton>
         </div>
 
-        {!isCollapsed && !compactMode ? (
+        {!isCollapsed && !compactMode && resize ? (
           <div
             aria-label="Resize sidebar"
             aria-orientation="vertical"
@@ -420,7 +435,7 @@ export function SidebarNav({
                       onClick={event => {
                         event.stopPropagation()
                         onNewChat()
-                        onCompactMenuOpenChange(false, 'preserve-destination-focus')
+                        closeCompactMenu('preserve-destination-focus')
                       }}
                       variant="ghost"
                     >
@@ -521,7 +536,7 @@ export function SidebarNav({
                                         isRemote: session.remote === true,
                                         title: session.title,
                                       })
-                                      onCompactMenuOpenChange(false)
+                                      closeCompactMenu()
                                       setSessionMenuId(null)
                                     }}
                                   >
@@ -614,7 +629,7 @@ export function SidebarNav({
                             aria-label={`Open ${app.label}`}
                             onClick={() => {
                               onOpenSandboxUiApp(app)
-                              onCompactMenuOpenChange(false)
+                              closeCompactMenu()
                             }}
                           >
                             <span className="nav-available-app__label">{app.label}</span>
@@ -667,11 +682,11 @@ export function SidebarNav({
                 <FileExplorerTree
                   onOpenFolder={uri => {
                     onOpenFilesSection(uri)
-                    onCompactMenuOpenChange(false)
+                    closeCompactMenu()
                   }}
                   onOpenPreview={preview => {
                     onOpenPreviewSection(preview)
-                    onCompactMenuOpenChange(false)
+                    closeCompactMenu()
                   }}
                   pushToast={pushToast}
                 />
@@ -758,8 +773,7 @@ export function SidebarNav({
                     className="sidebar-settings-menu-item sidebar-settings-route logout-link"
                     color="danger"
                     onClick={() => {
-                      updateSettingsMenuOpen(false)
-                      onCompactMenuOpenChange(false)
+                      closeCompactMenu()
                       onLogout()
                     }}
                     disabled={busy}
