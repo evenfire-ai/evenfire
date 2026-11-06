@@ -92,8 +92,18 @@ type SecretMetadata = {
 }
 
 /** client-node 1.4.0 reports a non-200 watch response as `statusCode`, never as `code`. */
-function isGone(error: unknown): boolean {
+export function isGone(error: unknown): boolean {
   return (error as { statusCode?: unknown } | null | undefined)?.statusCode === HTTP_GONE
+}
+
+/**
+ * Exponential reconnect backoff capped at MAX_BACKOFF_MS.
+ * attempts=1 → 1s, 2 → 2s, 3 → 4s, 4 → 8s, 5 → 16s, 6+ → 30s.
+ */
+export function computeWatchBackoffMs(attempts: number): number {
+  const exponent = Math.max(0, attempts - 1)
+  const delay = INITIAL_BACKOFF_MS * Math.pow(2, exponent)
+  return Math.min(delay, MAX_BACKOFF_MS)
 }
 
 export class SecretInformer {
@@ -152,16 +162,6 @@ export class SecretInformer {
       this.abortController.abort()
       this.abortController = null
     }
-  }
-
-  /**
-   * Compute exponential backoff capped at MAX_BACKOFF_MS.
-   * attempts=1 → 1s, 2 → 2s, 3 → 4s, 4 → 8s, 5 → 16s, 6+ → 30s.
-   */
-  private computeBackoff(): number {
-    const exponent = Math.max(0, this.attempts - 1)
-    const delay = INITIAL_BACKOFF_MS * Math.pow(2, exponent)
-    return Math.min(delay, MAX_BACKOFF_MS)
   }
 
   private async connect(): Promise<boolean> {
@@ -440,7 +440,7 @@ export class SecretInformer {
 
     secretInformerReconnectsTotal.inc({ namespace: this.namespace })
 
-    const delay = this.computeBackoff()
+    const delay = computeWatchBackoffMs(this.attempts)
     hccLogger.warn(`[SecretInformer] reconnecting in ${delay}ms (attempt ${this.attempts})`, {
       namespace: this.namespace,
     })

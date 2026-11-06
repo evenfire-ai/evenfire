@@ -432,20 +432,21 @@ For the create and existence-read counters, including PromQL examples, see [CREA
 
 **Secret watch, MCP API and reporters**
 
-| Metric                                               | Type    | Labels                        | Meaning                                                                                                 |
-| ---------------------------------------------------- | ------- | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `clerum_hcc_secret_informer_events_total`            | counter | `namespace`, `type`           | Secret informer events delivered to the consumer.                                                       |
-| `clerum_hcc_secret_informer_reconnects_total`        | counter | `namespace`                   | Secret informer reconnect attempts.                                                                     |
-| `clerum_hcc_secret_informer_running`                 | gauge   | `namespace`                   | `1` while the Secret watch is established; `0` while reconnecting or until a complete list succeeds.    |
-| `clerum_hcc_secret_informer_lists_total`             | counter | `namespace`, `outcome`        | Paginated Secret lists of the resume-mode informer (`initial`, `relist` after a 410, `failed`).         |
-| `clerum_hcc_secret_informer_resumes_total`           | counter | `namespace`                   | Secret watches the resume-mode informer reopened from the last resourceVersion it saw.                  |
-| `clerum_hcc_mcp_host_api_requests_total`             | counter | `action`, `outcome`, `reason` | Host-scoped MCP API requests (inventory, credential).                                                   |
-| `clerum_hcc_infrastructure_telemetry_enqueued_total` | counter | `telemetry_type`              | Telemetry items accepted by the bounded reporter.                                                       |
-| `clerum_hcc_infrastructure_telemetry_dropped_total`  | counter | `telemetry_type`, `reason`    | Telemetry items dropped.                                                                                |
-| `clerum_hcc_infrastructure_telemetry_flushes_total`  | counter | `result`                      | Telemetry flush attempts.                                                                               |
-| `clerum_hcc_infrastructure_telemetry_retries_total`  | counter | `telemetry_type`              | Telemetry retries after a failed flush.                                                                 |
-| `clerum_hcc_infrastructure_telemetry_gaps_total`     | counter | `telemetry_type`, `reason`    | Gaps that leave trace or cost coverage incomplete.                                                      |
-| `clerum_hcc_administrative_outcome_reporter_total`   | counter | `result`                      | Administrative outcome reports: enqueued, deduplicated, accepted, conflict, rejected, or a drop reason. |
+| Metric                                               | Type    | Labels                        | Meaning                                                                                                               |
+| ---------------------------------------------------- | ------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `clerum_hcc_secret_informer_events_total`            | counter | `namespace`, `type`           | Secret informer events delivered to the consumer.                                                                     |
+| `clerum_hcc_secret_informer_reconnects_total`        | counter | `namespace`                   | Secret informer reconnect attempts.                                                                                   |
+| `clerum_hcc_secret_informer_running`                 | gauge   | `namespace`                   | `1` while the Secret watch is established; `0` while reconnecting or until a complete list succeeds.                  |
+| `clerum_hcc_secret_informer_lists_total`             | counter | `namespace`, `outcome`        | Paginated Secret lists of the resume-mode informer (`initial`, `relist` after a 410, `failed`).                       |
+| `clerum_hcc_secret_informer_resumes_total`           | counter | `namespace`                   | Secret watches the resume-mode informer reopened from the last resourceVersion it saw.                                |
+| `clerum_hcc_deployment_informer_running`             | gauge   | `namespace`                   | `1` while the watch of HCC-managed Deployments is established; `0` while stopped, reconnecting or waiting for a list. |
+| `clerum_hcc_mcp_host_api_requests_total`             | counter | `action`, `outcome`, `reason` | Host-scoped MCP API requests (inventory, credential).                                                                 |
+| `clerum_hcc_infrastructure_telemetry_enqueued_total` | counter | `telemetry_type`              | Telemetry items accepted by the bounded reporter.                                                                     |
+| `clerum_hcc_infrastructure_telemetry_dropped_total`  | counter | `telemetry_type`, `reason`    | Telemetry items dropped.                                                                                              |
+| `clerum_hcc_infrastructure_telemetry_flushes_total`  | counter | `result`                      | Telemetry flush attempts.                                                                                             |
+| `clerum_hcc_infrastructure_telemetry_retries_total`  | counter | `telemetry_type`              | Telemetry retries after a failed flush.                                                                               |
+| `clerum_hcc_infrastructure_telemetry_gaps_total`     | counter | `telemetry_type`, `reason`    | Gaps that leave trace or cost coverage incomplete.                                                                    |
+| `clerum_hcc_administrative_outcome_reporter_total`   | counter | `result`                      | Administrative outcome reports: enqueued, deduplicated, accepted, conflict, rejected, or a drop reason.               |
 
 ## Environment Variables
 
@@ -705,16 +706,16 @@ The shipped Roles and RoleBindings are the source of truth — see `deploy/base/
 
 In `mcp-server` (`deploy/base/mcp-server/rbac.yaml`):
 
-| API Group           | Resource            | Verbs                             | Purpose                                                      |
-| ------------------- | ------------------- | --------------------------------- | ------------------------------------------------------------ |
-| `clerum.io`         | `mcpservers`        | get, list, watch, patch           | Watch McpServer CRDs                                         |
-| `clerum.io`         | `mcpservers/status` | get, patch                        | Publish readiness / secret-resolution conditions             |
-| `clerum.io`         | `contexts`          | get, list, watch                  | Watch Context CRDs for NetworkPolicy reconciliation          |
-| `networking.k8s.io` | `networkpolicies`   | get, list, create, update, delete | Manage generated NetworkPolicies                             |
-| `apps`              | `deployments`       | get, list, create, update, delete | Manage MCP server Deployments                                |
-| _(core)_            | `services`          | get, list, create, update, delete | Manage MCP server Services                                   |
-| _(core)_            | `configmaps`        | get, list, create, update, delete | Manage the remote egress proxy nginx config                  |
-| _(core)_            | `secrets`           | get, list, watch                  | Read auth tokens, validate `envSecret`, re-enqueue on change |
+| API Group           | Resource            | Verbs                                    | Purpose                                                                         |
+| ------------------- | ------------------- | ---------------------------------------- | ------------------------------------------------------------------------------- |
+| `clerum.io`         | `mcpservers`        | get, list, watch, patch                  | Watch McpServer CRDs                                                            |
+| `clerum.io`         | `mcpservers/status` | get, patch                               | Publish readiness / secret-resolution conditions                                |
+| `clerum.io`         | `contexts`          | get, list, watch                         | Watch Context CRDs for NetworkPolicy reconciliation                             |
+| `networking.k8s.io` | `networkpolicies`   | get, list, create, update, delete        | Manage generated NetworkPolicies                                                |
+| `apps`              | `deployments`       | get, list, watch, create, update, delete | Manage MCP server Deployments; re-enqueue a server when its stuck rollout moves |
+| _(core)_            | `services`          | get, list, create, update, delete        | Manage MCP server Services                                                      |
+| _(core)_            | `configmaps`        | get, list, create, update, delete        | Manage the remote egress proxy nginx config                                     |
+| _(core)_            | `secrets`           | get, list, watch                         | Read auth tokens, validate `envSecret`, re-enqueue on change                    |
 
 In `mcp-host` (`deploy/base/mcp-host/rbac.yaml`), the controller additionally manages per-Host identity and SharedFileSystem resources: `hosts` (get, list, watch), `sharedfilesystems` + `sharedfilesystems/status`, `batch/jobs`, `deployments`, `services`, `persistentvolumeclaims`, `networkpolicies`, `serviceaccounts`, `roles`/`rolebindings`, `configmaps` (get, watch, list), `pods` (get, list), and `secrets` with **get, watch, list, create, update, patch, delete** — it creates the per-Host `host-<hostRef>-mcp-host-runtime-tokens` Secret and the per-Host ServiceAccount + Role + RoleBinding on every reconcile.
 

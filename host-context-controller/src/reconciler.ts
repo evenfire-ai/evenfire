@@ -21,6 +21,7 @@ import {
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from './constants'
+import { evaluateDeploymentRollout } from './deploymentRollout'
 import { K8S_REQUEST_TIMEOUT_CODE, makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import { hccLogger } from './logger'
 import {
@@ -777,32 +778,9 @@ export class McpServerReconciler {
   }
 
   /**
-   * Read a Deployment's rollout state, generation-aware.
-   *
-   * `readyReplicas > 0` is NOT enough (issue #223): during a rolling update the
-   * OLD pod is still Ready, so a new pod that never starts would be reported as
-   * healthy. A rollout has actually converged only when the controller has
-   * observed the current generation AND every replica is updated, ready, and
-   * available.
-   *
-   * `totalReplicas === updatedReplicas` is the part that catches a FAILED
-   * rollout of a credential rotation (issue #223, E2): with replicas=1 and the
-   * default RollingUpdate (maxSurge=1, maxUnavailable=0), a new pod that
-   * crash-loops on a bad credential never becomes Ready, so Kubernetes keeps
-   * the OLD pod. That old pod holds readyReplicas=1 and availableReplicas=1, so
-   * unavailableReplicas stays 0 and updatedReplicas reaches 1 — every other
-   * signal looks converged. Only `status.replicas` (total managed pods) reveals
-   * the leftover: it stays at 2 while the new pod crash-loops, and drops to 1
-   * only once the rollout truly completes. Without this check the poll would
-   * report a failed rotation as healthy and never write RolloutIncomplete.
-   *
-   * `detail` carries the numbers into status conditions so a stuck rollout says
-   * what is stuck instead of just "not ready".
-   *
-   * `generation` is the Deployment's `metadata.generation`, exposed so the
-   * readiness poll can tell "same rollout, keep counting" apart from "NEW
-   * rollout, fresh window" (issue #223, E2). It plays no part in the
-   * readiness verdict above. null when the Deployment could not be read.
+   * Read a Deployment's rollout state; `evaluateDeploymentRollout` holds the
+   * readiness formula. `generation` is null when the Deployment could not be
+   * read.
    *
    * `readFailure` carries the error of a failed read, so a reconcile can tell
    * "the read failed" apart from "the rollout is not ready" (#1338 H3).
@@ -818,29 +796,7 @@ export class McpServerReconciler {
   }> {
     try {
       const deployment = await this.appsApi.readNamespacedDeployment({ name, namespace })
-      const desired = deployment.spec?.replicas ?? 1
-      const generation = deployment.metadata?.generation ?? 0
-      const observedGeneration = deployment.status?.observedGeneration ?? 0
-      const updatedReplicas = deployment.status?.updatedReplicas ?? 0
-      const readyReplicas = deployment.status?.readyReplicas ?? 0
-      const totalReplicas = deployment.status?.replicas ?? 0
-      const unavailableReplicas = deployment.status?.unavailableReplicas ?? 0
-
-      const ready =
-        observedGeneration >= generation &&
-        updatedReplicas === desired &&
-        readyReplicas === desired &&
-        totalReplicas === updatedReplicas &&
-        unavailableReplicas === 0
-
-      return {
-        ready,
-        generation,
-        detail:
-          `generation ${observedGeneration}/${generation}, ` +
-          `updated ${updatedReplicas}/${desired}, ready ${readyReplicas}/${desired}, ` +
-          `total ${totalReplicas}, unavailable ${unavailableReplicas}`,
-      }
+      return evaluateDeploymentRollout(deployment)
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       return {

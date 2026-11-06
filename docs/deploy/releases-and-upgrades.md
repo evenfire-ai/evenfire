@@ -236,6 +236,7 @@ Read the notes for every release you skip over, not only the target release.
 | [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.x; Node 25+ blocks its network. |
 | [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap.          |
 | [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor) | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`. |
+| [HCC Deployment watch RBAC](#hcc-deployment-watch-rbac) | Every cluster. Apply the updated Role before you roll the new host-context-controller image. |
 
 #### Snippet runner Node permissions
 
@@ -345,6 +346,21 @@ only, for example
 `kubectl -n rpc-proxy get secret rpc-proxy-secrets -o go-template='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}'`;
 do not print its values. rpc-proxy reads these values at startup, so the new
 default and the cap check apply when the new pods start.
+
+### HCC Deployment watch RBAC
+
+host-context-controller (HCC) now watches its managed Deployments in `mcp-server`,
+so its Role there needs `watch` on `deployments`. Apply the Role before you roll
+the new HCC image. If your CD identity may not patch Roles, re-run
+`deploy/scripts/bootstrap-rbac.sh` before upgrading.
+
+If the image rolls first, the list succeeds, the watch answers 403, and the
+informer retries at up to 30 s with a warning per attempt, with
+`clerum_hcc_deployment_informer_running` at 0. HCC readiness does not depend on
+the informer. While the informer is down, a stuck rollout recovers only at the
+next NetworkPolicy pass, and a Control UI credential rotation that converges
+between 120 s and 180 s reports a false failure, because the condition stays
+False until that pass.
 
 ### mcp-host authority staleness floor
 
