@@ -47,7 +47,7 @@ for rendered in "$@"; do
     # (issue #1350). The overlay pins the 180s production default against the 30s
     # interval, which absorbs four missed HCC polls (issue #425).
     #
-    # #1338 L6: besides the explicit literal pins (plan-1350 D2), the rendered
+    # #1338: besides the explicit literal pins (#1350), the rendered
     # pair is checked against the rule itself, with its constants and defaults
     # extracted from mcp-host/src/config.ts. Every failing check of the pair is
     # reported, so the pins and the rule check each keep their own message.

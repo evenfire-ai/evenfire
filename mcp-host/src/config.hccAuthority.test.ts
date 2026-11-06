@@ -175,7 +175,7 @@ describe('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL parsing (issue #1353)', () => {
   })
 })
 
-describe("the validator's T is the inventory poll's real timeout (#1338 L3)", () => {
+describe("the validator's T is the inventory poll's real timeout (#1338)", () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
@@ -223,7 +223,7 @@ describe("the validator's T is the inventory poll's real timeout (#1338 L3)", ()
   })
 })
 
-describe('the poll-interval ceiling the docs state (#1338 L7)', () => {
+describe('the poll-interval ceiling the docs state (#1338)', () => {
   it('accepts a 56333 ms interval under the 180000 ms default and rejects 56334', async () => {
     const { validateHccAuthorityTiming, CONTEXT_MAPPER_REQUEST_TIMEOUT_MS } =
       await import('./config')

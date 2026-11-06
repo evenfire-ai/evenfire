@@ -334,7 +334,7 @@ assert_rejected \
   'NP-08 render contract: CLERUM_CONTEXT_MAPPER_POLL_INTERVAL must be "30000"' \
   'mcp-host context mapper poll interval of 60000ms'
 
-# #1338 L6: the rule itself, computed from mcp-host/src/config.ts. 101000 below
+# #1338: the rule itself, computed from mcp-host/src/config.ts. 101000 below
 # is produced by the contract's computation, not typed into it.
 authority_staleness_below_rule="${tmpdir}/authority-staleness-below-rule.yaml"
 mutate_render authority-staleness-below-rule "${authority_staleness_below_rule}"

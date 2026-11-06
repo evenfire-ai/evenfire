@@ -293,7 +293,7 @@ async function metricValue(name: string, labels: Record<string, string>): Promis
   )
 }
 
-describe('SecretInformer resume mode (#1338 F2 Layer B)', () => {
+describe('SecretInformer resume mode (#1338)', () => {
   const NS = 'mcp-server'
   let api: ReturnType<typeof fakeSecretApiserver>
   let events: SecretEvent[]

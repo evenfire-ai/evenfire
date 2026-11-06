@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cluster-free tests for scripts/e2e/_lib/host-log-window.sh (issue #1338 L5):
+# Cluster-free tests for scripts/e2e/_lib/host-log-window.sh (issue #1338):
 # a Host log read counts only when it provably covers the whole window.
 set -u
 

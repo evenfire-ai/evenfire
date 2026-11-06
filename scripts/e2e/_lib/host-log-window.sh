@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Read a Host runtime's log for a time window, and prove the read is complete
-# (issue #1338 L5).
+# (issue #1338).
 #
 # `kubectl logs deployment/<host> --since-time=...` reads the current
 # containers of one pod. A container that restarted inside the window lost the

@@ -3221,7 +3221,7 @@ describe('McpServerWatcher startup', () => {
     await Promise.all([blocker, convergence])
 
     // MODIFIED is Secret-change evidence for every server that referenced
-    // the Secret when the event arrived (#1338 F2 Layer A).
+    // the Secret when the event arrived (#1338).
     expect(
       reconciler.recordSecretChangeEvidence.mock.calls.map(([name]: [string]) => name).sort()
     ).toEqual([currentServer.name, staleServer.name].sort())

@@ -1243,7 +1243,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
       name: 'pg',
       namespace: 'mcp-server',
     })
-    // #1338 H3 (D1.b): the fail-closed verdict is published in memory before
+    // #1338: the fail-closed verdict is published in memory before
     // the retract, so a retract that throws no longer leaves the previous
     // (here: never-reconciled) verdict behind.
     expect(reconciler.getStatus('pg')).toMatchObject({
@@ -2998,7 +2998,7 @@ describe('unconfigured inventory authority fails closed (G1)', () => {
   })
 })
 
-// ─── #1338 H3: a failed Kubernetes call does not withdraw a published verdict ──
+// ─── #1338: a failed Kubernetes call does not withdraw a published verdict ──
 
 type H3LogEntry = { level: string; message: string; fields: any }
 
@@ -3173,7 +3173,7 @@ async function h3ReadyCluster(server = h3Server()) {
   return f
 }
 
-describe('#1338 H3 D1.a — a Secret read error keeps an authoritative verdict', () => {
+describe('#1338: a Secret read error keeps an authoritative verdict', () => {
   let logs: ReturnType<typeof captureH3Logs>
   beforeEach(() => {
     logs = captureH3Logs()
@@ -3399,7 +3399,7 @@ describe('#1338 H3 D1.a — a Secret read error keeps an authoritative verdict',
     expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
   })
 
-  // #1338 F2 Layer A inverts the residual this test used to pin: evidence is
+  // Durable Secret-change evidence inverts the residual this test used to pin: evidence is
   // reconciler state, so a reconcile superseded at entry no longer loses it,
   // and the next ReadError publishes not-ready instead of keeping ready.
   it('U14 Secret-change evidence survives a reconcile superseded at entry, so the next ReadError publishes', async () => {
@@ -3447,7 +3447,7 @@ describe('#1338 H3 D1.a — a Secret read error keeps an authoritative verdict',
   ]
 
   it.each(NON_TRANSIENT_READ_FAILURES)(
-    'U16 publishes not-ready over a ready verdict when the Secret read fails with %s (#1338 F1)',
+    'U16 publishes not-ready over a ready verdict when the Secret read fails with %s (#1338)',
     async (_label, failure) => {
       const server = h3Server()
       const f = await h3ReadyCluster(server)
@@ -3527,7 +3527,7 @@ describe('#1338 H3 D1.a — a Secret read error keeps an authoritative verdict',
     ),
     ['the request deadline', () => h3Timeout()] as const,
   ])(
-    'U18 keeps a ready verdict when the Secret read fails with %s (#1338 F3)',
+    'U18 keeps a ready verdict when the Secret read fails with %s (#1338)',
     async (_label, failure) => {
       const server = h3Server()
       const f = await h3ReadyCluster(server)
@@ -3724,7 +3724,7 @@ describe('validateSecret structured logs', () => {
   })
 })
 
-describe('#1338 F3 — only listed transport codes are transient', () => {
+describe('#1338: only listed transport codes are transient', () => {
   let logs: ReturnType<typeof captureH3Logs>
   beforeEach(() => {
     logs = captureH3Logs()
@@ -3775,7 +3775,7 @@ describe('#1338 F3 — only listed transport codes are transient', () => {
   })
 })
 
-describe('#1338 H3 D1.b — a fail-closed verdict withdraws readiness before the retract', () => {
+describe('#1338: a fail-closed verdict withdraws readiness before the retract', () => {
   let logs: ReturnType<typeof captureH3Logs>
   beforeEach(() => {
     logs = captureH3Logs()
@@ -3880,7 +3880,7 @@ describe('#1338 H3 D1.b — a fail-closed verdict withdraws readiness before the
   })
 })
 
-describe('#1338 H3 D2 — out-of-pass obligations reach the incomplete-reconciliation listener', () => {
+describe('#1338: out-of-pass obligations reach the incomplete-reconciliation listener', () => {
   let logs: ReturnType<typeof captureH3Logs>
   beforeEach(() => {
     logs = captureH3Logs()
@@ -4434,7 +4434,7 @@ describe('#1338 H3 D2 — out-of-pass obligations reach the incomplete-reconcili
     expect(f.listener).not.toHaveBeenCalled()
   })
 
-  it('U9 N4 a call followed by a queued successor leaves the report to the successor', async () => {
+  it('U9 a call followed by a queued successor leaves the report to the successor', async () => {
     const server = h3Server()
     const f = await h3ReadyCluster(server)
     const firstRead = deferred()
@@ -4456,7 +4456,7 @@ describe('#1338 H3 D2 — out-of-pass obligations reach the incomplete-reconcili
   })
 })
 
-describe('#1338 H3 N1 — transient failures of the other managed reconcile calls', () => {
+describe('#1338: transient failures of the other managed reconcile calls', () => {
   let logs: ReturnType<typeof captureH3Logs>
   beforeEach(() => {
     logs = captureH3Logs()
@@ -4499,7 +4499,7 @@ describe('#1338 H3 N1 — transient failures of the other managed reconcile call
   ] as const
 
   it.each(SITES)(
-    'N1 keeps an authoritative ready verdict when the %s call times out',
+    'keeps an authoritative ready verdict when the %s call times out',
     async (site, failingCalls) => {
       const server = handshakeServer()
       const f = await h3ReadyCluster(server)
@@ -4528,7 +4528,7 @@ describe('#1338 H3 N1 — transient failures of the other managed reconcile call
   )
 
   it.each(SITES)(
-    'N1 still publishes not-ready for a new generation when the %s call times out',
+    'still publishes not-ready for a new generation when the %s call times out',
     async (site, failingCalls, message) => {
       const server = handshakeServer()
       const f = await h3ReadyCluster(server)
@@ -4552,7 +4552,7 @@ describe('#1338 H3 N1 — transient failures of the other managed reconcile call
     data: { password: storedSecret('rotated-fixture-input-value') },
   }
 
-  it('O1 a restored ready verdict with a failing read has no maximum age: it is still kept at +1 h', async () => {
+  it('a restored ready verdict with a failing read has no maximum age: it is still kept at +1 h', async () => {
     vi.useFakeTimers()
     const f = h3Cluster()
     const server = persistReadySeed(h3Server())
@@ -4569,7 +4569,7 @@ describe('#1338 H3 N1 — transient failures of the other managed reconcile call
     expect(f.patches()).toBe(0)
   })
 
-  it('O1 a confirmed ready verdict with a failing read is kept at +1 h', async () => {
+  it('a confirmed ready verdict with a failing read is kept at +1 h', async () => {
     vi.useFakeTimers()
     const server = h3Server()
     const f = await h3ReadyCluster(server)
@@ -4584,7 +4584,7 @@ describe('#1338 H3 N1 — transient failures of the other managed reconcile call
     expect(await reconcileCallFailures('secret_read', 'verdict_kept')).toBe(keptBefore + 1)
   })
 
-  it('O1 a Secret revision other than the applied one publishes not-ready when a later call times out', async () => {
+  it('a Secret revision other than the applied one publishes not-ready when a later call times out', async () => {
     const server = h3Server()
     const f = await h3ReadyCluster(server)
     f.coreApi.readNamespacedSecret.mockResolvedValueOnce(rotatedSecret)
@@ -4602,7 +4602,7 @@ describe('#1338 H3 N1 — transient failures of the other managed reconcile call
     )
   })
 
-  it('O1 an ensureDeployment that applied nothing records no revision', async () => {
+  it('an ensureDeployment that applied nothing records no revision', async () => {
     const server = h3Server()
     const f = await h3ReadyCluster(server)
     const ensureDeployment = vi
@@ -4622,7 +4622,7 @@ describe('#1338 H3 N1 — transient failures of the other managed reconcile call
   })
 
   it.each(SITES)(
-    'N1 publishes not-ready when the %s call times out with a Secret change pending',
+    'publishes not-ready when the %s call times out with a Secret change pending',
     async (site, failingCalls, message) => {
       const server = handshakeServer()
       const f = await h3ReadyCluster(server)
@@ -4639,7 +4639,7 @@ describe('#1338 H3 N1 — transient failures of the other managed reconcile call
     }
   )
 
-  it('N1 publishes not-ready when this reconcile had to write the runtime before the call failed', async () => {
+  it('publishes not-ready when this reconcile had to write the runtime before the call failed', async () => {
     const server = h3Server()
     const f = await h3ReadyCluster(server)
     f.coreApi.readNamespacedSecret.mockResolvedValueOnce({
@@ -4662,7 +4662,7 @@ describe('#1338 H3 N1 — transient failures of the other managed reconcile call
     ['a 409', () => Object.assign(new Error('conflict'), { code: 409 })],
     ['a 422', () => Object.assign(new Error('invalid'), { code: 422 })],
     ['an untyped error', () => new Error('opaque failure')],
-  ])('N1 publishes not-ready when the handshake fails with %s', async (_label, failure) => {
+  ])('publishes not-ready when the handshake fails with %s', async (_label, failure) => {
     const server = handshakeServer()
     const f = await h3ReadyCluster(server)
     f.customApi.patchNamespacedCustomObject.mockRejectedValueOnce(failure())

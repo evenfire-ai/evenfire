@@ -671,7 +671,7 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
     })
   })
 
-  describe('#1338 H3 D2: an out-of-pass obligation gets the McpServer lane retry', () => {
+  describe('#1338: an out-of-pass obligation gets the McpServer lane retry', () => {
     const witness = 'runtime-witness'
     const peer = 'runtime-peer'
     let secretReads: Map<string, number>
@@ -1634,7 +1634,7 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       for (const name of names) expect(fixture.deployments.has(name)).toBe(true)
     })
 
-    it('I15 evidence for a server that left the inventory no longer requests recovery passes (#1338 M1)', async () => {
+    it('I15 evidence for a server that left the inventory no longer requests recovery passes (#1338)', async () => {
       fixture.server.spec.managed = false
       const state = await startCertified()
       state.reconciler.recordSecretChangeEvidence(witness)

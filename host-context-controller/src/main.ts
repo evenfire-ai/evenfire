@@ -258,7 +258,7 @@ async function main(): Promise<void> {
   if (!config.devMode && provider instanceof McpServerWatcher) {
     const kc = getKubeConfig()
     if (kc) {
-      // #1338 F2 Layer B, user decision D-C (1): only this informer runs in
+      // #1338: only this informer runs in
       // resume mode. Each page of its list runs on HCC's request deadline.
       const secretListApi = makeK8sApiClientWithDeadline(
         kc,
@@ -302,7 +302,7 @@ async function main(): Promise<void> {
             hccLogger.error('[Main] reconcileChannelReaderRevision failed', { err })
           })
         },
-        // D-C (1): replay mode until this consumer has its own retry owner.
+        // Replay mode until this consumer has its own retry owner (#1360).
         { mode: 'replay' }
       )
       try {
@@ -331,7 +331,7 @@ async function main(): Promise<void> {
             hccLogger.error('[Main] reconcileLlmHookByEnvSecret failed', { err })
           })
         },
-        // D-C (1): replay mode until this consumer has its own retry owner.
+        // Replay mode until this consumer has its own retry owner (#1360).
         { mode: 'replay' }
       )
       try {

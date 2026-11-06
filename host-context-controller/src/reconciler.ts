@@ -79,7 +79,7 @@ export type SecretValidationResult =
       message: string
       /**
        * Set only on ReadError: `isTransientKubernetesFailure` of the read
-       * error, classified where the error still exists (#1338 F1).
+       * error, classified where the error still exists (#1338).
        */
       transient?: boolean
     }
@@ -143,7 +143,7 @@ export type SecretAccessProbeOutcome = 'allowed' | 'denied' | 'failed' | 'no-tar
 
 /**
  * Transport error codes that mean the request got no answer from the
- * apiserver and that resolve without a change to HCC (#1338 F3):
+ * apiserver and that resolve without a change to HCC (#1338):
  * - ECONNRESET, EPIPE: the connection broke mid-request;
  * - ECONNREFUSED: the apiserver is restarting;
  * - ETIMEDOUT: the connect timed out;
@@ -483,7 +483,7 @@ export class McpServerReconciler {
    */
   private readonly verdictsAwaitingExternalChange = new Map<string, VerdictAwaitingExternalChange>()
 
-  // #1338 H3 (D2): only the fleet lane reads pendingReconciliations, and only
+  // #1338: only the fleet lane reads pendingReconciliations, and only
   // at the end of its own pass. Work that runs outside a pass (watch events,
   // SecretInformer events, readiness-poll ticks) reports an obligation it
   // leaves through this listener, so the watcher can arm the lane's retry.
@@ -496,9 +496,9 @@ export class McpServerReconciler {
   private readonly fleetPassFences = new WeakSet<() => boolean>()
 
   /**
-   * #1338 F2 Layer A: Secret-change evidence (E of user decision Q1 (a)) is
+   * #1338: Secret-change evidence is
    * per-server state, not an argument of one reconcile call, so a superseded
-   * reconcile, a fleet pass or a D2 retry still sees it. The value is the
+   * reconcile, a fleet pass or a retry of the McpServer lane still sees it. The value is the
    * sequence number of the latest record. An entry is discharged only by a
    * completed reconcile that started after it was recorded (seq <= the
    * watermark taken when that reconcile started), or by a completed delete.
@@ -514,8 +514,8 @@ export class McpServerReconciler {
 
   /**
    * True while a server still in the inventory carries undischarged evidence.
-   * Entries for names the inventory no longer holds are pruned here (#1338
-   * M1): a server that left the inventory without a delete reaching this
+   * Entries for names the inventory no longer holds are pruned here (#1338):
+   *  a server that left the inventory without a delete reaching this
    * reconciler (a relist that dropped it, a WRC-owned server with no
    * Deployment to clean up) has nothing left to converge.
    */
@@ -647,7 +647,7 @@ export class McpServerReconciler {
   }
 
   /**
-   * Wire the owner of obligations left outside a fleet pass (#1338 H3, D2).
+   * Wire the owner of obligations left outside a fleet pass (#1338).
    * Called once per incomplete out-of-pass reconcile, per incomplete
    * out-of-pass delete, and per readiness-poll tick that records an
    * obligation.
@@ -839,7 +839,7 @@ export class McpServerReconciler {
    * read.
    *
    * `readFailure` carries the error of a failed read, so a reconcile can tell
-   * "the read failed" apart from "the rollout is not ready" (#1338 H3).
+   * "the read failed" apart from "the rollout is not ready" (#1338).
    */
   private async readDeploymentRollout(
     name: string,
@@ -1104,7 +1104,7 @@ export class McpServerReconciler {
 
     const secretName = server.spec.envSecret.name
 
-    // L4 (#1338 H3): the try covers the read call only. A failure while
+    // #1338: the try covers the read call only. A failure while
     // hashing or checking the data is a defect in HCC, not a transient read
     // error, so it rejects reconcile() instead of becoming `ReadError`.
     let secret: k8s.V1Secret
@@ -2912,7 +2912,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   }
 
   /**
-   * #1338 H3 (D1.a). A failed Secret read observed nothing about the runtime,
+   * #1338. A failed Secret read observed nothing about the runtime,
    * which the ReadError branch leaves running. Over an authoritative verdict
    * (same uid and generation in memory, or a generation-matched persisted
    * Ready) it may therefore publish nothing: no in-memory change and no
@@ -2920,7 +2920,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * credentialRevision does not move. The rule, with P the published verdict
    * and E undischarged Secret-change evidence for this server, keeps iff
    * `P.authoritative && (!P.ready || (transient && !E))`:
-   * - a ready verdict is kept only for a transient read failure (F1) and only
+   * - a ready verdict is kept only for a transient read failure and only
    *   while no Secret change is pending;
    * - a not-ready verdict, fail-closed included, is kept unconditionally, so a
    *   ReadError never overwrites SecretNotFound and the policy intent cannot
@@ -2948,7 +2948,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   }
 
   /**
-   * #1338 H3 (N1). The same rule for the other Kubernetes calls of a managed
+   * #1338. The same rule for the other Kubernetes calls of a managed
    * reconcile (resource sync, pre-deploy handshake, rollout read): a call that
    * failed for a transport or server reason observed nothing about the
    * runtime, so an authoritative ready verdict is kept. The verdict is
@@ -3022,7 +3022,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       .catch(() => undefined)
       .then(async () => {
         if (!isCurrent()) return
-        // #1338 F2 Layer A (M1): the watermark is taken where the reconcile
+        // #1338: the watermark is taken where the reconcile
         // starts, before any branch, so every completed return discharges
         // only evidence recorded before this reconcile could observe it.
         const watermark = this.secretEvidenceSeq
@@ -3040,7 +3040,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       if (latest) {
         this.inFlight.delete(key)
       }
-      // #1338 H3 (D2): fulfilled or rejected, an obligation this call leaves
+      // #1338: fulfilled or rejected, an obligation this call leaves
       // has no timer unless a fleet pass issued the call. A queued successor
       // reports for itself, and superseded work belongs to the event that
       // superseded it.
@@ -3138,7 +3138,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       let cleanupComplete = true
       let retract: RetractManagedRuntimeResult | undefined
       if (withdrawRuntime) {
-        // #1338 H3 (D1.b): the Secret verdict is known here, whatever the
+        // #1338: the Secret verdict is known here, whatever the
         // retract does. Withdraw readiness before its first await: the retract
         // can throw, be denied, or end with a declined write, and each of those
         // returns below before the status write. Retiring the poll first stops
@@ -3198,7 +3198,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // Ensure resources exist and are up to date. A create or replace attempt, or
     // a Secret revision other than the one this process last applied, means the
     // live runtime differed from desired (or was absent), so a later transient
-    // failure in this reconcile must not keep the published verdict (#1338 H3, N1).
+    // failure in this reconcile must not keep the published verdict (#1338).
     const knownRevision = this.appliedSecretRevisions.get(server.name)
     let runtimeDiffers = knownRevision !== undefined && knownRevision !== secretResult.revision
     const noteRuntimeWrite = (): void => {
@@ -3543,7 +3543,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       const complete = await this.deleteRuntimeResources(name, namespace, () =>
         this.orphanDeleteAllowed(name, namespace, capturedAuthority)
       )
-      // #1338 M1: a completed delete clears Secret-change evidence on both
+      // #1338: a completed delete clears Secret-change evidence on both
       // delete paths (a watch DELETED and a fleet-pass orphan cleanup).
       if (complete) this.secretChangeEvidence.delete(name)
       if (complete && this.pendingReconciliations.get(name) === obligation) {
@@ -3551,7 +3551,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         this.clearStatus(name)
       }
     } finally {
-      // #1338 H3 (D2, N5): an orphan delete issued by fullReconcile reports
+      // #1338: an orphan delete issued by fullReconcile reports
       // through the pass end; any other delete owns its obligation here.
       if (!owner.fleetPassOwned && this.pendingReconciliations.has(name)) {
         this.notifyIncompleteReconciliation(name)

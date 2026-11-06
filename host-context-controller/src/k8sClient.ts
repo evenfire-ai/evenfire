@@ -252,7 +252,7 @@ type CompletedInventoryRevision = { contextRevision: number; serverRevision: num
 // A scoped McpServer pass retries only names left incomplete by a pass whose
 // effects all ran under this inventory revision, or names an out-of-pass
 // reconcile left incomplete while that same revision was already certified
-// (#1338 H3, D2). 'full' covers the fleet.
+// (#1338). 'full' covers the fleet.
 type McpServerConvergenceRequest =
   | 'full'
   | (CompletedInventoryRevision & { names: ReadonlySet<string> })
@@ -966,7 +966,7 @@ export class McpServerWatcher implements McpServerProvider {
   // member cannot block unrelated live events while same-resource updates
   // still retain last-writer ordering.
   private readonly mcpServerReconciliationQueues = new Map<string, KeyedReconciliationQueue>()
-  // #1338 F2 Layer A: `namespace/name` of Secrets that changed while the
+  // #1338: `namespace/name` of Secrets that changed while the
   // McpServer inventory was not authoritative. Bounded by the Secrets in the
   // namespace and emptied at every authority gain (restartMcpServerWatch).
   private readonly unroutedSecretChanges = new Set<string>()
@@ -1602,7 +1602,7 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
-   * #1338 F2 Layer A: route the Secret changes deferred while the inventory
+   * #1338: route the Secret changes deferred while the inventory
    * was not authoritative against the inventory just installed. The recovery
    * decision that follows sees the evidence and requests a full convergence.
    */
@@ -2742,7 +2742,7 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
-   * The mcp-server SecretInformer's consumer (#1338 F5). It passes the event
+   * The mcp-server SecretInformer's consumer (#1338). It passes the event
    * type through unchanged: that type decides whether the change is evidence.
    */
   readonly handleSecretEvent = (evt: SecretEvent): void => {
@@ -2871,9 +2871,9 @@ export class McpServerWatcher implements McpServerProvider {
    * event.
    *
    * `eventType` decides whether the change is Secret-change evidence:
-   * MODIFIED and DELETED are, ADDED is not (#1338 H3, user decision Q1 (a)).
+   * MODIFIED and DELETED are, ADDED is not (#1338).
    * The evidence is recorded before any authority check, as reconciler state
-   * (F2 Layer A): while the McpServer inventory is not authoritative the
+   * (#1338): while the McpServer inventory is not authoritative the
    * Secret is kept unrouted and routed at the next authority gain, whose
    * recovery decision then requests a full convergence.
    */
@@ -3998,7 +3998,7 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
-   * #1338 H3 (D2): the owner of an obligation a reconcile left outside a fleet
+   * #1338: the owner of an obligation a reconcile left outside a fleet
    * pass (watch, SecretInformer, readiness poll). The retry is scoped to the
    * name only while the current inventory revision is already certified, so
    * a scoped success re-asserts that certificate and never certifies an

@@ -4,7 +4,7 @@ import type { SecretList, SecretListPage, WatchLike } from '../informers/secretI
 
 /**
  * A fake apiserver for one namespace's Secrets with real watch semantics
- * (#1338 F2 Layer B tests):
+ * (#1338 resume-mode tests):
  * - a watch without `resourceVersion` sends a synthetic ADDED for every
  *   existing Secret, then live changes;
  * - a watch with `resourceVersion` sends only the changes made after it;

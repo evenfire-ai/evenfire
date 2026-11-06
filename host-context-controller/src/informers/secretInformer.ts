@@ -10,7 +10,7 @@
  * - `replay`: every connect watches without a resourceVersion, so the
  *   apiserver replays every Secret as ADDED after each reconnect. The
  *   informer holds no state between connections.
- * - `resume` (#1338 F2 Layer B): the informer keeps a metadata-only cache
+ * - `resume` (#1338): the informer keeps a metadata-only cache
  *   (name, uid, resourceVersion) and the last resourceVersion it saw. A
  *   reconnect resumes the watch from that resourceVersion, so a reconnect
  *   after which nothing changed emits nothing. When a resume is impossible
@@ -328,7 +328,7 @@ export class SecretInformer {
       return
     }
     if (cached === undefined) {
-      // Genuinely first seen by this process (Q1 (a): not evidence).
+      // Genuinely first seen by this process (ADDED is not change evidence).
       this.emit({ type: 'ADDED', name, namespace })
       return
     }
