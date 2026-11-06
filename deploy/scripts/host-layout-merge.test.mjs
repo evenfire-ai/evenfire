@@ -467,13 +467,13 @@ test('an orphan check Pod takes the HCC pull Secret: empty means none, a name is
 })
 
 test('a duplicated HCC env entry resolves to the last one, as Kubernetes does', () => {
-  const secret = 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET'
+  const pullSecretEnv = 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET'
   for (const first of [
-    { name: secret, value: 'first' },
-    { name: secret, valueFrom: { secretKeyRef: { name: 's', key: 'k' } } },
+    { name: pullSecretEnv, value: 'first' },
+    { name: pullSecretEnv, valueFrom: { secretKeyRef: { name: 's', key: 'k' } } },
   ]) {
     const f = fleet()
-    f.hcc = hcc([first, { name: secret, value: 'regcred' }])
+    f.hcc = hcc([first, { name: pullSecretEnv, value: 'regcred' }])
     f.pvcs.push(pvc('delta'))
     f.checks['delta-workspace'] = { output: 'WILL_MERGE\n' }
     const r = verify(f)
