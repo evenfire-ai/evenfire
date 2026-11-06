@@ -416,7 +416,8 @@ family, or an "OpenAI-compatible" request shape.
   `LLM_CATALOG_SYNC_INTERVAL_MS`. Each run enables at most
   `LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` (default 100) new models
   per provider and `LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` (default 300) in total;
-  both accept 1–1000 and the rest wait for the next run, the providers further
+  both accept 1–1000 and the rest wait for the next sync run (with the cron off,
+  a manual sync or a restart), the providers further
   down `PROVIDER_IDS` after the ones ahead of them. Without the cron, one boot
   sync still runs a few seconds after start (`LLM_CATALOG_BOOT_SYNC_ENABLED`,
   default `true`), so run

@@ -71,7 +71,8 @@ The catalog sync enables a new model only when its provider's catalog policy is
 ON and the model is eligible. One run enables at most
 `LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` models per provider
 (default 100) and `LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` in total (default
-is 300); both accept 1–1000, and the rest wait for the next run. The newest
+is 300); both accept 1–1000, and the rest wait for the next sync run (the cron's next
+tick, a manual sync or a restart; with the cron off nothing runs on its own). The newest
 releases of a provider go first, and the total is handed out in the fixed
 provider order of `PROVIDER_IDS`, so the providers further down wait for the
 ones ahead. See

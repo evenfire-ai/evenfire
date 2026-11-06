@@ -176,7 +176,9 @@ cannot decide (see "Offline installations"). Whether an inserted row starts
   `PROVIDER_IDS` (`@clerum/llm-providers`, starting with `openai` and
   `claude`), so once it runs out the providers further down wait until the
   ones ahead have nothing left to enable. The models over a cap are not
-  inserted yet; the next runs pick them up, so a large catalog (for example
+  inserted yet; the next sync runs pick them up (the cron's next tick, a
+  manual sync or the boot sync of a restart; with the cron off nothing runs on
+  its own), so a large catalog (for example
   `openrouter` switched ON) completes over several runs. The sync logs a
   warning per provider while models are waiting. Do not switch that provider OFF to stop it: the
   waiting models would then be inserted disabled for good.
