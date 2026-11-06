@@ -87,7 +87,12 @@ export async function switchTeam(
       { userSessionToken: sessionToken }
     )
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 503) throw error
+    // control-api answers an ended session on this route with a bare 401
+    // (requireValidExternalSessionToken), the same body its service-credential guard
+    // sends; neither is "not a member". Both reach the client as that 401, a 503 as is.
+    if (error instanceof ControlApiError && (error.status === 401 || error.status === 503)) {
+      throw error
+    }
     return null
   }
 

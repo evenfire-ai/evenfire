@@ -43,10 +43,12 @@ export class ControlApiError extends Error {
 }
 
 /**
- * control-api declares a session ended (invalid, expired or revoked) only with its
- * public `401 {error:{code:'invalid_session'}}` envelope. A bare 401 from control-api
- * comes from its service-credential guard, i.e. from this edge's own credential, and
- * says nothing about the user's session.
+ * control-api sends the public `401 {error:{code:'invalid_session'}}` envelope from
+ * `/external/users/:id/me` and the `/external/auth/*` session routes. Every route behind
+ * its `requireValidExternalSessionToken` (`/external/users/*` except `/me`,
+ * `/external/teams/*`, `/external/members/*` and the other session-plane routes) answers
+ * an ended session with a bare 401, the same body its service-credential guard sends when
+ * it refuses this edge's credential; the two cannot be told apart.
  */
 export function isControlApiInvalidSession(error: unknown): error is ControlApiError {
   if (!(error instanceof ControlApiError) || error.status !== 401) return false
