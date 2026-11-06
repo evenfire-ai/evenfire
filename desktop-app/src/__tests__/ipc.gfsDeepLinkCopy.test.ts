@@ -6,7 +6,7 @@ type Handler = (event: unknown, payload: unknown) => Promise<unknown>
 
 const electron = vi.hoisted(() => ({
   handlers: new Map<string, Handler>(),
-  writeText: vi.fn(),
+  writeText: vi.fn(async () => undefined),
 }))
 
 vi.mock('electron', () => ({
@@ -52,6 +52,43 @@ afterEach(() => {
 describe('gfs:copyDeepLink trusted clipboard handoff', () => {
   it('creates and copies the producer URL for the exact canonical resource', async () => {
     await expect(copyHandler()(trusted, { uri: ` ${uri} ` })).resolves.toEqual({ url: sharedUrl })
+
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
+    expect(electron.writeText).toHaveBeenCalledOnce()
+    expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
+  })
+
+  it('does not report success until a pending clipboard write settles', async () => {
+    let settleWrite: (() => void) | undefined
+    electron.writeText.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          settleWrite = () => resolve()
+        })
+    )
+
+    let settled = false
+    const result = copyHandler()(trusted, { uri }).then(value => {
+      settled = true
+      return value
+    })
+
+    await vi.waitFor(() => expect(electron.writeText).toHaveBeenCalledOnce())
+    expect(settled).toBe(false)
+    if (!settleWrite) throw new Error('clipboard write did not start')
+    settleWrite()
+    await expect(result).resolves.toEqual({ url: sharedUrl })
+    expect(settled).toBe(true)
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
+    expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
+  })
+
+  it('propagates a clipboard write failure instead of reporting success', async () => {
+    electron.writeText.mockRejectedValueOnce(new Error('clipboard unavailable'))
+
+    await expect(copyHandler()(trusted, { uri })).rejects.toThrow('clipboard unavailable')
 
     expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
     expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
