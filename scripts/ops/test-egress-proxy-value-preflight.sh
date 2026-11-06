@@ -439,6 +439,45 @@ expect_output reserved-query-witness 'static: S2 query placeholder PATH'
 expect_output reserved-header-witness \
   'static: S2 authHeader X-Api-Key references reserved name NGINX_ENVSUBST_FILTER'
 
+# S2 parity with the new HCC's platform-owned predicate: the exact-case
+# KUBERNETES_ prefix and LC_ALL are screened with the reserved names,
+# without joining RESERVED_NAMES (the SC-1 section pins that list at
+# eight).
+reset_fixture
+headers='[{"header":"X-Api-Key","valueTemplate":"${KUBERNETES_SERVICE_HOST}"}]'
+add_server kubeprefix 'https://mcp.example.com/mcp?q=${KUBERNETES_PORT_443_TCP_ADDR}' \
+  'return 200 ok;' '[]' "$headers"
+run_case s2-kubernetes-prefix 1 'server=fixture-namespace/kubeprefix verdict=REJECT'
+expect_output s2-kubernetes-query-witness \
+  'static: S2 query placeholder KUBERNETES_PORT_443_TCP_ADDR names a platform-owned Kubernetes service variable'
+expect_output s2-kubernetes-header-witness \
+  'static: S2 authHeader X-Api-Key references platform-owned name KUBERNETES_SERVICE_HOST'
+
+reset_fixture
+headers='[{"header":"X-Api-Key","valueTemplate":"${LC_ALL}"}]'
+add_server lcall 'https://mcp.example.com/mcp?q=${LC_ALL}' 'return 200 ok;' '[]' "$headers"
+run_case s2-lc-all 1 'server=fixture-namespace/lcall verdict=REJECT'
+expect_output s2-lc-all-query-witness \
+  'static: S2 query placeholder LC_ALL names a reserved egress-proxy env var'
+expect_output s2-lc-all-header-witness \
+  'static: S2 authHeader X-Api-Key references reserved name LC_ALL'
+
+# A name that merely contains the prefix is an ordinary tenant name: in
+# the screened query position it still renders, resolves and reaches the
+# checker like any other value.
+reset_fixture
+add_server kubesubstring 'https://example.com/mcp?q=${MY_KUBERNETES_PORT}' \
+  'proxy_pass https://example.com/mcp?q=${MY_KUBERNETES_PORT};' \
+  "$(literal MY_KUBERNETES_PORT 'TESTKEY-CLEAN-9482')"
+run_case s2-kubernetes-substring-clean 0 \
+  'server=fixture-namespace/kubesubstring verdict=OK'
+expect_absent s2-kubernetes-substring-not-screened 'static: S2'
+if [ "$(check_ran_with MY_KUBERNETES_PORT)" = yes ]; then
+  pass s2-kubernetes-substring-resolution
+else
+  fail 's2-kubernetes-substring-resolution (no single check run saw MY_KUBERNETES_PORT)'
+fi
+
 # --- referenced names only ------------------------------------------------
 reset_fixture
 envs=$(jq -cn '[{name:"LD_PRELOAD",value:"TESTKEY-UNREFERENCED"},

@@ -40,11 +40,15 @@
 #   S1  literal URL characters the new HCC refuses after WHATWG normalization:
 #       the query (from the first "?" to the first "#"), with complete ${NAME}
 #       placeholders removed, may not hold \ ; { } $; the path may not hold $ ;.
-#   S2  a query placeholder or authHeader reference naming one of the eight
-#       reserved egress-proxy names or one of the nine FORBIDDEN_CRD_ENV_NAMES.
-# The two name lists live on the RESERVED_NAMES= and FORBIDDEN_NAMES= lines so
-# that host-context-controller's SC-1 test can compare them with the TypeScript
-# sets instead of duplicating them.
+#   S2  a query placeholder or authHeader reference naming a platform-owned
+#       variable: one of the eight reserved egress-proxy names, LC_ALL, a
+#       name with the exact-case KUBERNETES_ prefix of the service variables
+#       the kubelet injects, or one of the nine FORBIDDEN_CRD_ENV_NAMES.
+# The two enumerated lists live on the RESERVED_NAMES= and FORBIDDEN_NAMES=
+# lines so that host-context-controller's SC-1 test can compare them with
+# the TypeScript sets instead of duplicating them. LC_ALL and the
+# KUBERNETES_ prefix mirror the platform-owned predicate in reconciler.ts
+# and stay out of those lists, so the SC-1 counts remain eight and nine.
 #
 # The host rule is out of scope: an internal hostname with a trailing dot
 # (for example sentry.svc.cluster.local.) is refused by the new HCC after
@@ -147,6 +151,16 @@ epvp_kc() {
 epvp_list_has() {
   case " $2 " in
     *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# True when $1 carries the exact-case KUBERNETES_ prefix of the service
+# variables the kubelet injects into every container. A name that merely
+# contains the prefix (MY_KUBERNETES_PORT) is an ordinary tenant name.
+epvp_kubernetes_service_name() {
+  case $1 in
+    KUBERNETES_*) return 0 ;;
   esac
   return 1
 }
@@ -282,7 +296,10 @@ epvp_static_lines() {
           "$epvp_found" >>"$findings"
         ;;
       s2q)
-        if epvp_list_has "$epvp_found" "$RESERVED_NAMES"; then
+        if epvp_kubernetes_service_name "$epvp_found"; then
+          printf 'static: S2 query placeholder %s names a platform-owned Kubernetes service variable; the new HCC fails this server\n' \
+            "$epvp_found" >>"$findings"
+        elif epvp_list_has "$epvp_found" "$RESERVED_NAMES" || [ "$epvp_found" = LC_ALL ]; then
           printf 'static: S2 query placeholder %s names a reserved egress-proxy env var; the new HCC fails this server\n' \
             "$epvp_found" >>"$findings"
         elif epvp_list_has "$epvp_found" "$FORBIDDEN_NAMES"; then
@@ -301,7 +318,10 @@ epvp_static_lines() {
     [ -n "$epvp_header" ] && [ -n "$epvp_ref" ] || continue
     epvp_ref=${epvp_ref#\$}
     epvp_ref=${epvp_ref#\{}
-    if epvp_list_has "$epvp_ref" "$RESERVED_NAMES"; then
+    if epvp_kubernetes_service_name "$epvp_ref"; then
+      printf 'static: S2 authHeader %s references platform-owned name %s; the new HCC drops this header\n' \
+        "$epvp_header" "$epvp_ref" >>"$findings"
+    elif epvp_list_has "$epvp_ref" "$RESERVED_NAMES" || [ "$epvp_ref" = LC_ALL ]; then
       printf 'static: S2 authHeader %s references reserved name %s; the new HCC drops this header\n' \
         "$epvp_header" "$epvp_ref" >>"$findings"
     elif epvp_list_has "$epvp_ref" "$FORBIDDEN_NAMES"; then
