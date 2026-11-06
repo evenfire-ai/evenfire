@@ -299,7 +299,7 @@ describe('attach form', () => {
     await tick()
     const alert = screen.getByRole('alert')
     expect(alert).toHaveClass('cu-banner--error')
-    expect(alert).toHaveTextContent('egress proxy refused the new value')
+    expect(alert).toHaveTextContent('egress proxy refused a value')
     expect(alert).toHaveTextContent('Correct the value')
     // The controller's own message, verbatim — the render this path produced.
     expect(alert).toHaveTextContent(blocked.message)

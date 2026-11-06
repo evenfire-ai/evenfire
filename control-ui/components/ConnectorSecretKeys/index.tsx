@@ -311,8 +311,8 @@ export function ConnectorSecretKeys({
       ) : null}
       {phase === 'failed' && failureKind === 'egress-refused' ? (
         <div className="cu-banner cu-banner--error" role="alert">
-          The egress proxy refused the new value, so the connector is not using it. Correct the
-          value and rotate again. {phaseMessage}
+          The egress proxy refused a value, so the connector is not using it. Correct the value and
+          rotate again. {phaseMessage}
         </div>
       ) : null}
       {(phase === 'failed' && failureKind !== 'egress-refused') || phase === 'timeout' ? (

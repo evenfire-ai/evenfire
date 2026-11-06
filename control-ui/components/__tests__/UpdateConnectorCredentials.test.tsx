@@ -1004,7 +1004,7 @@ describe('UpdateConnectorCredentials — egress-proxy refusal', () => {
     fireEvent.change(within(dialog).getByLabelText('New value', { exact: false }), {
       target: { value: 'refused-value' },
     })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate', exact: true }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate' }))
     await flush()
 
     // The write succeeded, so the dialog is already closed when the refusal

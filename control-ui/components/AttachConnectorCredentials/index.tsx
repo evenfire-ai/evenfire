@@ -451,8 +451,8 @@ export function AttachConnectorCredentials({
         ) : null}
         {phase === 'failed' && failureKind === 'egress-refused' ? (
           <div role="alert" className="cu-banner cu-banner--error">
-            Credentials were attached, but the egress proxy refused the new value. Correct the
-            value, then refresh to update the credentials. {phaseMessage}
+            Credentials were attached, but the egress proxy refused a value. Correct the value, then
+            refresh to update the credentials. {phaseMessage}
           </div>
         ) : null}
         {phase === 'failed' && failureKind !== 'egress-refused' ? (

@@ -213,7 +213,7 @@ describe('EditConnectorSecretPage', () => {
     await submitRotation('api-key', 'refused-value')
     expect(screen.getByText(/Value saved. Waiting for linear-conn/)).toBeInTheDocument()
 
-    const blocked = egressValuesRefused({ at: '2026-01-01T00:00:05.000Z' })
+    const blocked = egressValuesRefused({ at: '2026-01-01T00:00:05.000Z', observedGeneration: 1 })
     mockGetMcpServer.mockResolvedValue({
       ...server({ name: 'linear-conn' }),
       status: {
@@ -236,7 +236,7 @@ describe('EditConnectorSecretPage', () => {
 
     const alert = screen.getByRole('alert')
     expect(alert).toHaveClass('cu-banner--error')
-    expect(alert.textContent).toContain('egress proxy refused the new value')
+    expect(alert.textContent).toContain('egress proxy refused a value')
     expect(alert.textContent).toContain('Correct the value')
     // The controller's own message, verbatim — the render this path produced.
     expect(alert.textContent).toContain(blocked.message)

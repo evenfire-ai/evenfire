@@ -179,7 +179,7 @@ describe('shared rollout observation', () => {
     },
     {
       label: 'a block without observedGeneration',
-      condition: egressValuesRefused({ at: FRESH }),
+      condition: egressValuesRefused({ at: FRESH, observedGeneration: undefined }),
     },
     {
       label: 'a within-class True',
@@ -207,7 +207,7 @@ describe('shared rollout observation', () => {
     // already uses for DeploymentReady success.
     const blocked = response('True', {
       timestamp: cutoff,
-      extraConditions: [egressValuesRefused({ at: FRESH })],
+      extraConditions: [egressValuesRefused({ at: FRESH, observedGeneration: 3 })],
     })
     delete blocked.metadata
     vi.mocked(getMcpServer).mockResolvedValue(blocked)

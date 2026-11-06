@@ -33,10 +33,13 @@ const DEFAULT_SECRET_NAME = 'remote-creds'
 const DEFAULT_SECRET_KEY = 'api-key'
 
 /** The instant the controller stamped the transition at, plus the generation
- *  it observed when the fixture models a current-generation verdict. Omitting
- *  `observedGeneration` models a condition written before the producer
- *  stamped one — the rollout wait must not read it as this write's verdict. */
-type Stamped = { at: string; observedGeneration?: number }
+ *  it observed when the fixture models a current-generation verdict. Pass
+ *  `undefined` explicitly to model a condition written before the producer
+ *  stamped one — the rollout wait must not read it as this write's verdict.
+ *  The field is required-but-nullable so a call site cannot drift into the
+ *  unstamped shape by omission: every real egress write carries the
+ *  server's generation. */
+type Stamped = { at: string; observedGeneration: number | undefined }
 
 function observed({ observedGeneration }: Stamped): Pick<McpServerCondition, 'observedGeneration'> {
   return observedGeneration === undefined ? {} : { observedGeneration }

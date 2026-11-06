@@ -797,8 +797,8 @@ describe('EgressProxyValuesValid producer contract — fixture builders match th
     expect(fixture.observedGeneration).toBe(7)
   })
 
-  it('the builders leave observedGeneration unstamped unless asked', () => {
-    const refused = egressValuesRefused({ at: AT })
+  it('the builders leave observedGeneration unstamped when explicitly undefined', () => {
+    const refused = egressValuesRefused({ at: AT, observedGeneration: undefined })
     expect(refused.observedGeneration).toBeUndefined()
     // Witness: the same builder still produced the producer-shaped refusal.
     expect(refused.status).toBe(egressRefusalWrite.status)
