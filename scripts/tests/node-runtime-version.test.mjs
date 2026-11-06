@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -136,6 +137,69 @@ test('the staged Desktop verifier keeps its policy and rejects missing policy fi
     copyFileSync(path.join(root, '.nvmrc'), path.join(context, '.nvmrc'))
     rmSync(path.join(context, 'scripts/check-node-version.cjs'))
     assert.equal(run('24.22.1').status, 1)
+  } finally {
+    rmSync(context, { recursive: true, force: true })
+  }
+})
+
+test('the staged Desktop verifier --check-only never executes electron or downloads', () => {
+  const context = mkdtempSync(path.join(tmpdir(), 'node-runtime-context-'))
+  try {
+    for (const filename of [
+      '.nvmrc',
+      'scripts/check-node-version.cjs',
+      'desktop-app/scripts/verify-electron-runtime.mjs',
+    ]) {
+      const destination = path.join(context, filename)
+      mkdirSync(path.dirname(destination), { recursive: true })
+      copyFileSync(path.join(root, filename), destination)
+    }
+    const electron = path.join(context, 'desktop-app/node_modules/electron')
+    const dist = path.join(electron, 'dist')
+    mkdirSync(dist, { recursive: true })
+    const runtime = path.join(dist, 'runtime')
+    writeFileSync(runtime, '#!/bin/sh\nexit 0\n')
+    chmodSync(runtime, 0o755)
+    writeFileSync(path.join(electron, 'path.txt'), 'runtime')
+    writeFileSync(
+      path.join(electron, 'package.json'),
+      JSON.stringify({ type: 'module', main: 'index.js', version: '9.9.9' })
+    )
+    // Any import of the package entry leaves a marker and explodes: passing
+    // --check-only runs below therefore prove electron was never imported.
+    writeFileSync(
+      path.join(electron, 'index.js'),
+      "import fs from 'node:fs'\n" +
+        "fs.writeFileSync(new URL('./imported.marker', import.meta.url), 'imported')\n" +
+        "throw new Error('electron index must not execute in --check-only')\n"
+    )
+    const marker = path.join(electron, 'imported.marker')
+    const verifier = pathToFileURL(
+      path.join(context, 'desktop-app/scripts/verify-electron-runtime.mjs')
+    ).href
+    const runCheckOnly = () =>
+      spawnSync(
+        process.execPath,
+        [
+          '--input-type=module',
+          '-e',
+          "Object.defineProperty(process.versions, 'node', { value: process.argv[1] }); await import(process.argv[2])",
+          '24.22.1',
+          verifier,
+          '--check-only',
+        ],
+        { encoding: 'utf8', timeout: 5_000 }
+      )
+    const materialized = runCheckOnly()
+    assert.equal(materialized.status, 0, materialized.stderr)
+    assert.match(materialized.stdout, /Electron runtime executable:.*runtime/)
+    assert.equal(existsSync(marker), false)
+    rmSync(dist, { recursive: true, force: true })
+    const cold = runCheckOnly()
+    assert.equal(cold.status, 1)
+    assert.match(cold.stderr, /not materialized and --check-only never downloads/)
+    assert.equal(existsSync(marker), false)
+    assert.equal(existsSync(dist), false)
   } finally {
     rmSync(context, { recursive: true, force: true })
   }

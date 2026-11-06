@@ -845,7 +845,8 @@ async function main() {
       QA_RECORDER_IMAGE_MODEL_UNKNOWN: models[2].model,
       QA_RECORDER_ROOT: evidence,
     }
-    command('npm', ['run', 'verify:electron', '--prefix', 'desktop-app'])
+    // Bounded pre-flight: never pay the Electron runtime download here.
+    command('npm', ['--prefix', 'desktop-app', 'run', 'verify:electron', '--', '--check-only'])
     process.stdout.write(`Image capability fixture ready: ${state.runId} (lane ${lane})\n`)
     // Playwright's JSON reporter writes this reserved inode with writeFile. Keep
     // the descriptor until the verdict; a replacement path cannot supply proof.
