@@ -744,6 +744,20 @@ jobs:
           done
           curl -sf http://127.0.0.1:18085/health || (echo "Registry never became ready" && exit 1)
 
+      # workflow-recipes `npm test` runs `tsc -b` first (pretest), which builds the
+      # packages/workflow-runtime-core project reference. Install and build that package
+      # first, as the test matrix job does, or the build fails with TS2688
+      # "Cannot find type definition file for 'node'" before any test runs.
+      - name: Install workflow-runtime-core dependencies
+        if: steps.token_check.outputs.skip != 'true'
+        working-directory: packages/workflow-runtime-core
+        run: npm ci
+
+      - name: Build workflow-runtime-core
+        if: steps.token_check.outputs.skip != 'true'
+        working-directory: packages/workflow-runtime-core
+        run: npm run build
+
       - name: Run consumer integration tests against the booted registry
         if: steps.token_check.outputs.skip != 'true'
         working-directory: workflow-recipes
@@ -848,6 +862,9 @@ jobs:
 
       - name: Test Minikube mutation and WRC recovery admission (hermetic, cluster-free)
         run: bash scripts/tests/test-minikube-mutation-boundary.sh
+
+      - name: Test egress CDN rotation cleanup witness (hermetic, cluster-free)
+        run: bash scripts/tests/test-egress-cdn-rotation-cleanup.sh
 
       - name: Test minikube sandbox-ui NetworkPolicy lint (static-policy ownership + DNS)
         run: bash scripts/tests/test-lint-networkpolicies.sh
