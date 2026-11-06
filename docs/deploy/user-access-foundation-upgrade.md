@@ -21,10 +21,13 @@ replaces step 3 of the [general order](releases-and-upgrades.md#general-order)
 Rollback goes the other way: control-api first, then External REST and Profile
 UI.
 
-`keyper-labs/evenfire-infra#143` is open: the infra pipeline does not run these
-steps in this order yet. Until it does, run the three steps by hand. With a
-single apply, old External REST pods meet the new control-api, and team create,
-team switch and password reset fail (see [The mixed window](#the-mixed-window)).
+`keyper-labs/evenfire-infra#154` implements this order in the infra deploy
+helper (it applies External REST and Profile UI first and waits for them before
+control-api). Until it is merged on the infra repository's `main` and a dev
+deploy log shows its `EDGE_PHASE apply` and `EDGE_PHASE settled` lines, run the
+three steps by hand. With a single apply, old External REST pods meet the new
+control-api, and team create, team switch and password reset fail (see
+[The mixed window](#the-mixed-window)).
 
 Before step 1:
 
@@ -94,7 +97,7 @@ ignored by the old one. The release installs no database triggers and no
 revision functions, so nothing keeps running against the old image.
 
 Logout revokes only the token it receives. A V1 token issued before a team
-switch stays valid until its own expiry (at most 12 hours), as on `dev`. A new
+switch stays valid until its own expiry (at most 7 days, 604800 s), as on `dev`. A new
 Desktop build against the old External REST removes a rejected stored token as
 before this release.
 
@@ -150,9 +153,11 @@ before this release.
 - `0132` treats every V1 session issued at or before the second of a user's
   `password_set_at` as issued before that password event, and rejects it. The
   previous release kept existing sessions when a password was set or changed,
-  and a V1 session lasts 12 hours. So a user whose password was set or changed
-  within 12 hours before the migration loses the sessions issued up to that
-  second and must sign in again. This includes the session issued in the same second
+  and a V1 session lasts 7 days (604800 s). So a user whose password was set or
+  changed within 7 days before the migration loses the sessions issued up to
+  that second and must sign in again. If the release serving before the
+  migration predates the seven-day V1 lifetime, its sessions last 12 hours and
+  only password changes in the 12 hours before the migration are affected. This includes the session issued in the same second
   when a first password was set from an invitation, and the session from which
   a user changed their password in Profile UI. No other session is affected by
   the backfill.
@@ -255,7 +260,7 @@ No rows means the database is ready for step 1. If it returns rows:
   still recorded and budgeted by user, recipe, Host and LLM secret.
 - A Google user who has only a pending invitation gets a session without a team
   until they accept the invitation.
-- Users who set or changed their password in the 12 hours before the migration
+- Users who set or changed their password in the 7 days before the migration
   must sign in again (see the `0132` bullet above).
 
 ## Variables this release does not read
