@@ -1139,6 +1139,53 @@ describe('a leftover client Secret blocks the slot', () => {
     expect(res.status).toBe(409)
     expect(res.body).toEqual({ error: 'install_in_progress' })
   })
+
+  /** Serves the seeded Secret as its JSON copy, where `creationTimestamp` is a string. */
+  async function serveSecretAsJson(
+    gw: MockGateway,
+    secretName: string,
+    mutate?: (s: { metadata: { creationTimestamp?: unknown } }) => void
+  ) {
+    const json = JSON.parse(JSON.stringify(await gw.getSecret(secretName, NS)))
+    mutate?.(json)
+    vi.spyOn(gw, 'getSecret').mockResolvedValue(json)
+  }
+
+  it('an old Secret read as JSON (string creationTimestamp) → 409 catalog_slot_residue', async () => {
+    serveEntry(remoteOAuthRow({ expectedRegistration: 'pre-registered' }))
+    const gw = new MockGateway(NS)
+    const secretName = `${canonical('user')}-oauth-client`
+    gw.seedSecret(secretName, NS, {
+      creationTimestamp: oldTimestamp(),
+      stringData: { client_id: 'orphan', client_secret: 'orphan-secret' },
+    })
+    await serveSecretAsJson(gw, secretName)
+
+    const res = await request(makeApp(gw, cimdResult))
+      .post(ROUTE)
+      .send(preRegisteredBody('client-b'))
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: 'catalog_slot_residue', secretName })
+  })
+
+  it('an unparseable creationTimestamp → install_in_progress, never residue', async () => {
+    serveEntry(remoteOAuthRow({ expectedRegistration: 'pre-registered' }))
+    const gw = new MockGateway(NS)
+    const secretName = `${canonical('user')}-oauth-client`
+    gw.seedSecret(secretName, NS, {
+      creationTimestamp: oldTimestamp(),
+      stringData: { client_id: 'orphan', client_secret: 'orphan-secret' },
+    })
+    await serveSecretAsJson(gw, secretName, s => {
+      s.metadata.creationTimestamp = 'not-a-timestamp'
+    })
+
+    const res = await request(makeApp(gw, cimdResult))
+      .post(ROUTE)
+      .send(preRegisteredBody('client-b'))
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'install_in_progress' })
+  })
 })
 
 describe('installing from a stale catalog snapshot', () => {

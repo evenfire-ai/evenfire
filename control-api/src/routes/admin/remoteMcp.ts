@@ -307,9 +307,14 @@ async function resolveCatalogInstallTarget(input: {
  */
 const CATALOG_SLOT_RESIDUE_MIN_AGE_MS = PENDING_TTL_MS
 
-/** The client deserializes `creationTimestamp` to a Date; anything else is unknown. */
+/**
+ * The typed client deserializes `creationTimestamp` to a Date, while a JSON copy of the
+ * same object carries its RFC 3339 string. Anything unparseable is unknown (NaN), which
+ * the caller treats as an install in progress.
+ */
 function creationTimeMs(value: unknown): number {
   if (value instanceof Date) return value.getTime()
+  if (typeof value === 'string') return Date.parse(value)
   return Number.NaN
 }
 
