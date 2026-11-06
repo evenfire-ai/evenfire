@@ -45,3 +45,17 @@ export type LlmProviderCatalogPolicy = {
   updated_at: string | null
   updated_by: string | null
 }
+
+/**
+ * What one catalog sync did with providers' NEW models, summed over the
+ * `providerCounts` of `POST /admin/llm-models/discovery/sync`
+ * (`CatalogSyncProviderCount` in control-api/src/services/llmCatalogSync.ts).
+ */
+export type LlmDiscoverySyncOutcome = {
+  /** Rows inserted enabled (already part of the result's `added`). */
+  autoEnabled: number
+  /** New models not inserted: auto-enable on, but the run could not decide. */
+  heldUndecidable: number
+  /** New models not inserted: the run reached its auto-enable cap. */
+  deferredByCap: number
+}

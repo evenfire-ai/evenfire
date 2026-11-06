@@ -5,7 +5,12 @@ import {
   METADATA_READ_CACHE_MAX_ENTRIES,
   METADATA_READ_TTL_MS,
 } from '@constants/readRequests'
-import type { ApiRequestError, ApiRequestOptions, LlmProviderCatalogPolicy } from './api.types'
+import type {
+  ApiRequestError,
+  ApiRequestOptions,
+  LlmDiscoverySyncOutcome,
+  LlmProviderCatalogPolicy,
+} from './api.types'
 import type { GenericDiscoveryPrefill } from './oauthGeneric.types'
 import type {
   McpSecretSummary,
@@ -2566,9 +2571,15 @@ export type LlmDiscoverySyncResult = {
   // DB commit time of this run — matches the status endpoint's `ranAt`, so the
   // "last synced" label is stable across a reload.
   ranAt: string
+  // Includes the rows inserted enabled (`outcome.autoEnabled`).
   added: number
   updated: number
   staled: number
+  // Whether the run could decide which new models to enable (live, plausible
+  // catalog). `null` when the control-api predates the field.
+  decidable: boolean | null
+  // Summed per-provider breakdown; `null` when the control-api predates it.
+  outcome: LlmDiscoverySyncOutcome | null
 }
 
 // Last-run summary from the optional status endpoint. `null` when discovery has
@@ -2583,12 +2594,49 @@ export type LlmDiscoveryStatus = {
 
 // Runs the catalog sync. New rows start disabled; only eligible models from a
 // live catalog, for a provider whose auto-enable policy is on, start enabled,
-// up to a per-run cap. Existing rows are never re-evaluated.
-export async function syncDiscovery() {
-  return apiSend(
-    'POST',
-    '/api/v1/admin/llm-models/discovery/sync'
-  ) as Promise<LlmDiscoverySyncResult>
+// up to a per-run cap. Existing rows are never re-evaluated. The body is
+// parsed, not cast: the auto-enable fields are absent on older control-api.
+export async function syncDiscovery(): Promise<LlmDiscoverySyncResult> {
+  return parseDiscoverySyncResult(await apiSend('POST', '/api/v1/admin/llm-models/discovery/sync'))
+}
+
+function syncCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
+}
+
+function sumSyncOutcome(providerCounts: unknown): LlmDiscoverySyncOutcome | null {
+  if (!providerCounts || typeof providerCounts !== 'object' || Array.isArray(providerCounts)) {
+    return null
+  }
+  const outcome: LlmDiscoverySyncOutcome = { autoEnabled: 0, heldUndecidable: 0, deferredByCap: 0 }
+  for (const entry of Object.values(providerCounts)) {
+    if (!entry || typeof entry !== 'object') continue
+    const count = entry as Record<string, unknown>
+    outcome.autoEnabled += syncCount(count.autoEnabled)
+    outcome.heldUndecidable += syncCount(count.skippedUndecidable)
+    outcome.deferredByCap += syncCount(count.deferredByCap)
+  }
+  return outcome
+}
+
+/**
+ * Normalize a raw sync body. `decidable` and `providerCounts` were added to the
+ * producer after the counters, so their absence maps to `null` (an older
+ * control-api), never to "nothing happened". An unknown `source` is read as
+ * `vendored`: the fallback is the claim that promises less about the data.
+ */
+export function parseDiscoverySyncResult(raw: unknown): LlmDiscoverySyncResult {
+  const rec = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  return {
+    source: rec.source === 'live' ? 'live' : 'vendored',
+    fetchedAt: typeof rec.fetchedAt === 'string' ? rec.fetchedAt : '',
+    ranAt: typeof rec.ranAt === 'string' ? rec.ranAt : '',
+    added: syncCount(rec.added),
+    updated: syncCount(rec.updated),
+    staled: syncCount(rec.staled),
+    decidable: typeof rec.decidable === 'boolean' ? rec.decidable : null,
+    outcome: sumSyncOutcome(rec.providerCounts),
+  }
 }
 
 // Reads the last sync run. The endpoint is optional (spec 09 §7 F2): a missing

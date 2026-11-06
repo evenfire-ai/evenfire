@@ -5,6 +5,11 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import * as api from '../../lib/api'
 import type { LlmAllowedModel } from '../../lib/api'
+import {
+  sumProviderCounts,
+  syncResultCase,
+  syncResultLegacyCase,
+} from '../../test/fixtures/llmCatalogSyncResult'
 import { catalogPolicyCase } from '../../test/fixtures/llmProviderCatalogPolicy'
 import { LlmDiscoveryPanel } from '../LlmDiscoveryPanel'
 import { ToastProvider } from '../Toast'
@@ -67,14 +72,9 @@ beforeEach(() => {
     staled: 1,
   })
   vi.mocked(api.updateLlmModel).mockResolvedValue(reviewModel)
-  vi.mocked(api.syncDiscovery).mockResolvedValue({
-    fetchedAt: '2026-07-29T12:59:59.000Z',
-    ranAt: '2026-07-29T13:00:00.000Z',
-    source: 'live',
-    added: 2,
-    updated: 12,
-    staled: 0,
-  })
+  vi.mocked(api.syncDiscovery).mockResolvedValue(
+    api.parseDiscoverySyncResult(syncResultCase('decidable_none_enabled'))
+  )
 })
 
 afterEach(() => {
@@ -93,11 +93,11 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     )
 
     expect(screen.getByText('LLM Models')).toBeInTheDocument()
-    expect(
-      screen.getByText(
-        /A new model starts enabled only if its provider's auto-enable setting is on and the model qualifies; the rest start disabled\./
-      )
-    ).toBeInTheDocument()
+    const subtitle = screen.getByText(/^The catalog sync brings in newly released models\./)
+    expect(subtitle).toHaveTextContent(
+      "If a provider's auto-enable setting is on, qualifying models are added enabled and appear in the Catalog tab; a run can hold some back until you sync again. Every other new model is added disabled and waits here for review."
+    )
+    expect(screen.queryByText(/adds new models here/)).toBeNull()
 
     expect(screen.getByRole('columnheader', { name: /Provider/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Expand OpenAI review models' })).toHaveAttribute(
@@ -258,12 +258,17 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
       })
     )
     const onRefresh = vi.fn().mockResolvedValue(undefined)
+    const synced = `+${syncResultCase('decidable_none_enabled').added} new`
+    // The sync's count must differ from both status mocks, or the assertions
+    // below cannot tell which one the status bar shows.
+    expect(synced).not.toBe('+3 new')
+    expect(synced).not.toBe('+99 new')
 
     render(<LlmDiscoveryPanel items={[reviewModel]} loading={false} onRefresh={onRefresh} />)
     fireEvent.click(screen.getByRole('button', { name: 'Sync catalog' }))
 
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1))
-    expect(screen.getByText('+2 new')).toBeInTheDocument()
+    expect(screen.getByText(synced)).toBeInTheDocument()
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Reload discovery review' })).toBeEnabled()
     )
@@ -276,9 +281,175 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
       staled: 99,
     })
 
-    await waitFor(() => expect(screen.getByText('+2 new')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(synced)).toBeInTheDocument())
     expect(screen.queryByText('+99 new')).toBeNull()
     expect(screen.getByRole('button', { name: 'Reload discovery review' })).toBeEnabled()
+  })
+})
+
+describe('LlmDiscoveryPanel sync feedback', () => {
+  function useSyncCase(body: unknown) {
+    vi.mocked(api.syncDiscovery).mockResolvedValue(api.parseDiscoverySyncResult(body))
+  }
+
+  // The status bar is also role="status", so the toast and the notice are
+  // found by their own classes, never by role alone.
+  async function syncAndReadToast(): Promise<HTMLElement> {
+    render(
+      <LlmDiscoveryPanel
+        items={[reviewModel]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Sync catalog' }))
+    return waitFor(() => {
+      const toast = document.querySelector<HTMLElement>('.cu-toast')
+      expect(toast).not.toBeNull()
+      return toast as HTMLElement
+    })
+  }
+
+  function notice(): HTMLElement | null {
+    return document.querySelector<HTMLElement>('.cu-banner--dismissible')
+  }
+
+  it('counts auto-enabled models inside "+N new" and points to the Catalog tab', async () => {
+    const body = syncResultCase('decidable_auto_enabled')
+    const enabled = sumProviderCounts(body, 'autoEnabled')
+    useSyncCase(body)
+
+    const toast = await syncAndReadToast()
+
+    expect(toast).toHaveClass('cu-toast--success')
+    expect(toast).toHaveTextContent(
+      `Synced from live: +${body.added} new (${enabled} enabled automatically), ${body.updated} updated, ${body.staled} marked stale. Enabled models are in the Catalog tab.`
+    )
+    expect(notice()).toBeNull()
+  })
+
+  it('keeps the counters alone when a decidable run enabled nothing', async () => {
+    const body = syncResultCase('decidable_none_enabled')
+    useSyncCase(body)
+
+    const toast = await syncAndReadToast()
+
+    expect(toast).toHaveClass('cu-toast--success')
+    expect(toast.querySelector('.cu-toast__text')).toHaveTextContent(
+      new RegExp(
+        `^Synced from live: \\+${body.added} new, ${body.updated} updated, ${body.staled} marked stale\\.$`
+      )
+    )
+    expect(toast).not.toHaveTextContent(/enabled automatically|could not decide/)
+    expect(notice()).toBeNull()
+  })
+
+  it('warns in a dismissible notice when a vendored run held models back', async () => {
+    const body = syncResultCase('undecidable_vendored')
+    const held = sumProviderCounts(body, 'skippedUndecidable')
+    useSyncCase(body)
+
+    const toast = await syncAndReadToast()
+
+    expect(toast).toHaveClass('cu-toast--success')
+    expect(toast).not.toHaveTextContent(/could not decide|enabled automatically/)
+    const banner = notice()
+    expect(banner).toHaveClass('cu-banner', 'cu-banner--warn')
+    expect(banner).toHaveAttribute('role', 'alert')
+    expect(banner).toHaveTextContent(
+      `Auto-enable could not decide this run (the live catalog could not be reached): ${held} new models from providers with auto-enable on were not added; run the sync again once it is reachable.`
+    )
+
+    const dismiss = screen.getByRole('button', { name: 'Dismiss sync notice' })
+    expect(banner).toContainElement(dismiss)
+    dismiss.focus()
+    expect(dismiss).toHaveFocus()
+    fireEvent.click(dismiss)
+    expect(notice()).toBeNull()
+  })
+
+  it('returns focus to the sync button when the notice is dismissed', async () => {
+    useSyncCase(syncResultCase('decidable_capped'))
+    await syncAndReadToast()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Sync catalog' })).toBeEnabled())
+
+    const dismiss = screen.getByRole('button', { name: 'Dismiss sync notice' })
+    dismiss.focus()
+    fireEvent.click(dismiss)
+
+    expect(notice()).toBeNull()
+    expect(screen.getByRole('button', { name: 'Sync catalog' })).toHaveFocus()
+  })
+
+  it('warns on a live catalog that looked incomplete, keyed on decidable and not on source', async () => {
+    const body = syncResultCase('undecidable_implausible')
+    useSyncCase(body)
+
+    const toast = await syncAndReadToast()
+
+    expect(toast).toHaveTextContent(/^Synced from live:/)
+    expect(notice()).toHaveClass('cu-banner--warn')
+    expect(notice()).toHaveTextContent(
+      `Auto-enable could not decide this run (the live catalog looked incomplete): ${sumProviderCounts(body, 'skippedUndecidable')} new models from providers with auto-enable on were not added; run the sync again.`
+    )
+    expect(notice()).not.toHaveTextContent(/could not be reached|reachable/)
+  })
+
+  it('tells the operator to sync again when the cap deferred models', async () => {
+    const body = syncResultCase('decidable_capped')
+    const deferred = sumProviderCounts(body, 'deferredByCap')
+    useSyncCase(body)
+
+    const toast = await syncAndReadToast()
+
+    expect(toast).toHaveClass('cu-toast--success')
+    expect(toast).toHaveTextContent(
+      `+${body.added} new (${sumProviderCounts(body, 'autoEnabled')} enabled automatically)`
+    )
+    expect(notice()).toHaveClass('cu-banner--info')
+    expect(notice()).toHaveAttribute('role', 'status')
+    expect(notice()).toHaveTextContent(
+      `${deferred} more new models were not added yet (auto-enable limit for this run reached); run the sync again to add them.`
+    )
+  })
+
+  it('claims nothing about auto-enable against an older control-api', async () => {
+    const body = syncResultLegacyCase('undecidable_vendored')
+    useSyncCase(body)
+
+    const toast = await syncAndReadToast()
+
+    expect(toast.querySelector('.cu-toast__text')).toHaveTextContent(
+      new RegExp(
+        `^Synced from vendored: \\+${body.added} new, ${body.updated} updated, ${body.staled} marked stale\\.$`
+      )
+    )
+    expect(notice()).toBeNull()
+  })
+
+  it('clears the previous notice when the next sync starts', async () => {
+    useSyncCase(syncResultCase('undecidable_vendored'))
+    let resolveNext!: (value: api.LlmDiscoverySyncResult) => void
+    render(
+      <LlmDiscoveryPanel
+        items={[reviewModel]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Sync catalog' }))
+    await waitFor(() => expect(notice()).not.toBeNull())
+
+    vi.mocked(api.syncDiscovery).mockReturnValueOnce(
+      new Promise(resolve => {
+        resolveNext = resolve
+      })
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Sync catalog' }))
+    expect(notice()).toBeNull()
+    resolveNext(api.parseDiscoverySyncResult(syncResultCase('decidable_none_enabled')))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Sync catalog' })).toBeEnabled())
+    expect(notice()).toBeNull()
   })
 })
 
