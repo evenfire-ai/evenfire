@@ -1,3 +1,4 @@
+import { logger } from '../../logger'
 import { LlmError, LlmErrorCode } from '../errors'
 import { LlmPort, PromptBuilder, ReasoningPort } from '../interfaces'
 import type { TokenCounter } from '../tokenizer/tokenCounter'
@@ -59,8 +60,15 @@ export class DefaultReasoningPort implements ReasoningPort {
   ) {}
 
   async respondWithTools(context: ReasoningContext): Promise<RespondResult> {
-    console.log(
-      `[NewCore:Reasoning] respondWithTools → tools=${context.available_tools.length}, messages=${context.messages.length}, model=${this.llmPort.modelName()}, cache=${this.systemPromptParts ? 'on' : 'off'}`
+    logger.info(
+      {
+        component: 'Reasoning',
+        toolCount: context.available_tools.length,
+        messageCount: context.messages.length,
+        model: this.llmPort.modelName(),
+        cache: Boolean(this.systemPromptParts),
+      },
+      'respondWithTools'
     )
     try {
       const { messages, systemPromptParts } = this.buildMessages(context)
@@ -94,8 +102,13 @@ export class DefaultReasoningPort implements ReasoningPort {
     context: ReasoningContext,
     results: ToolResult[]
   ): Promise<RespondResult> {
-    console.log(
-      `[NewCore:Reasoning] continueWithToolResults → toolResults=${results.length}, messages=${context.messages.length}`
+    logger.info(
+      {
+        component: 'Reasoning',
+        toolResultCount: results.length,
+        messageCount: context.messages.length,
+      },
+      'continueWithToolResults'
     )
     try {
       // Tool results are already appended to context.messages by the loop
@@ -190,16 +203,20 @@ export class DefaultReasoningPort implements ReasoningPort {
         maxTokens: this.contextMaxTokens ?? 0,
       })
     } catch (err) {
-      console.error('[NewCore:Reasoning] context breakdown capture failed (ignored):', err)
+      logger.error(
+        { component: 'Reasoning', error: err instanceof Error ? err.message : String(err) },
+        'Context breakdown capture failed (ignored)'
+      )
     }
   }
 
   private classifyResponse(response: ToolCompletionResponse): RespondResult {
     // Tool calls take priority
     if (response.tool_calls && response.tool_calls.length > 0) {
-      const toolNames = response.tool_calls.map(tc => tc.name).join(', ')
-      console.log(
-        `[NewCore:Reasoning] classify → tool_calls (${response.tool_calls.length} calls: ${toolNames})`
+      const toolNames = response.tool_calls.map(tc => tc.name)
+      logger.info(
+        { component: 'Reasoning', toolCallCount: response.tool_calls.length, toolNames },
+        'Classified as tool_calls'
       )
       return {
         type: 'tool_calls',
@@ -215,7 +232,7 @@ export class DefaultReasoningPort implements ReasoningPort {
 
     // Content filter is an error
     if (response.finish_reason === FinishReason.ContentFilter) {
-      console.log(`[NewCore:Reasoning] classify → error (content_filter)`)
+      logger.info({ component: 'Reasoning' }, 'Classified as error (content_filter)')
       return {
         type: 'error',
         error: new LlmError(
@@ -231,13 +248,13 @@ export class DefaultReasoningPort implements ReasoningPort {
     if (response.content) {
       const cleaned = cleanResponse(response.content)
       if (cleaned.length > 0) {
-        console.log(`[NewCore:Reasoning] classify → text (${cleaned.length} chars)`)
+        logger.info({ component: 'Reasoning', chars: cleaned.length }, 'Classified as text')
         return { type: 'text', content: cleaned }
       }
     }
 
     // Nothing useful
-    console.log(`[NewCore:Reasoning] classify → error (empty_response)`)
+    logger.info({ component: 'Reasoning' }, 'Classified as error (empty_response)')
     return {
       type: 'error',
       error: new LlmError(
