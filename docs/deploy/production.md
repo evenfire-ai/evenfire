@@ -188,7 +188,10 @@ agent pod with `envFrom`, and `rpc-proxy` reads `rpc-proxy-config`. Neither is
 in base; without them those pods fail to start. Copy the minikube versions
 ([`mcp-host-config.yaml`](../../deploy/overlays/minikube/configmaps/mcp-host-config.yaml),
 [`rpc-proxy-config.yaml`](../../deploy/overlays/minikube/configmaps/rpc-proxy-config.yaml))
-and replace their values: the minikube `rpc-proxy-config` contains fixed
+and replace their values. In `mcp-host-config`, `HCC_AUTHORITY_MAX_STALENESS_MS`
+must satisfy the
+[mcp-host authority staleness floor](releases-and-upgrades.md#mcp-host-authority-staleness-floor)
+or every Host refuses to start. The minikube `rpc-proxy-config` contains fixed
 development secrets (`RPC_PROXY_DESKTOP_COOKIE_SECRET`,
 `RPC_PROXY_DESKTOP_API_TOKEN`, `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`) and
 localhost URLs. Many features are off in base and on in minikube; decide each

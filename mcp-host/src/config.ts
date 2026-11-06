@@ -642,25 +642,80 @@ export function resolveDevModelProvider(raw: string | undefined): LlmProvider | 
   return raw
 }
 
+/** Per-request timeout of every Context Mapper (HCC) fetch, including the inventory poll. */
+export const CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = 10_000
+/** Slack for timer lateness across the polls the authority deadline must absorb. */
+export const HCC_AUTHORITY_SCHEDULING_ALLOWANCE_MS = 1_000
+/** Consecutive failed HCC inventory polls a healthy MCP fleet must survive. */
+export const HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS = 2
+/** Hard upper bound applied to HCC_AUTHORITY_MAX_STALENESS_MS before validation. */
+export const HCC_AUTHORITY_MAX_STALENESS_CEILING_MS = 600_000 // 10 min
+
+function assertPositiveSafeIntegerMs(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(
+      `${name} (${value}ms) must be a positive safe integer number of milliseconds; refusing to start`
+    )
+  }
+}
+
 /**
- * Keep the poll cadence strictly inside the authority-retention window.
+ * Require the authority staleness bound S to absorb
+ * HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS (N) failed HCC polls.
  *
- * A cadence at or above the staleness ceiling guarantees that a healthy fleet
- * can be revoked before the next authoritative poll arrives. Failing startup
- * closed is safer than silently widening the retention window or allowing a
- * deployment to flap forever after every successful reconnect.
+ * Rule: S >= I + N * max(I, T) + T + J, where I is the poll interval, T the
+ * inventory request timeout and J the scheduling allowance.
+ *
+ * Derivation. The deadline is armed at the arrival of the last good answer
+ * (t0), at t0 + S. The next poll starts no later than t0 + I. A failed poll
+ * lasts at most T, and the coalesced runner starts the next poll at the next
+ * tick, or immediately when a tick fired while the failed poll was in flight,
+ * so consecutive starts are at most max(I, T) apart. After N failed polls the
+ * next poll therefore answers no later than t0 + I + N * max(I, T) + T. A
+ * smaller S revokes a healthy fleet that only lost N polls to an HCC restart,
+ * which is issue #1350. The previous rule (I < S) tolerated no missed poll.
+ *
+ * Not covered by the rule:
+ * - the 401 -> credential refresh -> retry path inside one poll
+ *   (ContextMapperClient), which can make that poll last 2T plus the refresh;
+ * - event-loop stalls longer than J;
+ * - J also absorbs the setInterval drift over the N + 1 ticks (about 0.5 ms per
+ *   tick measured, so about 1.5 ms at N = 2);
+ * - cold start before the first success: no deadline is armed until then, so S
+ *   does not govern it.
+ *
+ * Every argument must be a positive safe integer: parseInt returns NaN for a
+ * non-numeric poll interval, and setInterval(fn, NaN) polls every 1 ms.
+ * Failing startup closed is safer than retaining or revoking authority on a
+ * cadence the bound was never checked against.
  */
 export function validateHccAuthorityTiming(
   contextMapperPollIntervalMs: number,
-  hccAuthorityMaxStalenessMs: number
+  hccAuthorityMaxStalenessMs: number,
+  contextMapperRequestTimeoutMs: number
 ): void {
-  if (
-    Number.isFinite(contextMapperPollIntervalMs) &&
-    Number.isFinite(hccAuthorityMaxStalenessMs) &&
-    contextMapperPollIntervalMs >= hccAuthorityMaxStalenessMs
-  ) {
+  assertPositiveSafeIntegerMs('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', contextMapperPollIntervalMs)
+  assertPositiveSafeIntegerMs('HCC_AUTHORITY_MAX_STALENESS_MS', hccAuthorityMaxStalenessMs)
+  assertPositiveSafeIntegerMs('Context Mapper request timeout', contextMapperRequestTimeoutMs)
+
+  const missedPolls = HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS
+  const pollSpacingMs = Math.max(contextMapperPollIntervalMs, contextMapperRequestTimeoutMs)
+  const minimumMs =
+    contextMapperPollIntervalMs +
+    missedPolls * pollSpacingMs +
+    contextMapperRequestTimeoutMs +
+    HCC_AUTHORITY_SCHEDULING_ALLOWANCE_MS
+  if (hccAuthorityMaxStalenessMs < minimumMs) {
     throw new Error(
-      `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL (${contextMapperPollIntervalMs}ms) must be less than HCC_AUTHORITY_MAX_STALENESS_MS (${hccAuthorityMaxStalenessMs}ms)`
+      `HCC_AUTHORITY_MAX_STALENESS_MS (${hccAuthorityMaxStalenessMs}ms, effective after the ` +
+        `${HCC_AUTHORITY_MAX_STALENESS_CEILING_MS}ms cap) must be at least poll interval + ` +
+        `${missedPolls} × max(poll interval, inventory request timeout) + inventory request timeout + ` +
+        `${HCC_AUTHORITY_SCHEDULING_ALLOWANCE_MS}ms scheduling allowance = ` +
+        `${contextMapperPollIntervalMs} + ${missedPolls * pollSpacingMs} + ` +
+        `${contextMapperRequestTimeoutMs} + ${HCC_AUTHORITY_SCHEDULING_ALLOWANCE_MS} = ${minimumMs}ms ` +
+        `(CLERUM_CONTEXT_MAPPER_POLL_INTERVAL=${contextMapperPollIntervalMs}ms, request timeout ` +
+        `${contextMapperRequestTimeoutMs}ms), so that ${missedPolls} missed HCC polls followed by an ` +
+        `answer at the request timeout cannot revoke a healthy MCP fleet; refusing to start`
     )
   }
 }
@@ -802,9 +857,24 @@ function parseApprovalPromptHistoryMaxBytes(raw: string): number {
   return Number.isSafeInteger(value) && value >= 1_024 && value <= 32_768 ? value : Number.NaN
 }
 
-const contextMapperPollInterval = parseInt(
-  getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!,
-  10
+function parseContextMapperPollIntervalMs(raw: string): number {
+  if (!/^[1-9][0-9]*$/.test(raw)) {
+    throw new Error(
+      `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL ("${raw}") must be a positive whole number of milliseconds in plain digits; refusing to start`
+    )
+  }
+  const value = Number(raw)
+  // A larger timer delay overflows and fires after about 1 ms.
+  if (value > MAX_TIMER_DELAY_MS) {
+    throw new Error(
+      `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL ("${raw}") must be at most ${MAX_TIMER_DELAY_MS} milliseconds; refusing to start`
+    )
+  }
+  return value
+}
+
+const contextMapperPollInterval = parseContextMapperPollIntervalMs(
+  getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!
 )
 // Fail-closed window for an UNREACHABLE HCC (5xx / transport failures only).
 // It is bounded so a revoked-but-unconfirmable authority cannot linger forever,
@@ -821,10 +891,14 @@ const contextMapperPollInterval = parseInt(
 // credential while unavailable and rechecks live authorization when reachable.
 // See issue #425.
 //
-// Operators may lower it, or raise it up to HCC_AUTHORITY_MAX_STALENESS_CEILING_MS
-// for slower-starting clusters. The minikube e2e lane pins 60000 explicitly so the
-// revoke-on-staleness scenario stays fast and deterministic.
-const HCC_AUTHORITY_MAX_STALENESS_CEILING_MS = 600_000 // 10 min hard upper bound
+// Operators may raise it up to HCC_AUTHORITY_MAX_STALENESS_CEILING_MS for
+// slower-starting clusters. Since issue #1350, #425's "operators may fail closed
+// sooner" stops at the floor enforced by validateHccAuthorityTiming: the bound must
+// absorb HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS (2) failed polls, which is
+// 101000ms at the 30s poll interval. The floor is a validity check, not a
+// recommended value; the 180s default absorbs 4 missed polls. With the 180s
+// default the poll interval may be at most 56333ms (196333ms at the 600s cap);
+// see docs/deploy/releases-and-upgrades.md, "mcp-host authority staleness floor".
 const hccAuthorityMaxStalenessMs = Math.min(
   getEnvNumber('HCC_AUTHORITY_MAX_STALENESS_MS', 180_000),
   HCC_AUTHORITY_MAX_STALENESS_CEILING_MS
@@ -833,7 +907,13 @@ const hccAuthorityMaxStalenessMs = Math.min(
 // Dev mode does not retain a Kubernetes-authoritative MCP fleet, so the
 // production polling/staleness relationship is intentionally not required for
 // local fixture runs. Every cluster-mode process must satisfy it at startup.
-if (!devMode) validateHccAuthorityTiming(contextMapperPollInterval, hccAuthorityMaxStalenessMs)
+if (!devMode) {
+  validateHccAuthorityTiming(
+    contextMapperPollInterval,
+    hccAuthorityMaxStalenessMs,
+    CONTEXT_MAPPER_REQUEST_TIMEOUT_MS
+  )
+}
 
 export const config: Config = {
   devMode,

@@ -9,9 +9,15 @@
  * In dev mode, it reads MCP servers from environment variables
  * and skips Kubernetes reconciliation.
  */
+import * as k8s from '@kubernetes/client-node'
 import { config } from './config'
 import { HeartbeatPoller } from './heartbeatPoller'
-import { SecretInformer } from './informers/secretInformer'
+import {
+  ManagedDeploymentInformer,
+  managedDeploymentListFromAppsApi,
+} from './informers/deploymentInformer'
+import { SecretInformer, secretListFromCoreApi } from './informers/secretInformer'
+import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import {
   McpServerProvider,
   McpServerWatcher,
@@ -19,6 +25,7 @@ import {
   createMcpServerProvider,
   getKubeConfig,
 } from './k8sClient'
+import { hccLogger } from './logger'
 import { McpApiAuthenticator } from './mcpApiAuthentication'
 import { McpAuthorizationService } from './mcpAuthorization'
 import {
@@ -36,6 +43,7 @@ import {
 
 let provider: McpServerProvider | null = null
 let server: ContextMapperServer | null = null
+let deploymentInformer: ManagedDeploymentInformer | null = null
 let secretInformer: SecretInformer | null = null
 let channelSecretInformer: SecretInformer | null = null
 let llmHooksSecretInformer: SecretInformer | null = null
@@ -48,13 +56,14 @@ let isShuttingDown = false
  */
 async function shutdown(signal: string): Promise<void> {
   if (isShuttingDown) {
-    console.log('[Main] Shutdown already in progress...')
+    hccLogger.info('[Main] Shutdown already in progress...')
     return
   }
   isShuttingDown = true
 
-  console.log(`[Main] Received ${signal}, shutting down`)
+  hccLogger.info('[Main] Received signal, shutting down', { signal })
 
+  deploymentInformer?.stop()
   secretInformer?.stop()
   channelSecretInformer?.stop()
   llmHooksSecretInformer?.stop()
@@ -70,14 +79,13 @@ async function shutdown(signal: string): Promise<void> {
  * Main entry point.
  */
 async function main(): Promise<void> {
-  console.log('='.repeat(50))
-  console.log('Host Context Controller - Starting')
-  console.log('='.repeat(50))
-  console.log(`[Main] Mode: ${config.devMode ? 'DEV' : 'PRODUCTION'}`)
-  console.log(`[Main] Port: ${config.port}`)
+  hccLogger.info('[Main] Host Context Controller starting', {
+    mode: config.devMode ? 'DEV' : 'PRODUCTION',
+    port: config.port,
+  })
 
   if (!config.devMode && !config.desktopApiToken) {
-    console.warn(
+    hccLogger.warn(
       '[HCC] WARNING: CONTEXT_MAPPER_DESKTOP_API_TOKEN is empty in production mode — ' +
         'desktop API endpoints have no service-token auth. Set this to match RPC_PROXY_DESKTOP_API_TOKEN.'
     )
@@ -90,18 +98,18 @@ async function main(): Promise<void> {
     try {
       assertInternalControlJwtHmacSecret(config.internalControlJwtHccHmacSecret)
     } catch (err) {
-      console.error(`[HCC] FATAL: ${err instanceof Error ? err.message : String(err)}`)
+      hccLogger.error('[Main] FATAL: InternalControl JWT HMAC secret is invalid', { err })
       process.exit(1)
     }
   }
 
   if (!config.hccTargetNamespace.trim()) {
-    console.error('[HCC] FATAL: HCC_TARGET_NAMESPACE must not be empty')
+    hccLogger.error('[Main] FATAL: HCC_TARGET_NAMESPACE must not be empty')
     process.exit(1)
   }
   if (config.hccTargetNamespace !== config.hostNamespace) {
-    console.error(
-      '[HCC] FATAL: HCC_TARGET_NAMESPACE must equal CONTEXT_MAPPER_HOST_NAMESPACE for caller-bound Host credentials'
+    hccLogger.error(
+      '[Main] FATAL: HCC_TARGET_NAMESPACE must equal CONTEXT_MAPPER_HOST_NAMESPACE for caller-bound Host credentials'
     )
     process.exit(1)
   }
@@ -115,22 +123,23 @@ async function main(): Promise<void> {
       maxTokenLifetimeSeconds: config.mcpHostJwtMaxTtlSeconds,
     })
   } catch (err) {
-    console.error(
-      `[HCC] FATAL: ${err instanceof Error ? err.message : 'MCP JWT verifier configuration failed'}`
-    )
+    hccLogger.error('[Main] FATAL: MCP JWT verifier configuration failed', { err })
     process.exit(1)
     return
   }
   if (!config.devMode) {
-    console.log(`[Main] Namespace: ${config.namespace}`)
-    console.log(`[Main] Reconciler: ENABLED (will manage Deployments + Services)`)
+    hccLogger.info('[Main] Reconciler enabled (will manage Deployments + Services)', {
+      namespace: config.namespace,
+    })
   }
 
   // Create and start the provider (K8s watcher + reconciler, or dev provider)
   provider = createMcpServerProvider()
 
   provider.onChange(() => {
-    console.log(`[Main] McpServer cache updated, total: ${provider?.getAllServers().length || 0}`)
+    hccLogger.info('[Main] McpServer cache updated', {
+      total: provider?.getAllServers().length || 0,
+    })
   })
 
   // Create and start the REST API server
@@ -183,10 +192,10 @@ async function main(): Promise<void> {
       signInternalControlJwt: () => signInternalControlJwt(),
     })
     heartbeatPoller.start()
-    console.log(
-      `[Main] Stateless heartbeat poller started (interval=${config.heartbeatPollMs}ms, ` +
-        `target=${config.controlApiBaseUrl})`
-    )
+    hccLogger.info('[Main] Stateless heartbeat poller started', {
+      intervalMs: config.heartbeatPollMs,
+      target: config.controlApiBaseUrl,
+    })
   }
   const mcpAuthorization = new McpAuthorizationService(createMcpAuthorizationStore(provider))
   server = new ContextMapperServer(
@@ -217,8 +226,31 @@ async function main(): Promise<void> {
   }
 
   await provider.start()
-  console.log(`[Main] Provider started, loaded ${provider.getAllServers().length} McpServer(s)`)
+  hccLogger.info('[Main] Provider started', { mcpServers: provider.getAllServers().length })
   server.setReady(true)
+
+  // Re-enqueues a server with a terminal RolloutIncomplete when its Deployment
+  // moves. Not awaited: the watch request has no transport deadline, and an await
+  // that hangs here would keep the SIGTERM handler below from ever registering.
+  if (!config.devMode && provider instanceof McpServerWatcher) {
+    const kc = getKubeConfig()
+    if (kc) {
+      const deploymentListApi = makeK8sApiClientWithDeadline(
+        kc,
+        k8s.AppsV1Api,
+        config.k8sRequestTimeoutMs
+      )
+      deploymentInformer = new ManagedDeploymentInformer(
+        kc,
+        config.namespace,
+        provider.handleDeploymentObservation,
+        managedDeploymentListFromAppsApi(deploymentListApi, config.namespace)
+      )
+      void deploymentInformer.start().catch(err => {
+        hccLogger.error('[Main] Deployment informer failed to start', { err })
+      })
+    }
+  }
 
   // Start SecretInformer (production only) — reacts to Secret lifecycle events
   // so McpServers referencing a missing Secret reconcile once the Secret
@@ -226,23 +258,28 @@ async function main(): Promise<void> {
   if (!config.devMode && provider instanceof McpServerWatcher) {
     const kc = getKubeConfig()
     if (kc) {
-      const watcher = provider
-      secretInformer = new SecretInformer(kc, config.namespace, evt => {
-        watcher.reconcileByEnvSecret(evt.name, evt.namespace).catch(err => {
-          console.error('[Main] reconcileByEnvSecret failed:', err)
-        })
+      // #1338: only this informer runs in
+      // resume mode. Each page of its list runs on HCC's request deadline.
+      const secretListApi = makeK8sApiClientWithDeadline(
+        kc,
+        k8s.CoreV1Api,
+        config.k8sRequestTimeoutMs
+      )
+      secretInformer = new SecretInformer(kc, config.namespace, provider.handleSecretEvent, {
+        mode: 'resume',
+        list: secretListFromCoreApi(secretListApi),
       })
       try {
         const running = await secretInformer.start()
         if (running) {
-          console.log(`[Main] SecretInformer started on namespace ${config.namespace}`)
+          hccLogger.info(`[Main] SecretInformer started on namespace ${config.namespace}`)
         } else {
-          console.warn(
+          hccLogger.warn(
             `[Main] SecretInformer degraded on namespace ${config.namespace}; reconnect will continue in background`
           )
         }
       } catch (err) {
-        console.error('[Main] SecretInformer failed to start:', err)
+        hccLogger.error('[Main] SecretInformer failed to start', { err })
       }
     }
   }
@@ -257,18 +294,24 @@ async function main(): Promise<void> {
   if (!config.devMode && watcher) {
     const kc = getKubeConfig()
     if (kc) {
-      channelSecretInformer = new SecretInformer(kc, config.channelsNamespace, evt => {
-        watcher.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
-          console.error('[Main] reconcileChannelReaderRevision failed:', err)
-        })
-      })
+      channelSecretInformer = new SecretInformer(
+        kc,
+        config.channelsNamespace,
+        evt => {
+          watcher.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
+            hccLogger.error('[Main] reconcileChannelReaderRevision failed', { err })
+          })
+        },
+        // Replay mode until this consumer has its own retry owner (#1360).
+        { mode: 'replay' }
+      )
       try {
         await channelSecretInformer.start()
-        console.log(
+        hccLogger.info(
           `[Main] channels SecretInformer started on namespace ${config.channelsNamespace}`
         )
       } catch (err) {
-        console.error('[Main] channels SecretInformer failed to start:', err)
+        hccLogger.error('[Main] channels SecretInformer failed to start', { err })
       }
     }
   }
@@ -280,23 +323,29 @@ async function main(): Promise<void> {
     const kc = getKubeConfig()
     if (kc) {
       const watcher = provider
-      llmHooksSecretInformer = new SecretInformer(kc, config.llmHooksNamespace, evt => {
-        watcher.reconcileLlmHookByEnvSecret(evt.name, evt.namespace).catch(err => {
-          console.error('[Main] reconcileLlmHookByEnvSecret failed:', err)
-        })
-      })
+      llmHooksSecretInformer = new SecretInformer(
+        kc,
+        config.llmHooksNamespace,
+        evt => {
+          watcher.reconcileLlmHookByEnvSecret(evt.name, evt.namespace).catch(err => {
+            hccLogger.error('[Main] reconcileLlmHookByEnvSecret failed', { err })
+          })
+        },
+        // Replay mode until this consumer has its own retry owner (#1360).
+        { mode: 'replay' }
+      )
       try {
         await llmHooksSecretInformer.start()
-        console.log(
+        hccLogger.info(
           `[Main] llm-hooks SecretInformer started on namespace ${config.llmHooksNamespace}`
         )
       } catch (err) {
-        console.error('[Main] llm-hooks SecretInformer failed to start:', err)
+        hccLogger.error('[Main] llm-hooks SecretInformer failed to start', { err })
       }
     }
   }
 
-  console.log('\n[Main] Host Context Controller running. Press Ctrl+C to exit.\n')
+  hccLogger.info('[Main] Host Context Controller running. Press Ctrl+C to exit.')
 
   // Handle graceful shutdown (use 'once' to prevent multiple handlers)
   process.once('SIGTERM', () => shutdown('SIGTERM'))
@@ -305,6 +354,6 @@ async function main(): Promise<void> {
 
 // Run main
 main().catch(error => {
-  console.error('[Main] Fatal error:', error)
+  hccLogger.error('[Main] Fatal error', { err: error })
   process.exit(1)
 })

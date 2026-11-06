@@ -7,6 +7,7 @@ import { applyNetworkPolicy } from '../src/utils'
 // (empty -> no ipBlock) and the configured kube-dns Service IP paths.
 const mockConfig = {
   namespace: 'mcp-server',
+  k8sRequestTimeoutMs: 30_000,
   hostNamespace: 'mcp-host',
   rpcProxyNamespace: 'rpc-proxy',
   runtimeNamespaces: ['sandbox-recipes'],

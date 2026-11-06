@@ -17,7 +17,10 @@ import {
   replaceAuthoritativeMcpFleet,
   runAuthoritativeMcpInitialization,
 } from '../mcp/authoritativeFleet'
-import { handleMcpAuthorityPollFailure } from '../mcp/authorityLifecycle'
+import {
+  type McpAuthorityPollFailureDisposition,
+  handleMcpAuthorityPollFailure,
+} from '../mcp/authorityLifecycle'
 import { McpManager } from '../mcp/manager'
 import type { McpServerInfo } from '../types'
 
@@ -650,6 +653,250 @@ describe('context-mapper polling lifecycle', () => {
     } finally {
       vi.clearAllTimers()
       vi.useRealTimers()
+    }
+  })
+})
+
+/**
+ * Issue #1350: compose the real coalesced poll runner on setInterval(I), the
+ * absolute staleness deadline and the poll-failure classifier. The stub poll
+ * mirrors pollContextMapper: the first N calls fail at the request timeout T
+ * and are classified; call N + 1 answers at exactly T and records success.
+ * The last good answer is at t = 0 (latency 0, the worst case), so polls start
+ * on the ticks I, 2I, ... or, when T > I, on the trailing run that starts at the
+ * previous poll's timeout.
+ */
+describe('staleness deadline survives N missed polls', () => {
+  interface MissedPollScenario {
+    intervalMs: number
+    timeoutMs: number
+    stalenessMs: number
+    missedPolls: number
+  }
+
+  function startMissedPollScenario({
+    intervalMs,
+    timeoutMs,
+    stalenessMs,
+    missedPolls,
+  }: MissedPollScenario) {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+
+    const starts: number[] = []
+    const dispositions: McpAuthorityPollFailureDisposition[] = []
+    const classifierRevocations: string[] = []
+    const expiries: number[] = []
+    let dispositionsAtExpiry: McpAuthorityPollFailureDisposition[] | null = null
+    let revoked = false
+    let lastSuccessAt = 0
+    let successAt: number | null = null
+    let recoveryAnsweredAt: number | null = null
+    let calls = 0
+    let pollTimer: ReturnType<typeof setInterval> | null = null
+
+    // Mirrors stopContextMapperPolling: stop the runner and clear its producer.
+    const stopPolling = (): void => {
+      runner.stop()
+      if (pollTimer !== null) clearInterval(pollTimer)
+      pollTimer = null
+    }
+
+    const deadline = createMcpAuthorityStalenessDeadline(stalenessMs, () => {
+      expiries.push(Date.now())
+      dispositionsAtExpiry = [...dispositions]
+      revoked = true
+      // revokeMcpAuthorityState stops polling first.
+      stopPolling()
+    })
+
+    const runner = createCoalescedPollRunner(async () => {
+      const call = ++calls
+      starts.push(Date.now())
+      await new Promise<void>(resolve => setTimeout(resolve, timeoutMs))
+      if (call <= missedPolls) {
+        dispositions.push(
+          handleMcpAuthorityPollFailure(
+            new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
+            {
+              hasPublishedManager: () => !revoked,
+              lastSuccessAt: () => lastSuccessAt,
+              now: () => Date.now(),
+              maxStalenessMs: stalenessMs,
+              revoke: reason => {
+                classifierRevocations.push(reason)
+                revoked = true
+                stopPolling()
+                deadline.clear()
+              },
+              onCallerAuthorizationRejected: () => {},
+              onInventoryAuthorityRevoked: () => {},
+              onUnavailable: () => {},
+            }
+          )
+        )
+        return
+      }
+      recoveryAnsweredAt = Date.now()
+      // main.ts discards an answer that arrives after a revocation
+      // (mcpManager === manager); only a current answer records success.
+      if (!revoked) {
+        lastSuccessAt = Date.now()
+        successAt = lastSuccessAt
+        deadline.recordSuccess(lastSuccessAt)
+      }
+      // Stop before resolving so the runner's trailing re-trigger sees
+      // `stopped` and no later poll re-arms the deadline.
+      stopPolling()
+    })
+
+    lastSuccessAt = 0
+    deadline.recordSuccess(0)
+    pollTimer = setInterval(() => runner.trigger(), intervalMs)
+
+    return {
+      starts,
+      dispositions,
+      classifierRevocations,
+      expiries,
+      get dispositionsAtExpiry() {
+        return dispositionsAtExpiry
+      },
+      get successAt() {
+        return successAt
+      },
+      get recoveryAnsweredAt() {
+        return recoveryAnsweredAt
+      },
+      get calls() {
+        return calls
+      },
+      dispose: () => {
+        stopPolling()
+        deadline.clear()
+        vi.clearAllTimers()
+        vi.useRealTimers()
+      },
+    }
+  }
+
+  const unavailable = (count: number) => Array(count).fill('unavailable')
+
+  it.each([
+    {
+      name: 'I=30000 T=10000 N=2 at the validator minimum',
+      scenario: { intervalMs: 30_000, timeoutMs: 10_000, stalenessMs: 101_000, missedPolls: 2 },
+      starts: [30_000, 60_000, 90_000],
+      answerAt: 100_000,
+    },
+    {
+      name: 'I=30000 T=10000 N=2 one ms past the answer',
+      scenario: { intervalMs: 30_000, timeoutMs: 10_000, stalenessMs: 100_001, missedPolls: 2 },
+      starts: [30_000, 60_000, 90_000],
+      answerAt: 100_000,
+    },
+    {
+      name: 'I=7000 T=10000 N=2 (trailing runs) at the validator minimum',
+      scenario: { intervalMs: 7_000, timeoutMs: 10_000, stalenessMs: 38_000, missedPolls: 2 },
+      starts: [7_000, 17_000, 27_000],
+      answerAt: 37_000,
+    },
+    {
+      name: 'I=7000 T=10000 N=2 (trailing runs) one ms past the answer',
+      scenario: { intervalMs: 7_000, timeoutMs: 10_000, stalenessMs: 37_001, missedPolls: 2 },
+      starts: [7_000, 17_000, 27_000],
+      answerAt: 37_000,
+    },
+    {
+      name: 'the 180000 default absorbs N=4',
+      scenario: { intervalMs: 30_000, timeoutMs: 10_000, stalenessMs: 180_000, missedPolls: 4 },
+      starts: [30_000, 60_000, 90_000, 120_000, 150_000],
+      answerAt: 160_000,
+    },
+  ])('survives: $name', async ({ scenario, starts, answerAt }) => {
+    const run = startMissedPollScenario(scenario)
+    try {
+      await vi.advanceTimersByTimeAsync(answerAt)
+
+      expect(run.starts).toEqual(starts)
+      expect(run.calls).toBe(scenario.missedPolls + 1)
+      expect(run.dispositions).toEqual(unavailable(scenario.missedPolls))
+      expect(run.recoveryAnsweredAt).toBe(answerAt)
+      expect(run.successAt).toBe(answerAt)
+      expect(run.expiries).toEqual([])
+      expect(run.classifierRevocations).toEqual([])
+      // Polling is stopped: only the re-armed deadline is pending.
+      expect(vi.getTimerCount()).toBe(1)
+
+      // The deadline was re-armed by the recovery answer: it fires once, at
+      // successAt + S, and nothing else polls in between.
+      await vi.advanceTimersByTimeAsync(scenario.stalenessMs)
+      expect(run.expiries).toEqual([answerAt + scenario.stalenessMs])
+      expect(run.calls).toBe(scenario.missedPolls + 1)
+    } finally {
+      run.dispose()
+    }
+  })
+
+  it.each([
+    {
+      name: 'I=30000 T=10000 N=2 one ms before the answer',
+      scenario: { intervalMs: 30_000, timeoutMs: 10_000, stalenessMs: 99_999, missedPolls: 2 },
+      starts: [30_000, 60_000, 90_000],
+      answerAt: 100_000,
+    },
+    {
+      name: 'I=7000 T=10000 N=2 (trailing runs) one ms before the answer',
+      scenario: { intervalMs: 7_000, timeoutMs: 10_000, stalenessMs: 36_999, missedPolls: 2 },
+      starts: [7_000, 17_000, 27_000],
+      answerAt: 37_000,
+    },
+  ])('revokes at the deadline: $name', async ({ scenario, starts, answerAt }) => {
+    const run = startMissedPollScenario(scenario)
+    try {
+      await vi.advanceTimersByTimeAsync(scenario.stalenessMs)
+
+      expect(run.expiries).toEqual([scenario.stalenessMs])
+      // The classifier saw only `unavailable` before the expiry, so the
+      // revocation is the deadline's.
+      expect(run.dispositionsAtExpiry).toEqual(unavailable(scenario.missedPolls))
+      expect(run.classifierRevocations).toEqual([])
+      expect(run.starts).toEqual(starts)
+
+      // The in-flight recovery answer still arrives, but after the revocation it
+      // records no success and arms no second deadline.
+      await vi.advanceTimersByTimeAsync(answerAt - scenario.stalenessMs)
+      expect(run.recoveryAnsweredAt).toBe(answerAt)
+      expect(run.successAt).toBeNull()
+      expect(vi.getTimerCount()).toBe(0)
+      await vi.advanceTimersByTimeAsync(scenario.stalenessMs)
+      expect(run.expiries).toEqual([scenario.stalenessMs])
+    } finally {
+      run.dispose()
+    }
+  })
+
+  it('revokes at the 180000 default deadline after N=5 missed polls', async () => {
+    const run = startMissedPollScenario({
+      intervalMs: 30_000,
+      timeoutMs: 10_000,
+      stalenessMs: 180_000,
+      missedPolls: 5,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(180_000)
+
+      // The deadline coincides with a tick, so the call count is not asserted.
+      expect(run.expiries).toEqual([180_000])
+      expect(run.dispositionsAtExpiry).toEqual(unavailable(5))
+      expect(run.classifierRevocations).toEqual([])
+
+      await vi.advanceTimersByTimeAsync(180_000)
+      expect(run.expiries).toEqual([180_000])
+      expect(run.successAt).toBeNull()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      run.dispose()
     }
   })
 })

@@ -34,6 +34,7 @@ import {
   POLICY_TYPE_LABEL,
 } from './constants'
 import { accumulateHostExactHostEgress } from './externalEgressAccumulator'
+import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import { hccLogger } from './logger'
 import {
   confirmAuthoritativeMcpServerAbsence,
@@ -458,6 +459,19 @@ function k8sApiEgressPodSelector(namespace: string): k8s.V1LabelSelector {
   return { matchLabels: { 'clerum.io/k8s-api-egress': 'true' } }
 }
 
+/**
+ * Ordered stages of one full NetworkPolicy reconciliation. The owner records
+ * the current stage so a pass that overruns its bound can say where it stopped.
+ */
+export type NetworkPolicyPassPhase =
+  | 'ensure-defaults'
+  | 'inventory-list'
+  | 'context-orphan-cleanup'
+  | 'context-revocation'
+  | 'server-orphan-cleanup'
+  | 'server-revocation'
+  | 'additive'
+
 export interface NetworkPolicyFullReconcileOptions {
   serverInventoryComplete?: boolean
   ensureDefaults?: boolean
@@ -497,6 +511,8 @@ export interface NetworkPolicyFullReconcileOptions {
    * closes.
    */
   onExternalEgressRevoked?: (server: McpServerCRD) => void
+  /** Called when the pass enters each stage, in order. */
+  onPhase?: (phase: NetworkPolicyPassPhase) => void
 }
 
 export class NetworkPolicyReconciler {
@@ -530,8 +546,19 @@ export class NetworkPolicyReconciler {
   private externalEgressMinObservedTtlMs = Infinity
 
   constructor(kc: k8s.KubeConfig, serverCache: Map<string, McpServerCRD>) {
-    this.networkingApi = kc.makeApiClient(k8s.NetworkingV1Api)
-    this.customApi = kc.makeApiClient(k8s.CustomObjectsApi)
+    // Every finite call here can hold the authoritative NetworkPolicy pass,
+    // which is single-flight: a request that never settles would block every
+    // later pass (#1338).
+    this.networkingApi = makeK8sApiClientWithDeadline(
+      kc,
+      k8s.NetworkingV1Api,
+      config.k8sRequestTimeoutMs
+    )
+    this.customApi = makeK8sApiClientWithDeadline(
+      kc,
+      k8s.CustomObjectsApi,
+      config.k8sRequestTimeoutMs
+    )
     this.serverCache = serverCache
   }
 
@@ -1395,6 +1422,7 @@ export class NetworkPolicyReconciler {
       (options.serverInventoryAuthoritative?.() ?? true)
 
     if (options.ensureDefaults !== false) {
+      options.onPhase?.('ensure-defaults')
       await this.ensureDefaultPolicies()
     }
 
@@ -1490,6 +1518,7 @@ export class NetworkPolicyReconciler {
       }
     }
 
+    options.onPhase?.('inventory-list')
     let allContextPolicies = contextCleanupAuthoritative()
       ? await this.listAllContextPolicies()
       : []
@@ -1593,6 +1622,7 @@ export class NetworkPolicyReconciler {
     // (and the external-orphan loop below) so a blown cache cannot mass-delete,
     // then the pass still certifies live inventory.
     if (!capReason) {
+      options.onPhase?.('context-orphan-cleanup')
       await cleanupOrphanedContextPolicies(
         allContextPolicies,
         policy =>
@@ -1626,6 +1656,7 @@ export class NetworkPolicyReconciler {
     }
 
     let liveDesiredRevisionChanged = false
+    options.onPhase?.('context-revocation')
     for (const context of contexts) {
       const contextId = context.spec.contextId
       await runContextEffect(contextId, async () => {
@@ -1662,6 +1693,7 @@ export class NetworkPolicyReconciler {
 
     // Clean up external egress policies for servers that no longer exist.
     if (!capReason && options.serverInventoryComplete !== false && serverCleanupAuthoritative()) {
+      options.onPhase?.('server-orphan-cleanup')
       for (const policy of allExternalPolicies) {
         const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
         if (!serverName) {
@@ -1724,6 +1756,7 @@ export class NetworkPolicyReconciler {
     }
 
     if (options.serverInventoryComplete !== false) {
+      options.onPhase?.('server-revocation')
       for (const server of servers) {
         await runServerEffect(server.name, async () => {
           const current = options.resolveCurrentServer
@@ -1793,6 +1826,7 @@ export class NetworkPolicyReconciler {
     // ExternalEgressConvergenceCoordinator is their sole startup, retry, and
     // periodic-resync owner.
     const contextAdditiveFailures: unknown[] = []
+    options.onPhase?.('additive')
     for (const context of contexts) {
       const contextId = context.spec.contextId
       try {

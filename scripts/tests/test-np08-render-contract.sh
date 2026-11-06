@@ -6,6 +6,16 @@ if [[ "$#" -lt 1 ]]; then
   exit 2
 fi
 
+# The mcp-host authority staleness rule is read from its single source. The
+# positional arguments are rendered manifests, so the source path is an env
+# var; its default is resolved from this script's directory, not the cwd.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MCP_HOST_CONFIG_SOURCE="${NP08_MCP_HOST_CONFIG_SOURCE:-${ROOT}/mcp-host/src/config.ts}"
+if [[ ! -f "${MCP_HOST_CONFIG_SOURCE}" ]]; then
+  echo "FAIL: mcp-host config source is absent: ${MCP_HOST_CONFIG_SOURCE}" >&2
+  exit 1
+fi
+
 for rendered in "$@"; do
   if [[ "${rendered}" != "-" && ! -f "${rendered}" ]]; then
     echo "FAIL: rendered manifest is absent" >&2
@@ -14,6 +24,7 @@ for rendered in "$@"; do
 
   RUBYOPT=--disable=gems ruby -ryaml -e '
     source = ARGV.fetch(0)
+    config_source_path = ARGV.fetch(1)
     yaml = source == "-" ? STDIN.read : File.read(source)
     documents = YAML.load_stream(yaml).select { |document| document.is_a?(Hash) }
 
@@ -30,11 +41,53 @@ for rendered in "$@"; do
 
     host_config = require_resource.call("ConfigMap", "mcp-host-config", "mcp-host")
     abort("mcp-host must keep direct MCP transport") unless host_config.dig("data", "MCP_PROXY_ENABLED") == "false"
-    # The minikube e2e lane pins staleness to 60s so the revoke-on-staleness
-    # scenario is fast and deterministic. Production defaults to 180s (bounded at
-    # 600s) in mcp-host/src/config.ts so a normal HCC rollout does not tear down
-    # the MCP fleet — see issue #425. This assertion guards the e2e-lane pin.
-    abort("HCC authority staleness must stay pinned to 60s on the minikube e2e lane") unless host_config.dig("data", "HCC_AUTHORITY_MAX_STALENESS_MS") == "60000"
+    # The pair is constrained by validateHccAuthorityTiming (mcp-host/src/config.ts):
+    # staleness >= poll interval + 2 x max(poll interval, request timeout)
+    # + request timeout + 1000ms, or every Host runtime refuses to start
+    # (issue #1350). The overlay pins the 180s production default against the 30s
+    # interval, which absorbs four missed HCC polls (issue #425).
+    #
+    # #1338: besides the explicit literal pins (#1350), the rendered
+    # pair is checked against the rule itself, with its constants and defaults
+    # extracted from mcp-host/src/config.ts. Every failing check of the pair is
+    # reported, so the pins and the rule check each keep their own message.
+    config_source = File.read(config_source_path, encoding: "UTF-8")
+    extract = lambda do |label, pattern|
+      matches = config_source.scan(pattern)
+      unless matches.length == 1
+        abort("NP-08 render contract: expected exactly one #{label} in #{config_source_path}, found #{matches.length}; the mcp-host authority rule source changed, re-derive this extractor")
+      end
+      Integer(matches.first.first.delete("_"), 10)
+    end
+    request_timeout_ms = extract.call("CONTEXT_MAPPER_REQUEST_TIMEOUT_MS", /^export const CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = ([0-9_]+)$/)
+    allowance_ms = extract.call("HCC_AUTHORITY_SCHEDULING_ALLOWANCE_MS", /^export const HCC_AUTHORITY_SCHEDULING_ALLOWANCE_MS = ([0-9_]+)$/)
+    missed_polls = extract.call("HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS", /^export const HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS = ([0-9_]+)$/)
+    ceiling_ms = extract.call("HCC_AUTHORITY_MAX_STALENESS_CEILING_MS", /^export const HCC_AUTHORITY_MAX_STALENESS_CEILING_MS = ([0-9_]+)(?: \/\/.*)?$/)
+    default_bound_ms = extract.call("HCC_AUTHORITY_MAX_STALENESS_MS default", /getEnvNumber\(\x27HCC_AUTHORITY_MAX_STALENESS_MS\x27, ([0-9_]+)\)/)
+    default_interval_ms = extract.call("CLERUM_CONTEXT_MAPPER_POLL_INTERVAL default", /getEnv\(\x27CLERUM_CONTEXT_MAPPER_POLL_INTERVAL\x27, \x27([0-9_]+)\x27\)/)
+
+    bound_raw = host_config.dig("data", "HCC_AUTHORITY_MAX_STALENESS_MS")
+    interval_raw = host_config.dig("data", "CLERUM_CONTEXT_MAPPER_POLL_INTERVAL")
+    pair_failures = []
+    positive_safe_integer = lambda do |raw|
+      raw.is_a?(String) && raw.match?(/\A[1-9][0-9]*\z/) && Integer(raw, 10) <= 9_007_199_254_740_991
+    end
+    if positive_safe_integer.call(bound_raw) && positive_safe_integer.call(interval_raw)
+      bound_ms = [Integer(bound_raw, 10), ceiling_ms].min
+      interval_ms = Integer(interval_raw, 10)
+      minimum_ms = interval_ms + missed_polls * [interval_ms, request_timeout_ms].max + request_timeout_ms + allowance_ms
+      if bound_ms < minimum_ms
+        pair_failures << "NP-08 render contract: the mcp-host authority staleness rule (#{config_source_path}) requires min(HCC_AUTHORITY_MAX_STALENESS_MS, #{ceiling_ms}) >= interval + #{missed_polls} x max(interval, #{request_timeout_ms}) + #{request_timeout_ms} + #{allowance_ms} = #{minimum_ms}ms; got HCC_AUTHORITY_MAX_STALENESS_MS=#{bound_raw} and CLERUM_CONTEXT_MAPPER_POLL_INTERVAL=#{interval_raw}"
+      end
+    else
+      pair_failures << "NP-08 render contract: HCC_AUTHORITY_MAX_STALENESS_MS (#{bound_raw.inspect}) and CLERUM_CONTEXT_MAPPER_POLL_INTERVAL (#{interval_raw.inspect}) must be positive safe integers"
+    end
+    pair_failures << "NP-08 render contract: HCC_AUTHORITY_MAX_STALENESS_MS must be \"180000\" (the mcp-host authority staleness rule requires at least 101000 at a 30000ms poll interval)" unless bound_raw == "180000"
+    pair_failures << "NP-08 render contract: CLERUM_CONTEXT_MAPPER_POLL_INTERVAL must be \"30000\" (the mcp-host authority staleness rule ties it to HCC_AUTHORITY_MAX_STALENESS_MS)" unless interval_raw == "30000"
+    unless bound_raw == default_bound_ms.to_s && interval_raw == default_interval_ms.to_s
+      pair_failures << "NP-08 render contract: the overlay pins HCC_AUTHORITY_MAX_STALENESS_MS=#{bound_raw.inspect} and CLERUM_CONTEXT_MAPPER_POLL_INTERVAL=#{interval_raw.inspect}, which must equal the mcp-host source defaults #{default_bound_ms} and #{default_interval_ms} (#{config_source_path})"
+    end
+    abort(pair_failures.join("\n")) unless pair_failures.empty?
 
     hcc = require_resource.call("Deployment", "host-context-controller", "control-plane")
     hcc_container = Array(hcc.dig("spec", "template", "spec", "containers")).find do |container|
@@ -352,7 +405,7 @@ for rendered in "$@"; do
       role && secret_reading_role.call(role)
     end
     abort("mcp-host identities must not receive MCP Secret read grants") if host_mcp_secret_grant
-  ' "${rendered}"
+  ' "${rendered}" "${MCP_HOST_CONFIG_SOURCE}"
 
   echo "PASS: NP-08 rendered contract (${rendered##*/})"
 done

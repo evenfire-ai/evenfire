@@ -712,3 +712,35 @@ export function canonicalStringify(obj: Record<string, unknown>): string {
   const sorted = Object.keys(obj).sort()
   return JSON.stringify(sorted.map(k => [k, obj[k]]))
 }
+
+/** Run `work` over `items` with at most `maxConcurrency` in flight; settles every item. */
+export async function mapSettledWithConcurrency<T, TResult>(
+  items: readonly T[],
+  maxConcurrency: number,
+  work: (item: T, index: number) => Promise<TResult>
+): Promise<Array<PromiseSettledResult<TResult>>> {
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
+    throw new RangeError('maxConcurrency must be a positive integer')
+  }
+
+  const results = new Array<PromiseSettledResult<TResult>>(items.length)
+  let nextIndex = 0
+  const worker = async (): Promise<void> => {
+    while (nextIndex < items.length) {
+      const index = nextIndex
+      nextIndex += 1
+      try {
+        results[index] = {
+          status: 'fulfilled',
+          value: await work(items[index], index),
+        }
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason }
+      }
+    }
+  }
+
+  const workerCount = Math.min(maxConcurrency, items.length)
+  await Promise.all(Array.from({ length: workerCount }, () => worker()))
+  return results
+}

@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { V1Deployment, V1Service } from '@kubernetes/client-node'
+import { fakeSecretApiserver } from './__tests__/fakeSecretApiserver'
+import { config } from './config'
+import { ManagedDeploymentInformer } from './informers/deploymentInformer'
+import { SecretInformer } from './informers/secretInformer'
+import { K8sRequestTimeoutError } from './k8s/k8sRequestDeadline'
 import { McpServerWatcher } from './k8sClient'
 import { hccLogger } from './logger'
 import { registry } from './metrics'
@@ -22,11 +27,12 @@ const fixture = vi.hoisted(() => ({
   failDeployment: false,
   failDeploymentName: undefined as string | undefined,
   serverExists: true,
-  readInput: undefined as undefined | (() => Promise<unknown>),
+  readInput: undefined as undefined | ((request: { name: string }) => Promise<unknown>),
+  statusPatches: 0,
   failPublication: undefined as undefined | ((body: any[]) => boolean),
   server: undefined as any,
   peers: [] as any[],
-  readService: undefined as undefined | (() => Promise<void>),
+  readService: undefined as undefined | ((name: string) => Promise<void>),
 }))
 
 vi.mock('./config', () => ({
@@ -39,8 +45,12 @@ vi.mock('./config', () => ({
     rpcProxyNamespace: 'rpc-proxy',
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'rpc-proxy'],
     hostK8sRequestTimeoutMs: 30000,
+    k8sRequestTimeoutMs: 30_000,
+    netPolPassHardLimitMs: 1_800_000,
     hostResyncIntervalSec: 0,
-    netPolResyncIntervalSec: 3600,
+    // Below the 30 min NetworkPolicy pass hard limit: A-T7a holds a pass open
+    // across one full tick, and a pass held past the limit ends the process.
+    netPolResyncIntervalSec: 600,
     netPolDefaultsResyncIntervalSec: 0,
     externalEgressResyncIntervalSec: 0,
     allowedPluginImagePrefixes: ['ghcr.io/palmeradao/'],
@@ -83,8 +93,8 @@ vi.mock('@kubernetes/client-node', async importOriginal => {
     return structuredClone(object)
   }
   const core = {
-    readNamespacedSecret: async () => {
-      if (fixture.readInput) return fixture.readInput()
+    readNamespacedSecret: async (request: { name: string }) => {
+      if (fixture.readInput) return fixture.readInput(request)
       throw absent()
     },
     readNamespacedConfigMap: async () => {
@@ -94,7 +104,7 @@ vi.mock('@kubernetes/client-node', async importOriginal => {
       fixture.services.delete(name)
     },
     readNamespacedService: async ({ name }: any) => {
-      await fixture.readService?.()
+      await fixture.readService?.(name)
       return read(fixture.services, name)
     },
     createNamespacedService: async ({ namespace, body }: any) =>
@@ -129,6 +139,7 @@ vi.mock('@kubernetes/client-node', async importOriginal => {
     getNamespacedCustomObject: async ({ name }: any) => structuredClone(serverNamed(name)),
     getNamespacedCustomObjectStatus: async ({ name }: any) => structuredClone(serverNamed(name)),
     patchNamespacedCustomObjectStatus: async ({ name, body }: any) => {
+      fixture.statusPatches++
       if (fixture.failPublication?.(body))
         throw Object.assign(new Error('fixture status unavailable'), { code: 503 })
       const server = serverNamed(name)
@@ -240,6 +251,7 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
     fixture.serverExists = true
     fixture.peers = []
     fixture.readInput = undefined
+    fixture.statusPatches = 0
     fixture.failPublication = undefined
     fixture.readService = undefined
     fixture.server = {
@@ -278,7 +290,7 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
     fixture.services.delete('runtime-witness')
     const writesBefore = fixture.writes.length
     const skipsBefore = await skippedTickCount()
-    await vi.advanceTimersByTimeAsync(3600_000)
+    await vi.advanceTimersByTimeAsync(600_000)
     expect(await skippedTickCount()).toBe(skipsBefore + 1)
     expect(fixture.services.has('runtime-witness')).toBe(false)
     expect(fixture.writes).toHaveLength(writesBefore)
@@ -296,7 +308,7 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
     )
     expect(fixture.services.has('runtime-witness')).toBe(false)
     expect(fixture.writes).toHaveLength(writesBefore)
-    await vi.advanceTimersByTimeAsync(3600_000)
+    await vi.advanceTimersByTimeAsync(600_000)
     await drain(state)
     expect(fixture.services.get('runtime-witness')?.spec?.ports?.[0].port).toBe(3000)
     expect(fixture.writes.slice(writesBefore)).toContain('Service/runtime-witness')
@@ -656,6 +668,1422 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       await vi.advanceTimersByTimeAsync(5000)
       await drain(state)
       expect([...reconciled].sort()).toEqual(['runtime-peer', 'runtime-witness'])
+    })
+  })
+
+  describe('#1338: an out-of-pass obligation gets the McpServer lane retry', () => {
+    const witness = 'runtime-witness'
+    const peer = 'runtime-peer'
+    let secretReads: Map<string, number>
+    let failures: Map<string, Array<() => unknown>>
+    let alwaysFail: Set<string>
+    let deploymentInformers: ManagedDeploymentInformer[]
+
+    const reads = (input: string) => secretReads.get(input) ?? 0
+    const timeout = () => new K8sRequestTimeoutError('readNamespacedSecret', 30_000)
+    const absentInput = () => Object.assign(new Error('fixture input absent'), { code: 404 })
+    const failNext = (input: string, ...next: Array<() => unknown>) => {
+      failures.set(input, [...(failures.get(input) ?? []), ...next])
+    }
+
+    beforeEach(() => {
+      secretReads = new Map()
+      failures = new Map()
+      alwaysFail = new Set()
+      deploymentInformers = []
+      fixture.server.spec.envSecret = { name: 'witness-input', keys: [] }
+      fixture.readInput = async request => {
+        secretReads.set(request.name, reads(request.name) + 1)
+        if (alwaysFail.has(request.name)) throw timeout()
+        const failure = failures.get(request.name)?.shift()
+        if (failure) throw failure()
+        return { metadata: { name: request.name, resourceVersion: '1' }, data: {} }
+      }
+    })
+
+    afterEach(() => {
+      for (const informer of deploymentInformers) informer.stop()
+      config.netPolResyncIntervalSec = 600
+    })
+
+    async function retryCount(): Promise<number> {
+      const metric = registry.getSingleMetric('clerum_hcc_initial_convergence_retries_total')
+      if (!metric) throw new Error('clerum_hcc_initial_convergence_retries_total is not registered')
+      const snapshot = await metric.get()
+      return snapshot.values.find(value => value.labels.lane === 'McpServer')?.value ?? 0
+    }
+
+    /** A started watcher whose NetworkPolicy and McpServer lanes are certified at the current revision. */
+    async function startCertified(options: { withPeer?: boolean } = {}) {
+      if (options.withPeer) {
+        const sibling = structuredClone(fixture.server)
+        sibling.metadata = { ...sibling.metadata, name: peer, uid: `${peer}-uid` }
+        sibling.spec.envSecret = { name: 'peer-input', keys: [] }
+        fixture.peers = [sibling]
+      }
+      const harness = prepareWatcher()
+      watcher = harness.watcher
+      const { state } = harness
+      await watcher.start()
+      await drain(state)
+      // Fold the conditions the first reconcile wrote back through a real LIST,
+      // so the cache carries exactly what a successful reconcile publishes.
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      expect(state.runtimeRepairPending).toBe(false)
+      expect(state.matchesCurrentInventory(state.completedRuntimeRevision)).toBe(true)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(false)
+      expect(state.reconciler.getStatus(state.servers.get(witness))).toMatchObject({
+        ready: true,
+        authoritative: true,
+      })
+      return state
+    }
+
+    it('I1 an informer ADDED read timeout keeps ready, and the scoped retry discharges the obligation', async () => {
+      const state = await startCertified()
+      const info = vi.spyOn(hccLogger, 'info')
+      const patchesBefore = fixture.statusPatches
+      const readsBefore = reads('witness-input')
+      failNext('witness-input', timeout)
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(true)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(true)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(true)
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+      expect(reads('witness-input')).toBe(readsBefore + 2)
+      expect(info).toHaveBeenCalledWith(
+        '[K8s] Running scoped McpServer background reconciliation retry...',
+        { servers: [witness] }
+      )
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(true)
+      expect(fixture.statusPatches).toBe(patchesBefore)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(false)
+    })
+
+    it('I2 an informer MODIFIED read timeout publishes not-ready, and the retry restores ready', async () => {
+      const state = await startCertified()
+      const patchesBefore = fixture.statusPatches
+      const readsBefore = reads('witness-input')
+      failNext('witness-input', timeout)
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'MODIFIED')
+
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(false)
+      expect(fixture.statusPatches).toBeGreaterThan(patchesBefore)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'SecretResolved', status: 'False', reason: 'ReadError' }),
+        ])
+      )
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+      expect(reads('witness-input')).toBe(readsBefore + 2)
+      expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(true)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+    })
+
+    // A watch event that changes the desired revision (spec, labels or
+    // annotations) also starts a NetworkPolicy pass whose authoritative
+    // revocation requests a full McpServer convergence, and that run owns the
+    // obligation. The watch event the fleet lane never covers is a replayed
+    // ADDED of an unchanged object: it reconciles without moving the revision.
+    it('I3 a replayed watch ADDED that moves no revision gets the retry from its own reconcile', async () => {
+      const state = await startCertified()
+      const revisionBefore = state.mcpServerDesiredRevision
+      const readsBefore = reads('witness-input')
+      failNext('witness-input', timeout)
+
+      await state.getMcpServerWatchCallback()('ADDED', structuredClone(fixture.server))
+      await drain(state)
+
+      expect(state.mcpServerDesiredRevision).toBe(revisionBefore)
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(true)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(true)
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+      expect(reads('witness-input')).toBe(readsBefore + 2)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+    })
+
+    it('I4 a persistent read failure retries only at the lane rungs and keeps ready without status writes', async () => {
+      const state = await startCertified()
+      const patchesBefore = fixture.statusPatches
+      const retriesBefore = await retryCount()
+      const readsBefore = reads('witness-input')
+      alwaysFail.add('witness-input')
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+
+      // Cumulative rungs of INITIAL_CONVERGENCE_RETRY_DELAYS_MS: 5, 20, 50, 110, 410 s.
+      const rungs = [5_000, 15_000, 30_000, 60_000, 300_000]
+      for (const [index, delay] of rungs.entries()) {
+        await vi.advanceTimersByTimeAsync(delay - 1)
+        await drain(state)
+        expect(reads('witness-input')).toBe(readsBefore + 1 + index)
+        await vi.advanceTimersByTimeAsync(1)
+        await drain(state)
+        expect(reads('witness-input')).toBe(readsBefore + 2 + index)
+        expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(true)
+      }
+      expect(fixture.statusPatches).toBe(patchesBefore)
+      expect(await retryCount()).toBe(retriesBefore + rungs.length + 1)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(true)
+    })
+
+    it('I5 a retry that fires without a safety certificate waits for the next certified full convergence', async () => {
+      const state = await startCertified({ withPeer: true })
+      const warn = vi.spyOn(console, 'warn')
+      const core = vi.spyOn(state, 'runInitialMcpServerConvergenceCore')
+      const witnessBefore = reads('witness-input')
+      const peerBefore = reads('peer-input')
+      failNext('witness-input', timeout)
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('Scheduling initial McpServer background convergence retry 1')
+      )
+      state.netPolReconciler.hasCertifiedSafetyInventory.mockReturnValue(false)
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+
+      expect(core).toHaveBeenCalledTimes(1)
+      expect(reads('witness-input')).toBe(witnessBefore + 1)
+      expect(reads('peer-input')).toBe(peerBefore)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(false)
+      expect(state.runtimeRepairPending).toBe(true)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(true)
+
+      state.netPolReconciler.hasCertifiedSafetyInventory.mockReturnValue(true)
+      await state.runInitialNetworkPolicyConvergence({ cause: 'retry' })
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+      expect(reads('peer-input')).toBe(peerBefore + 1)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(state.runtimeRepairPending).toBe(false)
+    })
+
+    it('I6 a retry requested while the lane certificate lags the inventory runs the whole fleet', async () => {
+      const state = await startCertified({ withPeer: true })
+      state.completedRuntimeRevision = {
+        ...state.completedRuntimeRevision,
+        serverRevision: state.completedRuntimeRevision.serverRevision - 1,
+      }
+      const witnessBefore = reads('witness-input')
+      const peerBefore = reads('peer-input')
+      failNext('witness-input', timeout)
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+
+      expect(reads('witness-input')).toBe(witnessBefore + 1)
+      expect(state.mcpServerRetryRequest).toBe('full')
+      expect(state.matchesCurrentInventory(state.completedRuntimeRevision)).toBe(false)
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+      expect(reads('peer-input')).toBe(peerBefore + 1)
+      expect(state.matchesCurrentInventory(state.completedRuntimeRevision)).toBe(true)
+      expect(state.runtimeRepairPending).toBe(false)
+    })
+
+    it('I7 a kept verdict fails closed at the first retry that reads 404', async () => {
+      const state = await startCertified()
+      const readsBefore = reads('witness-input')
+      failNext('witness-input', timeout, absentInput)
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(true)
+      expect(fixture.deployments.has(witness)).toBe(true)
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(readsBefore + 2)
+      expect(fixture.deployments.has(witness)).toBe(false)
+      expect(state.reconciler.getStatus(witness).ready).toBe(false)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'Ready',
+            status: 'False',
+            reason: 'SecretValidationFailed',
+          }),
+        ])
+      )
+    })
+
+    const forbidden = () => Object.assign(new Error('fixture access denied'), { code: 403 })
+    const recoveryDecision = (reason: string, decision: string) =>
+      expect.objectContaining({ event: 'networkpolicy-recovery-decision', decision, reason })
+
+    it('I8 a Secret change while the inventory is not authoritative is routed at recovery, and its read error publishes', async () => {
+      const state = await startCertified()
+      const consoleWarn = vi.spyOn(console, 'warn')
+      const info = vi.spyOn(hccLogger, 'info')
+      const readsBefore = reads('witness-input')
+      state.retireMcpServerWatch()
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'MODIFIED')
+
+      const deferredLines = consoleWarn.mock.calls
+        .map(call => String(call[0]))
+        .filter(line => line.includes('secret-change-deferred'))
+      expect(deferredLines).toHaveLength(1)
+      expect(JSON.parse(deferredLines[0])).toMatchObject({
+        event: 'secret-change-deferred',
+        eventType: 'MODIFIED',
+        deferredChanges: 1,
+      })
+      expect(deferredLines[0]).not.toContain('witness-input')
+      expect(reads('witness-input')).toBe(readsBefore)
+      failNext('witness-input', timeout)
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('work-pending', 'request')
+      )
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(state.reconciler.getStatus(state.servers.get(witness))).toMatchObject({
+        ready: false,
+        authoritative: true,
+      })
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'SecretResolved', status: 'False', reason: 'ReadError' }),
+        ])
+      )
+
+      // Routing emptied the deferred set: a later recovery has nothing to route.
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      info.mockClear()
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('identical-complete', 'skip')
+      )
+      expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
+    })
+
+    it('I17 a Secret first seen while the inventory is not authoritative is replayed after an identical recovery', async () => {
+      failNext('witness-input', absentInput, absentInput)
+      const harness = prepareWatcher()
+      watcher = harness.watcher
+      const { state } = harness
+      await watcher.start()
+      await drain(state)
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      expect(fixture.deployments.has(witness)).toBe(false)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'SecretResolved', reason: 'SecretNotFound' }),
+        ])
+      )
+      const info = vi.spyOn(hccLogger, 'info')
+      const readsBefore = reads('witness-input')
+      state.retireMcpServerWatch()
+
+      await watcher.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      await watcher.reconcileByEnvSecret('unrelated-input', 'mcp-server', 'ADDED')
+
+      expect(reads('witness-input')).toBe(readsBefore)
+      expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('identical-complete', 'skip')
+      )
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(reads('unrelated-input')).toBe(0)
+      expect(fixture.deployments.has(witness)).toBe(true)
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+    })
+
+    it('I18 a queued ADDED dropped because authority moved is replayed, and its read timeout keeps ready', async () => {
+      const state = await startCertified()
+      const warn = vi.spyOn(hccLogger, 'warn')
+      const info = vi.spyOn(hccLogger, 'info')
+      const readsBefore = reads('witness-input')
+      const { blocker, started, release } = holdQueue(state)
+      await started.promise
+
+      const event = watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      state.retireMcpServerWatch()
+      release.resolve()
+      await Promise.all([blocker, event])
+      await drain(state)
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ event: 'secret-reconcile-dropped', serverName: witness })
+      )
+      expect(reads('witness-input')).toBe(readsBefore)
+      failNext('witness-input', timeout)
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('identical-complete', 'skip')
+      )
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(state.reconciler.incompleteReconciliationNames()).toEqual([witness])
+    })
+
+    it('I18b MODIFIED then ADDED for one Secret records evidence and also replays', async () => {
+      const state = await startCertified()
+      const reconciled = recordReconciledNames(state)
+      state.retireMcpServerWatch()
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'MODIFIED')
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      failNext('witness-input', timeout)
+
+      const info = vi.spyOn(hccLogger, 'info')
+      await state.recoverMcpServerInventoryAndWatch()
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('work-pending', 'request')
+      )
+      await drain(state)
+      // The pass the evidence requested and the replayed ADDED each reconcile.
+      expect(reconciled).toEqual([witness, witness])
+      expect(state.unroutedSecretAdditions.size).toBe(0)
+    })
+
+    it('I18c a DELETED event whose read times out publishes not-ready', async () => {
+      const state = await startCertified()
+      const readsBefore = reads('witness-input')
+      failNext('witness-input', timeout)
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'DELETED')
+
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(state.reconciler.getStatus(witness).ready).toBe(false)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'SecretResolved', status: 'False', reason: 'ReadError' }),
+        ])
+      )
+    })
+
+    it('I9 a Secret change whose reconcile is dropped because authority moved is still converged at recovery', async () => {
+      const state = await startCertified()
+      const warn = vi.spyOn(hccLogger, 'warn')
+      const info = vi.spyOn(hccLogger, 'info')
+      const readsBefore = reads('witness-input')
+      const started = deferred()
+      const release = deferred()
+      const blocker = state.enqueueMcpServerReconciliation(
+        { name: witness, namespace: 'mcp-server' },
+        async () => {
+          started.resolve()
+          await release.promise
+        }
+      )
+      await started.promise
+
+      const event = watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'MODIFIED')
+      state.retireMcpServerWatch()
+      release.resolve()
+      await Promise.all([blocker, event])
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ event: 'secret-reconcile-dropped', serverName: witness })
+      )
+      expect(reads('witness-input')).toBe(readsBefore)
+      failNext('witness-input', timeout)
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('work-pending', 'request')
+      )
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(false)
+    })
+
+    async function informerEvents(type: string): Promise<number> {
+      const metric = registry.getSingleMetric('clerum_hcc_secret_informer_events_total')
+      if (!metric) throw new Error('clerum_hcc_secret_informer_events_total is not registered')
+      const snapshot = await metric.get()
+      return (
+        snapshot.values.find(
+          value => value.labels.namespace === 'mcp-server' && value.labels.type === type
+        )?.value ?? 0
+      )
+    }
+
+    async function informerCounter(name: string, labels: Record<string, string>) {
+      const metric = registry.getSingleMetric(name)
+      if (!metric) throw new Error(`${name} is not registered`)
+      const snapshot = await metric.get()
+      return (
+        snapshot.values.find(value =>
+          Object.entries(labels).every(([label, expected]) => value.labels[label] === expected)
+        )?.value ?? 0
+      )
+    }
+
+    /** The mcp-server informer, in resume mode, wired to the watcher as main.ts wires it. */
+    async function startInformer(state: any, names: string[]) {
+      const api = fakeSecretApiserver('mcp-server', names)
+      const informer = new SecretInformer(
+        {} as any,
+        'mcp-server',
+        watcher!.handleSecretEvent,
+        { mode: 'resume', list: api.list },
+        { watch: { watch: api.watch } }
+      )
+      await expect(informer.start()).resolves.toBe(true)
+      await drain(state)
+      return { api, informer }
+    }
+
+    it('I10a an informer MODIFIED reaches the watcher as MODIFIED: evidence is recorded and a read timeout publishes', async () => {
+      const state = await startCertified()
+      const { api, informer } = await startInformer(state, ['witness-input'])
+      try {
+        const readsBefore = reads('witness-input')
+        const modifiedBefore = await informerEvents('MODIFIED')
+        failNext('witness-input', timeout)
+
+        api.modify('witness-input')
+        await drain(state)
+
+        expect(await informerEvents('MODIFIED')).toBe(modifiedBefore + 1)
+        expect(reads('witness-input')).toBe(readsBefore + 1)
+        expect(state.reconciler.hasSecretChangeEvidence()).toBe(true)
+        expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(false)
+      } finally {
+        informer.stop()
+      }
+    })
+
+    it('I10b an informer ADDED for a first-seen Secret reaches the watcher as ADDED: a read timeout keeps ready', async () => {
+      const state = await startCertified()
+      const { api, informer } = await startInformer(state, ['unrelated-input'])
+      try {
+        const readsBefore = reads('witness-input')
+        const addedBefore = await informerEvents('ADDED')
+        failNext('witness-input', timeout)
+
+        api.create('witness-input')
+        await drain(state)
+
+        expect(await informerEvents('ADDED')).toBe(addedBefore + 1)
+        expect(reads('witness-input')).toBe(readsBefore + 1)
+        expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
+        expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(true)
+      } finally {
+        informer.stop()
+      }
+    })
+
+    /** Three env-Secret McpServers, ready and certified, with the informer started. */
+    async function startQuietFleet() {
+      const peers = ['peer-one', 'peer-two'].map(name => {
+        const sibling = structuredClone(fixture.server)
+        sibling.metadata = { ...sibling.metadata, name, uid: `${name}-uid` }
+        sibling.spec.envSecret = { name: `${name}-input`, keys: [] }
+        return sibling
+      })
+      fixture.peers = peers
+      const state = await startCertified()
+      const started = await startInformer(state, [
+        'witness-input',
+        'peer-one-input',
+        'peer-two-input',
+      ])
+      const allReads = () => [...secretReads.values()].reduce((sum, value) => sum + value, 0)
+      return { state, ...started, allReads }
+    }
+
+    it.each([
+      ['resumes', false],
+      ['relists after a 410', true],
+    ] as const)(
+      'I11 a quiet informer reconnect that %s costs no reconcile, no Secret read and no status write',
+      async (_label, expire) => {
+        const { state, api, informer, allReads } = await startQuietFleet()
+        try {
+          const byEnvSecret = vi.spyOn(watcher!, 'reconcileByEnvSecret')
+          const readsBefore = allReads()
+          const patchesBefore = fixture.statusPatches
+          const resumesBefore = await informerCounter('clerum_hcc_secret_informer_resumes_total', {
+            namespace: 'mcp-server',
+          })
+          const relistsBefore = await informerCounter('clerum_hcc_secret_informer_lists_total', {
+            namespace: 'mcp-server',
+            outcome: 'relist',
+          })
+
+          for (let reconnect = 0; reconnect < 3; reconnect++) {
+            api.disconnect()
+            if (expire && reconnect === 0) {
+              api.expireNextResume()
+              await vi.advanceTimersByTimeAsync(1000)
+            }
+            await vi.advanceTimersByTimeAsync(1000)
+            await drain(state)
+          }
+
+          expect(byEnvSecret).not.toHaveBeenCalled()
+          expect(allReads()).toBe(readsBefore)
+          expect(fixture.statusPatches).toBe(patchesBefore)
+          const watches = api.watchCalls.slice(1)
+          expect(watches.length).toBeGreaterThanOrEqual(3)
+          for (const call of watches) expect(call.queryParams.resourceVersion).toBeDefined()
+          if (expire) {
+            expect(api.list).toHaveBeenCalledTimes(2)
+            expect(
+              await informerCounter('clerum_hcc_secret_informer_lists_total', {
+                namespace: 'mcp-server',
+                outcome: 'relist',
+              })
+            ).toBe(relistsBefore + 1)
+          } else {
+            expect(api.watchFn).toHaveBeenCalledTimes(4)
+            expect(
+              await informerCounter('clerum_hcc_secret_informer_resumes_total', {
+                namespace: 'mcp-server',
+              })
+            ).toBe(resumesBefore + 3)
+          }
+        } finally {
+          informer.stop()
+        }
+      }
+    )
+
+    it('I12 a Secret modified while the informer was down becomes evidence, so a read timeout publishes', async () => {
+      const state = await startCertified()
+      const { api, informer } = await startInformer(state, ['witness-input'])
+      try {
+        const readsBefore = reads('witness-input')
+        api.disconnect()
+        api.expireNextResume()
+        api.modify('witness-input')
+        failNext('witness-input', timeout)
+
+        await vi.advanceTimersByTimeAsync(2000)
+        await drain(state)
+
+        expect(api.list).toHaveBeenCalledTimes(2)
+        expect(reads('witness-input')).toBe(readsBefore + 1)
+        expect(state.reconciler.hasSecretChangeEvidence()).toBe(true)
+        expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(false)
+      } finally {
+        informer.stop()
+      }
+    })
+
+    it('I13 a Secret deleted while the informer was down is reconciled and fails the server closed', async () => {
+      const state = await startCertified()
+      const { api, informer } = await startInformer(state, ['witness-input'])
+      try {
+        const readsBefore = reads('witness-input')
+        expect(fixture.deployments.has(witness)).toBe(true)
+        api.disconnect()
+        api.expireNextResume()
+        api.remove('witness-input')
+        failNext('witness-input', absentInput)
+
+        await vi.advanceTimersByTimeAsync(2000)
+        await drain(state)
+
+        expect(reads('witness-input')).toBe(readsBefore + 1)
+        expect(fixture.deployments.has(witness)).toBe(false)
+        expect(fixture.server.status.conditions).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'SecretResolved',
+              status: 'False',
+              reason: 'SecretNotFound',
+            }),
+          ])
+        )
+      } finally {
+        informer.stop()
+      }
+    })
+
+    async function secretAccessProbes(outcome: string): Promise<number> {
+      return informerCounter('clerum_hcc_secret_access_probes_total', { outcome })
+    }
+
+    async function denyWitness(state: any) {
+      failNext('witness-input', forbidden)
+      await state.reconciler.reconcile(state.servers.get(witness))
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([witness])
+    }
+
+    it('I14 a denied Secret read fails closed, uses no retry, and the probe restores the server once access returns', async () => {
+      const state = await startCertified()
+      const retriesBefore = await retryCount()
+      const readsBefore = reads('witness-input')
+      failNext('witness-input', forbidden)
+      const reconciled = recordReconciledNames(state)
+
+      await state.reconciler.reconcile(state.servers.get(witness))
+      reconciled.length = 0
+
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(fixture.deployments.has(witness)).toBe(false)
+      expect(state.reconciler.getStatus(witness).ready).toBe(false)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(await retryCount()).toBe(retriesBefore)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(false)
+
+      const deniedBefore = await secretAccessProbes('denied')
+      failNext('witness-input', forbidden)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(readsBefore + 2)
+      expect(reconciled).toEqual([])
+      expect(fixture.deployments.has(witness)).toBe(false)
+      expect(await secretAccessProbes('denied')).toBe(deniedBefore + 1)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(readsBefore + 4)
+      expect(reconciled).toEqual([witness])
+      expect(fixture.deployments.has(witness)).toBe(true)
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([])
+      expect(await retryCount()).toBe(retriesBefore)
+    })
+
+    it('I22b stop ends the probe ticks', async () => {
+      const state = await startCertified()
+      await denyWitness(state)
+      failNext('witness-input', forbidden)
+      const probe = vi.spyOn(state, 'probeMcpServerSecretAccess')
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+      expect(probe).toHaveBeenCalledTimes(1)
+      const readsAtStop = reads('witness-input')
+
+      await watcher!.stop()
+      expect(state.secretAccessProbeTimer).toBeNull()
+      await vi.advanceTimersByTimeAsync(180_000)
+
+      expect(probe).toHaveBeenCalledTimes(1)
+      expect(reads('witness-input')).toBe(readsAtStop)
+    })
+
+    it('I22c with nothing denied a tick issues no read and no probe', async () => {
+      const state = await startCertified()
+      const readsBefore = reads('witness-input')
+      const accessor = vi.spyOn(state.reconciler, 'namesAwaitingExternalChange')
+      const probe = vi.spyOn(state.reconciler, 'probeSecretAccess')
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(accessor).toHaveBeenCalledTimes(1)
+      expect(probe).not.toHaveBeenCalled()
+      expect(reads('witness-input')).toBe(readsBefore)
+    })
+
+    it('I23 the probe in-flight guard holds through the fan-out', async () => {
+      config.netPolResyncIntervalSec = 0
+      const state = await startCertified({ withPeer: true })
+      await denyWitness(state)
+      failNext('peer-input', forbidden)
+      await state.reconciler.reconcile(state.servers.get(peer))
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([
+        witness,
+        peer,
+      ])
+      const reconciled = recordReconciledNames(state)
+      const entered = deferred()
+      const release = deferred()
+      fixture.readService = async name => {
+        if (name !== witness) return
+        entered.resolve()
+        await release.promise
+      }
+      failNext('peer-input', forbidden)
+      const witnessBefore = reads('witness-input')
+      const peerBefore = reads('peer-input')
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await entered.promise
+      await until(
+        () => state.reconciler.namesAwaitingExternalChange('SecretAccessDenied').length === 1
+      )
+
+      // Probe read and the reconcile's read for the witness; the peer returned to the set.
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+      expect(reads('peer-input')).toBe(peerBefore + 1)
+      expect([...reconciled].sort()).toEqual([peer, witness])
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([peer])
+
+      await vi.advanceTimersByTimeAsync(60_000)
+
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+      expect(reads('peer-input')).toBe(peerBefore + 1)
+
+      release.resolve()
+      fixture.readService = undefined
+      failNext('peer-input', forbidden)
+      await drain(state)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('peer-input')).toBe(peerBefore + 2)
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+      expect(reconciled).toHaveLength(2)
+    })
+
+    it('I24 the probe does not act without inventory authority', async () => {
+      config.netPolResyncIntervalSec = 3600
+      const state = await startCertified()
+      await denyWitness(state)
+      // Fold the fail-closed status through a real LIST; that pass is still denied.
+      failNext('witness-input', forbidden)
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([witness])
+      const probe = vi.spyOn(state.reconciler, 'probeSecretAccess')
+      const readsBefore = reads('witness-input')
+      state.retireMcpServerWatch()
+
+      await vi.advanceTimersByTimeAsync(60_000)
+
+      expect(reads('witness-input')).toBe(readsBefore)
+      expect(probe).not.toHaveBeenCalled()
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([witness])
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      failNext('witness-input', forbidden)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(probe).toHaveBeenCalledTimes(1)
+
+      // Part two: the queued wake finds its authority gone.
+      const reconciled = recordReconciledNames(state)
+      const info = vi.spyOn(hccLogger, 'info')
+      const { blocker, started, release } = holdQueue(state)
+      await started.promise
+      await vi.advanceTimersByTimeAsync(60_000)
+      state.retireMcpServerWatch()
+      release.resolve()
+      await blocker
+      await drain(state)
+
+      expect(reconciled).toEqual([])
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(
+        info.mock.calls.filter(call => call[1]?.event === 'mcpserver-verdict-reobservation')
+      ).toHaveLength(1)
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([witness])
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(reconciled).toContain(witness)
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(fixture.deployments.has(witness)).toBe(true)
+    })
+
+    it.each([
+      ['a timeout', timeout],
+      ['a 500', () => Object.assign(new Error('fixture failure'), { code: 500 })],
+    ] as const)(
+      'I29 a probe answered by %s changes nothing and reads again next tick',
+      async (_label, failure) => {
+        const { state } = await startStuckCertified({ withPeer: true })
+        failNext('peer-input', forbidden)
+        await state.reconciler.reconcile(state.servers.get(peer))
+        const reconciled = recordReconciledNames(state)
+        const patchesBefore = fixture.statusPatches
+        const readsBefore = reads('peer-input')
+        const failedBefore = await secretAccessProbes('failed')
+        failNext('peer-input', failure, forbidden)
+
+        await vi.advanceTimersByTimeAsync(60_000)
+        await drain(state)
+
+        expect(reads('peer-input')).toBe(readsBefore + 1)
+        expect(reconciled).toEqual([])
+        expect(fixture.statusPatches).toBe(patchesBefore)
+        expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([peer])
+        expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+        expect(await secretAccessProbes('failed')).toBe(failedBefore + 1)
+
+        await vi.advanceTimersByTimeAsync(60_000)
+        await drain(state)
+        expect(reads('peer-input')).toBe(readsBefore + 2)
+      }
+    )
+
+    it('I30 a successful probe wakes every denied server, and one still denied returns to the set', async () => {
+      const state = await startCertified({ withPeer: true })
+      await denyWitness(state)
+      failNext('peer-input', forbidden)
+      await state.reconciler.reconcile(state.servers.get(peer))
+      const witnessBefore = reads('witness-input')
+      const peerBefore = reads('peer-input')
+      failNext('peer-input', forbidden)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+      expect(reads('peer-input')).toBe(peerBefore + 1)
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([peer])
+
+      failNext('peer-input', forbidden)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('peer-input')).toBe(peerBefore + 2)
+      expect(reads('witness-input')).toBe(witnessBefore + 2)
+    })
+
+    it('I31 a Secret that is gone answers the probe 404, and the reconcile publishes SecretNotFound', async () => {
+      const state = await startCertified()
+      await denyWitness(state)
+      const readsBefore = reads('witness-input')
+      failNext('witness-input', absentInput, absentInput)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(readsBefore + 2)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'SecretResolved', reason: 'SecretNotFound' }),
+        ])
+      )
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([])
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+      expect(reads('witness-input')).toBe(readsBefore + 2)
+    })
+
+    it('I32 a recovered access wakes denied servers at most 10 at a time', async () => {
+      const names = Array.from({ length: 12 }, (_value, index) => `denied-${index}`)
+      fixture.peers = names.map(name => {
+        const sibling = structuredClone(fixture.server)
+        sibling.metadata = { ...sibling.metadata, name, uid: `${name}-uid` }
+        sibling.spec.envSecret = { name: `${name}-input`, keys: [] }
+        return sibling
+      })
+      const state = await startCertified()
+      for (const name of names) {
+        failNext(`${name}-input`, forbidden)
+        await state.reconciler.reconcile(state.servers.get(name))
+      }
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual(names)
+      const release = deferred()
+      let serviceReads = 0
+      fixture.readService = async () => {
+        serviceReads++
+        await release.promise
+      }
+      const reconciled = recordReconciledNames(state)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+
+      expect(reconciled).toHaveLength(10)
+      expect(serviceReads).toBe(10)
+
+      release.resolve()
+      fixture.readService = undefined
+      await drain(state)
+      await until(() => reconciled.length === 12)
+      await drain(state)
+
+      expect([...reconciled].sort()).toEqual([...names].sort())
+      expect(state.reconciler.namesAwaitingExternalChange('SecretAccessDenied')).toEqual([])
+      for (const name of names) expect(fixture.deployments.has(name)).toBe(true)
+    })
+
+    it('I15 evidence for a server that left the inventory no longer requests recovery passes (#1338)', async () => {
+      fixture.server.spec.managed = false
+      const state = await startCertified()
+      state.reconciler.recordSecretChangeEvidence(witness)
+      fixture.serverExists = false
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      const info = vi.spyOn(hccLogger, 'info')
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(state.servers.has(witness)).toBe(false)
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('identical-complete', 'skip')
+      )
+      expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
+    })
+
+    /** A real Deployment informer over the fixture, wired as main.ts wires it. */
+    async function attachDeploymentInformer() {
+      let onEvent: ((type: string, object: unknown) => void) | undefined
+      const informer = new ManagedDeploymentInformer(
+        {} as any,
+        'mcp-server',
+        watcher!.handleDeploymentObservation,
+        async () => ({
+          items: [...fixture.deployments.values()].map(value => structuredClone(value)),
+          metadata: { resourceVersion: String(fixture.revision) },
+        }),
+        {
+          watch: {
+            watch: async (_path, _query, callback) => {
+              onEvent = callback
+              return { abort() {} } as unknown as AbortController
+            },
+          },
+        }
+      )
+      deploymentInformers.push(informer)
+      await expect(informer.start()).resolves.toBe(true)
+      return (type: string, name: string) => {
+        const deployment = structuredClone(fixture.deployments.get(name))
+        if (!deployment) throw new Error(`fixture has no Deployment ${name}`)
+        deployment.metadata = {
+          ...deployment.metadata,
+          resourceVersion: String(++fixture.revision),
+        }
+        onEvent!(type, deployment)
+      }
+    }
+
+    function markRolloutReady(name: string) {
+      const deployment = fixture.deployments.get(name)!
+      deployment.status!.readyReplicas = 1
+      deployment.status!.availableReplicas = 1
+    }
+
+    /** The witness is stuck with a terminal verdict, the peer is ready, the revision is certified. */
+    async function startStuckCertified(options: { withPeer?: boolean } = {}) {
+      fixture.rolloutReady = false
+      if (options.withPeer) {
+        const sibling = structuredClone(fixture.server)
+        sibling.metadata = { ...sibling.metadata, name: peer, uid: `${peer}-uid` }
+        sibling.spec.envSecret = { name: 'peer-input', keys: [] }
+        fixture.peers = [sibling]
+      }
+      const harness = prepareWatcher()
+      watcher = harness.watcher
+      const { state } = harness
+      await watcher.start()
+      await drain(state)
+      const emit = await attachDeploymentInformer()
+      if (options.withPeer) markRolloutReady(peer)
+      await vi.advanceTimersByTimeAsync(24 * 5000)
+      await drain(state)
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'DeploymentReady', reason: 'RolloutIncomplete' }),
+        ])
+      )
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(state.matchesCurrentInventory(state.completedRuntimeRevision)).toBe(true)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(false)
+      return { state, emit }
+    }
+
+    function holdQueue(state: any) {
+      const started = deferred()
+      const release = deferred()
+      const blocker = state.enqueueMcpServerReconciliation(
+        { name: witness, namespace: 'mcp-server' },
+        async () => {
+          started.resolve()
+          await release.promise
+        }
+      )
+      return { blocker, started, release }
+    }
+
+    it('I16 a rollout that converges after its readiness poll gave up is restored by its Deployment event', async () => {
+      fixture.rolloutReady = false
+      const harness = prepareWatcher()
+      watcher = harness.watcher
+      const { state } = harness
+      await watcher.start()
+      await drain(state)
+      const emit = await attachDeploymentInformer()
+      expect(state.reconciler.readinessPolls.size).toBe(1)
+      const retriesBefore = await retryCount()
+
+      await vi.advanceTimersByTimeAsync(24 * 5000)
+      await drain(state)
+
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'DeploymentReady',
+            status: 'False',
+            reason: 'RolloutIncomplete',
+          }),
+        ])
+      )
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+      expect(await retryCount()).toBe(retriesBefore)
+      const reconciled = recordReconciledNames(state)
+      const filter = vi.spyOn(state.reconciler, 'rolloutObservationRequiresReconcile')
+      markRolloutReady(witness)
+
+      // Nothing polls: without an event the converged rollout stays unobserved.
+      await vi.advanceTimersByTimeAsync(30_000)
+      await drain(state)
+      expect(reconciled).toEqual([])
+
+      const clockAtEvent = Date.now()
+      emit('MODIFIED', witness)
+      await drain(state)
+
+      expect(filter).toHaveReturnedWith(true)
+      expect(Date.now()).toBe(clockAtEvent)
+      expect(reconciled).toEqual([witness])
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'DeploymentReady', status: 'True' }),
+        ])
+      )
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+      expect(await retryCount()).toBe(retriesBefore)
+    })
+
+    it('I19 a stuck server holds neither the fleet nor certification, and only its moving event costs a reconcile', async () => {
+      config.netPolResyncIntervalSec = 0
+      const { state, emit } = await startStuckCertified({ withPeer: true })
+      const retriesBefore = await retryCount()
+      const reconciled = recordReconciledNames(state)
+      const filter = vi.spyOn(state.reconciler, 'rolloutObservationRequiresReconcile')
+
+      await vi.advanceTimersByTimeAsync(900_000)
+      await drain(state)
+      emit('MODIFIED', witness)
+      await drain(state)
+      expect(filter).toHaveLastReturnedWith(false)
+      expect(reconciled).toEqual([])
+
+      await vi.advanceTimersByTimeAsync(900_000)
+      await drain(state)
+      expect(reconciled).toEqual([])
+      expect(await retryCount()).toBe(retriesBefore)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(false)
+
+      markRolloutReady(witness)
+      emit('MODIFIED', witness)
+      await drain(state)
+
+      expect(filter).toHaveLastReturnedWith(true)
+      expect(reconciled).toEqual([witness])
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+    })
+
+    it('I20 a stuck server does not pin the lane: a peer failure after 15 min retries at the first rung', async () => {
+      const { state } = await startStuckCertified({ withPeer: true })
+      await vi.advanceTimersByTimeAsync(900_000)
+      await drain(state)
+      const before = reads('peer-input')
+      failNext('peer-input', timeout)
+
+      await watcher!.reconcileByEnvSecret('peer-input', 'mcp-server', 'ADDED')
+      expect(reads('peer-input')).toBe(before + 1)
+
+      await vi.advanceTimersByTimeAsync(4999)
+      expect(reads('peer-input')).toBe(before + 1)
+      await vi.advanceTimersByTimeAsync(1)
+      await drain(state)
+      expect(reads('peer-input')).toBe(before + 2)
+    })
+
+    it('I21 a stuck server does not force a recovery pass, while a live readiness window still does', async () => {
+      fixture.rolloutReady = false
+      const harness = prepareWatcher()
+      watcher = harness.watcher
+      const { state } = harness
+      await watcher.start()
+      await drain(state)
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      const info = vi.spyOn(hccLogger, 'info')
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('work-pending', 'request')
+      )
+
+      await vi.advanceTimersByTimeAsync(24 * 5000)
+      await drain(state)
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      info.mockClear()
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('identical-complete', 'skip')
+      )
+    })
+
+    it('I22a a timeout on the wake keeps the verdict and leaves a scoped retry for that name', async () => {
+      const { state, emit } = await startStuckCertified({ withPeer: true })
+      const retriesBefore = await retryCount()
+      const patchesBefore = fixture.statusPatches
+      const readsBefore = reads('witness-input')
+      failNext('witness-input', timeout)
+      markRolloutReady(witness)
+
+      emit('MODIFIED', witness)
+      await drain(state)
+
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(fixture.statusPatches).toBe(patchesBefore)
+      expect(state.reconciler.getStatus(witness).ready).toBe(false)
+      expect(state.mcpServerRetryRequest.names).toEqual(new Set([witness]))
+      expect(await retryCount()).toBe(retriesBefore + 1)
+
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+    })
+
+    it('I25 an event inside a non-authoritative window is replayed after the recovery decision', async () => {
+      const { state, emit } = await startStuckCertified()
+      const reconciled = recordReconciledNames(state)
+      const filter = vi.spyOn(state.reconciler, 'rolloutObservationRequiresReconcile')
+      const info = vi.spyOn(hccLogger, 'info')
+      state.retireMcpServerWatch()
+      markRolloutReady(witness)
+
+      emit('MODIFIED', witness)
+      await drain(state)
+
+      expect(filter).toHaveReturnedWith(true)
+      expect(reconciled).toEqual([])
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('identical-complete', 'skip')
+      )
+      expect(reconciled).toEqual([witness])
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+    })
+
+    it('I25b a queued wake dropped because authority moved is replayed at recovery', async () => {
+      const { state, emit } = await startStuckCertified()
+      const reconciled = recordReconciledNames(state)
+      const { blocker, started, release } = holdQueue(state)
+      await started.promise
+      markRolloutReady(witness)
+
+      emit('MODIFIED', witness)
+      state.retireMcpServerWatch()
+      release.resolve()
+      await blocker
+      await drain(state)
+
+      expect(reconciled).toEqual([])
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(reconciled).toEqual([witness])
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+    })
+
+    it('I25c a queued wake that finds a new generation re-dispatches instead of waiting for another recovery', async () => {
+      const { state, emit } = await startStuckCertified()
+      const reconciled = recordReconciledNames(state)
+      const { blocker, started, release } = holdQueue(state)
+      await started.promise
+      markRolloutReady(witness)
+
+      emit('MODIFIED', witness)
+      state.retireMcpServerWatch()
+      await state.recoverMcpServerInventoryAndWatch()
+      expect(reconciled).toEqual([])
+      const clockAtRelease = Date.now()
+      const recovery = vi.spyOn(state, 'recoverMcpServerInventoryAndWatch')
+
+      release.resolve()
+      await blocker
+      await drain(state)
+
+      expect(recovery).not.toHaveBeenCalled()
+      expect(Date.now()).toBe(clockAtRelease)
+      expect(reconciled).toEqual([witness])
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+    })
+
+    it('I26 a wake queued behind a held key does not apply a newer spec ahead of its egress work', async () => {
+      const { state, emit } = await startStuckCertified()
+      const reconciled = recordReconciledNames(state)
+      // No revocation completes here, so no fleet pass joins the order under test.
+      state.netPolReconciler.fullReconcile.mockImplementation(async () => {})
+      const order: string[] = []
+      state.netPolReconciler.reconcileExternalEgress.mockImplementation(async () => {
+        order.push('egress')
+      })
+      const { blocker, started, release } = holdQueue(state)
+      await started.promise
+      markRolloutReady(witness)
+      emit('MODIFIED', witness)
+      expect(reconciled).toEqual([])
+
+      const edited = structuredClone(fixture.server)
+      edited.metadata.generation = 2
+      edited.metadata.resourceVersion = String(++fixture.revision)
+      edited.spec.image = 'ghcr.io/palmeradao/runtime-test:v2'
+      edited.spec.egressBindings = [{ name: 'fixture-egress' }]
+      fixture.server = edited
+      const watchEvent = state.getMcpServerWatchCallback()('MODIFIED', structuredClone(edited))
+      fixture.writes.length = 0
+      const write = fixture.writes.push.bind(fixture.writes)
+      vi.spyOn(fixture.writes, 'push').mockImplementation((...items: string[]) => {
+        order.push(items[0])
+        return write(...items)
+      })
+
+      release.resolve()
+      await blocker
+      await watchEvent
+      await drain(state)
+
+      expect(reconciled).toEqual([witness])
+      expect(order.indexOf('egress')).toBeGreaterThanOrEqual(0)
+      expect(order.indexOf('egress')).toBeLessThan(order.indexOf(`Deployment/${witness}`))
+      expect(fixture.deployments.get(witness)?.spec?.template.spec?.containers[0].image).toBe(
+        'ghcr.io/palmeradao/runtime-test:v2'
+      )
+    })
+
+    it('I27 a periodic pass reconciles a stuck server once, patches nothing, and certifies', async () => {
+      config.netPolResyncIntervalSec = 3600
+      const { state } = await startStuckCertified({ withPeer: true })
+      const retriesBefore = await retryCount()
+      const patchesBefore = fixture.statusPatches
+      const reconciled = recordReconciledNames(state)
+      const certificateBefore = state.completedRuntimeRevision
+
+      await vi.advanceTimersByTimeAsync(3_600_000 - 24 * 5000)
+      await drain(state)
+
+      expect([...reconciled].sort()).toEqual([peer, witness])
+      expect(fixture.statusPatches).toBe(patchesBefore)
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+      expect(state.completedRuntimeRevision).not.toBe(certificateBefore)
+      expect(state.matchesCurrentInventory(state.completedRuntimeRevision)).toBe(true)
+      expect(await retryCount()).toBe(retriesBefore)
+
+      // With no informer event, the next pass still observes a converged rollout.
+      markRolloutReady(witness)
+      await vi.advanceTimersByTimeAsync(3_600_000)
+      await drain(state)
+
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'DeploymentReady', status: 'True' }),
+        ])
+      )
+    })
+
+    it('I28 a wake running when a pass ends costs a scoped retry and certifies 5 s later', async () => {
+      const { state, emit } = await startStuckCertified({ withPeer: true })
+      const holds = new Map<string, Promise<void>>()
+      const entered = new Map<string, number>()
+      const readInput = fixture.readInput!
+      fixture.readInput = async request => {
+        entered.set(request.name, (entered.get(request.name) ?? 0) + 1)
+        await holds.get(request.name)
+        return readInput(request)
+      }
+      const reconciled = recordReconciledNames(state)
+      const certificateBefore = state.completedRuntimeRevision
+      const holdPeer = deferred()
+      holds.set('peer-input', holdPeer.promise)
+
+      const pass = state.runInitialMcpServerConvergence('full')
+      await until(() => entered.get('peer-input') === 1 && entered.get('witness-input') === 1)
+      await until(
+        () =>
+          !state.reconciler.incompleteReconciliationNames().includes(witness) &&
+          state.reconciler.namesAwaitingExternalChange('RolloutIncomplete').includes(witness)
+      )
+
+      const holdWake = deferred()
+      holds.set('witness-input', holdWake.promise)
+      markRolloutReady(witness)
+      emit('MODIFIED', witness)
+      await until(() => entered.get('witness-input') === 2)
+
+      holdPeer.resolve()
+      await pass
+      expect(state.mcpServerRetryRequest.names).toEqual(new Set([witness]))
+      expect(state.completedRuntimeRevision).toBe(certificateBefore)
+
+      holdWake.resolve()
+      await drain(state)
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      const peerReconciles = reconciled.filter(name => name === peer).length
+
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+
+      expect(state.completedRuntimeRevision).not.toBe(certificateBefore)
+      expect(state.matchesCurrentInventory(state.completedRuntimeRevision)).toBe(true)
+      expect(reconciled.filter(name => name === peer)).toHaveLength(peerReconciles)
     })
   })
 })
