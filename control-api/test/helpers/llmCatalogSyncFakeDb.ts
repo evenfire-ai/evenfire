@@ -287,8 +287,9 @@ const SQL = {
 
 const SESSION_LOCK = /^SELECT pg_try_advisory_lock\(hashtext\('([a-z0-9-]+)'\)\) AS acquired$/
 const SESSION_UNLOCK = /^SELECT pg_advisory_unlock\(hashtext\('([a-z0-9-]+)'\)\)$/
+const escapeRegExp = (text: string) => text.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')
 const ADMIN_UPDATE = new RegExp(
-  `^UPDATE llm_allowed_models SET (.+) WHERE id = \\$(\\d+) RETURNING ${MODEL_COLUMNS.replace(/[()]/g, '\\$&')}$`
+  `^UPDATE llm_allowed_models SET (.+) WHERE id = \\$(\\d+) RETURNING ${escapeRegExp(MODEL_COLUMNS)}$`
 )
 const ADMIN_UPDATE_COLUMNS = new Set([
   'provider',
