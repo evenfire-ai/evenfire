@@ -60,7 +60,7 @@ export function AttachConnectorCredentials({
   const completed = useRef(false)
   const callbacks = useRef({ onBusyChange, onSpecSaved, onFinished })
   callbacks.current = { onBusyChange, onSpecSaved, onFinished }
-  const { phase, phaseMessage, setPhase, setPhaseMessage } = useRolloutWait({
+  const { phase, phaseMessage, failureKind, setPhase, setPhaseMessage } = useRolloutWait({
     serverName,
     cutoff: saved?.cutoff ?? null,
     expectedUid: saved?.server.metadata?.uid,
@@ -449,7 +449,13 @@ export function AttachConnectorCredentials({
             Credentials attached. Waiting for {serverName} to become ready… {phaseMessage}
           </div>
         ) : null}
-        {phase === 'failed' ? (
+        {phase === 'failed' && failureKind === 'egress-refused' ? (
+          <div role="alert" className="cu-banner cu-banner--error">
+            Credentials were attached, but the egress proxy refused a value. Correct the value, then
+            refresh to update the credentials. {phaseMessage}
+          </div>
+        ) : null}
+        {phase === 'failed' && failureKind !== 'egress-refused' ? (
           <div role="alert" className="cu-banner cu-banner--error">
             {saved ? 'Credentials were attached, but readiness could not be verified: ' : ''}
             {phaseMessage}

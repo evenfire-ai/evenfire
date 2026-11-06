@@ -220,6 +220,10 @@ function applyContainerDefaults(container: k8s.V1Container): void {
   applyProbeDefaults(container.livenessProbe)
   applyProbeDefaults(container.readinessProbe)
   for (const env of container.env ?? []) {
+    // The apiserver omits an empty `env[].value` (omitempty), so a live GET of a
+    // container whose entry carried `value: ""` — the authHeader backfill and
+    // the platform NGINX_ENVSUBST_FILTER reset — has no `value` key at all.
+    if (env.value === '') delete env.value
     if (env.valueFrom?.fieldRef && env.valueFrom.fieldRef.apiVersion === undefined) {
       env.valueFrom.fieldRef.apiVersion = 'v1'
     }

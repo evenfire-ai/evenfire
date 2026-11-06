@@ -21,33 +21,33 @@ an agent is a separate edit of that agent's Context.
 
 ### Core
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `spec.description` | string | no | -- | Human-readable description of what this MCP server does. |
-| `spec.image` | string | yes | -- | Docker image for the MCP server container (e.g. `mongodb/mongodb-mcp-server:latest`). |
-| `spec.imagePullPolicy` | string | no | _(none)_ | Image pull policy. One of: `Always`, `IfNotPresent`, `Never`. The schema sets no default; if omitted, HCC applies `CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY` (default `IfNotPresent`). |
-| `spec.command` | string[] | no | -- | Override the container entrypoint (Docker ENTRYPOINT). |
-| `spec.args` | string[] | no | -- | Arguments passed to the container entrypoint (Docker CMD). |
-| `spec.enabled` | boolean | no | `true` | Whether this MCP server is enabled. Disabled servers have their deployments removed. |
-| `spec.managed` | boolean | no | `true` | Runtime ownership. `true` or omitted means HCC owns the runtime resources. `false` means WRC owns the runtime; HCC only exposes discovery/status and must not create or delete the WRC-owned runtime. |
+| Field                  | Type     | Required | Default  | Description                                                                                                                                                                                           |
+| ---------------------- | -------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.description`     | string   | no       | --       | Human-readable description of what this MCP server does.                                                                                                                                              |
+| `spec.image`           | string   | yes      | --       | Docker image for the MCP server container (e.g. `mongodb/mongodb-mcp-server:latest`).                                                                                                                 |
+| `spec.imagePullPolicy` | string   | no       | _(none)_ | Image pull policy. One of: `Always`, `IfNotPresent`, `Never`. The schema sets no default; if omitted, HCC applies `CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY` (default `IfNotPresent`).              |
+| `spec.command`         | string[] | no       | --       | Override the container entrypoint (Docker ENTRYPOINT).                                                                                                                                                |
+| `spec.args`            | string[] | no       | --       | Arguments passed to the container entrypoint (Docker CMD).                                                                                                                                            |
+| `spec.enabled`         | boolean  | no       | `true`   | Whether this MCP server is enabled. Disabled servers have their deployments removed.                                                                                                                  |
+| `spec.managed`         | boolean  | no       | `true`   | Runtime ownership. `true` or omitted means HCC owns the runtime resources. `false` means WRC owns the runtime; HCC only exposes discovery/status and must not create or delete the WRC-owned runtime. |
 
 ### Transport
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `spec.transport` | object | yes | -- | Transport configuration for connecting to the MCP server. |
-| `spec.transport.type` | string | yes | -- | Transport type. One of: `sse` (Server-Sent Events), `streamableHttp` (HTTP streaming), `stdio` (stdin/stdout, requires stdio-bridge sidecar). |
-| `spec.transport.url` | string | no | -- | Client-facing URL endpoint. Required for `sse` and `streamableHttp`. Auto-generated for `stdio` (stdio-bridge sidecar provides the HTTP endpoint). |
-| `spec.transport.port` | integer | no | `3000` | Port the MCP server listens on (used for container port and Service). |
+| Field                 | Type    | Required | Default | Description                                                                                                                                        |
+| --------------------- | ------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.transport`      | object  | yes      | --      | Transport configuration for connecting to the MCP server.                                                                                          |
+| `spec.transport.type` | string  | yes      | --      | Transport type. One of: `sse` (Server-Sent Events), `streamableHttp` (HTTP streaming), `stdio` (stdin/stdout, requires stdio-bridge sidecar).      |
+| `spec.transport.url`  | string  | no       | --      | Client-facing URL endpoint. Required for `sse` and `streamableHttp`. Auto-generated for `stdio` (stdio-bridge sidecar provides the HTTP endpoint). |
+| `spec.transport.port` | integer | no       | `3000`  | Port the MCP server listens on (used for container port and Service).                                                                              |
 
 ### Authentication
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.auth` | object | no | Authentication configuration for the mcp-host connecting to this server. |
-| `spec.auth.type` | string | no | Authentication type. One of: `none`, `bearer`, `basic`, `apiKey`, `oauth`. `oauth` requires `spec.oauth` and forbids `secretRef`/`secretKey`. |
-| `spec.auth.secretRef` | string | no | Name of the Kubernetes Secret containing auth credentials. |
-| `spec.auth.secretKey` | string | no | Key within the secret to use (default depends on auth type). |
+| Field                 | Type   | Required | Description                                                                                                                                   |
+| --------------------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.auth`           | object | no       | Authentication configuration for the mcp-host connecting to this server.                                                                      |
+| `spec.auth.type`      | string | no       | Authentication type. One of: `none`, `bearer`, `basic`, `apiKey`, `oauth`. `oauth` requires `spec.oauth` and forbids `secretRef`/`secretKey`. |
+| `spec.auth.secretRef` | string | no       | Name of the Kubernetes Secret containing auth credentials.                                                                                    |
+| `spec.auth.secretKey` | string | no       | Key within the secret to use (default depends on auth type).                                                                                  |
 
 ### OAuth (`spec.oauth`)
 
@@ -72,21 +72,21 @@ after creation:
 - **`generic`**: an operator-configured client with explicit endpoints and
   wire options.
 
-| Field | Applies to | Description |
-|-------|-----------|-------------|
-| `oauth.id` | all | Stable client identifier; also the callback path segment. Immutable. |
-| `oauth.provider` | built-in | `salesforce`, `slack`, `notion`, `microsoft-graph`, `google`, `monday`, `clickup`, `vercel`. Immutable. |
-| `oauth.clientIdRef` / `oauth.clientSecretRef` | all | `{name, key}` of Secrets in the `mcp-server` namespace (control-api's `CONTROL_API_MCP_SERVERS_NAMESPACE`) holding the client id / secret. |
-| `oauth.scopes[]` | all | Scopes to request. Include the provider's offline/refresh scope when `backgroundAccess` is true. |
-| `oauth.backgroundAccess` | all | Allow use by a workload with no live human session. |
-| `oauth.grantScope` | all | `user` (default): every user authorizes their own grant. `context`: one shared identity per Context that enables the server in its `spec.mcpServers`, which one member bootstraps and others inherit. Immutable. |
-| `oauth.source` | — | absent (built-in), `remote`, or `generic`. Immutable. |
-| `oauth.clientMode` | remote | `public` (PKCE, no secret) or `confidential`. |
-| `oauth.authorizationEndpoint`, `tokenEndpoint`, `resource` | remote, generic | Pinned endpoints; `resource` is the RFC 8707 resource indicator. |
-| `oauth.registrationEndpoint`, `issuer`, `issForCallback` | remote | Dynamic client registration URL, issuer, and the RFC 9207 `iss` validated on callback. |
-| `oauth.bearerInBody`, `supportsRefresh` | remote (`supportsRefresh` also generic) | Pinned at install. `bearerInBody` must be `false`. |
-| `oauth.asProfile` | remote | Optional. Closed authorization-server profile, set at install when the pinned issuer is recognised. Only value: `entra-v2` (Microsoft Entra ID v2, tenant authority): the RFC 8707 `resource` is not sent, `offline_access` is always requested, and the scopes are sent on the code exchange and on refresh. Requires a Microsoft Entra tenant issuer (see the AS-PROFILE-ISSUER rule below). With `entra-v2`, control-api also checks `oauth.scopes` against the host of `spec.remote.baseUrl` at install and at runtime; see [Scopes and audience](../how-to/connect-oauth-connector.md#scopes-and-audience). Immutable. |
-| `oauth.tokenRequestFormat`, `tokenAuthMethod`, `scopeSeparator`, `sendScope`, `usePkce`, `includeResponseType`, `refreshEndpoint`, `extraAuthorizeParams` | generic | Wire options for non-standard authorization servers. |
+| Field                                                                                                                                                     | Applies to                              | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `oauth.id`                                                                                                                                                | all                                     | Stable client identifier; also the callback path segment. Immutable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `oauth.provider`                                                                                                                                          | built-in                                | `salesforce`, `slack`, `notion`, `microsoft-graph`, `google`, `monday`, `clickup`, `vercel`. Immutable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `oauth.clientIdRef` / `oauth.clientSecretRef`                                                                                                             | all                                     | `{name, key}` of Secrets in the `mcp-server` namespace (control-api's `CONTROL_API_MCP_SERVERS_NAMESPACE`) holding the client id / secret.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `oauth.scopes[]`                                                                                                                                          | all                                     | Scopes to request. Include the provider's offline/refresh scope when `backgroundAccess` is true.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `oauth.backgroundAccess`                                                                                                                                  | all                                     | Allow use by a workload with no live human session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `oauth.grantScope`                                                                                                                                        | all                                     | `user` (default): every user authorizes their own grant. `context`: one shared identity per Context that enables the server in its `spec.mcpServers`, which one member bootstraps and others inherit. Immutable.                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `oauth.source`                                                                                                                                            | —                                       | absent (built-in), `remote`, or `generic`. Immutable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `oauth.clientMode`                                                                                                                                        | remote                                  | `public` (PKCE, no secret) or `confidential`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `oauth.authorizationEndpoint`, `tokenEndpoint`, `resource`                                                                                                | remote, generic                         | Pinned endpoints; `resource` is the RFC 8707 resource indicator.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `oauth.registrationEndpoint`, `issuer`, `issForCallback`                                                                                                  | remote                                  | Dynamic client registration URL, issuer, and the RFC 9207 `iss` validated on callback.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `oauth.bearerInBody`, `supportsRefresh`                                                                                                                   | remote (`supportsRefresh` also generic) | Pinned at install. `bearerInBody` must be `false`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `oauth.asProfile`                                                                                                                                         | remote                                  | Optional. Closed authorization-server profile, set at install when the pinned issuer is recognised. Only value: `entra-v2` (Microsoft Entra ID v2, tenant authority): the RFC 8707 `resource` is not sent, `offline_access` is always requested, and the scopes are sent on the code exchange and on refresh. Requires a Microsoft Entra tenant issuer (see the AS-PROFILE-ISSUER rule below). With `entra-v2`, control-api also checks `oauth.scopes` against the host of `spec.remote.baseUrl` at install and at runtime; see [Scopes and audience](../how-to/connect-oauth-connector.md#scopes-and-audience). Immutable. |
+| `oauth.tokenRequestFormat`, `tokenAuthMethod`, `scopeSeparator`, `sendScope`, `usePkce`, `includeResponseType`, `refreshEndpoint`, `extraAuthorizeParams` | generic                                 | Wire options for non-standard authorization servers.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 **Redirect URI to register** with the provider:
 
@@ -103,77 +103,211 @@ full walkthrough.
 
 ### Server Configuration
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `spec.serverConfig` | object | no | -- | Operational configuration for the MCP server runtime. |
-| `spec.serverConfig.readOnly` | boolean | no | `true` | Whether the MCP server operates in read-only mode. |
-| `spec.serverConfig.loggers` | string | no | `"stderr"` | Comma-separated list of logger outputs (e.g. `stderr`, `disk`, `mcp`). |
-| `spec.serverConfig.telemetry` | string | no | `"disabled"` | Whether telemetry collection is enabled. One of: `enabled`, `disabled`. |
+| Field                         | Type    | Required | Default      | Description                                                             |
+| ----------------------------- | ------- | -------- | ------------ | ----------------------------------------------------------------------- |
+| `spec.serverConfig`           | object  | no       | --           | Operational configuration for the MCP server runtime.                   |
+| `spec.serverConfig.readOnly`  | boolean | no       | `true`       | Whether the MCP server operates in read-only mode.                      |
+| `spec.serverConfig.loggers`   | string  | no       | `"stderr"`   | Comma-separated list of logger outputs (e.g. `stderr`, `disk`, `mcp`).  |
+| `spec.serverConfig.telemetry` | string  | no       | `"disabled"` | Whether telemetry collection is enabled. One of: `enabled`, `disabled`. |
 
 ### Environment Variables
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.env` | object[] | no | Additional environment variables for the container. |
-| `spec.env[].name` | string | yes | Environment variable name. |
-| `spec.env[].value` | string | yes | Environment variable value. |
-| `spec.envSecret` | object | no | Secret-backed environment variables. The context-mapper validates that the secret and all referenced keys exist before creating the deployment. |
-| `spec.envSecret.name` | string | yes* | Name of the Kubernetes Secret in the same namespace. (*Required when `envSecret` is set.) |
-| `spec.envSecret.keys` | object[] | yes* | Mapping of secret keys to environment variable names. |
-| `spec.envSecret.keys[].secretKey` | string | yes | Key within the Kubernetes Secret. |
-| `spec.envSecret.keys[].envVar` | string | yes | Environment variable name to expose the secret value as. |
+| Field                             | Type     | Required | Description                                                                                                                                     |
+| --------------------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.env`                        | object[] | no       | Additional environment variables for the container.                                                                                             |
+| `spec.env[].name`                 | string   | yes      | Environment variable name.                                                                                                                      |
+| `spec.env[].value`                | string   | yes      | Environment variable value.                                                                                                                     |
+| `spec.envSecret`                  | object   | no       | Secret-backed environment variables. The context-mapper validates that the secret and all referenced keys exist before creating the deployment. |
+| `spec.envSecret.name`             | string   | yes\*    | Name of the Kubernetes Secret in the same namespace. (\*Required when `envSecret` is set.)                                                      |
+| `spec.envSecret.keys`             | object[] | yes\*    | Mapping of secret keys to environment variable names.                                                                                           |
+| `spec.envSecret.keys[].secretKey` | string   | yes      | Key within the Kubernetes Secret.                                                                                                               |
+| `spec.envSecret.keys[].envVar`    | string   | yes      | Environment variable name to expose the secret value as.                                                                                        |
 
 ### Environment Variable Mapping
 
 `spec.envMapping` maps CRD fields to image-specific environment variable names. The context-mapper
 reads structured CRD fields and sets the named env vars automatically.
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.envMapping.transport` | string | no | Env var for transport mode (value derived: `sse`/`streamableHttp` maps to `"http"`). |
-| `spec.envMapping.httpHost` | string | no | Env var for HTTP bind host (value: always `"0.0.0.0"`). |
-| `spec.envMapping.httpPort` | string | no | Env var for HTTP port (value from `spec.transport.port`). |
-| `spec.envMapping.healthCheckHost` | string | no | Env var for health check bind host (value: always `"0.0.0.0"`). |
-| `spec.envMapping.healthCheckPort` | string | no | Env var for health check port (value from `spec.healthCheck.port`). |
-| `spec.envMapping.readOnly` | string | no | Env var for read-only mode (value from `spec.serverConfig.readOnly`). |
-| `spec.envMapping.loggers` | string | no | Env var for loggers (value from `spec.serverConfig.loggers`). |
-| `spec.envMapping.telemetry` | string | no | Env var for telemetry (value from `spec.serverConfig.telemetry`). |
+| Field                             | Type   | Required | Description                                                                          |
+| --------------------------------- | ------ | -------- | ------------------------------------------------------------------------------------ |
+| `spec.envMapping.transport`       | string | no       | Env var for transport mode (value derived: `sse`/`streamableHttp` maps to `"http"`). |
+| `spec.envMapping.httpHost`        | string | no       | Env var for HTTP bind host (value: always `"0.0.0.0"`).                              |
+| `spec.envMapping.httpPort`        | string | no       | Env var for HTTP port (value from `spec.transport.port`).                            |
+| `spec.envMapping.healthCheckHost` | string | no       | Env var for health check bind host (value: always `"0.0.0.0"`).                      |
+| `spec.envMapping.healthCheckPort` | string | no       | Env var for health check port (value from `spec.healthCheck.port`).                  |
+| `spec.envMapping.readOnly`        | string | no       | Env var for read-only mode (value from `spec.serverConfig.readOnly`).                |
+| `spec.envMapping.loggers`         | string | no       | Env var for loggers (value from `spec.serverConfig.loggers`).                        |
+| `spec.envMapping.telemetry`       | string | no       | Env var for telemetry (value from `spec.serverConfig.telemetry`).                    |
 
 ### Health Check
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `spec.healthCheck` | object | no | -- | Health check endpoint configuration for Kubernetes probes. |
-| `spec.healthCheck.port` | integer | no | `3001` | Port for the health check endpoint (separate from the main transport port). |
+| Field                   | Type    | Required | Default | Description                                                                 |
+| ----------------------- | ------- | -------- | ------- | --------------------------------------------------------------------------- |
+| `spec.healthCheck`      | object  | no       | --      | Health check endpoint configuration for Kubernetes probes.                  |
+| `spec.healthCheck.port` | integer | no       | `3001`  | Port for the health check endpoint (separate from the main transport port). |
 
 ### Resources
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.resources` | object | no | Resource requests and limits for the container. |
-| `spec.resources.requests.memory` | string | no | Memory request (e.g. `"64Mi"`). |
-| `spec.resources.requests.cpu` | string | no | CPU request (e.g. `"50m"`). |
-| `spec.resources.limits.memory` | string | no | Memory limit. |
-| `spec.resources.limits.cpu` | string | no | CPU limit. |
+| Field                            | Type   | Required | Description                                     |
+| -------------------------------- | ------ | -------- | ----------------------------------------------- |
+| `spec.resources`                 | object | no       | Resource requests and limits for the container. |
+| `spec.resources.requests.memory` | string | no       | Memory request (e.g. `"64Mi"`).                 |
+| `spec.resources.requests.cpu`    | string | no       | CPU request (e.g. `"50m"`).                     |
+| `spec.resources.limits.memory`   | string | no       | Memory limit.                                   |
+| `spec.resources.limits.cpu`      | string | no       | CPU limit.                                      |
 
 ### Remote Proxy
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.remote` | object | no | Remote MCP server configuration. When present, the Context Mapper creates an nginx-based egress proxy Pod instead of deploying the vendor image directly. The proxy forwards requests to the external `baseUrl`, injecting auth headers from `envSecret`. |
-| `spec.remote.baseUrl` | string | yes* | External MCP server endpoint URL (e.g. `https://mcp.sentry.io/sse`). Must be HTTPS and must not reference an internal cluster service (`svc.cluster.local`). (*Required when `remote` is set.) |
-| `spec.remote.authHeaders` | object[] | no | HTTP headers to inject when proxying to the remote server (max 20). Rendered into nginx `proxy_set_header` directives. |
-| `spec.remote.authHeaders[].header` | string | yes | HTTP header name. Alphanumeric and hyphens only (1--128 chars). |
-| `spec.remote.authHeaders[].valueTemplate` | string | yes | Header value template. May contain `${VAR}` placeholders that nginx envsubst resolves at startup from mounted env vars. |
+| Field                                     | Type     | Required | Description                                                                                                                                                                                                                                                                                                                                                                |
+| ----------------------------------------- | -------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.remote`                             | object   | no       | Remote MCP server configuration. When present, the Context Mapper creates an nginx-based egress proxy Pod instead of deploying the vendor image directly. The proxy forwards requests to the external `baseUrl`, injecting auth headers from `envSecret`.                                                                                                                  |
+| `spec.remote.baseUrl`                     | string   | yes\*    | External MCP server endpoint URL (e.g. `https://mcp.sentry.io/sse`). Must be HTTPS and must not reference an internal cluster service (`svc.cluster.local`). The query may contain complete `${NAME}` placeholders where `NAME` matches `[A-Za-z_][A-Za-z0-9_]*`; each name must be present in the rendered egress-proxy environment. (\*Required when `remote` is set.)   |
+| `spec.remote.authHeaders`                 | object[] | no       | HTTP headers to inject when proxying to the remote server (max 20). Rendered into nginx `proxy_set_header` directives.                                                                                                                                                                                                                                                     |
+| `spec.remote.authHeaders[].header`        | string   | yes      | HTTP header name. Alphanumeric and hyphens only (1--128 chars).                                                                                                                                                                                                                                                                                                            |
+| `spec.remote.authHeaders[].valueTemplate` | string   | yes      | CRD-authored header value template. May contain `${VAR}` or `$VAR` placeholders that nginx envsubst resolves at startup. HCC escapes `\` and `"` in this text and never escapes the resolved value. The resolved value is in the byte-wise quoted class (no byte 0x01–0x1F or 0x7F, no `"`, `$`, or `\`; any byte ≥ 0x80 is allowed). See [Value classes](#value-classes). |
 
 An McpServer with `spec.remote` must declare at least one `egressBinding`.
 
+Query credentials must use an `envSecret`-backed placeholder, not a literal URL
+value or `spec.env`. A placeholder remains in the generated ConfigMap and is
+resolved inside the egress-proxy container. A literal query value is not migrated
+automatically: it remains in the existing CRD and ConfigMap until an operator
+replaces it, and an affected provider key must be rotated because it may already
+have been logged. `spec.envSecret` keeps the value out of the Deployment manifest
+environment; a literal `spec.env` value is visible there.
+
+The resolved query value — the Secret, `spec.env`, or `envMapping` bytes named
+by a `${NAME}` placeholder, not the literal URL text — may contain only
+`[-A-Za-z0-9._~!'()*,=:@/?]` and complete `%XX` escapes. That accepts `=`, `/`,
+`:`, `@`, `?`, `,`, `!`, `'`, `(`, `)`, and `*` raw, and rejects any byte ≥
+0x80. The proxy does not encode values. A reference is in query position when
+an unescaped `?` occurs earlier in the same unquoted argument. Raw `+` is
+refused: store `%2B`, because a form-decoding upstream reads `+` as a space.
+`API_KEY='example/def+gh=='` is refused; `API_KEY='example/def%2Bgh=='` and
+`API_KEY='sk:example_1'` are accepted. Raw `\` is refused: store `%5C`, because
+NGINX unescapes `\\`, `\t`, `\n`, and `\r` inside an unquoted argument, and a
+trailing `\` escapes the `;`. HCC carries the rendered NGINX template digest
+on the remote PodTemplate, so a ConfigMap-only `baseUrl` migration rolls the
+egress proxy. The image and HCC roll together; the pairing, the per-roll
+mcp-host disconnect, and the pre-upgrade inventory are in
+[Before upgrading](../../nginx-egress-proxy/README.md#before-upgrading).
+
+The resolved authHeader value is a different class from the CRD-authored
+`valueTemplate`. HCC escapes `\` and `"` in the template text and never escapes
+the resolved value. That resolved value, including a Secret projected with
+`secretKeyRef`, must be in the byte-wise quoted class: no byte 0x01–0x1F or
+0x7F, and no `"`, `$`, or `\`. Every other byte is accepted, including every
+byte ≥ 0x80, whether or not the value is valid UTF-8 (NEL, bytes `C2 85`, and
+U+2028 are accepted). A trailing newline left by `kubectl create secret
+--from-file` is a rejected LF. Recreate the Secret with
+`--from-literal=<key>=<value>`, or write the file with `printf '%s'`. There is
+no percent-encoding for a header value: `"`, `$`, or `\` in the resolved value
+cannot go through an authHeader placeholder.
+
+### Value classes
+
+The image check (`egress-proxy-template-check`) and the HCC preflight enforce
+channels 2 and 3 with the same classes. HCC alone validates channels 1 and 4.
+An undefined braced `${NAME}` is rejected wherever it sits. An undefined bare
+`$name` is left alone.
+
+| #   | Channel                                                                                                          | Where it lands                                         | Class                                                                                                                                                                                         |
+| --- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Literal query text in `spec.remote.baseUrl`, outside `${NAME}`                                                   | `proxy_pass`, unquoted, after `?`                      | Parser output minus `\`, `;`, `{`, `}`, `$`, and U+0000–U+0020. Unchanged.                                                                                                                    |
+| 2   | Resolved value of the env var named by a query placeholder `${NAME}` (Secret, `spec.env`, or `envMapping`)       | `proxy_pass`, unquoted, after `?` in the same argument | Query class: `[-A-Za-z0-9._~!'()*,=:@/?]` plus complete `%XX` escapes.                                                                                                                        |
+| 3   | Resolved value of the env var referenced by `authHeaders[].valueTemplate` (`${NAME}` or `$NAME`). Never escaped. | `proxy_set_header`, inside `"…"`                       | Quoted class, byte-wise: reject bytes 0x01–0x1F, 0x7F, `"` (0x22), `$` (0x24), and `\` (0x5C). Accept every other byte, including every byte ≥ 0x80, whether or not the value is valid UTF-8. |
+| 4   | Literal text of `authHeaders[].valueTemplate` (CRD-authored). HCC escapes `\` and `"` in this text.              | `proxy_set_header`, inside `"…"`                       | At most 2048 characters; no CR, LF, or NUL; no reference to a forbidden or reserved name. Unchanged.                                                                                          |
+| 5   | A defined env var at any other unquoted position (not after `?`)                                                 | generic unquoted argument                              | `[A-Za-z0-9._~-]` plus complete `%XX` escapes. HCC never emits this position.                                                                                                                 |
+| 6   | A defined env var at an argument start, inside `'…'`, in a comment, or after `\`                                 | —                                                      | No defined value is accepted.                                                                                                                                                                 |
+
+The quoted class is defined on bytes so the image, the HCC preflight, and
+`scripts/ops/egress-proxy-value-preflight.sh` compute the same verdict in any
+locale. The excluded bytes are the ones that change the NGINX string or the
+header line: a control byte can end or split the request line sent upstream,
+`"` ends the string, `$` starts an NGINX variable, and `\` starts an escape. A
+byte ≥ 0x80 is `obs-text` in an HTTP field value and is accepted in a quoted
+value. It is rejected in a query value, because it is not allowed unencoded in
+a URI. Byte 0x00 cannot be part of an environment-variable value, so the image
+never sees it; the HCC preflight rejects a Secret value that contains it. The
+preflight is also stricter for a referenced literal that contains `$(`: HCC
+judges the literal as written and does not emulate Kubernetes' expansion of
+`$(NAME)`, so that literal is refused.
+
+An empty resolved authHeader value is within the quoted class; NGINX omits a
+header set to an empty value (`proxy_set_header X ""`), so that header is not sent.
+
+Query class, character by character. "Encode as" is the operator's
+remediation. The proxy never encodes a value.
+
+| Characters                                    | Verdict | Reason                                                                                                                                                    | Encode as                                             |
+| --------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `A–Z` `a–z` `0–9` `-` `.` `_` `~`             | accept  | RFC 3986 unreserved                                                                                                                                       | —                                                     |
+| `!` `'` `(` `)` `*` `,` `=`                   | accept  | RFC 3986 sub-delims with no meaning to NGINX or to a form decoder inside a value; a second `=` stays in the value because decoders split on the first `=` | —                                                     |
+| `:` `@`                                       | accept  | RFC 3986 pchar                                                                                                                                            | —                                                     |
+| `/` `?`                                       | accept  | RFC 3986 query characters                                                                                                                                 | —                                                     |
+| `%` followed by two hex digits                | accept  | complete escape, passed through unchanged                                                                                                                 | —                                                     |
+| `+`                                           | reject  | a form-decoding upstream reads it as a space                                                                                                              | `%2B`                                                 |
+| `&`                                           | reject  | starts a new parameter                                                                                                                                    | `%26`                                                 |
+| `#`                                           | reject  | fragment delimiter; not valid in a request-target                                                                                                         | `%23`                                                 |
+| `%` not followed by two hex digits            | reject  | malformed escape; one left-to-right pass removes non-overlapping complete escapes and does not rescan text that removal creates                           | `%25`                                                 |
+| space                                         | reject  | ends the NGINX token                                                                                                                                      | `%20`                                                 |
+| `;`                                           | reject  | ends the directive                                                                                                                                        | `%3B`                                                 |
+| `{`                                           | reject  | ends the NGINX token                                                                                                                                      | `%7B`                                                 |
+| `$`                                           | reject  | NGINX expands it as a variable at request time                                                                                                            | `%24`                                                 |
+| `\`                                           | reject  | NGINX unescapes `\\`, `\t`, `\n`, and `\r` inside an unquoted argument; a trailing `\` escapes the `;`                                                    | `%5C`                                                 |
+| `"` `<` `>` `[` `]` `}` `\|` `^` and backtick | reject  | not allowed unencoded in an RFC 3986 query; NGINX sends them raw and upstreams disagree                                                                   | `%22` `%3C` `%3E` `%5B` `%5D` `%7D` `%7C` `%5E` `%60` |
+| C0 controls, DEL                              | reject  | end or alter the directive; invalid in a URI                                                                                                              | `%00`–`%1F`, `%7F`                                    |
+| any byte ≥ 0x80                               | reject  | not allowed unencoded in a URI                                                                                                                            | UTF-8 percent-encoding                                |
+
+#### Reserved egress-proxy env names
+
+Eight names cannot be a query placeholder or an authHeader reference. Six are
+pinned by the image entrypoint, which assigns them before the template check,
+and HCC strips a CRD-supplied value of any of those six from every remote-server
+env source (`spec.env`, `spec.envSecret`, and `envMapping`):
+
+`NGINX_ENVSUBST_TEMPLATE_DIR`, `NGINX_ENVSUBST_TEMPLATE_SUFFIX`,
+`NGINX_ENVSUBST_OUTPUT_DIR`, `NGINX_ENVSUBST_STREAM_TEMPLATE_SUFFIX`,
+`NGINX_ENVSUBST_STREAM_OUTPUT_DIR`, `NGINX_ENVSUBST_FILTER`.
+
+The resolver pair is reserved and stripped: `NGINX_ENTRYPOINT_LOCAL_RESOLVERS`
+and `NGINX_LOCAL_RESOLVERS`. HCC strips a CRD-supplied value of either name
+from every remote-server env source (`spec.env`, `spec.envSecret`, and
+`envMapping`). The image exports `NGINX_LOCAL_RESOLVERS` after the template
+check when `NGINX_ENTRYPOINT_LOCAL_RESOLVERS` is set, so a placeholder of
+either name would be filled with a value the check never saw. HCC appends its
+own `NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1`, so a CRD value of the pair is never
+effective. The only reference to the pair in a template HCC renders is its own
+`resolver` line. A query placeholder that names a reserved or forbidden name
+fails the reconcile (`Resource sync failed`). An authHeader reference to one
+is dropped, so the upstream stops receiving that header. HCC then appends one
+empty `NGINX_ENVSUBST_FILTER` last.
+
+#### Migration
+
+On the previous release the resolved value was substituted verbatim. These
+shapes are refused now:
+
+| Shape                                                                                                         | Channel | Remediation                                                                                         |
+| ------------------------------------------------------------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------- |
+| raw `+` in a query value (standard base64)                                                                    | 2       | Store `%2B`. `abc/def+gh==` is refused. `abc/def%2Bgh==` and `sk:live_1` are accepted.              |
+| `\` in a query value                                                                                          | 2       | Store `%5C`.                                                                                        |
+| any other character outside the query table                                                                   | 2       | Percent-encode it.                                                                                  |
+| a byte 0x01–0x1F or 0x7F in a header value, most often a trailing LF from `kubectl create secret --from-file` | 3       | Recreate the Secret without it (`--from-literal=<key>=<value>`, or `printf '%s'` into the file).    |
+| `"`, `$`, or `\` in a header value                                                                            | 3       | No encoding exists for a header value. That credential cannot go through an authHeader placeholder. |
+| a `$(NAME)` reference in a literal `spec.env` or `envMapping` value whose env var a placeholder references    | 2, 3    | Blocked by design. Put the final value in the CRD or in a Secret.                                   |
+| `\`, `;`, `{`, `}`, or `$` in the literal query of `spec.remote.baseUrl`, outside a complete `${NAME}`        | 1       | Percent-encode it in the CRD (`\` as `%5C`).                                                        |
+| a query placeholder or an authHeader reference naming one of the eight reserved names or a forbidden name     | 2, 3    | Rename the env var.                                                                                 |
+
+Inventory before upgrading, and the behavior of a blocked server, are in
+[Before upgrading](../../nginx-egress-proxy/README.md#before-upgrading).
+
 ### Image Pull Secrets
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.imagePullSecrets` | object[] | no | Image pull secrets for the container. |
-| `spec.imagePullSecrets[].name` | string | no | Name of the image pull Secret. |
+| Field                          | Type     | Required | Description                           |
+| ------------------------------ | -------- | -------- | ------------------------------------- |
+| `spec.imagePullSecrets`        | object[] | no       | Image pull secrets for the container. |
+| `spec.imagePullSecrets[].name` | string   | no       | Name of the image pull Secret.        |
 
 HCC copies `spec.imagePullSecrets` verbatim onto the generated Deployment and re-validates
 nothing, so whatever writes this field owns the decision.
@@ -200,24 +334,24 @@ through `envSecret` is readable by the workload process itself.
 
 ### Security Context
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.security` | object | no | Security context overrides for the MCP server pod. |
-| `spec.security.runAsUser` | integer | no | UID to run the container as. Minimum `1`. |
-| `spec.security.runAsGroup` | integer | no | GID to run the container as. |
-| `spec.security.fsGroup` | integer | no | Supplemental group applied to mounted volumes. |
-| `spec.security.addCapabilities` | string[] | no | Linux capabilities to add. Each one of: `CHOWN`, `FOWNER`, `DAC_OVERRIDE`, `NET_BIND_SERVICE`. |
+| Field                           | Type     | Required | Description                                                                                    |
+| ------------------------------- | -------- | -------- | ---------------------------------------------------------------------------------------------- |
+| `spec.security`                 | object   | no       | Security context overrides for the MCP server pod.                                             |
+| `spec.security.runAsUser`       | integer  | no       | UID to run the container as. Minimum `1`.                                                      |
+| `spec.security.runAsGroup`      | integer  | no       | GID to run the container as.                                                                   |
+| `spec.security.fsGroup`         | integer  | no       | Supplemental group applied to mounted volumes.                                                 |
+| `spec.security.addCapabilities` | string[] | no       | Linux capabilities to add. Each one of: `CHOWN`, `FOWNER`, `DAC_OVERRIDE`, `NET_BIND_SERVICE`. |
 
 ### Egress Bindings
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.egressBindings` | object[] | no | External egress bindings allowing this MCP server to reach external APIs. Each binding generates a NetworkPolicy allowing egress to the specified destination. |
-| `spec.egressBindings[].egressClass` | string | no | Egress class. `exact-host` is the default for `dns`/`cidr` bindings. `public-web` is explicit public TCP 80/443 egress with private, metadata, cluster-internal, link-local, multicast, and reserved ranges blocked. |
-| `spec.egressBindings[].dns` | string | no | DNS hostname to resolve (e.g. `api.openai.com`). Mutually exclusive with `cidr`. |
-| `spec.egressBindings[].cidr` | string | no | Public IPv4 CIDR range (e.g. `203.0.114.10/32`). Mutually exclusive with `dns`. Must use canonical network notation and must not overlap private, metadata, link-local, documentation, multicast, or reserved IPv4 ranges (this rejects `0.0.0.0/0` and any RFC1918 range such as `10.0.0.0/8`). |
-| `spec.egressBindings[].port` | integer | conditional | Destination port number. Required for `exact-host` bindings; `public-web` bindings must omit it. |
-| `spec.egressBindings[].protocol` | string | no | Network protocol for exact-host bindings. One of: `TCP`, `UDP`. If omitted, the controller treats exact-host as `TCP`; public-web must omit this field. |
+| Field                               | Type     | Required    | Description                                                                                                                                                                                                                                                                                      |
+| ----------------------------------- | -------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `spec.egressBindings`               | object[] | no          | External egress bindings allowing this MCP server to reach external APIs. Each binding generates a NetworkPolicy allowing egress to the specified destination.                                                                                                                                   |
+| `spec.egressBindings[].egressClass` | string   | no          | Egress class. `exact-host` is the default for `dns`/`cidr` bindings. `public-web` is explicit public TCP 80/443 egress with private, metadata, cluster-internal, link-local, multicast, and reserved ranges blocked.                                                                             |
+| `spec.egressBindings[].dns`         | string   | no          | DNS hostname to resolve (e.g. `api.openai.com`). Mutually exclusive with `cidr`.                                                                                                                                                                                                                 |
+| `spec.egressBindings[].cidr`        | string   | no          | Public IPv4 CIDR range (e.g. `203.0.114.10/32`). Mutually exclusive with `dns`. Must use canonical network notation and must not overlap private, metadata, link-local, documentation, multicast, or reserved IPv4 ranges (this rejects `0.0.0.0/0` and any RFC1918 range such as `10.0.0.0/8`). |
+| `spec.egressBindings[].port`        | integer  | conditional | Destination port number. Required for `exact-host` bindings; `public-web` bindings must omit it.                                                                                                                                                                                                 |
+| `spec.egressBindings[].protocol`    | string   | no          | Network protocol for exact-host bindings. One of: `TCP`, `UDP`. If omitted, the controller treats exact-host as `TCP`; public-web must omit this field.                                                                                                                                          |
 
 Validation rules enforce that exactly one of `dns` or `cidr` must be set per binding, and
 that a `cidr` is a canonical public IPv4 range that does not overlap private, metadata,
@@ -232,13 +366,57 @@ API translates to this explicit `egressClass: public-web` CRD shape.
 
 ## Status
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `status.resolvedEgressIPs` | object[] | Resolved IPs for DNS-based egress bindings (for auditability). |
-| `status.resolvedEgressIPs[].dns` | string | The DNS hostname that was resolved. |
-| `status.resolvedEgressIPs[].ips` | string[] | Resolved IP addresses. |
-| `status.resolvedEgressIPs[].resolvedAt` | date-time | When the resolution occurred. |
-| `status.conditions[]` | object[] | Standard conditions written by host-context-controller (e.g. `SecretResolved`, `Ready`) with `reason` (e.g. `SecretNotFound`) and `observedGeneration`. Control UI uses them to show connectors whose credentials are still missing. |
+| Field                                   | Type      | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status.resolvedEgressIPs`              | object[]  | Resolved IPs for DNS-based egress bindings (for auditability).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `status.resolvedEgressIPs[].dns`        | string    | The DNS hostname that was resolved.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `status.resolvedEgressIPs[].ips`        | string[]  | Resolved IP addresses.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `status.resolvedEgressIPs[].resolvedAt` | date-time | When the resolution occurred.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `status.conditions[]`                   | object[]  | Standard conditions written by host-context-controller (`SecretResolved`, `Ready`, `EgressProxyValuesValid`, `DeploymentReady`) with `reason` and `observedGeneration`. `EgressProxyValuesValid` reasons are `ValuesWithinClass` and `ValueOutsideClass`. `Ready` reason `EgressProxyValuesInvalid` is the same refusal. Control UI uses `SecretResolved` to show connectors whose credentials are still missing. A credential rotation treats a fresh `EgressProxyValuesValid=False` as a terminal failure and shows that condition's message: fresh means `lastTransitionTime` is after the write instant minus the 5s clock-skew tolerance, and `observedGeneration` matches when the write changed the spec. The server list does not badge `EgressProxyValuesValid`, and rotation success is still a fresh `DeploymentReady=True`. |
+
+Only a managed, enabled, remote server gets `EgressProxyValuesValid`. After a
+successful deploy the condition is `True`, reason `ValuesWithinClass`, message
+`Every value the egress-proxy template substitutes is within its class`. When a
+resolved value is outside its class, HCC does not write the ConfigMap or the
+Deployment. It sets `EgressProxyValuesValid=False` with reason
+`ValueOutsideClass` and `Ready=False` with reason `EgressProxyValuesInvalid`,
+both with the same message. The message starts `<n> value(s) would be refused
+by the egress-proxy image; the existing ConfigMap and Deployment are
+unchanged:` and ends with a pointer to this page's "Value classes" section. Each entry has one of these shapes:
+`query placeholder ${API_KEY} (Secret "remote-creds" key "api-key")`,
+`authHeader X-Api-Key placeholder ${TOKEN} (quoted value; Secret "remote-creds" key "token")`,
+`query placeholder ${K} (literal value from spec.env or spec.envMapping)`,
+`authHeader X-Api-Key placeholder ${TOKEN} (quoted value; literal value from spec.env or spec.envMapping)`,
+or `env var ${scheme} collides with an NGINX variable the template uses`.
+A query or authHeader entry for a literal holding `$(NAME)` carries the
+suffix `; a $(NAME) dependent env reference is not expanded by HCC, store the final value`
+inside the parentheses, after the source. Entries are sorted by context, placeholder, and header, at most
+10, then `and <m> more`. The message names the placeholder, the source, and
+the context. It never includes value bytes, the value's length, or the
+offending character. When `spec.envSecret` is set and the Secret exists with
+its keys, `SecretResolved` stays `True` with reason `SecretFound`: the Secret
+is present, and the refusal is the value class, not a missing Secret. A
+non-remote server and a `managed: false` server never have it.
+
+If rendering the template or running the preflight fails before a verdict
+exists for the current spec (for example an undeclared query placeholder),
+HCC writes `Ready=False` with reason `ResourceSyncFailed` and the fixed
+message `Resource sync failed`, and removes `EgressProxyValuesValid`. The
+underlying error is never copied into the condition; read the
+host-context-controller log for the `Resource sync failed` entry and its
+`errorCode` field. If the failure happens after the preflight has passed
+(for example a transient API error while syncing the Deployment), HCC
+writes no condition at all: the existing verdict still describes the
+current values, and the next reconcile retries the sync.
+
+`EgressProxyValuesValid` is removed whenever the runtime it judged stops
+being this server's managed remote runtime: `spec.remote` is removed, the
+server is disabled, a pre-verdict `ResourceSyncFailed` lands, a fail-closed
+Secret failure withdraws the runtime, any WRC-owned (`managed: false`)
+`Ready` write lands (success or Secret failure), or the plugin image
+allowlist blocks the build (`Ready=False`, reason `ImageNotAllowed`). A
+transient Secret read failure keeps the condition, because the runtime
+keeps serving the values the verdict already judged.
 
 ## Additional Printer Columns
 
@@ -281,11 +459,11 @@ spec:
     port: 3000
   env:
     - name: MCP_TRANSPORT
-      value: "sse"
+      value: 'sse'
     - name: MCP_HOST
-      value: "0.0.0.0"
+      value: '0.0.0.0'
     - name: MCP_PORT
-      value: "3000"
+      value: '3000'
   envSecret:
     name: github-mcp-credentials
     keys:
@@ -299,11 +477,11 @@ spec:
     secretKey: github-token
   resources:
     requests:
-      memory: "64Mi"
-      cpu: "50m"
+      memory: '64Mi'
+      cpu: '50m'
     limits:
-      memory: "128Mi"
-      cpu: "200m"
+      memory: '128Mi'
+      cpu: '200m'
   enabled: true
 ```
 

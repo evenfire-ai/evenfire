@@ -16,6 +16,7 @@ import {
 } from '@lib/api'
 import type { EnvSecret, McpServerResource } from '@lib/api'
 import { buildDirectCrdMcpServerReference } from '../../test/fixtures/mcpServer'
+import { egressValuesRefused } from './fixtures/egressProxyConditions'
 
 vi.mock('@lib/api', () => ({
   getMcpServer: vi.fn(),
@@ -61,7 +62,7 @@ function serverWithCondition(condition?: {
               status: condition.status,
               reason:
                 condition.reason ??
-                (condition.status === 'True' ? 'RolloutComplete' : 'RolloutIncomplete'),
+                (condition.status === 'True' ? 'ReplicasAvailable' : 'RolloutIncomplete'),
               message: condition.message,
               lastTransitionTime: condition.lastTransitionTime,
             },
@@ -91,7 +92,8 @@ async function flush(ticks = 4) {
 async function renderPanel(
   envSecret: EnvSecret | undefined,
   surface: CredentialSurface = 'rotate',
-  recipeOwned = false
+  recipeOwned = false,
+  perKeyEditing = false
 ) {
   const utils = render(
     <ToastProvider>
@@ -100,6 +102,7 @@ async function renderPanel(
         envSecret={envSecret}
         surface={surface}
         recipeOwned={recipeOwned}
+        perKeyEditing={perKeyEditing}
       />
     </ToastProvider>
   )
@@ -889,6 +892,140 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // Regression guard for the overclaim: the unobserved connector must never be
     // asserted as already serving the new credential.
     expect(banner.textContent).not.toMatch(new RegExp(`${OTHER}[^.]*restarted and is serving`))
+  })
+})
+
+describe('UpdateConnectorCredentials — egress-proxy refusal', () => {
+  // The blocking shape the rollout wait documents: the PREVIOUS rollout's
+  // DeploymentReady=True (stale — it predates the write cutoff, the submit
+  // instant minus the 5s skew tolerance) is still on the CRD, and the fresh
+  // refusal is this write's verdict.
+  function serverWithRefusal(blocked: ReturnType<typeof egressValuesRefused>): McpServerResource {
+    return {
+      metadata: { name: SERVER_NAME, generation: 1 },
+      status: {
+        conditions: [
+          {
+            type: 'DeploymentReady',
+            status: 'True',
+            reason: 'ReplicasAvailable',
+            message: 'ready',
+            lastTransitionTime: '2025-12-31T23:59:00.000Z',
+            observedGeneration: 1,
+          },
+          blocked,
+        ],
+      },
+    }
+  }
+
+  it('reports a set-mode refusal as credentials set but refused, not as a failed create', async () => {
+    const blocked = egressValuesRefused({
+      at: '2026-01-01T00:00:05.000Z',
+      observedGeneration: 1,
+    })
+    mockCreateMcpSecret.mockResolvedValue({ name: ENV_SECRET.name, namespace: 'mcp-server' })
+    mockGetMcpServer.mockResolvedValue(serverWithRefusal(blocked))
+
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    // Life: the Secret WAS created and the poll is running before the verdict.
+    expect(mockCreateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockCreateMcpSecret).toHaveBeenCalledWith(ENV_SECRET.name, ALL_KEYS)
+    expect(screen.getByText(/Setting credentials/)).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('Credentials were set, but the egress proxy refused a value')
+    expect(alert).toHaveTextContent(`so ${SERVER_NAME} is not using it`)
+    expect(alert).toHaveTextContent('Correct the value and rotate again')
+    // The controller's own message, verbatim — the render this path produced.
+    expect(alert).toHaveTextContent(blocked.message)
+    expect(alert.textContent).not.toContain('Could not set credentials')
+    expect(screen.queryByText(/Credentials set\./)).not.toBeInTheDocument()
+  })
+
+  it('reports a rotate-mode refusal as credentials rotated but refused, not as a failed rotation', async () => {
+    const blocked = egressValuesRefused({
+      at: '2026-01-01T00:00:05.000Z',
+      observedGeneration: 1,
+    })
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    mockGetMcpServer.mockResolvedValue(serverWithRefusal(blocked))
+
+    await renderPanel(ENV_SECRET)
+    await submitRotation({ 'api-key': 'refused-value' })
+
+    // Life: the value WAS saved and the poll is running before the verdict.
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(/Rotating credentials/)).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent(
+      'Credentials were rotated, but the egress proxy refused a value'
+    )
+    expect(alert).toHaveTextContent(`so ${SERVER_NAME} is not using it`)
+    expect(alert).toHaveTextContent('Correct the value and rotate again')
+    // The controller's own message, verbatim — the render this path produced.
+    expect(alert).toHaveTextContent(blocked.message)
+    expect(alert.textContent).not.toContain('Rotation failed')
+    expect(screen.queryByText(/Credentials rotated\./)).not.toBeInTheDocument()
+  })
+
+  it('reports a per-key refusal on the form after the rotate dialog has closed', async () => {
+    const blocked = egressValuesRefused({
+      at: '2026-01-01T00:00:05.000Z',
+      observedGeneration: 1,
+    })
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    mockGetMcpServer.mockResolvedValue(serverWithRefusal(blocked))
+
+    await renderPanel(ENV_SECRET, 'rotate', false, true)
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate api-key' }))
+    const dialog = screen.getByRole('dialog', { name: 'Rotate api-key' })
+    fireEvent.change(within(dialog).getByLabelText('New value', { exact: false }), {
+      target: { value: 'refused-value' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate' }))
+    await flush()
+
+    // The write succeeded, so the dialog is already closed when the refusal
+    // arrives: the verdict can only surface on the form, never in the dialog.
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByText(/Rotating credentials/)).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent(
+      'Credentials were rotated, but the egress proxy refused a value'
+    )
+    expect(alert).toHaveTextContent('Correct the value and rotate again')
+    // The controller's own message, verbatim — the render this path produced.
+    expect(alert).toHaveTextContent(blocked.message)
+    expect(alert.textContent).not.toContain('Rotation failed')
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })
 

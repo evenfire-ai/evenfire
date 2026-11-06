@@ -703,8 +703,9 @@ describe('PR-B B1 — validateSecret result shape', () => {
     const server = makeServer({ name: 'no-secret' })
     const result = await reconciler.validateSecret(server)
     // No credentials to hash, so no credentials-revision annotation is written
-    // on the pod template (issue #223).
-    expect(result).toEqual({ ok: true, revision: '' })
+    // on the pod template, and the egress-proxy value preflight has
+    // no Secret snapshot to decode.
+    expect(result).toEqual({ ok: true, revision: '', secretData: {} })
   })
 
   it('returns SecretNotFound when the Secret is missing (404)', async () => {
@@ -778,7 +779,10 @@ describe('PR-B B1 — validateSecret result shape', () => {
   it('returns ok:true and the content revision when all required keys are present', async () => {
     // The base64 value does not matter for key-presence validation, but it IS
     // what the revision hashes (issue #223).
-    coreApi.readNamespacedSecret.mockResolvedValueOnce({ data: { password: 'cGFzcw==' } })
+    const syntheticEncodedFixture = 'cGFzcw=='
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      data: { password: syntheticEncodedFixture },
+    })
 
     const server = makeServer({
       name: 'pg',
@@ -786,7 +790,14 @@ describe('PR-B B1 — validateSecret result shape', () => {
     })
 
     const result = await reconciler.validateSecret(server)
-    expect(result).toEqual({ ok: true, revision: expect.stringMatching(/^[0-9a-f]{64}$/) })
+    // The same base64 `data` object that was hashed travels with the result, so
+    // the egress-proxy preflight judges the exact Secret version whose digest
+    // goes on the PodTemplate.
+    expect(result).toEqual({
+      ok: true,
+      revision: expect.stringMatching(/^[0-9a-f]{64}$/),
+      secretData: { password: syntheticEncodedFixture },
+    })
   })
 
   it('fails closed and removes managed runtime resources when secret validation fails', async () => {

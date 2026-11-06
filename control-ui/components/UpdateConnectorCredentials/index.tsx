@@ -104,7 +104,7 @@ export function UpdateConnectorCredentials({
   const [previewAffected, setPreviewAffected] = useState<string[] | null>(null)
 
   const [rotationCutoff, setRotationCutoff] = useState<string | null>(null)
-  const { phase, phaseMessage, setPhase, setPhaseMessage } = useRolloutWait({
+  const { phase, phaseMessage, failureKind, setPhase, setPhaseMessage } = useRolloutWait({
     serverName,
     cutoff: rotationCutoff,
   })
@@ -546,7 +546,15 @@ export function UpdateConnectorCredentials({
           </div>
         ) : null}
 
-        {phase === 'failed' && editingKey === null ? (
+        {phase === 'failed' && failureKind === 'egress-refused' && editingKey === null ? (
+          <div className="cu-banner cu-banner--error" role="alert">
+            {submittedMode === 'set'
+              ? `Credentials were set, but the egress proxy refused a value, so ${serverName} is not using it. Correct the value and rotate again. ${phaseMessage}`
+              : `Credentials were rotated, but the egress proxy refused a value, so ${serverName} is not using it. Correct the value and rotate again. ${phaseMessage}`}
+          </div>
+        ) : null}
+
+        {phase === 'failed' && failureKind !== 'egress-refused' && editingKey === null ? (
           <div className="cu-banner cu-banner--error" role="alert">
             {submittedMode === 'set'
               ? `Could not set credentials: ${phaseMessage}`

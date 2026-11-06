@@ -480,6 +480,7 @@ spec:
                       description: >-
                         External MCP server endpoint URL (must be HTTPS, e.g. https://mcp.sentry.io/sse).
                         The egress proxy will forward all requests to this URL.
+                        Literal query text outside a complete ${NAME} placeholder is the parser class (no \, ;, {, }, $, or U+0000–U+0020), and a resolved ${NAME} value is the query class ([-A-Za-z0-9._~!'()*,=:@/?] plus complete %XX escapes); see docs/crds/mcpserver.md (Value classes).
                     authHeaders:
                       type: array
                       maxItems: 20
@@ -506,6 +507,7 @@ spec:
                             description: |
                               Header value template. May contain ${VAR} placeholders that
                               nginx envsubst resolves at startup from mounted env vars.
+                              The resolved value is in the byte-wise quoted class (no byte 0x01–0x1F or 0x7F, no ", $, or \; any byte ≥ 0x80 is allowed); see docs/crds/mcpserver.md (Value classes).
                   required:
                     - baseUrl
                   x-kubernetes-validations:

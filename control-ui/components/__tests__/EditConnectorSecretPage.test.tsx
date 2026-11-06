@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act } from '@testing-library/react'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { ToastProvider } from '@components/Toast'
-import { POLL_INTERVAL_MS } from '@components/UpdateConnectorCredentials'
+import { POLL_INTERVAL_MS, POLL_TIMEOUT_MS } from '@components/UpdateConnectorCredentials'
 import EditConnectorSecretPage from '../../app/secrets/connector/[name]/edit/page'
 import {
   createMcpSecret,
@@ -15,6 +15,7 @@ import {
   updateMcpServer,
 } from '../../lib/api'
 import { buildMcpServerReference } from '../../test/fixtures/mcpServer'
+import { egressValuesRefused } from './fixtures/egressProxyConditions'
 
 // Exercise the Secrets page against names-only Secret metadata. Stored keys
 // and connector mappings have separate ownership; rotation verifies rollout
@@ -205,6 +206,119 @@ describe('EditConnectorSecretPage', () => {
     expect(
       screen.getByText(/linear-conn restarted and is serving the new credential/)
     ).toBeInTheDocument()
+  })
+
+  it('reports an egress-proxy refusal as a rejected value to correct, not as unverified', async () => {
+    await renderPage()
+    await submitRotation('api-key', 'refused-value')
+    expect(screen.getByText(/Value saved. Waiting for linear-conn/)).toBeInTheDocument()
+
+    const blocked = egressValuesRefused({ at: '2026-01-01T00:00:05.000Z', observedGeneration: 1 })
+    mockGetMcpServer.mockResolvedValue({
+      ...server({ name: 'linear-conn' }),
+      status: {
+        conditions: [
+          {
+            type: 'DeploymentReady',
+            status: 'True',
+            reason: 'RolloutComplete',
+            message: 'ready',
+            lastTransitionTime: '2025-12-31T23:59:00.000Z',
+            observedGeneration: 1,
+          },
+          blocked,
+        ],
+      },
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveClass('cu-banner--error')
+    expect(alert.textContent).toContain('egress proxy refused a value')
+    expect(alert.textContent).toContain('Correct the value')
+    // The controller's own message, verbatim — the render this path produced.
+    expect(alert.textContent).toContain(blocked.message)
+    expect(alert.textContent).not.toContain('could not be verified')
+    expect(screen.queryByText(/restarted and is serving/)).not.toBeInTheDocument()
+  })
+
+  it('keeps the unverified notice when no rollout verdict arrives in time', async () => {
+    await renderPage()
+    await submitRotation('api-key', 'slow-value')
+    expect(screen.getByText(/Value saved. Waiting for linear-conn/)).toBeInTheDocument()
+
+    // Only the stale previous verdict: the bounded poll must expire without
+    // ever claiming the value was refused.
+    mockGetMcpServer.mockResolvedValue({
+      ...server({ name: 'linear-conn' }),
+      status: {
+        conditions: [
+          {
+            type: 'DeploymentReady',
+            status: 'True',
+            reason: 'RolloutComplete',
+            message: 'ready',
+            lastTransitionTime: '2025-12-31T23:59:00.000Z',
+            observedGeneration: 1,
+          },
+        ],
+      },
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS + POLL_INTERVAL_MS)
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveClass('cu-banner--warning')
+    expect(alert.textContent).toContain('connector restart could not be verified')
+    expect(alert.textContent).toContain('did not finish within')
+    expect(alert.textContent).not.toContain('refused')
+  })
+
+  it('keeps the unverified notice with the rollout diagnostic when RolloutIncomplete never clears', async () => {
+    await renderPage()
+    await submitRotation('api-key', 'slow-value')
+    expect(screen.getByText(/Value saved. Waiting for linear-conn/)).toBeInTheDocument()
+
+    // A rotate carries no rollout identity, so the diagnosed-failure path
+    // here is the controller's own RolloutIncomplete verdict outliving the
+    // poll budget — with no egress condition on the CRD at all.
+    mockGetMcpServer.mockResolvedValue({
+      ...server({ name: 'linear-conn' }),
+      status: {
+        conditions: [
+          {
+            type: 'DeploymentReady',
+            status: 'False',
+            reason: 'RolloutIncomplete',
+            message: 'updated 0/1',
+            lastTransitionTime: '2026-01-01T00:00:05.000Z',
+            observedGeneration: 1,
+          },
+        ],
+      },
+    })
+    // First sighting: the diagnostic is not latched — still verifying.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+    expect(screen.getByText(/Value saved. Waiting for linear-conn/)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS)
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveClass('cu-banner--warning')
+    expect(alert.textContent).toContain('connector restart could not be verified')
+    expect(alert.textContent).toContain('updated 0/1')
+    expect(alert.textContent).not.toContain('refused')
+    // The pair that separates this diagnosed failure from the inconclusive
+    // timeout sharing the same banner: no timeout wording.
+    expect(alert.textContent).not.toContain('did not finish within')
   })
 
   it('refuses a non-canonical stored Secret name without rotating its trimmed alias', async () => {

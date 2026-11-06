@@ -12,6 +12,7 @@ import {
   updateMcpServer,
 } from '@lib/api'
 import type { EnvSecret, McpServerResource } from '@lib/api'
+import { egressValuesRefused } from './fixtures/egressProxyConditions'
 
 vi.mock('@lib/api', () => ({
   createMcpSecret: vi.fn(),
@@ -347,5 +348,71 @@ describe('ChangeConnectorSecret — assignment save', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh credentials' }))
     expect(onFinished).toHaveBeenCalledOnce()
+  })
+
+  it('reports an egress-proxy refusal as a rejected value to correct, not as unverified', async () => {
+    const { onFinished } = await renderPanel()
+    await chooseReplacement()
+    await submitThroughConfirm()
+    expect(screen.getByRole('status').textContent).toContain('Assignment saved')
+
+    // The blocking reconcile wrote no DeploymentReady: the previous True is
+    // stale, and the fresh preflight refusal is this assignment's verdict.
+    const blocked = egressValuesRefused({
+      at: '2026-01-01T00:00:05.000Z',
+      observedGeneration: 3,
+    })
+    mockGetMcpServer.mockResolvedValue(
+      savedServer({
+        conditions: [
+          {
+            type: 'DeploymentReady',
+            status: 'True',
+            reason: 'RolloutComplete',
+            message: 'ready',
+            lastTransitionTime: '2025-12-31T23:59:00.000Z',
+            observedGeneration: 3,
+          },
+          blocked,
+        ],
+      })
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveClass('cu-banner--error')
+    expect(alert.textContent).toContain('egress proxy refused')
+    expect(alert.textContent).toContain('Correct the value')
+    // The controller's own message, verbatim — the render this path produced.
+    expect(alert.textContent).toContain(blocked.message)
+    expect(alert.textContent).not.toContain('could not be verified')
+    expect(onFinished).not.toHaveBeenCalled()
+  })
+
+  it('reports a changed connector during verification as unverified, not as refused', async () => {
+    const { onFinished } = await renderPanel()
+    await chooseReplacement()
+    await submitThroughConfirm()
+    expect(screen.getByRole('status').textContent).toContain('Assignment saved')
+
+    // The connector was replaced mid-verification: a diagnosed failure with
+    // no refusal behind it, reached through the poll itself.
+    const replaced = savedServer()
+    mockGetMcpServer.mockResolvedValue({
+      ...replaced,
+      metadata: { ...replaced.metadata, uid: 'replacement-uid' },
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toContain('Assignment saved, but readiness could not be verified')
+    expect(alert.textContent).toContain('The connector changed during verification')
+    expect(alert.textContent).not.toContain('refused')
+    expect(alert.textContent).not.toContain('Correct the value')
+    expect(onFinished).not.toHaveBeenCalled()
   })
 })

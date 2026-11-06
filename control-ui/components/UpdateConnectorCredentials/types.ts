@@ -62,12 +62,25 @@ export type UpdateConnectorCredentialsProps = {
  *             DeploymentReady condition (the connector restarting after a
  *             rotation, or starting for the first time after a create).
  * - success:  a fresh DeploymentReady=True was observed after the write.
- * - failed:   the write failed, or the UI budget expired after an unresolved
+ * - failed:   the write failed, a fresh EgressProxyValuesValid=False refusal
+ *             arrived (terminal: the HCC blocks the update and writes no
+ *             DeploymentReady), or the UI budget expired after an unresolved
  *             RolloutIncomplete diagnostic (a fresh False alone is not final).
  * - timeout:  the bounded poll window elapsed without a fresh terminal
  *             condition. Never reported as success.
  */
 export type RotationPhase = 'idle' | 'saving' | 'rotating' | 'success' | 'failed' | 'timeout'
+
+/**
+ * Why a `failed` phase failed, when the rollout wait itself diagnosed it.
+ * Only the egress-proxy refusal is distinguished: unlike every other failure
+ * it is a verdict on the VALUE the operator just wrote — the controller
+ * blocked the update and kept the previous ConfigMap and Deployment — so
+ * callers must say the value was refused and has to be corrected, never that
+ * the rollout merely could not be verified. `null` in every other phase, and
+ * for failures a caller raises itself through `setPhase('failed')`.
+ */
+export type RolloutFailureKind = 'egress-refused'
 
 export type RolloutWaitOptions = {
   serverName: string

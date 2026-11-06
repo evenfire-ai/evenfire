@@ -6,6 +6,7 @@ import { ToastProvider } from '@components/Toast'
 import { POLL_INTERVAL_MS, POLL_TIMEOUT_MS } from '@constants/connectorCredentials'
 import * as api from '@lib/api'
 import type { McpServerResource } from '@lib/api'
+import { egressValuesRefused } from './fixtures/egressProxyConditions'
 
 vi.mock('@lib/api', async importOriginal => ({
   ...(await importOriginal<typeof import('@lib/api')>()),
@@ -271,11 +272,63 @@ describe('attach form', () => {
     await confirm()
     vi.mocked(api.getMcpServer).mockResolvedValue(saved)
     await tick(POLL_TIMEOUT_MS)
+    // No verdict arrived inside the budget, so the unverified notice is the
+    // honest report here — the witness that the refusal copy below is
+    // reserved for an actual refusal.
     expect(screen.getByRole('alert')).toHaveTextContent('Credentials were attached')
+    expect(screen.getByRole('alert')).toHaveTextContent('readiness could not be verified')
+    expect(screen.getByRole('alert')).not.toHaveTextContent('refused')
     expect(api.deleteMcpSecret).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Refresh credentials' }))
     expect(onFinished).toHaveBeenCalledOnce()
     expect(api.createMcpSecret).toHaveBeenCalledOnce()
+  })
+  it('reports an egress-proxy refusal as a rejected value to correct, not as unverified', async () => {
+    panel()
+    fill()
+    await confirm()
+    expect(screen.getByText(/Waiting for search to become ready/)).toBeInTheDocument()
+    const blocked = egressValuesRefused({
+      at: '2026-10-23T12:00:10.000Z',
+      observedGeneration: 3,
+    })
+    vi.mocked(api.getMcpServer).mockResolvedValue({
+      ...saved,
+      status: { conditions: [blocked] },
+    })
+    await tick()
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveClass('cu-banner--error')
+    expect(alert).toHaveTextContent('egress proxy refused a value')
+    expect(alert).toHaveTextContent('Correct the value')
+    // The controller's own message, verbatim — the render this path produced.
+    expect(alert).toHaveTextContent(blocked.message)
+    expect(alert).not.toHaveTextContent('could not be verified')
+    expect(onFinished).not.toHaveBeenCalled()
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+  })
+  it('reports a changed connector during verification as unverified, not as refused', async () => {
+    panel()
+    fill()
+    await confirm()
+    expect(screen.getByText(/Waiting for search to become ready/)).toBeInTheDocument()
+    const pollsBefore = vi.mocked(api.getMcpServer).mock.calls.length
+    // The connector was replaced mid-verification: a diagnosed failure with
+    // no refusal behind it, reached through the poll itself.
+    vi.mocked(api.getMcpServer).mockResolvedValue({
+      ...saved,
+      metadata: { ...saved.metadata, uid: 'replacement-uid' },
+    })
+    await tick()
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent(
+      'Credentials were attached, but readiness could not be verified'
+    )
+    expect(alert).toHaveTextContent('The connector changed during verification')
+    expect(alert).not.toHaveTextContent('refused')
+    // Witness the verdict came from a fresh poll read, not a stale render.
+    expect(vi.mocked(api.getMcpServer).mock.calls.length).toBeGreaterThan(pollsBefore)
+    expect(onFinished).not.toHaveBeenCalled()
   })
   it('allows leaving verification after a saved attachment', async () => {
     panel()

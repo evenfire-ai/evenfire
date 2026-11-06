@@ -1,0 +1,135 @@
+#!/bin/sh
+# Start wrapper for the Clerum remote MCP egress proxy.
+#
+# NGINX must stay PID 1: the kubelet's STOPSIGNAL (SIGQUIT) and a SIGTERM have
+# to reach the NGINX master directly, and the container's exit code has to be
+# NGINX's. So this wrapper does its three jobs and then execs the official
+# entrypoint, which execs `nginx -g 'daemon off;'`:
+#
+#   0. It copies each mounted template into a private directory and checks
+#      that copy, synchronously and before anything else starts. mktemp -d
+#      creates the directory mode 0700 with a new name on every start. Each
+#      non-dot top-level *.template is cat'd into a new regular file there,
+#      one open per file, so the check and envsubst both read one kubelet
+#      AtomicWriter generation. egress-proxy-template-check then refuses to
+#      start (exit 1) when a value envsubst is about to insert would change
+#      the NGINX syntax around it, or when a query value is outside the class
+#      the upstream reads unchanged. Before that check it assigns the six
+#      NGINX_ENVSUBST_* knobs with plain assignments and exports them, so the
+#      check and 20-envsubst-on-templates.sh see the same directory, suffixes,
+#      output paths and an empty filter. A pod environment cannot retarget
+#      them. umask 077 covers only the copy and is restored afterwards.
+#   1. It keeps the official /docker-entrypoint.sh, so the template envsubst
+#      (20-envsubst-on-templates.sh) and the image's other
+#      /docker-entrypoint.d scripts still run. A script that exports a
+#      variable for envsubst (15-local-resolvers.envsh, when
+#      NGINX_ENTRYPOINT_LOCAL_RESOLVERS is set) runs after job 0, so the
+#      check never sees that value; the export reaches only the entrypoint's
+#      script loop, where envsubst reads it. 15-local-resolvers.envsh does not
+#      overwrite the six knobs assigned in job 0. No HCC template references
+#      NGINX_LOCAL_RESOLVERS, and HCC rejects both resolver names as
+#      placeholders.
+#   2. It routes only NGINX's stderr through the log filter. The remote
+#      baseUrl query may carry a credential and NGINX prints the full upstream
+#      URL in every upstream error line; NGINX also quotes the upstream's
+#      response-header bytes in four upstream messages, where an upstream can
+#      echo any credential the proxy forwarded, the per-user OAuth Bearer
+#      included. stdout keeps the access log unfiltered: it records the
+#      client's request line, to which the proxy never adds the remote query.
+#
+# The filter is a child of NGINX after the exec, so the master reaps it. If it
+# dies after NGINX has opened its error log, NGINX keeps serving (it ignores
+# SIGPIPE, the FIFO writes fail with EPIPE and no unfiltered line is ever
+# written) and every error line is dropped. If it dies before that, NGINX
+# blocks opening the FIFO: no listener, so readiness fails, and the filter's
+# own error is on the container stderr. In both cases
+# /usr/local/bin/egress-proxy-liveness, the exec liveness probe, fails and the
+# kubelet restarts the container.
+set -eu
+
+# An empty command would make /docker-entrypoint.sh exec nothing and exit 0,
+# which looks like a clean shutdown instead of a broken image.
+if [ "$#" -eq 0 ]; then
+  echo "egress-proxy-entrypoint: no command to run" >&2
+  exit 1
+fi
+
+FIFO=/tmp/egress-proxy-error.fifo
+FILTER=/usr/local/bin/egress-proxy-log-filter
+TEMPLATE_CHECK=/usr/local/bin/egress-proxy-template-check
+
+MOUNTED_TEMPLATES=/etc/nginx/templates
+
+# The copy envsubst renders from. mktemp -d creates it with mode 0700 and a new
+# name at every start, so a restart that keeps the writable layer never reuses
+# a previous copy. There is no exists-check and no fallback to the live mount:
+# a failed create, cat or short write refuses to start. umask 077 applies to
+# the copy only and is restored right after it, before the check and before
+# the official entrypoint. 15-local-resolvers.envsh runs later, inside
+# /docker-entrypoint.sh, and does not overwrite the six pins below.
+saved_umask="$(umask)"
+umask 077
+TEMPLATES="$(mktemp -d /tmp/egress-proxy-templates.XXXXXX)" || {
+  echo "egress-proxy-entrypoint: cannot create the template snapshot" >&2
+  exit 1
+}
+
+# Unconditional pins, before the check. Plain assignments, never ${VAR:-default},
+# so a pod value cannot replace them. Exported so the check's ENVIRON and
+# envsubst see the same values.
+NGINX_ENVSUBST_TEMPLATE_DIR="$TEMPLATES"
+NGINX_ENVSUBST_TEMPLATE_SUFFIX=.template
+NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx/conf.d
+NGINX_ENVSUBST_STREAM_TEMPLATE_SUFFIX=.stream-template
+NGINX_ENVSUBST_STREAM_OUTPUT_DIR=/etc/nginx/stream-conf.d
+NGINX_ENVSUBST_FILTER=
+export NGINX_ENVSUBST_TEMPLATE_DIR \
+  NGINX_ENVSUBST_TEMPLATE_SUFFIX \
+  NGINX_ENVSUBST_OUTPUT_DIR \
+  NGINX_ENVSUBST_STREAM_TEMPLATE_SUFFIX \
+  NGINX_ENVSUBST_STREAM_OUTPUT_DIR \
+  NGINX_ENVSUBST_FILTER
+
+count=0
+if [ -d "$MOUNTED_TEMPLATES" ]; then
+  for src in "$MOUNTED_TEMPLATES"/*.template; do
+    # The unmatched glob: the mount is absent of top-level *.template files.
+    [ -e "$src" ] || [ -L "$src" ] || continue
+    if [ ! -f "$src" ]; then
+      echo "egress-proxy-entrypoint: ${src##*/} is not a regular file" >&2
+      exit 1
+    fi
+    # One open of the mounted path, written to a new regular file. No cp -a,
+    # no symlink, and no walk into ..data. cat exits non-zero on a short write.
+    if ! cat -- "$src" >"$TEMPLATES/${src##*/}"; then
+      echo "egress-proxy-entrypoint: ${src##*/}: snapshot copy failed" >&2
+      exit 1
+    fi
+    count=$((count + 1))
+  done
+fi
+umask "$saved_umask"
+if [ "$count" -gt 0 ]; then
+  # shellcheck disable=SC2086 # one pathname prefix plus the suffix glob; names have no whitespace
+  if ! awk -f "$TEMPLATE_CHECK" "$TEMPLATES"/*.template >&2; then
+    echo "egress-proxy-entrypoint: refusing to start: a template value would change the NGINX configuration" >&2
+    exit 1
+  fi
+fi
+
+# A fresh FIFO per container: a stale one from an earlier run would keep a
+# writer blocked on a reader that never comes.
+rm -f "$FIFO"
+mkfifo -m 0600 "$FIFO"
+
+# The filter reads the FIFO and writes the redacted lines to the container's
+# stderr. Its fd 1 is the wrapper's current fd 2, taken before the redirection
+# below replaces fd 2 for the exec'd process, so the access log on stdout is
+# never routed through the filter. The open for reading and the open for
+# writing below rendezvous on the FIFO.
+awk -f "$FILTER" <"$FIFO" >&2 &
+
+# The official entrypoint only runs the /docker-entrypoint.d scripts when the
+# command is nginx; the image CMD is `nginx -g daemon off;`. exec keeps the
+# process as PID 1 and opens the FIFO for writing as NGINX's stderr.
+exec /docker-entrypoint.sh "$@" 2>"$FIFO"
