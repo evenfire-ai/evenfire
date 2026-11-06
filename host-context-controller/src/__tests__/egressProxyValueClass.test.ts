@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 import { isQueryValueAllowed, isQuotedValueAllowed } from '../egressProxyValueClass'
 
 /**
- * VC-1 (spec §8.5): the TypeScript classifier must reproduce the reviewed
+ * VC-1: the TypeScript classifier must reproduce the reviewed
  * verdicts of the shared corpus for every query and quoted row. The image
  * harness reads the same file with the awk program, so a class change on either
  * side without the other fails a test instead of drifting silently.

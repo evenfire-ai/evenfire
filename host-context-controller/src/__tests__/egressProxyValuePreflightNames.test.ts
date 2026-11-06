@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 import { FORBIDDEN_CRD_ENV_NAMES, RESERVED_PROXY_ENV } from '../reconciler'
 
 /**
- * SC-1 (spec §8.5, §5.2 step 3): the operator script keeps its two name lists on
+ * SC-1: the operator script keeps its two name lists on
  * greppable `RESERVED_NAMES=` / `FORBIDDEN_NAMES=` lines so that this test can
  * compare them with the exported TypeScript sets instead of duplicating them.
  * A drift on either side fails here; the script test's own SC-1 section pins the

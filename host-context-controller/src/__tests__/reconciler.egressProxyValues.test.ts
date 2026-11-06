@@ -16,7 +16,7 @@ import { McpServerReconciler } from '../reconciler'
 import type { McpServerCRD } from '../types'
 
 /**
- * Egress-proxy value preflight (spec §4/§8.5, issue #1240): PF-1..PF-20 and
+ * Egress-proxy value preflight: PF-1..PF-20 and
  * PF-11b. Every negative assertion carries a witness that the path ran: the
  * Secret read, the condition write, the `False` condition or the block's
  * `Ready=False` patch.
@@ -158,7 +158,7 @@ function expectNoValueFragment(message: string, value: string): void {
   }
 }
 
-describe('egress-proxy value preflight (PF for #1240)', () => {
+describe('egress-proxy value preflight (PF)', () => {
   let appsApi: MockAppsApi
   let coreApi: MockCoreApi
   let customApi: MockCustomApi

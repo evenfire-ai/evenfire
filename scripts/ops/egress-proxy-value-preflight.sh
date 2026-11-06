@@ -1,6 +1,6 @@
 #!/bin/bash
 # egress-proxy-value-preflight: read-only, pre-upgrade inventory of the values a
-# remote McpServer will render into its egress-proxy NGINX template (#1240).
+# remote McpServer will render into its egress-proxy NGINX template.
 #
 # Usage:
 #   CONTEXT=<kube-context> NAMESPACE=<mcp-server namespace> \

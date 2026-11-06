@@ -9,7 +9,7 @@
 # or the direct run of the same check.
 #
 # The assertions that depend on the sibling change to nginx-egress-proxy/
-# egress-proxy-template-check and on the new shared corpus (spec §3 and §5.5)
+# egress-proxy-template-check and on the new shared corpus
 # always run: this checkout carries the check, the corpus and the HCC/image name
 # lists, so a missing input is a hard failure, never a skip.
 # EGRESS_PREFLIGHT_INTEGRATION stays accepted for callers that set it and
@@ -921,7 +921,7 @@ fi
 expect_output xtrace-shellopts-was-on '+ set +x'
 expect_absent xtrace-shellopts-no-value 'TESTKEY-XTRACE-77'
 
-# --- query value class (spec §3.1 row 2, §3.4) ---------------------------
+# --- query value class -----------------------------------------------
 # The new query class accepts / = : @ and complete %XX; the rejection names the
 # query context.
 reset_fixture
@@ -938,7 +938,7 @@ secret_bytes 'TESTKEY-B64/def+gh=='
 run_case query-context 1 'server=fixture-namespace/queryctx verdict=REJECT'
 expect_output query-context-witness 'the value of API_KEY is not allowed in an unquoted query value'
 
-# --- corpus (spec §3.5 / §5.5): 90 query+quoted rows ----------------------
+# --- corpus: 90 query+quoted rows ------------------------------------
 if [ ! -r "$CORPUS" ]; then
   fail "corpus-missing (the suite needs $CORPUS)"
 else
@@ -968,7 +968,7 @@ else
     fi
     reset_fixture
     add_server corpus 'https://example.com/mcp' "$corpus_template" "$(secret_ref VALUE)"
-    # The corpus value field is a POSIX printf format (spec §3.5).
+    # The corpus value field is a POSIX printf format.
     # shellcheck disable=SC2059
     encoded=$(printf -- "$bytes" | base64 | tr -d '\n')
     jq -n --arg v "$encoded" '{data:{credential:$v}}' \
@@ -991,7 +991,7 @@ else
   fi
 fi
 
-# --- SC-1 (spec §8.5): name lists parsed from the real sources ------------
+# --- SC-1: name lists parsed from the real sources ---------------------
 sorted_words() {
   printf '%s\n' "$1" | LC_ALL=C "$REAL_AWK" '
     { n = split($0, field, " "); for (i = 1; i <= n; i++) if (field[i] != "") print field[i] }' |

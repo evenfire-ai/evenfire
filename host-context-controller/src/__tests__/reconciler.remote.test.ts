@@ -593,8 +593,8 @@ describe('McpServerReconciler remote egress proxy', () => {
       // Producer half: buildDeployment currently emits every envSecret key as
       // a secretKeyRef, PATH included — there is no producer filter yet.
       // Consumer half: buildNginxConfigMap still rejects the exact name as
-      // forbidden, before the declared check. When the producer filter lands
-      // (#1281, subset of #1246) the PATH entry below must disappear and this
+      // forbidden, before the declared check. When the producer filter lands,
+      // the PATH entry below must disappear and this
       // test flips; the consumer rejection stays.
       const server = cloneServer(REMOTE_SERVER, {
         remote: { baseUrl: 'https://api.example.com/mcp?h=' + '$' + '{PATH}' },
@@ -972,7 +972,7 @@ describe('McpServerReconciler remote egress proxy', () => {
           }),
       ],
     ])(
-      'ignores upstream X-Accel-Redirect and X-Accel-Charset once inside the proxied location for %s (#1240)',
+      'ignores upstream X-Accel-Redirect and X-Accel-Charset once inside the proxied location for %s',
       (_label, server) => {
         const conf = remoteConfig(reconciler, server())
         const directive = 'proxy_ignore_headers X-Accel-Redirect X-Accel-Charset;'
@@ -1656,7 +1656,7 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(egressContainer.securityContext.allowPrivilegeEscalation).toBe(false)
     })
 
-    it('strips the six envsubst knobs from every CRD source and appends one empty filter last (U6 for #1240)', () => {
+    it('strips the six envsubst knobs from every CRD source and appends one empty filter last (U6)', () => {
       // The filter name arrives from three CRD sources (envMapping, spec.env and
       // a Secret mapping). The image pins all six knobs before it checks and
       // renders, so a CRD value is ineffective: the strip removes every source
@@ -3291,7 +3291,7 @@ describe('remote reconcile security warnings', () => {
   })
 })
 
-// ─── Reserved egress-proxy env (RS-1..RS-4 for #1240) ───────────────────────
+// ─── Reserved egress-proxy env (RS-1..RS-4) ───────────────────────
 
 const PINNED_ENVSUBST_NAMES = [
   'NGINX_ENVSUBST_TEMPLATE_DIR',
@@ -3316,7 +3316,7 @@ function egressProxyContainer(
   return container
 }
 
-describe('reserved egress-proxy env (RS for #1240)', () => {
+describe('reserved egress-proxy env (RS)', () => {
   let reconciler: McpServerReconciler
 
   beforeEach(() => {

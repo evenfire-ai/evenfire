@@ -19,7 +19,7 @@ import type { RolloutFailureKind, RolloutWaitOptions, RotationPhase } from './ty
  * PREVIOUS state (e.g. the old pod staying Ready while the HCC has not
  * reconciled the new Secret yet); treating a stale True as success would report
  * a rotation that never happened, and treating a stale refusal as this write's
- * verdict would blame the new value for an old one (issue #223 plan, Fase 3 §6).
+ * verdict would blame the new value for an old one.
  */
 function findFreshCondition(
   conditions: McpServerCondition[] | undefined,

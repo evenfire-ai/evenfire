@@ -703,7 +703,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
     const server = makeServer({ name: 'no-secret' })
     const result = await reconciler.validateSecret(server)
     // No credentials to hash, so no credentials-revision annotation is written
-    // on the pod template (issue #223), and the egress-proxy value preflight has
+    // on the pod template, and the egress-proxy value preflight has
     // no Secret snapshot to decode.
     expect(result).toEqual({ ok: true, revision: '', secretData: {} })
   })
@@ -792,7 +792,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
     const result = await reconciler.validateSecret(server)
     // The same base64 `data` object that was hashed travels with the result, so
     // the egress-proxy preflight judges the exact Secret version whose digest
-    // goes on the PodTemplate (spec §4.4).
+    // goes on the PodTemplate.
     expect(result).toEqual({
       ok: true,
       revision: expect.stringMatching(/^[0-9a-f]{64}$/),

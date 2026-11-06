@@ -166,7 +166,7 @@ const conditionWrites = extractConditionWrites()
  * this allowlist. A literal write that is not the success status is `unknown`
  * and cannot match any site, which is how a novel condition lands red.
  *
- * `blockEgressProxyValues` (issue #1240) is the site that forced this shape: a
+ * `blockEgressProxyValues` is the site that forced this shape: a
  * rotation whose credential is readable but outside the egress-proxy value class
  * still clears a stale `SecretResolved=False` from an earlier state, writing the
  * same success triple as the two reconcile paths. It is a real producer site,
@@ -183,7 +183,7 @@ const KNOWN_PRODUCER_WRITE_SITES: readonly ProducerWriteSite[] = [
   // The WRC-owned paths write the same two shapes for their own branch.
   { owner: 'reconcileWrcOwnedServer', shape: 'literal-success' },
   { owner: 'reconcileWrcOwnedServer', shape: 'forward-validateSecret' },
-  // The egress-proxy value preflight's block path (issue #1240).
+  // The egress-proxy value preflight's block path.
   { owner: 'blockEgressProxyValues', shape: 'literal-success' },
 ]
 
