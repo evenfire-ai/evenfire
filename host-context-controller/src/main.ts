@@ -16,7 +16,7 @@ import {
   ManagedDeploymentInformer,
   managedDeploymentListFromAppsApi,
 } from './informers/deploymentInformer'
-import { SecretInformer } from './informers/secretInformer'
+import { SecretInformer, secretListFromCoreApi } from './informers/secretInformer'
 import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import {
   McpServerProvider,
@@ -267,12 +267,7 @@ async function main(): Promise<void> {
       )
       secretInformer = new SecretInformer(kc, config.namespace, provider.handleSecretEvent, {
         mode: 'resume',
-        list: (namespace, page) =>
-          secretListApi.listNamespacedSecret({
-            namespace,
-            limit: page.limit,
-            _continue: page.continueToken,
-          }),
+        list: secretListFromCoreApi(secretListApi),
       })
       try {
         const running = await secretInformer.start()

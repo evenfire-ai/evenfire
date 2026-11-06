@@ -339,6 +339,41 @@ describe('SecretInformer resume mode (#1338 F2 Layer B)', () => {
     vi.useRealTimers()
   })
 
+  it('a stop during a deferred relist emits nothing and opens no watch', async () => {
+    await startQuiet(['alpha'])
+    const realList = api.list.getMockImplementation()!
+    let releaseList!: () => void
+    const held = new Promise<void>(resolve => {
+      releaseList = resolve
+    })
+    api.list.mockImplementationOnce(async (namespace, page) => {
+      await held
+      return realList(namespace, page)
+    })
+    api.disconnect()
+    api.expireNextResume()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(api.list).toHaveBeenCalledTimes(2)
+    const watchesBefore = api.watchFn.mock.calls.length
+
+    informer.stop()
+    releaseList()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(events).toEqual([])
+    expect(api.watchFn).toHaveBeenCalledTimes(watchesBefore)
+  })
+
+  it('an ADDED for a cached name with a new uid is delivered as MODIFIED', async () => {
+    await startQuiet(['alpha'])
+
+    api.watchCalls.at(-1)!.cb('ADDED', {
+      metadata: { name: 'alpha', namespace: NS, uid: 'recreated-uid', resourceVersion: '900' },
+    })
+
+    expect(events).toEqual([{ type: 'MODIFIED', name: 'alpha', namespace: NS }])
+  })
+
   it('B10 the initial list emits one ADDED per Secret, once, then watches from its resourceVersion', async () => {
     const initialBefore = await metricValue('clerum_hcc_secret_informer_lists_total', {
       namespace: NS,

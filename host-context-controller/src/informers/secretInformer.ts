@@ -69,6 +69,18 @@ export type SecretListPage = { limit: number; continueToken?: string }
 /** Lists one page of the namespace's Secrets (`CoreV1Api.listNamespacedSecret`). */
 export type SecretList = (namespace: string, page: SecretListPage) => Promise<k8s.V1SecretList>
 
+/** The production list: one page of `CoreV1Api.listNamespacedSecret`. */
+export function secretListFromCoreApi(
+  api: Pick<k8s.CoreV1Api, 'listNamespacedSecret'>
+): SecretList {
+  return (namespace, page) =>
+    api.listNamespacedSecret({
+      namespace,
+      limit: page.limit,
+      _continue: page.continueToken,
+    })
+}
+
 /**
  * `resume` needs the list that seeds and repairs its cache; `replay` never
  * lists, so its wiring carries no list dependency.
