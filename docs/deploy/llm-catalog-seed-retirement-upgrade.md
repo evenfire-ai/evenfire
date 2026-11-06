@@ -13,9 +13,11 @@ installations that applied it.
 
 ### Placeholder prices are removed
 
-Every placeholder price that still has the four values (and the `USD`
-currency) the seed wrote is deleted. A price an admin changed in any of those
-values is kept. The pairs concerned are:
+A placeholder price is deleted only if nobody touched it since the seed wrote
+it: it still has the four values and the `USD` currency the seed wrote, it is
+still enabled, and it was never saved again. A price an admin edited, re-saved
+(even with the same values) or disabled is kept. A kept disabled price also
+stops the catalog sync from pricing that pair. The pairs concerned are:
 
 | Provider  | Model               |
 | --------- | ------------------- |
@@ -44,8 +46,9 @@ upgrade or right after it. Pay attention to the ones the seed enabled
 (`claude/claude-sonnet-4-6`, `openai/gpt-5.4-mini`, `zai/glm-5.1`,
 `bailian/qwen3-coder-plus`), and to `openai/gpt-4o` and `openai/gpt-4o-mini`
 if a catalog sync already added them: their placeholder may match the real
-price, but it is still removed. A price you set before the upgrade is an edit,
-so the migration keeps it.
+price, but it is still removed unless someone saved it. Saving a price under
+**Cost → LLM prices** before the upgrade, even unchanged, is enough for the
+migration to keep it.
 
 ### 28 seeded pairs become catalog-managed
 

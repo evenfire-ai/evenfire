@@ -362,6 +362,123 @@ describeRealPostgres('0135 retires the seeded LLM catalog (real PostgreSQL)', ()
     })
   })
 
+  describe('placeholder prices: only the ones nobody touched are deleted', () => {
+    const pk = (p: { provider: string; model: string }) => key(p.provider, p.model)
+    const seedPrice = (provider: string, model: string) => {
+      const seed = LEGACY_SEEDED_MODEL_PRICES.find(
+        p => p.provider === provider && p.model === model
+      )
+      expect(seed, `${provider}/${model} is a 0044 placeholder`).toBeDefined()
+      return seed!
+    }
+    // An edit made outside the API (psql) changes the value without bumping
+    // `updated_at`; only the value comparison can keep these.
+    const SQL_EDITS = [
+      { provider: 'openai', model: 'gpt-4o-mini', column: 'input_token_price', value: '0.2' },
+      { provider: 'claude', model: 'claude-sonnet-4-6', column: 'output_token_price', value: '16' },
+      {
+        provider: 'claude',
+        model: 'claude-3-5-sonnet',
+        column: 'cache_read_token_price',
+        value: '0.31',
+      },
+      {
+        provider: 'claude',
+        model: 'claude-3-5-haiku',
+        column: 'cache_write_token_price',
+        value: '1.5',
+      },
+      { provider: 'openai', model: 'gpt-4o', column: 'currency', value: 'EUR' },
+    ] as const
+    // Re-saved through the admin service with the same values: only
+    // `updated_at` tells it apart from the seed.
+    const RESAVED = { provider: 'zai', model: 'glm-5.1' } as const
+    // Disabled outside the API, so `updated_at` does not move: only `enabled`
+    // tells it apart. A disable through the API also bumps `updated_at`.
+    const DISABLED = { provider: 'bailian', model: 'qwen3-coder-plus' } as const
+    const UNTOUCHED = { provider: 'openai', model: 'gpt-5.4-mini' } as const
+
+    let pool: Pool
+    let after: Map<string, Awaited<ReturnType<typeof listLlmPrices>>[number]>
+
+    beforeAll(async () => {
+      pool = await freshDatabase('control_api_retire_seed_prices')
+      await pool.query('DELETE FROM schema_migrations WHERE version = $1', [MIGRATION])
+      await applyLegacyCatalogSeeds(pool)
+      for (const e of SQL_EDITS) {
+        seedPrice(e.provider, e.model)
+        await pool.query(
+          `UPDATE llm_model_prices SET ${e.column} = $3 WHERE provider = $1 AND model = $2`,
+          [e.provider, e.model, e.value]
+        )
+      }
+      const prices = await listLlmPrices(pool)
+      const idOf = (p: { provider: string; model: string }) =>
+        prices.find(r => r.provider === p.provider && r.model === p.model)!.id
+      const resavedSeed = seedPrice(RESAVED.provider, RESAVED.model)
+      await updateLlmPrice(
+        idOf(RESAVED),
+        {
+          input_token_price: Number(resavedSeed.input_token_price),
+          output_token_price: Number(resavedSeed.output_token_price),
+          cache_read_token_price: Number(resavedSeed.cache_read_token_price),
+          cache_write_token_price: Number(resavedSeed.cache_write_token_price),
+          currency: 'USD',
+        },
+        pool
+      )
+      seedPrice(DISABLED.provider, DISABLED.model)
+      await pool.query(
+        'UPDATE llm_model_prices SET enabled = false WHERE provider = $1 AND model = $2',
+        [DISABLED.provider, DISABLED.model]
+      )
+      seedPrice(UNTOUCHED.provider, UNTOUCHED.model)
+
+      await initDb({ connect: () => pool.connect() })
+      after = new Map((await listLlmPrices(pool)).map(p => [pk(p), p]))
+    })
+
+    it.each(SQL_EDITS.map(e => [e.column, e] as const))(
+      'keeps a placeholder whose %s was edited',
+      (_column, e) => {
+        const row = after.get(pk(e))
+        expect(row, pk(e)).toBeDefined()
+        expect(String(row![e.column]), pk(e)).toBe(
+          e.column === 'currency' ? e.value : String(Number(e.value))
+        )
+      }
+    )
+
+    it('keeps a placeholder an admin re-saved with the same values', () => {
+      expect(after.has(pk(RESAVED))).toBe(true)
+    })
+
+    it('keeps a placeholder an admin disabled, and a later sync does not price the pair', async () => {
+      expect(after.get(pk(DISABLED))?.enabled).toBe(false)
+      await syncDiscoveredModels(
+        {
+          materializer: new LlmAllowedModelsConfigMapWriter(
+            new FakeConfigMapApi(),
+            'mcp-host',
+            3,
+            pool
+          ),
+          loadCatalog: loadStub(CATALOG, 'live', CATALOG_CAPTURE_0135.capturedAt),
+        },
+        pool
+      )
+      const rows = (await listLlmPrices(pool)).filter(p => pk(p) === pk(DISABLED))
+      expect(rows).toHaveLength(1)
+      expect(rows[0].enabled).toBe(false)
+    })
+
+    it('deletes the placeholder nobody touched, and only that one', () => {
+      expect(after.has(pk(UNTOUCHED))).toBe(false)
+      const placeholderKeys = LEGACY_SEEDED_MODEL_PRICES.map(pk)
+      expect(placeholderKeys.filter(k => !after.has(k))).toEqual([pk(UNTOUCHED)])
+    })
+  })
+
   it('fresh install: a live run populates the catalog and auto-enables per policy', async () => {
     const pool = await freshDatabase('control_api_retire_seed_fresh_sync')
     await sync(pool, CATALOG)

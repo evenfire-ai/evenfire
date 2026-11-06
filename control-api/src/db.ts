@@ -6375,11 +6375,17 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
  *   window are not written here. The sync never changes `enabled` on an
  *   existing row, and never the display name or context window of an enabled
  *   one; on a disabled one it only fills them while they are NULL.
- * - 0044's placeholder prices are deleted while all four prices (and the
- *   currency) still equal what the seed wrote. A row an admin changed is a real
- *   price and stays. The deleted pairs become unpriced until an admin prices
- *   them: the sync loads a price only when it inserts a model, and these rows
- *   already exist.
+ * - 0044's placeholder prices are deleted only while nobody has touched them:
+ *   all four prices and the currency still equal what the seed wrote, the row
+ *   is still enabled, and `updated_at` still equals `created_at` (0044 left
+ *   both at the same NOW(); every admin PATCH, including one that re-saves the
+ *   same values or only disables the price, bumps `updated_at`). The value
+ *   comparison stays for edits made outside the API, which do not bump
+ *   `updated_at`. A disabled placeholder is the operator's decision not to
+ *   price the pair: deleting it would let a later sync insert the catalog
+ *   price against that decision. The deleted pairs become unpriced until an
+ *   admin prices them: the sync loads a price only when it inserts a model,
+ *   and these rows already exist.
  */
 async function applyRetireSeededLlmCatalog(db: DbClient): Promise<void> {
   await db.query(
@@ -6404,7 +6410,9 @@ async function applyRetireSeededLlmCatalog(db: DbClient): Promise<void> {
         AND p.output_token_price = s.output_price
         AND p.cache_read_token_price = s.cache_read_price
         AND p.cache_write_token_price = s.cache_write_price
-        AND p.currency = 'USD'`,
+        AND p.currency = 'USD'
+        AND p.enabled
+        AND p.updated_at = p.created_at`,
     [
       LEGACY_SEEDED_MODEL_PRICES.map(row => row.provider),
       LEGACY_SEEDED_MODEL_PRICES.map(row => row.model),
