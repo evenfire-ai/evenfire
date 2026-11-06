@@ -207,5 +207,7 @@ describe('publish retry ticket state machine (model)', () => {
       }),
       { numRuns: 5_000 }
     )
-  })
+    // 5,000 runs take ~2 s alone but can pass the default 10 s timeout when the
+    // whole suite runs on a loaded machine.
+  }, 60_000)
 })
