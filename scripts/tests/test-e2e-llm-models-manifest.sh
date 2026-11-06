@@ -53,9 +53,11 @@ scripts/e2e/image-capabilities-fixture.mjs zai/glm-5.3-flash
 scripts/e2e/e2e-hcc-readiness-bootstrap.sh openai/e2e-readiness
 tests/e2e/fixtures/custom-workflow-coordinator/index.js openai/gpt-4o-mini
 '
-# - image-capabilities-fixture.mjs adds its own llm-models rows through the
-#   admin API and restores the originals afterwards; pre-seeding them would
-#   change what it restores.
+# - image-capabilities-fixture.mjs edits the discovered glm-5.3 rows through
+#   the admin API and restores them afterwards, and refuses to run until the
+#   catalog has discovered them; pre-seeding them would change what it
+#   restores. Its run-scoped model is created and deleted, which leaves a
+#   tombstone for a pair no catalog lists.
 # - e2e-hcc-readiness-bootstrap.sh applies placeholder Hosts that only prove
 #   controller readiness and never run a model turn.
 # - custom-workflow-coordinator/index.js names gpt-4o-mini only inside
