@@ -4267,12 +4267,6 @@ export function App() {
                                     />
                                   </TitlebarActionsPortal>
                                   <ToastStack items={vm.toasts} onDismiss={vm.dismissToast} />
-                                  {vm.isAuthenticated && !vm.currentTeamId ? (
-                                    <StatusBanner
-                                      tone="warn"
-                                      text="You’re signed in, but this session has no active team."
-                                    />
-                                  ) : null}
                                   {sessionInvalidation && sessionInvalidationReadFailed ? (
                                     <div
                                       data-testid="sandbox-ui-session-revalidation-pending"

@@ -1035,7 +1035,8 @@ describe('App deep-link orchestration', () => {
   )
   const getSandboxUiLocation = vi.fn().mockResolvedValue(null)
 
-  it('shows an explicit no-team state without signing out the principal', () => {
+  // An empty session team is not a user-facing condition: V2 sessions never carry a team.
+  it('keeps a principal without a session team signed in, with no team banner', () => {
     currentController = makeController({
       initialExperienceLoading: false,
       isAuthenticated: true,
@@ -1053,9 +1054,11 @@ describe('App deep-link orchestration', () => {
 
     render(<App />)
 
-    expect(screen.getByRole('status').textContent).toContain(
-      'You’re signed in, but this session has no active team.'
-    )
+    // Witness: the authenticated shell rendered, so the absence below means something.
+    expect(document.querySelector('.login-shell, #email-input')).toBeNull()
+    expect(document.body.textContent?.length).toBeGreaterThan(0)
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByText(/no active team/i)).toBeNull()
   })
 
   beforeEach(() => {
