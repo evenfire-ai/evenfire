@@ -58,6 +58,15 @@ class TestPointerEvent extends MouseEvent {
 }
 
 describe('sidebar width rules', () => {
+  it('pins the approved minimum, default, and maximum independently of the exports', () => {
+    expect(SIDEBAR_MIN_WIDTH).toBe(192)
+    expect(SIDEBAR_DEFAULT_WIDTH).toBe(328)
+    expect(SIDEBAR_MAX_WIDTH).toBe(460)
+    expect(clampSidebarWidth(0)).toBe(192)
+    expect(clampSidebarWidth(328)).toBe(328)
+    expect(clampSidebarWidth(900)).toBe(460)
+  })
+
   it.each([
     [-100, SIDEBAR_MIN_WIDTH],
     [SIDEBAR_MIN_WIDTH, SIDEBAR_MIN_WIDTH],
