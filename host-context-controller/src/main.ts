@@ -56,12 +56,12 @@ let isShuttingDown = false
  */
 async function shutdown(signal: string): Promise<void> {
   if (isShuttingDown) {
-    console.log('[Main] Shutdown already in progress...')
+    hccLogger.info('[Main] Shutdown already in progress...')
     return
   }
   isShuttingDown = true
 
-  console.log(`[Main] Received ${signal}, shutting down`)
+  hccLogger.info('[Main] Received signal, shutting down', { signal })
 
   deploymentInformer?.stop()
   secretInformer?.stop()
@@ -79,14 +79,13 @@ async function shutdown(signal: string): Promise<void> {
  * Main entry point.
  */
 async function main(): Promise<void> {
-  console.log('='.repeat(50))
-  console.log('Host Context Controller - Starting')
-  console.log('='.repeat(50))
-  console.log(`[Main] Mode: ${config.devMode ? 'DEV' : 'PRODUCTION'}`)
-  console.log(`[Main] Port: ${config.port}`)
+  hccLogger.info('[Main] Host Context Controller starting', {
+    mode: config.devMode ? 'DEV' : 'PRODUCTION',
+    port: config.port,
+  })
 
   if (!config.devMode && !config.desktopApiToken) {
-    console.warn(
+    hccLogger.warn(
       '[HCC] WARNING: CONTEXT_MAPPER_DESKTOP_API_TOKEN is empty in production mode — ' +
         'desktop API endpoints have no service-token auth. Set this to match RPC_PROXY_DESKTOP_API_TOKEN.'
     )
@@ -99,18 +98,18 @@ async function main(): Promise<void> {
     try {
       assertInternalControlJwtHmacSecret(config.internalControlJwtHccHmacSecret)
     } catch (err) {
-      console.error(`[HCC] FATAL: ${err instanceof Error ? err.message : String(err)}`)
+      hccLogger.error('[Main] FATAL: InternalControl JWT HMAC secret is invalid', { err })
       process.exit(1)
     }
   }
 
   if (!config.hccTargetNamespace.trim()) {
-    console.error('[HCC] FATAL: HCC_TARGET_NAMESPACE must not be empty')
+    hccLogger.error('[Main] FATAL: HCC_TARGET_NAMESPACE must not be empty')
     process.exit(1)
   }
   if (config.hccTargetNamespace !== config.hostNamespace) {
-    console.error(
-      '[HCC] FATAL: HCC_TARGET_NAMESPACE must equal CONTEXT_MAPPER_HOST_NAMESPACE for caller-bound Host credentials'
+    hccLogger.error(
+      '[Main] FATAL: HCC_TARGET_NAMESPACE must equal CONTEXT_MAPPER_HOST_NAMESPACE for caller-bound Host credentials'
     )
     process.exit(1)
   }
@@ -124,22 +123,23 @@ async function main(): Promise<void> {
       maxTokenLifetimeSeconds: config.mcpHostJwtMaxTtlSeconds,
     })
   } catch (err) {
-    console.error(
-      `[HCC] FATAL: ${err instanceof Error ? err.message : 'MCP JWT verifier configuration failed'}`
-    )
+    hccLogger.error('[Main] FATAL: MCP JWT verifier configuration failed', { err })
     process.exit(1)
     return
   }
   if (!config.devMode) {
-    console.log(`[Main] Namespace: ${config.namespace}`)
-    console.log(`[Main] Reconciler: ENABLED (will manage Deployments + Services)`)
+    hccLogger.info('[Main] Reconciler enabled (will manage Deployments + Services)', {
+      namespace: config.namespace,
+    })
   }
 
   // Create and start the provider (K8s watcher + reconciler, or dev provider)
   provider = createMcpServerProvider()
 
   provider.onChange(() => {
-    console.log(`[Main] McpServer cache updated, total: ${provider?.getAllServers().length || 0}`)
+    hccLogger.info('[Main] McpServer cache updated', {
+      total: provider?.getAllServers().length || 0,
+    })
   })
 
   // Create and start the REST API server
@@ -192,10 +192,10 @@ async function main(): Promise<void> {
       signInternalControlJwt: () => signInternalControlJwt(),
     })
     heartbeatPoller.start()
-    console.log(
-      `[Main] Stateless heartbeat poller started (interval=${config.heartbeatPollMs}ms, ` +
-        `target=${config.controlApiBaseUrl})`
-    )
+    hccLogger.info('[Main] Stateless heartbeat poller started', {
+      intervalMs: config.heartbeatPollMs,
+      target: config.controlApiBaseUrl,
+    })
   }
   const mcpAuthorization = new McpAuthorizationService(createMcpAuthorizationStore(provider))
   server = new ContextMapperServer(
@@ -226,7 +226,7 @@ async function main(): Promise<void> {
   }
 
   await provider.start()
-  console.log(`[Main] Provider started, loaded ${provider.getAllServers().length} McpServer(s)`)
+  hccLogger.info('[Main] Provider started', { mcpServers: provider.getAllServers().length })
   server.setReady(true)
 
   // Re-enqueues a server with a terminal RolloutIncomplete when its Deployment
@@ -345,7 +345,7 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log('\n[Main] Host Context Controller running. Press Ctrl+C to exit.\n')
+  hccLogger.info('[Main] Host Context Controller running. Press Ctrl+C to exit.')
 
   // Handle graceful shutdown (use 'once' to prevent multiple handlers)
   process.once('SIGTERM', () => shutdown('SIGTERM'))
@@ -354,6 +354,6 @@ async function main(): Promise<void> {
 
 // Run main
 main().catch(error => {
-  console.error('[Main] Fatal error:', error)
+  hccLogger.error('[Main] Fatal error', { err: error })
   process.exit(1)
 })
