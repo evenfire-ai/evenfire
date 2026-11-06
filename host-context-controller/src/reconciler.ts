@@ -210,7 +210,11 @@ export const ENVSUBST_PINNED_PROXY_ENV = new Set([
 // The image's 15-local-resolvers.envsh exports NGINX_LOCAL_RESOLVERS when
 // NGINX_ENTRYPOINT_LOCAL_RESOLVERS is set. It runs after the template check, so
 // a placeholder naming either variable would be filled with an unchecked value.
-// A CRD may still set them; no template HCC renders references them.
+// HCC strips both names from every CRD env source of a remote server and
+// appends its own NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1: a CRD value was never
+// effective (the envsh overwrites it), and a retained NGINX_LOCAL_RESOLVERS
+// entry would make the template check refuse the template's own resolver
+// line, the one rendered reference to the pair.
 export const RESOLVER_RESERVED_PROXY_ENV = new Set([
   'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
   'NGINX_LOCAL_RESOLVERS',
@@ -1968,8 +1972,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * remote authHeaders backfill and the empty NGINX_ENVSUBST_FILTER. Forbidden
    * spec.env names are stripped here, silently, so no caller can deploy one;
    * buildDeployment sanitizes first and reports each stripped name once per
-   * reconcile. For remote servers the six envsubst knobs the image pins are
-   * stripped too, and `onStripped` receives each removed (name, source) pair.
+   * reconcile. For remote servers the six envsubst knobs the image pins and
+   * the resolver pair are stripped too, and `onStripped` receives each removed
+   * (name, source) pair.
    */
   private buildContainerEnv(
     server: McpServerCRD,
@@ -2073,9 +2078,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     for (const item of assembled) {
       // The egress-proxy entrypoint assigns these six before it checks and
       // renders, so a CRD value would never reach envsubst and would only make
-      // the Deployment state a value the pod ignores. Exact and case-sensitive,
-      // like envsubst. Non-remote servers keep them: a local image may use them.
-      if (isRemote && ENVSUBST_PINNED_PROXY_ENV.has(item.entry.name)) {
+      // the Deployment state a value the pod ignores. The resolver pair is
+      // stripped for the same reason (see RESOLVER_RESERVED_PROXY_ENV): the
+      // platform appends its own flag below. Exact and case-sensitive, like
+      // envsubst. Non-remote servers keep them: a local image may use them.
+      if (
+        isRemote &&
+        (ENVSUBST_PINNED_PROXY_ENV.has(item.entry.name) ||
+          RESOLVER_RESERVED_PROXY_ENV.has(item.entry.name))
+      ) {
         onStripped(item.entry.name, item.source)
         continue
       }

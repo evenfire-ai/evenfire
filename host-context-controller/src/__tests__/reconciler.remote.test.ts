@@ -1712,52 +1712,80 @@ describe('McpServerReconciler remote egress proxy', () => {
       }
     })
 
-    it('appends the platform resolver and envsubst filter env after every CRD source (U6)', () => {
-      // The resolver and filter names arrive from three CRD sources (envMapping,
-      // spec.env and a Secret mapping). The platform entries must still come
-      // last: a CRD-supplied filter that excludes a declared placeholder would
-      // otherwise leave ${NAME} in the rendered config for NGINX to expand.
-      const server = cloneServer(REMOTE_SERVER, {
-        envMapping: { loggers: 'NGINX_ENVSUBST_FILTER' },
-        serverConfig: { loggers: 'debug' },
-        env: [
-          { name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS', value: '' },
-          { name: 'NGINX_ENVSUBST_FILTER', value: '^NGINX_LOCAL_RESOLVERS$' },
-        ],
-        envSecret: {
-          name: 'sentry-credentials',
-          keys: [
-            { secretKey: 'SENTRY_AUTH_TOKEN', envVar: 'SENTRY_AUTH_TOKEN' },
-            { secretKey: 'resolver', envVar: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS' },
-            { secretKey: 'filter', envVar: 'NGINX_ENVSUBST_FILTER' },
+    it('strips CRD resolver and filter entries and appends the platform pair last (U6)', () => {
+      // The resolver and filter names arrive from CRD sources (envMapping,
+      // spec.env and a Secret mapping). A CRD value for either name was
+      // never effective (the image exports its own resolvers and the
+      // platform flag is appended last), and a retained
+      // NGINX_LOCAL_RESOLVERS entry would make the template check refuse
+      // the rendered resolver line, so buildContainerEnv strips the pair
+      // and the six knobs from every CRD source; only the platform
+      // entries remain, last.
+      const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
+      try {
+        const server = cloneServer(REMOTE_SERVER, {
+          envMapping: { loggers: 'NGINX_ENVSUBST_FILTER' },
+          serverConfig: { loggers: 'debug' },
+          env: [
+            { name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS', value: '' },
+            { name: 'NGINX_ENVSUBST_FILTER', value: '^NGINX_LOCAL_RESOLVERS$' },
           ],
-        },
-      })
-      const deployment = (reconciler as any).buildDeployment(server)
-      const containers = deployment.spec.template.spec.containers
+          envSecret: {
+            name: 'sentry-credentials',
+            keys: [
+              { secretKey: 'SENTRY_AUTH_TOKEN', envVar: 'SENTRY_AUTH_TOKEN' },
+              { secretKey: 'resolver', envVar: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS' },
+              { secretKey: 'filter', envVar: 'NGINX_ENVSUBST_FILTER' },
+            ],
+          },
+        })
+        const deployment = (reconciler as any).buildDeployment(server)
+        const containers = deployment.spec.template.spec.containers
 
-      const egressContainer = containers.find((c: any) => c.name === 'egress-proxy')
-      const sentryEnv = egressContainer.env.find((e: any) => e.name === 'SENTRY_AUTH_TOKEN')
-      expect(sentryEnv).toBeDefined()
-      expect(sentryEnv.valueFrom.secretKeyRef).toEqual({
-        name: 'sentry-credentials',
-        key: 'SENTRY_AUTH_TOKEN',
-      })
-      // Witnesses that all three CRD sources produced an entry (envMapping,
-      // spec.env and the Secret mapping), and that the platform entries come
-      // after every one of them.
-      const names = egressContainer.env.map((e: any) => e.name)
-      expect(names.filter((n: string) => n === 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS')).toHaveLength(3)
-      expect(names.filter((n: string) => n === 'NGINX_ENVSUBST_FILTER')).toHaveLength(4)
-      expect(egressContainer.env.at(-2)).toEqual({
-        name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
-        value: '1',
-      })
-      expect(egressContainer.env.at(-1)).toEqual({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
-      const filterEntries = egressContainer.env.filter(
-        (e: any) => e.name === 'NGINX_ENVSUBST_FILTER'
-      )
-      expect(filterEntries.slice(0, -1).every((e: any) => e.value !== '')).toBe(true)
+        const egressContainer = containers.find((c: any) => c.name === 'egress-proxy')
+        // Life witness: the ordinary Secret mapping still produces its entry.
+        const sentryEnv = egressContainer.env.find((e: any) => e.name === 'SENTRY_AUTH_TOKEN')
+        expect(sentryEnv).toBeDefined()
+        expect(sentryEnv.valueFrom.secretKeyRef).toEqual({
+          name: 'sentry-credentials',
+          key: 'SENTRY_AUTH_TOKEN',
+        })
+        // One platform entry per name, last two, in order.
+        expect(
+          egressContainer.env.filter((e: any) => e.name === 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS')
+        ).toEqual([{ name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS', value: '1' }])
+        expect(egressContainer.env.filter((e: any) => e.name === 'NGINX_ENVSUBST_FILTER')).toEqual([
+          { name: 'NGINX_ENVSUBST_FILTER', value: '' },
+        ])
+        expect(egressContainer.env.at(-2)).toEqual({
+          name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
+          value: '1',
+        })
+        expect(egressContainer.env.at(-1)).toEqual({ name: 'NGINX_ENVSUBST_FILTER', value: '' })
+        // One strip warning per (name, source): FILTER from all three
+        // channels, ENTRYPOINT from spec.env and the Secret mapping.
+        const stripped = warn.mock.calls.filter(([message]) =>
+          String(message).includes('stripped (reserved for the egress-proxy image)')
+        )
+        const pairs = new Set(
+          stripped.map(([, fields]) => `${(fields as any)?.envVar}::${(fields as any)?.source}`)
+        )
+        expect(pairs).toEqual(
+          new Set([
+            'NGINX_ENVSUBST_FILTER::envMapping',
+            'NGINX_ENVSUBST_FILTER::spec.env',
+            'NGINX_ENVSUBST_FILTER::spec.envSecret',
+            'NGINX_ENTRYPOINT_LOCAL_RESOLVERS::spec.env',
+            'NGINX_ENTRYPOINT_LOCAL_RESOLVERS::spec.envSecret',
+          ])
+        )
+        expect(JSON.stringify(stripped)).not.toContain('^NGINX_LOCAL_RESOLVERS$')
+        const conf = remoteConfig(reconciler, server)
+        expect(conf).toContain('proxy_ignore_headers X-Accel-Redirect X-Accel-Charset;')
+        expect(conf).not.toContain('^NGINX_LOCAL_RESOLVERS$')
+      } finally {
+        warn.mockRestore()
+      }
     })
 
     it('should backfill empty env vars for auth header placeholders when envSecret is absent', () => {
@@ -3426,9 +3454,12 @@ describe('reserved egress-proxy env (RS for #1240)', () => {
         // Life witness: the sibling header over a CRD-controlled name renders.
         expect(conf).toContain('proxy_set_header X-Ok "Bearer ${SENTRY_AUTH_TOKEN}";')
         // The dropped header must not leave its env name in the container: the
-        // backfill is skipped, and the only FILTER entry is the platform's.
+        // backfill is skipped, and the only FILTER / ENTRYPOINT entries are
+        // the platform's appended pair.
         const entries = (container.env ?? []).filter(entry => entry.name === name)
         if (name === 'NGINX_ENVSUBST_FILTER') expect(entries).toEqual([{ name, value: '' }])
+        else if (name === 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS')
+          expect(entries).toEqual([{ name, value: '1' }])
         else expect(entries).toEqual([])
         const rejected = warn.mock.calls.filter(([message]) =>
           String(message).includes('Rejecting authHeader')
@@ -3442,18 +3473,40 @@ describe('reserved egress-proxy env (RS for #1240)', () => {
     }
   )
 
-  it('keeps the resolver pair in a CRD-set env: reserved in #1243, not stripped (RS-4)', () => {
-    const server = cloneServer(REMOTE_SERVER, {
-      env: [
-        { name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS', value: '1' },
-        { name: 'NGINX_LOCAL_RESOLVERS', value: '10.0.0.10' },
-      ],
-    })
-    const container = egressProxyContainer(reconciler, server)
+  it('strips the resolver pair from CRD env and appends the platform flag (RS-4)', () => {
+    const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
+    try {
+      const server = cloneServer(REMOTE_SERVER, {
+        env: [
+          { name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS', value: '0' },
+          { name: 'NGINX_LOCAL_RESOLVERS', value: '10.0.0.10' },
+          { name: 'SPEC_ENV_WITNESS', value: 'kept' },
+        ],
+      })
+      const container = egressProxyContainer(reconciler, server)
 
-    expect(container.env).toContainEqual({ name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS', value: '1' })
-    expect(container.env).toContainEqual({ name: 'NGINX_LOCAL_RESOLVERS', value: '10.0.0.10' })
-    // The #1271 union has to change this deliberately.
-    expect((container.env ?? []).some(entry => entry.name === 'NGINX_LOCAL_RESOLVERS')).toBe(true)
+      // Life witness: an ordinary spec.env entry on the same channel stays.
+      expect(container.env).toContainEqual({ name: 'SPEC_ENV_WITNESS', value: 'kept' })
+      // The CRD pair is gone; only the platform flag remains, with its own
+      // value (the CRD decoy '0' proves the strip, not a coincidence).
+      expect(
+        (container.env ?? []).filter(entry => entry.name === 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS')
+      ).toEqual([{ name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS', value: '1' }])
+      expect((container.env ?? []).filter(entry => entry.name === 'NGINX_LOCAL_RESOLVERS')).toEqual(
+        []
+      )
+      const stripped = warn.mock.calls.filter(([message]) =>
+        String(message).includes('stripped (reserved for the egress-proxy image)')
+      )
+      const pairs = new Set(
+        stripped.map(([, fields]) => `${(fields as any)?.envVar}::${(fields as any)?.source}`)
+      )
+      expect(pairs).toEqual(
+        new Set(['NGINX_ENTRYPOINT_LOCAL_RESOLVERS::spec.env', 'NGINX_LOCAL_RESOLVERS::spec.env'])
+      )
+      expect(JSON.stringify(stripped)).not.toContain('10.0.0.10')
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
