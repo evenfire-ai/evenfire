@@ -1,5 +1,6 @@
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { isDeepStrictEqual } from 'node:util'
 import {
   type AdministrativeOutcomeReporter,
   BoundedAdministrativeOutcomeReporter,
@@ -2785,13 +2786,32 @@ describe('Host Deployment pull Secret from config', () => {
 })
 
 describe('Host workspace PVC StorageClass from config', () => {
-  // Like the apiserver (ValidatePersistentVolumeClaimUpdate): once set,
-  // spec.storageClassName cannot change on update; only nil -> class is allowed.
+  // Like the apiserver's ValidatePersistentVolumeClaimUpdate for a claim with no volumeName: the
+  // spec is immutable, apart from volumeName and a nil class moving to a class, "" included. Only
+  // the class a beta annotation names can replace a nil one. The apiserver defaults volumeMode
+  // before it compares. This mock also refuses dropping the annotation, which upstream allows in
+  // that upgrade: it can only refuse more than the apiserver, and ensurePvc keeps annotations.
+  const BETA_CLASS_ANNOTATION = 'volume.beta.kubernetes.io/storage-class'
+  const immutablePvcSpec = ({
+    storageClassName: _class,
+    volumeName: _volume,
+    volumeMode,
+    ...rest
+  }: k8s.V1PersistentVolumeClaimSpec) => ({ ...rest, volumeMode: volumeMode ?? 'Filesystem' })
   const apiserverPvcReplace =
     (live: k8s.V1PersistentVolumeClaim) =>
     async ({ body }: { body: k8s.V1PersistentVolumeClaim }) => {
       const liveClass = live.spec!.storageClassName
-      if (liveClass !== undefined && body.spec?.storageClassName !== liveClass) {
+      const sentClass = body.spec!.storageClassName
+      const betaClass = live.metadata?.annotations?.[BETA_CLASS_ANNOTATION]
+      const classAllowed =
+        sentClass === liveClass ||
+        (liveClass === undefined && (betaClass === undefined || sentClass === betaClass))
+      const allowed =
+        classAllowed &&
+        body.metadata?.annotations?.[BETA_CLASS_ANNOTATION] === betaClass &&
+        isDeepStrictEqual(immutablePvcSpec(body.spec!), immutablePvcSpec(live.spec!))
+      if (!allowed) {
         throw Object.assign(new Error('spec is immutable after creation'), { code: 422 })
       }
       return body
@@ -2916,9 +2936,7 @@ describe('Host workspace PVC StorageClass from config', () => {
         status: { phase: 'Pending' },
       }
       coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
-      coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(
-        async ({ body }: { body: k8s.V1PersistentVolumeClaim }) => body
-      )
+      coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(apiserverPvcReplace(live))
 
       await expect(
         (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
@@ -3019,5 +3037,69 @@ describe('Host workspace PVC StorageClass from config', () => {
     expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
     const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
     expect(body.spec.storageClassName).toBe('class-a')
+  })
+
+  it.each<{
+    name: string
+    spec: k8s.V1PersistentVolumeClaimSpec
+    annotations: Record<string, string>
+    resolves: boolean
+  }>([
+    {
+      name: 'a size the Pending claim does not have',
+      spec: { resources: { requests: { storage: '5Gi' } } },
+      annotations: {},
+      resolves: false,
+    },
+    {
+      name: 'a class that differs from the beta annotation',
+      spec: {},
+      annotations: { [BETA_CLASS_ANNOTATION]: 'class-b' },
+      resolves: false,
+    },
+    {
+      name: 'the class the beta annotation names',
+      spec: {},
+      annotations: { [BETA_CLASS_ANNOTATION]: 'class-a' },
+      resolves: true,
+    },
+  ])('sends $name and the pass follows the apiserver', async ({ spec, annotations, resolves }) => {
+    const original = config.hostWorkspaceStorageClassName
+    onTestFinished(() => {
+      config.hostWorkspaceStorageClassName = original
+    })
+    config.hostWorkspaceStorageClassName = 'class-a'
+    const { reconciler, coreApi } = createReconciler()
+    const live: k8s.V1PersistentVolumeClaim = {
+      metadata: {
+        name: 'alpha-host-workspace',
+        namespace: 'mcp-host',
+        uid: 'pvc-uid',
+        labels: {
+          'clerum.io/host': 'alpha-host',
+          'clerum.io/managed-by': 'host-context-controller',
+        },
+        annotations,
+        resourceVersion: '7',
+      },
+      spec: {
+        volumeMode: 'Filesystem',
+        accessModes: ['ReadWriteOnce'],
+        resources: { requests: { storage: config.hostWorkspaceStorageSize } },
+        ...spec,
+      },
+      status: { phase: 'Pending' },
+    }
+    coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
+    coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(apiserverPvcReplace(live))
+
+    await expect(
+      (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
+    ).resolves.toBe(resolves)
+    // Liveness witness: the unbound-claim replace ran, with what buildPvc sends.
+    expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+    const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
+    expect(body.spec.storageClassName).toBe('class-a')
+    expect(body.spec.resources.requests.storage).toBe(config.hostWorkspaceStorageSize)
   })
 })
