@@ -218,6 +218,7 @@ STUB="$TMP/stub"
 mkdir -p "$STUB"
 cat >"$STUB/kubectl" <<'SH'
 #!/bin/sh
+[ -z "${STUB_CALLS:-}" ] || printf '%s\n' "$*" >>"$STUB_CALLS"
 if [ "$1" = "kustomize" ] && [ -n "${STUB_RENDER:-}" ]; then
   cat "$STUB_RENDER"
   exit 0
@@ -256,7 +257,8 @@ fi
 
 # The wrapper's checks walk the namespaces this render derives, not its hard-coded fallback
 # lists. Each list has a witness only the render can supply; webhook-ingress is only in the
-# fallback. The stub refuses the reads, so every per-namespace check reports a failure.
+# fallback. The stub refuses the reads, so checks 2 and 3 report a failure per namespace. Check 4
+# prints nothing per namespace when its reads return nothing, so its witness is the reads it sent.
 RUNTIME_WITNESS='            - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
               value: mcp-server,runtime-witness'
 fixture "$TMP/o.yaml" hcc "$RUNTIME_WITNESS" "$MINIMAL_BASE"
@@ -269,12 +271,15 @@ metadata:
   labels:
     app.kubernetes.io/part-of: clerum
 YAML
-STUB_NODES=1 wrapper "$TMP/o.yaml"
+STUB_NODES=1 STUB_CALLS="$TMP/o.calls" wrapper "$TMP/o.yaml"
+O_CALLS="$(cat "$TMP/o.calls")"
 if [ "$RC" -eq 1 ] &&
   [[ "$OUT" == *"FAIL  all-witness: cannot validate DNS egress"* ]] &&
   [[ "$OUT" == *"FAIL  runtime-witness: allow-k8s-api-egress-runtime-witness not found"* ]] &&
-  [[ "$OUT" == *"no RBAC-empowered pod is missing the label in: mcp-server runtime-witness"* ]] &&
-  [[ "$OUT" != *"webhook-ingress"* ]]; then
+  [[ "$O_CALLS" == *"-n runtime-witness get rolebindings"* ]] &&
+  [[ "$O_CALLS" == *"-n runtime-witness get pods"* ]] &&
+  [[ "$O_CALLS" == *"-n mcp-server get pods"* ]] &&
+  [[ "$OUT" != *"webhook-ingress"* ]] && [[ "$O_CALLS" != *"-n webhook-ingress "* ]]; then
   pass "o. the wrapper's checks walk the inventory the helper derived"
 else
   fail "o. derived lists not used: exit $RC, stdout: $OUT, stderr: $ERR"
