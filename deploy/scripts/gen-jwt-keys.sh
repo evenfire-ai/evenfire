@@ -15,9 +15,15 @@ set -euo pipefail
 #   6. inter-service-tokens (placeholder tokens + desktop-api-token)
 #   7. WRC signing key + configmaps
 #   8. control-api-public-key ConfigMap (admin JWT public key for WRC verification)
+# Then restarts every deployed consumer of the rotated keys (see the restart
+# section near the end).
 # (#273: legacy clerum-channel-reader-credentials Secret retired — per-Host
 #  channel-reader-<host>-credentials Secrets are written by control-api's
 #  /admin/channel-secrets, not bootstrap-time.)
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/restart-jwt-key-consumers.sh
+source "${SCRIPT_DIR}/lib/restart-jwt-key-consumers.sh"
 
 kctl() {
   if [ -n "${CONTEXT:-}" ]; then
@@ -180,10 +186,13 @@ echo ""
 echo "=== All secrets and configmaps created ==="
 
 # --- Auto-sync RPC public key to mcp-host-config ---
-echo ""
-echo "=== Syncing JWT public key to mcp-host-config ==="
-if kctl get configmap mcp-host-config -n mcp-host >/dev/null 2>&1; then
-  echo "  Patching existing mcp-host-config..."
+# Writes the new RPC public key into mcp-host-config, then restarts every
+# Deployment in the mcp-host namespace under the same retry / pending / exit-1
+# contract as the other consumers (lib/restart-jwt-key-consumers.sh). When the
+# ConfigMap cannot be read or written, mcp-host is not restarted (it would
+# reload the old key); the next deploy's sync-auth-key.sh step writes the key
+# and restarts the mcp-host pods, and this script exits 1.
+sync_mcp_host_config() {
   kctl get configmap mcp-host-config -n mcp-host -o json \
     | python3 -c "
 import sys, json
@@ -194,14 +203,52 @@ for key in ['resourceVersion', 'uid', 'creationTimestamp', 'managedFields']:
     cm.get('metadata', {}).pop(key, None)
 json.dump(cm, sys.stdout)
 " | kctl apply -f -
-  echo "  mcp-host-config patched with new RPC public key."
-  # Restart mcp-host deployments to pick up the new key
-  kctl rollout restart deploy -n mcp-host 2>/dev/null || true
-  echo "  mcp-host namespace deployments restarted."
+}
+
+RESTARTS_PENDING=0
+MCP_SYNC_PENDING=0
+echo ""
+echo "=== Syncing JWT public key to mcp-host-config ==="
+if ! MCP_HOST_CONFIG="$(jwt_key_retry kctl get configmap mcp-host-config -n mcp-host --ignore-not-found -o name)"; then
+  echo "  ERROR: cannot read mcp-host/mcp-host-config" >&2
+  MCP_SYNC_PENDING=1
+elif [ -n "$MCP_HOST_CONFIG" ]; then
+  echo "  Patching existing mcp-host-config..."
+  if ! jwt_key_retry sync_mcp_host_config >/dev/null; then
+    echo "  ERROR: cannot write the new RPC public key to mcp-host-config" >&2
+    MCP_SYNC_PENDING=1
+  else
+    echo "  mcp-host-config patched with new RPC public key."
+    if [ -n "${CONTEXT:-}" ]; then
+      restart_jwt_key_namespace mcp-host kubectl --context "$CONTEXT" || RESTARTS_PENDING=1
+    else
+      restart_jwt_key_namespace mcp-host kubectl || RESTARTS_PENDING=1
+    fi
+  fi
 else
   echo "  WARNING: mcp-host-config ConfigMap not found in mcp-host namespace."
   echo "  Deploy services first (make gcp-prod-deploy-all or gcp-dev-deploy-all),"
   echo "  then re-run this script or manually create mcp-host-config."
+fi
+
+# --- Restart the consumers of the rotated keys ---
+# Every run regenerates every key above. The consumer list and the reason each
+# one is on it live in lib/restart-jwt-key-consumers.sh. Not restarted there:
+# mcp-host (restarted above with mcp-host-config), gfsc (this script does not
+# write gfs-config; every deploy's sync-auth-key.sh step syncs it, or run the
+# sync-auth-key target after a rotation), control-postgres (constant values,
+# read by the server only when it initialises its data directory) and
+# inter-service-tokens (no Deployment reads it). The script prints the gfsc
+# notice at the end of every run.
+# A pending restart does not skip the validation below; the script exits 1
+# after it. The literal kubectl argv is passed so the printed recovery commands
+# can be run as they are.
+echo ""
+echo "=== Restarting consumers of the rotated keys ==="
+if [ -n "${CONTEXT:-}" ]; then
+  restart_jwt_key_consumers kubectl --context "$CONTEXT" || RESTARTS_PENDING=1
+else
+  restart_jwt_key_consumers kubectl || RESTARTS_PENDING=1
 fi
 
 echo ""
@@ -216,14 +263,31 @@ for ns in control-plane sandbox-recipes; do
     echo "  OK: clerum-wrc-public-key in $ns has valid PEM key"
   fi
 done
+if [[ "$MCP_SYNC_PENDING" -eq 1 ]]; then
+  echo ""
+  echo "MCP-HOST SYNC PENDING: mcp-host-config was not updated, so mcp-host was not restarted."
+  echo "The next deploy's auth-key sync (scripts/minikube/sync-auth-key.sh) writes the key and restarts"
+  echo "the mcp-host consumers; to converge now, run the sync-auth-key target for this environment."
+fi
+if [[ "$RESTARTS_PENDING" -eq 1 ]]; then
+  echo ""
+  echo "RESTARTS PENDING: the keys are rotated but some consumers were not restarted (see the commands above)."
+fi
+echo ""
+echo "GFSC KEY SYNC REQUIRED: where gfsc is deployed, control-api signs gfs tokens with the new RPC key once it"
+echo "restarts, but this script does not write gfs-config, so gfsc keeps verifying them with the previous key"
+echo "until scripts/minikube/sync-auth-key.sh runs. The next deploy runs it; to converge now, run the"
+echo "sync-auth-key target for this environment."
 if [[ "$VALIDATION_FAILED" -eq 1 ]]; then
   echo ""
   echo "VALIDATION FAILED: One or more ConfigMaps still have placeholder values."
   echo "This will cause model-config-failed errors in workflow pods."
+fi
+if [[ "$VALIDATION_FAILED" -eq 1 || "$MCP_SYNC_PENDING" -eq 1 || "$RESTARTS_PENDING" -eq 1 ]]; then
   exit 1
 fi
 
 echo ""
 echo "=== Done ==="
 echo ""
-echo "All secrets created, JWT public key synced, and validation passed."
+echo "All secrets created and validation passed."

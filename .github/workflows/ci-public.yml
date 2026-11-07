@@ -860,8 +860,14 @@ jobs:
       - name: Test WRC-to-HCC contracts
         run: bash scripts/tests/test-wrc-hcc-contracts-gate.sh
 
-      - name: Test inter-service token HCC restart skip
+      - name: Test token consumer restart rules
         run: bash scripts/tests/test-inter-service-tokens.sh
+
+      - name: Test JWT key rotation consumer restarts
+        run: bash scripts/tests/test-gen-jwt-keys-restarts.sh
+
+      - name: Test minikube key generation
+        run: bash scripts/tests/test-minikube-generate-keys.sh
 
       - name: Test WRC internal dependency NetworkPolicy contracts
         run: bash scripts/tests/test-wrc-internal-dependency-networkpolicy-gate.sh

@@ -687,6 +687,43 @@ proxy_request() {
     "http://127.0.0.1:$(host_port "$container" 3000)$path"
 }
 
+# First request of a case. /health answers before the proxy's first DNS answer
+# fills `server ... resolve`, and a request in that window gets a 502 with "no
+# live upstreams" without reaching any upstream. Only that signature is repeated,
+# for at most READY_SECONDS; any other response, including a 502 with another
+# error, is returned as it is. nginx logs the error before it answers, but the
+# line can reach `docker logs` later, so each 502 waits for its error line.
+proxy_first_request() {
+  local container="$1" token="$2" code log new_errors new_no_live wait_deadline
+  local errors=0 no_live=0 deadline=$((SECONDS + READY_SECONDS))
+  while :; do
+    code="$(proxy_request "$container" "$token")"
+    if [ "$code" != "502" ]; then
+      printf '%s' "$code"
+      return 0
+    fi
+    wait_deadline=$((SECONDS + LOG_SECONDS))
+    while :; do
+      log="$(container_log "$container")" || return 2
+      new_errors="$(grep -cF '[error]' <<<"$log" || true)"
+      [ "$new_errors" -le "$errors" ] || break
+      if [ "$SECONDS" -ge "$wait_deadline" ]; then
+        printf '%s' "$code"
+        return 0
+      fi
+      sleep 0.2
+    done
+    new_no_live="$(grep -cF 'no live upstreams' <<<"$log" || true)"
+    if [ "$new_no_live" -le "$no_live" ] || [ "$SECONDS" -ge "$deadline" ]; then
+      printf '%s' "$code"
+      return 0
+    fi
+    errors="$new_errors"
+    no_live="$new_no_live"
+    sleep 0.2
+  done
+}
+
 # Prints the upstream log lines for a token (empty when none). Returns 2 when
 # the upstream log cannot be read.
 upstream_log_line() {
@@ -702,7 +739,7 @@ expect_accept() {
   token="tok-$case_name-$RUN_ID"
   cases=$((cases + 1))
   start_proxy "$case_name" "$port" yes
-  code="$(proxy_request "$container" "$token")"
+  code="$(proxy_first_request "$container" "$token")"
   if [ "$code" != "200" ]; then
     fail "$case_name: expected 200, got $code; proxy log: $(container_log "$container" | tail -n 5)"
   elif ! grep -qF "echo token=$token" "$WORK/body"; then
@@ -732,7 +769,7 @@ expect_reject() {
     return
   fi
   start_proxy "$case_name" "$port" "$mount_ca"
-  code="$(proxy_request "$container" "$token")"
+  code="$(proxy_first_request "$container" "$token")"
   after="after-$case_name-$RUN_ID"
   if [ "$code" != "502" ]; then
     fail "$case_name: expected 502, got $code"
@@ -790,7 +827,7 @@ expect_dns_switch() {
   # Warmup: the first answer must be X, so a later Y can only come from the
   # record change. Without it the case could pass with Y as the first answer.
   token="warmup-$case_name-$RUN_ID"
-  code="$(proxy_request "$container" "$token")"
+  code="$(proxy_first_request "$container" "$token")"
   if [ "$code" != "200" ] || ! grep -qF "id=X" "$WORK/body"; then
     fail "$case_name: warmup expected 200 id=X, got $code $(cat "$WORK/body")"
     docker rm -f "$container" >/dev/null 2>&1 || true
@@ -870,7 +907,7 @@ expect_query_accept() {
     return
   fi
   start_proxy "$case_name" query-accept yes -e "UPSTREAM_QUERY_KEY=$QUERY_MARKER"
-  code="$(proxy_request "$container" "$token")"
+  code="$(proxy_first_request "$container" "$token")"
   if [ "$code" != "200" ]; then
     fail "$case_name: expected 200, got $code; proxy log: $(container_log "$container" | tail -n 5)"
   elif ! grep -qF "echo token=$token" "$WORK/body"; then
