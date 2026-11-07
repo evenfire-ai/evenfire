@@ -425,8 +425,9 @@ else
 fi
 
 # The CI steps: in the job the dev ruleset requires, with no filter that could skip them, exactly
-# these commands and nothing that softens them, on the merge result, and with history enough to
-# read HEAD^1. Depth comes from the workflow, so the clone below proves it.
+# these commands with no key that softens them, on the merge result, and with history enough to
+# read HEAD^1. Depth comes from the workflow, so the clone below proves it. The job's other steps
+# are not pinned: one inserted before these can still change what they see.
 # shellcheck disable=SC2016 # Ruby source.
 if depth="$(RUBYOPT=--disable=gems ruby -ryaml -e '
   doc = YAML.load_file(ARGV.fetch(0))

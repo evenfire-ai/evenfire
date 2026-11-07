@@ -279,6 +279,7 @@ if [ "$RC" -eq 1 ] &&
   [[ "$O_CALLS" == *"-n runtime-witness get rolebindings"* ]] &&
   [[ "$O_CALLS" == *"-n runtime-witness get pods"* ]] &&
   [[ "$O_CALLS" == *"-n mcp-server get pods"* ]] &&
+  [[ "$O_CALLS" != *"-n rpc-proxy get pods"* ]] &&
   [[ "$OUT" != *"webhook-ingress"* ]] && [[ "$O_CALLS" != *"-n webhook-ingress "* ]]; then
   pass "o. the wrapper's checks walk the inventory the helper derived"
 else
