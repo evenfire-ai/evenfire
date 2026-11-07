@@ -86,7 +86,9 @@ describe('D34 migration execution policy', () => {
     expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(5)
     expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(5)
     expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0137'))
+      PR1_ONLINE_INDEX_PLAN.filter(
+        index => index.migrationVersion === USER_ACCESS_FOUNDATION_VERSION
+      )
     ).toHaveLength(5)
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))

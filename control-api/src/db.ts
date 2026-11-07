@@ -7,7 +7,10 @@ import {
 import { config } from './config.js'
 import { SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG } from './data/llmCatalogLegacySeeds.js'
 import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
-import { applyPendingPr1Migrations } from './migrations/migrationRunner.js'
+import {
+  LAST_DEV_MIGRATION_VERSION,
+  applyPendingPr1Migrations,
+} from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
 import {
   applyUserAccessFoundationSchema,
@@ -131,9 +134,6 @@ type DbConnector = {
 const INIT_DB_LOCK_KEY_SQL = "hashtext('control-api-init-db-v1')::bigint"
 const migrationLogger = rootLogger.child({ module: 'database-migration' })
 const PASSWORD_SUCCESS_ADMISSION_MIGRATION = '0130_password_login_success_admission'
-// initDb applies every migration up to this one in a single transaction. The
-// versions after it belong to PR1_MIGRATION_VERSIONS (migrations/migrationRunner.ts).
-const LAST_DEV_BATCH_MIGRATION = '0136_llm_catalog_dismissed_backfill'
 
 type DbMigration = {
   version: string
@@ -6788,7 +6788,9 @@ async function applyPendingLegacyMigrations(db: DbClient): Promise<Set<string>> 
   const appliedVersions = await loadAppliedMigrationVersions(db)
 
   for (const migration of CONTROL_API_MIGRATIONS) {
-    if (migration.version > LAST_DEV_BATCH_MIGRATION) break
+    // Everything through this bound runs in this single transaction; the versions
+    // after it belong to the PR1 runner (migrations/migrationRunner.ts).
+    if (migration.version > LAST_DEV_MIGRATION_VERSION) break
     if (appliedVersions.has(migration.version)) continue
     if (migration.legacyVersions?.some(version => appliedVersions.has(version))) {
       await recordMigration(db, migration.version)

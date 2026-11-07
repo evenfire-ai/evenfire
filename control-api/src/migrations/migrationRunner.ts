@@ -7,20 +7,20 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0138_legacy_password_security_epoch_backfill',
 ] as const)
 
-// Every migration up to and including dev's last migration runs in initDb's
-// single dev batch; this runner owns only the PR1 versions that follow it.
-// Until this change merges, a dev merge that brings new migrations moves this
-// bound and LAST_DEV_BATCH_MIGRATION, the dev-batch bound in db.ts, to dev's last
-// version, and renumbers PR1_MIGRATION_VERSIONS above it. After it merges the bound
-// stays: a later
-// migration adds its version to the list this runner applies, or initDb throws
-// "Unclassified post-dev migrations".
-const LAST_DEV_MIGRATION_VERSION = '0136_llm_catalog_dismissed_backfill'
+// The one bound between initDb's single dev batch and this runner: every migration
+// up to and including this version runs in the dev batch (db.ts imports it), and
+// this runner owns only the PR1 versions that follow it. Until this change merges,
+// a dev merge that brings new migrations moves this bound to dev's last version and
+// renumbers PR1_MIGRATION_VERSIONS above it, and every dev merge moves the latestDev
+// producer in tests/contracts/certification-inputs.json to dev's tip. After it merges
+// the bound stays: a later migration adds its version to the list this runner
+// applies, or initDb throws "Unclassified post-dev migrations".
+export const LAST_DEV_MIGRATION_VERSION = '0136_llm_catalog_dismissed_backfill'
 
 // Migration names that earlier heads of this change recorded under other
 // four-character prefixes (decimal such as `0126` or hexadecimal such as
-// `010a`; some below 0130, and the same 0131 version with a larger body). The
-// name after the prefix is the identity.
+// `010a`; some below 0130, and `user_access_foundation` under the prefix `0131`,
+// in some heads with a larger body). The name after the prefix is the identity.
 const EARLIER_PR1_MIGRATION_NAMES: readonly string[] = Object.freeze([
   'user_access_foundation',
   'invitation_delivery_commands',
