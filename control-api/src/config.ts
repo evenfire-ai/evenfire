@@ -916,7 +916,7 @@ export const config: Config = {
   // desktopGfsOperatorLinkingEnabled. Missing/'false' → OFF; only 'true' enables.
   mcpOauthBrokerEnabled: failClosedBooleanFromEnv('MCP_OAUTH_BROKER_ENABLED'),
   userApprovalRequestDefaultTtlSec: Number(process.env.WORKFLOW_APPROVAL_DEFAULT_TTL_SEC || 86400),
-  userApprovalRequestMaxTtlSec: Number(process.env.WORKFLOW_APPROVAL_MAX_TTL_SEC || 604800),
+  userApprovalRequestMaxTtlSec: Number(process.env.WORKFLOW_APPROVAL_MAX_TTL_SEC || 172800),
   userApprovalRequestExpiryIntervalMs: Number(
     process.env.WORKFLOW_APPROVAL_EXPIRY_INTERVAL_MS || 60000
   ),
@@ -1444,9 +1444,9 @@ export const config: Config = {
   wfcServiceUrlTemplate:
     process.env.CONTROL_API_WFC_SERVICE_URL_TEMPLATE ||
     'http://wfc-{hash}.mcp-host.svc.cluster.local:8086',
-  // Plugin image-host allowlist (Phase 2.3). Permissive default = current
-  // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit
-  // mode). NOT parseCsvList — that lowercases, which would corrupt prefixes.
+  // Plugin image-host allowlist (Phase 2.3). Default from @clerum/image-policy:
+  // the deploy/base list plus registry.evenfire.ai/; enforce defaults to false
+  // (audit mode). NOT parseCsvList — that lowercases, which would corrupt prefixes.
   allowedPluginImagePrefixes: (
     process.env.CONTROL_API_ALLOWED_IMAGE_PREFIXES ??
     [...DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES].join(',')

@@ -33,8 +33,66 @@ every pull request:
 
 - `update-desktop-release-manifest.mjs --validate-only` fails if the manifest
   disagrees with the package versions.
-- `validate-release-version-bumps.mjs` fails if code under `external-rest-api/`
-  or `rpc-proxy/` changed but that package's version did not.
+- `validate-release-version-bumps.mjs` fails if `src/`, `test/` or `tsconfig.json`
+  under `external-rest-api/` or `rpc-proxy/`, or the `packages/jwt-key-policy/` they
+  both ship, changed but that package's version did not. Bump that package's version
+  to fix it.
+
+On pull requests into `dev`, the required check `Repo hygiene (no internal working
+artifacts)` runs the same script with `--all-services` against the merge result.
+`dev` requires branches to be up to date, so that result contains `dev`'s tip. A
+version line that merged cleanly into the same number on both sides fails, and so
+does a version below the base; the hook bumps only a version equal to `HEAD`, so
+set a lower one above the base by hand. A service the base does not have yet passes,
+so one pull request can add or rename a service and list it.
+
+The check covers `channel-reader`, `control-api`, `control-ui`, `external-rest-api`,
+`host-context-controller`, `mcp-host`, `mcp-proxy`, `mcp-servers/doc-generator`,
+`mcp-servers/web-search`, `profile-ui`, `rpc-proxy`, `stdio-bridge` and
+`workflow-recipes`. Like the hook, it looks at every file under a service's directory,
+and at `packages/jwt-key-policy/` for the three services that declare it (`control-api`,
+`external-rest-api`, `rpc-proxy`), and it leaves out
+`external-rest-api/src/releaseManifest.ts`, which the release script writes. Unlike the
+hook, it counts both sides of a rename, so a file moved out of a service with nothing
+else changed there fails the check with no hook bump: set that service's version by
+hand. It also leaves out what a running service does not load: test code (`test/`,
+`tests/` and `e2e/` at the service's root, `__tests__/`, JavaScript and TypeScript files
+named `*.test.*` or `*.spec.*`, `*.testFixtures.ts`), Markdown, the dev-only files
+`Makefile`, `makefile`, `vitest.config.*` and `.env.example` at the service's root, and
+`scripts/` in `control-api`, `mcp-host` and `workflow-recipes`. The same names lower down
+still count, and so does `scripts/` in any other service. `channel-reader` and
+`external-rest-api` compile the test files under `src/` into `dist/`, so for those two one
+version can name two `dist/` trees that differ only in test modules no production module
+imports.
+
+It covers nothing else, so a change elsewhere can still leave one version on two
+trees: services the hook does not bump (`workflow-approval-request-reader`,
+`gfs-controller`, `workspace-files-controller`, `webhook-gateway`, `webhook-proxy`,
+`codex-llm-proxy`, `grok-llm-proxy`), images with no `package.json`
+(`nginx-egress-proxy`, `hooks/reference-guardrail-hook`), `packages/**` other than
+`packages/jwt-key-policy/`, and `mcp-servers/` outside the two services above. A pull
+request retargeted to `dev` after its last push also has no run of the check, because
+GitHub starts no run when the base changes: close and reopen it, or push a commit.
+
+**A revert fails this check on purpose.** `git revert` and GitHub's Revert button run
+no hook, so a revert lowers every version it touches and the check reports `went down`.
+The next hook bump would otherwise issue a number that already named the reverted code.
+In the revert pull request, set each package the error names above the base's version:
+
+```bash
+(cd <service> && npm version --no-git-tag-version --ignore-scripts <version above the base>)
+git add <service>/package.json <service>/package-lock.json
+git commit -m "chore: set versions above the base after the revert"
+```
+
+**If the check itself is wrong**, fix it in the pull request that needs it. The check
+runs from the merge result, workflow and script included, so a corrected
+`validate-release-version-bumps.mjs` and its test apply to that pull request's own run.
+When an incident leaves no time for that, remove the check's two steps from the
+`repo-hygiene` job in that pull request and restore them in the next one; the other
+required checks and the approval still apply. Removing only the first step turns the
+second one red, and removing or renaming the job leaves the required status missing, so
+that pull request cannot merge until the ruleset changes.
 
 `desktop-app` is not a hook package root, so the hook never bumps it. See
 [CONTRIBUTING.md](../../CONTRIBUTING.md#the-pre-commit-hook-may-edit-your-commit)
@@ -227,14 +285,15 @@ Read the notes for every release you skip over, not only the target release.
 
 ### Feature-specific notes
 
-| Note                                                                               | Read it when                                                                                                                              |
-| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.                                |
-| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                                      |
-| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                         |
-| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                               |
-| [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.x; Node 25+ blocks its network. |
-| [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap.          |
+| Note                                                                               | Read it when                                                                                                                               |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.                                 |
+| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                                       |
+| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                          |
+| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                                |
+| [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.x; Node 25+ blocks its network.  |
+| [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap.           |
+| [Changed code defaults](#changed-code-defaults-first-release-after-v0120)          | You run HCC, WRC, control-api or the approval reader with a variable unset. The pull Secret change restarts Host pods once; plan a window. |
 | [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.  |
 
 #### Snippet runner Node permissions
@@ -269,6 +328,17 @@ network access under `--permission`, and the runner does not pass `--allow-net`
 (Node 24 rejects that flag). On a runtime that rejects `--permission` (Node older
 than 22.13.0, or a 23.x release older than 23.5.0) the startup check fails and
 the runner exits.
+
+### Changed code defaults (first release after v0.12.0)
+
+These defaults apply only where a variable is unset. Check the env of your
+Deployments against each item before you upgrade.
+
+- **Host and workspace-files-controller pull Secret (HCC).** `CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET` and `CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET` now default to empty (no `imagePullSecrets`) instead of `clerum`. If neither variable is set on your HCC Deployment, as in installs that use `deploy/base` without an overlay, the first reconcile after the upgrade removes `imagePullSecrets: [{name: clerum}]` from every Host and workspace-files-controller Deployment. Both use the `Recreate` strategy, so every running Host pod and every workspace-files-controller pod restarts once; suspended Hosts stay suspended, and a Host whose suspension is blocked changes when the hold ends. Upgrade HCC in a maintenance window. If you rely on a pull Secret named `clerum`, set both variables to `clerum` on HCC before the upgrade, and before the [Host PVC layout](host-pvc-layout-upgrade.md#before-the-upgrade) `inventory` if you run it: the pod templates then stay identical and nothing restarts. Overlays that set both variables, including to `""` as the minikube overlay does, are unaffected.
+- **Host workspace StorageClass (HCC).** `CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS` no longer defaults to `do-block-storage-retain`. When it is unset, new Host workspace PVCs omit `storageClassName` and get your cluster's default StorageClass and its reclaim policy. If you relied on the old default on DigitalOcean, set the variable to `do-block-storage-retain` on HCC before the upgrade to keep that class. Existing PVCs keep their StorageClass: HCC does not update a bound PVC, and when it updates an unbound one with the variable unset it carries over the class already set, because Kubernetes does not allow changing it. A Host workspace PVC that stayed `Pending` because your cluster has no `do-block-storage-retain` class therefore keeps that class; delete it, and HCC creates it again with the default class on its next reconcile. HCC deletes a Host's workspace PVC when you delete the Host, so with a default class whose reclaim policy is `Delete` the workspace volume and its data are deleted with it; the old default `do-block-storage-retain` kept the volume.
+- **External-egress window (HCC, WRC).** `HCC_EXTERNAL_EGRESS_OVERLAP_SEC` and `WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS` now default to `3600` (was `300`), and `WRC_EXTERNAL_EGRESS_MAX_ENTRIES` to `256` (was `128`). The overlap window keeps each resolved IP of an allowed hostname in the egress NetworkPolicy after its DNS TTL. An IP that a provider rotates out of DNS stays allowed for at most that hour and for about half of it at least, because HCC and WRC write a renewed window only when less than half of it is left; size long-lived connections on the half hour. The entry cap bounds how many IPs one policy keeps. While DNS lookups for that hostname fail with a transient error such as a timeout or `SERVFAIL`, HCC and WRC keep the IPs they already have beyond that hour (fail-static) until a lookup succeeds or the hostname is removed from the declaration; when the resolver answers that the hostname has no records (`ENOTFOUND`, `ENODATA`), HCC and WRC remove its IPs on the next pass that reaches that policy, without waiting for that hour. This release's `deploy/base` also sets all three explicitly, so an install that uses it carries these values instead of relying on the code default. The minikube overlays keep `WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS` at `300`, because the WRC egress degradation E2E bounds its recovery wait by that window. Overlays that patch these `env` entries by name keep their values. A value supplied through `envFrom` (a ConfigMap or Secret) no longer applies, because `deploy/base` now declares the entries explicitly and an `env` entry takes precedence over `envFrom`: patch the `env` entries instead. To keep the old behaviour, set them to `300` and `128`.
+- **Defaults that `deploy/base` already sets.** An install that uses `deploy/base` sees no change; a Deployment from which you removed one of these variables gets the new value. `CONTEXT_MAPPER_RUNTIME_NAMESPACES` defaults to `mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui` (was `mcp-server,mcp-host,sandbox-recipes,rpc-proxy`, so `mcp-host` drops out) and `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES` to `sandbox-ui` (was empty, which gave every runtime namespace the full infrastructure set). HCC does not delete NetworkPolicies it wrote before. If you listed `sandbox-ui` in `CONTEXT_MAPPER_RUNTIME_NAMESPACES` and left `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES` unset, `allow-hcc-api-egress-sandbox-ui` and `allow-k8s-api-egress-sandbox-ui` stay after the upgrade and are no longer reconciled. To reach the DNS-only set, delete them if they carry the label `clerum.io/managed-by=host-context-controller`. If you relied on the old runtime default, the HCC-labelled policies in `mcp-host` also stay; keep `deny-all-mcp-host` unless another deny-all covers that namespace (`deploy/base/mcp-host/networkpolicies.yaml` ships one). With the new runtime default HCC also manages `sandbox-ui`. It needs that namespace and HCC's Role and RoleBinding there (`deploy/base/sandbox-ui/`), or HCC fails its startup NetworkPolicy pass. `deploy/scripts/np-enforce-preflight.sh` reads either variable, when your overlay leaves it unset, as the new default whichever HCC is running: if your overlay leaves one unset, upgrade HCC before you run the preflight, because an older HCC still manages `mcp-host` and gives a listed `sandbox-ui` the Kubernetes API policy. `WORKFLOW_APPROVAL_MAX_TTL_SEC` defaults to `172800` (was `604800`); where it is unset, a workflow approval step with `timeoutSeconds` above `172800` now fails when the step starts, with `Approval request failed (400)`. `WORKFLOW_APPROVAL_READER_ENABLED_MEDIA` defaults to `telegram,slack,teams` (was `telegram,slack`).
+- **Plugin image allowlist default.** `CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES` and `CONTROL_API_ALLOWED_IMAGE_PREFIXES` default to `ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/,registry.evenfire.ai/`: the `deploy/base` list plus the Evenfire registry. The placeholder Artifact Registry path `us-central1-docker.pkg.dev/your-gcp-project/clerum/` is no longer listed. An install that uses `deploy/base` sets the variables and sees no change. Where a variable is unset, images from `ghcr.io/evenfire-ai/` now pass the check; with `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true` or `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST=true` they are accepted, and images under the placeholder path are refused.
 
 ### rpc-proxy default changes
 

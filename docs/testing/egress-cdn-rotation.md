@@ -39,8 +39,8 @@ a product failure (exit 1), not an inconclusive result.
   (the script checks `curl --version` in each pod before probing).
 - The `deny-all-mcp-server` NetworkPolicy (empty `podSelector`, `Egress`) in
   `mcp-server`; this is the T2 HCC contract shape.
-- No leftovers from an aborted run: no `HCC_EXTERNAL_EGRESS_OVERLAP_SEC` in the
-  HCC env, no `clerum.io/e2e-temporary-override` annotation, no CDN host row in
+- No leftovers from an aborted run: no `HCC_EXTERNAL_EGRESS_OVERLAP_SEC=60` in the
+  HCC env (`deploy/base` declares the key with its production value), no `clerum.io/e2e-temporary-override` annotation, no CDN host row in
   the CoreDNS `hosts` block, and no `e2e-cdn-rotation*` resources (McpServer,
   Service, Deployment, ConfigMap or NetworkPolicy). Absence must be confirmed by
   the API server: a `kubectl get` that fails for any reason other than
@@ -214,7 +214,7 @@ Only two objects are modified, both with the annotation
 `clerum.io/e2e-temporary-override: e2e-egress-cdn-rotation` in
 `metadata.annotations` (never in a pod template):
 
-1. **HCC Deployment** `control-plane/host-context-controller`: adds
+1. **HCC Deployment** `control-plane/host-context-controller`: sets
    `HCC_EXTERNAL_EGRESS_OVERLAP_SEC=60` and `HCC_EXTERNAL_EGRESS_RESYNC_SEC=10`.
    The original container `env` array is saved as one JSON array and restored
    with a JSON patch, then compared as the full JSON (order and presence). HCC

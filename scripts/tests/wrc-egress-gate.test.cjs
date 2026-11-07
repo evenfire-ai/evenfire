@@ -15,6 +15,9 @@ const {
   deploymentReady,
   policyObservation,
   acceptPolicyIntentChange,
+  DNS_FIXTURE_TTL_SECONDS,
+  maxSupportedExternalEgressOverlapSeconds,
+  assertRecoveryBudgetFitsCap,
 } = require('../e2e/_lib/wrc-egress-gate.cjs')
 const {
   Journal,
@@ -277,6 +280,24 @@ function uiFixture(t, { assigned = true, children = true } = {}) {
   journal.save()
   return { ...fixtureState, parent, parentObject, physicalName, uiObjects }
 }
+
+test('the supported overlap is the largest one the gate does not refuse', () => {
+  const max = maxSupportedExternalEgressOverlapSeconds()
+  // deploy/overlays/minikube/patches/wrc-external-egress-overlap.yaml names this bound.
+  assert.equal(max, 505)
+  const now = 1_000_000
+  // The window WRC stores: now + TTL + overlap (packages/network-policy-core/index.cjs).
+  const expiryFor = overlap => now + (overlap + DNS_FIXTURE_TTL_SECONDS) * 1000
+  assert.doesNotThrow(() => assertRecoveryBudgetFitsCap(expiryFor(max), now))
+  assert.throws(
+    () => assertRecoveryBudgetFitsCap(expiryFor(max + 1), now),
+    /DNS_WINDOW_EXCEEDS_GATE_RECOVERY_BUDGET/
+  )
+  // The flow that calls it needs a cluster, so this pins its only call site: a statement of its
+  // own at the indent of exercise()'s body. A source read cannot show the flow reaches that line.
+  const gateSource = fs.readFileSync(require.resolve('../e2e/_lib/wrc-egress-gate.cjs'), 'utf8')
+  assert.match(gateSource, /^ {2}assertRecoveryBudgetFitsCap\(latestExpiry, Date\.now\(\)\)$/m)
+})
 
 test('foreground recipe deletion cannot leave UI children after its finalizer swallows DELETE503', async t => {
   const { kube, journal, objects, hooks, file, events, parent, physicalName, uiObjects } =

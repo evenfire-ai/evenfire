@@ -614,6 +614,7 @@ describe('FilePreviewPage', () => {
     const nativeDigest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle)
     let digestCompleted!: () => void
     let releaseDigest!: (value: ArrayBuffer) => void
+    let digestDelivered = false
     const digestFinished = new Promise<void>(resolve => {
       digestCompleted = resolve
     })
@@ -625,7 +626,10 @@ describe('FilePreviewPage', () => {
       .mockImplementation(async (algorithm, data) => {
         const actualDigest = await nativeDigest(algorithm, data)
         digestCompleted()
-        return digestResult.then(() => actualDigest)
+        return digestResult.then(() => {
+          digestDelivered = true
+          return actualDigest
+        })
       })
     const renameResource = vi.fn(async () => undefined)
     const affordances = vi.fn(async () => activeAffordances)
@@ -641,12 +645,25 @@ describe('FilePreviewPage', () => {
         version: 7,
         bytes: 1,
       })
+    // Generation 2 re-resolves its resource before it may read its own
+    // authority. Holding that read keeps the generation-2 page from reading
+    // permissions, so a permission read while it is held can only come from the
+    // generation-1 rename.
+    let holdReplacementResolve = false
+    let releaseReplacementResolve!: () => void
+    const replacementResolveHeld = new Promise<void>(resolve => {
+      releaseReplacementResolve = resolve
+    })
+    const resolve = vi.fn(async () => {
+      if (holdReplacementResolve) await replacementResolveHeld
+      return producerResource()
+    })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
         gfs: {
           downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
-          resolve: vi.fn(producerResource),
+          resolve,
           affordances,
           renameResource,
         },
@@ -672,34 +689,45 @@ describe('FilePreviewPage', () => {
       })
       fireEvent.submit(dialog)
       await digestFinished
+      const resolveReadsBeforeReplacement = resolve.mock.calls.length
+      const permissionReadsBeforeReplacement = affordances.mock.calls.length
 
+      holdReplacementResolve = true
       controllerState.sessionGeneration = 2
       view.rerender(<FilePreviewPage {...props} />)
+      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(resolveReadsBeforeReplacement + 1))
+      await act(async () => releaseDigest(new ArrayBuffer(0)))
+      // Microtasks drain before a macrotask, so every continuation of the
+      // released digest has run once this resolves.
+      await act(() => new Promise<void>(resolveTask => setTimeout(resolveTask, 0)))
+
+      expect(digestDelivered).toBe(true)
+      expect(renameResource).not.toHaveBeenCalled()
+      expect(affordances).toHaveBeenCalledTimes(permissionReadsBeforeReplacement)
+
+      // Liveness: once generation 2 owns its resource, the page reads its own
+      // resource and source-folder authority through the counted producer.
+      await act(async () => releaseReplacementResolve())
+      await waitFor(() =>
+        expect(affordances).toHaveBeenCalledTimes(permissionReadsBeforeReplacement + 2)
+      )
+      // The call count does not say which key the authority was cached under:
+      // generation 2's reads must land under generation 2's keys.
       const queryClient = queryClients.at(-1)
       if (!queryClient) throw new Error('Preview query client is unavailable')
-      // The replacement generation owns fresh file and source-parent reads.
-      // Settle both while the old digest is blocked so only that old operation
-      // can cause additional permission reads after the baseline below.
       await waitFor(() => {
         for (const resourceId of ['0123456789abcdef0123456789abcdef', 'preview-parent']) {
-          const state = queryClient.getQueryState(
-            desktopQueryKeys.gfsAffordances(controllerState.sessionScope, resourceId, 'main', 2)
-          )
-          expect(state?.status).toBe('success')
-          expect(state?.fetchStatus).toBe('idle')
+          expect(
+            queryClient.getQueryState(
+              desktopQueryKeys.gfsAffordances(controllerState.sessionScope, resourceId, 'main', 2)
+            )?.status
+          ).toBe('success')
         }
       })
-      const permissionReadsBeforeDigestRelease = affordances.mock.calls.length
-      await act(async () => releaseDigest(new ArrayBuffer(0)))
-      await act(async () => {
-        await Promise.resolve()
-        await Promise.resolve()
-      })
-
       expect(renameResource).not.toHaveBeenCalled()
-      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeDigestRelease)
     } finally {
       releaseDigest(new ArrayBuffer(0))
+      releaseReplacementResolve()
       digestSpy.mockRestore()
       view.unmount()
     }
@@ -755,8 +783,11 @@ describe('FilePreviewPage', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Delete diagram.png?' })
     const cancel = within(dialog).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement
     const confirm = within(dialog).getByRole('button', { name: 'Delete' }) as HTMLButtonElement
-    const cancelFocus = vi.spyOn(cancel, 'focus')
+    // The dialog opens after an awaited permission check, outside act(), so its
+    // mount-time focus effect may still be pending here. Observe re-focus only
+    // after that initial focus has landed.
     await waitFor(() => expect(document.activeElement).toBe(cancel))
+    const cancelFocus = vi.spyOn(cancel, 'focus')
 
     fireEvent.click(confirm)
 

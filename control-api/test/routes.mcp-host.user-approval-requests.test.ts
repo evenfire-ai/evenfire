@@ -1100,7 +1100,7 @@ describe('User Approval Request Routes', () => {
       )
     })
 
-    it('accepts ttlSeconds at the upper boundary (7 days exactly)', async () => {
+    it('accepts ttlSeconds at the upper boundary (2 days exactly)', async () => {
       const { accessToken } = issueTestTokens()
       vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(true)
       vi.mocked(userApprovalRequestService.createApprovalRequest).mockResolvedValueOnce({
@@ -1118,14 +1118,14 @@ describe('User Approval Request Routes', () => {
           recipeName: RECIPE,
           target: { userId: '00000000-0000-0000-0000-000000000001' },
           payload: { message: 'approve at the edge' },
-          ttlSeconds: 7 * 24 * 60 * 60,
+          ttlSeconds: 2 * 24 * 60 * 60,
         })
 
       expect(res.status).toBe(200)
     })
 
     it.each([
-      { label: 'above 7-day cap', ttl: 7 * 24 * 60 * 60 + 1, errMatch: '604800' },
+      { label: 'above 2-day cap', ttl: 2 * 24 * 60 * 60 + 1, errMatch: '172800' },
       { label: 'zero', ttl: 0, errMatch: 'positive integer' },
       { label: 'negative', ttl: -1, errMatch: 'positive integer' },
       { label: 'non-integer', ttl: 1.5, errMatch: 'positive integer' },
