@@ -293,9 +293,10 @@ test('the supported overlap is the largest one the gate does not refuse', () => 
     () => assertRecoveryBudgetFitsCap(expiryFor(max + 1), now),
     /DNS_WINDOW_EXCEEDS_GATE_RECOVERY_BUDGET/
   )
-  // The flow that calls it needs a cluster, so this pins its only call site.
+  // The flow that calls it needs a cluster, so this pins its only call site: a statement of its
+  // own at the indent of exercise()'s body. A source read cannot show the flow reaches that line.
   const gateSource = fs.readFileSync(require.resolve('../e2e/_lib/wrc-egress-gate.cjs'), 'utf8')
-  assert.ok(gateSource.includes('assertRecoveryBudgetFitsCap(latestExpiry, Date.now())'))
+  assert.match(gateSource, /^ {2}assertRecoveryBudgetFitsCap\(latestExpiry, Date\.now\(\)\)$/m)
 })
 
 test('foreground recipe deletion cannot leave UI children after its finalizer swallows DELETE503', async t => {
