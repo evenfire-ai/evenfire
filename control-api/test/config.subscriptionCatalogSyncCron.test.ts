@@ -60,10 +60,11 @@ function read(relativeFromThisFile: string): string {
 /** Fail-loud single-match extraction — a miss means the key is unregistered. */
 function extractOne(source: string, pattern: RegExp, label: string): string {
   const match = source.match(pattern)
-  if (!match || match[1] === undefined) {
+  const capturedValue = match?.slice(1).find(value => value !== undefined)
+  if (capturedValue === undefined) {
     throw new Error(`Could not extract ${label} with ${pattern} — register the key`)
   }
-  return match[1]
+  return capturedValue
 }
 
 describe('subscription catalog sync cron config', () => {
@@ -111,6 +112,18 @@ describe('subscription catalog sync cron config', () => {
     ).toBe(false)
   })
 
+  it('rejects mismatched quotes around a ConfigMap scalar', () => {
+    const malformed = `SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED: 'false"`
+
+    expect(() =>
+      extractOne(
+        malformed,
+        /SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED:\s*(?:"([^\"]+)"|'([^']+)')/,
+        'SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED'
+      )
+    ).toThrow(/Could not extract/)
+  })
+
   it('registers all three cron keys in the base ConfigMap with the deployed values', async () => {
     const config = await loadConfigWith({})
     const source = read('../../deploy/base/control-plane/configmaps.yaml')
@@ -120,7 +133,7 @@ describe('subscription catalog sync cron config', () => {
     expect(
       extractOne(
         source,
-        /SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED:\s*"([^"]+)"/,
+        /SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED:\s*(?:"([^\"]+)"|'([^']+)')/,
         'SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED in deploy/base/control-plane/configmaps.yaml'
       )
     ).toBe('false')
@@ -130,7 +143,7 @@ describe('subscription catalog sync cron config', () => {
     const interval = Number(
       extractOne(
         source,
-        /SUBSCRIPTION_CATALOG_SYNC_INTERVAL_MS:\s*"(\d+)"/,
+        /SUBSCRIPTION_CATALOG_SYNC_INTERVAL_MS:\s*(?:"(\d+)"|'(\d+)')/,
         'SUBSCRIPTION_CATALOG_SYNC_INTERVAL_MS in deploy/base/control-plane/configmaps.yaml'
       )
     )
@@ -142,7 +155,7 @@ describe('subscription catalog sync cron config', () => {
     expect(
       extractOne(
         source,
-        /LLM_CATALOG_SYNC_CRON_ENABLED:\s*"([^"]+)"/,
+        /LLM_CATALOG_SYNC_CRON_ENABLED:\s*(?:"([^\"]+)"|'([^']+)')/,
         'LLM_CATALOG_SYNC_CRON_ENABLED in deploy/base/control-plane/configmaps.yaml'
       )
     ).toBe('true')

@@ -110,10 +110,11 @@ function read(relativeFromThisFile: string): string {
 /** Fail-loud single-match extraction — a miss means the key is unregistered. */
 function extractOne(source: string, pattern: RegExp, label: string): string {
   const match = source.match(pattern)
-  if (!match || match[1] === undefined) {
+  const capturedValue = match?.slice(1).find(value => value !== undefined)
+  if (capturedValue === undefined) {
     throw new Error(`Could not extract ${label} with ${pattern} — register the key (plan D1)`)
   }
-  return match[1]
+  return capturedValue
 }
 
 describe('plugin SDK platform rate-limit config (issue #348)', () => {
@@ -166,6 +167,15 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
     expect(config.pluginSdkCredentialRlPerMin).toBe(1800)
   })
 
+  it('rejects mismatched quotes around a ConfigMap scalar', () => {
+    const env = 'CONTROL_API_PLUGIN_SDK_ADMIN_PER_MIN'
+    const malformed = `${env}: '600"`
+
+    expect(() =>
+      extractOne(malformed, new RegExp(`${env}:\\s*(?:"(\\d+)"|'(\\d+)')`), env)
+    ).toThrow(/Could not extract/)
+  })
+
   it('registers every key at the code default in the base ConfigMap', async () => {
     const config = await loadConfigWith({})
     const source = read('../../deploy/base/control-plane/configmaps.yaml')
@@ -173,7 +183,7 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
     for (const { env, field } of EXPECTED) {
       const value = extractOne(
         source,
-        new RegExp(`${env}:\\s*"(\\d+)"`),
+        new RegExp(`${env}:\\s*(?:"(\\d+)"|'(\\d+)')`),
         `${env} in deploy/base/control-plane/configmaps.yaml`
       )
       expect(Number(value), env).toBe(config[field])
