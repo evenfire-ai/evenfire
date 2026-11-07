@@ -51,9 +51,10 @@ The check covers `channel-reader`, `control-api`, `control-ui`, `external-rest-a
 `mcp-servers/web-search`, `profile-ui`, `rpc-proxy`, `stdio-bridge` and
 `workflow-recipes`. Like the hook, it looks at every file under a service's directory,
 and at `packages/jwt-key-policy/` for the three services that declare it (`control-api`,
-`external-rest-api`, `rpc-proxy`). Unlike the hook, it counts both sides of a rename and
-leaves out `external-rest-api/src/releaseManifest.ts`, which the release script writes,
-and what no running image contains: test code (`test/`, `tests/` and `e2e/` at the
+`external-rest-api`, `rpc-proxy`), and it leaves out
+`external-rest-api/src/releaseManifest.ts`, which the release script writes. Unlike the
+hook, it counts both sides of a rename and leaves out what no running image contains:
+test code (`test/`, `tests/` and `e2e/` at the
 service's root, `__tests__/`, `*.test.*`, `*.spec.*`, `*.testFixtures.ts`), Markdown,
 the dev-only files `Makefile`, `makefile`, `vitest.config.*` and `.env.example` at the
 service's root, and `scripts/` in `control-api`, `mcp-host` and `workflow-recipes`. The
