@@ -33,27 +33,60 @@ every pull request:
 
 - `update-desktop-release-manifest.mjs --validate-only` fails if the manifest
   disagrees with the package versions.
-- `validate-release-version-bumps.mjs` fails if code under `external-rest-api/`
-  or `rpc-proxy/`, or the `packages/jwt-key-policy/` they both ship, changed but
-  that package's version did not. Bump that package's version to fix it.
+- `validate-release-version-bumps.mjs` fails if `src/`, `test/` or `tsconfig.json`
+  under `external-rest-api/` or `rpc-proxy/`, or the `packages/jwt-key-policy/` they
+  both ship, changed but that package's version did not. Bump that package's version
+  to fix it.
 
 On pull requests into `dev`, the required check `Repo hygiene (no internal working
 artifacts)` runs the same script with `--all-services` against the merge result.
 `dev` requires branches to be up to date, so that result contains `dev`'s tip. A
 version line that merged cleanly into the same number on both sides fails, and so
 does a version below the base; the hook bumps only a version equal to `HEAD`, so
-set a lower one above the base by hand. The check covers the two packages above and
-these directories, without test files: `channel-reader/src`, `control-api/src`,
-`control-ui/{app,components,lib}`, `host-context-controller/src`, `mcp-host/src`,
-`mcp-proxy/src`, `mcp-servers/doc-generator/src`, `mcp-servers/web-search/src`,
-`profile-ui/{app,lib}`, `stdio-bridge/src` and `workflow-recipes/src`.
+set a lower one above the base by hand. A service the base does not have yet passes,
+so one pull request can add or rename a service and list it.
+
+The check covers `channel-reader`, `control-api`, `control-ui`, `external-rest-api`,
+`host-context-controller`, `mcp-host`, `mcp-proxy`, `mcp-servers/doc-generator`,
+`mcp-servers/web-search`, `profile-ui`, `rpc-proxy`, `stdio-bridge` and
+`workflow-recipes`. Like the hook, it looks at every file under a service's directory,
+and at `packages/jwt-key-policy/` for the three services that declare it (`control-api`,
+`external-rest-api`, `rpc-proxy`). Unlike the hook, it counts both sides of a rename and
+leaves out `external-rest-api/src/releaseManifest.ts`, which the release script writes,
+and what no running image contains: test code (`test/`, `tests/` and `e2e/` at the
+service's root, `__tests__/`, `*.test.*`, `*.spec.*`, `*.testFixtures.ts`), Markdown,
+the dev-only files `Makefile`, `makefile`, `vitest.config.*` and `.env.example` at the
+service's root, and `scripts/` in `control-api`, `mcp-host` and `workflow-recipes`. The
+same names lower down still count, and so does `scripts/` in any other service.
 
 It covers nothing else, so a change elsewhere can still leave one version on two
 trees: services the hook does not bump (`workflow-approval-request-reader`,
 `gfs-controller`, `workspace-files-controller`, `webhook-gateway`, `webhook-proxy`,
-`codex-llm-proxy`, `grok-llm-proxy`), `packages/**` other than
-`packages/jwt-key-policy/`, `mcp-servers/` outside the two services above, and
-lockfiles, `tsconfig` files and `public/` directories.
+`codex-llm-proxy`, `grok-llm-proxy`), images with no `package.json`
+(`nginx-egress-proxy`, `hooks/reference-guardrail-hook`), `packages/**` other than
+`packages/jwt-key-policy/`, and `mcp-servers/` outside the two services above. A pull
+request retargeted to `dev` after its last push also has no run of the check, because
+GitHub starts no run when the base changes: close and reopen it, or push a commit.
+
+**A revert fails this check on purpose.** `git revert` and GitHub's Revert button run
+no hook, so a revert lowers every version it touches and the check reports `went down`.
+The next hook bump would otherwise issue a number that already named the reverted code.
+In the revert pull request, set each package the error names above the base's version:
+
+```bash
+(cd <service> && npm version --no-git-tag-version --ignore-scripts <version above the base>)
+git add <service>/package.json <service>/package-lock.json
+git commit -m "chore: set versions above the base after the revert"
+```
+
+**If the check itself is wrong**, fix it in the pull request that needs it. The check
+runs from the merge result, workflow and script included, so a corrected
+`validate-release-version-bumps.mjs` and its test apply to that pull request's own run.
+When an incident leaves no time for that, remove the check's two steps from the
+`repo-hygiene` job in that pull request and restore them in the next one; the other
+required checks and the approval still apply. Removing only the first step turns the
+second one red, and removing or renaming the job leaves the required status missing, so
+that pull request cannot merge until the ruleset changes.
 
 `desktop-app` is not a hook package root, so the hook never bumps it. See
 [CONTRIBUTING.md](../../CONTRIBUTING.md#the-pre-commit-hook-may-edit-your-commit)
