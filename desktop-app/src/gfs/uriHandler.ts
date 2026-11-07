@@ -10,6 +10,7 @@
  * by path. Diverging from the server grammar would break deep links.
  */
 import { config } from '../config.js'
+import { isReservedWindowsDeviceName } from './zipEntryPath.js'
 
 const RID_RE = /^[0-9a-f]{32}$/
 const TRAILING_RID_RE = /-([0-9a-f]{32})$/
@@ -19,6 +20,18 @@ export class GfsUriError extends Error {
     super(message, options)
     this.name = 'GfsUriError'
   }
+}
+
+function isUnsafeGfsSaveFilename(filename: string): boolean {
+  const deviceBaseName = (filename.split('.', 1)[0] ?? filename).replace(/[ .]+$/g, '')
+  return (
+    !filename ||
+    filename === '.' ||
+    filename === '..' ||
+    /[\\/\u0000-\u001f\u007f:*?"<>|]/.test(filename) ||
+    /[ .]$/.test(filename) ||
+    isReservedWindowsDeviceName(deviceBaseName)
+  )
 }
 
 export interface ParsedGfsUri {
@@ -100,6 +113,12 @@ export interface GfsTransport {
     token: string,
     opts?: { maxBytes?: number; signal?: AbortSignal }
   ): Promise<ArrayBuffer>
+  /** Whole-body trusted receipt used by main-process single-file Download. */
+  fetchBytesWithMetadata?(
+    url: string,
+    token: string,
+    opts?: { signal?: AbortSignal }
+  ): Promise<{ bytes: ArrayBuffer; headers: Headers }>
   /**
    * Streamed binary fetch for downloads (folder-zip). `onChunk` receives the
    * body one chunk at a time, so a large payload never materializes as one
@@ -113,6 +132,30 @@ export interface GfsTransport {
     onChunk: (chunk: Uint8Array) => Promise<void>
   ): Promise<number>
 }
+
+export interface GfsDownloadReceipt {
+  uri: string
+  version: number
+  filename: string
+  bytes: ArrayBuffer
+}
+
+export interface GfsConvergenceLocationEntry {
+  resourceId: string
+  rid: string
+  gfsUri: string
+  name: string
+  kind: 'file' | 'directory'
+  version: number
+}
+
+export type GfsConvergenceLocationResult =
+  | {
+      available: true
+      location: GfsConvergenceLocationEntry
+      breadcrumbs: GfsConvergenceLocationEntry[]
+    }
+  | { available: false }
 
 /**
  * A resource view as gfsc returns it (gfs-controller src/api/read.ts toView).
@@ -453,6 +496,30 @@ export class GfsClient {
     }
   }
 
+  async resolveConvergenceLocation(
+    uri: string,
+    token: string,
+    signal?: AbortSignal
+  ): Promise<GfsConvergenceLocationResult> {
+    const parsed = parseGfsUri(uri)
+    if (!parsed.rid || parsed.byPath !== null || uri !== `gfs://${parsed.drive}/${parsed.rid}`) {
+      throw new GfsUriError('convergence location requires a canonical resource identity')
+    }
+    try {
+      const payload = await this.transport.requestJson<GfsEnvelope<GfsConvergenceLocationResult>>(
+        'GET',
+        joinUrl(
+          this.transport.baseUrl,
+          `/api/v1/me/gfs/convergence-location?uri=${encodeURIComponent(uri)}`
+        ),
+        { token, signal }
+      )
+      return unwrap(payload)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+  }
+
   /**
    * Resolve then download the resource bytes through the brokered proxy.
    * `opts.maxBytes` bounds the download (preview path); omitting it reads the
@@ -486,6 +553,55 @@ export class GfsClient {
     } catch (error) {
       throw surfaceGfsGrantError(error)
     }
+  }
+
+  /** Read exact clicked identity and retain its admitted response metadata. */
+  async downloadWithReceipt(
+    uri: string,
+    token: string,
+    signal?: AbortSignal
+  ): Promise<GfsDownloadReceipt> {
+    const parsed = parseGfsUri(uri)
+    if (!parsed.rid || !this.transport.fetchBytesWithMetadata) {
+      throw new GfsUriError('single-file Download requires a canonical resource identity')
+    }
+    const canonicalUri = `gfs://${parsed.drive}/${parsed.rid}`
+    if (uri !== canonicalUri) {
+      throw new GfsUriError('single-file Download requires a canonical resource identity')
+    }
+    const resourceId = `${parsed.rid.slice(0, 8)}-${parsed.rid.slice(8, 12)}-${parsed.rid.slice(12, 16)}-${parsed.rid.slice(16, 20)}-${parsed.rid.slice(20)}`
+    const proxyUrl = joinUrl(
+      this.transport.baseUrl,
+      `/api/v1/me/gfs/proxy/${resourceId}?drive=${encodeURIComponent(parsed.drive)}`
+    )
+    let response: { bytes: ArrayBuffer; headers: Headers }
+    try {
+      response = signal
+        ? await this.transport.fetchBytesWithMetadata(proxyUrl, token, { signal })
+        : await this.transport.fetchBytesWithMetadata(proxyUrl, token)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+    const receiptUri = response.headers.get('x-gfs-uri')
+    const versionText = response.headers.get('x-gfs-version')
+    const disposition = response.headers.get('content-disposition')
+    const match = disposition?.match(/^attachment;\s*filename\*=UTF-8''([^;]+)$/i)
+    const version = versionText && /^[1-9][0-9]*$/.test(versionText) ? Number(versionText) : NaN
+    let filename: string | null = null
+    try {
+      filename = match?.[1] ? decodeURIComponent(match[1]) : null
+    } catch {
+      filename = null
+    }
+    if (
+      receiptUri !== canonicalUri ||
+      !Number.isSafeInteger(version) ||
+      !filename ||
+      isUnsafeGfsSaveFilename(filename)
+    ) {
+      throw new GfsUriError('GFS Download receipt metadata is missing or inconsistent')
+    }
+    return { uri: canonicalUri, version, filename, bytes: response.bytes }
   }
 
   /**

@@ -136,6 +136,69 @@ type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
 function useReactiveController(controller: AppController): AppController {
   const [, force] = useReducer((count: number) => count + 1, 0)
   forceControllerRender = force
+  const filesController = controller as Partial<
+    Pick<
+      AppController,
+      | 'beginFilesPathIntent'
+      | 'commitFilesPathIntent'
+      | 'failFilesPathIntent'
+      | 'markFilesPathsUnavailable'
+      | 'reconcileFilesConvergence'
+      | 'recordFilesMutation'
+    >
+  >
+  const filesPathOwners = new Map<
+    string,
+    { sequence: number; path: string | null; pathRevision: number; pending: boolean }
+  >()
+  let filesMutationEpoch = 0
+  filesController.beginFilesPathIntent ??= vi.fn(tabId => {
+    const tab = controller.workspaceTabs.tabs.find(candidate => candidate.id === tabId)
+    if (!tab || tab.kind !== 'files') return null
+    let owner = filesPathOwners.get(tabId)
+    if (!owner) {
+      owner = { sequence: 0, path: tab.files?.path ?? null, pathRevision: 0, pending: false }
+      filesPathOwners.set(tabId, owner)
+    }
+    owner.sequence += 1
+    owner.pending = true
+    return {
+      tabId,
+      sequence: owner.sequence,
+      path: owner.path,
+      pathRevision: owner.pathRevision,
+      mutationEpoch: filesMutationEpoch,
+    }
+  })
+  filesController.commitFilesPathIntent ??= vi.fn((receipt, path, name) => {
+    const owner = filesPathOwners.get(receipt.tabId)
+    if (!owner || owner.sequence !== receipt.sequence || !owner.pending) return false
+    owner.pending = false
+    owner.path = path
+    owner.pathRevision += 1
+    controller.setWorkspaceTabs(state => ({
+      ...state,
+      tabs: state.tabs.map(tab =>
+        tab.id === receipt.tabId && tab.kind === 'files'
+          ? {
+              ...tab,
+              title: name ?? tab.title,
+              files: { ...tab.files, path },
+            }
+          : tab
+      ),
+    }))
+    return true
+  })
+  filesController.failFilesPathIntent ??= vi.fn(receipt => {
+    const owner = filesPathOwners.get(receipt.tabId)
+    if (!owner || owner.sequence !== receipt.sequence || !owner.pending) return false
+    owner.pending = false
+    return true
+  })
+  filesController.markFilesPathsUnavailable ??= vi.fn()
+  filesController.reconcileFilesConvergence ??= vi.fn(async () => undefined)
+  filesController.recordFilesMutation ??= vi.fn(() => ++filesMutationEpoch)
   const activeTab = activeWorkspaceTab(controller.workspaceTabs)
   ;(controller as { activeWorkspaceTab: unknown }).activeWorkspaceTab = activeTab
   ;(controller as { navItem: unknown }).navItem = controller.appsPickerActive
@@ -823,6 +886,7 @@ describe('App deep-link orchestration', () => {
 
   function resetAppDeepLinkHarness(): void {
     vi.clearAllMocks()
+    desktopQueryClient.clear()
     confirmDialogHarness.props = null
     confirmDialogHarness.mountedCount = 0
     appHeaderHarness.props = null
@@ -1204,6 +1268,8 @@ describe('App deep-link orchestration', () => {
       withCurrentGeneration(() =>
         service.moveGfsResource(id, target, generation, drive, ifMatch, newName)
       )
+    window.clerum.gfs.dispatchFileExplorerMutation = request =>
+      withCurrentGeneration(() => service.dispatchFileExplorerMutation(request))
     act(() => getController().openFilesSection(rootUri))
     const sidebar = within(await view.findByTestId('lag-sidebar'))
     fireEvent.click(await sidebar.findByRole('button', { name: 'Move parent' }))
@@ -5719,6 +5785,11 @@ describe('App deep-link orchestration', () => {
         ) => service.moveGfsResource(id, target, generation, drive, ifMatch, newName)
       )
       window.clerum.gfs.moveResource = move
+      const dispatchFileExplorerMutation = vi.fn(
+        (request: Parameters<Window['clerum']['gfs']['dispatchFileExplorerMutation']>[0]) =>
+          service.dispatchFileExplorerMutation(request)
+      )
+      window.clerum.gfs.dispatchFileExplorerMutation = dispatchFileExplorerMutation
       act(() => getController().openFilesSection(root.gfsUri))
       const sidebar = surface.startsWith('sidebar')
       let panel = sidebar ? within(await view.findByTestId('lag-sidebar')) : within(view.container)
@@ -5792,8 +5863,26 @@ describe('App deep-link orchestration', () => {
           path: `/api/v1/me/gfs/resources/${sourceId}`,
           body: { newParentId: destinationId, ifMatch: source.version },
         })
-        expect(move).toHaveBeenCalledTimes(1)
-        expect(move.mock.calls[0]?.[5]).toBe(authoritativeGeneration)
+        if (surface === 'sidebar-dialog') {
+          expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+            operation: 'move',
+            target: {
+              resourceId: sourceId,
+              drive: 'main',
+              gfsUri: source.gfsUri,
+              kind: 'file',
+              version: source.version,
+              name: sourceName,
+              parentResourceId: rootId,
+              sessionGeneration: authoritativeGeneration,
+            },
+            destinationResourceId: destinationId,
+          })
+          expect(move).not.toHaveBeenCalled()
+        } else {
+          expect(move).toHaveBeenCalledTimes(1)
+          expect(move.mock.calls[0]?.[5]).toBe(authoritativeGeneration)
+        }
       } finally {
         queryClient.clear()
       }

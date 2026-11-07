@@ -62,7 +62,15 @@ type Producers = {
   listAccessible?: (drive?: string, cursor?: string) => Promise<unknown>
   listChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
   download?: (uri: string) => Promise<unknown>
+  saveToDisk?: (
+    uri: string,
+    expectedSessionGeneration: number
+  ) => Promise<Awaited<ReturnType<typeof window.clerum.gfs.saveToDisk>>>
+  dispatchFileExplorerMutation?: (
+    request: Parameters<typeof window.clerum.gfs.dispatchFileExplorerMutation>[0]
+  ) => Promise<Awaited<ReturnType<typeof window.clerum.gfs.dispatchFileExplorerMutation>>>
   affordances?: (resourceId: string, drive?: string) => Promise<unknown>
+  resolve?: (uri: string) => Promise<unknown>
   getSessionGeneration?: () => Promise<number>
 }
 
@@ -77,7 +85,17 @@ function installClerum(producers: Producers) {
         download:
           producers.download ??
           vi.fn(async () => downloadResult(resolvedFile('fallback', 'fallback.bin'))),
+        saveToDisk:
+          producers.saveToDisk ??
+          vi.fn(async () => ({
+            status: 'cancelled_no_publication' as const,
+            uri: 'gfs://main/fallback',
+            filePath: null,
+          })),
+        dispatchFileExplorerMutation:
+          producers.dispatchFileExplorerMutation ?? vi.fn(async () => ({})),
         affordances: producers.affordances ?? vi.fn(async () => resourceAffordances(['read'])),
+        resolve: producers.resolve ?? vi.fn(async () => resolvedFile('unused', 'unused.txt')),
       },
     },
   })
@@ -121,6 +139,7 @@ function renderTree(
   const onOpenFolder = props.onOpenFolder ?? vi.fn()
   const onOpenPreview = props.onOpenPreview ?? vi.fn()
   const onResourceAction = props.onResourceAction ?? vi.fn()
+  const onRenameResource = props.onRenameResource
   const pushToast = props.pushToast ?? vi.fn()
   const queryClient = new QueryClient(
     productionQueryDefaults
@@ -133,11 +152,12 @@ function renderTree(
         onOpenFolder={onOpenFolder}
         onOpenPreview={onOpenPreview}
         onResourceAction={onResourceAction}
+        onRenameResource={onRenameResource}
         pushToast={pushToast}
       />
     </QueryClientProvider>
   )
-  return { onOpenFolder, onOpenPreview, onResourceAction, pushToast, queryClient }
+  return { onOpenFolder, onOpenPreview, onResourceAction, onRenameResource, pushToast, queryClient }
 }
 
 beforeEach(() => {
@@ -281,7 +301,9 @@ describe('FileExplorerTree — resource action menus', () => {
           gfsUri: root.gfsUri,
           parentResourceId: null,
         }),
-        'copy-route'
+        'copy-route',
+        undefined,
+        7
       )
     }
 
@@ -296,7 +318,9 @@ describe('FileExplorerTree — resource action menus', () => {
           parentResourceId: folder.resourceId,
           readable: target.readable !== false,
         }),
-        'move'
+        'move',
+        undefined,
+        7
       )
     }
   })
@@ -371,7 +395,7 @@ describe('FileExplorerTree — resource action menus', () => {
     }
   )
 
-  it('opens a context menu on a long row and dispatches its exact resource without toggling', async () => {
+  it('dispatches the exact row and observed generation without toggling', async () => {
     const resource = accessibleResource(
       'folder-1',
       'A very long folder name that will be truncated in the narrow sidebar',
@@ -395,7 +419,9 @@ describe('FileExplorerTree — resource action menus', () => {
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'folder-1', gfsUri: resource.gfsUri }),
-      'new-folder'
+      'new-folder',
+      undefined,
+      7
     )
     expect(row.getAttribute('aria-expanded')).toBe('false')
     expect(onOpenFolder).not.toHaveBeenCalled()
@@ -433,7 +459,9 @@ describe('FileExplorerTree — resource action menus', () => {
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'second', gfsUri: second.gfsUri }),
-      'copy-route'
+      'copy-route',
+      undefined,
+      7
     )
     expect(firstRow.getAttribute('aria-selected')).toBe('true')
     expect(secondRow.getAttribute('aria-selected')).toBe('false')
@@ -464,7 +492,9 @@ describe('FileExplorerTree — resource action menus', () => {
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'second', gfsUri: second.gfsUri }),
-      'download'
+      'download',
+      undefined,
+      7
     )
     expect(onOpenPreview).toHaveBeenCalledTimes(1)
     expect(firstRow.getAttribute('aria-selected')).toBe('true')
@@ -633,7 +663,9 @@ describe('FileExplorerTree — resource action menus', () => {
       expect(trigger.isConnected).toBe(true)
       expect(onResourceAction).toHaveBeenCalledWith(
         expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
-        actionName === 'Copy file ID' ? 'copy-route' : 'copy-link'
+        actionName === 'Copy file ID' ? 'copy-route' : 'copy-link',
+        undefined,
+        7
       )
     }
   )
@@ -663,6 +695,7 @@ describe('FileExplorerTree — resource action menus', () => {
               onOpenFolder={vi.fn()}
               onOpenPreview={vi.fn()}
               onResourceAction={onResourceAction}
+              onRenameResource={vi.fn()}
               pushToast={vi.fn()}
             />
           ) : null}
@@ -696,7 +729,9 @@ describe('FileExplorerTree — resource action menus', () => {
     expect(focusTrigger).not.toHaveBeenCalled()
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
-      'copy-route'
+      'copy-route',
+      undefined,
+      7
     )
   })
 
@@ -726,7 +761,9 @@ describe('FileExplorerTree — resource action menus', () => {
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
-      'copy-route'
+      'copy-route',
+      undefined,
+      7
     )
     expect(document.activeElement).not.toBe(trigger)
   })
@@ -763,7 +800,9 @@ describe('FileExplorerTree — resource action menus', () => {
     await waitFor(() =>
       expect(onResourceAction).toHaveBeenCalledWith(
         expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
-        'copy-content'
+        'copy-content',
+        undefined,
+        7
       )
     )
     await new Promise(resolve => window.setTimeout(resolve, 10))
@@ -810,7 +849,9 @@ describe('FileExplorerTree — resource action menus', () => {
         await waitFor(() =>
           expect(callbacks.onResourceAction).toHaveBeenCalledWith(
             expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
-            'download'
+            'download',
+            undefined,
+            7
           )
         )
       }
@@ -840,10 +881,11 @@ describe('FileExplorerTree — resource action menus', () => {
           <FileExplorerTree
             onOpenFolder={vi.fn()}
             onOpenPreview={vi.fn()}
-            onResourceAction={(item, action) => {
-              onResourceAction(item, action)
+            onResourceAction={(item, action, file, sessionGeneration) => {
+              onResourceAction(item, action, file, sessionGeneration)
               if (action === 'delete') setDialogOpen(true)
             }}
+            onRenameResource={vi.fn()}
             pushToast={vi.fn()}
           />
           {dialogOpen ? (
@@ -877,7 +919,9 @@ describe('FileExplorerTree — resource action menus', () => {
     expect(document.activeElement).not.toBe(trigger)
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
-      'delete'
+      'delete',
+      undefined,
+      7
     )
   })
 
@@ -928,7 +972,9 @@ describe('FileExplorerTree — resource action menus', () => {
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'nested', gfsUri: nested.gfsUri }),
-      'copy-route'
+      'copy-route',
+      undefined,
+      7
     )
     expect(nestedRow.getAttribute('aria-expanded')).toBe('false')
     expect(onOpenFolder).not.toHaveBeenCalled()
@@ -1066,6 +1112,7 @@ describe('FileExplorerTree — resource action menus', () => {
           onOpenFolder={vi.fn()}
           onOpenPreview={vi.fn()}
           onResourceAction={vi.fn()}
+          onRenameResource={vi.fn()}
           pushToast={vi.fn()}
         />
         <AccessStateProbe />
@@ -1095,6 +1142,192 @@ describe('FileExplorerTree — resource action menus', () => {
     expect(within(menu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
     expect(affordances).toHaveBeenCalledTimes(2)
   })
+
+  it('renames an unreadable write-only row using its exact producer identity and version', async () => {
+    const parent = accessibleResource('parent', 'Restricted folder', 'directory')
+    const target = childView('write-only', 'secret.txt', 'file', {
+      parentResourceId: parent.resourceId,
+      readable: false,
+      version: 12,
+    })
+    const resolve = vi.fn(async () => resolvedFile('unused', 'unused.txt'))
+    const onRenameResource = vi.fn(async () => undefined)
+    const onResourceAction = vi.fn()
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([parent])),
+      listChildren: vi.fn(async () => listChildrenPage([target])),
+      affordances: vi.fn(async () => resourceAffordances(['write'])),
+      resolve,
+    })
+
+    renderTree({ onRenameResource, onResourceAction })
+    const user = userEvent.setup()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Restricted folder' }))
+    const row = await screen
+      .findByRole('button', { name: /secret\.txt/ })
+      .then(button => button.closest('[role="treeitem"]') as HTMLElement)
+    openContextMenuFor(row)
+    const menu = await screen.findByRole('menu', { name: 'Actions for secret.txt' })
+    fireEvent.click(await within(menu).findByRole('menuitem', { name: 'Rename' }))
+
+    const input = await screen.findByRole('textbox', { name: 'New name for secret.txt' })
+    expect(within(row).getByText('No access')).toBeTruthy()
+    await user.clear(input)
+    await user.type(input, 'renamed.txt')
+    await user.keyboard('{Enter}')
+
+    await waitFor(() =>
+      expect(onRenameResource).toHaveBeenCalledWith({
+        actionId: 'rename',
+        targetUri: target.gfsUri,
+        targetResource: {
+          resourceId: target.resourceId,
+          drive: target.drive,
+          gfsUri: target.gfsUri,
+          kind: target.kind,
+          version: target.version,
+          parentResourceId: target.parentResourceId,
+          name: target.name,
+          sessionGeneration: 7,
+        },
+        requestedName: 'renamed.txt',
+      })
+    )
+    expect(onRenameResource).toHaveBeenCalledTimes(1)
+    expect(onResourceAction).not.toHaveBeenCalled()
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it('routes inline Rename through the default controller CAS owner with the captured receipt', async () => {
+    const parent = accessibleResource(
+      '22222222222242228222222222222222',
+      'Restricted folder',
+      'directory'
+    )
+    const target = childView('11111111111141118111111111111111', 'secret.txt', 'file', {
+      parentResourceId: parent.resourceId,
+      readable: false,
+      version: 12,
+    })
+    const dispatchFileExplorerMutation = vi.fn(async () => ({
+      resourceId: target.resourceId,
+      version: 13,
+    }))
+    const resolve = vi.fn(async () => resolvedFile('unused', 'unused.txt'))
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([parent])),
+      listChildren: vi.fn(async () => listChildrenPage([target])),
+      affordances: vi.fn(async () => resourceAffordances(['write'])),
+      dispatchFileExplorerMutation,
+      resolve,
+    })
+
+    renderTree()
+    const user = userEvent.setup()
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Restricted folder' }))
+    const row = await screen
+      .findByRole('button', { name: /secret\.txt/ })
+      .then(button => button.closest('[role="treeitem"]') as HTMLElement)
+    openContextMenuFor(row)
+    const menu = await screen.findByRole('menu', { name: 'Actions for secret.txt' })
+    fireEvent.click(await within(menu).findByRole('menuitem', { name: 'Rename' }))
+    const input = await screen.findByRole('textbox', { name: 'New name for secret.txt' })
+    await user.clear(input)
+    await user.type(input, 'renamed.txt')
+    await user.keyboard('{Enter}')
+
+    await waitFor(() => expect(dispatchFileExplorerMutation).toHaveBeenCalledOnce())
+    expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+      operation: 'rename',
+      target: {
+        resourceId: target.resourceId,
+        drive: target.drive,
+        gfsUri: target.gfsUri,
+        kind: target.kind,
+        version: target.version,
+        name: target.name,
+        parentResourceId: target.parentResourceId,
+        sessionGeneration: 7,
+      },
+      requestedName: 'renamed.txt',
+    })
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it('does not dispatch Rename on Escape or explicit cancel', async () => {
+    const parent = accessibleResource('parent', 'Restricted folder', 'directory')
+    const target = childView('write-only', 'secret.txt', 'file', {
+      parentResourceId: parent.resourceId,
+      readable: false,
+    })
+    const onRenameResource = vi.fn()
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([parent])),
+      listChildren: vi.fn(async () => listChildrenPage([target])),
+      affordances: vi.fn(async () => resourceAffordances(['write'])),
+    })
+    renderTree({ onRenameResource })
+    const user = userEvent.setup()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Restricted folder' }))
+    const row = await screen
+      .findByRole('button', { name: /secret\.txt/ })
+      .then(button => button.closest('[role="treeitem"]') as HTMLElement)
+    openContextMenuFor(row)
+    const firstMenu = await screen.findByRole('menu', { name: 'Actions for secret.txt' })
+    fireEvent.click(await within(firstMenu).findByRole('menuitem', { name: 'Rename' }))
+    const firstInput = await screen.findByRole('textbox', { name: 'New name for secret.txt' })
+    fireEvent.change(firstInput, { target: { value: 'discarded.txt' } })
+    fireEvent.keyDown(firstInput, { key: 'Escape' })
+    expect(onRenameResource).not.toHaveBeenCalled()
+
+    openContextMenuFor(row)
+    const secondMenu = await screen.findByRole('menu', { name: 'Actions for secret.txt' })
+    fireEvent.click(await within(secondMenu).findByRole('menuitem', { name: 'Rename' }))
+    fireEvent.change(await screen.findByRole('textbox', { name: 'New name for secret.txt' }), {
+      target: { value: 'also-discarded.txt' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel rename for secret.txt' }))
+    expect(onRenameResource).not.toHaveBeenCalled()
+  })
+
+  it('shows safe inline feedback when the Rename owner rejects a stale or denied request', async () => {
+    const parent = accessibleResource('parent', 'Restricted folder', 'directory')
+    const target = childView('write-only', 'secret.txt', 'file', {
+      parentResourceId: parent.resourceId,
+      readable: false,
+    })
+    const onRenameResource = vi.fn(async () => {
+      throw new Error('403 Forbidden: secret protected filename')
+    })
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([parent])),
+      listChildren: vi.fn(async () => listChildrenPage([target])),
+      affordances: vi.fn(async () => resourceAffordances(['write'])),
+    })
+    renderTree({ onRenameResource })
+    const user = userEvent.setup()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Restricted folder' }))
+    const row = await screen
+      .findByRole('button', { name: /secret\.txt/ })
+      .then(button => button.closest('[role="treeitem"]') as HTMLElement)
+    openContextMenuFor(row)
+    const menu = await screen.findByRole('menu', { name: 'Actions for secret.txt' })
+    fireEvent.click(await within(menu).findByRole('menuitem', { name: 'Rename' }))
+    const input = await screen.findByRole('textbox', { name: 'New name for secret.txt' })
+    await user.clear(input)
+    await user.type(input, 'renamed.txt')
+    await user.keyboard('{Enter}')
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toBe(
+      'Rename could not be completed. The item may have changed or permission may have been revoked.'
+    )
+    expect(alert.textContent).not.toContain('secret protected filename')
+    expect(onRenameResource).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('FileExplorerTree — sanitizes externally-controlled GFS names in chrome', () => {
@@ -1120,7 +1353,13 @@ describe('FileExplorerTree — sanitizes externally-controlled GFS names in chro
       listAccessible: vi.fn(async () =>
         listAccessiblePage([accessibleResource('z', `arch‮ive.zip`, 'file')])
       ),
-      download: vi.fn(async () => downloadResult(resolvedFile('z', `arch‮ive.zip`))),
+      saveToDisk: vi.fn(async (uri: string) => ({
+        status: 'saved_access_verified' as const,
+        uri,
+        version: 1,
+        filePath: '/downloads/archive.zip',
+        stageCleanup: 'complete' as const,
+      })),
     })
 
     const { pushToast } = renderTree()
@@ -1209,12 +1448,18 @@ describe('FileExplorerTree — rapid double-click on a file', () => {
   })
 
   it('file: a double-click on a non-previewable file downloads and toasts exactly once', async () => {
-    const download = vi.fn(async () => downloadResult(resolvedFile('zip-1', 'archive.zip')))
+    const saveToDisk = vi.fn(async (uri: string) => ({
+      status: 'saved_access_verified' as const,
+      uri,
+      version: 1,
+      filePath: '/downloads/archive.zip',
+      stageCleanup: 'complete' as const,
+    }))
     installClerum({
       listAccessible: vi.fn(async () =>
         listAccessiblePage([accessibleResource('zip-1', 'archive.zip', 'file')])
       ),
-      download,
+      saveToDisk,
     })
 
     const { onOpenPreview, pushToast } = renderTree()
@@ -1230,7 +1475,8 @@ describe('FileExplorerTree — rapid double-click on a file', () => {
     fireEvent.doubleClick(fileButton)
 
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
-    expect(download).toHaveBeenCalledTimes(1)
+    expect(saveToDisk).toHaveBeenCalledWith('gfs://main/zip-1', 7)
+    expect(saveToDisk).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledTimes(1)
     expect(onOpenPreview).not.toHaveBeenCalled()
   })
@@ -1304,12 +1550,18 @@ describe('FileExplorerTree — file single-click activates', () => {
   })
 
   it('downloads a non-previewable file on single-click and toasts success', async () => {
-    const download = vi.fn(async () => downloadResult(resolvedFile('zip-1', 'archive.zip')))
+    const saveToDisk = vi.fn(async (uri: string) => ({
+      status: 'saved_access_verified' as const,
+      uri,
+      version: 1,
+      filePath: '/downloads/archive.zip',
+      stageCleanup: 'complete' as const,
+    }))
     installClerum({
       listAccessible: vi.fn(async () =>
         listAccessiblePage([accessibleResource('zip-1', 'archive.zip', 'file')])
       ),
-      download,
+      saveToDisk,
     })
 
     const { onOpenPreview, pushToast } = renderTree()
@@ -1317,7 +1569,7 @@ describe('FileExplorerTree — file single-click activates', () => {
     const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
     fireEvent.click(fileButton)
 
-    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
+    await waitFor(() => expect(saveToDisk).toHaveBeenCalledWith('gfs://main/zip-1', 7))
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
     expect(onOpenPreview).not.toHaveBeenCalled()
   })
@@ -1380,6 +1632,7 @@ describe('FileExplorerTree — folder activation focuses an existing files tab',
           }
           onOpenPreview={vi.fn()}
           onResourceAction={vi.fn()}
+          onRenameResource={vi.fn()}
           pushToast={vi.fn()}
         />
       </>
@@ -1463,6 +1716,7 @@ describe('FileExplorerTree — expanded folder revalidates its listing (R1-H5)',
           onOpenFolder={vi.fn()}
           onOpenPreview={vi.fn()}
           onResourceAction={vi.fn()}
+          onRenameResource={vi.fn()}
           pushToast={vi.fn()}
         />
       </QueryClientProvider>
@@ -1511,6 +1765,7 @@ describe('FileExplorerTree — expanded folder revalidates its listing (R1-H5)',
           onOpenFolder={vi.fn()}
           onOpenPreview={vi.fn()}
           onResourceAction={vi.fn()}
+          onRenameResource={vi.fn()}
           pushToast={vi.fn()}
         />
       </QueryClientProvider>
@@ -1608,7 +1863,9 @@ describe('FileExplorerTree — unreadable rows refuse activation (R1-H1)', () =>
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'secret', readable: false }),
-      'move'
+      'move',
+      undefined,
+      7
     )
   })
 })
@@ -1652,6 +1909,7 @@ describe('FileExplorerTree — shared revoked access across controller mounts (R
           onOpenFolder={vi.fn()}
           onOpenPreview={vi.fn()}
           onResourceAction={vi.fn()}
+          onRenameResource={vi.fn()}
           pushToast={vi.fn()}
         />
         <AccessStateProbe />
@@ -1688,15 +1946,61 @@ describe('FileExplorerTree — download-path authority wiring (R1-H8)', () => {
   // reaches the revoked surface). A 403 here would be a per-resource denial
   // (operation surface does not treat it as session authority) — this asserts a
   // session 401, which must revoke.
-  it('revokes the session when activating a non-previewable file 401s on download', async () => {
-    const download = vi.fn(async () => {
+  it('routes activation fallback through the shared save owner with the captured generation', async () => {
+    const saveToDisk = vi.fn(async (uri: string, expectedSessionGeneration: number) => ({
+      status: 'saved_access_verified' as const,
+      uri,
+      version: 4,
+      filePath: '/downloads/archive.zip',
+      stageCleanup: 'complete' as const,
+    }))
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('zip-1', 'archive.zip', 'file')])
+      ),
+      saveToDisk,
+    })
+
+    const { onOpenPreview, pushToast } = renderTree()
+    const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
+    fireEvent.click(fileButton)
+    fireEvent.click(fileButton)
+
+    await waitFor(() => expect(saveToDisk).toHaveBeenCalledTimes(1))
+    expect(saveToDisk).toHaveBeenCalledWith('gfs://main/zip-1', 7)
+    expect(onOpenPreview).not.toHaveBeenCalled()
+    expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success')
+  })
+
+  it('keeps a cancelled activation fallback silent', async () => {
+    const saveToDisk = vi.fn(async (uri: string) => ({
+      status: 'cancelled_no_publication' as const,
+      uri,
+      filePath: null,
+    }))
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('zip-1', 'archive.zip', 'file')])
+      ),
+      saveToDisk,
+    })
+
+    const { pushToast } = renderTree()
+    fireEvent.click(await screen.findByRole('button', { name: 'archive.zip' }))
+
+    await waitFor(() => expect(saveToDisk).toHaveBeenCalledWith('gfs://main/zip-1', 7))
+    expect(pushToast).not.toHaveBeenCalledWith('Downloaded archive.zip', 'success')
+  })
+
+  it('revokes the session when the trusted activation save owner returns 401', async () => {
+    const saveToDisk = vi.fn(async () => {
       throw new Error('401 Unauthorized')
     })
     installClerum({
       listAccessible: vi.fn(async () =>
         listAccessiblePage([accessibleResource('zip-1', 'archive.zip', 'file')])
       ),
-      download,
+      saveToDisk,
     })
 
     const { onOpenPreview, pushToast } = renderTree()
@@ -1708,10 +2012,43 @@ describe('FileExplorerTree — download-path authority wiring (R1-H8)', () => {
     // surface, so the tree revokes and swaps in the unauthorized + retry surface
     // instead of surfacing the raw error as a toast.
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
-    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
+    await waitFor(() => expect(saveToDisk).toHaveBeenCalledWith('gfs://main/zip-1', 7))
     expect(onOpenPreview).not.toHaveBeenCalled()
     // The authority path pre-empts the error toast (the catch returns before it).
     expect(pushToast).not.toHaveBeenCalledWith('401 Unauthorized', 'error')
+  })
+
+  it('surfaces a stale-generation rejection without reporting a completed save', async () => {
+    let liveSessionGeneration = 7
+    const getSessionGeneration = vi.fn(async () => liveSessionGeneration)
+    const saveToDisk = vi.fn(async (uri: string, expectedSessionGeneration: number) => {
+      if (expectedSessionGeneration !== liveSessionGeneration) {
+        throw new Error('stale_session_generation')
+      }
+      return {
+        status: 'saved_access_verified' as const,
+        uri,
+        version: 4,
+        filePath: '/downloads/archive.zip',
+        stageCleanup: 'complete' as const,
+      }
+    })
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('zip-1', 'archive.zip', 'file')])
+      ),
+      getSessionGeneration,
+      saveToDisk,
+    })
+
+    const { pushToast } = renderTree()
+    const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
+    liveSessionGeneration = 8
+    fireEvent.click(fileButton)
+
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('stale_session_generation', 'error'))
+    expect(saveToDisk).toHaveBeenCalledWith('gfs://main/zip-1', 7)
+    expect(pushToast).not.toHaveBeenCalledWith('Downloaded archive.zip', 'success')
   })
 })
 
@@ -1773,6 +2110,7 @@ function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree
           onOpenFolder={onOpenFolder}
           onOpenPreview={onOpenPreview}
           onResourceAction={vi.fn()}
+          onRenameResource={vi.fn()}
           pushToast={pushToast}
         />
       </GfsDragSessionProvider>
@@ -2198,6 +2536,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
             onOpenFolder={onOpenFolder}
             onOpenPreview={onOpenPreview}
             onResourceAction={vi.fn()}
+            onRenameResource={vi.fn()}
             pushToast={pushToast}
           />
           <SessionProbe onApi={api => (sessionApi = api)} />

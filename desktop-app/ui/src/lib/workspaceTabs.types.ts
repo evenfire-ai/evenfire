@@ -24,6 +24,8 @@ export type SettingsTabPayload = {
  */
 export type FilesTabPayload = {
   path: string | null
+  /** A convergence denial keeps the opaque saved target but withholds its metadata. */
+  unavailable?: boolean
 }
 
 /**

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
+import { Badge, Button, IconButton, StatusBanner, TextInput } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import type { GfsResourceMenuOpenRequest } from '@components/GfsResourceMenu/types'
@@ -40,8 +40,12 @@ import {
 } from '@/gfs/dropVerdict'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
-import { IconChevronRight, IconContexts } from '../icons'
-import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
+import { IconCheck, IconChevronRight, IconClose, IconContexts } from '../icons'
+import type {
+  FileExplorerNodeProps,
+  FileExplorerRenameRequest,
+  FileExplorerTreeProps,
+} from './types'
 
 // A folder's single-click (toggle) must not act before we know a double-click
 // (open its files tab) is not coming, so it is deferred by this window to let a
@@ -107,6 +111,7 @@ function FileExplorerNode({
   onActivateFolder,
   onActivateFile,
   onResourceAction,
+  onRenameResource,
   onAuthorityFailure,
   onNodeDragStart,
   onNodeDragEnd,
@@ -121,6 +126,11 @@ function FileExplorerNode({
   const label = displayName(node.name)
   const [resourceMenuOpen, setResourceMenuOpen] = useState(false)
   const [menuOpenRequest, setMenuOpenRequest] = useState<GfsResourceMenuOpenRequest | null>(null)
+  const [renameTarget, setRenameTarget] = useState<FileExplorerRenameRequest | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [renamePending, setRenamePending] = useState(false)
+  const [renameError, setRenameError] = useState<string | null>(null)
+  const renamePendingRef = useRef(false)
   const menuRequestIdRef = useRef(0)
   const rowLabelRef = useRef<HTMLButtonElement | null>(null)
   const touchStartRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
@@ -130,9 +140,10 @@ function FileExplorerNode({
   const suppressTouchClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Server-computed: the row is visible but the session cannot read it (a
   // folder grant without inheritance; a file whose parent does not inherit).
-  // Mark it so it does not look actionable, and let the activate handlers
-  // refuse it with a toast instead of a later download/preview 403. Absent
-  // (older servers) is treated as unknown, not unreadable.
+  // Hide read and navigation capabilities, while still allowing independently
+  // authorized write/delete/ACL actions from fresh producer affordances. The
+  // activate handlers refuse protected reads instead of surfacing a later
+  // download/preview 403. Absent (older servers) is unknown, not unreadable.
   const isUnreadable = node.readable === false
 
   const affordancesQuery = useQuery({
@@ -172,34 +183,56 @@ function FileExplorerNode({
           uri: node.gfsUri,
           handlers: {
             refresh:
-              accessActive && !isUnreadable ? () => onResourceAction(node, 'refresh') : undefined,
-            'copy-link': () => onResourceAction(node, 'copy-link'),
-            'copy-route': () => onResourceAction(node, 'copy-route'),
-            'open-route': () => onResourceAction(node, 'open-route'),
-            rename: () => onResourceAction(node, 'rename'),
-            move: () => onResourceAction(node, 'move'),
-            'new-folder': () => onResourceAction(node, 'new-folder'),
-            'upload-file': () => onResourceAction(node, 'upload-file'),
-            share: () => onResourceAction(node, 'share'),
+              accessActive && !isUnreadable
+                ? () => onResourceAction(node, 'refresh', undefined, sessionGeneration)
+                : undefined,
+            'copy-link': () => onResourceAction(node, 'copy-link', undefined, sessionGeneration),
+            'copy-route': () => onResourceAction(node, 'copy-route', undefined, sessionGeneration),
+            'open-route': () => onResourceAction(node, 'open-route', undefined, sessionGeneration),
+            rename: () => {
+              if (!isGfsSessionGeneration(sessionGeneration)) return
+              setRenameTarget({
+                actionId: 'rename',
+                targetUri: node.gfsUri,
+                targetResource: {
+                  resourceId: node.resourceId,
+                  drive: node.drive,
+                  gfsUri: node.gfsUri,
+                  kind: node.kind,
+                  version: node.version,
+                  parentResourceId: node.parentResourceId,
+                  name: node.name,
+                  sessionGeneration,
+                },
+                requestedName: '',
+              })
+              setRenameDraft(displayName(node.name))
+              setRenameError(null)
+            },
+            move: () => onResourceAction(node, 'move', undefined, sessionGeneration),
+            'new-folder': () => onResourceAction(node, 'new-folder', undefined, sessionGeneration),
+            'upload-file': () =>
+              onResourceAction(node, 'upload-file', undefined, sessionGeneration),
+            share: () => onResourceAction(node, 'share', undefined, sessionGeneration),
             'copy-content': canCopyContent
-              ? () => onResourceAction(node, 'copy-content')
+              ? () => onResourceAction(node, 'copy-content', undefined, sessionGeneration)
               : undefined,
-            preview: canPreview ? () => onActivateFile(node) : undefined,
+            preview: canPreview ? () => onActivateFile(node, sessionGeneration) : undefined,
             download:
               node.kind === 'file' && !isUnreadable
-                ? () => onResourceAction(node, 'download')
+                ? () => onResourceAction(node, 'download', undefined, sessionGeneration)
                 : undefined,
             replace:
               node.kind === 'file' && hasBit(affordances, 'write')
                 ? (file, context) => {
-                    if (file) onResourceAction(node, 'replace', file)
+                    if (file) onResourceAction(node, 'replace', file, sessionGeneration)
                     else context?.requestFileSelection?.()
                   }
                 : undefined,
             'open-folder': isDirectory && !isUnreadable ? () => onActivateFolder(node) : undefined,
-            delete: () => onResourceAction(node, 'delete'),
+            delete: () => onResourceAction(node, 'delete', undefined, sessionGeneration),
           },
-          canRename: hasBit(affordances, 'write'),
+          canRename: isGfsSessionGeneration(sessionGeneration) && hasBit(affordances, 'write'),
           canMove: accessActive && node.parentResourceId != null,
           canCreateFolder: isDirectory && hasBit(affordances, 'write'),
           canUpload: isDirectory && hasBit(affordances, 'write'),
@@ -222,7 +255,9 @@ function FileExplorerNode({
       node,
       onActivateFile,
       onActivateFolder,
+      onRenameResource,
       onResourceAction,
+      sessionGeneration,
     ]
   )
 
@@ -310,8 +345,8 @@ function FileExplorerNode({
 
   const runActivate = useCallback(() => {
     if (isDirectory) onActivateFolder(node)
-    else onActivateFile(node)
-  }, [isDirectory, node, onActivateFile, onActivateFolder])
+    else onActivateFile(node, sessionGeneration)
+  }, [isDirectory, node, onActivateFile, onActivateFolder, sessionGeneration])
 
   const handleRowClick = useCallback(() => {
     if (suppressTouchClickRef.current) {
@@ -402,6 +437,39 @@ function FileExplorerNode({
     clearClickTimer()
     runActivate()
   }, [clearClickTimer, runActivate])
+
+  const cancelRename = useCallback(() => {
+    if (renamePendingRef.current) return
+    setRenameTarget(null)
+    setRenameError(null)
+  }, [])
+
+  const submitRename = useCallback(
+    (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      event.stopPropagation()
+      if (!renameTarget || renamePendingRef.current) return
+
+      renamePendingRef.current = true
+      setRenamePending(true)
+      setRenameError(null)
+      void Promise.resolve()
+        .then(() => onRenameResource({ ...renameTarget, requestedName: renameDraft }))
+        .then(() => setRenameTarget(null))
+        .catch(() => {
+          // Mutation errors can contain protected names or server details. Keep
+          // the row-local message useful without reflecting those values.
+          setRenameError(
+            'Rename could not be completed. The item may have changed or permission may have been revoked.'
+          )
+        })
+        .finally(() => {
+          renamePendingRef.current = false
+          setRenamePending(false)
+        })
+    },
+    [onRenameResource, renameDraft, renamePending, renameTarget]
+  )
 
   const handleRowKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLButtonElement>) => {
@@ -572,35 +640,89 @@ function FileExplorerNode({
         ) : (
           <span className="da-file-explorer__toggle-placeholder" aria-hidden="true" />
         )}
-        <Button
-          ref={rowLabelRef}
-          align="start"
-          block
-          className={`da-file-explorer__label${isSelected ? ' is-selected' : ''}${
-            isUnreadable ? ' da-file-explorer__label--no-access' : ''
-          }`}
-          color="neutral"
-          draggable={canDrag}
-          onClick={handleRowClick}
-          onDoubleClick={handleRowDoubleClick}
-          onDragStart={canDrag ? handleDragStart : undefined}
-          onDragEnd={canDrag ? onNodeDragEnd : undefined}
-          onKeyDown={handleRowKeyDown}
-          title={canDrag ? `Drag ${label} into a folder to move it` : undefined}
-          variant="text"
-        >
-          <span className="da-file-explorer__icon" aria-hidden="true">
-            {isDirectory ? <IconContexts /> : <GfsFileIcon name={node.name} />}
-          </span>
-          <span className="da-file-explorer__name">{label}</span>
-          {/* Rendered inside the label so "No access" joins the row's accessible
-              name, matching the Files page's row affordance. */}
-          {isUnreadable ? (
-            <Badge tone="neutral" className="da-file-explorer__no-access-badge">
-              No access
-            </Badge>
-          ) : null}
-        </Button>
+        {renameTarget ? (
+          <form className="da-gfs-inline-rename" onSubmit={submitRename}>
+            <TextInput
+              aria-label={`New name for ${label}`}
+              autoFocus
+              className="da-gfs-inline-rename__input"
+              disabled={renamePending}
+              onChange={event => setRenameDraft(event.currentTarget.value)}
+              onKeyDown={event => {
+                event.stopPropagation()
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  cancelRename()
+                }
+              }}
+              value={renameDraft}
+            />
+            {isUnreadable ? (
+              <Badge tone="neutral" className="da-file-explorer__no-access-badge">
+                No access
+              </Badge>
+            ) : null}
+            <span className="da-gfs-inline-rename__actions">
+              <IconButton
+                aria-label={`Save rename for ${label}`}
+                className="da-gfs-inline-rename__confirm"
+                disabled={renamePending}
+                label={`Save rename for ${label}`}
+                size="sm"
+                type="submit"
+                variant="outline"
+              >
+                <IconCheck />
+              </IconButton>
+              <IconButton
+                aria-label={`Cancel rename for ${label}`}
+                className="da-gfs-inline-rename__cancel"
+                disabled={renamePending}
+                label={`Cancel rename for ${label}`}
+                onClick={cancelRename}
+                size="sm"
+                variant="ghost"
+              >
+                <IconClose />
+              </IconButton>
+            </span>
+            {renameError ? (
+              <span className="da-file-explorer__rename-error" role="alert">
+                {renameError}
+              </span>
+            ) : null}
+          </form>
+        ) : (
+          <Button
+            ref={rowLabelRef}
+            align="start"
+            block
+            className={`da-file-explorer__label${isSelected ? ' is-selected' : ''}${
+              isUnreadable ? ' da-file-explorer__label--no-access' : ''
+            }`}
+            color="neutral"
+            draggable={canDrag}
+            onClick={handleRowClick}
+            onDoubleClick={handleRowDoubleClick}
+            onDragStart={canDrag ? handleDragStart : undefined}
+            onDragEnd={canDrag ? onNodeDragEnd : undefined}
+            onKeyDown={handleRowKeyDown}
+            title={canDrag ? `Drag ${label} into a folder to move it` : undefined}
+            variant="text"
+          >
+            <span className="da-file-explorer__icon" aria-hidden="true">
+              {isDirectory ? <IconContexts /> : <GfsFileIcon name={node.name} />}
+            </span>
+            <span className="da-file-explorer__name">{label}</span>
+            {/* Rendered inside the label so "No access" joins the row's accessible
+                name, matching the Files page's row affordance. */}
+            {isUnreadable ? (
+              <Badge tone="neutral" className="da-file-explorer__no-access-badge">
+                No access
+              </Badge>
+            ) : null}
+          </Button>
+        )}
         <GfsResourceMenu
           actions={resourceActions}
           contextOpenRequest={menuOpenRequest}
@@ -634,6 +756,7 @@ function FileExplorerNode({
               onActivateFile={onActivateFile}
               onActivateFolder={onActivateFolder}
               onResourceAction={onResourceAction}
+              onRenameResource={onRenameResource}
               onAuthorityFailure={onAuthorityFailure}
               onNodeDragEnd={onNodeDragEnd}
               onNodeDragLeave={onNodeDragLeave}
@@ -686,9 +809,17 @@ export function FileExplorerTree({
   onOpenFolder,
   onOpenPreview,
   onResourceAction,
+  onRenameResource,
   pushToast,
 }: FileExplorerTreeProps) {
   const ctrl = useGfsBrowserController()
+  const renameResource = useCallback(
+    (request: FileExplorerRenameRequest) =>
+      onRenameResource
+        ? onRenameResource(request)
+        : ctrl.renameResourceFromSnapshot(request.targetResource, request.requestedName),
+    [ctrl.renameResourceFromSnapshot, onRenameResource]
+  )
   const queryClient = useQueryClient()
   const dragSession = useGfsDragSession()
   const adjudication = useGfsDragAdjudication({
@@ -1217,7 +1348,7 @@ export function FileExplorerTree({
   const downloadsInFlight = useRef<Set<string>>(new Set())
 
   const handleActivateFile = useCallback(
-    (node: GfsBrowserChild) => {
+    (node: GfsBrowserChild, sessionGeneration: number | null) => {
       // A file whose parent grant does not inherit is listed but unreadable:
       // both the preview and the download fallback would 403. Refuse before
       // either, matching the Files page's openResource guard and toast.
@@ -1235,9 +1366,39 @@ export function FileExplorerTree({
       downloadsInFlight.current.add(node.gfsUri)
       void (async () => {
         try {
+          if (!isGfsSessionGeneration(sessionGeneration)) {
+            throw new Error('The Desktop session changed before Download started.')
+          }
           // The raw name is the real on-disk filename; the toast shows the cleaned one.
-          await saveGfsFileToDisk(node.gfsUri, node.name)
-          pushToast(`Downloaded ${displayName(node.name)}`, 'success')
+          const receipt = await saveGfsFileToDisk(node.gfsUri, node.name, sessionGeneration)
+          if (
+            receipt.status === 'saved_access_verified' ||
+            receipt.status === 'published_finalization_warning'
+          ) {
+            if (
+              receipt.status === 'published_finalization_warning' ||
+              receipt.stageCleanup === 'failed'
+            ) {
+              pushToast(
+                `Downloaded ${displayName(node.name)}, but private stage cleanup failed: ${receipt.residualStagePath ?? 'path unavailable'}`,
+                'error'
+              )
+            } else {
+              pushToast(`Downloaded ${displayName(node.name)}`, 'success')
+            }
+          } else if (receipt.status === 'failed_no_publication') {
+            pushToast(
+              `Download failed; private stage cleanup failed: ${receipt.residualStagePath}`,
+              'error'
+            )
+          } else if (receipt.status === 'published_private_warning') {
+            pushToast(`Downloaded ${displayName(node.name)} with private permissions.`, 'error')
+          } else if (receipt.status === 'published_access_unverified') {
+            pushToast(
+              `Downloaded ${displayName(node.name)}, but its final permissions could not be verified.`,
+              'error'
+            )
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           if (authorityFailure(error, 'operation')) return
@@ -1313,6 +1474,7 @@ export function FileExplorerTree({
               onActivateFile={handleActivateFile}
               onActivateFolder={handleActivateFolder}
               onResourceAction={onResourceAction}
+              onRenameResource={renameResource}
               onAuthorityFailure={handleAuthorityFailure}
               onNodeDragEnd={clearDragState}
               onNodeDragLeave={handleNodeDragLeave}

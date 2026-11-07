@@ -255,13 +255,16 @@ export function FilePreviewPage({
 
   const handleCopyLink = useCallback(async () => {
     try {
-      const result = await window.clerum.gfs.copyDeepLink?.(gfsUri)
+      if (!isGfsSessionGeneration(capturedSessionGeneration)) {
+        throw new Error('The Desktop session changed before the link was copied.')
+      }
+      const result = await window.clerum.gfs.copyDeepLink?.(gfsUri, capturedSessionGeneration)
       if (!result?.url) throw new Error('Shareable EvenDrive links are unavailable in this version')
       pushToast?.('Shareable EvenDrive link copied', 'success')
     } catch (error) {
       pushToast?.(`Could not copy the EvenDrive link: ${toMessage(error)}`, 'error')
     }
-  }, [gfsUri, pushToast])
+  }, [capturedSessionGeneration, gfsUri, pushToast])
 
   const handleCopyRoute = useCallback(async () => {
     try {

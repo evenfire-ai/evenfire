@@ -994,6 +994,34 @@ export function createExternalGfsRouter(): Router {
   )
 
   router.get(
+    '/external/gfs/convergence-location',
+    externalGfsResourceRouteRateLimit,
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const uri = typeof req.query.uri === 'string' ? req.query.uri : ''
+      if (!uri) {
+        res.status(400).json({ error: 'uri_required' })
+        return
+      }
+      if (uri.length > MAX_GFS_URI_LEN) {
+        res.status(400).json({ error: 'uri_too_long' })
+        return
+      }
+      const identity = /^gfs:\/\/([^/]+)\/([0-9a-f]{32})$/.exec(uri)
+      if (!identity?.[1]) {
+        res.status(400).json({ error: 'convergence_target_invalid' })
+        return
+      }
+      const drive = driveOf(identity[1])
+      await proxyReadToGfsc(
+        req,
+        res,
+        drive,
+        `/v1/convergence-location?uri=${encodeURIComponent(uri)}`
+      )
+    })
+  )
+
+  router.get(
     '/external/gfs/resources/:id/children',
     externalGfsResourceRouteRateLimit,
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
@@ -1075,6 +1103,15 @@ async function proxyReadToGfsc(
   // the streamed download body — a large/slow read must not be truncated
   // mid-stream by the mutation budget. Cleared once headers arrive.
   const readDeadline = new AbortController()
+  let clientDisconnected = false
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  const onClientClose = () => {
+    if (res.writableFinished) return
+    clientDisconnected = true
+    readDeadline.abort()
+    void reader?.cancel().catch(() => undefined)
+  }
+  res.on('close', onClientClose)
   const readTimer = setTimeout(() => readDeadline.abort(), config.gfscProxyTimeoutMs)
   try {
     upstream = await fetch(target, {
@@ -1087,7 +1124,12 @@ async function proxyReadToGfsc(
     })
   } catch (err) {
     const timedOut =
-      readDeadline.signal.aborted || (err instanceof Error && err.name === 'TimeoutError')
+      !clientDisconnected &&
+      (readDeadline.signal.aborted || (err instanceof Error && err.name === 'TimeoutError'))
+    if (clientDisconnected || res.destroyed) {
+      res.off('close', onClientClose)
+      return
+    }
     rootLogger.error(
       { err, gfscPath, timeoutMs: config.gfscProxyTimeoutMs },
       timedOut
@@ -1095,6 +1137,7 @@ async function proxyReadToGfsc(
         : 'gfs external read proxy: gfsc fetch failed'
     )
     res.status(timedOut ? 504 : 502).json({ error: timedOut ? 'gfsc_timeout' : 'gfsc_unreachable' })
+    res.off('close', onClientClose)
     return
   } finally {
     clearTimeout(readTimer)
@@ -1102,43 +1145,72 @@ async function proxyReadToGfsc(
   if (upstream.status >= 400) {
     // Error envelopes are small JSON: buffer, LOG, forward verbatim (a gfsc 5xx on a
     // read was invisible at this hop before). Success bodies keep streaming below.
-    const errorBody = await upstream.text()
-    if (upstream.status >= 500) {
-      rootLogger.error(
-        { gfscPath, status: upstream.status, body: errorBody.slice(0, 2048) },
-        'gfs external read proxy: gfsc upstream error'
-      )
+    try {
+      const errorBody = await upstream.text()
+      if (clientDisconnected || res.destroyed) return
+      if (upstream.status >= 500) {
+        rootLogger.error(
+          { gfscPath, status: upstream.status, body: errorBody.slice(0, 2048) },
+          'gfs external read proxy: gfsc upstream error'
+        )
+      }
+      res.status(upstream.status)
+      const ct = upstream.headers.get('content-type')
+      if (ct) res.setHeader('content-type', ct)
+      res.send(errorBody)
+    } catch (error) {
+      if (clientDisconnected || res.destroyed) return
+      throw error
+    } finally {
+      res.off('close', onClientClose)
     }
-    res.status(upstream.status)
-    const ct = upstream.headers.get('content-type')
-    if (ct) res.setHeader('content-type', ct)
-    res.send(errorBody)
     return
   }
   res.status(upstream.status)
-  for (const h of ['content-type', 'content-disposition', 'content-length']) {
+  for (const h of [
+    'content-type',
+    'content-disposition',
+    'content-length',
+    'x-gfs-uri',
+    'x-gfs-version',
+  ]) {
     const v = upstream.headers.get(h)
     if (v) res.setHeader(h, v)
   }
   if (!upstream.body) {
     res.end()
+    res.off('close', onClientClose)
     return
   }
-  const reader = upstream.body.getReader()
+  reader = upstream.body.getReader()
   try {
     for (;;) {
       const { done, value } = await reader.read()
-      if (done) break
-      if (value) res.write(Buffer.from(value))
+      if (done || clientDisconnected) break
+      if (value && !res.write(Buffer.from(value))) {
+        await new Promise<void>(resolve => {
+          const finish = () => {
+            res.off('drain', finish)
+            res.off('close', finish)
+            resolve()
+          }
+          res.once('drain', finish)
+          res.once('close', finish)
+        })
+      }
     }
-    res.end()
+    if (!clientDisconnected) res.end()
   } catch (err) {
+    if (clientDisconnected || res.destroyed) return
     // Mid-stream gfsc read failure (pod restart, network abort). Surface it —
     // never swallow silently. If headers are already committed we can only end
     // the (now-truncated) response; the logged error is the operator's trace.
     rootLogger.error({ err, gfscPath }, 'gfs external read proxy: gfsc upstream stream error')
     if (!res.headersSent) res.status(502).json({ error: 'gfsc upstream error' })
     else res.end()
+  } finally {
+    if (clientDisconnected) await reader.cancel().catch(() => undefined)
+    res.off('close', onClientClose)
   }
 }
 

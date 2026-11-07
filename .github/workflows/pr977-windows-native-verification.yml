@@ -1,0 +1,55 @@
+name: PR 1085 temporary R26 Windows native verification
+
+on:
+  push:
+    branches:
+      - test/pr1085-r26-native-win-20261106
+    paths:
+      - .validation/pr1085/native.trigger
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr1085-r26-native-win-20261106
+  cancel-in-progress: false
+
+jobs:
+  windows-native:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify exact source and native test filesystem
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:GITHUB_SHA) { throw 'Checkout does not match workflow source SHA' }
+          Write-Output "SOURCE_SHA=$actual"
+          Get-Volume -DriveLetter $env:SystemDrive.Substring(0,1) |
+            Select-Object DriveLetter, FileSystem, FileSystemLabel | Format-List
+          node --version
+          if ((Get-Content .nvmrc -Raw).Trim() -ne '24.22.1') { throw 'Unexpected Node pin' }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: desktop-app/package-lock.json
+      - name: Install Desktop dependencies
+        working-directory: desktop-app
+        run: npm ci
+      - name: Verify Electron runtime
+        working-directory: desktop-app
+        run: npm run verify:electron
+      - name: Build Desktop main and native bridge
+        working-directory: desktop-app
+        run: npm run build:main
+      - name: Run native filesystem tests
+        working-directory: desktop-app
+        run: node --test native/gfs_save_bridge.test.cjs
+      - name: Run trusted save owner and IPC acceptance tests
+        working-directory: desktop-app
+        run: npm exec -- vitest run src/__tests__/gfsSaveOwner.test.ts src/__tests__/ipc.gfsSaveToDisk.test.ts src/__tests__/appService.nativeCommit.test.ts

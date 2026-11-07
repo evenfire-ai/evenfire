@@ -44,7 +44,11 @@ import {
   useGfsSessionAccessState,
 } from '@hooks/domain/useGfsBrowserController'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
-import type { WorkspaceNavigationSnapshot } from '@hooks/domain/useNavigationController'
+import type {
+  FilesPathIntentReceipt,
+  ResolveFilesConvergenceLocation,
+  WorkspaceNavigationSnapshot,
+} from '@hooks/domain/useNavigationController'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
 import {
@@ -174,6 +178,30 @@ type EmbedHandoffWaiter = {
   originReleased: boolean
   originClosed: boolean
 }
+
+type SidebarLocalActionId = Extract<
+  GfsResourceActionId,
+  'share' | 'move' | 'new-folder' | 'upload-file' | 'replace' | 'delete'
+>
+
+type SidebarLocalActionTarget = Readonly<{
+  resourceId: string
+  drive: string
+  gfsUri: string
+  kind: 'file' | 'directory'
+  version: number
+  name: string
+  parentResourceId: string | null
+  sessionGeneration: number
+}>
+
+type PendingSidebarLocalAction = Readonly<{
+  id: number
+  actionId: SidebarLocalActionId
+  targetUri: string
+  targetResource: SidebarLocalActionTarget
+  file?: File
+}>
 
 function formatLinkProvidedEnvironmentName(name: string): string {
   const characters = Array.from(name.trim())
@@ -363,6 +391,37 @@ export function App() {
   useWindowFocusBridge()
   const [themeMode, setThemeMode] = React.useState<ThemeMode>(getInitialThemeMode)
   const [remoteGfsChangeEpoch, setRemoteGfsChangeEpoch] = React.useState(0)
+  const priorRemoteGfsChangeEpochRef = React.useRef(remoteGfsChangeEpoch)
+  React.useEffect(() => {
+    if (priorRemoteGfsChangeEpochRef.current === remoteGfsChangeEpoch) return
+    priorRemoteGfsChangeEpochRef.current = remoteGfsChangeEpoch
+    vm.recordFilesMutation()
+  }, [remoteGfsChangeEpoch, vm.recordFilesMutation])
+  const resolveFilesConvergenceLocation = React.useCallback<ResolveFilesConvergenceLocation>(
+    (uri, sessionGeneration, options) => {
+      const gfs = window.clerum.gfs as typeof window.clerum.gfs & {
+        resolveConvergenceLocation?: ResolveFilesConvergenceLocation
+      }
+      if (!gfs.resolveConvergenceLocation) return Promise.resolve({ available: false })
+      return gfs.resolveConvergenceLocation(uri, sessionGeneration, options)
+    },
+    []
+  )
+  React.useEffect(() => {
+    if (!isGfsSessionGeneration(gfsSessionGeneration) || gfsSessionAccessState === 'revoked') {
+      vm.markFilesPathsUnavailable()
+      return
+    }
+    void vm.reconcileFilesConvergence(gfsSessionGeneration, resolveFilesConvergenceLocation)
+  }, [
+    gfsSessionGeneration,
+    gfsSessionScope,
+    gfsSessionAccessState,
+    vm.filesMutationEpoch,
+    vm.markFilesPathsUnavailable,
+    vm.reconcileFilesConvergence,
+    resolveFilesConvergenceLocation,
+  ])
   const gfsSearchPrincipal =
     vm.isAuthenticated && !vm.authTransitioning ? (vm.authenticatedPrincipalIdentity ?? null) : null
   const previousGfsSearchPrincipalRef = React.useRef(gfsSearchPrincipal)
@@ -419,6 +478,11 @@ export function App() {
   >([])
   const [pendingGfsResourceAction, setPendingGfsResourceAction] =
     React.useState<GfsResourceActionRequest | null>(null)
+  const [pendingSidebarLocalAction, setPendingSidebarLocalAction] =
+    React.useState<PendingSidebarLocalAction | null>(null)
+  const pendingSidebarLocalActionRef = React.useRef(pendingSidebarLocalAction)
+  pendingSidebarLocalActionRef.current = pendingSidebarLocalAction
+  const sidebarLocalActionMutationClaimsRef = React.useRef(new Set<number>())
   const pendingGfsResourceActionRef = React.useRef(pendingGfsResourceAction)
   pendingGfsResourceActionRef.current = pendingGfsResourceAction
   const gfsResourceActionRequestIdRef = React.useRef(0)
@@ -1103,7 +1167,85 @@ export function App() {
   )
 
   const handleSidebarGfsResourceAction = React.useCallback(
-    (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => {
+    (
+      resource: GfsBrowserChild,
+      actionId: GfsResourceActionId,
+      file?: File,
+      observedSessionGeneration?: number | null
+    ) => {
+      if (actionId === 'copy-route') {
+        void navigator.clipboard
+          .writeText(resource.gfsUri)
+          .then(() => vm.pushToast('Resource ID copied.', 'success'))
+          .catch(() => vm.pushToast('Could not copy the resource ID.', 'error'))
+        return
+      }
+      if (actionId === 'copy-link') {
+        if (!Number.isSafeInteger(observedSessionGeneration) || observedSessionGeneration! < 0) {
+          vm.pushToast(
+            'This file action is no longer current. Refresh the file list and try again.',
+            'error'
+          )
+          return
+        }
+        const copyDeepLink = window.clerum.gfs.copyDeepLink
+        if (typeof copyDeepLink !== 'function') {
+          vm.pushToast('Shareable EvenDrive links are unavailable in this version.', 'error')
+          return
+        }
+        void copyDeepLink(resource.gfsUri, observedSessionGeneration!)
+          .then(() => vm.pushToast('EvenDrive link copied.', 'success'))
+          .catch(error =>
+            vm.pushToast(
+              error instanceof Error ? error.message : 'Could not copy the EvenDrive link.',
+              'error'
+            )
+          )
+        return
+      }
+      if (actionId === 'download') {
+        if (!Number.isSafeInteger(observedSessionGeneration) || observedSessionGeneration! < 0) {
+          vm.pushToast(
+            'This file action is no longer current. Refresh the file list and try again.',
+            'error'
+          )
+          return
+        }
+        void window.clerum.gfs
+          .saveToDisk(resource.gfsUri, observedSessionGeneration!)
+          .then(receipt => {
+            if (
+              receipt.status === 'saved_access_verified' ||
+              receipt.status === 'published_finalization_warning'
+            ) {
+              if (
+                receipt.status === 'published_finalization_warning' ||
+                receipt.stageCleanup === 'failed'
+              ) {
+                vm.pushToast(
+                  `Downloaded ${resource.name}, but private stage cleanup failed: ${receipt.residualStagePath ?? 'path unavailable'}`,
+                  'error'
+                )
+              } else {
+                vm.pushToast(`Downloaded ${resource.name}`, 'success')
+              }
+            } else if (receipt.status === 'failed_no_publication') {
+              vm.pushToast(
+                `Download failed; private stage cleanup failed: ${receipt.residualStagePath}`,
+                'error'
+              )
+            } else if (receipt.status === 'published_private_warning') {
+              vm.pushToast(`Downloaded ${resource.name} with private permissions.`, 'error')
+            } else if (receipt.status === 'published_access_unverified') {
+              vm.pushToast(
+                `Downloaded ${resource.name}, but its final permissions could not be verified.`,
+                'error'
+              )
+            }
+          })
+          .catch(() => vm.pushToast('Could not download this file.', 'error'))
+        return
+      }
       if (actionId === 'open-route') {
         gfsResourceActionRouteRef.current = null
         setPendingGfsResourceAction(null)
@@ -1123,31 +1265,38 @@ export function App() {
         if (preview) openScopedPreviewSection(preview)
         return
       }
-      if (actionId === 'move') {
-        const navigationUri =
-          resource.parentResourceId === null
-            ? null
-            : normalizeGfsResourceUri(
-                `gfs://${resource.drive}/${resource.parentResourceId.replace(/-/g, '').toLowerCase()}`
-              )
-        if (resource.parentResourceId !== null && !navigationUri) {
-          vm.pushToast('This resource has an invalid parent location.', 'error')
+      if (
+        actionId === 'share' ||
+        actionId === 'move' ||
+        actionId === 'new-folder' ||
+        actionId === 'upload-file' ||
+        actionId === 'replace' ||
+        actionId === 'delete'
+      ) {
+        if (!Number.isSafeInteger(observedSessionGeneration) || observedSessionGeneration! < 0) {
+          vm.pushToast(
+            'This file action is no longer current. Refresh the file list and try again.',
+            'error'
+          )
           return
         }
-        const request: GfsResourceActionRequest = {
-          id: ++gfsResourceActionRequestIdRef.current,
-          targetUri: resource.gfsUri,
+        const id = ++gfsResourceActionRequestIdRef.current
+        setPendingSidebarLocalAction({
+          id,
           actionId,
-          navigationUri,
+          targetUri: resource.gfsUri,
           targetResource: {
             resourceId: resource.resourceId,
-            name: resource.name,
+            drive: resource.drive,
+            gfsUri: resource.gfsUri,
             kind: resource.kind,
             version: resource.version,
+            name: resource.name,
             parentResourceId: resource.parentResourceId,
+            sessionGeneration: observedSessionGeneration!,
           },
-        }
-        beginFilesResourceAction(request, navigationUri)
+          ...(file ? { file } : {}),
+        })
         return
       }
       const request: GfsResourceActionRequest = {
@@ -1183,6 +1332,26 @@ export function App() {
       gfsResourceActionRouteRef.current = null
     }
     setPendingGfsResourceAction(current => (current?.id === requestId ? null : current))
+  }, [])
+
+  const handleSidebarLocalActionHandled = React.useCallback((_requestId: number) => {
+    // The presenter owns the accepted receipt until its modal is dismissed or
+    // its operation reaches a terminal result. Clearing it at consumption
+    // would unmount the presenter before its operation can finish.
+  }, [])
+
+  const handleSidebarLocalActionFinished = React.useCallback((requestId: number) => {
+    sidebarLocalActionMutationClaimsRef.current.delete(requestId)
+    setPendingSidebarLocalAction(current => (current?.id === requestId ? null : current))
+  }, [])
+  const claimSidebarLocalActionMutation = React.useCallback((requestId: number): boolean => {
+    if (pendingSidebarLocalActionRef.current?.id !== requestId) return false
+    if (sidebarLocalActionMutationClaimsRef.current.has(requestId)) return false
+    sidebarLocalActionMutationClaimsRef.current.add(requestId)
+    return true
+  }, [])
+  const settleSidebarLocalActionMutation = React.useCallback((requestId: number) => {
+    sidebarLocalActionMutationClaimsRef.current.delete(requestId)
   }, [])
 
   const openChatDrawer = React.useCallback(() => {
@@ -1730,10 +1899,73 @@ export function App() {
     filesSeedRef.current = { id: activeFilesTabId, path: activeFilesTab?.files?.path ?? null }
   }
   const filesSeedPath = filesSeedRef.current.path
+  const activeFilesPathIntentRef = React.useRef<FilesPathIntentReceipt | null>(null)
+  const beginActiveFilesPathIntent = React.useCallback(
+    (tracksFilesPath = true) => {
+      const ownerTabId = activeFilesTabIdRef.current
+      if (!ownerTabId) {
+        vm.beginUserNavigationIntent()
+        return null
+      }
+      vm.beginUserNavigationIntent()
+      if (!tracksFilesPath) {
+        const pending = activeFilesPathIntentRef.current
+        if (pending?.tabId === ownerTabId) vm.failFilesPathIntent(pending)
+        activeFilesPathIntentRef.current = null
+        return null
+      }
+      const receipt = vm.beginFilesPathIntent(ownerTabId)
+      activeFilesPathIntentRef.current = receipt
+      return receipt
+    },
+    [vm.beginFilesPathIntent, vm.beginUserNavigationIntent, vm.failFilesPathIntent]
+  )
+  const handleFilesExplicitNavigationResult = React.useCallback(
+    (
+      receipt: FilesPathIntentReceipt | null,
+      success: boolean,
+      gfsUri: string | null,
+      name: string | null
+    ) => {
+      const activeReceipt = activeFilesPathIntentRef.current
+      if (
+        !receipt ||
+        !activeReceipt ||
+        activeReceipt.tabId !== receipt.tabId ||
+        activeReceipt.sequence !== receipt.sequence
+      )
+        return
+      activeFilesPathIntentRef.current = null
+      const settled = success
+        ? vm.commitFilesPathIntent(receipt, gfsUri, name)
+        : vm.failFilesPathIntent(receipt)
+      if (settled && isGfsSessionGeneration(gfsSessionGeneration)) {
+        void vm.reconcileFilesConvergence(gfsSessionGeneration, resolveFilesConvergenceLocation)
+      }
+    },
+    [
+      gfsSessionGeneration,
+      resolveFilesConvergenceLocation,
+      vm.commitFilesPathIntent,
+      vm.failFilesPathIntent,
+      vm.reconcileFilesConvergence,
+    ]
+  )
   // Keep browser updates tied to the files tab and navigation intent that own
   // them; a delayed resolver from a canceled link cannot retarget another tab.
   const handleFilesLocationChange = React.useCallback(
     (ownerTabId: string, intentSequence: number, gfsUri: string | null, name: string | null) => {
+      const filesIntent = activeFilesPathIntentRef.current
+      if (filesIntent?.tabId === ownerTabId) {
+        const committed = vm.commitFilesPathIntent(filesIntent, gfsUri, name)
+        if (committed) {
+          activeFilesPathIntentRef.current = null
+          if (isGfsSessionGeneration(gfsSessionGeneration)) {
+            void vm.reconcileFilesConvergence(gfsSessionGeneration, resolveFilesConvergenceLocation)
+          }
+        }
+        return
+      }
       if (!vm.isNavigationIntentCurrent(intentSequence)) return
       if (workspaceTabsRef.current.activeTabId !== ownerTabId) return
       const route = gfsResourceActionRouteRef.current
@@ -1756,7 +1988,15 @@ export function App() {
         return setFilesTabPath(state, ownerTabId, gfsUri, name ?? undefined)
       })
     },
-    [pendingGfsResourceAction?.id, setWorkspaceTabs, vm.isNavigationIntentCurrent]
+    [
+      pendingGfsResourceAction?.id,
+      gfsSessionGeneration,
+      resolveFilesConvergenceLocation,
+      setWorkspaceTabs,
+      vm.commitFilesPathIntent,
+      vm.isNavigationIntentCurrent,
+      vm.reconcileFilesConvergence,
+    ]
   )
   const handleActiveFilesLocationChange = React.useCallback(
     (gfsUri: string | null, name: string | null) => {
@@ -1775,6 +2015,9 @@ export function App() {
       vm.navigationIntentSequence,
     ]
   )
+  const handleAuthoritativeFilesMutation = React.useCallback(() => {
+    vm.recordFilesMutation()
+  }, [vm.recordFilesMutation])
   const isActiveGfsDeepLinkCurrent = React.useCallback(() => {
     const request = activeGfsDeepLinkRef.current
     return Boolean(
@@ -4112,7 +4355,12 @@ export function App() {
         return
       }
       const command = getDesktopCommand(commandId)
-      if (origin !== 'palette' && hasBlockingDesktopDialog()) return
+      if (
+        origin !== 'palette' &&
+        hasBlockingDesktopDialog() &&
+        !(pendingSidebarLocalAction && commandId.startsWith('tabs.select'))
+      )
+        return
       const state = workspaceTabsRef.current
       if (!isDesktopCommandEligible(command, desktopCommandContext)) return
       // Universal tab commands: activate a tab then reveal its content (chat load
@@ -4132,6 +4380,14 @@ export function App() {
           () => revealWorkspaceTab(projectedTab, false, true),
           ACTIVE_TAB_LAUNCH
         )
+      }
+      if (
+        pendingSidebarLocalAction &&
+        command.eligibility === 'tab-index' &&
+        command.tabIndex !== undefined
+      ) {
+        selectAndReveal(current => selectWorkspaceTabAt(current, command.tabIndex!))
+        return
       }
       if (commandId === 'commands.open') {
         closeChatLocalSearch(false)
@@ -5165,15 +5421,35 @@ export function App() {
                                         activeGfsDeepLinkForFiles?.ownerTabId
                                       }
                                       isPendingGfsDeepLinkCurrent={isActiveGfsDeepLinkCurrent}
-                                      onExplicitNavigationIntent={vm.beginUserNavigationIntent}
+                                      onExplicitNavigationIntent={beginActiveFilesPathIntent}
+                                      onExplicitNavigationResult={
+                                        handleFilesExplicitNavigationResult
+                                      }
                                       onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
                                       remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                       onLocationChange={handleActiveFilesLocationChange}
+                                      onAuthoritativeGfsMutation={handleAuthoritativeFilesMutation}
+                                      savedLocationUnavailable={Boolean(
+                                        activeFilesTab?.files?.unavailable
+                                      )}
                                       onOpenPreview={handleSidebarOpenPreviewSection}
                                       onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
                                       pendingResourceAction={pendingGfsResourceAction}
                                       onPendingResourceActionHandled={
                                         handleGfsResourceActionHandled
+                                      }
+                                      pendingSidebarLocalAction={pendingSidebarLocalAction}
+                                      onPendingSidebarLocalActionHandled={
+                                        handleSidebarLocalActionHandled
+                                      }
+                                      onSidebarLocalActionFinished={
+                                        handleSidebarLocalActionFinished
+                                      }
+                                      onSidebarLocalActionMutationClaim={
+                                        claimSidebarLocalActionMutation
+                                      }
+                                      onSidebarLocalActionMutationSettled={
+                                        settleSidebarLocalActionMutation
                                       }
                                       routeDialogRequestId={gfsRouteDialogRequestId}
                                       onRouteDialogRequestHandled={
@@ -5312,6 +5588,21 @@ export function App() {
                                 )}
                               </section>
                             </main>
+                            {pendingSidebarLocalAction && vm.navItem !== DESKTOP_ROUTES.files ? (
+                              <FilesPage
+                                key={`sidebar-presenter-${pendingSidebarLocalAction.id}`}
+                                pushToast={vm.pushToast}
+                                pendingSidebarLocalAction={pendingSidebarLocalAction}
+                                onPendingSidebarLocalActionHandled={handleSidebarLocalActionHandled}
+                                onSidebarLocalActionFinished={handleSidebarLocalActionFinished}
+                                onSidebarLocalActionMutationClaim={claimSidebarLocalActionMutation}
+                                onSidebarLocalActionMutationSettled={
+                                  settleSidebarLocalActionMutation
+                                }
+                                onAuthoritativeGfsMutation={handleAuthoritativeFilesMutation}
+                                sidebarPresenterOnly
+                              />
+                            ) : null}
                             {commandPaletteOpen ? (
                               <CommandPalette
                                 platform={platformFromNavigator(navigator.platform)}

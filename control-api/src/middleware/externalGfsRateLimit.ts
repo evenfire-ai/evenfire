@@ -75,6 +75,9 @@ export function externalGfsOperationFor(
   if (path === '/resolve' && method === 'GET') {
     return { operationClass: 'resource', route: `${GFS_PREFIX}/resolve` }
   }
+  if (path === '/convergence-location' && method === 'GET') {
+    return { operationClass: 'resource', route: `${GFS_PREFIX}/convergence-location` }
+  }
   // Indexed resumable-upload routes are part of the same public GFS boundary.
   // Keep capability/status probes in the read budget and create/part/lifecycle
   // mutations in the operation budget so the pre-resolution gate cannot turn a

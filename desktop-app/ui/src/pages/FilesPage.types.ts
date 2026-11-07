@@ -1,7 +1,9 @@
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
+import type { FilesPathIntentReceipt } from '@hooks/domain/useNavigationController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import type { GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import type { Tone } from '@/uiTypes'
+import type { FileExplorerMutationTarget } from '../../../src/appService.js'
 
 export type GfsDriveResource = GfsBrowserChild & {
   sources?: string[]
@@ -29,7 +31,13 @@ export interface FilesPageProps {
   /** Live owner/session/intent fence for this queued request. */
   isPendingGfsDeepLinkCurrent?: () => boolean
   /** App-owned intent ordering for explicit navigation within this Files tab. */
-  onExplicitNavigationIntent?: () => void
+  onExplicitNavigationIntent?: (tracksFilesPath?: boolean) => FilesPathIntentReceipt | null
+  onExplicitNavigationResult?: (
+    receipt: FilesPathIntentReceipt | null,
+    success: boolean,
+    gfsUri: string | null,
+    name: string | null
+  ) => void
   onPendingGfsDeepLinkOutcome?: (
     id: number,
     outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
@@ -69,6 +77,24 @@ export interface FilesPageProps {
   /** One-shot action requested by a sidebar resource row. */
   pendingResourceAction?: GfsResourceActionRequest | null
   onPendingResourceActionHandled?: (requestId: number) => void
+  /** App-owned action receipt for a row-scoped Files operation. */
+  pendingSidebarLocalAction?: {
+    id: number
+    actionId: 'share' | 'move' | 'new-folder' | 'upload-file' | 'replace' | 'delete'
+    targetUri: string
+    targetResource: FileExplorerMutationTarget
+    file?: File
+  } | null
+  onPendingSidebarLocalActionHandled?: (requestId: number) => void
+  onSidebarLocalActionFinished?: (requestId: number) => void
+  /** Claims one mutation attempt across remounts of the local presenter. */
+  onSidebarLocalActionMutationClaim?: (requestId: number) => boolean
+  onSidebarLocalActionMutationSettled?: (requestId: number) => void
+  /** Mounts only the Files-owned action presenter without rendering browser content. */
+  sidebarPresenterOnly?: boolean
+  /** Records authoritative ACL/content mutations for per-tab path convergence. */
+  onAuthoritativeGfsMutation?: (operation: 'delete' | 'move' | 'share') => void
+  savedLocationUnavailable?: boolean
 }
 
 /**

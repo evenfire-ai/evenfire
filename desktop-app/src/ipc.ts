@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
-import { AppService } from './appService.js'
+import { AppService, type FileExplorerMutationRequest } from './appService.js'
 import { runChatGetIndex } from './chatGetIndexHandler.js'
 import {
   getChatStoreBindingGeneration,
@@ -21,6 +21,7 @@ import {
 } from './chatStoreBinding.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import { type GfsSaveStage, saveGfsReceiptToPath } from './gfs/saveOwner.js'
 import { GFS_SESSION_AUTHORITY_ERROR_CODES } from './gfs/sessionAuthority.js'
 import {
   abortZipJob,
@@ -512,6 +513,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   // 'gfs:abort' on Stop; the in-flight request's AbortController ends the
   // producer fetch instead of leaving it to burn the read budget.
   const gfsRequestAborters = new Map<string, AbortController>()
+  const gfsSaveOperations = new Map<
+    string,
+    { signature: string; promise: Promise<unknown>; cancelRequested: boolean }
+  >()
   ipcMain.on('gfs:abort', (event, payload: { requestId?: string }) => {
     try {
       assertTrustedSender(event)
@@ -519,7 +524,11 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       return
     }
     const requestId = payload?.requestId ? sanitizeString(payload.requestId) : ''
-    if (requestId) gfsRequestAborters.get(requestId)?.abort()
+    if (requestId) {
+      const save = gfsSaveOperations.get(requestId)
+      if (save) save.cancelRequested = true
+      gfsRequestAborters.get(requestId)?.abort()
+    }
   })
   function runWithGfsAbortSignal<T>(
     requestId: string | undefined,
@@ -760,12 +769,52 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
   })
-  handleGfs('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
-    assertTrustedSender(event)
-    const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
-    await clipboard.writeText(result.url)
-    return result
-  })
+  handleGfs(
+    'gfs:resolveConvergenceLocation',
+    async (
+      event,
+      payload: {
+        uri?: unknown
+        expectedSessionGeneration?: unknown
+        requestId?: unknown
+      }
+    ) => {
+      assertTrustedSender(event)
+      if (
+        typeof payload?.expectedSessionGeneration !== 'number' ||
+        !Number.isSafeInteger(payload.expectedSessionGeneration) ||
+        payload.expectedSessionGeneration < 0
+      ) {
+        throw new Error('invalid_session_generation')
+      }
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      return runWithGfsAbortSignal(requestId, signal =>
+        service.resolveGfsConvergenceLocation(
+          sanitizeString(payload?.uri),
+          payload.expectedSessionGeneration as number,
+          signal
+        )
+      )
+    }
+  )
+  handleGfs(
+    'gfs:copyDeepLink',
+    async (event, payload: { uri?: unknown; expectedSessionGeneration?: unknown }) => {
+      assertTrustedSender(event)
+      if (
+        typeof payload?.expectedSessionGeneration !== 'number' ||
+        !Number.isSafeInteger(payload.expectedSessionGeneration) ||
+        payload.expectedSessionGeneration < 0
+      ) {
+        throw new Error('invalid_session_generation')
+      }
+      return service.copyGfsResourceDeepLink(
+        sanitizeString(payload?.uri),
+        url => clipboard.writeText(url),
+        payload.expectedSessionGeneration
+      )
+    }
+  )
   handleGfs('gfs:getResourceProfileOrigin', async event => {
     assertTrustedSender(event)
     return service.getGfsResourceProfileOrigin()
@@ -786,6 +835,77 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       return runWithGfsAbortSignal(requestId, signal =>
         service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes, signal)
       )
+    }
+  )
+  handleGfs(
+    'gfs:saveToDisk',
+    async (
+      event,
+      payload: { uri?: unknown; expectedSessionGeneration?: unknown; requestId?: unknown }
+    ) => {
+      assertTrustedSender(event)
+      const uri = sanitizeString(payload?.uri)
+      if (
+        typeof payload?.expectedSessionGeneration !== 'number' ||
+        !Number.isSafeInteger(payload.expectedSessionGeneration) ||
+        payload.expectedSessionGeneration < 0
+      ) {
+        throw new Error('invalid_session_generation')
+      }
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : ''
+      if (!requestId) throw new Error('invalid_gfs_save_request_id')
+      const signature = JSON.stringify([uri, payload.expectedSessionGeneration])
+      const existing = gfsSaveOperations.get(requestId)
+      if (existing) {
+        if (existing.signature !== signature) throw new Error('gfs_save_request_id_reused')
+        return existing.promise
+      }
+      const operation = {
+        signature,
+        promise: Promise.resolve(undefined) as Promise<unknown>,
+        cancelRequested: false,
+      }
+      const pending = runWithGfsAbortSignal(requestId, async signal => {
+        const admitted = await service.admitGfsSave(
+          uri,
+          payload.expectedSessionGeneration as number,
+          signal
+        )
+        let receipt
+        try {
+          receipt = await admitted.receipt
+        } catch (error) {
+          if (signal?.aborted)
+            return { status: 'cancelled_no_publication', uri, filePath: null } as const
+          throw error
+        }
+        if (signal?.aborted)
+          return { status: 'cancelled_no_publication', uri, filePath: null } as const
+        const owner = BrowserWindow.fromWebContents(event.sender) ?? undefined
+        const saveOptions = { defaultPath: receipt.filename, title: 'Save file' }
+        const { completion: dialogCompletion } = await service.beginGfsSaveDialog(
+          admitted.binding,
+          () =>
+            owner ? dialog.showSaveDialog(owner, saveOptions) : dialog.showSaveDialog(saveOptions)
+        )
+        const selected = await dialogCompletion
+        if (selected.canceled || !selected.filePath || signal?.aborted) {
+          return { status: 'cancelled_no_publication', uri: receipt.uri, filePath: null } as const
+        }
+        return saveGfsReceiptToPath({
+          uri: receipt.uri,
+          version: receipt.version,
+          filePath: selected.filePath,
+          bytes: receipt.bytes,
+          signal,
+          cancelRequested: () => operation.cancelRequested,
+          readPublishedIdentity: ipcGfsSaveReadbackTestHook,
+          publishFence: publish => service.publishGfsSave(admitted.binding, publish),
+        })
+      })
+      operation.promise = pending
+      gfsSaveOperations.set(requestId, operation)
+      return pending
     }
   )
   handleGfs('gfs:downloadPreview', async (event, payload: { uri: string; maxBytes: number }) => {
@@ -1103,6 +1223,13 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
         drive,
         sanitizeOptionalInteger(payload?.ifMatch)
       )
+    }
+  )
+  handleGfs(
+    'gfs:dispatchFileExplorerMutation',
+    async (event, payload: FileExplorerMutationRequest) => {
+      assertTrustedSender(event)
+      return service.dispatchFileExplorerMutation(payload)
     }
   )
   handleGfs(
@@ -2619,4 +2746,16 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     ;(await pluginSdk()).setTheme(payload?.theme)
   })
+}
+
+let ipcGfsSaveReadbackTestHook:
+  | ((
+      stage: GfsSaveStage,
+      attempt: 'primary' | 'reconciliation'
+    ) => string | null | Promise<string | null>)
+  | undefined
+
+/** Internal seam for the registered IPC save-owner queue integration test. */
+export function setIpcGfsSaveReadbackTestHook(hook: typeof ipcGfsSaveReadbackTestHook): void {
+  ipcGfsSaveReadbackTestHook = hook
 }

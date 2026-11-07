@@ -47,6 +47,7 @@ import {
   type GfsUriOpenFailure,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
+import type { FilesPathIntentReceipt } from '@hooks/domain/useNavigationController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
 import {
   GFS_AUTHORITY_STALE_TIME_MS,
@@ -103,11 +104,13 @@ import { toastMoveOutcome } from '@/gfs/moveCommit'
 import type {
   MoveCommitExpectedSourceSnapshot,
   MoveCommitOutcome,
+  MoveCommitSourceSnapshot,
   MoveToast,
 } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
+import type { FileExplorerMutationTarget } from '../../../src/appService.js'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type { FilesPageProps, GfsDriveResource, MyAgentEntry } from './FilesPage.types'
 
@@ -358,6 +361,7 @@ export function FilesPage({
   pendingGfsDeepLinkOwnerTabId,
   isPendingGfsDeepLinkCurrent,
   onExplicitNavigationIntent,
+  onExplicitNavigationResult,
   onPendingGfsDeepLinkOutcome,
   remoteGfsChangeEpoch,
   onLocationChange,
@@ -367,7 +371,45 @@ export function FilesPage({
   onRouteDialogRequestHandled,
   pendingResourceAction,
   onPendingResourceActionHandled,
+  pendingSidebarLocalAction,
+  onPendingSidebarLocalActionHandled,
+  onSidebarLocalActionFinished,
+  onSidebarLocalActionMutationClaim,
+  onSidebarLocalActionMutationSettled,
+  sidebarPresenterOnly = false,
+  onAuthoritativeGfsMutation,
+  savedLocationUnavailable = false,
 }: FilesPageProps) {
+  const [presentedSidebarAction, setPresentedSidebarAction] = useState<NonNullable<
+    FilesPageProps['pendingSidebarLocalAction']
+  > | null>(null)
+  const dismissedSidebarActionIdRef = useRef<number | null>(null)
+  const activeSidebarAction =
+    pendingSidebarLocalAction &&
+    pendingSidebarLocalAction.id !== dismissedSidebarActionIdRef.current
+      ? pendingSidebarLocalAction
+      : presentedSidebarAction
+  const sidebarActionTarget = activeSidebarAction?.targetResource ?? null
+  const finishSidebarAction = useCallback(() => {
+    const actionId = activeSidebarAction?.id
+    if (actionId !== undefined) dismissedSidebarActionIdRef.current = actionId
+    setPresentedSidebarAction(null)
+    if (actionId !== undefined) onSidebarLocalActionFinished?.(actionId)
+  }, [activeSidebarAction?.id, onSidebarLocalActionFinished])
+  useEffect(() => {
+    if (!presentedSidebarAction || pendingSidebarLocalAction?.id === presentedSidebarAction.id)
+      return
+    dismissedSidebarActionIdRef.current = presentedSidebarAction.id
+    setPresentedSidebarAction(null)
+    setManageOpen(false)
+    setShareDetailsOpen(false)
+    setCreateFolderOpen(false)
+    setDeleteTarget(null)
+    closeMoveDialog()
+    setRenameTarget(null)
+    sidebarFileTargetRef.current = null
+    uploadTargetRef.current = null
+  }, [pendingSidebarLocalAction?.id, presentedSidebarAction?.id])
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [createFolderParentId, setCreateFolderParentId] = useState<string | null>(null)
@@ -516,6 +558,10 @@ export function FilesPage({
   const dragSessionRef = useRef(0)
   const manageReturnCrumbsRef = useRef<GfsCrumb[] | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
+  const sidebarFileTargetRef = useRef<{
+    actionId: 'upload-file' | 'replace'
+    target: FileExplorerMutationTarget
+  } | null>(null)
   const uploadTargetRef = useRef<{
     parentResourceId: string
     occupiedNames: Set<string>
@@ -527,12 +573,28 @@ export function FilesPage({
   const createFolderDescriptionId = useId()
   const createFolderInputId = useId()
   const queryClient = useQueryClient()
-  const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
+  const ctrl = useGfsBrowserController({
+    grantsListEnabled: manageOpen,
+    sidebarTarget: sidebarActionTarget,
+    sidebarPresenterOnly,
+  })
   const seedPendingRef = useRef(false)
-  const beginExplicitFilesNavigation = useCallback(() => {
-    seedPendingRef.current = false
-    onExplicitNavigationIntent?.()
-  }, [onExplicitNavigationIntent])
+  const beginExplicitFilesNavigation = useCallback(
+    (tracksFilesPath = true) => {
+      seedPendingRef.current = false
+      return onExplicitNavigationIntent?.(tracksFilesPath) ?? null
+    },
+    [onExplicitNavigationIntent]
+  )
+  const claimSidebarLocalActionMutation = useCallback(() => {
+    const requestId = activeSidebarAction?.id
+    if (requestId === undefined) return true
+    return onSidebarLocalActionMutationClaim?.(requestId) ?? true
+  }, [activeSidebarAction?.id, onSidebarLocalActionMutationClaim])
+  const settleSidebarLocalActionMutation = useCallback(() => {
+    const requestId = activeSidebarAction?.id
+    if (requestId !== undefined) onSidebarLocalActionMutationSettled?.(requestId)
+  }, [activeSidebarAction?.id, onSidebarLocalActionMutationSettled])
   useEffect(() => {
     pageActiveRef.current = true
     return () => {
@@ -556,6 +618,19 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+  const sidebarResource = sidebarActionTarget
+    ? ({
+        resourceId: sidebarActionTarget.resourceId,
+        gfsUri: sidebarActionTarget.gfsUri,
+        parentResourceId: sidebarActionTarget.parentResourceId,
+        name: sidebarActionTarget.name,
+        kind: sidebarActionTarget.kind,
+        version: sidebarActionTarget.version,
+        bytes: 0,
+      } satisfies GfsCrumb)
+    : null
+  const manageResource = sidebarActionTarget ? sidebarResource : current
+  const manageAffordances = sidebarActionTarget ? ctrl.sidebarAffordances : affordances
   const accessibleRootResourceIds = useMemo(
     () => new Set(accessibleResources.map(resource => resource.resourceId)),
     [accessibleResources]
@@ -809,20 +884,22 @@ export function FilesPage({
   )
   const closeManage = useCallback(() => {
     setManageOpen(false)
+    if (sidebarActionTarget) finishSidebarAction()
     const returnCrumbs = manageReturnCrumbsRef.current
     manageReturnCrumbsRef.current = null
     if (returnCrumbs) ctrl.restoreCrumbs(returnCrumbs)
-  }, [ctrl.restoreCrumbs])
+  }, [ctrl.restoreCrumbs, finishSidebarAction, sidebarActionTarget])
   const closeCreateFolder = useCallback(() => {
     setCreateFolderOpen(false)
     setCreateFolderName('')
     setCreateFolderError(null)
     setCreateFolderParentId(null)
     setCreateFolderParentName(null)
+    if (sidebarActionTarget) finishSidebarAction()
     const returnCrumbs = manageReturnCrumbsRef.current
     manageReturnCrumbsRef.current = null
     if (returnCrumbs) ctrl.restoreCrumbs(returnCrumbs)
-  }, [ctrl.restoreCrumbs])
+  }, [ctrl.restoreCrumbs, finishSidebarAction, sidebarActionTarget])
   const openCreateFolder = useCallback((parentResourceId: string, parentName: string) => {
     setCreateFolderName('')
     setCreateFolderError(null)
@@ -862,6 +939,7 @@ export function FilesPage({
     if (!accessRevoked) return
     manageReturnCrumbsRef.current = null
     uploadTargetRef.current = null
+    sidebarFileTargetRef.current = null
     setCreateFolderParentId(null)
     setCreateFolderParentName(null)
     setManageOpen(false)
@@ -872,6 +950,7 @@ export function FilesPage({
     setCreateFolderOpen(false)
     setRenameOpen(false)
     setDeleteOpen(false)
+    if (activeSidebarAction) finishSidebarAction()
   }, [accessRevoked])
   /** Central imperative boundary: route any non-query GFS failure through the
    *  controller's authority classifier before toasting. Returns true when the
@@ -1004,6 +1083,68 @@ export function FilesPage({
     }
     return true
   }
+  const requireSidebarTargetPermissions = async (
+    target: FileExplorerMutationTarget,
+    requiredBits: string[],
+    requiredGrantableBits: string[] = []
+  ): Promise<boolean> => {
+    const validTarget =
+      target.drive === GFS_DRIVE_MAIN &&
+      target.gfsUri ===
+        `gfs://${target.drive}/${target.resourceId.replace(/-/g, '').toLowerCase()}` &&
+      target.sessionGeneration === ctrl.sessionGeneration &&
+      Number.isSafeInteger(target.version) &&
+      target.version >= 1
+    if (!validTarget || accessRevoked || !sessionScope || !pageActiveRef.current) return false
+    const targetScope = sessionScope
+    const targetGeneration = target.sessionGeneration
+    const key = desktopQueryKeys.gfsAffordances(
+      targetScope,
+      target.resourceId,
+      target.drive,
+      targetGeneration
+    )
+    try {
+      assertGfsAuthorityRetryAllowed(queryClient, key)
+      const authority = await queryClient.fetchQuery({
+        queryKey: key,
+        queryFn: () => window.clerum.gfs.affordances(target.resourceId, target.drive),
+        staleTime: 0,
+        retry: false,
+      })
+      const liveGeneration = await window.clerum.auth.getSessionGeneration()
+      if (
+        liveGeneration !== targetGeneration ||
+        !pageActiveRef.current ||
+        !isGfsSessionAuthorityCurrent(
+          targetScope,
+          targetGeneration,
+          moveWorkspaceRef.current.sessionScope,
+          moveWorkspaceRef.current.sessionGeneration
+        )
+      )
+        return false
+      const missing = requiredBits.filter(bit => !hasBit(authority, bit))
+      if (missing.length) {
+        pushToast?.(`You do not have ${missing.join(' and ')} access to ${target.name}.`, 'error')
+        return false
+      }
+      const noLongerGrantable = requiredGrantableBits.filter(
+        bit => !authority.grantableBits?.includes(bit)
+      )
+      if (noLongerGrantable.length) {
+        pushToast?.(
+          `You can no longer grant ${noLongerGrantable.join(' and ')} on ${target.name}.`,
+          'error'
+        )
+        return false
+      }
+      return true
+    } catch (error) {
+      failClosedOnAuthorizationError(error, targetScope, targetGeneration)
+      return false
+    }
+  }
   const runWithFreshResourcePermissions = async (
     target: GfsActionTarget,
     authorityResourceId: string,
@@ -1073,17 +1214,21 @@ export function FilesPage({
   // has access" (R1-M3). R1-H3: rows folded before a walk stop are still
   // rendered — the notice only discloses what is missing, choosing accurate
   // copy per coverage state (boundary states are not load failures).
-  const inheritedAccessNotice = ctrl.inheritedAccessError
-    ? INHERITED_DERIVATION_NOTICE
-    : ctrl.inheritedCoverage === 'read-boundary'
+  const inheritedAccessNotice =
+    sidebarActionTarget && !ctrl.sidebarAffordances?.held?.includes('read')
       ? INHERITED_READ_BOUNDARY_NOTICE
-      : ctrl.inheritedCoverage === 'acl-limited'
-        ? INHERITED_ACL_LIMITED_NOTICE
-        : ctrl.inheritedCoverage === 'unavailable'
-          ? INHERITED_DERIVATION_NOTICE
-          : null
+      : ctrl.inheritedAccessError
+        ? INHERITED_DERIVATION_NOTICE
+        : ctrl.inheritedCoverage === 'read-boundary'
+          ? INHERITED_READ_BOUNDARY_NOTICE
+          : ctrl.inheritedCoverage === 'acl-limited'
+            ? INHERITED_ACL_LIMITED_NOTICE
+            : ctrl.inheritedCoverage === 'unavailable'
+              ? INHERITED_DERIVATION_NOTICE
+              : null
   const inheritedAccessNoticeHint =
-    !ctrl.inheritedAccessError && ctrl.inheritedCoverage === 'read-boundary'
+    (sidebarActionTarget && !ctrl.sidebarAffordances?.held?.includes('read')) ||
+    (!ctrl.inheritedAccessError && ctrl.inheritedCoverage === 'read-boundary')
       ? INHERITED_READ_BOUNDARY_HINT
       : null
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
@@ -1173,6 +1318,38 @@ export function FilesPage({
     inherit: boolean,
     isDraftCurrent: () => boolean
   ) => {
+    if (sidebarActionTarget) {
+      if (
+        !(await requireSidebarTargetPermissions(sidebarActionTarget, ['manage_acl'], bits)) ||
+        !isDraftCurrent()
+      )
+        return
+      if (!claimSidebarLocalActionMutation()) return
+      try {
+        await ctrl.grant(subjectKeys, bits, inherit)
+        onAuthoritativeGfsMutation?.('share')
+        if (isDraftCurrent()) {
+          pushToast?.(
+            `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
+            'success'
+          )
+        }
+        await ctrl.refreshGrants()
+      } catch (grantError) {
+        if (
+          failClosedOnAuthorizationError(
+            grantError,
+            sessionScope,
+            sidebarActionTarget.sessionGeneration
+          )
+        )
+          return
+        throw grantError
+      } finally {
+        settleSidebarLocalActionMutation()
+      }
+      return
+    }
     if (
       !current ||
       !(await requireFreshRowPermissions(
@@ -1188,6 +1365,7 @@ export function FilesPage({
     }
     try {
       await ctrl.grant(subjectKeys, bits, inherit)
+      onAuthoritativeGfsMutation?.('share')
     } catch (grantError) {
       if (failClosedOnAuthorizationError(grantError)) return
       throw grantError
@@ -1203,6 +1381,28 @@ export function FilesPage({
   }
 
   const handleRevokeGrant = async (grantId: string, label: string) => {
+    if (sidebarActionTarget) {
+      if (!(await requireSidebarTargetPermissions(sidebarActionTarget, ['manage_acl']))) return
+      if (!claimSidebarLocalActionMutation()) return
+      try {
+        await ctrl.revokeGrantForSnapshot(sidebarActionTarget, grantId)
+        onAuthoritativeGfsMutation?.('share')
+        pushToast?.(`Access revoked for ${label}`, 'success')
+      } catch (revokeError) {
+        if (
+          failClosedOnAuthorizationError(
+            revokeError,
+            sessionScope,
+            sidebarActionTarget.sessionGeneration
+          )
+        )
+          return
+        pushToast?.(describeGfsGrantError(revokeError).message, 'error')
+      } finally {
+        settleSidebarLocalActionMutation()
+      }
+      return
+    }
     if (
       !current ||
       !(await requireFreshRowPermissions(current.resourceId, current.name, ['manage_acl']))
@@ -1211,6 +1411,7 @@ export function FilesPage({
     }
     try {
       await ctrl.revokeGrant(grantId)
+      onAuthoritativeGfsMutation?.('share')
       pushToast?.(`Access revoked for ${label}`, 'success')
     } catch (revokeError) {
       if (failClosedOnAuthorizationError(revokeError)) return
@@ -1219,6 +1420,28 @@ export function FilesPage({
   }
 
   const handleRevokeShare = async (shareId: string, label: string) => {
+    if (sidebarActionTarget) {
+      if (!(await requireSidebarTargetPermissions(sidebarActionTarget, ['manage_acl']))) return
+      if (!claimSidebarLocalActionMutation()) return
+      try {
+        await ctrl.revokeShareForSnapshot(sidebarActionTarget, shareId)
+        onAuthoritativeGfsMutation?.('share')
+        pushToast?.(`Shared access revoked for ${label}`, 'success')
+      } catch (revokeError) {
+        if (
+          failClosedOnAuthorizationError(
+            revokeError,
+            sessionScope,
+            sidebarActionTarget.sessionGeneration
+          )
+        )
+          return
+        pushToast?.(describeGfsGrantError(revokeError).message, 'error')
+      } finally {
+        settleSidebarLocalActionMutation()
+      }
+      return
+    }
     if (
       !current ||
       !(await requireFreshRowPermissions(current.resourceId, current.name, ['manage_acl']))
@@ -1227,6 +1450,7 @@ export function FilesPage({
     }
     try {
       await ctrl.revokeShare(shareId)
+      onAuthoritativeGfsMutation?.('share')
       pushToast?.(`Shared access revoked for ${label}`, 'success')
     } catch (revokeError) {
       if (failClosedOnAuthorizationError(revokeError)) return
@@ -1550,8 +1774,32 @@ export function FilesPage({
 
   const handleDownload = async (uri: string, name: string) => {
     try {
-      await saveGfsFileToDisk(uri, name)
-      pushToast?.(`Downloaded ${name}`, 'success')
+      const sessionGeneration = ctrl.sessionGeneration
+      if (!isGfsSessionGeneration(sessionGeneration)) return
+      const receipt = await saveGfsFileToDisk(uri, name, sessionGeneration)
+      if (
+        receipt.status === 'saved_access_verified' ||
+        receipt.status === 'published_finalization_warning'
+      ) {
+        if (
+          receipt.status === 'published_finalization_warning' ||
+          receipt.stageCleanup === 'failed'
+        ) {
+          pushToast?.(
+            `Downloaded ${name}, but private stage cleanup failed: ${receipt.residualStagePath ?? 'path unavailable'}`,
+            'error'
+          )
+        } else pushToast?.(`Downloaded ${name}`, 'success')
+      } else if (receipt.status === 'failed_no_publication') {
+        pushToast?.(
+          `Download failed; private stage cleanup failed: ${receipt.residualStagePath}`,
+          'error'
+        )
+      } else if (receipt.status === 'published_private_warning') {
+        pushToast?.(`Downloaded ${name} with private permissions.`, 'error')
+      } else if (receipt.status === 'published_access_unverified') {
+        pushToast?.(`Downloaded ${name}, but its final permissions could not be verified.`, 'error')
+      }
     } catch (downloadError) {
       if (failClosedOnAuthorizationError(downloadError)) return
       pushToast?.(describeGfsReadError(downloadError).message, 'error')
@@ -1626,7 +1874,9 @@ export function FilesPage({
 
   const handleCopyLink = async (uri: string) => {
     try {
-      const result = await window.clerum.gfs.copyDeepLink?.(uri)
+      const sessionGeneration = ctrl.sessionGeneration
+      if (!isGfsSessionGeneration(sessionGeneration)) return
+      const result = await window.clerum.gfs.copyDeepLink?.(uri, sessionGeneration)
       if (!result?.url) throw new Error('Shareable EvenDrive links are unavailable in this version')
       pushToast?.('Shareable EvenDrive link copied', 'success')
     } catch (clipboardError) {
@@ -1654,13 +1904,19 @@ export function FilesPage({
 
   const handleRefreshCurrent = async () => {
     if (!current || refreshingCurrent) return
-    beginExplicitFilesNavigation()
+    const intentReceipt = beginExplicitFilesNavigation()
     setRefreshingCurrent(true)
     try {
       const refreshed = await ctrl.refreshCurrentLocation()
+      if (!pageActiveRef.current) {
+        onExplicitNavigationResult?.(intentReceipt, false, null, null)
+        return
+      }
       if (!refreshed) throw new Error('The resource could not be refreshed')
+      onExplicitNavigationResult?.(intentReceipt, true, current.gfsUri, current.name)
       pushToast?.('EvenDrive refreshed', 'success')
     } catch (refreshError) {
+      onExplicitNavigationResult?.(intentReceipt, false, null, null)
       pushToast?.(
         refreshError instanceof Error ? refreshError.message : 'Could not refresh EvenDrive',
         'error'
@@ -1681,7 +1937,8 @@ export function FilesPage({
       originatingSessionScope: string | null,
       originatingSessionGeneration: number | null
     ) => boolean,
-    filesActionSeedRequestId?: number
+    filesActionSeedRequestId?: number,
+    explicitIntentReceipt: FilesPathIntentReceipt | null = null
   ) => {
     const returnCrumbs = [...crumbs]
     const shouldContinue = () => pageActiveRef.current && (isCurrent?.() ?? true)
@@ -1692,8 +1949,14 @@ export function FilesPage({
     // The resolver may settle after this keyed FilesPage has unmounted or the
     // pending link has changed. Do not let that stale continuation open a
     // preview, start a download, or restore this page's breadcrumbs.
-    if (!shouldContinue()) return false
-    if (opened === false) return false
+    if (!shouldContinue()) {
+      onExplicitNavigationResult?.(explicitIntentReceipt, false, null, null)
+      return false
+    }
+    if (opened === false) {
+      onExplicitNavigationResult?.(explicitIntentReceipt, false, null, null)
+      return false
+    }
     if (typeof opened === 'object' && opened.kind === 'file') {
       const preview = resolveGfsPreview(opened)
       // A valid pending-link preview callback may select its new Preview tab.
@@ -1702,6 +1965,12 @@ export function FilesPage({
       // the Files-page ownership predicate.
       if (preview && openPendingPreview) {
         const returnCrumb = returnCrumbs.at(-1)
+        onExplicitNavigationResult?.(
+          explicitIntentReceipt,
+          true,
+          returnCrumb?.gfsUri ?? null,
+          returnCrumb?.name ?? null
+        )
         const previewOpened = openPendingPreview(
           preview,
           {
@@ -1731,6 +2000,7 @@ export function FilesPage({
         // page so the pending-action consumer can run its existing descriptor;
         // generic link handling would open Preview or start a second download.
         onOpened?.()
+        onExplicitNavigationResult?.(explicitIntentReceipt, true, opened.gfsUri, opened.name)
         return true
       }
       const previewOpened = openFilePreview(
@@ -1741,10 +2011,20 @@ export function FilesPage({
       )
       if (!shouldContinue()) return false
       ctrl.restoreCrumbs(returnCrumbs)
+      const returnCrumb = returnCrumbs.at(-1)
+      onExplicitNavigationResult?.(
+        explicitIntentReceipt,
+        true,
+        returnCrumb?.gfsUri ?? null,
+        returnCrumb?.name ?? null
+      )
       if (!previewOpened) {
         await handleDownload(opened.gfsUri, opened.name)
       }
       if (!shouldContinue()) return false
+    }
+    if (typeof opened === 'object' && opened.kind === 'directory') {
+      onExplicitNavigationResult?.(explicitIntentReceipt, true, opened.gfsUri, opened.name)
     }
     onOpened?.()
     return true
@@ -1913,6 +2193,40 @@ export function FilesPage({
     const parentResourceId = createFolderParentId
     if (!requestedName || !parentResourceId) return
     const parentName = createFolderParentName ?? 'folder'
+    if (sidebarActionTarget) {
+      if (!(await requireSidebarTargetPermissions(sidebarActionTarget, ['write']))) {
+        finishSidebarAction()
+        return
+      }
+      if (!claimSidebarLocalActionMutation()) return
+      setCreateFolderError(null)
+      try {
+        const name = await normalizeGfsResourceName(requestedName)
+        await ctrl.dispatchSidebarMutation({
+          operation: 'create-folder',
+          target: sidebarActionTarget,
+          name,
+        })
+        setCreateFolderOpen(false)
+        finishSidebarAction()
+        pushToast?.(`Folder ${name} created`, 'success')
+      } catch (createError) {
+        if (
+          failClosedOnAuthorizationError(
+            createError,
+            sessionScope,
+            sidebarActionTarget.sessionGeneration
+          )
+        )
+          return
+        setCreateFolderError(
+          createError instanceof Error ? createError.message : String(createError)
+        )
+      } finally {
+        settleSidebarLocalActionMutation()
+      }
+      return
+    }
     if (!(await requireFreshRowPermissions(parentResourceId, parentName, ['write']))) return
     setCreateFolderError(null)
     try {
@@ -1933,6 +2247,10 @@ export function FilesPage({
     occupiedNames = new Set(items.map(item => item.name)),
     parentName = current?.name ?? 'folder'
   ) => {
+    if (sidebarActionTarget) {
+      await performSidebarFileAction(sidebarActionTarget, file, 'upload-file')
+      return
+    }
     if (!file || !parentResourceId) return
     if (!(await requireFreshRowPermissions(parentResourceId, parentName, ['write']))) return
     try {
@@ -1981,6 +2299,79 @@ export function FilesPage({
   ) => {
     uploadTargetRef.current = { parentResourceId, occupiedNames, parentName }
     uploadInputRef.current?.click()
+  }
+
+  const performSidebarFileAction = async (
+    target: FileExplorerMutationTarget,
+    file: File | null | undefined,
+    action: 'upload-file' | 'replace'
+  ) => {
+    if (!file) return
+    try {
+      if (action === 'upload-file' && target.kind !== 'directory') {
+        throw new Error('Upload requires a folder target.')
+      }
+      if (action === 'replace' && target.kind !== 'file') {
+        throw new Error('Replace requires a file target.')
+      }
+      assertGfsFileUploadSize(file.size)
+      if (!(await requireSidebarTargetPermissions(target, ['write']))) {
+        finishSidebarAction()
+        return
+      }
+      if (!claimSidebarLocalActionMutation()) return
+      const filePath = window.clerum.gfs.getPathForFile(file)
+      try {
+        if (!filePath) throw new Error('Could not resolve the selected local file')
+        if (action === 'replace') {
+          await ctrl.dispatchSidebarMutation({ operation: 'replace', target, filePath })
+          pushToast?.(`Replaced ${target.name}`, 'success')
+        } else {
+          const normalizedName = await normalizeGfsResourceName(file.name)
+          const reservation = uploadNameReservationsRef.current.begin(
+            target.resourceId,
+            normalizedName,
+            new Set()
+          )
+          try {
+            for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
+              const name = reservation.reserveNext()
+              try {
+                if (!(await requireSidebarTargetPermissions(target, ['write']))) {
+                  finishSidebarAction()
+                  return
+                }
+                await ctrl.dispatchSidebarMutation({ operation: 'upload', target, name, filePath })
+                reservation.markSuccess(name)
+                pushToast?.(`Uploaded ${name}`, 'success')
+                break
+              } catch (uploadError) {
+                const decision = gfsUploadNameRetryDecision(uploadError, { attempt })
+                if (decision === 'terminal') throw uploadError
+                reservation.markConflict(name)
+                if (decision === 'exhausted') throw new Error(GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE)
+              }
+            }
+          } finally {
+            reservation.release()
+          }
+        }
+        finishSidebarAction()
+      } catch (actionError) {
+        if (failClosedOnAuthorizationError(actionError, sessionScope, target.sessionGeneration))
+          return
+        pushToast?.(
+          actionError instanceof Error ? actionError.message : String(actionError),
+          'error'
+        )
+      } finally {
+        settleSidebarLocalActionMutation()
+      }
+    } catch (actionError) {
+      if (failClosedOnAuthorizationError(actionError, sessionScope, target.sessionGeneration))
+        return
+      pushToast?.(actionError instanceof Error ? actionError.message : String(actionError), 'error')
+    }
   }
 
   const clearResourceDrag = () => {
@@ -2269,7 +2660,8 @@ export function FilesPage({
     expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot,
     reportOutcomes = true,
     authorizeNumberedRename?: (proposedName: string) => Promise<boolean>,
-    authoritativeSessionGeneration?: number
+    authoritativeSessionGeneration?: number,
+    presentedSourceSnapshot?: MoveCommitSourceSnapshot
   ): Promise<MoveCommitOutcome> => {
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
@@ -2326,6 +2718,7 @@ export function FilesPage({
           source,
           destination,
           ...(expectedSourceSnapshot ? { expectedSourceSnapshot } : {}),
+          ...(presentedSourceSnapshot ? { presentedSourceSnapshot } : {}),
           occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
           ...(authoritativeSessionGeneration !== undefined
             ? { sessionGeneration: authoritativeSessionGeneration }
@@ -2560,6 +2953,7 @@ export function FilesPage({
     if (!(await requireFreshRowPermissions(current.resourceId, current.name, ['delete']))) return
     try {
       await ctrl.deleteResource(current.resourceId, current.version)
+      onAuthoritativeGfsMutation?.('delete')
       setDeleteOpen(false)
       closeManage()
       pushToast?.(`Deleted ${current.name}`, 'success')
@@ -2570,12 +2964,44 @@ export function FilesPage({
   }
 
   const handleDeleteResource = async (resource: GfsActionTarget) => {
+    if (sidebarActionTarget?.resourceId === resource.resourceId) {
+      if (!(await requireSidebarTargetPermissions(sidebarActionTarget, ['delete']))) {
+        setDeleteTarget(null)
+        finishSidebarAction()
+        return
+      }
+      if (!claimSidebarLocalActionMutation()) return
+      try {
+        await ctrl.dispatchSidebarMutation({ operation: 'delete', target: sidebarActionTarget })
+        onAuthoritativeGfsMutation?.('delete')
+        pushToast?.(`Deleted ${sidebarActionTarget.name}`, 'success')
+        finishSidebarAction()
+      } catch (deleteError) {
+        if (
+          !failClosedOnAuthorizationError(
+            deleteError,
+            sessionScope,
+            sidebarActionTarget.sessionGeneration
+          )
+        ) {
+          pushToast?.(
+            deleteError instanceof Error ? deleteError.message : String(deleteError),
+            'error'
+          )
+        }
+      } finally {
+        settleSidebarLocalActionMutation()
+        setDeleteTarget(null)
+      }
+      return
+    }
     if (!(await requireFreshRowPermissions(resource.resourceId, resource.name, ['delete']))) {
       setDeleteTarget(null)
       return
     }
     try {
       await ctrl.deleteResource(resource.resourceId, resource.version)
+      onAuthoritativeGfsMutation?.('delete')
       pushToast?.(`Deleted ${resource.name}`, 'success')
     } catch (deleteError) {
       if (!failClosedOnAuthorizationError(deleteError)) {
@@ -2891,15 +3317,36 @@ export function FilesPage({
       // The permission-checking state belongs only to the reads above. Let the
       // consent prompt remain actionable after the original PATCH settles.
       setMovePermissionStatus(null)
-      const outcome = await runMoveCommit(
-        moveSource,
-        { resourceId: destinationId, name: destinationName },
-        () => pageActiveRef.current && ownsDialog() && contextStillMatches(),
-        expectedSourceSnapshot,
-        false,
-        authorizeNumberedRename,
-        authoritativeSessionGeneration ?? undefined
-      )
+      if (sidebarActionTarget && !claimSidebarLocalActionMutation()) return
+      let outcome: MoveCommitOutcome
+      try {
+        outcome = await runMoveCommit(
+          moveSource,
+          { resourceId: destinationId, name: destinationName },
+          () => pageActiveRef.current && ownsDialog() && contextStillMatches(),
+          expectedSourceSnapshot,
+          false,
+          authorizeNumberedRename,
+          authoritativeSessionGeneration ?? undefined,
+          sidebarActionTarget?.resourceId === target.resourceId &&
+            sidebarActionTarget.gfsUri === moveSource.gfsUri &&
+            sidebarActionTarget.kind === moveSource.kind &&
+            sidebarActionTarget.version === target.version &&
+            sidebarActionTarget.parentResourceId === sourceParentId
+            ? {
+                resourceId: target.resourceId,
+                gfsUri: moveSource.gfsUri,
+                kind: moveSource.kind,
+                name: target.name,
+                version: target.version,
+                parentResourceId: sourceParentId,
+              }
+            : undefined
+        )
+      } finally {
+        if (sidebarActionTarget) settleSidebarLocalActionMutation()
+      }
+      if (outcome.status === 'committed') onAuthoritativeGfsMutation?.('move')
       if (!pageActiveRef.current) return
       if (!sessionStillMatches()) {
         closeOwnedDialog()
@@ -3115,9 +3562,10 @@ export function FilesPage({
       ['manage_acl'],
       () => {
         if (resource.resourceId !== current?.resourceId) {
-          beginExplicitFilesNavigation()
+          const intentReceipt = beginExplicitFilesNavigation()
           manageReturnCrumbsRef.current = [...crumbs]
           ctrl.openResource(resource)
+          onExplicitNavigationResult?.(intentReceipt, true, resource.gfsUri, resource.name)
         } else {
           manageReturnCrumbsRef.current = resource.kind === 'file' ? crumbs.slice(0, -1) : null
         }
@@ -3335,10 +3783,16 @@ export function FilesPage({
       pushToast?.(`You do not have read access to ${resource.name || resource.drive}`, 'error')
       return
     }
-    beginExplicitFilesNavigation()
+    let intentReceipt: FilesPathIntentReceipt | null
+    if (resource.kind === 'file') {
+      intentReceipt = beginExplicitFilesNavigation(false)
+    } else {
+      intentReceipt = beginExplicitFilesNavigation()
+    }
     if (resource.kind === 'directory') {
       if (currentIsFolder) ctrl.openChild(resource)
       else ctrl.openResource(resource)
+      onExplicitNavigationResult?.(intentReceipt, true, resource.gfsUri, resource.name)
       return
     }
     if (openFilePreview(resource)) return
@@ -3400,483 +3854,140 @@ export function FilesPage({
     current && crumbs.some(crumb => crumb.resourceId === current.resourceId)
   )
 
+  const handledSidebarActionIdRef = useRef<number | null>(null)
+  useEffect(() => {
+    const action = activeSidebarAction
+    if (!action || handledSidebarActionIdRef.current === action.id) return
+    handledSidebarActionIdRef.current = action.id
+    const target = action.targetResource
+    if (
+      action.targetUri !== target.gfsUri ||
+      target.drive !== GFS_DRIVE_MAIN ||
+      target.sessionGeneration !== ctrl.sessionGeneration
+    ) {
+      pushToast?.(
+        'This file action is no longer current. Refresh the file list and try again.',
+        'error'
+      )
+      onPendingSidebarLocalActionHandled?.(action.id)
+      onSidebarLocalActionFinished?.(action.id)
+      return
+    }
+    setPresentedSidebarAction(action)
+    onPendingSidebarLocalActionHandled?.(action.id)
+    if (action.actionId === 'share') {
+      void requireSidebarTargetPermissions(target, ['manage_acl']).then(allowed => {
+        if (allowed && pageActiveRef.current) setManageOpen(true)
+        else if (pageActiveRef.current) finishSidebarAction()
+      })
+      return
+    }
+    if (action.actionId === 'move') {
+      showMoveDialog(target)
+      return
+    }
+    if (action.actionId === 'new-folder') {
+      if (target.kind !== 'directory') {
+        pushToast?.('New folder requires a folder target.', 'error')
+        finishSidebarAction()
+        return
+      }
+      setCreateFolderParentId(target.resourceId)
+      setCreateFolderParentName(target.name)
+      setCreateFolderName('')
+      setCreateFolderError(null)
+      setCreateFolderOpen(true)
+      return
+    }
+    if (action.actionId === 'delete') {
+      setDeleteTarget(target)
+      return
+    }
+    if (action.file) {
+      void performSidebarFileAction(target, action.file, action.actionId)
+    } else {
+      sidebarFileTargetRef.current = { actionId: action.actionId, target }
+      uploadInputRef.current?.click()
+    }
+  }, [
+    activeSidebarAction?.id,
+    ctrl.sessionGeneration,
+    finishSidebarAction,
+    onSidebarLocalActionFinished,
+    onPendingSidebarLocalActionHandled,
+    pushToast,
+  ])
+
   return (
-    <section className="page da-gfs-page">
-      <GfsResourceTitlebarActions
-        target={titlebarLeadingTarget}
-        onRefresh={current ? () => void handleRefreshCurrent() : () => void ctrl.retryDiscovery()}
-        refreshing={current ? refreshingCurrent : visibleLoading}
-        onCopyLink={current ? () => void handleCopyLink(current.gfsUri) : undefined}
-        onOpenLink={() => setOpenLinkOpen(true)}
-      />
-      {/* The drop verdict is painted on the target row; this live region is
+    <>
+      {!sidebarPresenterOnly ? (
+        savedLocationUnavailable ? (
+          <section
+            className="page da-gfs-page"
+            role="status"
+            aria-label="File location unavailable"
+          >
+            <StatusBanner
+              tone="info"
+              text="This file location is no longer available. Open an authorized location from the file list."
+            />
+          </section>
+        ) : (
+          <section className="page da-gfs-page">
+            <GfsResourceTitlebarActions
+              target={titlebarLeadingTarget}
+              onRefresh={
+                current ? () => void handleRefreshCurrent() : () => void ctrl.retryDiscovery()
+              }
+              refreshing={current ? refreshingCurrent : visibleLoading}
+              onCopyLink={current ? () => void handleCopyLink(current.gfsUri) : undefined}
+              onOpenLink={() => setOpenLinkOpen(true)}
+            />
+            {/* The drop verdict is painted on the target row; this live region is
           its spoken form, so a screen reader learns whether the folder under
           the pointer accepts the move (RP-026). */}
-      <p aria-live="polite" className="visually-hidden">
-        {dropVerdictAnnouncement}
-      </p>
-      <div className="page-header">
-        <h2>Files</h2>
-        <p className="muted">Browse and manage everything shared with you in one place.</p>
-      </div>
+            <p aria-live="polite" className="visually-hidden">
+              {dropVerdictAnnouncement}
+            </p>
+            <div className="page-header">
+              <h2>Files</h2>
+              <p className="muted">Browse and manage everything shared with you in one place.</p>
+            </div>
 
-      <div className="page-layout da-gfs-layout">
-        <section
-          className="page-card da-gfs-drive"
-          aria-label="EvenDrive browser"
-          aria-busy={driveBusy}
-          onDragEnter={handleGfsDragEnter}
-          onDragLeave={handleGfsDragLeave}
-          onDragOver={handleGfsDragOver}
-          onDrop={event => void handleGfsDrop(event)}
-        >
-          <div className="page-card__header da-gfs-drive__header">
-            <div className="da-gfs-drive__title-row">
-              <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
-                <Button
-                  className="da-gfs-drive__breadcrumb"
-                  color="neutral"
-                  disabled={!current}
-                  onClick={() => {
-                    beginExplicitFilesNavigation()
-                    manageReturnCrumbsRef.current = null
-                    setManageOpen(false)
-                    ctrl.reset()
-                  }}
-                  variant="text"
-                >
-                  Shared with me
-                </Button>
-                {crumbs.map((crumb, index) => (
-                  <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
-                    <IconChevronRight aria-hidden="true" />
-                    {renameTarget?.resourceId === crumb.resourceId ? (
-                      <GfsInlineRename
-                        className="da-gfs-drive__inline-rename"
-                        onCancel={() => setRenameTarget(null)}
-                        onChange={setRenameDraft}
-                        onSubmit={() => void handleRenameTarget()}
-                        value={renameDraft}
-                        busy={ctrl.mutating}
-                      />
-                    ) : (
+            <div className="page-layout da-gfs-layout">
+              <section
+                className="page-card da-gfs-drive"
+                aria-label="EvenDrive browser"
+                aria-busy={driveBusy}
+                onDragEnter={handleGfsDragEnter}
+                onDragLeave={handleGfsDragLeave}
+                onDragOver={handleGfsDragOver}
+                onDrop={event => void handleGfsDrop(event)}
+              >
+                <div className="page-card__header da-gfs-drive__header">
+                  <div className="da-gfs-drive__title-row">
+                    <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
                       <Button
-                        className={`da-gfs-drive__breadcrumb${
-                          dragOverFolderId === crumb.resourceId
-                            ? ' da-gfs-drive__breadcrumb--allowed'
-                            : ''
-                        }`}
+                        className="da-gfs-drive__breadcrumb"
                         color="neutral"
-                        // The active crumb stays a live drop target; only its click is inert.
-                        aria-current={index === crumbs.length - 1 ? 'page' : undefined}
-                        title={
-                          gfsDropVerdictReason(dropStatesById[crumb.resourceId]) !== undefined
-                            ? gfsDropVerdictLiveAnnouncement(
-                                dropStatesById[crumb.resourceId]!,
-                                crumb.name,
-                                dragSourceName ?? undefined
-                              )
-                            : undefined
-                        }
-                        data-drop-state={dropStatesById[crumb.resourceId]?.state}
-                        data-drop-reason={gfsDropVerdictReason(dropStatesById[crumb.resourceId])}
-                        onClick={
-                          index === crumbs.length - 1
-                            ? undefined
-                            : () => {
-                                beginExplicitFilesNavigation()
-                                ctrl.goToCrumb(index)
-                              }
-                        }
-                        onDragEnter={event => handleCrumbDragOver(event, crumb, index)}
-                        onDragOver={event => handleCrumbDragOver(event, crumb, index)}
-                        onDragLeave={handleFolderDragLeave}
-                        onDrop={event =>
-                          void handleFolderDrop(event, {
-                            resourceId: crumb.resourceId,
-                            name: crumb.name,
-                            kind: 'directory',
-                          })
-                        }
+                        disabled={!current}
+                        onClick={() => {
+                          const intentReceipt = beginExplicitFilesNavigation()
+                          manageReturnCrumbsRef.current = null
+                          setManageOpen(false)
+                          ctrl.reset()
+                          onExplicitNavigationResult?.(intentReceipt, true, null, null)
+                        }}
                         variant="text"
                       >
-                        {crumb.name}
+                        Shared with me
                       </Button>
-                    )}
-                  </span>
-                ))}
-              </nav>
-              {current && !currentIsFile && currentIsBeingRenamed && !currentIsInBreadcrumbs ? (
-                <GfsInlineRename
-                  className="da-gfs-drive__inline-rename"
-                  onCancel={() => setRenameTarget(null)}
-                  onChange={setRenameDraft}
-                  onSubmit={() => void handleRenameTarget()}
-                  value={renameDraft}
-                  busy={ctrl.mutating}
-                />
-              ) : null}
-              {current && !currentIsFile && !currentIsBeingRenamed ? (
-                <GfsResourceMenu
-                  actions={getGfsMenuActions(currentResourceActions)}
-                  resourceName={current.name}
-                />
-              ) : null}
-            </div>
-            <div className="da-gfs-drive__upload-input">
-              <input
-                aria-label="Upload file"
-                aria-hidden="true"
-                className="visually-hidden"
-                ref={uploadInputRef}
-                tabIndex={-1}
-                type="file"
-                onChange={event => {
-                  const file = event.currentTarget.files?.[0]
-                  const target = uploadTargetRef.current
-                  uploadTargetRef.current = null
-                  event.currentTarget.value = ''
-                  if (!file || !target) return
-                  void handleUploadFile(
-                    file,
-                    target.parentResourceId,
-                    target.occupiedNames,
-                    target.parentName
-                  )
-                }}
-              />
-            </div>
-          </div>
-
-          {dragActive || droppedUploadCount > 0 ? (
-            <div className="composer-drop-overlay da-gfs-drop-overlay" role="status">
-              {droppedUploadCount > 0
-                ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
-                : droppedUploadRestriction ||
-                  `Drop files to upload to ${current?.name || 'this folder'}`}
-            </div>
-          ) : null}
-
-          {dropSessionLost ? (
-            // Persistent (A11): the refusal outlives the dead gesture and the
-            // revoked surface below — it is not a one-shot toast.
-            <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
-          ) : null}
-          {zipJob ? (
-            <div className="da-gfs-zip-progress" role="status" data-testid="gfs-zip-progress">
-              <span className="da-gfs-zip-progress__label">
-                {zipJob.progress.phase === 'listing'
-                  ? `Preparing ${zipJob.folderName}.zip — reading folder contents…`
-                  : zipJob.progress.phase === 'downloading'
-                    ? `Preparing ${zipJob.folderName}.zip — downloading ${zipJob.progress.filesAdded} of ${zipJob.progress.filesFound} ${zipJob.progress.filesFound === 1 ? 'file' : 'files'}…`
-                    : `Preparing ${zipJob.folderName}.zip — assembling archive…`}
-              </span>
-              <button
-                type="button"
-                className="da-gfs-zip-progress__stop"
-                aria-label="Stop preparing zip"
-                onClick={() => zipAbortRef.current?.abort()}
-              >
-                Stop
-              </button>
-            </div>
-          ) : null}
-
-          {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
-          {current && loadingAffordances ? (
-            <div role="status">
-              <StatusBanner tone="info" text={`Checking permissions for ${current.name}…`} />
-            </div>
-          ) : null}
-          {current &&
-          affordancesError &&
-          (ctrl.affordancesHttpStatus === 429 ||
-            ctrl.affordancesHttpStatus === 403 ||
-            ctrl.affordancesHttpStatus === 404) ? (
-            <div role="alert">
-              <StatusBanner
-                tone="error"
-                text={
-                  ctrl.affordancesHttpStatus === 429
-                    ? 'Too many file requests. Wait before retrying permissions.'
-                    : 'Could not verify permissions for ' +
-                      current.name +
-                      ': access could not be confirmed.'
-                }
-              />
-              {ctrl.affordancesHttpStatus === 429 ? (
-                <Button
-                  color="secondary"
-                  onClick={() =>
-                    void fetchRowAuthority(current.resourceId, current.name, GFS_DRIVE_MAIN)
-                  }
-                >
-                  Retry permission check
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-          {Object.entries(ctrl.moveSourceParentStatusById ?? {}).map(([resourceId, status]) => {
-            if (!status.error || resourceId === current?.resourceId) return null
-            const rateLimited = status.rateLimited && status.httpStatus === 429
-            return (
-              <div key={resourceId} role="alert">
-                <StatusBanner tone={rateLimited ? 'warn' : 'error'}>
-                  <span>Could not verify Move permissions: {status.error}</span>
-                </StatusBanner>
-                <Button
-                  color="secondary"
-                  onClick={() =>
-                    void fetchRowAuthority(resourceId, 'the source folder', GFS_DRIVE_MAIN)
-                  }
-                >
-                  Retry permission check
-                </Button>
-              </div>
-            )
-          })}
-          {pendingGfsDeepLinkFailure ? (
-            <div role="alert">
-              <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
-              {pendingGfsDeepLinkFailure.retryable ? (
-                <Button
-                  color="secondary"
-                  onClick={() => {
-                    setPendingGfsDeepLinkFailure(null)
-                    setGfsDeepLinkRetry(current => ({
-                      id: pendingGfsDeepLinkFailure.id,
-                      request:
-                        current?.id === pendingGfsDeepLinkFailure.id ? current.request + 1 : 1,
-                    }))
-                  }}
-                  size="sm"
-                  variant="outline"
-                >
-                  Retry opening link
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-          {unavailableLocation ? (
-            <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
-          ) : null}
-          {visibleError && !accessRevoked && !blockingFailure ? (
-            // Presented, not raw. The banner is the non-blocking half of the
-            // same read-plane failure the card shows, so it must not be the one
-            // surface left leaking `Error invoking remote method '…'` at the
-            // user — which is what it did for every failure the card declines
-            // to take over, a rate-limited `Load more` among them.
-            <StatusBanner tone="error" text={describeGfsReadError(visibleError).message} />
-          ) : null}
-
-          {accessRevoked ? (
-            <>
-              {/* The revoked surface owns the session-ended sentence (A11): it
-                  outlives any gesture's ownership, so a drag whose probe died
-                  stays explained even after the revocation invalidated it. */}
-              <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
-              <EmptyState
-                title="File access is not authorized"
-                body="Your current Desktop session cannot access this location. Sign in again or contact an administrator."
-              />
-              <div className="da-gfs-footer-actions">
-                <Button onClick={() => ctrl.retryAccess()} size="sm" variant="outline">
-                  Retry file access
-                </Button>
-              </div>
-            </>
-          ) : blockingFailure ? (
-            <GfsReadFailureCard
-              failure={blockingFailure.failure}
-              onRetry={() => {
-                void blockingFailure.retry()
-              }}
-            />
-          ) : visibleLoading ? (
-            <div
-              className="da-gfs-loading"
-              role="status"
-              aria-label="Loading files"
-              aria-live="polite"
-            >
-              <span className="da-gfs-loading__dots" aria-hidden="true">
-                <span className="da-gfs-loading__dot" />
-                <span className="da-gfs-loading__dot" />
-                <span className="da-gfs-loading__dot" />
-              </span>
-              <span>Loading files…</span>
-            </div>
-          ) : currentIsFile ? (
-            <div className="da-gfs-current-file">
-              <span className="da-gfs-current-file__icon" aria-hidden="true">
-                {currentIsFile ? <GfsFileIcon name={current.name} /> : <IconAttachFile />}
-              </span>
-              <div className="da-gfs-current-file__copy">
-                <div className="da-gfs-current-file__title-row">
-                  {currentIsBeingRenamed ? (
-                    <GfsInlineRename
-                      className="da-gfs-current-file__inline-rename"
-                      onCancel={() => setRenameTarget(null)}
-                      onChange={setRenameDraft}
-                      onSubmit={() => void handleRenameTarget()}
-                      value={renameDraft}
-                      busy={ctrl.mutating}
-                    />
-                  ) : (
-                    <>
-                      <h3>{current.name}</h3>
-                      <GfsResourceMenu
-                        actions={getGfsMenuActions(currentResourceActions)}
-                        resourceName={current.name}
-                      />
-                    </>
-                  )}
-                </div>
-                <p className="muted">
-                  {currentPreviewAvailable
-                    ? 'Preview this file again or use the menu to download or replace it.'
-                    : 'Use the menu to download or replace this file.'}
-                </p>
-              </div>
-            </div>
-          ) : pendingGfsDeepLinkFailure ? null : visibleResources.length === 0 ? (
-            // `unsupported` earns its own copy because the other two assert
-            // something this branch cannot know. An older server that has no
-            // listing endpoint never told us the library was empty — it told us
-            // it cannot answer — and "No shared files yet" reports the absence
-            // of an answer as an answer. No Retry either: the endpoint will not
-            // appear because the user pressed a button. The banner above already
-            // points at opening a link, so this states the one thing it does
-            // not: the list is missing, the files may not be.
-            <EmptyState
-              title={
-                rootListingUnsupported
-                  ? 'Files cannot be listed here'
-                  : currentIsFolder
-                    ? 'This folder is empty'
-                    : 'No shared files yet'
-              }
-              body={
-                rootListingUnsupported
-                  ? 'This server cannot list shared resources, so Evenfire has no way to tell what you have access to. That does not mean you have none.'
-                  : currentIsFolder
-                    ? 'Files and folders added here will appear in this list.'
-                    : 'Resources shared directly with you or your teams will appear here.'
-              }
-            />
-          ) : (
-            <div
-              className="da-grid da-gfs-drive__grid"
-              style={{
-                '--da-grid-cols':
-                  'calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) minmax(4.5rem, auto) 9.5rem',
-              }}
-            >
-              <div className="da-grid__head">
-                <span className="da-grid__col-header" aria-hidden="true" />
-                <span className="da-grid__col-header">Name</span>
-                <span className="da-grid__col-header da-gfs-drive__size-column da-grid__col-header--right">
-                  Size
-                </span>
-                <span className="da-grid__col-header da-grid__col-header--right">Actions</span>
-              </div>
-              <div className="da-grid__body">
-                {visibleResources.map(resource => {
-                  const resourceName = resource.name || resource.drive
-                  const permissionNotice = rowPermissionNoticeFor(resource.resourceId, resourceName)
-                  const isDragging =
-                    draggingResourceId === resource.resourceId ||
-                    movingResourceId === resource.resourceId
-                  const isDropTarget = dragOverFolderId === resource.resourceId
-                  const dropState =
-                    resource.kind === 'directory' ? dropStatesById[resource.resourceId] : undefined
-                  const dropReason = gfsDropVerdictReason(dropState)
-                  // The deny/no-op/unknown tint carries no reason of its own;
-                  // the tooltip speaks the full sentence (one wording per
-                  // reason, every surface).
-                  const dropReasonTooltip =
-                    dropState && dropReason !== undefined
-                      ? gfsDropVerdictLiveAnnouncement(
-                          dropState,
-                          resource.name,
-                          dragSourceName ?? undefined
-                        )
-                      : undefined
-                  const canDragResource =
-                    resource.readable !== false && movingResourceId === null && !ctrl.mutating
-                  return (
-                    <div
-                      className="da-grid__row da-grid__row--clickable da-grid__row--compact"
-                      key={resource.resourceId}
-                      draggable={canDragResource}
-                      title={
-                        dropReasonTooltip ??
-                        (canDragResource
-                          ? `Drag ${resource.name} into a folder to move it`
-                          : undefined)
-                      }
-                      data-dragging={isDragging ? 'true' : undefined}
-                      data-drop-target={isDropTarget ? 'true' : undefined}
-                      data-drop-state={dropState?.state}
-                      data-drop-reason={dropReason}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={
-                        resource.readable === false
-                          ? `${resource.name || resource.drive} (no read access)`
-                          : `Open ${resource.name || resource.drive}`
-                      }
-                      onClick={event => {
-                        if (isEventFromNestedInteractive(event)) return
-                        openResource(resource)
-                      }}
-                      onKeyDown={event => {
-                        if (event.key !== 'Enter' && event.key !== ' ') return
-                        if (isEventFromNestedInteractive(event)) return
-                        event.preventDefault()
-                        openResource(resource)
-                      }}
-                      onDragStart={
-                        canDragResource
-                          ? event => handleResourceDragStart(event, resource)
-                          : undefined
-                      }
-                      onDragEnd={canDragResource ? handleResourceDragEnd : undefined}
-                      onDragEnter={
-                        resource.kind === 'directory'
-                          ? event => handleFolderDragOver(event, resource)
-                          : undefined
-                      }
-                      onDragOver={
-                        resource.kind === 'directory'
-                          ? event => handleFolderDragOver(event, resource)
-                          : undefined
-                      }
-                      onDragLeave={
-                        resource.kind === 'directory' ? handleFolderDragLeave : undefined
-                      }
-                      onDrop={
-                        resource.kind === 'directory'
-                          ? event =>
-                              void handleFolderDrop(event, {
-                                resourceId: resource.resourceId,
-                                name: resource.name,
-                                kind: 'directory',
-                              })
-                          : undefined
-                      }
-                    >
-                      <span className="da-gfs-list__icon da-grid__cell" aria-hidden="true">
-                        {resource.kind === 'directory' ? (
-                          <IconContexts />
-                        ) : (
-                          <GfsFileIcon name={resource.name} />
-                        )}
-                      </span>
-                      <span className="da-gfs-list__identity da-grid__cell">
-                        <span className="da-gfs-list__name">
-                          {renameTarget?.resourceId === resource.resourceId ? (
+                      {crumbs.map((crumb, index) => (
+                        <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
+                          <IconChevronRight aria-hidden="true" />
+                          {renameTarget?.resourceId === crumb.resourceId ? (
                             <GfsInlineRename
+                              className="da-gfs-drive__inline-rename"
                               onCancel={() => setRenameTarget(null)}
                               onChange={setRenameDraft}
                               onSubmit={() => void handleRenameTarget()}
@@ -3885,104 +3996,565 @@ export function FilesPage({
                             />
                           ) : (
                             <Button
-                              align="start"
-                              block
-                              onClick={() => openResource(resource)}
+                              className={`da-gfs-drive__breadcrumb${
+                                dragOverFolderId === crumb.resourceId
+                                  ? ' da-gfs-drive__breadcrumb--allowed'
+                                  : ''
+                              }`}
+                              color="neutral"
+                              // The active crumb stays a live drop target; only its click is inert.
+                              aria-current={index === crumbs.length - 1 ? 'page' : undefined}
+                              title={
+                                gfsDropVerdictReason(dropStatesById[crumb.resourceId]) !== undefined
+                                  ? gfsDropVerdictLiveAnnouncement(
+                                      dropStatesById[crumb.resourceId]!,
+                                      crumb.name,
+                                      dragSourceName ?? undefined
+                                    )
+                                  : undefined
+                              }
+                              data-drop-state={dropStatesById[crumb.resourceId]?.state}
+                              data-drop-reason={gfsDropVerdictReason(
+                                dropStatesById[crumb.resourceId]
+                              )}
+                              onClick={
+                                index === crumbs.length - 1
+                                  ? undefined
+                                  : () => {
+                                      const intentReceipt = beginExplicitFilesNavigation()
+                                      ctrl.goToCrumb(index)
+                                      onExplicitNavigationResult?.(
+                                        intentReceipt,
+                                        true,
+                                        crumb.gfsUri,
+                                        crumb.name
+                                      )
+                                    }
+                              }
+                              onDragEnter={event => handleCrumbDragOver(event, crumb, index)}
+                              onDragOver={event => handleCrumbDragOver(event, crumb, index)}
+                              onDragLeave={handleFolderDragLeave}
+                              onDrop={event =>
+                                void handleFolderDrop(event, {
+                                  resourceId: crumb.resourceId,
+                                  name: crumb.name,
+                                  kind: 'directory',
+                                })
+                              }
                               variant="text"
                             >
-                              {resource.name || resource.drive}
+                              {crumb.name}
                             </Button>
                           )}
-                          {resource.readable === false ? (
-                            <Badge tone="neutral">No access</Badge>
-                          ) : null}
                         </span>
-                        {permissionNotice ? (
-                          <span className="muted" role={permissionNotice.role}>
-                            {permissionNotice.message}
-                          </span>
-                        ) : null}
-                      </span>
-                      <span className="da-gfs-drive__size da-grid__cell da-grid__cell--right">
-                        {formatSharedFileSize(resource.bytes)}
-                      </span>
-                      <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
-                        {rowCanManage(resource) ? (
-                          <IconButton
-                            label={`Share ${resource.name || resource.drive}`}
-                            onClick={() => openManage(resource)}
-                            size="sm"
-                            variant="ghost"
-                          >
-                            <IconShare width={16} height={16} />
-                          </IconButton>
-                        ) : null}
-                        {resource.kind === 'file' ? (
-                          <IconButton
-                            label={`Download ${resource.name}`}
-                            onClick={() => void handleDownload(resource.gfsUri, resource.name)}
-                            size="sm"
-                            variant="ghost"
-                            disabled={resource.readable === false}
-                          >
-                            <IconDownload width={16} height={16} />
-                          </IconButton>
-                        ) : null}
-                        {rowCanRename(resource) ? (
-                          <IconButton
-                            label={`Rename ${resource.name || resource.drive}`}
-                            onClick={() => openRenameTarget(resource)}
-                            size="sm"
-                            variant="ghost"
-                          >
-                            <IconEdit width={16} height={16} />
-                          </IconButton>
-                        ) : null}
-                        {resource.kind === 'directory' ? (
-                          <GfsResourceMenu
-                            actions={resourceMenuActionsFor(resource)}
-                            resourceName={resource.name}
-                            onOpenChange={open => {
-                              ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
-                              ctrl.setMoveSourceParentResourceId?.(
-                                open ? resource.parentResourceId : null
-                              )
-                            }}
+                      ))}
+                    </nav>
+                    {current &&
+                    !currentIsFile &&
+                    currentIsBeingRenamed &&
+                    !currentIsInBreadcrumbs ? (
+                      <GfsInlineRename
+                        className="da-gfs-drive__inline-rename"
+                        onCancel={() => setRenameTarget(null)}
+                        onChange={setRenameDraft}
+                        onSubmit={() => void handleRenameTarget()}
+                        value={renameDraft}
+                        busy={ctrl.mutating}
+                      />
+                    ) : null}
+                    {current && !currentIsFile && !currentIsBeingRenamed ? (
+                      <GfsResourceMenu
+                        actions={getGfsMenuActions(currentResourceActions)}
+                        resourceName={current.name}
+                      />
+                    ) : null}
+                  </div>
+                </div>
+
+                {dragActive || droppedUploadCount > 0 ? (
+                  <div className="composer-drop-overlay da-gfs-drop-overlay" role="status">
+                    {droppedUploadCount > 0
+                      ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
+                      : droppedUploadRestriction ||
+                        `Drop files to upload to ${current?.name || 'this folder'}`}
+                  </div>
+                ) : null}
+
+                {dropSessionLost ? (
+                  // Persistent (A11): the refusal outlives the dead gesture and the
+                  // revoked surface below — it is not a one-shot toast.
+                  <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+                ) : null}
+                {zipJob ? (
+                  <div className="da-gfs-zip-progress" role="status" data-testid="gfs-zip-progress">
+                    <span className="da-gfs-zip-progress__label">
+                      {zipJob.progress.phase === 'listing'
+                        ? `Preparing ${zipJob.folderName}.zip — reading folder contents…`
+                        : zipJob.progress.phase === 'downloading'
+                          ? `Preparing ${zipJob.folderName}.zip — downloading ${zipJob.progress.filesAdded} of ${zipJob.progress.filesFound} ${zipJob.progress.filesFound === 1 ? 'file' : 'files'}…`
+                          : `Preparing ${zipJob.folderName}.zip — assembling archive…`}
+                    </span>
+                    <button
+                      type="button"
+                      className="da-gfs-zip-progress__stop"
+                      aria-label="Stop preparing zip"
+                      onClick={() => zipAbortRef.current?.abort()}
+                    >
+                      Stop
+                    </button>
+                  </div>
+                ) : null}
+
+                {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
+                {current && loadingAffordances ? (
+                  <div role="status">
+                    <StatusBanner tone="info" text={`Checking permissions for ${current.name}…`} />
+                  </div>
+                ) : null}
+                {current &&
+                affordancesError &&
+                (ctrl.affordancesHttpStatus === 429 ||
+                  ctrl.affordancesHttpStatus === 403 ||
+                  ctrl.affordancesHttpStatus === 404) ? (
+                  <div role="alert">
+                    <StatusBanner
+                      tone="error"
+                      text={
+                        ctrl.affordancesHttpStatus === 429
+                          ? 'Too many file requests. Wait before retrying permissions.'
+                          : 'Could not verify permissions for ' +
+                            current.name +
+                            ': access could not be confirmed.'
+                      }
+                    />
+                    {ctrl.affordancesHttpStatus === 429 ? (
+                      <Button
+                        color="secondary"
+                        onClick={() =>
+                          void fetchRowAuthority(current.resourceId, current.name, GFS_DRIVE_MAIN)
+                        }
+                      >
+                        Retry permission check
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
+                {Object.entries(ctrl.moveSourceParentStatusById ?? {}).map(
+                  ([resourceId, status]) => {
+                    if (!status.error || resourceId === current?.resourceId) return null
+                    const rateLimited = status.rateLimited && status.httpStatus === 429
+                    return (
+                      <div key={resourceId} role="alert">
+                        <StatusBanner tone={rateLimited ? 'warn' : 'error'}>
+                          <span>Could not verify Move permissions: {status.error}</span>
+                        </StatusBanner>
+                        <Button
+                          color="secondary"
+                          onClick={() =>
+                            void fetchRowAuthority(resourceId, 'the source folder', GFS_DRIVE_MAIN)
+                          }
+                        >
+                          Retry permission check
+                        </Button>
+                      </div>
+                    )
+                  }
+                )}
+                {pendingGfsDeepLinkFailure ? (
+                  <div role="alert">
+                    <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
+                    {pendingGfsDeepLinkFailure.retryable ? (
+                      <Button
+                        color="secondary"
+                        onClick={() => {
+                          setPendingGfsDeepLinkFailure(null)
+                          setGfsDeepLinkRetry(current => ({
+                            id: pendingGfsDeepLinkFailure.id,
+                            request:
+                              current?.id === pendingGfsDeepLinkFailure.id
+                                ? current.request + 1
+                                : 1,
+                          }))
+                        }}
+                        size="sm"
+                        variant="outline"
+                      >
+                        Retry opening link
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
+                {unavailableLocation ? (
+                  <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
+                ) : null}
+                {visibleError && !accessRevoked && !blockingFailure ? (
+                  // Presented, not raw. The banner is the non-blocking half of the
+                  // same read-plane failure the card shows, so it must not be the one
+                  // surface left leaking `Error invoking remote method '…'` at the
+                  // user — which is what it did for every failure the card declines
+                  // to take over, a rate-limited `Load more` among them.
+                  <StatusBanner tone="error" text={describeGfsReadError(visibleError).message} />
+                ) : null}
+
+                {accessRevoked ? (
+                  <>
+                    {/* The revoked surface owns the session-ended sentence (A11): it
+                  outlives any gesture's ownership, so a drag whose probe died
+                  stays explained even after the revocation invalidated it. */}
+                    <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+                    <EmptyState
+                      title="File access is not authorized"
+                      body="Your current Desktop session cannot access this location. Sign in again or contact an administrator."
+                    />
+                    <div className="da-gfs-footer-actions">
+                      <Button onClick={() => ctrl.retryAccess()} size="sm" variant="outline">
+                        Retry file access
+                      </Button>
+                    </div>
+                  </>
+                ) : blockingFailure ? (
+                  <GfsReadFailureCard
+                    failure={blockingFailure.failure}
+                    onRetry={() => {
+                      void blockingFailure.retry()
+                    }}
+                  />
+                ) : visibleLoading ? (
+                  <div
+                    className="da-gfs-loading"
+                    role="status"
+                    aria-label="Loading files"
+                    aria-live="polite"
+                  >
+                    <span className="da-gfs-loading__dots" aria-hidden="true">
+                      <span className="da-gfs-loading__dot" />
+                      <span className="da-gfs-loading__dot" />
+                      <span className="da-gfs-loading__dot" />
+                    </span>
+                    <span>Loading files…</span>
+                  </div>
+                ) : currentIsFile ? (
+                  <div className="da-gfs-current-file">
+                    <span className="da-gfs-current-file__icon" aria-hidden="true">
+                      {currentIsFile ? <GfsFileIcon name={current.name} /> : <IconAttachFile />}
+                    </span>
+                    <div className="da-gfs-current-file__copy">
+                      <div className="da-gfs-current-file__title-row">
+                        {currentIsBeingRenamed ? (
+                          <GfsInlineRename
+                            className="da-gfs-current-file__inline-rename"
+                            onCancel={() => setRenameTarget(null)}
+                            onChange={setRenameDraft}
+                            onSubmit={() => void handleRenameTarget()}
+                            value={renameDraft}
+                            busy={ctrl.mutating}
                           />
                         ) : (
-                          <GfsResourceMenu
-                            actions={resourceMenuActionsFor(resource)}
-                            resourceName={resource.name}
-                            onOpenChange={open => {
-                              ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
-                              ctrl.setMoveSourceParentResourceId?.(
-                                open ? resource.parentResourceId : null
-                              )
-                            }}
-                          />
+                          <>
+                            <h3>{current.name}</h3>
+                            <GfsResourceMenu
+                              actions={getGfsMenuActions(currentResourceActions)}
+                              resourceName={current.name}
+                            />
+                          </>
                         )}
+                      </div>
+                      <p className="muted">
+                        {currentPreviewAvailable
+                          ? 'Preview this file again or use the menu to download or replace it.'
+                          : 'Use the menu to download or replace this file.'}
+                      </p>
+                    </div>
+                  </div>
+                ) : pendingGfsDeepLinkFailure ? null : visibleResources.length === 0 ? (
+                  // `unsupported` earns its own copy because the other two assert
+                  // something this branch cannot know. An older server that has no
+                  // listing endpoint never told us the library was empty — it told us
+                  // it cannot answer — and "No shared files yet" reports the absence
+                  // of an answer as an answer. No Retry either: the endpoint will not
+                  // appear because the user pressed a button. The banner above already
+                  // points at opening a link, so this states the one thing it does
+                  // not: the list is missing, the files may not be.
+                  <EmptyState
+                    title={
+                      rootListingUnsupported
+                        ? 'Files cannot be listed here'
+                        : currentIsFolder
+                          ? 'This folder is empty'
+                          : 'No shared files yet'
+                    }
+                    body={
+                      rootListingUnsupported
+                        ? 'This server cannot list shared resources, so Evenfire has no way to tell what you have access to. That does not mean you have none.'
+                        : currentIsFolder
+                          ? 'Files and folders added here will appear in this list.'
+                          : 'Resources shared directly with you or your teams will appear here.'
+                    }
+                  />
+                ) : (
+                  <div
+                    className="da-grid da-gfs-drive__grid"
+                    style={{
+                      '--da-grid-cols':
+                        'calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) minmax(4.5rem, auto) 9.5rem',
+                    }}
+                  >
+                    <div className="da-grid__head">
+                      <span className="da-grid__col-header" aria-hidden="true" />
+                      <span className="da-grid__col-header">Name</span>
+                      <span className="da-grid__col-header da-gfs-drive__size-column da-grid__col-header--right">
+                        Size
+                      </span>
+                      <span className="da-grid__col-header da-grid__col-header--right">
+                        Actions
                       </span>
                     </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
+                    <div className="da-grid__body">
+                      {visibleResources.map(resource => {
+                        const resourceName = resource.name || resource.drive
+                        const permissionNotice = rowPermissionNoticeFor(
+                          resource.resourceId,
+                          resourceName
+                        )
+                        const isDragging =
+                          draggingResourceId === resource.resourceId ||
+                          movingResourceId === resource.resourceId
+                        const isDropTarget = dragOverFolderId === resource.resourceId
+                        const dropState =
+                          resource.kind === 'directory'
+                            ? dropStatesById[resource.resourceId]
+                            : undefined
+                        const dropReason = gfsDropVerdictReason(dropState)
+                        // The deny/no-op/unknown tint carries no reason of its own;
+                        // the tooltip speaks the full sentence (one wording per
+                        // reason, every surface).
+                        const dropReasonTooltip =
+                          dropState && dropReason !== undefined
+                            ? gfsDropVerdictLiveAnnouncement(
+                                dropState,
+                                resource.name,
+                                dragSourceName ?? undefined
+                              )
+                            : undefined
+                        const canDragResource =
+                          resource.readable !== false && movingResourceId === null && !ctrl.mutating
+                        return (
+                          <div
+                            className="da-grid__row da-grid__row--clickable da-grid__row--compact"
+                            key={resource.resourceId}
+                            draggable={canDragResource}
+                            title={
+                              dropReasonTooltip ??
+                              (canDragResource
+                                ? `Drag ${resource.name} into a folder to move it`
+                                : undefined)
+                            }
+                            data-dragging={isDragging ? 'true' : undefined}
+                            data-drop-target={isDropTarget ? 'true' : undefined}
+                            data-drop-state={dropState?.state}
+                            data-drop-reason={dropReason}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={
+                              resource.readable === false
+                                ? `${resource.name || resource.drive} (no read access)`
+                                : `Open ${resource.name || resource.drive}`
+                            }
+                            onClick={event => {
+                              if (isEventFromNestedInteractive(event)) return
+                              openResource(resource)
+                            }}
+                            onKeyDown={event => {
+                              if (event.key !== 'Enter' && event.key !== ' ') return
+                              if (isEventFromNestedInteractive(event)) return
+                              event.preventDefault()
+                              openResource(resource)
+                            }}
+                            onDragStart={
+                              canDragResource
+                                ? event => handleResourceDragStart(event, resource)
+                                : undefined
+                            }
+                            onDragEnd={canDragResource ? handleResourceDragEnd : undefined}
+                            onDragEnter={
+                              resource.kind === 'directory'
+                                ? event => handleFolderDragOver(event, resource)
+                                : undefined
+                            }
+                            onDragOver={
+                              resource.kind === 'directory'
+                                ? event => handleFolderDragOver(event, resource)
+                                : undefined
+                            }
+                            onDragLeave={
+                              resource.kind === 'directory' ? handleFolderDragLeave : undefined
+                            }
+                            onDrop={
+                              resource.kind === 'directory'
+                                ? event =>
+                                    void handleFolderDrop(event, {
+                                      resourceId: resource.resourceId,
+                                      name: resource.name,
+                                      kind: 'directory',
+                                    })
+                                : undefined
+                            }
+                          >
+                            <span className="da-gfs-list__icon da-grid__cell" aria-hidden="true">
+                              {resource.kind === 'directory' ? (
+                                <IconContexts />
+                              ) : (
+                                <GfsFileIcon name={resource.name} />
+                              )}
+                            </span>
+                            <span className="da-gfs-list__identity da-grid__cell">
+                              <span className="da-gfs-list__name">
+                                {renameTarget?.resourceId === resource.resourceId ? (
+                                  <GfsInlineRename
+                                    onCancel={() => setRenameTarget(null)}
+                                    onChange={setRenameDraft}
+                                    onSubmit={() => void handleRenameTarget()}
+                                    value={renameDraft}
+                                    busy={ctrl.mutating}
+                                  />
+                                ) : (
+                                  <Button
+                                    align="start"
+                                    block
+                                    onClick={() => openResource(resource)}
+                                    variant="text"
+                                  >
+                                    {resource.name || resource.drive}
+                                  </Button>
+                                )}
+                                {resource.readable === false ? (
+                                  <Badge tone="neutral">No access</Badge>
+                                ) : null}
+                              </span>
+                              {permissionNotice ? (
+                                <span className="muted" role={permissionNotice.role}>
+                                  {permissionNotice.message}
+                                </span>
+                              ) : null}
+                            </span>
+                            <span className="da-gfs-drive__size da-grid__cell da-grid__cell--right">
+                              {formatSharedFileSize(resource.bytes)}
+                            </span>
+                            <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
+                              {rowCanManage(resource) ? (
+                                <IconButton
+                                  label={`Share ${resource.name || resource.drive}`}
+                                  onClick={() => openManage(resource)}
+                                  size="sm"
+                                  variant="ghost"
+                                >
+                                  <IconShare width={16} height={16} />
+                                </IconButton>
+                              ) : null}
+                              {resource.kind === 'file' ? (
+                                <IconButton
+                                  label={`Download ${resource.name}`}
+                                  onClick={() =>
+                                    void handleDownload(resource.gfsUri, resource.name)
+                                  }
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={resource.readable === false}
+                                >
+                                  <IconDownload width={16} height={16} />
+                                </IconButton>
+                              ) : null}
+                              {rowCanRename(resource) ? (
+                                <IconButton
+                                  label={`Rename ${resource.name || resource.drive}`}
+                                  onClick={() => openRenameTarget(resource)}
+                                  size="sm"
+                                  variant="ghost"
+                                >
+                                  <IconEdit width={16} height={16} />
+                                </IconButton>
+                              ) : null}
+                              {resource.kind === 'directory' ? (
+                                <GfsResourceMenu
+                                  actions={resourceMenuActionsFor(resource)}
+                                  resourceName={resource.name}
+                                  onOpenChange={open => {
+                                    ctrl.setRowAffordancesResourceId(
+                                      open ? resource.resourceId : null
+                                    )
+                                    ctrl.setMoveSourceParentResourceId?.(
+                                      open ? resource.parentResourceId : null
+                                    )
+                                  }}
+                                />
+                              ) : (
+                                <GfsResourceMenu
+                                  actions={resourceMenuActionsFor(resource)}
+                                  resourceName={resource.name}
+                                  onOpenChange={open => {
+                                    ctrl.setRowAffordancesResourceId(
+                                      open ? resource.resourceId : null
+                                    )
+                                    ctrl.setMoveSourceParentResourceId?.(
+                                      open ? resource.parentResourceId : null
+                                    )
+                                  }}
+                                />
+                              )}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
 
-          {hasMoreVisible ? (
-            <div className="da-gfs-footer-actions">
-              <Button
-                loading={loadingMoreVisible}
-                onClick={currentIsFolder ? ctrl.loadMore : ctrl.loadMoreAccessible}
-                size="sm"
-                variant="outline"
-              >
-                Load more
-              </Button>
+                {hasMoreVisible ? (
+                  <div className="da-gfs-footer-actions">
+                    <Button
+                      loading={loadingMoreVisible}
+                      onClick={currentIsFolder ? ctrl.loadMore : ctrl.loadMoreAccessible}
+                      size="sm"
+                      variant="outline"
+                    >
+                      Load more
+                    </Button>
+                  </div>
+                ) : null}
+              </section>
             </div>
-          ) : null}
-        </section>
-      </div>
+          </section>
+        )
+      ) : null}
+
+      <input
+        aria-label="Upload file"
+        aria-hidden="true"
+        className="visually-hidden"
+        ref={uploadInputRef}
+        tabIndex={-1}
+        type="file"
+        onChange={event => {
+          const file = event.currentTarget.files?.[0]
+          const sidebarTarget = sidebarFileTargetRef.current
+          sidebarFileTargetRef.current = null
+          if (file && sidebarTarget) {
+            event.currentTarget.value = ''
+            void performSidebarFileAction(sidebarTarget.target, file, sidebarTarget.actionId)
+            return
+          }
+          const target = uploadTargetRef.current
+          uploadTargetRef.current = null
+          event.currentTarget.value = ''
+          if (!file || !target) return
+          void handleUploadFile(
+            file,
+            target.parentResourceId,
+            target.occupiedNames,
+            target.parentName
+          )
+        }}
+      />
 
       {openLinkOpen ? (
         <div
@@ -4018,8 +4590,16 @@ export function FilesPage({
             <div className="da-gfs-link-dialog__body">
               <GfsFilePicker
                 onOpen={uri => {
-                  beginExplicitFilesNavigation()
-                  return handleOpenGfsLink(uri)
+                  const intentReceipt = beginExplicitFilesNavigation()
+                  return handleOpenGfsLink(
+                    uri,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    intentReceipt
+                  )
                 }}
                 onOpened={() => setOpenLinkOpen(false)}
                 busy={resolving}
@@ -4030,7 +4610,7 @@ export function FilesPage({
         </div>
       ) : null}
 
-      {manageOpen && current ? (
+      {manageOpen && manageResource ? (
         <div
           className="da-gfs-manage-modal"
           role="presentation"
@@ -4042,14 +4622,18 @@ export function FilesPage({
             className="da-gfs-manage-dialog"
             role="dialog"
             aria-modal="true"
-            aria-label={`Share ${currentIsFolder ? 'folder' : 'file'} ${current.name}`}
+            aria-label={`Share ${manageResource.kind === 'directory' ? 'folder' : 'file'} ${manageResource.name}`}
           >
             <header className="da-gfs-manage-dialog__header">
               <span
-                className={`da-gfs-manage-dialog__icon${currentIsFolder ? ' da-gfs-manage-dialog__icon--folder' : ''}`}
+                className={`da-gfs-manage-dialog__icon${manageResource.kind === 'directory' ? ' da-gfs-manage-dialog__icon--folder' : ''}`}
                 aria-hidden="true"
               >
-                {currentIsFolder ? <IconContexts /> : <GfsFileIcon name={current.name} />}
+                {manageResource.kind === 'directory' ? (
+                  <IconContexts />
+                ) : (
+                  <GfsFileIcon name={manageResource.name} />
+                )}
               </span>
               <span className="da-gfs-manage-dialog__heading">
                 {renameOpen ? (
@@ -4080,7 +4664,7 @@ export function FilesPage({
                     </Button>
                   </form>
                 ) : (
-                  <h3>Share “{current.name}”</h3>
+                  <h3>Share “{manageResource.name}”</h3>
                 )}
               </span>
               <span className="da-gfs-manage-dialog__top-actions">
@@ -4099,7 +4683,7 @@ export function FilesPage({
             <div className="da-gfs-manage-dialog__body">
               {canDeleteCurrent && deleteOpen ? (
                 <div className="da-gfs-inline-form" role="alertdialog" aria-label="Delete resource">
-                  <span className="da-gfs-inline-form__copy">Delete {current.name}?</span>
+                  <span className="da-gfs-inline-form__copy">Delete {manageResource.name}?</span>
                   <Button
                     color="danger"
                     loading={ctrl.mutating}
@@ -4125,13 +4709,25 @@ export function FilesPage({
                     <h4>Add people, teams, agents, or workflows</h4>
                   </div>
                 </div>
-                {affordancesError ? <StatusBanner tone="error" text={affordancesError} /> : null}
-                {affordances ? (
+                {sidebarActionTarget ? (
+                  ctrl.sidebarAffordancesError ? (
+                    <StatusBanner tone="error" text={ctrl.sidebarAffordancesError} />
+                  ) : null
+                ) : affordancesError ? (
+                  <StatusBanner tone="error" text={affordancesError} />
+                ) : null}
+                {manageAffordances ? (
                   <GfsDelegationPanel
-                    affordances={affordances}
-                    permissionPending={loadingAffordances}
-                    permissionCheckPending={loadingAffordances}
-                    permissionCheckFailed={Boolean(affordancesError)}
+                    affordances={manageAffordances}
+                    permissionPending={
+                      sidebarActionTarget ? !ctrl.sidebarAffordances : loadingAffordances
+                    }
+                    permissionCheckPending={
+                      sidebarActionTarget ? !ctrl.sidebarAffordances : loadingAffordances
+                    }
+                    permissionCheckFailed={Boolean(
+                      sidebarActionTarget ? ctrl.sidebarAffordancesError : affordancesError
+                    )}
                     subjectOptions={grantSubjectOptions}
                     subjectOptionsLoading={
                       teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
@@ -4140,7 +4736,7 @@ export function FilesPage({
                       teamDirectoryQuery.error,
                       myAgentsQuery.error
                     )}
-                    isDirectory={currentIsFolder}
+                    isDirectory={manageResource.kind === 'directory'}
                     onGrant={handleGrant}
                     onDetailViewChange={setShareDetailsOpen}
                   />
@@ -4171,9 +4767,15 @@ export function FilesPage({
                     // FILES AND FOLDERS merge inherited rows (the reported
                     // folder bug); the dialog itself only opens with a target.
                     mergeInherited
-                    onChangeInheritedRole={handleInheritedRoleChange}
-                    onChangeRole={affordances?.canDelegate ? handleAccessRoleChange : undefined}
-                    onRemoveInherited={handleInheritedRemove}
+                    onChangeInheritedRole={
+                      !sidebarActionTarget ? handleInheritedRoleChange : undefined
+                    }
+                    onChangeRole={
+                      !sidebarActionTarget && manageAffordances?.canDelegate
+                        ? handleAccessRoleChange
+                        : undefined
+                    }
+                    onRemoveInherited={!sidebarActionTarget ? handleInheritedRemove : undefined}
                     onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
                     onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
                     revoking={ctrl.revoking}
@@ -4299,7 +4901,10 @@ export function FilesPage({
               : 'The file will be deleted for everyone with access.'
           }
           confirmLabel="Delete"
-          onCancel={() => setDeleteTarget(null)}
+          onCancel={() => {
+            setDeleteTarget(null)
+            if (sidebarActionTarget) finishSidebarAction()
+          }}
           onConfirm={() => void handleDeleteResource(deleteTarget)}
           title={`Delete ${deleteTarget.name}?`}
           tone="danger"
@@ -4310,11 +4915,35 @@ export function FilesPage({
         <GfsMoveDialog
           busy={ctrl.mutating || movePermissionStatus === 'checking'}
           initialCrumbs={
-            moveTarget.resourceId === current?.resourceId ? crumbs.slice(0, -1) : crumbs
+            sidebarActionTarget?.resourceId === moveTarget.resourceId
+              ? (() => {
+                  const sourceParentId = sidebarActionTarget.parentResourceId
+                  const sourceParent = sourceParentId
+                    ? [...crumbs, ...accessibleResources, ...items].find(
+                        resource => resource.resourceId === sourceParentId
+                      )
+                    : undefined
+                  if (!sourceParent || sourceParent.kind !== 'directory') return []
+                  return [
+                    {
+                      resourceId: sourceParent.resourceId,
+                      gfsUri: sourceParent.gfsUri,
+                      parentResourceId: sourceParent.parentResourceId,
+                      name: sourceParent.name,
+                      kind: 'directory' as const,
+                      version: sourceParent.version,
+                      bytes: sourceParent.bytes,
+                    },
+                  ]
+                })()
+              : moveTarget.resourceId === current?.resourceId
+                ? crumbs.slice(0, -1)
+                : crumbs
           }
           onClose={() => {
             setMovePermissionStatus(null)
             closeMoveDialog()
+            if (sidebarActionTarget) finishSidebarAction()
           }}
           onMove={(destinationId, destinationName) =>
             handleMoveTarget(destinationId, destinationName)
@@ -4364,6 +4993,6 @@ export function FilesPage({
           }}
         />
       ) : null}
-    </section>
+    </>
   )
 }

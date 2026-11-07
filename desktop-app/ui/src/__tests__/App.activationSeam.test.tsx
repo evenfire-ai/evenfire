@@ -92,6 +92,29 @@ let forceControllerRender: () => void = () => {}
 function useReactiveController(controller: AppController): AppController {
   const [, force] = useReducer((count: number) => count + 1, 0)
   forceControllerRender = force
+  const filesController = controller as Partial<
+    Pick<
+      AppController,
+      | 'beginFilesPathIntent'
+      | 'commitFilesPathIntent'
+      | 'failFilesPathIntent'
+      | 'markFilesPathsUnavailable'
+      | 'reconcileFilesConvergence'
+      | 'recordFilesMutation'
+    >
+  >
+  filesController.beginFilesPathIntent ??= vi.fn(tabId => ({
+    tabId,
+    sequence: 1,
+    path: null,
+    pathRevision: 0,
+    mutationEpoch: 0,
+  }))
+  filesController.commitFilesPathIntent ??= vi.fn(() => true)
+  filesController.failFilesPathIntent ??= vi.fn(() => true)
+  filesController.markFilesPathsUnavailable ??= vi.fn()
+  filesController.reconcileFilesConvergence ??= vi.fn(async () => undefined)
+  filesController.recordFilesMutation ??= vi.fn(() => 0)
   const activeTab = activeWorkspaceTab(controller.workspaceTabs)
   ;(controller as { activeWorkspaceTab: unknown }).activeWorkspaceTab = activeTab
   ;(controller as { navItem: unknown }).navItem = controller.appsPickerActive

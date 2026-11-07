@@ -347,6 +347,13 @@ export function GfsMoveDialog({
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
+  const authorizedCurrentParentName =
+    currentParentName ??
+    (currentParentId
+      ? ((accessibleQuery.data?.pages ?? [])
+          .flatMap(page => page.items)
+          .find(item => item.resourceId === currentParentId)?.name ?? null)
+      : null)
   const rootFolders = useMemo(() => {
     const accessibleFolders = (accessibleQuery.data?.pages ?? [])
       .flatMap(page => page.items)
@@ -571,7 +578,7 @@ export function GfsMoveDialog({
             <span className="da-gfs-move-dialog__location-pill">
               <IconContexts />
               <strong>
-                {currentParentName ??
+                {authorizedCurrentParentName ??
                   (currentParentId ? 'another shared folder' : 'Shared with me')}
               </strong>
             </span>

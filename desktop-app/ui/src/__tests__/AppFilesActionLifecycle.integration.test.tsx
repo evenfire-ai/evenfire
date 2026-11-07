@@ -19,6 +19,10 @@ import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__
 import { ipcHostAccessRevoked } from '@hooks/domain/__tests__/__fixtures__/ipcErrors'
 import { installMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
 import { buildGfsSessionScope } from '@hooks/domain/useGfsBrowserController'
+import type {
+  FilesPathIntentReceipt,
+  ResolveFilesConvergenceLocation,
+} from '@hooks/domain/useNavigationController'
 import { useNotificationsController } from '@hooks/domain/useNotificationsController'
 import { useAppController } from '@hooks/useAppController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
@@ -33,6 +37,8 @@ import {
   openPreviewTab,
   openSettingsTab,
   selectWorkspaceTab,
+  setFilesTabPath,
+  setFilesTabUnavailable,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
@@ -62,6 +68,10 @@ const appHarness = vi.hoisted(() => ({
   filesPageLatestPendingAction: null as unknown,
   filesPageRenderCount: 0,
   filesPageLastLocation: null as { gfsUri: string | null; name: string | null } | null,
+  filesPagePropsByTab: new Map<string, import('@pages/FilesPage.types').FilesPageProps>(),
+  sidebarMutationClaims: [] as Array<{ id: number; claimed: boolean }>,
+  captureFilesPagePropsOnly: false,
+  renderTitlebarRoot: false,
   previewPagePendingActions: [] as unknown[],
   beforeNativeAgentConversationNotification: null as null | (() => void),
   nativeNotificationContinuation: null as null | Promise<void>,
@@ -150,7 +160,8 @@ vi.mock('@components/RightRailShell', () => ({
 }))
 vi.mock('@components/WindowTitleBar', () => ({
   TitlebarActionsPortal: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  WindowTitleBar: () => null,
+  WindowTitleBar: ({ leadingRef }: { leadingRef?: (node: HTMLDivElement | null) => void }) =>
+    appHarness.renderTitlebarRoot ? <div ref={leadingRef} /> : null,
 }))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
@@ -172,13 +183,24 @@ vi.mock('@pages/FilesPage', async importOriginal => {
     ...actual,
     FilesPage: (props: React.ComponentProps<typeof actual.FilesPage>) => {
       appHarness.filesPageRenderCount += 1
-      appHarness.filesPageLatestPendingAction = props.pendingResourceAction ?? null
+      if (props.workspaceTabId) appHarness.filesPagePropsByTab.set(props.workspaceTabId, props)
+      appHarness.filesPageLatestPendingAction =
+        props.pendingResourceAction ?? props.pendingSidebarLocalAction ?? null
       if (props.pendingResourceAction) {
         appHarness.filesPagePendingActions.push(props.pendingResourceAction)
       }
+      if (props.pendingSidebarLocalAction) {
+        appHarness.filesPagePendingActions.push(props.pendingSidebarLocalAction)
+      }
+      if (appHarness.captureFilesPagePropsOnly) return null
       return (
         <actual.FilesPage
           {...props}
+          onSidebarLocalActionMutationClaim={requestId => {
+            const claimed = props.onSidebarLocalActionMutationClaim?.(requestId) ?? true
+            appHarness.sidebarMutationClaims.push({ id: requestId, claimed })
+            return claimed
+          }}
           onLocationChange={(gfsUri, name) => {
             appHarness.filesPageLastLocation = { gfsUri, name }
             props.onLocationChange?.(gfsUri, name)
@@ -228,6 +250,160 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
   })
   const isNavigationIntentCurrent = vi.fn(
     (sequence: number) => sequence === navigationIntentSequence
+  )
+  const filesPathOwners = new Map<
+    string,
+    {
+      path: string | null
+      revision: number
+      sequence: number
+      mutationEpoch: number
+      pendingEpoch: number | null
+      intentPending: boolean
+      inFlight: boolean
+    }
+  >()
+  let filesMutationEpoch = 0
+  const ownerForFilesTab = (tabId: string) => {
+    const tab = controller.workspaceTabs.tabs.find(
+      candidate => candidate.id === tabId && candidate.kind === 'files'
+    )
+    if (!tab || tab.kind !== 'files') return null
+    let owner = filesPathOwners.get(tabId)
+    const path = tab.files?.path ?? null
+    if (!owner) {
+      owner = {
+        path,
+        revision: 0,
+        sequence: 0,
+        mutationEpoch: filesMutationEpoch,
+        pendingEpoch: null,
+        intentPending: false,
+        inFlight: false,
+      }
+      filesPathOwners.set(tabId, owner)
+    }
+    return owner
+  }
+  const beginFilesPathIntent = vi.fn((tabId: string): FilesPathIntentReceipt | null => {
+    const owner = ownerForFilesTab(tabId)
+    if (!owner) return null
+    owner.sequence += 1
+    owner.intentPending = true
+    owner.mutationEpoch = filesMutationEpoch
+    return {
+      tabId,
+      sequence: owner.sequence,
+      path: owner.path,
+      pathRevision: owner.revision,
+      mutationEpoch: owner.mutationEpoch,
+    }
+  })
+  const commitFilesPathIntent = vi.fn(
+    (receipt: FilesPathIntentReceipt, path: string | null, name: string | null): boolean => {
+      const owner = filesPathOwners.get(receipt.tabId)
+      if (!owner || owner.sequence !== receipt.sequence || !owner.intentPending) return false
+      owner.intentPending = false
+      owner.path = path
+      owner.revision += 1
+      const mutationArrived = filesMutationEpoch > receipt.mutationEpoch
+      if (mutationArrived) owner.pendingEpoch = filesMutationEpoch
+      setWorkspaceTabs(state =>
+        setFilesTabPath(
+          state,
+          receipt.tabId,
+          path,
+          mutationArrived ? undefined : (name ?? undefined)
+        )
+      )
+      return true
+    }
+  )
+  const failFilesPathIntent = vi.fn((receipt: FilesPathIntentReceipt): boolean => {
+    const owner = filesPathOwners.get(receipt.tabId)
+    if (!owner || owner.sequence !== receipt.sequence || !owner.intentPending) return false
+    owner.intentPending = false
+    if (
+      owner.path === receipt.path &&
+      owner.revision === receipt.pathRevision &&
+      filesMutationEpoch > receipt.mutationEpoch
+    )
+      owner.pendingEpoch = filesMutationEpoch
+    return true
+  })
+  const recordFilesMutation = vi.fn(() => {
+    filesMutationEpoch += 1
+    controller.filesMutationEpoch = filesMutationEpoch
+    for (const tab of controller.workspaceTabs.tabs) {
+      if (tab.kind !== 'files') continue
+      const owner = ownerForFilesTab(tab.id)
+      if (owner) owner.pendingEpoch = filesMutationEpoch
+    }
+    appHarness.forceRender()
+    return filesMutationEpoch
+  })
+  const markFilesPathsUnavailable = vi.fn(() => {
+    for (const tab of controller.workspaceTabs.tabs) {
+      if (tab.kind === 'files' && tab.files?.path) {
+        setWorkspaceTabs(state => setFilesTabUnavailable(state, tab.id, true))
+      }
+    }
+  })
+  const reconcileFilesConvergence = vi.fn(
+    async (generation: number, resolver: ResolveFilesConvergenceLocation): Promise<void> => {
+      await Promise.all(
+        controller.workspaceTabs.tabs.map(async tab => {
+          if (tab.kind !== 'files') return
+          const owner = ownerForFilesTab(tab.id)
+          const path = tab.files?.path ?? null
+          if (
+            !owner ||
+            !path ||
+            owner.pendingEpoch === null ||
+            owner.intentPending ||
+            owner.inFlight
+          )
+            return
+          const captured = {
+            path,
+            revision: owner.revision,
+            sequence: owner.sequence,
+            epoch: owner.pendingEpoch,
+          }
+          owner.pendingEpoch = null
+          owner.inFlight = true
+          try {
+            const response = await resolver(path, generation)
+            const currentTab = controller.workspaceTabs.tabs.find(
+              candidate => candidate.id === tab.id
+            )
+            if (
+              currentTab?.kind === 'files' &&
+              (currentTab.files?.path ?? null) === captured.path &&
+              owner.path === captured.path &&
+              owner.revision === captured.revision &&
+              owner.sequence === captured.sequence &&
+              !owner.intentPending &&
+              filesMutationEpoch === captured.epoch
+            ) {
+              if (response.available) {
+                owner.path = response.location.gfsUri
+                owner.revision += 1
+                setWorkspaceTabs(state =>
+                  setFilesTabPath(state, tab.id, response.location.gfsUri, response.location.name)
+                )
+              } else {
+                setWorkspaceTabs(state => setFilesTabUnavailable(state, tab.id, true))
+              }
+            }
+          } catch {
+            setWorkspaceTabs(state => setFilesTabUnavailable(state, tab.id, true))
+          } finally {
+            owner.inFlight = false
+          }
+        })
+      )
+    }
   )
   const selectWorkspaceTabById = vi.fn((id: string) => {
     if (!controller.workspaceTabs.tabs.some(tab => tab.id === id)) return false
@@ -295,6 +471,13 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
     showAppsPicker,
     clearAppsPicker,
     navigationIntentSequence,
+    filesMutationEpoch,
+    beginFilesPathIntent,
+    commitFilesPathIntent,
+    failFilesPathIntent,
+    recordFilesMutation,
+    markFilesPathsUnavailable,
+    reconcileFilesConvergence,
     beginUserNavigationIntent,
     isNavigationIntentCurrent,
     selectWorkspaceTabById,
@@ -346,6 +529,14 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
         options?: { keepNavItem?: boolean; navigationIntentSequence?: number }
       ) => {
         if (notification.kind !== 'assistant_reply') return
+        if (
+          typeof options?.navigationIntentSequence === 'number' &&
+          options.navigationIntentSequence > navigationIntentSequence
+        ) {
+          navigationIntentSequence = options.navigationIntentSequence
+          controller.navigationIntentSequence = navigationIntentSequence
+          appHarness.forceRender()
+        }
         controller.handleSelectChatAgent(notification.agentName, {
           ...(notification.chatId ? { chatId: notification.chatId } : {}),
           selectLatest: false,
@@ -355,11 +546,13 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
     ),
     openAgentConversationFromNotification: vi.fn(
       async (target: { agentName: string; chatId?: string }) => {
+        beginUserNavigationIntent()
         appHarness.beforeNativeAgentConversationNotification?.()
         await appHarness.nativeNotificationContinuation
         controller.handleSelectChatAgent(target.agentName, {
           ...(target.chatId ? { chatId: target.chatId } : {}),
           selectLatest: false,
+          keepNavItem: activeWorkspaceTab(controller.workspaceTabs)?.kind !== 'chat',
         })
       }
     ),
@@ -461,6 +654,10 @@ function installClerum(
   const createFolder = vi.fn(async () => ({}))
   const createFileFromPath = vi.fn(async () => ({}))
   const moveResource = vi.fn(async () => ({}))
+  const dispatchFileExplorerMutation = vi.fn(async request => ({
+    resourceId: request.target.resourceId,
+    version: request.target.version + 1,
+  }))
   const gfs = {
     listAccessible: vi.fn(async () => rootPage),
     listChildren: vi.fn(async (resourceId: string) =>
@@ -474,6 +671,7 @@ function installClerum(
     createFolder,
     createFileFromPath,
     moveResource,
+    dispatchFileExplorerMutation,
     copyDeepLink: vi.fn(async () => ({ url: 'https://profile.fixture.test/link' })),
     download: vi.fn(),
     downloadPreview: vi.fn(async (gfsUri: string, _maxBytes: number) => {
@@ -527,7 +725,14 @@ function installClerum(
       gfs,
     } as unknown as Window['clerum'],
   })
-  return { gfs, deleteResource, createFolder, createFileFromPath, moveResource }
+  return {
+    gfs,
+    deleteResource,
+    createFolder,
+    createFileFromPath,
+    moveResource,
+    dispatchFileExplorerMutation,
+  }
 }
 
 function renderApp() {
@@ -698,7 +903,7 @@ async function openLiveTargetInSameFilesTab() {
     parentResourceId: sourceFolder.resourceId,
     version: targetFolder.version,
   })
-  const { gfs, createFolder, createFileFromPath } = installClerum(
+  const { gfs, createFolder, createFileFromPath, dispatchFileExplorerMutation } = installClerum(
     [sourceFolder, targetFolder],
     new Map(),
     {
@@ -734,7 +939,14 @@ async function openLiveTargetInSameFilesTab() {
       files: { path: targetFolder.gfsUri },
     })
   )
-  return { sourceFolder, targetFolder, gfs, createFolder, createFileFromPath }
+  return {
+    sourceFolder,
+    targetFolder,
+    gfs,
+    createFolder,
+    createFileFromPath,
+    dispatchFileExplorerMutation,
+  }
 }
 
 const targetA = await resolveResource(
@@ -755,6 +967,10 @@ beforeEach(() => {
   appHarness.filesPageLatestPendingAction = null
   appHarness.filesPageRenderCount = 0
   appHarness.filesPageLastLocation = null
+  appHarness.filesPagePropsByTab.clear()
+  appHarness.sidebarMutationClaims = []
+  appHarness.captureFilesPagePropsOnly = false
+  appHarness.renderTitlebarRoot = false
   appHarness.previewPagePendingActions = []
   appHarness.beforeNativeAgentConversationNotification = null
   appHarness.nativeNotificationContinuation = null
@@ -1120,7 +1336,8 @@ describe('App → Files action lifecycle integration', () => {
   })
 
   it('opens the exact ancestor destination when acting on A after the same tab moves A → B', async () => {
-    const { sourceFolder, targetFolder, createFolder } = await openLiveTargetInSameFilesTab()
+    const { sourceFolder, targetFolder, dispatchFileExplorerMutation } =
+      await openLiveTargetInSameFilesTab()
 
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
       id: 'same-files-tab',
@@ -1144,30 +1361,43 @@ describe('App → Files action lifecycle integration', () => {
     )
 
     const activeTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
-    expect(activeTab).toMatchObject({ kind: 'files', files: { path: sourceFolder.gfsUri } })
-    expect(activeTab?.id).not.toBe('same-files-tab')
+    expect(activeTab).toMatchObject({
+      id: 'same-files-tab',
+      kind: 'files',
+      files: { path: targetFolder.gfsUri },
+    })
     expect(
       appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === 'same-files-tab')
     ).toMatchObject({ id: 'same-files-tab', kind: 'files', files: { path: targetFolder.gfsUri } })
     expect(
       appHarness.controller.workspaceTabs.tabs.filter(tab => tab.kind === 'files')
-    ).toHaveLength(2)
+    ).toHaveLength(1)
 
     fireEvent.change(within(dialog).getByRole('textbox', { name: 'Folder name' }), {
       target: { value: 'Created in ancestor' },
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Create folder' }))
     await waitFor(() =>
-      expect(createFolder).toHaveBeenCalledWith(
-        sourceFolder.resourceId,
-        'Created in ancestor',
-        'main'
-      )
+      expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+        operation: 'create-folder',
+        target: {
+          resourceId: sourceFolder.resourceId,
+          drive: 'main',
+          gfsUri: sourceFolder.gfsUri,
+          kind: 'directory',
+          version: sourceFolder.version,
+          name: sourceFolder.name,
+          parentResourceId: null,
+          sessionGeneration: 1,
+        },
+        name: 'Created in ancestor',
+      })
     )
   })
 
   it('opens and submits New folder against the exact live same-tab destination', async () => {
-    const { targetFolder, createFolder } = await openLiveTargetInSameFilesTab()
+    const { sourceFolder, targetFolder, dispatchFileExplorerMutation } =
+      await openLiveTargetInSameFilesTab()
 
     await chooseRowAction(targetFolder.name, 'New folder')
     const dialog = await screen.findByRole('dialog', { name: 'New folder' })
@@ -1180,18 +1410,27 @@ describe('App → Files action lifecycle integration', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Create folder' }))
 
     await waitFor(() =>
-      expect(createFolder).toHaveBeenCalledWith(
-        targetFolder.resourceId,
-        'Created from sidebar',
-        'main'
-      )
+      expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+        operation: 'create-folder',
+        target: {
+          resourceId: targetFolder.resourceId,
+          drive: 'main',
+          gfsUri: targetFolder.gfsUri,
+          kind: 'directory',
+          version: targetFolder.version,
+          name: targetFolder.name,
+          parentResourceId: sourceFolder.resourceId,
+          sessionGeneration: 1,
+        },
+        name: 'Created from sidebar',
+      })
     )
   })
 
   it('opens the file chooser and uploads into the exact live same-tab destination', async () => {
-    const { targetFolder, createFileFromPath } = await openLiveTargetInSameFilesTab()
-    const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
-    const uploadInput = within(filesBrowser).getByLabelText('Upload file', {
+    const { sourceFolder, targetFolder, dispatchFileExplorerMutation } =
+      await openLiveTargetInSameFilesTab()
+    const uploadInput = screen.getByLabelText('Upload file', {
       selector: 'input[type="file"]',
     }) as HTMLInputElement
     const clickChooser = vi.spyOn(uploadInput, 'click').mockImplementation(() => undefined)
@@ -1202,16 +1441,25 @@ describe('App → Files action lifecycle integration', () => {
     fireEvent.change(uploadInput, { target: { files: [upload] } })
 
     await waitFor(() =>
-      expect(createFileFromPath).toHaveBeenCalledWith(
-        targetFolder.resourceId,
-        'sidebar-upload.md',
-        'sidebar-upload.md',
-        'main'
-      )
+      expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+        operation: 'upload',
+        target: {
+          resourceId: targetFolder.resourceId,
+          drive: 'main',
+          gfsUri: targetFolder.gfsUri,
+          kind: 'directory',
+          version: targetFolder.version,
+          name: targetFolder.name,
+          parentResourceId: sourceFolder.resourceId,
+          sessionGeneration: 1,
+        },
+        name: 'sidebar-upload.md',
+        filePath: 'sidebar-upload.md',
+      })
     )
   })
 
-  it('reuses an inactive exact-destination Files tab and completes the pending action', async () => {
+  it('keeps Chat selected while presenting an action for an exact Files target', async () => {
     const target = await resolveResource(
       resolvedFile('22222222222222222222222222222222', 'existing-target.txt')
     )
@@ -1220,7 +1468,7 @@ describe('App → Files action lifecycle integration', () => {
       path: target.gfsUri,
     })
     appHarness.controller = makeController(selectWorkspaceTab(initialTabs, 'chat-tab-1'))
-    installClerum([target])
+    const { gfs, dispatchFileExplorerMutation } = installClerum([target])
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
@@ -1228,20 +1476,33 @@ describe('App → Files action lifecycle integration', () => {
     await chooseDeleteAction(target.name)
 
     expect(await screen.findByText(`Delete ${target.name}?`)).toBeTruthy()
-    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
-      id: 'existing-target-files',
-      kind: 'files',
-      files: { path: target.gfsUri },
-    })
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
     expect(
       appHarness.controller.workspaceTabs.tabs.filter(tab => tab.kind === 'files')
     ).toHaveLength(1)
+    expect(gfs.resolve).not.toHaveBeenCalledWith(target.gfsUri)
+
+    await confirmDelete(target.name)
+    await waitFor(() =>
+      expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+        operation: 'delete',
+        target: {
+          resourceId: target.resourceId,
+          drive: 'main',
+          gfsUri: target.gfsUri,
+          kind: 'file',
+          version: target.version,
+          name: target.name,
+          parentResourceId: target.parentResourceId,
+          sessionGeneration: 1,
+        },
+      })
+    )
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
   })
 
   it('hands a sidebar action from Chat with no Files tab to the exact ready resource once', async () => {
-    const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+    const { gfs, deleteResource, dispatchFileExplorerMutation } = installClerum([targetA])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
@@ -1251,27 +1512,34 @@ describe('App → Files action lifecycle integration', () => {
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
 
-    const breadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
-    expect((breadcrumb as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+    expect(appHarness.controller.workspaceTabs.tabs.some(tab => tab.kind === 'files')).toBe(false)
 
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
     await confirmDelete('target-a.txt')
-    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1))
-    expect(deleteResource.mock.calls[0]).toEqual([targetA.resourceId, 'main', targetA.version])
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    await waitFor(() =>
+      expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+        operation: 'delete',
+        target: {
+          resourceId: targetA.resourceId,
+          drive: 'main',
+          gfsUri: targetA.gfsUri,
+          kind: 'file',
+          version: targetA.version,
+          name: targetA.name,
+          parentResourceId: targetA.parentResourceId,
+          sessionGeneration: 1,
+        },
+      })
+    )
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
   })
 
-  it('cancels a pending sidebar action when its active owner tab is selected again', async () => {
-    const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+  it('keeps a pending sidebar action bound when its active owner tab is selected again', async () => {
+    const { gfs, deleteResource } = installClerum([targetA])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
@@ -1281,10 +1549,8 @@ describe('App → Files action lifecycle integration', () => {
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
 
-    const breadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
-    expect((breadcrumb as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     expect(deleteResource).not.toHaveBeenCalled()
 
     const tabs = within(screen.getByRole('toolbar', { name: 'Workspace tabs' })).getAllByRole(
@@ -1292,26 +1558,20 @@ describe('App → Files action lifecycle integration', () => {
     )
     const activeTab = tabs.find(tab => tab.getAttribute('aria-pressed') === 'true')
     expect(activeTab).toBeTruthy()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
     fireEvent.click(activeTab as HTMLButtonElement)
 
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
   })
 
-  it('cancels a pending folder action when the sidebar reopens the same active folder', async () => {
+  it('keeps a pending folder action bound when the sidebar reopens its source folder', async () => {
     const folder = await resolveResource(
       resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Folder A')
     )
-    const deferredFolder = deferred<unknown>()
-    const { gfs, createFolder } = installClerum(
-      [folder],
-      new Map([[folder.gfsUri, deferredFolder]])
-    )
+    const { gfs, createFolder } = installClerum([folder])
     appHarness.controller = makeController(
       openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
         id: 'folder-a-owner',
@@ -1323,13 +1583,19 @@ describe('App → Files action lifecycle integration', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     const folderRow = await screen.findByRole('treeitem', { name: /Folder A/ })
+    const resolveCallsBeforeAction = gfs.resolve.mock.calls.filter(
+      ([uri]) => uri === folder.gfsUri
+    ).length
     const openFilesSection = appHarness.controller.openFilesSection
     await chooseRowAction('Folder A', 'New folder')
-    expect(openFilesSection).toHaveBeenCalledWith(folder.gfsUri)
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(folder.gfsUri))
+    expect(await screen.findByRole('dialog', { name: 'New folder' })).toBeTruthy()
+    expect(openFilesSection).not.toHaveBeenCalled()
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === folder.gfsUri).length).toBe(
+      resolveCallsBeforeAction
+    )
     await expectActionAtConsumer(appHarness.filesPagePendingActions, folder.gfsUri, 'new-folder')
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe('folder-a-owner')
-    expect(screen.queryByRole('dialog', { name: 'New folder' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: 'New folder' })).toBeTruthy()
 
     const intentBeforeSelection = appHarness.controller.navigationIntentSequence
     fireEvent.doubleClick(within(folderRow).getByRole('button', { name: 'Folder A' }))
@@ -1340,18 +1606,12 @@ describe('App → Files action lifecycle integration', () => {
       files: { path: folder.gfsUri },
     })
 
-    await act(async () => {
-      deferredFolder.resolve(folder)
-      await deferredFolder.promise
-    })
-    expect(screen.queryByRole('dialog', { name: 'New folder' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: 'New folder' })).toBeTruthy()
     expect(createFolder).not.toHaveBeenCalled()
   })
 
-  it('cancels a pending sidebar action when a tabs shortcut reselects its active owner', async () => {
-    const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+  it('keeps a pending sidebar action bound when a tabs shortcut reselects its owner', async () => {
+    const { gfs, deleteResource } = installClerum([targetA])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
@@ -1359,102 +1619,77 @@ describe('App → Files action lifecycle integration', () => {
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
 
-    const breadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
-    expect((breadcrumb as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
 
     expect(appHarness.shortcutRegistrationCount).toBeGreaterThan(0)
-    expect(appHarness.controller.workspaceTabs.tabs).toHaveLength(2)
+    expect(appHarness.controller.workspaceTabs.tabs).toHaveLength(1)
     const ownerTabId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
     const activeTabIndex = appHarness.controller.workspaceTabs.tabs.findIndex(
       tab => tab.id === ownerTabId
     )
     expect(activeTabIndex).toBeGreaterThanOrEqual(0)
-    const intentBeforeSelection = appHarness.controller.navigationIntentSequence
-    expect(
-      document.querySelector(
-        '[role="dialog"][aria-modal="true"], .da-plugin-consent[role="dialog"]'
-      )
-    ).toBeNull()
+    expect(document.querySelector('[role="dialog"][aria-modal="true"]')).toBeTruthy()
     const commandId = `tabs.select${activeTabIndex + 1}`
     act(() => appHarness.shortcutCommand(commandId, 'host'))
     expect(appHarness.lastShortcutCommand).toBe(commandId)
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(ownerTabId)
-    expect(appHarness.controller.navigationIntentSequence).toBeGreaterThan(intentBeforeSelection)
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
-
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
   })
 
-  it('cancels a pending Files action when the drawer chat switcher advances user intent', async () => {
-    const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+  it('keeps a pending Files action when the drawer chat switcher advances user intent', async () => {
+    const { gfs, deleteResource } = installClerum([targetA])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
 
-    const breadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
-    expect((breadcrumb as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Open chats' }))
     const chats = await screen.findByRole('listbox', { name: 'Open chats' })
     const currentChat = within(chats).getByRole('option', { name: 'New chat' })
     const intentBeforeSelection = appHarness.controller.navigationIntentSequence
     fireEvent.click(currentChat)
     expect(appHarness.controller.navigationIntentSequence).toBeGreaterThan(intentBeforeSelection)
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
-
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
   })
 
-  it('cancels a pending Files action when the sidebar selects a chat in the open drawer', async () => {
-    const deferredTarget = deferred<unknown>()
+  it('keeps a pending Files action when the sidebar selects a chat in the open drawer', async () => {
     const latestChatSessions = await produceLatestSidebarSession()
-    const { gfs, deleteResource } = installClerum(
-      [targetA],
-      new Map([[targetA.gfsUri, deferredTarget]])
+    const { gfs, deleteResource } = installClerum([targetA])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
     )
     appHarness.controller.desktopEnvironmentSetupComplete = false
     appHarness.controller.latestChatSessions = latestChatSessions
     renderApp()
 
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
-    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
-      kind: 'files',
-      files: { path: targetA.gfsUri },
-    })
-    expect(
-      ((await screen.findByRole('button', { name: 'Shared with me' })) as HTMLButtonElement)
-        .disabled
-    ).toBe(true)
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
 
     const ownerTabId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
-    fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
     const intentBeforeSelection = appHarness.controller.navigationIntentSequence
     fireEvent.click(screen.getByRole('button', { name: 'Open New Chat' }))
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(ownerTabId)
@@ -1467,41 +1702,29 @@ describe('App → Files action lifecycle integration', () => {
       })
     )
 
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
     expect(appHarness.controller.navigationIntentSequence).toBeGreaterThan(intentBeforeSelection)
   })
 
-  it('cancels a pending Files action when a notification selects a drawer chat', async () => {
-    const deferredTarget = deferred<unknown>()
-    const { gfs, deleteResource } = installClerum(
-      [targetA],
-      new Map([[targetA.gfsUri, deferredTarget]])
+  it('keeps a pending Files action when a notification selects a drawer chat', async () => {
+    const { gfs, deleteResource } = installClerum([targetA])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
     )
     appHarness.controller.desktopEnvironmentSetupComplete = false
     appHarness.controller.notifications = [produceConversationNotification()]
     renderApp()
 
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
-    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
-      kind: 'files',
-      files: { path: targetA.gfsUri },
-    })
-    expect(
-      ((await screen.findByRole('button', { name: 'Shared with me' })) as HTMLButtonElement)
-        .disabled
-    ).toBe(true)
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
     const intentBeforeSelection = appHarness.controller.navigationIntentSequence
     fireEvent.click(screen.getByRole('button', { name: 'Open conversation notification' }))
     expect(appHarness.controller.handleOpenNotification).toHaveBeenCalledWith(
@@ -1516,31 +1739,29 @@ describe('App → Files action lifecycle integration', () => {
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
     expect(appHarness.controller.navigationIntentSequence).toBeGreaterThan(intentBeforeSelection)
 
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
     expect(gfs.download).not.toHaveBeenCalled()
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
   })
 
-  it('cancels a pending Files action before a native desktop conversation notification', async () => {
-    const deferredTarget = deferred<unknown>()
+  it('keeps a local Files action while a native desktop conversation notification opens', async () => {
     const notificationResolution = deferred<void>()
     appHarness.nativeNotificationContinuation = notificationResolution.promise
-    const { gfs, deleteResource } = installClerum(
-      [targetA],
-      new Map([[targetA.gfsUri, deferredTarget]])
+    const { gfs, deleteResource } = installClerum([targetA])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
     )
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
 
     let nativeNotificationOpen!: Promise<void>
@@ -1560,16 +1781,12 @@ describe('App → Files action lifecycle integration', () => {
     })
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
 
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
-
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
     notificationResolution.resolve()
     await act(async () => nativeNotificationOpen)
 
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(appHarness.controller.activeChatId).toBe('notification-chat')
     expect(deleteResource).not.toHaveBeenCalled()
     expect(gfs.download).not.toHaveBeenCalled()
@@ -1686,12 +1903,8 @@ describe('App → Files action lifecycle integration', () => {
     }
   })
 
-  it('cancels a pending Files action through a produced native notification while Host verification waits', async () => {
-    const deferredTarget = deferred<unknown>()
-    const { gfs, deleteResource } = installClerum(
-      [targetA],
-      new Map([[targetA.gfsUri, deferredTarget]])
-    )
+  it('keeps a local Files action bound through native notification Host verification', async () => {
+    const { gfs, deleteResource } = installClerum([targetA])
     const gfsRuntimeBridge = window.clerum as unknown as Record<string, any>
     const { clerum } = installAppControllerClerum({ agentNames: ['agent-a'] })
     const controllerBridge = window.clerum as unknown as Record<string, any>
@@ -1777,7 +1990,8 @@ describe('App → Files action lifecycle integration', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
       await screen.findByRole('treeitem', { name: /target-a\.txt/ })
       await chooseDeleteAction('target-a.txt')
-      await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
+      expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+      expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
       await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
       await waitFor(() => expect(notificationBridge.onClick).toHaveBeenCalled())
 
@@ -1826,19 +2040,9 @@ describe('App → Files action lifecycle integration', () => {
       act(() => clickHandler?.({ id: notificationId! }))
       await act(async () => verificationStarted.promise)
       expect(currentController().navItem).toBe(DESKTOP_ROUTES.files)
-      await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
-      const liveLocationBeforeResolve = appHarness.filesPageLastLocation?.gfsUri ?? null
-      await act(async () => {
-        deferredTarget.resolve(targetA)
-        await deferredTarget.promise
-        await new Promise(resolve => setTimeout(resolve, 0))
-      })
-
-      // Give the producer-backed resolver and FilesPage effects a task turn.
-      // Cancellation leaves the live route where it was; without the App bridge,
-      // FilesPage reports the exact target and opens Delete.
-      expect(appHarness.filesPageLastLocation?.gfsUri ?? null).toBe(liveLocationBeforeResolve)
-      expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+      expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+      await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
+      expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
       expect(deleteResource).not.toHaveBeenCalled()
       expect(gfs.download).not.toHaveBeenCalled()
       expect(currentController().statusText).toBe(previousStatus)
@@ -1849,6 +2053,7 @@ describe('App → Files action lifecycle integration', () => {
       })
       await waitFor(() => expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat))
       expect(currentController().activeChatId).toBe(notificationChatId)
+      expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
     } finally {
       if (previousNotificationSettings === null) {
         window.localStorage.removeItem(NOTIFICATION_SETTINGS_STORAGE_KEY)
@@ -1863,15 +2068,11 @@ describe('App → Files action lifecycle integration', () => {
     }
   })
 
-  it('does not download a canceled non-previewable action seed after notification selection', async () => {
+  it('keeps a non-previewable local action after notification selection without downloading', async () => {
     const binary = await resolveResource(
       resolvedFile('66666666666666666666666666666666', 'target-a.bin')
     )
-    const deferredTarget = deferred<unknown>()
-    const { gfs, deleteResource } = installClerum(
-      [binary],
-      new Map([[binary.gfsUri, deferredTarget]])
-    )
+    const { gfs, deleteResource } = installClerum([binary])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     appHarness.controller.notifications = [produceConversationNotification()]
     renderApp()
@@ -1879,25 +2080,24 @@ describe('App → Files action lifecycle integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.bin/ })
     await chooseDeleteAction('target-a.bin')
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(binary.gfsUri))
+    expect(await screen.findByText('Delete target-a.bin?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(binary.gfsUri)
     await expectActionAtConsumer(appHarness.filesPagePendingActions, binary.gfsUri, 'delete')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
     fireEvent.click(screen.getByRole('button', { name: 'Open conversation notification' }))
-    await act(async () => {
-      deferredTarget.resolve(binary)
-      await deferredTarget.promise
-    })
 
+    expect(await screen.findByText('Delete target-a.bin?')).toBeTruthy()
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, binary.gfsUri, 'delete')
     expect(gfs.download).not.toHaveBeenCalled()
     expect(deleteResource).not.toHaveBeenCalled()
-    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
   })
 
-  it('cancels a pending Files action when sidebar navigation selects Chat', async () => {
-    const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+  it('keeps a pending sidebar action bound when sidebar navigation selects Chat', async () => {
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    const { gfs, deleteResource } = installClerum([targetA])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
@@ -1905,47 +2105,33 @@ describe('App → Files action lifecycle integration', () => {
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
 
-    expect(
-      ((await screen.findByRole('button', { name: 'Shared with me' })) as HTMLButtonElement)
-        .disabled
-    ).toBe(true)
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     expect(deleteResource).not.toHaveBeenCalled()
     fireEvent.click(screen.getByTestId('nav-chat'))
     await waitFor(() =>
       expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
     )
-
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
-    const filesTab = getWorkspaceTabButtons('Files').find(
-      tab => tab.getAttribute('aria-pressed') !== 'true'
-    )
-    expect(filesTab).toBeTruthy()
-    fireEvent.click(filesTab as HTMLButtonElement)
-    await waitFor(() =>
-      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
-    )
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     expect(deleteResource).not.toHaveBeenCalled()
   })
 
-  it('cancels a pending sidebar action when its Files owner tab closes', async () => {
-    const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+  it('keeps a pending sidebar action bound when its Files owner tab closes', async () => {
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-owner', path: null })
+    )
+    const { gfs, dispatchFileExplorerMutation } = installClerum([targetA])
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
 
-    const breadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
-    expect((breadcrumb as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(deleteResource).not.toHaveBeenCalled()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
 
     const ownerTab = getWorkspaceTabButtons('Files').find(
       tab => tab.getAttribute('aria-pressed') === 'true'
@@ -1953,19 +2139,29 @@ describe('App → Files action lifecycle integration', () => {
     expect(ownerTab).toBeTruthy()
     const ownerTitle = ownerTab?.getAttribute('aria-label')
     expect(ownerTitle).toBeTruthy()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
     fireEvent.click(screen.getByRole('button', { name: `Close ${ownerTitle}` }))
     await waitFor(() => {
       expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
       expect(appHarness.controller.workspaceTabs.tabs.some(tab => tab.kind === 'files')).toBe(false)
     })
 
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(deleteResource).not.toHaveBeenCalled()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    await confirmDelete('target-a.txt')
+    await waitFor(() =>
+      expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+        operation: 'delete',
+        target: {
+          resourceId: targetA.resourceId,
+          drive: 'main',
+          gfsUri: targetA.gfsUri,
+          kind: 'file',
+          version: targetA.version,
+          name: targetA.name,
+          parentResourceId: targetA.parentResourceId,
+          sessionGeneration: 1,
+        },
+      })
+    )
   })
 
   it('distinguishes an active Files-root tab from no Files tab and completes the same handoff', async () => {
@@ -1974,7 +2170,7 @@ describe('App → Files action lifecycle integration', () => {
       path: null,
     })
     appHarness.controller = makeController(workspaceTabs)
-    const { deleteResource } = installClerum([targetA])
+    const { gfs, deleteResource, dispatchFileExplorerMutation } = installClerum([targetA])
     renderApp()
 
     const rootTab = getWorkspaceTabButtons('Files')[0]
@@ -1987,57 +2183,432 @@ describe('App → Files action lifecycle integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     await confirmDelete('target-a.txt')
 
-    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1))
-    expect(deleteResource.mock.calls[0]).toEqual([targetA.resourceId, 'main', targetA.version])
+    await waitFor(() =>
+      expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+        operation: 'delete',
+        target: {
+          resourceId: targetA.resourceId,
+          drive: 'main',
+          gfsUri: targetA.gfsUri,
+          kind: 'file',
+          version: targetA.version,
+          name: targetA.name,
+          parentResourceId: targetA.parentResourceId,
+          sessionGeneration: 1,
+        },
+      })
+    )
+    expect(deleteResource).not.toHaveBeenCalled()
   })
 
-  it('cancels on a reachable root-tab switch before target arrival and never revives on return', async () => {
+  it('keeps a local action bound while switching between Files tabs', async () => {
     const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
       id: 'root-files-tab',
       path: null,
     })
     appHarness.controller = makeController(workspaceTabs)
-    const deferredTarget = deferred<unknown>()
-    const { deleteResource, gfs } = installClerum(
-      [targetA],
-      new Map([[targetA.gfsUri, deferredTarget]])
-    )
+    const { deleteResource, gfs, dispatchFileExplorerMutation } = installClerum([targetA])
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseDeleteAction('target-a.txt')
 
-    const targetBreadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
-    expect((targetBreadcrumb as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     expect(deleteResource).not.toHaveBeenCalled()
-    const tabs = getWorkspaceTabButtons('Files')
-    expect(tabs).toHaveLength(2)
-
-    fireEvent.click(tabs[0]!)
-    await waitFor(() => expect(tabs[0]?.getAttribute('aria-pressed')).toBe('true'))
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
-    const targetTab = getWorkspaceTabButtons('Files')[1]
-    expect(targetTab).toBeDefined()
-    fireEvent.click(targetTab!)
+    const toolbar = within(screen.getByRole('toolbar', { name: 'Workspace tabs' }))
+    const chatTab = toolbar.getByRole('button', { name: 'New chat' })
+    fireEvent.click(chatTab)
     await waitFor(() =>
-      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
-        kind: 'preview',
-        preview: { gfsUri: targetA.gfsUri },
-      })
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
     )
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
+    fireEvent.click(getWorkspaceTabButtons('Files')[0]!)
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe('root-files-tab')
+    )
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    await confirmDelete('target-a.txt')
+    await waitFor(() =>
+      expect(dispatchFileExplorerMutation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'delete',
+          target: expect.objectContaining({
+            resourceId: targetA.resourceId,
+            gfsUri: targetA.gfsUri,
+            version: targetA.version,
+            sessionGeneration: 1,
+          }),
+        })
+      )
+    )
     expect(deleteResource).not.toHaveBeenCalled()
   })
 
-  it('does not replay a completed action after reaching its target, leaving, and returning', async () => {
+  it('does not replay a pending Delete after its Files presenter remounts', async () => {
+    const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'delete-remount-files',
+      path: null,
+    })
+    appHarness.controller = makeController(selectWorkspaceTab(workspaceTabs, 'chat-tab-1'))
+    const { dispatchFileExplorerMutation } = installClerum([targetA])
+    const mutation = deferred<{ resourceId: string; version: number }>()
+    dispatchFileExplorerMutation.mockImplementation(() => mutation.promise)
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    await chooseDeleteAction('target-a.txt')
+    await confirmDelete('target-a.txt')
+    await waitFor(() => expect(dispatchFileExplorerMutation).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(getWorkspaceTabButtons('Files')[0]!)
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(
+        'delete-remount-files'
+      )
+    )
+    await confirmDelete('target-a.txt')
+    expect(dispatchFileExplorerMutation).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      mutation.resolve({ resourceId: targetA.resourceId, version: targetA.version + 1 })
+      await mutation.promise
+    })
+    await waitFor(() => expect(screen.queryByText('Delete target-a.txt?')).toBeNull())
+    expect(dispatchFileExplorerMutation).toHaveBeenCalledTimes(1)
+    expect(dispatchFileExplorerMutation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'delete',
+        target: expect.objectContaining({
+          resourceId: targetA.resourceId,
+          gfsUri: targetA.gfsUri,
+          version: targetA.version,
+          sessionGeneration: 1,
+        }),
+      })
+    )
+  })
+
+  it('does not replay an in-flight Upload after its Files presenter remounts', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'upload-target')
+    )
+    const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'upload-remount-files',
+      path: null,
+    })
+    appHarness.controller = makeController(selectWorkspaceTab(workspaceTabs, 'chat-tab-1'))
+    const { dispatchFileExplorerMutation } = installClerum([folder])
+    const mutation = deferred<{ resourceId: string; version: number }>()
+    dispatchFileExplorerMutation.mockImplementation(() => mutation.promise)
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /upload-target/ })
+    await chooseRowAction('upload-target', 'Upload file')
+    const firstInput = screen.getByLabelText('Upload file', {
+      selector: 'input[type="file"]',
+    }) as HTMLInputElement
+    fireEvent.change(firstInput, {
+      target: { files: [new File(['first'], 'first.txt', { type: 'text/plain' })] },
+    })
+    await waitFor(() => expect(dispatchFileExplorerMutation).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(getWorkspaceTabButtons('Files')[0]!)
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(
+        'upload-remount-files'
+      )
+    )
+    const remountedInput = screen.getByLabelText('Upload file', {
+      selector: 'input[type="file"]',
+    }) as HTMLInputElement
+    fireEvent.change(remountedInput, {
+      target: { files: [new File(['second'], 'second.txt', { type: 'text/plain' })] },
+    })
+    await act(async () => Promise.resolve())
+    expect(appHarness.sidebarMutationClaims).toContainEqual(
+      expect.objectContaining({ claimed: false })
+    )
+    expect(dispatchFileExplorerMutation).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      mutation.resolve({ resourceId: folder.resourceId, version: folder.version + 1 })
+      await mutation.promise
+    })
+    await waitFor(() =>
+      expect(appHarness.controller.pushToast).toHaveBeenCalledWith('Uploaded first.txt', 'success')
+    )
+    expect(dispatchFileExplorerMutation).toHaveBeenCalledTimes(1)
+    expect(dispatchFileExplorerMutation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'upload',
+        target: expect.objectContaining({
+          resourceId: folder.resourceId,
+          gfsUri: folder.gfsUri,
+          version: folder.version,
+          sessionGeneration: 1,
+        }),
+        name: 'first.txt',
+      })
+    )
+  })
+
+  it('does not replay an in-flight Replace after its Files presenter remounts', async () => {
+    const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'replace-remount-files',
+      path: null,
+    })
+    appHarness.controller = makeController(selectWorkspaceTab(workspaceTabs, 'chat-tab-1'))
+    const { dispatchFileExplorerMutation } = installClerum([targetA])
+    const mutation = deferred<{ resourceId: string; version: number }>()
+    dispatchFileExplorerMutation.mockImplementation(() => mutation.promise)
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    await chooseRowAction('target-a.txt', 'Replace file')
+    const firstInput = screen.getByLabelText('Replace target-a.txt', {
+      selector: 'input[type="file"]',
+    }) as HTMLInputElement
+    fireEvent.change(firstInput, {
+      target: { files: [new File(['first'], 'first.txt', { type: 'text/plain' })] },
+    })
+    await waitFor(() => expect(dispatchFileExplorerMutation).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(getWorkspaceTabButtons('Files')[0]!)
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(
+        'replace-remount-files'
+      )
+    )
+    await act(async () => Promise.resolve())
+    expect(appHarness.sidebarMutationClaims).toContainEqual(
+      expect.objectContaining({ claimed: false })
+    )
+    expect(dispatchFileExplorerMutation).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      mutation.resolve({ resourceId: targetA.resourceId, version: targetA.version + 1 })
+      await mutation.promise
+    })
+    await waitFor(() =>
+      expect(appHarness.controller.pushToast).toHaveBeenCalledWith(
+        'Replaced target-a.txt',
+        'success'
+      )
+    )
+    expect(dispatchFileExplorerMutation).toHaveBeenCalledTimes(1)
+    expect(dispatchFileExplorerMutation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'replace',
+        target: expect.objectContaining({
+          resourceId: targetA.resourceId,
+          gfsUri: targetA.gfsUri,
+          version: targetA.version,
+          sessionGeneration: 1,
+        }),
+      })
+    )
+  })
+
+  it('rechecks a Files path after an explicit navigation settles across a mutation', async () => {
+    const savedDirectory = await resolveResource(
+      resolvedDirectory('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'Saved directory')
+    )
+    const explicitDirectory = await resolveResource(
+      resolvedDirectory('cccccccccccccccccccccccccccccccc', 'Explicit directory')
+    )
+    const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'files-convergence-intent',
+      path: savedDirectory.gfsUri,
+    })
+    appHarness.controller = makeController(workspaceTabs)
+    const { gfs } = installClerum([savedDirectory, explicitDirectory])
+    const reconciledLocation = await resolveResource(
+      resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Authorized location')
+    )
+    const resolveConvergenceLocation = vi.fn(async () => ({
+      available: true as const,
+      location: {
+        resourceId: reconciledLocation.resourceId,
+        rid: reconciledLocation.rid,
+        gfsUri: reconciledLocation.gfsUri,
+        name: reconciledLocation.name,
+        kind: 'directory' as const,
+        version: reconciledLocation.version,
+      },
+      breadcrumbs: [],
+    }))
+    Object.assign(gfs, { resolveConvergenceLocation })
+    appHarness.captureFilesPagePropsOnly = true
+    renderApp()
+
+    const initialReconcileCalls = vi.mocked(appHarness.controller.reconcileFilesConvergence).mock
+      .calls.length
+    const filesProps = appHarness.filesPagePropsByTab.get('files-convergence-intent')
+    let receipt: FilesPathIntentReceipt | null = null
+    act(() => {
+      receipt = filesProps?.onExplicitNavigationIntent?.() ?? null
+    })
+    expect(receipt).not.toBeNull()
+
+    act(() => appHarness.controller.recordFilesMutation())
+    await waitFor(() =>
+      expect(
+        vi.mocked(appHarness.controller.reconcileFilesConvergence).mock.calls.length
+      ).toBeGreaterThan(initialReconcileCalls)
+    )
+    expect(resolveConvergenceLocation).not.toHaveBeenCalled()
+
+    act(() => {
+      filesProps?.onExplicitNavigationResult?.(
+        receipt,
+        true,
+        explicitDirectory.gfsUri,
+        explicitDirectory.name
+      )
+    })
+    await waitFor(() => expect(resolveConvergenceLocation).toHaveBeenCalledTimes(1))
+    expect(appHarness.controller.commitFilesPathIntent).toHaveBeenCalledWith(
+      receipt,
+      explicitDirectory.gfsUri,
+      explicitDirectory.name
+    )
+    expect(resolveConvergenceLocation).toHaveBeenCalledWith(explicitDirectory.gfsUri, 1, undefined)
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        id: 'files-convergence-intent',
+        kind: 'files',
+        files: { path: reconciledLocation.gfsUri },
+      })
+    )
+  })
+
+  it('does not let a stale Files tab navigation result settle the active tab receipt', async () => {
+    const directoryA = await resolveResource(
+      resolvedDirectory('dddddddddddddddddddddddddddddddd', 'Navigation A')
+    )
+    const directoryB = await resolveResource(
+      resolvedDirectory('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'Navigation B')
+    )
+    const filesA = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'files-navigation-a',
+      path: directoryA.gfsUri,
+    })
+    const filesAB = openFilesTab(filesA, { id: 'files-navigation-b', path: directoryB.gfsUri })
+    appHarness.controller = makeController(selectWorkspaceTab(filesAB, 'files-navigation-a'))
+    installClerum([directoryA, directoryB])
+    renderApp()
+
+    const propsA = appHarness.filesPagePropsByTab.get('files-navigation-a')
+    let receiptA: FilesPathIntentReceipt | null = null
+    act(() => {
+      receiptA = propsA?.onExplicitNavigationIntent?.() ?? null
+    })
+    expect(receiptA).not.toBeNull()
+
+    act(() => appHarness.controller.selectWorkspaceTabById('files-navigation-b'))
+    const propsB = appHarness.filesPagePropsByTab.get('files-navigation-b')
+    let receiptB: FilesPathIntentReceipt | null = null
+    act(() => {
+      receiptB = propsB?.onExplicitNavigationIntent?.() ?? null
+    })
+    expect(receiptB).not.toBeNull()
+    expect((receiptB as FilesPathIntentReceipt | null)?.tabId).toBe('files-navigation-b')
+
+    act(() => {
+      propsA?.onExplicitNavigationResult?.(receiptA, true, directoryA.gfsUri, directoryA.name)
+    })
+    expect(appHarness.controller.commitFilesPathIntent).not.toHaveBeenCalled()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: 'files-navigation-b',
+      kind: 'files',
+      files: { path: directoryB.gfsUri },
+    })
+
+    act(() => {
+      propsB?.onExplicitNavigationResult?.(receiptB, true, directoryA.gfsUri, directoryA.name)
+    })
+    expect(appHarness.controller.commitFilesPathIntent).toHaveBeenCalledTimes(1)
+    expect(appHarness.controller.commitFilesPathIntent).toHaveBeenCalledWith(
+      receiptB,
+      directoryA.gfsUri,
+      directoryA.name
+    )
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: 'files-navigation-b',
+      kind: 'files',
+      files: { path: directoryA.gfsUri },
+    })
+  })
+
+  it('fences a refresh result after its Files page unmounts and another tab starts navigation', async () => {
+    const directoryA = await resolveResource(
+      resolvedDirectory('ffffffffffffffffffffffffffffffff', 'Refresh A')
+    )
+    const directoryB = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111112', 'Refresh B')
+    )
+    const filesA = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'files-refresh-a',
+      path: directoryA.gfsUri,
+    })
+    const filesAB = openFilesTab(filesA, { id: 'files-refresh-b', path: directoryB.gfsUri })
+    appHarness.controller = makeController(selectWorkspaceTab(filesAB, 'files-refresh-a'))
+    const { gfs } = installClerum([directoryA, directoryB])
+    appHarness.renderTitlebarRoot = true
+    renderApp()
+
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(directoryA.gfsUri))
+    const pendingRefresh = deferred<Awaited<ReturnType<typeof resolveResource>>>()
+    gfs.resolve.mockImplementationOnce(() => pendingRefresh.promise)
+    const actionsToolbar = within(screen.getByRole('toolbar', { name: 'EvenDrive actions' }))
+    fireEvent.click(actionsToolbar.getByRole('button', { name: 'Refresh' }))
+
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledTimes(2))
+    act(() => appHarness.controller.selectWorkspaceTabById('files-refresh-b'))
+    await waitFor(() =>
+      expect(appHarness.filesPageLastLocation).toEqual({
+        gfsUri: directoryB.gfsUri,
+        name: directoryB.name,
+      })
+    )
+    const propsB = appHarness.filesPagePropsByTab.get('files-refresh-b')
+    let receiptB: FilesPathIntentReceipt | null = null
+    act(() => {
+      receiptB = propsB?.onExplicitNavigationIntent?.() ?? null
+    })
+    expect((receiptB as FilesPathIntentReceipt | null)?.tabId).toBe('files-refresh-b')
+    const commitsBeforeOldPageSettles = vi.mocked(appHarness.controller.commitFilesPathIntent).mock
+      .calls.length
+
+    await act(async () => {
+      pendingRefresh.resolve(directoryA)
+      await pendingRefresh.promise
+    })
+    expect(vi.mocked(appHarness.controller.commitFilesPathIntent)).toHaveBeenCalledTimes(
+      commitsBeforeOldPageSettles
+    )
+    expect(appHarness.controller.pushToast).not.toHaveBeenCalledWith(
+      'EvenDrive refreshed',
+      'success'
+    )
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: 'files-refresh-b',
+      kind: 'files',
+      files: { path: directoryB.gfsUri },
+    })
+  })
+
+  it('does not replay a completed sidebar action after leaving and returning', async () => {
     const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
       id: 'root-files-tab',
       path: null,
@@ -2049,66 +2620,118 @@ describe('App → Files action lifecycle integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await chooseRowAction('target-a.txt', 'Copy link')
-    await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledWith(targetA.gfsUri))
+    await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledWith(targetA.gfsUri, 1))
     await waitFor(() =>
       expect(appHarness.controller.pushToast).toHaveBeenCalledWith(
-        'Shareable EvenDrive link copied',
+        'EvenDrive link copied.',
         'success'
       )
     )
-    await waitFor(() =>
-      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
-        kind: 'files',
-        files: { path: targetA.gfsUri },
-      })
-    )
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: null },
+    })
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
 
-    const targetResolveCount = gfs.resolve.mock.calls.filter(
-      ([uri]) => uri === targetA.gfsUri
-    ).length
+    const chatTab = within(screen.getByRole('toolbar', { name: 'Workspace tabs' })).getByRole(
+      'button',
+      { name: 'New chat' }
+    )
+    fireEvent.click(chatTab)
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
     fireEvent.click(getWorkspaceTabButtons('Files')[0]!)
-    await waitFor(() => expect(screen.queryByText('Delete target-a.txt?')).toBeNull())
-    fireEvent.click(getWorkspaceTabButtons('target-a.txt')[0]!)
-    await waitFor(() =>
-      expect(
-        gfs.resolve.mock.calls.filter(([uri]) => uri === targetA.gfsUri).length
-      ).toBeGreaterThan(targetResolveCount)
-    )
-    await waitFor(() =>
-      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
-        kind: 'preview',
-        preview: { gfsUri: targetA.gfsUri },
-      })
-    )
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: null },
+    })
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1)
   })
 
-  it('ignores an older unmount acknowledgement while a newer row action resolves', async () => {
-    const oldTarget = deferred<unknown>()
-    const { deleteResource, gfs } = installClerum(
-      [targetA, targetB],
-      new Map([[targetA.gfsUri, oldTarget]])
+  it('copies a sidebar link without navigating the Files tab to the clicked row', async () => {
+    const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'root-files-tab',
+      path: null,
+    })
+    appHarness.controller = makeController(workspaceTabs)
+    const { gfs } = installClerum([targetA])
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    await chooseRowAction('target-a.txt', 'Copy link')
+    await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledWith(targetA.gfsUri, 1))
+    await waitFor(() =>
+      expect(appHarness.controller.pushToast).toHaveBeenCalledWith(
+        'EvenDrive link copied.',
+        'success'
+      )
     )
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: null },
+    })
+    expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1)
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
+  })
+
+  it('copies the exact sidebar ID from Chat without changing the selected workspace tab', async () => {
+    const { gfs } = installClerum([targetA])
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    const chatTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+    expect(chatTab?.kind).toBe('chat')
+    await chooseRowAction('target-a.txt', 'Copy file ID')
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(targetA.gfsUri))
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(chatTab?.id)
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
+  })
+
+  it('dispatches the newer clicked row after the earlier action is canceled', async () => {
+    const { deleteResource, gfs, dispatchFileExplorerMutation } = installClerum([targetA, targetB])
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
     await screen.findByRole('treeitem', { name: /target-b\.txt/ })
     await chooseDeleteAction('target-a.txt')
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
+    expect(await screen.findByText('Delete target-a.txt?')).toBeTruthy()
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
     expect(deleteResource).not.toHaveBeenCalled()
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Delete target-a.txt?' })).getByRole('button', {
+        name: 'Cancel',
+      })
+    )
     await chooseDeleteAction('target-b.txt')
+    expect(await screen.findByText('Delete target-b.txt?')).toBeTruthy()
     await confirmDelete('target-b.txt')
 
-    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1))
-    expect(deleteResource.mock.calls[0]).toEqual([targetB.resourceId, 'main', targetB.version])
-    await act(async () => {
-      oldTarget.resolve(targetA)
-      await oldTarget.promise
-    })
+    await waitFor(() =>
+      expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+        operation: 'delete',
+        target: {
+          resourceId: targetB.resourceId,
+          drive: 'main',
+          gfsUri: targetB.gfsUri,
+          kind: 'file',
+          version: targetB.version,
+          name: targetB.name,
+          parentResourceId: targetB.parentResourceId,
+          sessionGeneration: 1,
+        },
+      })
+    )
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(deleteResource).toHaveBeenCalledTimes(1)
+    expect(deleteResource).not.toHaveBeenCalled()
   })
 
   it.each([false, true])(
@@ -2131,17 +2754,21 @@ describe('App → Files action lifecycle integration', () => {
         version: target.version,
         readable,
       })
-      const { moveResource } = installClerum([parent, target, destination], new Map(), {
-        accessibleRows: [
-          accessibleResource(parent.resourceId, parent.name, 'directory', {
-            gfsUri: parent.gfsUri,
-          }),
-          accessibleResource(destination.resourceId, destination.name, 'directory', {
-            gfsUri: destination.gfsUri,
-          }),
-        ],
-        childRowsByParent: new Map([[parent.resourceId, [unreadableChild]]]),
-      })
+      const { gfs, moveResource, dispatchFileExplorerMutation } = installClerum(
+        [parent, target, destination],
+        new Map(),
+        {
+          accessibleRows: [
+            accessibleResource(parent.resourceId, parent.name, 'directory', {
+              gfsUri: parent.gfsUri,
+            }),
+            accessibleResource(destination.resourceId, destination.name, 'directory', {
+              gfsUri: destination.gfsUri,
+            }),
+          ],
+          childRowsByParent: new Map([[parent.resourceId, [unreadableChild]]]),
+        }
+      )
       renderApp()
 
       fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
@@ -2149,6 +2776,8 @@ describe('App → Files action lifecycle integration', () => {
       fireEvent.click(within(parentRow).getByRole('button', { name: 'Expand Shared parent' }))
       await findResourceTreeRow('unreadable-child.txt')
       await chooseRowAction(target.name, 'Move to')
+
+      if (!readable) expect(gfs.resolve).not.toHaveBeenCalledWith(target.gfsUri)
 
       const dialog = await screen.findByRole('dialog', { name: 'Move file unreadable-child.txt' })
       expect(dialog.querySelector('.da-gfs-move-dialog__current-location')?.textContent).toContain(
@@ -2160,15 +2789,23 @@ describe('App → Files action lifecycle integration', () => {
       )
 
       await waitFor(() =>
-        expect(moveResource).toHaveBeenCalledWith(
-          target.resourceId,
-          destination.resourceId,
-          'main',
-          target.version,
-          undefined,
-          1
-        )
+        expect(dispatchFileExplorerMutation).toHaveBeenCalledWith({
+          operation: 'move',
+          target: {
+            resourceId: target.resourceId,
+            drive: 'main',
+            gfsUri: target.gfsUri,
+            kind: 'file',
+            version: target.version,
+            name: target.name,
+            parentResourceId: parent.resourceId,
+            sessionGeneration: 1,
+          },
+          destinationResourceId: destination.resourceId,
+        })
       )
+      if (!readable) expect(gfs.resolve).not.toHaveBeenCalledWith(target.gfsUri)
+      expect(moveResource).not.toHaveBeenCalled()
     }
   )
 

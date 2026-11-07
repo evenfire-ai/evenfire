@@ -101,6 +101,47 @@ describe('GfsClient.resolveUri', () => {
   })
 })
 
+describe('GfsClient.resolveConvergenceLocation', () => {
+  it('forwards the exact canonical URI and unwraps authorized ancestry', async () => {
+    const result = {
+      available: true as const,
+      location: {
+        resourceId: RID,
+        rid: RID,
+        gfsUri: `gfs://main/${RID}`,
+        name: 'folder',
+        kind: 'directory' as const,
+        version: 7,
+      },
+      breadcrumbs: [],
+    }
+    const t = transport({
+      requestJson: vi.fn(async () => ({
+        ok: true as const,
+        data: result,
+      })) as GfsTransport['requestJson'],
+    })
+    const signal = new AbortController().signal
+
+    await expect(
+      new GfsClient(t).resolveConvergenceLocation(`gfs://main/${RID}`, 'tok', signal)
+    ).resolves.toEqual(result)
+    expect(t.requestJson).toHaveBeenCalledWith(
+      'GET',
+      `https://api.example/api/v1/me/gfs/convergence-location?uri=${encodeURIComponent(`gfs://main/${RID}`)}`,
+      { token: 'tok', signal }
+    )
+  })
+
+  it('rejects a human path before the authenticated request', async () => {
+    const t = transport()
+    await expect(
+      new GfsClient(t).resolveConvergenceLocation('gfs://main/folder/file', 'tok')
+    ).rejects.toThrow('canonical resource identity')
+    expect(t.requestJson).not.toHaveBeenCalled()
+  })
+})
+
 describe('GfsClient.download', () => {
   it('resolves then fetches the bytes through the brokered proxy', async () => {
     const t = transport()
@@ -112,6 +153,68 @@ describe('GfsClient.download', () => {
       'tok'
     )
   })
+
+  it('downloads the exact clicked identity without resolve and validates its response receipt', async () => {
+    const fetchBytesWithMetadata = vi.fn(async () => ({
+      bytes: new TextEncoder().encode('hello').buffer,
+      headers: new Headers({
+        'x-gfs-uri': `gfs://main/${RID}`,
+        'x-gfs-version': '17',
+        'content-disposition': "attachment; filename*=UTF-8''report%20one.txt",
+      }),
+    }))
+    const t = transport({ fetchBytesWithMetadata })
+    const receipt = await new GfsClient(t).downloadWithReceipt(`gfs://main/${RID}`, 'tok')
+
+    expect(receipt).toMatchObject({
+      uri: `gfs://main/${RID}`,
+      version: 17,
+      filename: 'report one.txt',
+    })
+    expect(new TextDecoder().decode(receipt.bytes)).toBe('hello')
+    expect(t.requestJson).not.toHaveBeenCalled()
+    expect(fetchBytesWithMetadata).toHaveBeenCalledWith(
+      `https://api.example/api/v1/me/gfs/proxy/01234567-89ab-cdef-0123-456789abcdef?drive=main`,
+      'tok'
+    )
+  })
+
+  it('rejects missing or mismatched admitted metadata before returning file bytes', async () => {
+    const t = transport({
+      fetchBytesWithMetadata: vi.fn(async () => ({
+        bytes: new TextEncoder().encode('protected').buffer,
+        headers: new Headers({
+          'x-gfs-uri': `gfs://main/${RID}`,
+          'x-gfs-version': '0',
+          'content-disposition': "attachment; filename*=UTF-8''private.txt",
+        }),
+      })),
+    })
+    await expect(new GfsClient(t).downloadWithReceipt(`gfs://main/${RID}`, 'tok')).rejects.toThrow(
+      /receipt metadata is missing or inconsistent/
+    )
+  })
+
+  it.each(['CON', 'con.txt', 'NUL', 'COM1.bin', 'LPT9', 'CON .txt', 'trailing.'])(
+    'rejects a platform-unsafe admitted filename %s before returning bytes',
+    async filename => {
+      const t = transport({
+        fetchBytesWithMetadata: vi.fn(async () => ({
+          bytes: new TextEncoder().encode('protected bytes').buffer,
+          headers: new Headers({
+            'x-gfs-uri': `gfs://main/${RID}`,
+            'x-gfs-version': '17',
+            'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+          }),
+        })),
+      })
+
+      await expect(
+        new GfsClient(t).downloadWithReceipt(`gfs://main/${RID}`, 'tok')
+      ).rejects.toThrow(/receipt metadata is missing or inconsistent/)
+      expect(t.requestJson).not.toHaveBeenCalled()
+    }
+  )
 })
 
 const CHILD = {

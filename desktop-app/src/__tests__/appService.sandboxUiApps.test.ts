@@ -52,6 +52,7 @@ vi.mock('../sandboxUiSessionRefresh.js', () => ({
 vi.mock('../config.js', () => ({
   getActiveRuntimeConfigOptionId: () => null,
   getActiveEnvKey: () => 'test-env',
+  getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -594,6 +595,144 @@ describe('AppService profile UI link authority', () => {
     expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledWith(
       'user@tenant.example'
     )
+  })
+
+  it('does not copy a Profile link after logout and same-token restoration', async () => {
+    let resolveProfile!: (value: { profileUiBaseUrl: string }) => void
+    const profileLookup = new Promise<{ profileUiBaseUrl: string }>(resolve => {
+      resolveProfile = resolve
+    })
+    const service = makeService() as unknown as {
+      me: { id: string; email: string; teamId: string }
+      sessionToken: string | null
+      sessionGeneration: number
+      gfsAuthEpoch: number
+      gfsDispatchBlocked: boolean
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      tokenStore: {
+        clearSessionToken: ReturnType<typeof vi.fn>
+        setSessionToken: ReturnType<typeof vi.fn>
+      }
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+      commitPendingRuntimeConfigDiscoveryIfSafe: () => Promise<void>
+      stopAllStreams: () => void
+      updateEntityChangeSessionToken: () => void
+      restartEntityChangeStreamForSessionReplacement: () => void
+      bindCurrentChatStore: () => Promise<void>
+      invalidateSandboxUiSession: () => void
+      migrateLegacyDesktopGfsUploadScopes: () => Promise<void>
+      installAuthenticatedLogin: (
+        result: { token: string; me: { id: string; email: string; teamId: string } },
+        generation: number
+      ) => Promise<unknown>
+      getSessionGeneration: () => number
+      logout: () => Promise<number>
+      copyGfsResourceDeepLink: (
+        uri: string,
+        writeClipboard: (url: string) => void,
+        expectedSessionGeneration: number
+      ) => Promise<{ url: string }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example', teamId: 'team-1' }
+    service.sessionToken = 'same-session-token'
+    service.sessionGeneration = 5
+    service.gfsAuthEpoch = 3
+    service.gfsDispatchBlocked = false
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn(() => profileLookup),
+    }
+    service.tokenStore.clearSessionToken = vi.fn(async () => undefined)
+    service.tokenStore.setSessionToken = vi.fn(async () => undefined)
+    service.suspendDesktopGfsUploadsForAuthBoundary = async () => undefined
+    service.commitPendingRuntimeConfigDiscoveryIfSafe = async () => undefined
+    service.stopAllStreams = () => undefined
+    service.updateEntityChangeSessionToken = () => undefined
+    service.restartEntityChangeStreamForSessionReplacement = () => undefined
+    service.bindCurrentChatStore = async () => undefined
+    service.invalidateSandboxUiSession = () => undefined
+    service.migrateLegacyDesktopGfsUploadScopes = async () => undefined
+
+    const writeClipboard = vi.fn()
+    const copying = service.copyGfsResourceDeepLink(
+      'gfs://main/0123456789abcdef0123456789abcdef',
+      writeClipboard,
+      5
+    )
+    await vi.waitFor(() =>
+      expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledOnce()
+    )
+
+    await service.logout()
+    await service.installAuthenticatedLogin(
+      {
+        token: 'same-session-token',
+        me: { id: 'user-1', email: 'user@tenant.example', teamId: 'team-1' },
+      },
+      service.getSessionGeneration()
+    )
+    resolveProfile({ profileUiBaseUrl: 'https://profile.tenant.example' })
+
+    await expect(copying).rejects.toThrow(
+      'Desktop session changed while resolving the Profile link'
+    )
+    expect(writeClipboard).not.toHaveBeenCalled()
+  })
+
+  it('waits for the trusted clipboard writer before settling a Profile link operation', async () => {
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      sessionGeneration: number
+      gfsAuthEpoch: number
+      gfsDispatchBlocked: boolean
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      copyGfsResourceDeepLink: (
+        uri: string,
+        writeClipboard: (url: string) => void,
+        expectedSessionGeneration: number
+      ) => Promise<{ url: string }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.sessionGeneration = 13
+    service.gfsAuthEpoch = 2
+    service.gfsDispatchBlocked = false
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn().mockResolvedValue({
+        profileUiBaseUrl: 'https://profile.tenant.example',
+      }),
+    }
+
+    let releaseClipboard!: () => void
+    const clipboardWrite = new Promise<void>(resolve => {
+      releaseClipboard = resolve
+    })
+    const writeClipboard = vi.fn((_url: string) => clipboardWrite)
+    const pending = service.copyGfsResourceDeepLink(
+      'gfs://main/0123456789abcdef0123456789abcdef',
+      writeClipboard,
+      13
+    )
+    let settled = false
+    void pending.then(() => {
+      settled = true
+    })
+
+    await vi.waitFor(() => expect(writeClipboard).toHaveBeenCalledOnce())
+    expect(settled).toBe(false)
+    expect(writeClipboard).toHaveBeenCalledWith(
+      buildGfsResourceWebLink(
+        'https://profile.tenant.example',
+        'gfs://main/0123456789abcdef0123456789abcdef'
+      )
+    )
+
+    releaseClipboard()
+    await expect(pending).resolves.toEqual({
+      url: buildGfsResourceWebLink(
+        'https://profile.tenant.example',
+        'gfs://main/0123456789abcdef0123456789abcdef'
+      ),
+    })
+    expect(settled).toBe(true)
   })
 
   it('uses the invitation-specific Profile origin and rejects a changed session', async () => {

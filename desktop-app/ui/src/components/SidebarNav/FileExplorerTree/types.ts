@@ -4,6 +4,7 @@ import type { GfsPreviewResource } from '@lib/gfsPreview'
 import type { GfsResourceActionId } from '@lib/gfsResourceActions'
 import type { GfsDropVerdict } from '@/gfs/dragSession'
 import type { Tone } from '@/uiTypes'
+import type { FileExplorerMutationTarget } from '../../../../../src/appService.js'
 
 /**
  * Actions the sidebar file explorer hands back to the app. A file activates on
@@ -16,9 +17,27 @@ export interface FileExplorerTreeProps {
   /** Single-click / Enter on a previewable file → open (or focus) its preview tab. */
   onOpenPreview: (preview: GfsPreviewResource) => void
   /** Run an action for the exact tree row, independent of the main-pane selection. */
-  onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
+  onResourceAction: (
+    resource: GfsBrowserChild,
+    actionId: GfsResourceActionId,
+    file?: File,
+    sessionGeneration?: number | null
+  ) => void
+  /** Submit an inline Rename receipt to the existing mutation owner. */
+  onRenameResource?: (request: FileExplorerRenameRequest) => void | Promise<void>
   /** Transient success/error feedback for the download fallback. */
   pushToast: (message: string, tone: Tone) => void
+}
+
+/** Immutable action target captured from the row when inline Rename starts. */
+export type FileExplorerRenameTarget = FileExplorerMutationTarget
+
+/** Submit request handed to the App's existing Rename/CAS owner. */
+export interface FileExplorerRenameRequest {
+  actionId: 'rename'
+  targetUri: string
+  targetResource: Readonly<FileExplorerRenameTarget>
+  requestedName: string
 }
 
 export interface FileExplorerNodeProps {
@@ -52,8 +71,14 @@ export interface FileExplorerNodeProps {
   dragSourceName?: string | null
   onToggle: (resourceId: string) => void
   onActivateFolder: (node: GfsBrowserChild) => void
-  onActivateFile: (node: GfsBrowserChild) => void
-  onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
+  onActivateFile: (node: GfsBrowserChild, sessionGeneration: number | null) => void
+  onResourceAction: (
+    resource: GfsBrowserChild,
+    actionId: GfsResourceActionId,
+    file?: File,
+    sessionGeneration?: number | null
+  ) => void
+  onRenameResource: (request: FileExplorerRenameRequest) => void | Promise<void>
   /** Fail-closed hook: a listing authority error revokes the session. */
   onAuthorityFailure: (message: unknown, scope: string, sessionGeneration: number) => void
   onNodeDragStart: (

@@ -59,6 +59,39 @@ beforeEach(() => {
 })
 
 describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', () => {
+  it('forwards convergence-location by exact URI on the user session plane', async () => {
+    const result = {
+      available: true,
+      location: {
+        resourceId: '11111111-2222-4333-8444-555555555555',
+        rid: '11111111222243338444555555555555',
+        gfsUri: 'gfs://main/11111111222243338444555555555555',
+        name: 'folder',
+        kind: 'directory',
+        version: 9,
+      },
+      breadcrumbs: [],
+    }
+    clientMock.controlApiRequest.mockResolvedValue({ ok: true, data: result })
+    const uri = result.location.gfsUri
+
+    await request(buildApp())
+      .get(`/me/gfs/convergence-location?uri=${encodeURIComponent(uri)}`)
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-request-id', REQUEST_ID)
+      .expect(200, { ok: true, data: result })
+
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/gfs/convergence-location',
+      {
+        userSessionToken: 'sess-xyz',
+        query: { uri },
+        extraHeaders: expect.objectContaining({ 'x-request-id': REQUEST_ID }),
+      }
+    )
+  })
+
   it('applies one shared local edge bucket across v2 methods before proxying', async () => {
     clientMock.controlApiStreamRequest.mockImplementation(
       async () =>
@@ -635,22 +668,33 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
   })
 
   it('streams a content download (binary) from the proxy', async () => {
+    const resourceId = '11111111-2222-4333-8444-555555555555'
+    const resourceUri = `gfs://main/${resourceId.replaceAll('-', '')}`
     clientMock.controlApiStreamRequest.mockResolvedValue(
       new Response('hello', {
         status: 200,
-        headers: { 'content-type': 'application/octet-stream', 'content-length': '5' },
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': '5',
+          'content-disposition': "attachment; filename*=UTF-8''hello.txt",
+          'x-gfs-uri': resourceUri,
+          'x-gfs-version': '17',
+        },
       })
     )
     const res = await request(buildApp())
-      .get('/me/gfs/proxy/abc?drive=main')
+      .get(`/me/gfs/proxy/${resourceId}?drive=main`)
       .set('authorization', 'Bearer sess-xyz')
       .set('x-request-id', REQUEST_ID)
     expect(res.status).toBe(200)
     const bytes = Buffer.isBuffer(res.body) ? res.body : Buffer.from(res.text ?? '')
     expect(bytes.toString('utf8')).toBe('hello')
+    expect(res.headers['content-disposition']).toBe("attachment; filename*=UTF-8''hello.txt")
+    expect(res.headers['x-gfs-uri']).toBe(resourceUri)
+    expect(res.headers['x-gfs-version']).toBe('17')
     expect(clientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'GET',
-      '/external/gfs/proxy/abc',
+      `/external/gfs/proxy/${resourceId}`,
       {
         userSessionToken: 'sess-xyz',
         query: { drive: 'main' },

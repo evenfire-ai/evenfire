@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fetchBoundedBytes } from '../src/gfs/boundedDownload.js'
+import { fetchBoundedBytes, fetchBytesWithMetadata } from '../src/gfs/boundedDownload.js'
 import { ApiError } from '../src/httpClient.js'
 
 /**
@@ -161,5 +161,30 @@ describe('fetchBoundedBytes', () => {
     expect((rejection as ApiError).status).toBe(429)
     expect((rejection as ApiError).bodyText).toContain('"retryAfterSeconds":7')
     expect((rejection as ApiError).retryAfter).toBe('7')
+  })
+})
+
+describe('fetchBytesWithMetadata', () => {
+  it('returns body bytes with headers from the same successful response', async () => {
+    const fetchMock = async () =>
+      new Response('versioned body', {
+        status: 200,
+        headers: {
+          'x-gfs-uri': 'gfs://main/0123456789abcdef0123456789abcdef',
+          'x-gfs-version': '17',
+          'content-disposition': "attachment; filename*=UTF-8''report.txt",
+        },
+      })
+    const result = await fetchBytesWithMetadata(
+      'https://gfs.example/resource',
+      'token',
+      undefined,
+      {
+        fetch: fetchMock as typeof fetch,
+      }
+    )
+    expect(new TextDecoder().decode(result.bytes)).toBe('versioned body')
+    expect(result.headers.get('x-gfs-uri')).toBe('gfs://main/0123456789abcdef0123456789abcdef')
+    expect(result.headers.get('x-gfs-version')).toBe('17')
   })
 })

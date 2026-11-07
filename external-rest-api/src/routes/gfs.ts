@@ -35,6 +35,8 @@ const STREAM_HEADERS = [
   'content-type',
   'content-length',
   'content-disposition',
+  'x-gfs-uri',
+  'x-gfs-version',
   'cache-control',
   'location',
   'upload-offset',
@@ -327,6 +329,18 @@ export function createGfsRouter(options: GfsRouterOptions = {}): Router {
   router.get('/me/gfs/resolve', async (req: AuthedRequest, res, next) => {
     try {
       const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/resolve', {
+        userSessionToken: extractAuthToken(req),
+        query: { uri: typeof req.query.uri === 'string' ? req.query.uri : undefined },
+      })
+      res.status(200).json(data)
+    } catch (error) {
+      forwardControlApiError(error, res, next)
+    }
+  })
+
+  router.get('/me/gfs/convergence-location', async (req: AuthedRequest, res, next) => {
+    try {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/convergence-location', {
         userSessionToken: extractAuthToken(req),
         query: { uri: typeof req.query.uri === 'string' ? req.query.uri : undefined },
       })

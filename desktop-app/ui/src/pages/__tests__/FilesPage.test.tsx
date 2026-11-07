@@ -108,6 +108,15 @@ function baseController() {
     mutating: false,
     reset: vi.fn(),
     refreshAffordances: vi.fn(),
+    sidebarTarget: null,
+    sidebarAffordances: null,
+    sidebarAffordancesError: null,
+    dispatchSidebarMutation: vi.fn(async () => undefined),
+    renameResourceFromSnapshot: vi.fn(async () => undefined),
+    grantToSnapshot: vi.fn(async () => undefined),
+    createShareForSnapshot: vi.fn(async () => undefined),
+    revokeGrantForSnapshot: vi.fn(async () => undefined),
+    revokeShareForSnapshot: vi.fn(async () => undefined),
     discoveryFailure: null,
     retryDiscovery: vi.fn(),
     authorityPending: false,
@@ -123,7 +132,13 @@ function renderFilesPage(
   onPendingGfsUriHandled?: () => void,
   pendingResourceAction?: GfsResourceActionRequest | null,
   onPendingResourceActionHandled?: (requestId: number) => void,
-  titlebarLeadingTarget?: HTMLElement | null
+  titlebarLeadingTarget?: HTMLElement | null,
+  pendingSidebarLocalAction?: NonNullable<
+    import('../FilesPage.types').FilesPageProps['pendingSidebarLocalAction']
+  > | null,
+  onPendingSidebarLocalActionHandled?: (requestId: number) => void,
+  onSidebarLocalActionFinished?: (requestId: number) => void,
+  sidebarPresenterOnly = false
 ) {
   const clerum = (window as unknown as { clerum?: Record<string, unknown> }).clerum
   if (clerum) {
@@ -152,6 +167,10 @@ function renderFilesPage(
         onPendingGfsUriHandled={onPendingGfsUriHandled}
         pendingResourceAction={pendingResourceAction}
         onPendingResourceActionHandled={onPendingResourceActionHandled}
+        pendingSidebarLocalAction={pendingSidebarLocalAction}
+        onPendingSidebarLocalActionHandled={onPendingSidebarLocalActionHandled}
+        onSidebarLocalActionFinished={onSidebarLocalActionFinished}
+        sidebarPresenterOnly={sidebarPresenterOnly}
         titlebarLeadingTarget={titlebarLeadingTarget}
       />
     </QueryClientProvider>
@@ -288,6 +307,72 @@ describe('FilesPage', () => {
     cleanup()
     vi.useRealTimers()
     vi.restoreAllMocks()
+  })
+
+  it('presents a sidebar folder action without rendering Files or resolving the target', async () => {
+    const target = {
+      resourceId: '0123456789abcdef0123456789abcdef',
+      drive: 'main',
+      gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      kind: 'directory' as const,
+      version: 7,
+      name: 'Research',
+      parentResourceId: null,
+      sessionGeneration: 0,
+    }
+    const dispatchSidebarMutation = vi.fn(async () => undefined)
+    const acknowledged = vi.fn()
+    const finished = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      dispatchSidebarMutation,
+    })
+    const affordances = appServiceAffordanceProducer(async () => heldPermissionResponse(['write']))
+    const resolve = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
+        gfs: { affordances, resolve },
+      },
+    })
+    renderFilesPage(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        id: 41,
+        actionId: 'new-folder',
+        targetUri: target.gfsUri,
+        targetResource: target,
+      },
+      acknowledged,
+      finished,
+      true
+    )
+
+    await screen.findByRole('form', { name: 'Create folder' })
+    expect(screen.queryByRole('heading', { name: 'Files' })).toBeNull()
+    expect(resolve).not.toHaveBeenCalled()
+    expect(acknowledged).toHaveBeenCalledWith(41)
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Folder name' }), {
+      target: { value: 'Notes' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create folder' }))
+    await waitFor(() =>
+      expect(dispatchSidebarMutation).toHaveBeenCalledWith({
+        operation: 'create-folder',
+        target,
+        name: 'Notes',
+      })
+    )
+    expect(finished).toHaveBeenCalledWith(41)
+    expect(resolve).not.toHaveBeenCalled()
   })
 
   it('hides Move for a shared-root row unless its exact source parent can write and delete', async () => {
@@ -467,10 +552,10 @@ describe('FilesPage', () => {
       resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'report.txt')
     )
     const fileCrumb: GfsCrumb = { ...file, kind: 'file', bytes: file.bytes ?? 0 }
-    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const saveToDisk = vi.fn(async () => ({ status: 'saved_access_verified' as const }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { download, getPathForFile: vi.fn() } },
+      value: { gfs: { saveToDisk, getPathForFile: vi.fn() } },
     })
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
@@ -499,7 +584,7 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, undefined, file.gfsUri, handled)
 
     expect(await screen.findByRole('heading', { name: 'report.txt', level: 3 })).toBeTruthy()
-    await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
+    await waitFor(() => expect(saveToDisk).toHaveBeenCalledWith(file.gfsUri, 0))
     expect(openUri).toHaveBeenCalledWith(
       file.gfsUri,
       expect.objectContaining({ shouldContinue: expect.any(Function) })
@@ -555,12 +640,12 @@ describe('FilesPage', () => {
       resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'report.md')
     )
     const fileCrumb: GfsCrumb = { ...file, kind: 'file', bytes: file.bytes ?? 0 }
-    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const saveToDisk = vi.fn(async () => ({ status: 'saved_access_verified' as const }))
     const onOpenPreview = vi.fn()
     const handled = vi.fn()
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { download, getPathForFile: vi.fn() } },
+      value: { gfs: { saveToDisk, getPathForFile: vi.fn() } },
     })
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
@@ -594,8 +679,8 @@ describe('FilesPage', () => {
       handled
     )
 
-    await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
-    expect(download).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(saveToDisk).toHaveBeenCalledWith(file.gfsUri, 0))
+    expect(saveToDisk).toHaveBeenCalledTimes(1)
     expect(openUri).toHaveBeenCalledWith(
       file.gfsUri,
       expect.objectContaining({ shouldContinue: expect.any(Function) })
@@ -1363,7 +1448,7 @@ describe('FilesPage', () => {
     expect(screen.getByRole('button', { name: `Options for ${folderName}` })).toBeTruthy()
 
     await chooseResourceAction(folderName, 'Copy link')
-    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(gfsUri))
+    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(gfsUri, 0))
     await chooseResourceAction(folderName, 'Copy folder ID')
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(gfsUri))
 
@@ -4466,7 +4551,7 @@ describe('FilesPage', () => {
 
   it('downloads an accessible GFS file through the renderer download action', async () => {
     vi.useFakeTimers()
-    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const saveToDisk = vi.fn(async () => ({ status: 'saved_access_verified' as const }))
     const pushToast = vi.fn()
     const createObjectURL = vi.fn(() => 'blob:gfs-download')
     const revokeObjectURL = vi.fn()
@@ -4482,7 +4567,7 @@ describe('FilesPage', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
-        gfs: { download },
+        gfs: { saveToDisk },
       },
     })
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -4512,20 +4597,12 @@ describe('FilesPage', () => {
       await Promise.resolve()
     })
 
-    expect(download).toHaveBeenCalledWith('gfs://main/file-1')
-    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
-    expect(click).toHaveBeenCalled()
+    expect(saveToDisk).toHaveBeenCalledWith('gfs://main/file-1', 0)
     expect(pushToast).toHaveBeenCalledWith('Downloaded report.pdf', 'success')
-    expect(revokeObjectURL).not.toHaveBeenCalled()
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000)
-    })
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:gfs-download')
   })
 
   it('toasts a rate-limited download in read words, not permission words', async () => {
-    const download = vi.fn(async () => {
+    const saveToDisk = vi.fn(async () => {
       // The producer's exact shape. `appService.fetchBytes` throws
       // `gfs download failed: ${res.status}` and `surfaceGfsGrantError`
       // appends the window it vetted — so there is no inner colon and no
@@ -4540,7 +4617,7 @@ describe('FilesPage', () => {
     const pushToast = vi.fn()
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { download } },
+      value: { gfs: { saveToDisk } },
     })
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -4571,7 +4648,7 @@ describe('FilesPage', () => {
 
     // Witness: the download really ran and really rejected, so the copy
     // assertions below describe a handled failure.
-    expect(download).toHaveBeenCalledWith('gfs://main/file-1')
+    expect(saveToDisk).toHaveBeenCalledWith('gfs://main/file-1', 0)
     expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
   })
 
@@ -6678,13 +6755,13 @@ describe('FilesPage', () => {
   })
 
   it('downloads a previewable file when no preview surface is wired (fail-open to download)', async () => {
-    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const saveToDisk = vi.fn(async () => ({ status: 'saved_access_verified' as const }))
     const createObjectURL = vi.fn(() => 'blob:gfs-download')
     const revokeObjectURL = vi.fn()
     const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
-    Object.defineProperty(window, 'clerum', { configurable: true, value: { gfs: { download } } })
+    Object.defineProperty(window, 'clerum', { configurable: true, value: { gfs: { saveToDisk } } })
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       accessibleResources: [previewRow('diagram.PNG', 'image-1', 3)],
@@ -6695,8 +6772,7 @@ describe('FilesPage', () => {
     renderFilesPage()
     fireEvent.click(screen.getByRole('button', { name: 'diagram.PNG' }))
 
-    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/image-1'))
-    expect(anchorClick).toHaveBeenCalled()
+    await waitFor(() => expect(saveToDisk).toHaveBeenCalledWith('gfs://main/image-1', 0))
   })
 
   it('opens a preview tab from a resolved GFS link and closes the link dialog', async () => {
@@ -7051,7 +7127,7 @@ describe('FilesPage', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
     const shareMenu = screen.getByRole('menu', { name: 'Share options for Nested' })
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Copy link' }))
-    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(nestedFolder.gfsUri))
+    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(nestedFolder.gfsUri, 0))
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
     fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))

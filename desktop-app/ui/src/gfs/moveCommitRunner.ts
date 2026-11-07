@@ -1,6 +1,11 @@
 import type { GfsDragSource } from './dragSession.types'
 import { commitGfsMove, toastMoveOutcome } from './moveCommit'
-import type { MoveCommitExpectedSourceSnapshot, MoveCommitOutcome, MoveToast } from './moveCommit'
+import type {
+  MoveCommitExpectedSourceSnapshot,
+  MoveCommitOutcome,
+  MoveCommitSourceSnapshot,
+  MoveToast,
+} from './moveCommit'
 
 /**
  * The surface-level operations the shared commit path needs. They are the
@@ -44,6 +49,8 @@ export interface GfsMoveCommitRequest {
   destination: { resourceId: string; name: string }
   /** Explicit Move only: the immutable source snapshot shown by its dialog. */
   expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot
+  /** Exact source snapshot from a sidebar-local presenter with no read grant. */
+  presentedSourceSnapshot?: MoveCommitSourceSnapshot
   /** Names already known to be taken in the destination, when cached. */
   occupiedDestinationNames?: ReadonlySet<string>
   /** Captured main-process authenticated session generation. */
@@ -145,6 +152,9 @@ export async function runGfsMoveCommit(
       destination,
       ...(request.expectedSourceSnapshot
         ? { expectedSourceSnapshot: request.expectedSourceSnapshot }
+        : {}),
+      ...(request.presentedSourceSnapshot
+        ? { presentedSourceSnapshot: request.presentedSourceSnapshot }
         : {}),
       ...(request.occupiedDestinationNames
         ? { occupiedDestinationNames: request.occupiedDestinationNames }

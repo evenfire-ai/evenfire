@@ -5,6 +5,7 @@ import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import type { FilesPathIntentReceipt } from '@hooks/domain/useNavigationController'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import {
@@ -121,7 +122,7 @@ function FilesTabHarness({
   pendingGfsDeepLink?: { id: number; uri: string } | null
   pendingGfsUri?: string | null
   isPendingGfsDeepLinkCurrent?: () => boolean
-  onExplicitNavigationIntent?: () => void
+  onExplicitNavigationIntent?: (tracksFilesPath?: boolean) => FilesPathIntentReceipt | null
   onPendingGfsDeepLinkOutcome?: (
     id: number,
     outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
@@ -204,7 +205,7 @@ function renderHarness(
     pendingGfsDeepLink?: { id: number; uri: string } | null
     pendingGfsUri?: string | null
     isPendingGfsDeepLinkCurrent?: () => boolean
-    onExplicitNavigationIntent?: () => void
+    onExplicitNavigationIntent?: (tracksFilesPath?: boolean) => FilesPathIntentReceipt | null
     onPendingGfsDeepLinkOutcome?: (
       id: number,
       outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
@@ -1202,10 +1203,13 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     })
     const reportOutcome = vi.fn()
     let navigationCurrent = true
-    const reportExplicitIntent = vi.fn(() => {
-      navigationCurrent = false
-      reportOutcome(1090, 'superseded')
-    })
+    const reportExplicitIntent = vi.fn(
+      (_tracksFilesPath?: boolean): FilesPathIntentReceipt | null => {
+        navigationCurrent = false
+        reportOutcome(1090, 'superseded')
+        return null
+      }
+    )
     const { client, rerender } = renderHarness({
       pendingGfsDeepLink: null,
       onExplicitNavigationIntent: reportExplicitIntent,

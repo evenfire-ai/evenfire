@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { type IncomingMessage, get as httpGet } from 'node:http'
 import request from 'supertest'
 // Imports the MOCKED config object below; mutating gfscProxyTimeoutMs on it lets a
 // test drive a real deadline abort (see the 504 timeout test).
@@ -71,6 +72,105 @@ describe('/api/v1/gfs/proxy', () => {
       'http://gfsc.gfs.svc:8087/v1/resources/root/children',
       expect.objectContaining({ method: 'GET' })
     )
+  })
+
+  it('preserves the admitted GFS content metadata with the streamed bytes', async () => {
+    const resourceId = '01234567-89ab-4cde-8fab-0123456789ab'
+    const body = 'admitted file bytes'
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(body, {
+          status: 200,
+          headers: {
+            'content-type': 'application/octet-stream',
+            'content-length': String(Buffer.byteLength(body)),
+            'content-disposition': "attachment; filename*=UTF-8''report%20one.txt",
+            'x-gfs-uri': `gfs://main/${resourceId.replaceAll('-', '')}`,
+            'x-gfs-version': '17',
+          },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const app = await buildApp()
+    const res = await request(app).get(`/api/v1/gfs/proxy/v1/resources/${resourceId}/content`)
+
+    expect(res.status).toBe(200)
+    const bytes = Buffer.isBuffer(res.body) ? res.body : Buffer.from(res.text ?? '')
+    expect(res.headers['content-disposition']).toBe("attachment; filename*=UTF-8''report%20one.txt")
+    expect(res.headers['x-gfs-uri']).toBe(`gfs://main/${resourceId.replaceAll('-', '')}`)
+    expect(res.headers['x-gfs-version']).toBe('17')
+    expect(bytes.toString('utf8')).toBe(body)
+    expect(fetchMock).toHaveBeenCalledWith(
+      `http://gfsc.gfs.svc:8087/v1/resources/${resourceId}/content`,
+      expect.objectContaining({ method: 'GET' })
+    )
+  })
+
+  it('pauses upstream reads for a slow downstream and cancels on disconnect', async () => {
+    const chunkCount = 512
+    let pulls = 0
+    let canceledResolve!: () => void
+    const canceled = new Promise<void>(resolve => {
+      canceledResolve = resolve
+    })
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1
+        if (pulls > chunkCount) controller.close()
+        else controller.enqueue(new Uint8Array(64 * 1024))
+      },
+      cancel() {
+        canceledResolve()
+      },
+    })
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      void init.signal?.addEventListener('abort', () => undefined, { once: true })
+      return new Response(body, { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const app = await buildApp()
+    const server = app.listen(0)
+    await new Promise<void>(resolve => server.once('listening', resolve))
+    const address = server.address() as { port: number }
+    let incoming: IncomingMessage | undefined
+    let responseStarted!: () => void
+    const started = new Promise<void>(resolve => {
+      responseStarted = resolve
+    })
+    const req = httpGet(
+      {
+        host: '127.0.0.1',
+        port: address.port,
+        path: '/api/v1/gfs/proxy/v1/resources/root/content',
+      },
+      response => {
+        incoming = response
+        response.once('data', () => {
+          response.pause()
+          responseStarted()
+        })
+      }
+    )
+    try {
+      await started
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(pulls).toBeLessThan(chunkCount)
+      incoming?.destroy()
+      await Promise.race([
+        canceled,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('upstream body was not canceled')), 2_000)
+        ),
+      ])
+      expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(true)
+    } finally {
+      incoming?.destroy()
+      req.destroy()
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 
   it('sends upload capabilities and status reads to the writer service', async () => {

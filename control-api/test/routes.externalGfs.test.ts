@@ -3,6 +3,7 @@ import express from 'express'
 import { ipKeyGenerator } from 'express-rate-limit'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { type IncomingMessage, get as httpGet } from 'node:http'
 import request from 'supertest'
 // The MOCKED config object (defined below); mutating gfscProxyTimeoutMs drives a
 // real deadline abort in the read-proxy timeout test.
@@ -1189,6 +1190,10 @@ describe('linked Desktop operator authority contract', () => {
   it.each([
     ['get', '/external/gfs/resources'],
     ['get', '/external/gfs/resolve?uri=gfs%3A%2F%2Fmain%2Ffoo'],
+    [
+      'get',
+      `/external/gfs/convergence-location?uri=${encodeURIComponent(`gfs://main/${R.replaceAll('-', '')}`)}`,
+    ],
     ['get', `/external/gfs/resources/${R}/children`],
     ['get', `/external/gfs/resources/${R}/affordances`],
     ['get', `/external/gfs/proxy/${R}`],
@@ -2709,7 +2714,9 @@ describe('user read proxy via gfsc (GET /external/gfs/proxy/:rid)', () => {
           headers: {
             'content-type': 'text/plain',
             'content-length': '15',
-            'content-disposition': 'attachment; filename="f.bin"',
+            'content-disposition': "attachment; filename*=UTF-8''f.bin",
+            'x-gfs-uri': `gfs://main/${R.replaceAll('-', '')}`,
+            'x-gfs-version': '17',
           },
         })
     )
@@ -2720,7 +2727,9 @@ describe('user read proxy via gfsc (GET /external/gfs/proxy/:rid)', () => {
     expect(res.status).toBe(200)
     expect(res.headers['content-type']).toBe('text/plain')
     expect(res.headers['content-length']).toBe('15')
-    expect(res.headers['content-disposition']).toBe('attachment; filename="f.bin"')
+    expect(res.headers['content-disposition']).toBe("attachment; filename*=UTF-8''f.bin")
+    expect(res.headers['x-gfs-uri']).toBe(`gfs://main/${R.replaceAll('-', '')}`)
+    expect(res.headers['x-gfs-version']).toBe('17')
     expect(res.text).toBe('file-bytes-here')
     expect(mockSignGfsToken).toHaveBeenCalledWith({
       subject: U1,
@@ -2733,6 +2742,73 @@ describe('user read proxy via gfsc (GET /external/gfs/proxy/:rid)', () => {
       `http://gfsc.gfs.svc:8087/v1/resources/${R}/content`,
       expect.objectContaining({ method: 'GET', signal: expect.any(AbortSignal) })
     )
+  })
+
+  it('pauses upstream reads for a slow downstream and cancels on disconnect', async () => {
+    auth()
+    const chunkCount = 512
+    let pulls = 0
+    let canceledResolve!: () => void
+    const canceled = new Promise<void>(resolve => {
+      canceledResolve = resolve
+    })
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1
+        if (pulls > chunkCount) controller.close()
+        else controller.enqueue(new Uint8Array(64 * 1024))
+      },
+      cancel() {
+        canceledResolve()
+      },
+    })
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(init.signal).toBeInstanceOf(AbortSignal)
+      return new Response(body, { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const app = await buildApp()
+    const server = app.listen(0)
+    await new Promise<void>(resolve => server.once('listening', resolve))
+    const address = server.address() as { port: number }
+    let incoming: IncomingMessage | undefined
+    let responseStarted!: () => void
+    const started = new Promise<void>(resolve => {
+      responseStarted = resolve
+    })
+    const req = httpGet(
+      {
+        host: '127.0.0.1',
+        port: address.port,
+        path: readPath,
+        headers: { 'x-user-session-token': 'sess' },
+      },
+      response => {
+        incoming = response
+        response.once('data', () => {
+          response.pause()
+          responseStarted()
+        })
+      }
+    )
+    try {
+      await started
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(pulls).toBeLessThan(chunkCount)
+      incoming?.destroy()
+      await Promise.race([
+        canceled,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('upstream body was not canceled')), 2_000)
+        ),
+      ])
+      expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(true)
+    } finally {
+      incoming?.destroy()
+      req.destroy()
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 
   it('returns 504 gfsc_timeout on a REAL header-deadline abort (AbortError, signal.aborted)', async () => {
@@ -2781,5 +2857,52 @@ describe('user read proxy via gfsc (GET /external/gfs/proxy/:rid)', () => {
 
     expect(res.status).toBe(500)
     expect(res.body).toEqual({ ok: false, error: { code: 'internal', message: 'boom' } })
+  })
+})
+
+describe('authorized ancestry convergence proxy', () => {
+  it('forwards the exact canonical URI under the existing user read authority', async () => {
+    auth()
+    const uri = `gfs://archive/${R.replaceAll('-', '')}`
+    const result = { available: false }
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toBe(
+        `http://gfsc.gfs.svc:8087/v1/convergence-location?uri=${encodeURIComponent(uri)}`
+      )
+      return new Response(JSON.stringify({ ok: true, data: result }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const res = await request(await buildApp())
+      .get(`/external/gfs/convergence-location?uri=${encodeURIComponent(uri)}`)
+      .set('x-user-session-token', 'sess')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, data: result })
+    expect(mockSignGfsToken).toHaveBeenCalledWith({
+      subject: U1,
+      drive: 'archive',
+      scopes: ['gfs.read'],
+      authGeneration: 1,
+      principalType: 'user',
+    })
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a non-identity URI before minting or proxying', async () => {
+    auth()
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const uri = 'gfs://main/folder/name'
+    const res = await request(await buildApp())
+      .get(`/external/gfs/convergence-location?uri=${encodeURIComponent(uri)}`)
+      .set('x-user-session-token', 'sess')
+
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'convergence_target_invalid' })
+    expect(mockSignGfsToken).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

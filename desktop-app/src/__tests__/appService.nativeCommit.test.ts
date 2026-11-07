@@ -1,14 +1,207 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
   deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
+import { saveGfsReceiptToPath } from '../gfs/saveOwner.js'
 
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService native auth and environment commit ordering', () => {
+  it.each(['S144', 'S145'] as const)(
+    '%s freezes the real save receipt before queued logout commits',
+    async outcome => {
+      const { service } = await createNativeCommitTestHarness()
+      const me = { id: 'user-a', email: 'user-a@example.test', teamId: 'team-a' }
+      service.authClient = {
+        googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me }),
+      } as never
+      await service.googleLogin('synthetic-google-token')
+
+      const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+      const bytes = new TextEncoder().encode(`native-queue-${outcome}`).buffer
+      const app = service as unknown as {
+        gfsClient: { downloadWithReceipt: ReturnType<typeof vi.fn> }
+        getSessionGeneration(): number
+        tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
+      }
+      app.gfsClient.downloadWithReceipt = vi.fn(async () => ({
+        uri,
+        version: 19,
+        filename: 'queue.bin',
+        bytes,
+      }))
+      const admission = await service.admitGfsSave(uri, app.getSessionGeneration())
+      await admission.receipt
+
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), `r26-${outcome.toLowerCase()}-`))
+      const filePath = path.join(directory, 'queue.bin')
+      const readStarted = deferred<void>()
+      const releaseRead = deferred<void>()
+      const order: string[] = []
+      const originalClear = app.tokenStore.clearSessionToken
+      app.tokenStore.clearSessionToken = vi.fn(async (...args: unknown[]) => {
+        order.push('logout-commit')
+        await originalClear(...args)
+      })
+      const saving = saveGfsReceiptToPath({
+        uri,
+        version: 19,
+        filePath,
+        bytes,
+        publishFence: finalize => service.publishGfsSave(admission.binding, finalize),
+        readPublishedIdentity: async (_stage, attempt) => {
+          readStarted.resolve()
+          await releaseRead.promise
+          if (outcome === 'S144' && attempt === 'primary') {
+            throw new Error('injected primary read failure')
+          }
+          if (outcome === 'S145') throw new Error(`injected ${attempt} read failure`)
+          const stat = await fs.stat(filePath)
+          return `${stat.dev}:${stat.ino}`
+        },
+      })
+
+      try {
+        await readStarted.promise
+        const finalBeforeRelease = await fs.readFile(filePath)
+        expect(finalBeforeRelease.equals(Buffer.from(bytes))).toBe(true)
+        expect(order).toEqual([])
+        const logout = service.logout().then(value => {
+          order.push('logout-resolved')
+          return value
+        })
+        await Promise.resolve()
+        expect(order).toEqual([])
+        releaseRead.resolve()
+        const receipt = await saving
+        order.push('save-caller-resolved')
+        await logout
+
+        expect(order).toEqual(['save-caller-resolved', 'logout-commit', 'logout-resolved'])
+        expect(receipt.status).toBe(
+          outcome === 'S144' ? 'saved_access_verified' : 'published_access_unverified'
+        )
+        expect(await fs.readFile(filePath)).toEqual(Buffer.from(bytes))
+        const frozen = JSON.stringify(receipt)
+        await new Promise(resolve => setImmediate(resolve))
+        expect(JSON.stringify(receipt)).toBe(frozen)
+      } finally {
+        releaseRead.resolve()
+        await fs.rm(directory, { recursive: true, force: true })
+      }
+    }
+  )
+
+  it.each(['S144', 'S145'] as const)(
+    '%s keeps the registered save IPC caller inside the real auth queue until receipt freeze',
+    async outcome => {
+      const { service, ipcHandlers, saveDialog } = await createNativeCommitTestHarness()
+      service.authClient = {
+        googleLogin: vi.fn().mockResolvedValue({
+          token: 'synthetic-session-ipc',
+          me: { id: 'user-ipc', email: 'user-ipc@example.test', teamId: 'team-a' },
+        }),
+      } as never
+      await service.googleLogin('synthetic-google-token')
+
+      const uri = 'gfs://main/1123456789abcdef0123456789abcdef'
+      const bytes = new TextEncoder().encode(`ipc-native-queue-${outcome}`).buffer
+      const app = service as unknown as {
+        gfsClient: { downloadWithReceipt: ReturnType<typeof vi.fn> }
+        tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
+        logout(): Promise<number>
+      }
+      app.gfsClient.downloadWithReceipt = vi.fn(async () => ({
+        uri,
+        version: 23,
+        filename: 'ipc-queue.bin',
+        bytes,
+      }))
+
+      const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), `r26-ipc-${outcome.toLowerCase()}-`)
+      )
+      const filePath = path.join(directory, 'ipc-queue.bin')
+      saveDialog.mockResolvedValue({ canceled: false, filePath })
+      const readStarted = deferred<void>()
+      const releaseRead = deferred<void>()
+      const order: string[] = []
+      const attempts: string[] = []
+      const originalClear = app.tokenStore.clearSessionToken
+      app.tokenStore.clearSessionToken = vi.fn(async (...args: unknown[]) => {
+        order.push('logout-commit')
+        await originalClear(...args)
+      })
+      const { registerIpcHandlers, setIpcGfsSaveReadbackTestHook } = await import('../ipc.js')
+      setIpcGfsSaveReadbackTestHook(async (stage, attempt) => {
+        attempts.push(attempt)
+        if (attempt === 'primary') throw new Error('injected primary read failure')
+        readStarted.resolve()
+        await releaseRead.promise
+        if (outcome === 'S145') throw new Error('injected inconclusive reconciliation')
+        return stage.fileIdentity
+      })
+
+      try {
+        registerIpcHandlers(service as never, async () => 0)
+        const handler = ipcHandlers.get('gfs:saveToDisk') as
+          | ((event: unknown, payload: unknown) => Promise<unknown>)
+          | undefined
+        expect(handler).toBeTypeOf('function')
+        const caller = handler!(
+          { senderFrame: { url: 'file:///app/index.html' }, sender: {} },
+          {
+            uri,
+            expectedSessionGeneration: service.getSessionGeneration(),
+            requestId: `r26-ipc-${outcome.toLowerCase()}`,
+          }
+        )
+
+        const callerOutcome = caller.then(
+          () => new Promise<never>(() => undefined),
+          error => Promise.reject(error)
+        )
+        await vi.waitFor(() => expect(saveDialog).toHaveBeenCalledOnce(), { timeout: 5000 })
+        await Promise.race([readStarted.promise, callerOutcome])
+        expect((await fs.readFile(filePath)).equals(Buffer.from(bytes))).toBe(true)
+        expect((await fs.readdir(directory)).some(name => name.endsWith('.partial'))).toBe(true)
+        expect(order).toEqual([])
+        const logout = service.logout().then(value => {
+          order.push('logout-resolved')
+          return value
+        })
+        await Promise.resolve()
+        expect(order).toEqual([])
+
+        releaseRead.resolve()
+        const receipt = (await caller) as { status: string }
+        order.push('save-caller-resolved')
+        await logout
+        expect(order).toEqual(['save-caller-resolved', 'logout-commit', 'logout-resolved'])
+        expect(receipt.status).toBe(
+          outcome === 'S144' ? 'saved_access_verified' : 'published_access_unverified'
+        )
+        expect(attempts).toEqual(['primary', 'reconciliation'])
+        expect((await fs.readFile(filePath)).equals(Buffer.from(bytes))).toBe(true)
+        expect((await fs.readdir(directory)).some(name => name.endsWith('.partial'))).toBe(
+          outcome === 'S145'
+        )
+        const frozen = JSON.stringify(receipt)
+        await new Promise(resolve => setImmediate(resolve))
+        expect(JSON.stringify(receipt)).toBe(frozen)
+      } finally {
+        releaseRead.resolve()
+        setIpcGfsSaveReadbackTestHook(undefined)
+        await fs.rm(directory, { recursive: true, force: true })
+      }
+    }
+  )
+
   it('persists real version-2 GFS state as suspended_auth on logout', async () => {
     const { service } = await createNativeCommitTestHarness()
     const me = {

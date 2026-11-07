@@ -25,6 +25,7 @@ import {
   setAppTabSavedRoutePath,
   setAppTabTitle,
   setFilesTabPath,
+  setFilesTabUnavailable,
 } from '../workspaceTabs'
 import type {
   ActiveChat,
@@ -336,6 +337,29 @@ describe('workspaceTabs — files multi-instance by path (mini-spec 06 §3)', ()
     expect(rooted?.files?.path).toBeNull()
     expect(rooted?.title).toBe('Files')
   })
+
+  it.each(['active', 'inactive'] as const)(
+    'clears the saved Files name when an %s path becomes unavailable without changing selection',
+    ownership => {
+      let state = createWorkspaceTabsState('chat-tab-1')
+      state = openFilesTab(state, {
+        id: 'files-secret',
+        path: 'gfs://main/opaque-id',
+        title: 'Sensitive folder name',
+      })
+      if (ownership === 'active') state = selectWorkspaceTab(state, 'files-secret')
+      const selectedBefore = state.activeTabId
+
+      state = setFilesTabUnavailable(state, 'files-secret', true)
+
+      expect(state.activeTabId).toBe(selectedBefore)
+      expect(state.tabs.find(tab => tab.id === 'files-secret')).toMatchObject({
+        kind: 'files',
+        title: 'Files',
+        files: { path: 'gfs://main/opaque-id', unavailable: true },
+      })
+    }
+  )
 
   it('sanitizes an externally-controlled folder name at the files store border', () => {
     let state = createEmptyWorkspaceTabsState()

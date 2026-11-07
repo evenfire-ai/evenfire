@@ -734,6 +734,7 @@ describe('FilePreviewPage', () => {
       fireEvent.submit(dialog)
       await digestFinished
 
+      const permissionReadsBeforeReplacement = affordances.mock.calls.length
       controllerState.sessionGeneration = 2
       view.rerender(<FilePreviewPage {...props} />)
       const queryClient = queryClients.at(-1)
@@ -1066,7 +1067,7 @@ describe('FilePreviewPage', () => {
     await waitFor(() => expect((copyContent as HTMLButtonElement).disabled).toBe(false))
     fireEvent.click(copyContent)
 
-    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(uri))
+    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(uri, 1))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(uri))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
   })

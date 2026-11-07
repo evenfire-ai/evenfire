@@ -784,17 +784,51 @@ export function useFilePreviewResourceActions({
         if (resource?.kind !== 'file' || !canResolve) return
         const captured = moveContextRef.current
         if (!isGfsSessionGeneration(captured.sessionGeneration)) return
-        void saveGfsFileToDisk(gfsUri, resource.name)
-          .then(() => {
+        void saveGfsFileToDisk(gfsUri, resource.name, captured.sessionGeneration)
+          .then(receipt => {
             if (
-              isGfsSessionAuthorityCurrent(
+              !isGfsSessionAuthorityCurrent(
                 captured.sessionScope,
                 captured.sessionGeneration,
                 moveContextRef.current.sessionScope,
                 moveContextRef.current.sessionGeneration
               )
             )
-              pushToast?.(`Downloaded ${resource.name}`, 'success')
+              return
+            if (receipt.status === 'failed_no_publication') {
+              pushToast?.(
+                `Download failed; private stage cleanup failed: ${receipt.residualStagePath}`,
+                'error'
+              )
+              return
+            }
+            if (receipt.status === 'published_private_warning') {
+              pushToast?.(`Downloaded ${resource.name} with private permissions.`, 'error')
+              return
+            }
+            if (receipt.status === 'published_access_unverified') {
+              pushToast?.(
+                `Downloaded ${resource.name}, but its final permissions could not be verified.`,
+                'error'
+              )
+              return
+            }
+            if (
+              receipt.status !== 'saved_access_verified' &&
+              receipt.status !== 'published_finalization_warning'
+            )
+              return
+            if (
+              receipt.status === 'published_finalization_warning' ||
+              receipt.stageCleanup === 'failed'
+            ) {
+              pushToast?.(
+                `Downloaded ${resource.name}, but private stage cleanup failed: ${receipt.residualStagePath ?? 'path unavailable'}`,
+                'error'
+              )
+              return
+            }
+            pushToast?.(`Downloaded ${resource.name}`, 'success')
           })
           .catch(error => {
             if (

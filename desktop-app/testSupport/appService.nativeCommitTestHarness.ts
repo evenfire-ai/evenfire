@@ -48,6 +48,9 @@ const originalEnvironment = {
   profileUi: process.env.PROFILE_UI_BASE_URL,
 }
 const tempDirs = new Set<string>()
+const ipcHandlers = new Map<string, (...args: unknown[]) => unknown>()
+const ipcListeners = new Map<string, (...args: unknown[]) => unknown>()
+const saveDialog = vi.fn()
 
 export async function createNativeCommitTestHarness() {
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-native-commit-'))
@@ -58,6 +61,8 @@ export async function createNativeCommitTestHarness() {
   delete process.env.PROFILE_UI_BASE_URL
   vi.resetModules()
   vi.doMock('electron', () => ({
+    BrowserWindow: { fromWebContents: vi.fn(() => undefined), getAllWindows: vi.fn(() => []) },
+    Notification: vi.fn(),
     app: {
       getPath: vi.fn((name: string) =>
         name === 'appData' ? path.dirname(userDataDir) : userDataDir
@@ -67,6 +72,18 @@ export async function createNativeCommitTestHarness() {
       setName: vi.fn(),
       setPath: vi.fn(),
     },
+    clipboard: { writeText: vi.fn() },
+    dialog: { showSaveDialog: saveDialog },
+    ipcMain: {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) =>
+        ipcHandlers.set(channel, handler)
+      ),
+      on: vi.fn((channel: string, listener: (...args: unknown[]) => unknown) =>
+        ipcListeners.set(channel, listener)
+      ),
+      removeHandler: vi.fn(),
+    },
+    shell: { openExternal: vi.fn() },
   }))
 
   const [{ AppService }, runtimeConfig] = await Promise.all([
@@ -100,7 +117,17 @@ export async function createNativeCommitTestHarness() {
     getSessionToken: vi.fn().mockResolvedValue(null),
     setSessionToken: vi.fn().mockResolvedValue(undefined),
   } as never
-  return { service, runtimeConfig, restA, restB, optionA, optionB }
+  return {
+    service,
+    runtimeConfig,
+    restA,
+    restB,
+    optionA,
+    optionB,
+    ipcHandlers,
+    ipcListeners,
+    saveDialog,
+  }
 }
 
 export async function cleanupNativeCommitTestHarness(): Promise<void> {
@@ -117,4 +144,7 @@ export async function cleanupNativeCommitTestHarness(): Promise<void> {
   vi.resetModules()
   await Promise.all([...tempDirs].map(dir => fs.rm(dir, { recursive: true, force: true })))
   tempDirs.clear()
+  ipcHandlers.clear()
+  ipcListeners.clear()
+  saveDialog.mockReset()
 }

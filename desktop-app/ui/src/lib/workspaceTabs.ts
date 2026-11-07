@@ -322,11 +322,42 @@ export function setFilesTabPath(
   if (!target) return state
   const nextPath = path ?? null
   const nextTitle = (title ? sanitizeAppTabTitle(title) : '') || 'Files'
-  if ((target.files?.path ?? null) === nextPath && target.title === nextTitle) return state
+  if (
+    (target.files?.path ?? null) === nextPath &&
+    target.title === nextTitle &&
+    !target.files?.unavailable
+  )
+    return state
   return {
     ...state,
     tabs: state.tabs.map(tab =>
       tab.id === tabId ? { ...tab, title: nextTitle, files: { path: nextPath } } : tab
+    ),
+  }
+}
+
+export function setFilesTabUnavailable(
+  state: WorkspaceTabsState,
+  tabId: string,
+  unavailable: boolean
+): WorkspaceTabsState {
+  const target = state.tabs.find(tab => tab.id === tabId && tab.kind === 'files')
+  if (
+    !target ||
+    (Boolean(target.files?.unavailable) === unavailable &&
+      (!unavailable || target.title === 'Files'))
+  )
+    return state
+  return {
+    ...state,
+    tabs: state.tabs.map(tab =>
+      tab.id === tabId && tab.files
+        ? {
+            ...tab,
+            title: unavailable ? 'Files' : tab.title,
+            files: { ...tab.files, unavailable: unavailable || undefined },
+          }
+        : tab
     ),
   }
 }

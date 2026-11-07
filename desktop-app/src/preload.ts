@@ -1,5 +1,8 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { FileExplorerMutationRequest, FileExplorerMutationResult } from './appService.js'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import type { GfsSaveTerminalReceipt } from './gfs/saveOwner.js'
+import type { GfsConvergenceLocationResult } from './gfs/uriHandler.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DeepLinkAcknowledgmentAuthority,
@@ -144,18 +147,19 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
 function cancellableGfsInvoke<T>(
   channel: string,
   payload: Record<string, unknown>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  requestId?: string
 ): Promise<T> {
-  if (!signal) return invokeGfs<T>(channel, payload)
-  if (signal.aborted) {
+  if (!signal && !requestId) return invokeGfs<T>(channel, payload)
+  if (signal?.aborted) {
     return Promise.reject(new DOMException('Request was stopped before it started.', 'AbortError'))
   }
-  const requestId = crypto.randomUUID()
-  const onAbort = () => ipcRenderer.send('gfs:abort', { requestId })
-  signal.addEventListener('abort', onAbort, { once: true })
-  return invokeGfs<T>(channel, { ...payload, requestId }).finally(() =>
-    signal.removeEventListener('abort', onAbort)
-  ) as Promise<T>
+  const operationId = requestId ?? crypto.randomUUID()
+  const onAbort = () => ipcRenderer.send('gfs:abort', { requestId: operationId })
+  signal?.addEventListener('abort', onAbort, { once: true })
+  return invokeGfs<T>(channel, { ...payload, requestId: operationId }).finally(() =>
+    signal?.removeEventListener('abort', onAbort)
+  )
 }
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
@@ -263,6 +267,8 @@ const clerum = Object.freeze({
     switch: (teamId: string) => ipcRenderer.invoke('team:switch', { teamId }),
   },
   gfs: {
+    dispatchFileExplorerMutation: (request: FileExplorerMutationRequest) =>
+      invokeGfs<FileExplorerMutationResult>('gfs:dispatchFileExplorerMutation', request),
     getUserNavigationGeneration: (): number | null =>
       ipcRenderer.sendSync('gfs:getUserNavigationGeneration'),
     advanceUserNavigationGeneration: (): number | null =>
@@ -279,9 +285,31 @@ const clerum = Object.freeze({
       ipcRenderer.on('gfs:deepLink', listener)
       return () => ipcRenderer.off('gfs:deepLink', listener)
     },
-    copyDeepLink: (uri: string) => invokeGfs('gfs:copyDeepLink', { uri }),
+    copyDeepLink: (uri: string, expectedSessionGeneration: number) =>
+      invokeGfs('gfs:copyDeepLink', { uri, expectedSessionGeneration }),
     getResourceProfileOrigin: () => invokeGfs('gfs:getResourceProfileOrigin'),
     resolve: (uri: string) => invokeGfs('gfs:resolve', { uri }),
+    saveToDisk: (
+      uri: string,
+      expectedSessionGeneration: number,
+      options?: { signal?: AbortSignal }
+    ) =>
+      cancellableGfsInvoke<GfsSaveTerminalReceipt>(
+        'gfs:saveToDisk',
+        { uri, expectedSessionGeneration },
+        options?.signal,
+        crypto.randomUUID()
+      ),
+    resolveConvergenceLocation: (
+      uri: string,
+      expectedSessionGeneration: number,
+      options?: { signal?: AbortSignal }
+    ) =>
+      cancellableGfsInvoke<GfsConvergenceLocationResult>(
+        'gfs:resolveConvergenceLocation',
+        { uri, expectedSessionGeneration },
+        options?.signal
+      ),
     download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
       cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
     downloadPreview: (uri: string, maxBytes: number) =>

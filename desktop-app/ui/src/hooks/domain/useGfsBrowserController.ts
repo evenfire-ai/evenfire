@@ -11,6 +11,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
+import { normalizeGfsResourceName } from '@clerum/gfs-interaction-policy'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
 import {
   GFS_AUTHORITY_STALE_TIME_MS,
@@ -37,6 +38,10 @@ import type {
   GfsShareListItem,
 } from '@/gfs/delegation.types'
 import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
+import type {
+  FileExplorerMutationRequest,
+  FileExplorerMutationTarget,
+} from '../../../../src/appService.js'
 import { GFS_SESSION_AUTHORITY_ERROR_CODES } from '../../../../src/gfs/sessionAuthority.js'
 import { desktopQueryClient } from '../../lib/queryClient'
 import {
@@ -221,6 +226,27 @@ export interface GfsBrowserControllerOptions {
    * the only consumer, so the query runs only while it is open.
    */
   grantsListEnabled?: boolean
+  /** Exact sidebar receipt used by the shared local action presenter. */
+  sidebarTarget?: FileExplorerMutationTarget | null
+  /** Avoid Files discovery/listing while a hidden local-action presenter is mounted. */
+  sidebarPresenterOnly?: boolean
+}
+
+function isCanonicalMainDriveTarget(target: FileExplorerMutationTarget): boolean {
+  const compactId = target.resourceId.replace(/-/g, '').toLowerCase()
+  const compactParentId = target.parentResourceId?.replace(/-/g, '').toLowerCase()
+  return (
+    target.drive === DRIVE &&
+    /^[0-9a-f]{32}$/.test(compactId) &&
+    target.gfsUri === `gfs://${DRIVE}/${compactId}` &&
+    (target.parentResourceId === null || /^[0-9a-f]{32}$/.test(compactParentId ?? '')) &&
+    (target.kind === 'file' || target.kind === 'directory') &&
+    Number.isSafeInteger(target.version) &&
+    target.version >= 1 &&
+    Number.isSafeInteger(target.sessionGeneration) &&
+    target.sessionGeneration >= 0 &&
+    typeof target.name === 'string'
+  )
 }
 
 function toMessage(error: unknown): string {
@@ -410,7 +436,7 @@ export function revokeGfsSessionAccess(
 }
 
 export function useGfsBrowserController(options: GfsBrowserControllerOptions = {}) {
-  const { grantsListEnabled = false } = options
+  const { grantsListEnabled = false, sidebarTarget = null, sidebarPresenterOnly = false } = options
   const queryClient = useQueryClient()
   const {
     isAuthenticated,
@@ -457,6 +483,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const authorityEpochRef = useRef(Date.now())
 
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
+  const sidebarTargetIsCurrent = Boolean(
+    sidebarTarget &&
+    isCanonicalMainDriveTarget(sidebarTarget) &&
+    sidebarTarget.sessionGeneration === sessionGeneration
+  )
+  const aclResourceId = sidebarTargetIsCurrent ? sidebarTarget?.resourceId : current?.resourceId
+  const aclDrive = sidebarTargetIsCurrent ? (sidebarTarget?.drive ?? DRIVE) : DRIVE
   const currentCrumbRef = useRef<GfsCrumb | null>(current)
   currentCrumbRef.current = current
   const currentIsDirectory = current?.kind === 'directory'
@@ -514,6 +547,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const accessState: GfsAccessState =
     sessionGeneration === null ? 'revoked' : (accessStateQuery.data ?? 'active')
   const accessibleQueryEnabled =
+    !sidebarPresenterOnly &&
     Boolean(sessionScope) &&
     sessionGeneration !== null &&
     canListAccessibleResources &&
@@ -703,6 +737,21 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       accessState === 'active',
     ...gfsAuthorityQueryPolicy,
   })
+  const sidebarAffordancesQuery = useQuery({
+    queryKey: desktopQueryKeys.gfsAffordances(
+      sessionScope ?? 'anonymous',
+      sidebarTargetIsCurrent ? (sidebarTarget?.resourceId ?? '') : '',
+      sidebarTargetIsCurrent ? (sidebarTarget?.drive ?? DRIVE) : DRIVE,
+      sessionGeneration
+    ),
+    queryFn: () => window.clerum.gfs.affordances(sidebarTarget!.resourceId, sidebarTarget!.drive),
+    enabled:
+      Boolean(sessionScope) &&
+      sessionGeneration !== null &&
+      sidebarTargetIsCurrent &&
+      accessState === 'active',
+    ...gfsAuthorityQueryPolicy,
+  })
   const refreshAffordances = useCallback(async () => {
     const resourceId = current?.resourceId
     if (!sessionScope || !ownsPublishedAuthority() || !resourceId) return
@@ -743,15 +792,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const grantsQuery = useQuery({
     queryKey: desktopQueryKeys.gfsGrants(
       sessionScope ?? 'anonymous',
-      current?.resourceId ?? '',
-      DRIVE,
+      aclResourceId ?? '',
+      aclDrive,
       sessionGeneration
     ),
-    queryFn: () => window.clerum.gfs.listGrants(current!.resourceId, DRIVE),
+    queryFn: () => window.clerum.gfs.listGrants(aclResourceId!, aclDrive),
     enabled:
       Boolean(sessionScope) &&
       sessionGeneration !== null &&
-      Boolean(current) &&
+      Boolean(aclResourceId) &&
       grantsListEnabled &&
       accessState === 'active',
   })
@@ -761,15 +810,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const sharesQuery = useQuery({
     queryKey: desktopQueryKeys.gfsShares(
       sessionScope ?? 'anonymous',
-      current?.resourceId ?? '',
-      DRIVE,
+      aclResourceId ?? '',
+      aclDrive,
       sessionGeneration
     ),
-    queryFn: () => window.clerum.gfs.listShares(current!.resourceId, DRIVE),
+    queryFn: () => window.clerum.gfs.listShares(aclResourceId!, aclDrive),
     enabled:
       Boolean(sessionScope) &&
       sessionGeneration !== null &&
-      Boolean(current) &&
+      Boolean(aclResourceId) &&
       grantsListEnabled &&
       accessState === 'active',
   })
@@ -784,16 +833,17 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const inheritedAccessQuery = useQuery({
     queryKey: desktopQueryKeys.gfsInheritedAccess(
       sessionScope ?? 'anonymous',
-      current?.resourceId ?? '',
-      DRIVE,
+      aclResourceId ?? '',
+      aclDrive,
       sessionGeneration
     ),
-    queryFn: () => deriveGfsInheritedAccess(current!.resourceId, DRIVE),
+    queryFn: () => deriveGfsInheritedAccess(aclResourceId!, aclDrive),
     enabled:
       Boolean(sessionScope) &&
       sessionGeneration !== null &&
-      Boolean(current) &&
+      Boolean(aclResourceId) &&
       grantsListEnabled &&
+      (!sidebarTargetIsCurrent || sidebarAffordancesQuery.data?.held?.includes('read')) &&
       accessState === 'active',
     // An 'unavailable' coverage is a FAILED walk, not an observation: a
     // transient ancestor failure would otherwise be cached forever under the
@@ -807,46 +857,67 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         : Infinity,
   })
   const refreshShares = useCallback(async () => {
-    const resourceId = current?.resourceId
+    const resourceId = aclResourceId
     if (!sessionScope || !ownsPublishedAuthority() || !resourceId) return
     await queryClient.invalidateQueries({
       exact: true,
       queryKey: desktopQueryKeys.gfsShares(
         sessionScope ?? 'anonymous',
         resourceId,
-        DRIVE,
+        aclDrive,
         sessionGeneration
       ),
     })
-  }, [current?.resourceId, queryClient, sessionScope, sessionGeneration, ownsPublishedAuthority])
+  }, [
+    aclResourceId,
+    aclDrive,
+    queryClient,
+    sessionScope,
+    sessionGeneration,
+    ownsPublishedAuthority,
+  ])
   const refreshGrants = useCallback(async () => {
-    const resourceId = current?.resourceId
+    const resourceId = aclResourceId
     if (!sessionScope || !ownsPublishedAuthority() || !resourceId) return
     await queryClient.invalidateQueries({
       exact: true,
       queryKey: desktopQueryKeys.gfsGrants(
         sessionScope ?? 'anonymous',
         resourceId,
-        DRIVE,
+        aclDrive,
         sessionGeneration
       ),
     })
-  }, [current?.resourceId, queryClient, sessionScope, sessionGeneration, ownsPublishedAuthority])
+  }, [
+    aclResourceId,
+    aclDrive,
+    queryClient,
+    sessionScope,
+    sessionGeneration,
+    ownsPublishedAuthority,
+  ])
   // Re-derives inherited access after a confirmed parent-folder edit changed
   // the ancestor rows the walk collected.
   const refreshInheritedAccess = useCallback(async () => {
-    const resourceId = current?.resourceId
+    const resourceId = aclResourceId
     if (!sessionScope || !ownsPublishedAuthority() || !resourceId) return
     await queryClient.invalidateQueries({
       exact: true,
       queryKey: desktopQueryKeys.gfsInheritedAccess(
         sessionScope ?? 'anonymous',
         resourceId,
-        DRIVE,
+        aclDrive,
         sessionGeneration
       ),
     })
-  }, [current?.resourceId, queryClient, sessionScope, sessionGeneration, ownsPublishedAuthority])
+  }, [
+    aclResourceId,
+    aclDrive,
+    queryClient,
+    sessionScope,
+    sessionGeneration,
+    ownsPublishedAuthority,
+  ])
   const refreshGfs = useCallback(async () => {
     if (!ownsPublishedAuthority()) return
     await queryClient.invalidateQueries({
@@ -973,12 +1044,26 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [handleAuthorityFailure]
   )
   const revokeGrantMutation = useMutation({
-    mutationFn: (grantId: string) => window.clerum.gfs.revokeGrant(grantId),
+    mutationFn: (input: { grantId: string; target?: FileExplorerMutationTarget }) =>
+      input.target
+        ? window.clerum.gfs.dispatchFileExplorerMutation({
+            operation: 'revoke-grant',
+            target: input.target,
+            grantId: input.grantId,
+          })
+        : window.clerum.gfs.revokeGrant(input.grantId),
     onSuccess: refreshGrants,
     onError: failClosedOnMutationError,
   })
   const revokeShareMutation = useMutation({
-    mutationFn: (shareId: string) => window.clerum.gfs.revokeShare(shareId),
+    mutationFn: (input: { shareId: string; target?: FileExplorerMutationTarget }) =>
+      input.target
+        ? window.clerum.gfs.dispatchFileExplorerMutation({
+            operation: 'revoke-share',
+            target: input.target,
+            shareId: input.shareId,
+          })
+        : window.clerum.gfs.revokeShare(input.shareId),
     onSuccess: refreshShares,
     onError: failClosedOnMutationError,
   })
@@ -1320,14 +1405,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   )
   const inheritedAccess = useMemo(
     () =>
-      authorityPending || accessState === 'revoked' ? [] : (inheritedAccessQuery.data?.items ?? []),
-    [accessState, authorityPending, inheritedAccessQuery.data]
+      authorityPending ||
+      accessState === 'revoked' ||
+      (sidebarTargetIsCurrent && !sidebarAffordancesQuery.data?.held?.includes('read'))
+        ? []
+        : (inheritedAccessQuery.data?.items ?? []),
+    [
+      accessState,
+      authorityPending,
+      inheritedAccessQuery.data,
+      sidebarAffordancesQuery.data,
+      sidebarTargetIsCurrent,
+    ]
   )
   // R1-H3: coverage of the walk that produced `inheritedAccess` (null while
   // never loaded). The scope/revoked guard above intentionally does NOT apply:
   // coverage describes the observation, and a revoked session empties the
   // rows through that guard instead.
-  const inheritedCoverage = inheritedAccessQuery.data?.coverage ?? null
+  const inheritedCoverage =
+    sidebarTargetIsCurrent && !sidebarAffordancesQuery.data?.held?.includes('read')
+      ? 'read-boundary'
+      : (inheritedAccessQuery.data?.coverage ?? null)
   const accessibleErrorMessage = accessibleQuery.error ? toMessage(accessibleQuery.error) : null
   // The timestamp is a dependency in its own right, not decoration. It is the
   // only thing that distinguishes two consecutive failures carrying the same
@@ -1782,7 +1880,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   )
 
   const moveResourceMutation = useMutation({
-    mutationFn: (input: {
+    mutationFn: async (input: {
       resourceId: string
       destinationId: string
       ifMatch?: number
@@ -1791,15 +1889,40 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       operationScope?: string
       authorityHandledByCaller?: boolean
       expectedSessionGeneration: number
-    }) =>
-      window.clerum.gfs.moveResource(
+    }): Promise<{ resourceId: string; version: number }> => {
+      const target =
+        sidebarTargetIsCurrent && sidebarTarget?.resourceId === input.resourceId
+          ? sidebarTarget
+          : null
+      if (sidebarTarget && sidebarTarget.resourceId === input.resourceId && !target) {
+        throw new Error('stale_sidebar_mutation_authority')
+      }
+      if (target) {
+        const result = await window.clerum.gfs.dispatchFileExplorerMutation({
+          operation: 'move',
+          target,
+          destinationResourceId: input.destinationId,
+          ...(input.newName ? { newName: input.newName } : {}),
+        })
+        const version =
+          typeof result === 'object' && result !== null && 'version' in result
+            ? (result as { version?: unknown }).version
+            : undefined
+        if (!Number.isSafeInteger(version) || (version as number) < 1) {
+          throw new Error('invalid_sidebar_move_receipt')
+        }
+        return { resourceId: target.resourceId, version: version as number }
+      }
+      const result = await window.clerum.gfs.moveResource(
         input.resourceId,
         input.destinationId,
         DRIVE,
         input.ifMatch,
         input.newName,
         input.expectedSessionGeneration
-      ),
+      )
+      return result
+    },
     onSuccess: async (receipt, input) => {
       await convergeCommittedMove(input, receipt, input.operationScope)
     },
@@ -1910,20 +2033,127 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // the caller surfaces that — never swallow it. `inherit` omitted defaults to
   // `true` on the wire (uriHandler), so user/team panel grants cover folder
   // contents; callers that need a contents-excluding grant pass `false`.
+  const dispatchSidebarMutation = useCallback(
+    async (request: FileExplorerMutationRequest): Promise<unknown> => {
+      const target = request.target
+      if (
+        !isCanonicalMainDriveTarget(target) ||
+        !ownsPublishedAuthority() ||
+        target.sessionGeneration !== sessionGeneration
+      ) {
+        throw new Error('stale_sidebar_mutation_authority')
+      }
+      try {
+        const liveGeneration = await window.clerum.auth.getSessionGeneration()
+        if (liveGeneration !== target.sessionGeneration || !ownsPublishedAuthority()) {
+          throw new Error('stale_sidebar_mutation_authority')
+        }
+        const result = await window.clerum.gfs.dispatchFileExplorerMutation(request)
+        await queryClient.invalidateQueries({
+          queryKey: desktopQueryKeys.gfsRoot,
+          predicate: query =>
+            query.queryKey[2] === sessionScope &&
+            hasGfsSessionGeneration(query.queryKey, target.sessionGeneration),
+        })
+        return result
+      } catch (error) {
+        handleAuthorityFailure(error, 'operation', sessionScope, target.sessionGeneration)
+        throw error
+      }
+    },
+    [handleAuthorityFailure, ownsPublishedAuthority, queryClient, sessionGeneration, sessionScope]
+  )
+
+  const renameResourceFromSnapshot = useCallback(
+    async (target: FileExplorerMutationTarget, requestedName: string): Promise<void> => {
+      if (!isCanonicalMainDriveTarget(target)) throw new Error('invalid_sidebar_mutation_receipt')
+      const name = await normalizeGfsResourceName(requestedName)
+      const result = await dispatchSidebarMutation({
+        operation: 'rename',
+        target,
+        requestedName: name,
+      })
+      const nextVersion =
+        typeof result === 'object' &&
+        result !== null &&
+        'version' in result &&
+        Number.isSafeInteger((result as { version?: unknown }).version)
+          ? (result as { version: number }).version
+          : target.version + 1
+      setCrumbs(previous =>
+        previous.map(crumb =>
+          crumb.resourceId === target.resourceId && crumb.gfsUri === target.gfsUri
+            ? { ...crumb, name, version: nextVersion }
+            : crumb
+        )
+      )
+    },
+    [dispatchSidebarMutation]
+  )
+
+  const grantToSnapshot = useCallback(
+    async (
+      target: FileExplorerMutationTarget,
+      subjectKeys: string[],
+      permissions: string[],
+      inherit?: boolean
+    ) => {
+      await dispatchSidebarMutation({
+        operation: 'grant',
+        target,
+        subjectKeys,
+        permissions,
+        inherit,
+      })
+      await refreshGrants()
+    },
+    [dispatchSidebarMutation, refreshGrants]
+  )
+
+  const createShareForSnapshot = useCallback(
+    async (target: FileExplorerMutationTarget, subjectKeys: string[]) => {
+      await dispatchSidebarMutation({ operation: 'create-share', target, subjectKeys })
+      await refreshShares()
+    },
+    [dispatchSidebarMutation, refreshShares]
+  )
+
+  const revokeGrantForSnapshot = useCallback(
+    async (target: FileExplorerMutationTarget, grantId: string) => {
+      await dispatchSidebarMutation({ operation: 'revoke-grant', target, grantId })
+      await refreshGrants()
+    },
+    [dispatchSidebarMutation, refreshGrants]
+  )
+
+  const revokeShareForSnapshot = useCallback(
+    async (target: FileExplorerMutationTarget, shareId: string) => {
+      await dispatchSidebarMutation({ operation: 'revoke-share', target, shareId })
+      await refreshShares()
+    },
+    [dispatchSidebarMutation, refreshShares]
+  )
+
   const grant = useCallback(
     (subjectKeys: string[], bits: string[], inherit?: boolean): Promise<void> => {
+      if (sidebarTargetIsCurrent && sidebarTarget) {
+        return grantToSnapshot(sidebarTarget, subjectKeys, bits, inherit)
+      }
       if (!current) return Promise.reject(new Error('No resource selected'))
       return window.clerum.gfs.grant(current.resourceId, subjectKeys, bits, DRIVE, inherit)
     },
-    [current]
+    [current, grantToSnapshot, sidebarTarget, sidebarTargetIsCurrent]
   )
 
   const createShare = useCallback(
     (subjectKeys: string[]): Promise<void> => {
+      if (sidebarTargetIsCurrent && sidebarTarget) {
+        return createShareForSnapshot(sidebarTarget, subjectKeys)
+      }
       if (!current) return Promise.reject(new Error('No resource selected'))
       return window.clerum.gfs.createShare(current.resourceId, subjectKeys, DRIVE)
     },
-    [current]
+    [current, createShareForSnapshot, sidebarTarget, sidebarTargetIsCurrent]
   )
 
   return {
@@ -2015,6 +2245,20 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     restoreCrumbs,
     reset,
     refreshAffordances,
+    sidebarTarget: sidebarTargetIsCurrent ? sidebarTarget : null,
+    sidebarAffordances:
+      sidebarTargetIsCurrent && !authorityPending && accessState !== 'revoked'
+        ? ((sidebarAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null)
+        : null,
+    sidebarAffordancesError: sidebarAffordancesQuery.error
+      ? toPresentedMessage(sidebarAffordancesQuery.error)
+      : null,
+    dispatchSidebarMutation,
+    renameResourceFromSnapshot,
+    grantToSnapshot,
+    createShareForSnapshot,
+    revokeGrantForSnapshot,
+    revokeShareForSnapshot,
     grant,
     grants,
     // Raw error (not toMessage) so FilesPage can map server codes — e.g. a
@@ -2022,7 +2266,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     grantsError: grantsQuery.error,
     loadingGrants: grantsQuery.isFetching,
     refreshGrants,
-    revokeGrant: (grantId: string) => revokeGrantMutation.mutateAsync(grantId),
+    revokeGrant: (grantId: string) =>
+      revokeGrantMutation.mutateAsync({
+        grantId,
+        target: sidebarTargetIsCurrent ? (sidebarTarget ?? undefined) : undefined,
+      }),
     revoking: revokeGrantMutation.isPending,
     shares,
     // Raw error (not toMessage) so FilesPage maps server codes symmetrically
@@ -2044,7 +2292,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // are reported through inheritedCoverage instead.
     inheritedAccessError: inheritedAccessQuery.error ? toMessage(inheritedAccessQuery.error) : null,
     refreshInheritedAccess,
-    revokeShare: (shareId: string) => revokeShareMutation.mutateAsync(shareId),
+    revokeShare: (shareId: string) =>
+      revokeShareMutation.mutateAsync({
+        shareId,
+        target: sidebarTargetIsCurrent ? (sidebarTarget ?? undefined) : undefined,
+      }),
     revokingShare: revokeShareMutation.isPending,
     createShare,
     createFolder: (parentResourceId: string, name: string) =>

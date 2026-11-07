@@ -29,7 +29,16 @@ const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
 const sharedUrl = buildGfsResourceWebLink('https://profile.example', uri)
 const service = {
   getSessionGeneration: () => 1,
-  createGfsResourceDeepLink: vi.fn(async () => ({ url: sharedUrl })),
+  copyGfsResourceDeepLink: vi.fn(
+    async (
+      _uri: string,
+      writeClipboard: (url: string) => void,
+      _expectedSessionGeneration: number
+    ) => {
+      await writeClipboard(sharedUrl)
+      return { url: sharedUrl }
+    }
+  ),
 }
 const trusted = { senderFrame: { url: 'file:///app/index.html' } }
 
@@ -45,16 +54,20 @@ beforeAll(async () => {
 })
 
 afterEach(() => {
-  service.createGfsResourceDeepLink.mockClear()
+  service.copyGfsResourceDeepLink.mockClear()
   electron.writeText.mockClear()
 })
 
 describe('gfs:copyDeepLink trusted clipboard handoff', () => {
   it('creates and copies the producer URL for the exact canonical resource', async () => {
-    await expect(copyHandler()(trusted, { uri: ` ${uri} ` })).resolves.toEqual({ url: sharedUrl })
+    await expect(
+      copyHandler()(trusted, { uri: ` ${uri} `, expectedSessionGeneration: 1 })
+    ).resolves.toEqual({ url: sharedUrl })
 
-    expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
-    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
+    expect(service.copyGfsResourceDeepLink).toHaveBeenCalledOnce()
+    expect(service.copyGfsResourceDeepLink.mock.calls[0]?.[0]).toBe(uri)
+    expect(service.copyGfsResourceDeepLink.mock.calls[0]?.[1]).toBeTypeOf('function')
+    expect(service.copyGfsResourceDeepLink.mock.calls[0]?.[2]).toBe(1)
     expect(electron.writeText).toHaveBeenCalledOnce()
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })
@@ -69,7 +82,7 @@ describe('gfs:copyDeepLink trusted clipboard handoff', () => {
     )
 
     let settled = false
-    const result = copyHandler()(trusted, { uri }).then(value => {
+    const result = copyHandler()(trusted, { uri, expectedSessionGeneration: 1 }).then(value => {
       settled = true
       return value
     })
@@ -80,28 +93,46 @@ describe('gfs:copyDeepLink trusted clipboard handoff', () => {
     settleWrite()
     await expect(result).resolves.toEqual({ url: sharedUrl })
     expect(settled).toBe(true)
-    expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
-    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
+    expect(service.copyGfsResourceDeepLink).toHaveBeenCalledOnce()
+    expect(service.copyGfsResourceDeepLink.mock.calls[0]?.[0]).toBe(uri)
+    expect(service.copyGfsResourceDeepLink.mock.calls[0]?.[2]).toBe(1)
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })
 
   it('propagates a clipboard write failure instead of reporting success', async () => {
     electron.writeText.mockRejectedValueOnce(new Error('clipboard unavailable'))
 
-    await expect(copyHandler()(trusted, { uri })).rejects.toThrow('clipboard unavailable')
+    await expect(copyHandler()(trusted, { uri, expectedSessionGeneration: 1 })).rejects.toThrow(
+      'clipboard unavailable'
+    )
 
-    expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
-    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
+    expect(service.copyGfsResourceDeepLink).toHaveBeenCalledOnce()
+    expect(service.copyGfsResourceDeepLink.mock.calls[0]?.[0]).toBe(uri)
+    expect(service.copyGfsResourceDeepLink.mock.calls[0]?.[2]).toBe(1)
     expect(electron.writeText).toHaveBeenCalledOnce()
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })
 
   it('rejects untrusted renderer senders before creating or copying a link', async () => {
     await expect(
-      copyHandler()({ senderFrame: { url: 'https://untrusted.example' } }, { uri })
+      copyHandler()(
+        { senderFrame: { url: 'https://untrusted.example' } },
+        {
+          uri,
+          expectedSessionGeneration: 1,
+        }
+      )
     ).rejects.toThrow('Untrusted IPC sender')
 
-    expect(service.createGfsResourceDeepLink).not.toHaveBeenCalled()
+    expect(service.copyGfsResourceDeepLink).not.toHaveBeenCalled()
     expect(electron.writeText).not.toHaveBeenCalled()
+  })
+
+  it('rejects a missing or non-numeric clicked-row generation', async () => {
+    await expect(copyHandler()(trusted, { uri })).rejects.toThrow('invalid_session_generation')
+    await expect(copyHandler()(trusted, { uri, expectedSessionGeneration: null })).rejects.toThrow(
+      'invalid_session_generation'
+    )
+    expect(service.copyGfsResourceDeepLink).not.toHaveBeenCalled()
   })
 })

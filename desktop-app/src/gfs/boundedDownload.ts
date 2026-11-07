@@ -200,3 +200,31 @@ export async function fetchBoundedBytes(
   }
   return out.buffer
 }
+
+/** Uncapped single-file response with its own admitted metadata envelope. */
+export async function fetchBytesWithMetadata(
+  url: string,
+  token: string,
+  opts?: { signal?: AbortSignal },
+  deps: BoundedDownloadDeps = { fetch }
+): Promise<{ bytes: ArrayBuffer; headers: Headers }> {
+  const controller = new AbortController()
+  if (opts?.signal) {
+    if (opts.signal.aborted) controller.abort()
+    else opts.signal.addEventListener('abort', () => controller.abort(), { once: true })
+  }
+  const response = await deps.fetch(url, {
+    headers: { authorization: `Bearer ${token}` },
+    signal: controller.signal,
+  })
+  if (!response.ok) {
+    throw new ApiError(
+      `gfs download failed: ${response.status}`,
+      response.status,
+      await response.text(),
+      response.headers.get('retry-after')
+    )
+  }
+  const bytes = await response.arrayBuffer()
+  return { bytes, headers: response.headers }
+}

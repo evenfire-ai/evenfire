@@ -15,6 +15,8 @@ const PASSTHROUGH_RESPONSE_HEADERS = [
   'content-type',
   'content-disposition',
   'content-length',
+  'x-gfs-uri',
+  'x-gfs-version',
   'location',
   'upload-offset',
   'upload-length',
@@ -123,6 +125,15 @@ export function registerGfsProxyRoute(router: Router): void {
       // same reason). Cleared the moment headers arrive, so an upload still fails
       // loud (504) when gfsc never answers.
       const deadline = new AbortController()
+      let clientDisconnected = false
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+      const onClientClose = () => {
+        if (res.writableFinished) return
+        clientDisconnected = true
+        deadline.abort()
+        void reader?.cancel().catch(() => undefined)
+      }
+      res.on('close', onClientClose)
       const deadlineTimer = setTimeout(() => deadline.abort(), config.gfscProxyTimeoutMs)
       try {
         const fetchInit: RequestInit & { duplex?: 'half' } = {
@@ -141,7 +152,12 @@ export function registerGfsProxyRoute(router: Router): void {
       } catch (err) {
         // Never silent: a failed or timed-out gfsc fetch is logged with the target.
         const timedOut =
-          deadline.signal.aborted || (err instanceof Error && err.name === 'TimeoutError')
+          !clientDisconnected &&
+          (deadline.signal.aborted || (err instanceof Error && err.name === 'TimeoutError'))
+        if (clientDisconnected || res.destroyed) {
+          res.off('close', onClientClose)
+          return
+        }
         rootLogger.error(
           { err, target, method: req.method, timeoutMs: config.gfscProxyTimeoutMs },
           timedOut
@@ -151,6 +167,7 @@ export function registerGfsProxyRoute(router: Router): void {
         res
           .status(timedOut ? 504 : 502)
           .json({ error: timedOut ? 'gfsc_timeout' : 'gfsc_unreachable' })
+        res.off('close', onClientClose)
         return
       } finally {
         clearTimeout(deadlineTimer)
@@ -160,26 +177,34 @@ export function registerGfsProxyRoute(router: Router): void {
         // Error envelopes are small JSON: buffer, LOG (so a gfsc 5xx is never
         // undiagnosable at this hop again — the base64 RangeError 500 was invisible
         // here before), then forward the body verbatim.
-        const errorBody = await upstreamRes.text()
-        const logCtx = {
-          target,
-          method: req.method,
-          status: upstreamRes.status,
-          body: errorBody.slice(0, 2048),
+        try {
+          const errorBody = await upstreamRes.text()
+          if (clientDisconnected || res.destroyed) return
+          const logCtx = {
+            target,
+            method: req.method,
+            status: upstreamRes.status,
+            body: errorBody.slice(0, 2048),
+          }
+          if (upstreamRes.status >= 500)
+            rootLogger.error(logCtx, 'gfs operator proxy: gfsc upstream error')
+          else rootLogger.warn(logCtx, 'gfs operator proxy: gfsc upstream client error')
+          res.status(upstreamRes.status)
+          const contentType = upstreamRes.headers.get('content-type')
+          if (contentType) res.setHeader('content-type', contentType)
+          const retryAfter = upstreamRes.headers.get('retry-after')
+          if (retryAfter) res.setHeader('retry-after', retryAfter)
+          for (const header of PASSTHROUGH_RESPONSE_HEADERS) {
+            const value = upstreamRes.headers.get(header)
+            if (value) res.setHeader(header, value)
+          }
+          res.send(errorBody)
+        } catch (error) {
+          if (clientDisconnected || res.destroyed) return
+          throw error
+        } finally {
+          res.off('close', onClientClose)
         }
-        if (upstreamRes.status >= 500)
-          rootLogger.error(logCtx, 'gfs operator proxy: gfsc upstream error')
-        else rootLogger.warn(logCtx, 'gfs operator proxy: gfsc upstream client error')
-        res.status(upstreamRes.status)
-        const contentType = upstreamRes.headers.get('content-type')
-        if (contentType) res.setHeader('content-type', contentType)
-        const retryAfter = upstreamRes.headers.get('retry-after')
-        if (retryAfter) res.setHeader('retry-after', retryAfter)
-        for (const header of PASSTHROUGH_RESPONSE_HEADERS) {
-          const value = upstreamRes.headers.get(header)
-          if (value) res.setHeader(header, value)
-        }
-        res.send(errorBody)
         return
       }
 
@@ -191,21 +216,36 @@ export function registerGfsProxyRoute(router: Router): void {
 
       if (!upstreamRes.body) {
         res.end()
+        res.off('close', onClientClose)
         return
       }
-      const reader = upstreamRes.body.getReader()
+      reader = upstreamRes.body.getReader()
       try {
         for (;;) {
           const { done, value } = await reader.read()
-          if (done) break
-          if (value) res.write(Buffer.from(value))
+          if (done || clientDisconnected) break
+          if (value && !res.write(Buffer.from(value))) {
+            await new Promise<void>(resolve => {
+              const finish = () => {
+                res.off('drain', finish)
+                res.off('close', finish)
+                resolve()
+              }
+              res.once('drain', finish)
+              res.once('close', finish)
+            })
+          }
         }
-        res.end()
+        if (!clientDisconnected) res.end()
       } catch (err) {
+        if (clientDisconnected || res.destroyed) return
         // Mid-stream gfsc read failure — surface it, never swallow silently.
         rootLogger.error({ err, target }, 'gfs operator proxy: gfsc upstream stream error')
         if (!res.headersSent) res.status(502).json({ error: 'gfsc upstream error' })
         else res.end()
+      } finally {
+        if (clientDisconnected) await reader.cancel().catch(() => undefined)
+        res.off('close', onClientClose)
       }
     })
   )

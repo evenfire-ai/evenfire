@@ -28,6 +28,8 @@ export interface MoveCommitPlan {
   destination: { resourceId: string; name: string }
   /** Explicit Move only: the target shown by the dialog, before its fresh resolve. */
   expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot
+  /** Exact source snapshot captured by the local sidebar Move presenter. */
+  presentedSourceSnapshot?: MoveCommitSourceSnapshot
   /** Names already known to be taken in the destination, when cached. */
   occupiedDestinationNames?: ReadonlySet<string>
   /** Main-process authenticated session identity captured when this operation began. */
@@ -149,34 +151,59 @@ export async function commitGfsMove(
   if (!(await isSessionCurrent())) return { status: 'session-lost' }
 
   let snapshot: MoveCommitSourceSnapshot
-  try {
-    const resolved = await deps.resolveSource(plan.source.gfsUri)
-    if (!(await isSessionCurrent())) return { status: 'session-lost' }
-    snapshot = {
-      resourceId: resolved.resourceId,
-      gfsUri: plan.source.gfsUri,
-      kind: resolved.kind === 'directory' ? 'directory' : 'file',
-      name: resolved.name,
-      version: resolved.version,
-      parentResourceId: resolved.parentResourceId,
-    }
-  } catch (error) {
-    if (!(await isSessionCurrent())) return { status: 'session-lost' }
-    if (deps.isSessionAuthorityFailure(error)) return { status: 'session-lost' }
-    const status = parseHttpStatus(messageOf(error))
-    if (status === 404) {
+  if (plan.presentedSourceSnapshot) {
+    const presented = plan.presentedSourceSnapshot
+    if (
+      !plan.expectedSourceSnapshot ||
+      presented.resourceId !== plan.expectedSourceSnapshot.resourceId ||
+      presented.version !== plan.expectedSourceSnapshot.version ||
+      presented.parentResourceId !== plan.expectedSourceSnapshot.parentResourceId ||
+      presented.gfsUri !== plan.source.gfsUri ||
+      presented.kind !== plan.source.kind ||
+      presented.name !== plan.source.name ||
+      !Number.isSafeInteger(presented.version) ||
+      presented.version < 1 ||
+      !presented.parentResourceId
+    ) {
       return {
-        status: 'source-unavailable',
-        message: 'EvenDrive cannot verify this item’s current location. Refresh and try again.',
+        status: 'changed',
+        message:
+          'This item changed while you were moving it. Review its current location and try again.',
       }
     }
-    if (status === 403) {
-      return {
-        status: 'unconfirmed',
-        message: 'EvenDrive could not confirm permission for this move. Refresh and try again.',
+    // The clicked-row presenter already captured this exact identity. Do not
+    // demand content-read permission just to reach the trusted Move owner.
+    snapshot = { ...presented }
+  } else {
+    try {
+      const resolved = await deps.resolveSource(plan.source.gfsUri)
+      if (!(await isSessionCurrent())) return { status: 'session-lost' }
+      snapshot = {
+        resourceId: resolved.resourceId,
+        gfsUri: plan.source.gfsUri,
+        kind: resolved.kind === 'directory' ? 'directory' : 'file',
+        name: resolved.name,
+        version: resolved.version,
+        parentResourceId: resolved.parentResourceId,
       }
+    } catch (error) {
+      if (!(await isSessionCurrent())) return { status: 'session-lost' }
+      if (deps.isSessionAuthorityFailure(error)) return { status: 'session-lost' }
+      const status = parseHttpStatus(messageOf(error))
+      if (status === 404) {
+        return {
+          status: 'source-unavailable',
+          message: 'EvenDrive cannot verify this item’s current location. Refresh and try again.',
+        }
+      }
+      if (status === 403) {
+        return {
+          status: 'unconfirmed',
+          message: 'EvenDrive could not confirm permission for this move. Refresh and try again.',
+        }
+      }
+      return { status: 'unconfirmed', message: describeGfsReadError(error).message }
     }
-    return { status: 'unconfirmed', message: describeGfsReadError(error).message }
   }
 
   // An explicit Move dialog is consent for the exact resource snapshot it

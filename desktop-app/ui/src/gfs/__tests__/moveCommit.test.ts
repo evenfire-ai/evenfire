@@ -33,6 +33,53 @@ function plan(overrides: Partial<MoveCommitPlan> = {}): MoveCommitPlan {
 }
 
 describe('commitGfsMove — commit-time source refresh', () => {
+  it('dispatches the exact presented unreadable row without resolving protected content', async () => {
+    const resolveSource = vi.fn(async () => {
+      throw new Error('403 Forbidden: httpStatus=403')
+    })
+    const moveResource = vi.fn(async () => ({ resourceId: 'r-1', version: 8 }))
+    const expectedSourceSnapshot = {
+      resourceId: 'r-1',
+      version: 7,
+      parentResourceId: 'old-parent',
+    }
+    const presentedSourceSnapshot = {
+      ...resolved(),
+      gfsUri: 'gfs://main/r1',
+    }
+    const outcome = await commitGfsMove(
+      deps({ resolveSource, moveResource }),
+      plan({ expectedSourceSnapshot, presentedSourceSnapshot })
+    )
+    expect(outcome).toEqual({ status: 'committed', version: 8, previousParentId: 'old-parent' })
+    expect(resolveSource).not.toHaveBeenCalled()
+    expect(moveResource).toHaveBeenCalledWith(
+      'r-1',
+      'dest-1',
+      7,
+      undefined,
+      'old-parent',
+      undefined
+    )
+  })
+
+  it('rejects a presented source that differs from the dialog snapshot', async () => {
+    const moveResource = vi.fn()
+    const outcome = await commitGfsMove(
+      deps({ moveResource }),
+      plan({
+        expectedSourceSnapshot: {
+          resourceId: 'r-1',
+          version: 7,
+          parentResourceId: 'old-parent',
+        },
+        presentedSourceSnapshot: resolved({ version: 8 }),
+      })
+    )
+    expect(outcome.status).toBe('changed')
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
   it('resolves the source and sends exactly one PATCH with the fresh version and ifMatch', async () => {
     const moveResource = vi.fn(async () => ({ resourceId: 'r-1', version: 8 }))
     const outcome = await commitGfsMove(deps({ moveResource }), plan())

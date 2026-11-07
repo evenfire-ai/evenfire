@@ -245,6 +245,69 @@ async function produceSerializedAccessCatalogMalformedResponse(): Promise<Error>
 function useReactiveController(controller: AppController): AppController {
   const [, force] = useReducer((count: number) => count + 1, 0)
   forceControllerRender = force
+  const filesController = controller as Partial<
+    Pick<
+      AppController,
+      | 'beginFilesPathIntent'
+      | 'commitFilesPathIntent'
+      | 'failFilesPathIntent'
+      | 'markFilesPathsUnavailable'
+      | 'reconcileFilesConvergence'
+      | 'recordFilesMutation'
+    >
+  >
+  const filesPathOwners = new Map<
+    string,
+    { sequence: number; path: string | null; pathRevision: number; pending: boolean }
+  >()
+  let filesMutationEpoch = 0
+  filesController.beginFilesPathIntent ??= vi.fn(tabId => {
+    const tab = controller.workspaceTabs.tabs.find(candidate => candidate.id === tabId)
+    if (!tab || tab.kind !== 'files') return null
+    let owner = filesPathOwners.get(tabId)
+    if (!owner) {
+      owner = { sequence: 0, path: tab.files?.path ?? null, pathRevision: 0, pending: false }
+      filesPathOwners.set(tabId, owner)
+    }
+    owner.sequence += 1
+    owner.pending = true
+    return {
+      tabId,
+      sequence: owner.sequence,
+      path: owner.path,
+      pathRevision: owner.pathRevision,
+      mutationEpoch: filesMutationEpoch,
+    }
+  })
+  filesController.commitFilesPathIntent ??= vi.fn((receipt, path, name) => {
+    const owner = filesPathOwners.get(receipt.tabId)
+    if (!owner || owner.sequence !== receipt.sequence || !owner.pending) return false
+    owner.pending = false
+    owner.path = path
+    owner.pathRevision += 1
+    controller.setWorkspaceTabs(state => ({
+      ...state,
+      tabs: state.tabs.map(tab =>
+        tab.id === receipt.tabId && tab.kind === 'files'
+          ? {
+              ...tab,
+              title: name ?? tab.title,
+              files: { ...tab.files, path },
+            }
+          : tab
+      ),
+    }))
+    return true
+  })
+  filesController.failFilesPathIntent ??= vi.fn(receipt => {
+    const owner = filesPathOwners.get(receipt.tabId)
+    if (!owner || owner.sequence !== receipt.sequence || !owner.pending) return false
+    owner.pending = false
+    return true
+  })
+  filesController.markFilesPathsUnavailable ??= vi.fn()
+  filesController.reconcileFilesConvergence ??= vi.fn(async () => undefined)
+  filesController.recordFilesMutation ??= vi.fn(() => ++filesMutationEpoch)
   const activeTab = activeWorkspaceTab(controller.workspaceTabs)
   filesPageHarness.activeTabId = activeTab?.id ?? null
   filesPageHarness.activeFilesRoute =
@@ -310,6 +373,30 @@ const filesPageHarness = vi.hoisted(() => ({
     workspaceTabId?: string
     pendingResourceAction?: GfsResourceActionRequest | null
     onPendingResourceActionHandled?: (requestId: number) => void
+    pendingSidebarLocalAction?: {
+      id: number
+      actionId: Extract<
+        GfsResourceActionId,
+        'share' | 'move' | 'new-folder' | 'upload-file' | 'replace' | 'delete'
+      >
+      targetUri: string
+      targetResource: {
+        resourceId: string
+        drive: string
+        gfsUri: string
+        kind: 'file' | 'directory'
+        version: number
+        name: string
+        parentResourceId: string | null
+        sessionGeneration: number
+      }
+      file?: File
+    } | null
+    onPendingSidebarLocalActionHandled?: (requestId: number) => void
+    onSidebarLocalActionFinished?: (requestId: number) => void
+    onSidebarLocalActionMutationClaim?: (requestId: number) => boolean
+    onSidebarLocalActionMutationSettled?: (requestId: number) => void
+    sidebarPresenterOnly?: boolean
     routeDialogRequestId?: number
     onRouteDialogRequestHandled?: (requestId: number) => void
     onPendingGfsDeepLinkOutcome?: (
@@ -348,7 +435,8 @@ const sidebarHarness = vi.hoisted(() => ({
     onGfsResourceAction?: (
       resource: GfsBrowserChild,
       actionId: GfsResourceActionId,
-      file?: File
+      file?: File,
+      sessionGeneration?: number | null
     ) => void
     onSelect?: (item: NavItem) => void
   },
@@ -614,6 +702,30 @@ vi.mock('@pages/FilesPage', () => ({
     workspaceTabId?: string
     pendingResourceAction?: GfsResourceActionRequest | null
     onPendingResourceActionHandled?: (requestId: number) => void
+    pendingSidebarLocalAction?: {
+      id: number
+      actionId: Extract<
+        GfsResourceActionId,
+        'share' | 'move' | 'new-folder' | 'upload-file' | 'replace' | 'delete'
+      >
+      targetUri: string
+      targetResource: {
+        resourceId: string
+        drive: string
+        gfsUri: string
+        kind: 'file' | 'directory'
+        version: number
+        name: string
+        parentResourceId: string | null
+        sessionGeneration: number
+      }
+      file?: File
+    } | null
+    onPendingSidebarLocalActionHandled?: (requestId: number) => void
+    onSidebarLocalActionFinished?: (requestId: number) => void
+    onSidebarLocalActionMutationClaim?: (requestId: number) => boolean
+    onSidebarLocalActionMutationSettled?: (requestId: number) => void
+    sidebarPresenterOnly?: boolean
     routeDialogRequestId?: number
     onRouteDialogRequestHandled?: (requestId: number) => void
     onPendingGfsDeepLinkOutcome?: (
@@ -1344,7 +1456,7 @@ describe('App deep-link orchestration', () => {
     expect(filesPageHarness.pendingGfsUri).toBeNull()
   })
 
-  it('routes unreadable-row Move through its parent and preserves the exact target', async () => {
+  it('opens unreadable-row Move locally and preserves the exact target', async () => {
     const parentResourceId = '0123456789abcdef0123456789abcdef'
     const resource = (
       await listChildrenPage([
@@ -1355,7 +1467,6 @@ describe('App deep-link orchestration', () => {
       ])
     ).items[0]
     if (!resource) throw new Error('The producer fixture did not return the unreadable file')
-    const parentUri = `gfs://main/${parentResourceId}`
     const openFilesSection = vi.fn((path: string | null) => {
       const intentSequence = currentController.beginUserNavigationIntent()
       const next = openFilesTab(currentController.workspaceTabs, {
@@ -1372,28 +1483,30 @@ describe('App deep-link orchestration', () => {
 
     render(<App />)
 
-    act(() => sidebarHarness.props?.onGfsResourceAction?.(resource, 'move'))
+    const selectedTabId = currentController.workspaceTabs.activeTabId
+    act(() => sidebarHarness.props?.onGfsResourceAction?.(resource, 'move', undefined, 1))
 
-    await waitFor(() => expect(openFilesSection).toHaveBeenCalledWith(parentUri))
     await waitFor(() =>
-      expect(filesPageHarness.props?.pendingResourceAction).toMatchObject({
+      expect(filesPageHarness.props?.pendingSidebarLocalAction).toMatchObject({
         id: 1,
         targetUri: resource.gfsUri,
         actionId: 'move',
-        navigationUri: parentUri,
         targetResource: {
           resourceId: resource.resourceId,
           name: resource.name,
           kind: resource.kind,
           version: resource.version,
           parentResourceId,
+          sessionGeneration: 1,
         },
       })
     )
-    expect(filesPageHarness.pendingGfsUri).toBe(parentUri)
+    expect(openFilesSection).not.toHaveBeenCalled()
+    expect(currentController.workspaceTabs.activeTabId).toBe(selectedTabId)
+    expect(filesPageHarness.props?.pendingResourceAction).toBeUndefined()
   })
 
-  it('cancels a pending sidebar action when live navigation supersedes its route', async () => {
+  it('keeps a local Replace receipt bound to its row during Files navigation', async () => {
     const sourceUri = 'gfs://main/11111111111111111111111111111111'
     const target = (
       await listChildrenPage([
@@ -1412,19 +1525,25 @@ describe('App deep-link orchestration', () => {
     render(<App />)
     await waitFor(() => expect(filesPageHarness.props?.onLocationChange).toBeTypeOf('function'))
 
+    const originalFilesPath =
+      currentController.workspaceTabs.tabs.find(tab => tab.kind === 'files')?.kind === 'files'
+        ? currentController.workspaceTabs.tabs.find(tab => tab.kind === 'files')?.files?.path
+        : null
     act(() =>
       sidebarHarness.props?.onGfsResourceAction?.(
         target,
         'replace',
-        new File(['replacement'], 'replacement.txt')
+        new File(['replacement'], 'replacement.txt'),
+        1
       )
     )
-    const requestId = filesPageHarness.props?.pendingResourceAction?.id
-    expect(filesPageHarness.props?.pendingResourceAction).toMatchObject({
+    const requestId = filesPageHarness.props?.pendingSidebarLocalAction?.id
+    expect(filesPageHarness.props?.pendingSidebarLocalAction).toMatchObject({
       targetUri: target.gfsUri,
       actionId: 'replace',
+      targetResource: { resourceId: target.resourceId, version: target.version },
     })
-    expect(filesPageHarness.pendingGfsUri).toBe(target.gfsUri)
+    expect(filesPageHarness.props?.pendingResourceAction).toBeNull()
 
     act(() => filesPageHarness.props?.onExplicitNavigationIntent?.())
     act(() =>
@@ -1433,15 +1552,21 @@ describe('App deep-link orchestration', () => {
         'Other'
       )
     )
-    await waitFor(() => expect(filesPageHarness.props?.pendingResourceAction).toBeNull())
-
-    act(() => filesPageHarness.props?.onLocationChange?.(target.gfsUri, target.name))
-    expect(filesPageHarness.props?.pendingResourceAction).toBeNull()
-    expect(filesPageHarness.props?.onPendingResourceActionHandled).toBeTypeOf('function')
-    expect(requestId).toBe(1)
+    await waitFor(() =>
+      expect(filesPageHarness.props?.pendingSidebarLocalAction).toMatchObject({
+        id: requestId,
+        targetUri: target.gfsUri,
+        actionId: 'replace',
+      })
+    )
+    const currentFilesTab = currentController.workspaceTabs.tabs.find(tab => tab.kind === 'files')
+    expect(currentFilesTab?.kind === 'files' ? currentFilesTab.files?.path : null).toBe(
+      'gfs://main/33333333333333333333333333333333'
+    )
+    expect(originalFilesPath).toBe(sourceUri)
   })
 
-  it('cancels after the target route is left and ignores an older action acknowledgement', async () => {
+  it('ignores a stale local-action finish after a newer row receipt is presented', async () => {
     const sourceUri = 'gfs://main/11111111111111111111111111111111'
     const rows = await listChildrenPage([
       childView('22222222222222222222222222222222', 'first.txt', 'file'),
@@ -1461,22 +1586,19 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(filesPageHarness.props?.onLocationChange).toBeTypeOf('function'))
 
     act(() =>
-      sidebarHarness.props?.onGfsResourceAction?.(first, 'replace', new File(['1'], '1.txt'))
+      sidebarHarness.props?.onGfsResourceAction?.(first, 'replace', new File(['1'], '1.txt'), 1)
     )
-    const firstRequestId = filesPageHarness.props?.pendingResourceAction?.id
+    const firstRequestId = filesPageHarness.props?.pendingSidebarLocalAction?.id
     expect(firstRequestId).toBeDefined()
+    act(() => filesPageHarness.props?.onSidebarLocalActionFinished?.(firstRequestId ?? -1))
+    await waitFor(() => expect(filesPageHarness.props?.pendingSidebarLocalAction).toBeNull())
 
-    act(() => filesPageHarness.props?.onLocationChange?.(first.gfsUri, first.name))
-    act(() => filesPageHarness.props?.onExplicitNavigationIntent?.())
-    act(() => filesPageHarness.props?.onLocationChange?.(sourceUri, 'Source'))
-    await waitFor(() => expect(filesPageHarness.props?.pendingResourceAction).toBeNull())
-
-    act(() => sidebarHarness.props?.onGfsResourceAction?.(second, 'rename'))
-    const secondRequestId = filesPageHarness.props?.pendingResourceAction?.id
+    act(() => sidebarHarness.props?.onGfsResourceAction?.(second, 'share', undefined, 1))
+    const secondRequestId = filesPageHarness.props?.pendingSidebarLocalAction?.id
     expect(secondRequestId).toBeGreaterThan(firstRequestId ?? 0)
 
-    act(() => filesPageHarness.props?.onPendingResourceActionHandled?.(firstRequestId ?? -1))
-    expect(filesPageHarness.props?.pendingResourceAction?.id).toBe(secondRequestId)
+    act(() => filesPageHarness.props?.onSidebarLocalActionFinished?.(firstRequestId ?? -1))
+    expect(filesPageHarness.props?.pendingSidebarLocalAction?.id).toBe(secondRequestId)
   })
 
   it('routes in-app resource links through the authenticated navigation owner', async () => {

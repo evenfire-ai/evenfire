@@ -22,7 +22,11 @@ import {
   canonicalizeDesktopRestEndpoint,
   sameDesktopRestEndpoint,
 } from './desktopEnvironmentUrl.js'
-import { fetchBoundedBytes, streamBoundedBytes } from './gfs/boundedDownload.js'
+import {
+  fetchBoundedBytes,
+  fetchBytesWithMetadata,
+  streamBoundedBytes,
+} from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
   DesktopGfsUploadJob,
@@ -32,7 +36,14 @@ import {
   type DesktopUploadTransport,
   formatGfsUploadLimit,
 } from './gfs/upload.js'
-import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
+import {
+  GfsClient,
+  type GfsConvergenceLocationResult,
+  type GfsDownloadReceipt,
+  type GfsResourceView,
+  parseGfsUri,
+  parseSubjectKey,
+} from './gfs/uriHandler.js'
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
@@ -882,6 +893,79 @@ export interface AppServiceOptions {
   onSandboxUiSessionInvalidated?: () => void
 }
 
+function canonicalGfsResourceId(resourceId: string): string | null {
+  if (typeof resourceId !== 'string') return null
+  const compact = resourceId.replace(/-/g, '').toLowerCase()
+  return /^[0-9a-f]{32}$/.test(compact) ? compact : null
+}
+
+export interface FileExplorerRenameRequest {
+  resourceId: string
+  drive: string
+  gfsUri: string
+  kind: 'file' | 'directory'
+  version: number
+  name: string
+  parentResourceId: string | null
+  sessionGeneration: number
+  requestedName: string
+}
+
+export interface FileExplorerMutationTarget {
+  resourceId: string
+  drive: string
+  gfsUri: string
+  kind: 'file' | 'directory'
+  version: number
+  name: string
+  parentResourceId: string | null
+  sessionGeneration: number
+}
+
+export type FileExplorerMutationRequest =
+  | { operation: 'rename'; target: FileExplorerMutationTarget; requestedName: string }
+  | { operation: 'create-folder'; target: FileExplorerMutationTarget; name: string }
+  | {
+      operation: 'move'
+      target: FileExplorerMutationTarget
+      destinationResourceId: string
+      newName?: string
+    }
+  | { operation: 'delete'; target: FileExplorerMutationTarget }
+  | { operation: 'upload'; target: FileExplorerMutationTarget; name: string; filePath: string }
+  | { operation: 'replace'; target: FileExplorerMutationTarget; filePath: string }
+  | {
+      operation: 'grant'
+      target: FileExplorerMutationTarget
+      subjectKeys: string[]
+      permissions: string[]
+      inherit?: boolean
+    }
+  | { operation: 'create-share'; target: FileExplorerMutationTarget; subjectKeys: string[] }
+  | { operation: 'revoke-grant'; target: FileExplorerMutationTarget; grantId: string }
+  | { operation: 'revoke-share'; target: FileExplorerMutationTarget; shareId: string }
+
+export type FileExplorerMutationResult =
+  | GfsResourceView
+  | DesktopUploadSession
+  | { resourceId: string; version: number }
+  | { deleted: boolean; resourceId: string }
+  | void
+
+export interface GfsSaveAuthorityBinding {
+  environmentKey: string
+  profileId: string | null
+  restBaseUrl: string
+  userId: string
+  sessionGeneration: number
+  gfsAuthEpoch: number
+}
+
+export interface GfsSaveAdmission {
+  binding: GfsSaveAuthorityBinding
+  receipt: Promise<GfsDownloadReceipt>
+}
+
 export class AppService {
   private readonly authClient = new AuthClient()
   private readonly memberRegistrationServiceClient = new MemberRegistrationServiceClient()
@@ -893,6 +977,7 @@ export class AppService {
     },
     requestJson,
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
+    fetchBytesWithMetadata: (url, token, opts) => fetchBytesWithMetadata(url, token, opts),
     fetchByteStream: (url, token, opts, onChunk) => streamBoundedBytes(url, token, opts, onChunk),
   })
   private readonly tokenStore: TokenStore
@@ -2750,6 +2835,43 @@ export class AppService {
     return this.gfsClient.resolveUri(uri, this.requireGfsDispatchToken())
   }
 
+  /** Resolve a hidden Files target using its exact clicked URI and authority generation. */
+  async resolveGfsConvergenceLocation(
+    uri: string,
+    expectedSessionGeneration: number,
+    signal?: AbortSignal
+  ): Promise<GfsConvergenceLocationResult> {
+    const accepted = await this.withNativeAuthEnvironmentCommit(async () => {
+      if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+        throw new Error('invalid_session_generation')
+      }
+      this.assertSessionGeneration(expectedSessionGeneration)
+      if (this.gfsDispatchBlocked || !this.sessionToken || !this.me?.id) {
+        throw new Error('stale_auth_epoch: GFS ancestry query has no current authority')
+      }
+      return {
+        token: this.requireGfsDispatchToken(),
+        binding: {
+          ...this.captureAuthEnvironmentBinding(),
+          userId: this.me.id,
+          sessionGeneration: expectedSessionGeneration,
+          gfsAuthEpoch: this.gfsAuthEpoch,
+        } satisfies GfsSaveAuthorityBinding,
+      }
+    })
+    const result = await this.gfsClient.resolveConvergenceLocation(uri, accepted.token, signal)
+    if (!result.available) return result
+    const stillCurrent = await this.withNativeAuthEnvironmentCommit(async () => {
+      try {
+        this.assertGfsSaveAuthorityCurrent(accepted.binding)
+        return true
+      } catch {
+        return false
+      }
+    })
+    return stillCurrent ? result : { available: false }
+  }
+
   /**
    * Resolve for a plugin handoff only while the GFS authority that dispatched
    * the request is still current. A delayed old-scope result must not be tagged
@@ -2774,6 +2896,84 @@ export class AppService {
       this.requireGfsDispatchToken(),
       maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
     )
+  }
+
+  /**
+   * Admit a single-file save under the current local authority, then let the
+   * remote read settle outside the auth-commit queue. The returned binding is
+   * opaque authority metadata; it never contains the bearer token.
+   */
+  async admitGfsSave(
+    uri: string,
+    expectedSessionGeneration: number,
+    signal?: AbortSignal
+  ): Promise<GfsSaveAdmission> {
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+        throw new Error('invalid_session_generation')
+      }
+      this.assertSessionGeneration(expectedSessionGeneration)
+      if (this.gfsDispatchBlocked || !this.me?.id) {
+        throw new Error('stale_auth_epoch: GFS Download has no active local authority')
+      }
+      const token = this.requireGfsDispatchToken()
+      const binding: GfsSaveAuthorityBinding = {
+        ...this.captureAuthEnvironmentBinding(),
+        userId: this.me.id,
+        sessionGeneration: expectedSessionGeneration,
+        gfsAuthEpoch: this.gfsAuthEpoch,
+      }
+      const receipt = this.gfsClient.downloadWithReceipt(uri, token, signal)
+      return { binding, receipt }
+    })
+  }
+
+  /** Check that a Save dialog result still belongs to its original local session. */
+  assertGfsSaveAuthority(binding: GfsSaveAuthorityBinding): Promise<void> {
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertGfsSaveAuthorityCurrent(binding)
+    })
+  }
+
+  /** Invoke a native Save dialog while the original authority owns the queue slot. */
+  beginGfsSaveDialog<T>(
+    binding: GfsSaveAuthorityBinding,
+    invokeDialog: () => Promise<T>
+  ): Promise<{ completion: Promise<T> }> {
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertGfsSaveAuthorityCurrent(binding)
+      // Wrap the native promise so the queue slot is released immediately.
+      return { completion: invokeDialog() }
+    })
+  }
+
+  /**
+   * Fence GFS publication and its bounded terminal receipt with logout,
+   * environment switches and token/session replacement. Callers stage bytes
+   * before entering this queue; the callback may await only post-effect
+   * reconciliation and receipt finalization.
+   */
+  publishGfsSave<T>(binding: GfsSaveAuthorityBinding, finalize: () => T | Promise<T>): Promise<T> {
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertGfsSaveAuthorityCurrent(binding)
+      return await finalize()
+    })
+  }
+
+  private assertGfsSaveAuthorityCurrent(binding: GfsSaveAuthorityBinding): void {
+    if (
+      this.gfsDispatchBlocked ||
+      !this.sessionToken ||
+      !this.me?.id ||
+      this.me.id !== binding.userId ||
+      this.sessionGeneration !== binding.sessionGeneration ||
+      this.gfsAuthEpoch !== binding.gfsAuthEpoch ||
+      getActiveEnvKey() !== binding.environmentKey ||
+      getActiveRuntimeConfigOptionId() !== binding.profileId ||
+      canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl) !== binding.restBaseUrl
+    ) {
+      throw new Error('stale_auth_epoch: GFS Download authority changed before save')
+    }
   }
 
   /**
@@ -3502,6 +3702,211 @@ export class AppService {
       { resourceId, drive, newName, ifMatch },
       this.requireGfsDispatchToken()
     )
+  }
+
+  /**
+   * Dispatch a sidebar Rename against the exact presenter snapshot. The main
+   * authority queue decides whether this generation may start the request; the
+   * network promise is awaited after leaving that slot so a later logout is
+   * allowed to commit while an already-admitted remote mutation settles.
+   */
+  async dispatchFileExplorerRename(
+    request: FileExplorerRenameRequest
+  ): Promise<{ resourceId: string; version: number }> {
+    return this.dispatchFileExplorerMutation({
+      operation: 'rename',
+      target: {
+        resourceId: request.resourceId,
+        drive: request.drive,
+        gfsUri: request.gfsUri,
+        kind: request.kind,
+        version: request.version,
+        name: request.name,
+        parentResourceId: request.parentResourceId,
+        sessionGeneration: request.sessionGeneration,
+      },
+      requestedName: request.requestedName,
+    }) as Promise<{ resourceId: string; version: number }>
+  }
+
+  /**
+   * Trusted main-process entry for a sidebar-local mutation. The immutable row
+   * receipt is checked before the generation-bound request is invoked. The
+   * existing service method runs synchronously inside the authority slot so it
+   * captures that generation's token; only its promise is awaited afterward.
+   */
+  async dispatchFileExplorerMutation(
+    request: FileExplorerMutationRequest
+  ): Promise<FileExplorerMutationResult> {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) {
+      throw new Error('invalid_sidebar_mutation_request')
+    }
+    const target = request.target
+    const idKey = target && canonicalGfsResourceId(target.resourceId)
+    const parentKey = target?.parentResourceId
+      ? canonicalGfsResourceId(target.parentResourceId)
+      : null
+    let parsed: ReturnType<typeof parseGfsUri> | null = null
+    try {
+      if (typeof target?.gfsUri === 'string') parsed = parseGfsUri(target.gfsUri)
+    } catch {
+      parsed = null
+    }
+    if (
+      !target ||
+      !idKey ||
+      (target.parentResourceId !== null && !parentKey) ||
+      !target.drive ||
+      !parsed ||
+      parsed.rid !== idKey ||
+      parsed.byPath !== null ||
+      parsed.drive !== target.drive ||
+      target.gfsUri !== `gfs://${target.drive}/${idKey}` ||
+      (target.kind !== 'file' && target.kind !== 'directory') ||
+      !Number.isSafeInteger(target.version) ||
+      target.version < 1 ||
+      !Number.isSafeInteger(target.sessionGeneration) ||
+      target.sessionGeneration < 0 ||
+      typeof target.name !== 'string'
+    ) {
+      throw new Error('invalid_sidebar_mutation_receipt')
+    }
+
+    const nonEmpty = (value: unknown): value is string =>
+      typeof value === 'string' && value.trim().length > 0
+    const stringList = (value: unknown): value is string[] =>
+      Array.isArray(value) && value.length > 0 && value.every(nonEmpty)
+    switch (request.operation) {
+      case 'rename':
+        if (!nonEmpty(request.requestedName)) throw new Error('invalid_sidebar_rename_request')
+        break
+      case 'create-folder':
+        if (target.kind !== 'directory' || !nonEmpty(request.name)) {
+          throw new Error('invalid_sidebar_folder_request')
+        }
+        break
+      case 'move':
+        if (
+          !canonicalGfsResourceId(request.destinationResourceId) ||
+          (request.newName !== undefined && !nonEmpty(request.newName))
+        ) {
+          throw new Error('invalid_sidebar_move_destination')
+        }
+        break
+      case 'delete':
+        break
+      case 'upload':
+        if (
+          target.kind !== 'directory' ||
+          !nonEmpty(request.name) ||
+          typeof request.filePath !== 'string' ||
+          !path.isAbsolute(request.filePath)
+        ) {
+          throw new Error('invalid_sidebar_upload_request')
+        }
+        break
+      case 'replace':
+        if (
+          target.kind !== 'file' ||
+          typeof request.filePath !== 'string' ||
+          !path.isAbsolute(request.filePath)
+        ) {
+          throw new Error('invalid_sidebar_replace_request')
+        }
+        break
+      case 'grant':
+        if (!stringList(request.subjectKeys) || !stringList(request.permissions)) {
+          throw new Error('invalid_sidebar_grant_request')
+        }
+        if (request.inherit !== undefined && typeof request.inherit !== 'boolean') {
+          throw new Error('invalid_sidebar_grant_request')
+        }
+        break
+      case 'create-share':
+        if (!stringList(request.subjectKeys)) throw new Error('invalid_sidebar_share_request')
+        break
+      case 'revoke-grant':
+        if (!nonEmpty(request.grantId)) throw new Error('invalid_sidebar_grant_id')
+        break
+      case 'revoke-share':
+        if (!nonEmpty(request.shareId)) throw new Error('invalid_sidebar_share_id')
+        break
+      default:
+        throw new Error('unsupported_sidebar_mutation')
+    }
+
+    const { request: pending } = await this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(target.sessionGeneration)
+      if (this.gfsDispatchBlocked || !this.sessionToken || !this.me?.id) {
+        throw new Error('stale_auth_epoch: sidebar mutation has no current GFS authority')
+      }
+      const resourceId = target.resourceId
+      let operation: Promise<FileExplorerMutationResult>
+      switch (request.operation) {
+        case 'rename':
+          operation = this.renameGfsResource(
+            resourceId,
+            request.requestedName,
+            target.drive,
+            target.version
+          )
+          break
+        case 'create-folder':
+          operation = this.createGfsFolder(resourceId, request.name, target.drive)
+          break
+        case 'move':
+          operation = this.moveGfsResource(
+            resourceId,
+            request.destinationResourceId,
+            target.sessionGeneration,
+            target.drive,
+            target.version,
+            request.newName
+          )
+          break
+        case 'delete':
+          operation = this.deleteGfsResource(resourceId, target.drive, target.version)
+          break
+        case 'upload':
+          operation = this.startGfsFileUpload(
+            resourceId,
+            request.name,
+            request.filePath,
+            target.drive
+          )
+          break
+        case 'replace':
+          operation = this.startGfsFileReplace(
+            resourceId,
+            request.filePath,
+            target.drive,
+            target.version
+          )
+          break
+        case 'grant':
+          operation = this.grantGfs(
+            resourceId,
+            request.subjectKeys,
+            request.permissions,
+            target.drive,
+            request.inherit
+          )
+          break
+        case 'create-share':
+          operation = this.createGfsShare(resourceId, request.subjectKeys, target.drive)
+          break
+        case 'revoke-grant':
+          operation = this.revokeGfsGrant(request.grantId)
+          break
+        case 'revoke-share':
+          operation = this.revokeGfsShare(request.shareId)
+          break
+        default:
+          throw new Error('unsupported_sidebar_mutation')
+      }
+      return { request: operation }
+    })
+    return pending
   }
 
   /**
@@ -6262,6 +6667,61 @@ export class AppService {
       fallbackOnLookupError: false,
     })
     return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
+  }
+
+  /**
+   * Copy a resource link for the exact accepted row. Profile discovery stays
+   * outside the auth-commit queue; the final clipboard write is synchronous
+   * inside it and is discarded if the local authority changed meanwhile.
+   */
+  async copyGfsResourceDeepLink(
+    uri: string,
+    writeClipboard: (url: string) => void,
+    expectedSessionGeneration: number
+  ): Promise<{ url: string }> {
+    const { buildGfsResourceWebLink, normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
+    const canonicalUri = normalizeGfsResourceUri(uri)
+    if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
+
+    const accepted = await this.withNativeAuthEnvironmentCommit(async () => {
+      if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+        throw new Error('invalid_session_generation')
+      }
+      this.assertSessionGeneration(expectedSessionGeneration)
+      if (this.gfsDispatchBlocked || !this.sessionToken || !this.me?.id) {
+        throw new Error('An authenticated Desktop session is required to resolve Profile links')
+      }
+      return {
+        environment: this.captureAuthEnvironmentBinding(),
+        userId: this.me.id,
+        sessionGeneration: expectedSessionGeneration,
+        gfsAuthEpoch: this.gfsAuthEpoch,
+      }
+    })
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
+    const result = { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
+
+    await this.withNativeAuthEnvironmentCommit(async () => {
+      const current = this.captureAuthEnvironmentBinding()
+      if (
+        this.gfsDispatchBlocked ||
+        !this.sessionToken ||
+        this.me?.id !== accepted.userId ||
+        this.sessionGeneration !== accepted.sessionGeneration ||
+        this.gfsAuthEpoch !== accepted.gfsAuthEpoch ||
+        current.environmentKey !== accepted.environment.environmentKey ||
+        current.profileId !== accepted.environment.profileId ||
+        !sameDesktopRestEndpoint(current.restBaseUrl, accepted.environment.restBaseUrl)
+      ) {
+        throw new Error('Desktop session changed while resolving the Profile link')
+      }
+      // Electron's clipboard API is synchronous today. Await a returned thenable as well so
+      // the serialized authority owner does not release before the trusted writer settles.
+      await writeClipboard(result.url)
+    })
+    return result
   }
 
   async getGfsResourceProfileOrigin(): Promise<{

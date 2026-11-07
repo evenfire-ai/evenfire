@@ -1,4 +1,7 @@
+import type { FileExplorerMutationRequest, FileExplorerMutationResult } from './appService.js'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import type { GfsSaveTerminalReceipt } from './gfs/saveOwner.js'
+import type { GfsConvergenceLocationResult } from './gfs/uriHandler.js'
 import type {
   PluginAuditEntryView,
   PluginConsentRequest,
@@ -124,9 +127,12 @@ declare global {
         switch: (teamId: string) => Promise<SessionState>
       }
       gfs: {
+        dispatchFileExplorerMutation: (
+          request: FileExplorerMutationRequest
+        ) => Promise<FileExplorerMutationResult>
         getUserNavigationGeneration?: () => number | null
         advanceUserNavigationGeneration?: () => number | null
-        copyDeepLink?: (uri: string) => Promise<{ url: string }>
+        copyDeepLink?: (uri: string, expectedSessionGeneration: number) => Promise<{ url: string }>
         getResourceProfileOrigin?: () => Promise<{
           origin: string
           sessionGeneration: number
@@ -165,6 +171,16 @@ declare global {
           bytes?: number
           updatedAt?: string
         }>
+        saveToDisk: (
+          uri: string,
+          expectedSessionGeneration: number,
+          options?: { signal?: AbortSignal }
+        ) => Promise<GfsSaveTerminalReceipt>
+        resolveConvergenceLocation: (
+          uri: string,
+          expectedSessionGeneration: number,
+          options?: { signal?: AbortSignal }
+        ) => Promise<GfsConvergenceLocationResult>
         download: (
           uri: string,
           options?: { maxBytes?: number; signal?: AbortSignal }

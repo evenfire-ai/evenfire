@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { act, renderHook } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../../constants/navigation'
 import { resolveGfsPreview } from '../../../lib/gfsPreview'
 import {
@@ -8,11 +8,20 @@ import {
   openChatTab,
   openFilesTab,
   selectWorkspaceTab,
+  setFilesTabPath,
 } from '../../../lib/workspaceTabs'
 import { useNavigationController } from '../useNavigationController'
 
 let mainNavigationGeneration = 0
 let originalClerum: PropertyDescriptor | undefined
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
 
 beforeEach(() => {
   mainNavigationGeneration = 0
@@ -435,5 +444,199 @@ describe('Chat intent receipt ownership', () => {
     expect(result.current.navigationIntentSequence).toBe(explicitIntent)
     expect(result.current.workspaceTabs.activeTabId).toBe(selectedFiles)
     expect(result.current.navItem).toBe(DESKTOP_ROUTES.files)
+  })
+})
+
+describe('Files path convergence coordination', () => {
+  const savedPath = 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const canonicalPath = 'gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  const location = {
+    resourceId: 'resource-b',
+    rid: 'resource-b',
+    gfsUri: canonicalPath,
+    name: 'Canonical name',
+    kind: 'directory' as const,
+    version: 4,
+  }
+
+  async function flush() {
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  it('keeps an older convergence response from overwriting a committed explicit path', async () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-a', path: savedPath })
+      )
+    )
+    const pending = deferred<{
+      available: true
+      location: typeof location
+      breadcrumbs: (typeof location)[]
+    }>()
+    const resolver = vi.fn(() => pending.promise)
+    act(() => result.current.recordFilesMutation())
+    await act(async () => result.current.reconcileFilesConvergence(7, resolver))
+    expect(resolver).toHaveBeenCalledWith(savedPath, 7)
+
+    let receipt!: ReturnType<typeof result.current.beginFilesPathIntent>
+    act(() => {
+      receipt = result.current.beginFilesPathIntent('files-a')
+    })
+    expect(receipt).not.toBeNull()
+    act(() =>
+      expect(result.current.commitFilesPathIntent(receipt!, canonicalPath, 'Explicit')).toBe(true)
+    )
+    await act(async () => {
+      pending.resolve({ available: true, location, breadcrumbs: [location] })
+      await pending.promise
+    })
+
+    const filesTab = result.current.workspaceTabs.tabs.find(tab => tab.id === 'files-a')
+    expect(filesTab?.kind).toBe('files')
+    if (filesTab?.kind === 'files') expect(filesTab.files?.path).toBe(canonicalPath)
+    expect(result.current.activeTab?.kind).toBe('files')
+  })
+
+  it('rechecks the unchanged saved path once when explicit navigation fails across a mutation', async () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-requery', path: savedPath })
+      )
+    )
+    let receipt!: ReturnType<typeof result.current.beginFilesPathIntent>
+    act(() => {
+      receipt = result.current.beginFilesPathIntent('files-requery')
+    })
+    act(() => result.current.recordFilesMutation())
+    act(() => expect(result.current.failFilesPathIntent(receipt!)).toBe(true))
+
+    const resolver = vi.fn(async () => ({
+      available: true as const,
+      location,
+      breadcrumbs: [location],
+    }))
+    await act(async () => result.current.reconcileFilesConvergence(9, resolver))
+    await waitFor(() => expect(resolver).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      const tab = result.current.workspaceTabs.tabs.find(
+        candidate => candidate.id === 'files-requery'
+      )
+      expect(tab?.kind === 'files' && tab.files?.path).toBe(canonicalPath)
+    })
+    await flush()
+    expect(resolver).toHaveBeenCalledTimes(1)
+  })
+
+  it('rechecks once after an in-flight old result loses to a failed explicit intent', async () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-inflight-failure', path: savedPath })
+      )
+    )
+    const old = deferred<{ available: false }>()
+    const resolver = vi
+      .fn()
+      .mockImplementationOnce(() => old.promise)
+      .mockResolvedValueOnce({ available: true, location, breadcrumbs: [location] })
+    act(() => result.current.recordFilesMutation())
+    await act(async () => result.current.reconcileFilesConvergence(10, resolver))
+    expect(resolver).toHaveBeenCalledTimes(1)
+
+    let receipt!: ReturnType<typeof result.current.beginFilesPathIntent>
+    act(() => {
+      receipt = result.current.beginFilesPathIntent('files-inflight-failure')
+    })
+    act(() => result.current.recordFilesMutation())
+    act(() => expect(result.current.failFilesPathIntent(receipt!)).toBe(true))
+    await act(async () => {
+      old.resolve({ available: false })
+      await old.promise
+    })
+    await waitFor(() => expect(resolver).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      const tab = result.current.workspaceTabs.tabs.find(
+        candidate => candidate.id === 'files-inflight-failure'
+      )
+      expect(tab?.kind === 'files' && tab.files?.path).toBe(canonicalPath)
+    })
+    expect(resolver.mock.calls).toEqual([
+      [savedPath, 10],
+      [savedPath, 10],
+    ])
+  })
+
+  it('coalesces a burst of mutations into one trailing latest-state resolution', async () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-burst', path: savedPath })
+      )
+    )
+    const first = deferred<{ available: false }>()
+    const resolver = vi
+      .fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce({ available: true, location, breadcrumbs: [location] })
+    act(() => result.current.recordFilesMutation())
+    await act(async () => result.current.reconcileFilesConvergence(11, resolver))
+    expect(resolver).toHaveBeenCalledTimes(1)
+    act(() => {
+      result.current.recordFilesMutation()
+      result.current.recordFilesMutation()
+      result.current.recordFilesMutation()
+    })
+    await act(async () => {
+      first.resolve({ available: false })
+      await first.promise
+    })
+    await waitFor(() => expect(resolver).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      const tab = result.current.workspaceTabs.tabs.find(
+        candidate => candidate.id === 'files-burst'
+      )
+      expect(tab?.kind === 'files' && tab.files?.path).toBe(canonicalPath)
+    })
+    expect(resolver.mock.calls[1]).toEqual([savedPath, 11])
+  })
+
+  it('uses a new same-URI explicit intent to invalidate an older response', async () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-same-uri', path: savedPath })
+      )
+    )
+    const pending = deferred<{
+      available: true
+      location: typeof location
+      breadcrumbs: (typeof location)[]
+    }>()
+    const resolver = vi.fn(() => pending.promise)
+    act(() => result.current.recordFilesMutation())
+    await act(async () => result.current.reconcileFilesConvergence(13, resolver))
+    let receipt!: ReturnType<typeof result.current.beginFilesPathIntent>
+    act(() => {
+      receipt = result.current.beginFilesPathIntent('files-same-uri')
+    })
+    act(() =>
+      expect(result.current.commitFilesPathIntent(receipt!, savedPath, 'Explicit title')).toBe(true)
+    )
+    await act(async () => {
+      pending.resolve({ available: true, location, breadcrumbs: [location] })
+      await pending.promise
+    })
+    const tab = result.current.workspaceTabs.tabs.find(
+      candidate => candidate.id === 'files-same-uri'
+    )
+    expect(tab?.kind).toBe('files')
+    if (tab?.kind === 'files') expect(tab.files?.path).toBe(savedPath)
+    if (tab?.kind === 'files') expect(tab.title).toBe('Explicit title')
   })
 })
