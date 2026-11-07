@@ -326,6 +326,39 @@ async function readErrorBody(response: Response): Promise<string> {
   }
 }
 
+/** The sign-in markers, wherever a response body printed them. */
+const UNVETTED_SIGN_IN_MARKERS = /(?:^|\s)(?:httpStatus|retryAfterSeconds|signInTransport)=\S*/g
+
+function vettedRetryAfterSeconds(value: string | undefined): number | null {
+  if (!value || !/^[1-9]\d*$/.test(value)) return null
+  const seconds = Number(value)
+  return Number.isSafeInteger(seconds) ? seconds : null
+}
+
+/**
+ * Only the message crosses IPC to the sign-in screen, which reads the marker at its end
+ * (lib/signInFailure.ts). Every failure of the credential call gets one, so text from a
+ * response body can never be in that position. A failure with no HTTP answer gets its
+ * own token so the screen can tell it from a server answer.
+ */
+function markedPasswordLoginFailure(error: unknown): Error {
+  const message = (error instanceof Error ? error.message : String(error)).replace(
+    UNVETTED_SIGN_IN_MARKERS,
+    ''
+  )
+  if (!(error instanceof ApiError)) {
+    return new Error(`${message} signInTransport=noResponse`, { cause: error })
+  }
+  const seconds = error.status === 429 ? vettedRetryAfterSeconds(error.retryAfter) : null
+  const wait = seconds === null ? '' : ` retryAfterSeconds=${seconds}`
+  return new ApiError(
+    `${message} httpStatus=${error.status}${wait}`,
+    error.status,
+    error.bodyText,
+    error.retryAfter
+  )
+}
+
 export class AuthClient {
   async health(): Promise<{ status: string }> {
     return requestJson<{ status: string }>('GET', url('/health'))
@@ -363,17 +396,7 @@ export class AuthClient {
         body: { email, password },
       })
     } catch (error) {
-      if (!(error instanceof ApiError) || error.status !== 429) throw error
-      // Only the message crosses IPC to the sign-in screen. The transport's status and
-      // Retry-After go at its end, where text from the response body cannot imitate them.
-      const seconds = Number(error.retryAfter)
-      const wait = Number.isInteger(seconds) && seconds > 0 ? ` retryAfterSeconds=${seconds}` : ''
-      throw new ApiError(
-        `${error.message} httpStatus=429${wait}`,
-        error.status,
-        error.bodyText,
-        error.retryAfter
-      )
+      throw markedPasswordLoginFailure(error)
     }
   }
 

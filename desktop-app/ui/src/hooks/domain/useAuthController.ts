@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { DEFAULT_TOAST_DURATION_MS } from '@constants/toasts'
 import { desktopQueryClient } from '@lib/queryClient'
+import { classifySignInFailure } from '@lib/signInFailure'
 import type {
   DependencyHealth,
   DesktopReleaseStatus,
@@ -25,24 +26,10 @@ interface UseAuthControllerParams {
   logoutForEnvironmentMismatch: () => Promise<number | null>
 }
 
-function isInvitationExpiredError(error: unknown) {
-  const message = error instanceof Error ? error.message.toLowerCase() : String(error)
-  return message.includes('410') || message.includes('invitation_expired')
-}
-
+// The code main raises for desktop setup, whole, after the IPC wrapper's `Error: `.
 function isMissingInvitationConfigError(error: unknown) {
-  const message = error instanceof Error ? error.message.toLowerCase() : String(error)
-  return message.includes('404') || message.includes('invitation_config_not_found')
-}
-
-function isUnauthorizedError(error: unknown) {
-  if (error && typeof error === 'object' && 'status' in error) {
-    const status = Number((error as { status?: unknown }).status)
-    if (status === 401) return true
-  }
-
-  const message = error instanceof Error ? error.message.toLowerCase() : String(error)
-  return /\b401\s+unauthorized\b/.test(message) || /:\s*401\s/.test(message)
+  const message = error instanceof Error ? error.message : String(error)
+  return /(^|Error: )invitation_config_not_found$/.test(message)
 }
 
 function describeLoginWait(seconds: number): string {
@@ -53,17 +40,13 @@ function describeLoginWait(seconds: number): string {
 }
 
 /**
- * The sign-in text for a rate-limited login, or null for any other failure. authClient
- * appends `httpStatus=429` and the wait to the end of the message, because only the
- * message crosses IPC. The server did not verify the password on this path, so the text
- * must not suggest that the password is wrong.
+ * The server did not verify the password on this path, so the text must not suggest that
+ * the password is wrong. It holds for every admission reason behind a 429.
  */
-function rateLimitedLoginMessage(error: unknown): string | null {
-  const message = error instanceof Error ? error.message : String(error)
-  const match = message.match(/(?:^|\s)httpStatus=429(?: retryAfterSeconds=(\d+))?$/)
-  if (!match) return null
-  const wait = match[1] ? describeLoginWait(Number.parseInt(match[1], 10)) : 'in a little while'
-  return `There have been too many sign-in attempts, so sign-in is paused for now. Your password was not checked. Please try again ${wait}.`
+function rateLimitedLoginMessage(retryAfterSeconds: number | null): string {
+  const wait =
+    retryAfterSeconds === null ? 'in a little while' : describeLoginWait(retryAfterSeconds)
+  return `Sign-in is paused for now. Your password was not checked. Please try again ${wait}.`
 }
 
 function getDesktopSetupErrorMessage(error: unknown) {
@@ -275,47 +258,37 @@ export function useAuthController({
       setStatus('Signed in.', 'success')
       await onSessionNeedsLoad({ preserveNav: true })
     } catch (error) {
-      // First: the wait is digits in the message, and the two invitation checks below
-      // match `410` and `404` anywhere in it.
-      const rateLimitedMessage = rateLimitedLoginMessage(error)
-      if (rateLimitedMessage) {
-        // The backend answered, so no switch to another backend is offered.
-        setStatus(rateLimitedMessage, 'error', undefined, {
+      const failure = classifySignInFailure(error instanceof Error ? error.message : String(error))
+      // A 401 or a 429 means the backend answered, so no switch to another backend is
+      // offered.
+      if (failure.kind === 'invalid_credentials') {
+        setStatus('Email or password is incorrect.', 'error', undefined, {
           toastDurationMs: DEFAULT_TOAST_DURATION_MS,
         })
         return
       }
-      const invitationExpired = isInvitationExpiredError(error)
-      const missingInvitationConfig = isMissingInvitationConfigError(error)
-      const unauthorized = isUnauthorizedError(error)
+      if (failure.kind === 'rate_limited') {
+        setStatus(rateLimitedLoginMessage(failure.retryAfterSeconds), 'error')
+        return
+      }
       setStatus(
-        invitationExpired
-          ? 'Invitation expired.'
-          : missingInvitationConfig
-            ? 'You must be invited to be part of a team.'
-            : unauthorized
-              ? 'Email or password is incorrect.'
-              : 'Login failed. Check your email and password.',
-        'error',
-        undefined,
-        unauthorized ? { toastDurationMs: DEFAULT_TOAST_DURATION_MS } : undefined
+        failure.kind === 'unavailable'
+          ? "Sign-in isn't available right now. Please try again in a moment."
+          : 'Login failed. Check your email and password.',
+        'error'
       )
-      // A generic (non-401, non-invitation) failure is the signature of a login
-      // aimed at a backend that isn't answering — most often the app is on a
-      // saved profile while a local minikube cluster is what's actually up.
-      // Only then do we probe for a reachable localhost and, if found, offer a
-      // one-click switch. A clean 401 means the backend answered, so it's a
-      // password problem, not a wrong-server problem — no switch offered.
-      if (!invitationExpired && !missingInvitationConfig && !unauthorized) {
-        try {
-          const hint =
-            typeof window.clerum.auth.diagnoseLoginBackend === 'function'
-              ? await window.clerum.auth.diagnoseLoginBackend()
-              : null
-          setBackendSwitchHint(hint)
-        } catch {
-          setBackendSwitchHint(null)
-        }
+      // Any other failure can be the signature of a login aimed at a backend that
+      // isn't answering — most often the app is on a saved profile while a local
+      // minikube cluster is what's actually up. Only then do we probe for a reachable
+      // localhost and, if found, offer a one-click switch.
+      try {
+        const hint =
+          typeof window.clerum.auth.diagnoseLoginBackend === 'function'
+            ? await window.clerum.auth.diagnoseLoginBackend()
+            : null
+        setBackendSwitchHint(hint)
+      } catch {
+        setBackendSwitchHint(null)
       }
     } finally {
       setAuthTransitioning(false)

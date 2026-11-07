@@ -266,7 +266,7 @@ test('an outage keeps the Desktop session, and a real session end returns to sig
     await page.locator('#email-input').fill(E2E_EMAIL)
     await page.locator('#password-input').fill(E2E_DESKTOP_PASSWORD)
     await page.getByRole('button', { name: /^Sign in$/ }).click()
-    const notice = page.getByRole('alert').filter({ hasText: 'too many sign-in attempts' })
+    const notice = page.getByRole('alert').filter({ hasText: 'Sign-in is paused for now.' })
     await expect(notice, 'the rate-limit notice appears').toBeVisible({ timeout: 20_000 })
     await expect(notice).toContainText('Your password was not checked.')
     await expect(notice).toContainText(/try again in about \d+ (second|seconds|minutes)/)
