@@ -229,6 +229,80 @@ describe('WorkspaceTabStrip', () => {
     }
   )
 
+  it.each(['arrow', 'wheel'] as const)(
+    'consumes a positive-width clamped reveal before later %s input',
+    input => {
+      let state = createEmptyWorkspaceTabsState()
+      for (const [index, title] of [
+        'Before',
+        'Oversized selected tab',
+        'After',
+        'Last',
+      ].entries()) {
+        state = openAppTab(state, {
+          id: `wide-${index}`,
+          appRef: 'example/app',
+          title,
+        })
+      }
+      const onSelect = vi.fn()
+      const view = render(
+        <WorkspaceTabStrip
+          activeTabId={null}
+          onClose={vi.fn()}
+          onReorder={vi.fn()}
+          onSelect={onSelect}
+          tabs={state.tabs}
+        />
+      )
+      const scroller = view.container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement
+      const layout = installSyntheticTabStripLayout(view.container, [96, 300, 96, 96], 200)
+      const restoreRects = layout.trackFutureTabRects()
+      try {
+        layout.measure()
+        view.rerender(
+          <WorkspaceTabStrip
+            activeTabId="wide-1"
+            onClose={vi.fn()}
+            onReorder={vi.fn()}
+            onSelect={onSelect}
+            tabs={state.tabs}
+          />
+        )
+
+        const selected = view.container.querySelector<HTMLElement>(
+          '[data-workspace-tab-id="wide-1"].chat-view-tab'
+        )!
+        const viewport = scroller.getBoundingClientRect()
+        const selectedBounds = selected.getBoundingClientRect()
+        const revealOffset = layout.scrollLeft()
+        expect(revealOffset).toBeGreaterThan(0)
+        expect(selectedBounds.width).toBeGreaterThan(viewport.width)
+        expect(selectedBounds.left).toBeLessThan(viewport.right)
+        expect(selectedBounds.right).toBeGreaterThan(viewport.left)
+
+        if (input === 'arrow') {
+          fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs right' }))
+        } else {
+          fireEvent.wheel(scroller, {
+            deltaX: 48,
+            deltaY: 0,
+            deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+          })
+        }
+        const userOffset = layout.scrollLeft()
+        expect(userOffset).toBeGreaterThan(revealOffset)
+
+        fireEvent.scroll(scroller)
+        layout.measure()
+        expect(layout.scrollLeft()).toBe(userOffset)
+        expect(onSelect).not.toHaveBeenCalled()
+      } finally {
+        restoreRects()
+      }
+    }
+  )
+
   it('renders the tab order and exposes non-destructive view actions', () => {
     const onSelect = vi.fn()
     const onClose = vi.fn()

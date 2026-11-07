@@ -120,9 +120,12 @@ export function WorkspaceTabStrip({
       '[data-workspace-tab-id] [role="tab"]'
     )
     const focusTarget = nextActive ?? nextRoving ?? stripRef.current
+    if (nextActive && activeTabId && tabs.some(tab => tab.id === activeTabId)) {
+      requestFocusReveal(activeTabId)
+    }
     if (nextRoving && !nextActive) setFocusedTabId(nextRoving.dataset.workspaceTabId ?? null)
     focusTarget?.focus({ preventScroll: true })
-  }, [activeTabId, tabs])
+  }, [activeTabId, requestFocusReveal, tabs])
 
   const handleCloseCapture = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.detail !== 0) return

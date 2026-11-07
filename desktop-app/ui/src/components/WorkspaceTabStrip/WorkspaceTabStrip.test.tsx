@@ -55,6 +55,24 @@ const twoChatTabs = newChatTab(
 ).tabs
 
 describe('WorkspaceTabStrip', () => {
+  it('keeps rc-tabs DefaultTabBar absent at the custom native-scroll boundary', () => {
+    render(
+      <WorkspaceTabStrip
+        tabs={twoChatTabs}
+        activeTabId="one"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+      />
+    )
+
+    expect(document.querySelector('.ant-tabs-nav-wrap')).toBeNull()
+    expect(document.querySelector('.ant-tabs-nav-list')).toBeNull()
+    expect(document.querySelector('.ant-tabs-nav-more')).toBeNull()
+    expect(screen.getByRole('toolbar', { name: 'Workspace tabs' })).toBeTruthy()
+    expect(screen.getByRole('tablist', { name: 'Workspace tabs' })).toBeTruthy()
+  })
+
   it('uses Ant Design tab actions while retaining separate editable close controls', () => {
     const onSelect = vi.fn()
     render(
@@ -77,6 +95,35 @@ describe('WorkspaceTabStrip', () => {
     fireEvent.click(selectedTab)
     expect(onSelect).toHaveBeenCalledTimes(1)
     expect(onSelect).toHaveBeenCalledWith('one')
+  })
+
+  it('keeps AntD internal selection aligned with the controlled workspace key', () => {
+    const onSelect = vi.fn()
+    const props = {
+      tabs: twoChatTabs,
+      activeTabId: 'one',
+      onSelect,
+      onClose: vi.fn(),
+      onReorder: vi.fn(),
+    }
+    const view = render(<WorkspaceTabStrip {...props} />)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'New chat' }))
+    expect(onSelect).toHaveBeenCalledTimes(1)
+    expect(onSelect).toHaveBeenLastCalledWith('two')
+
+    // The producer has not committed that request, so the controlled projection
+    // remains on A. AntD's internal active key must not keep an independent B.
+    view.rerender(<WorkspaceTabStrip {...props} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'First chat' }))
+
+    expect(onSelect.mock.calls).toEqual([['two'], ['one']])
+    expect(screen.getByRole('tab', { name: 'First chat' }).getAttribute('aria-selected')).toBe(
+      'true'
+    )
+    expect(screen.getByRole('tab', { name: 'New chat' }).getAttribute('aria-selected')).toBe(
+      'false'
+    )
   })
 
   it('renders the tab order and exposes non-destructive view actions', () => {

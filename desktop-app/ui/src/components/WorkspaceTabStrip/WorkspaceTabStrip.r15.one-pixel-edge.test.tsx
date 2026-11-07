@@ -63,6 +63,39 @@ afterEach(() => {
 })
 
 describe('WorkspaceTabStrip r15 one-pixel edge', () => {
+  it('reveals the same store-selected A after committed Apps null and Chat projection', () => {
+    const storeState = makeFourAppTabs()
+    const selectedId = storeState.activeTabId!
+    const onSelect = vi.fn()
+    const props = { tabs: storeState.tabs, onSelect, onClose: vi.fn(), onReorder: vi.fn() }
+    const view = render(<WorkspaceTabStrip {...props} activeTabId={selectedId} />)
+    const scroller = view.container.querySelector('.chat-view-tabs__scroller') as HTMLElement
+    const layout = installSyntheticTabStripLayout(view.container, [96, 96, 96, 96], 248)
+    layout.measure()
+
+    layout.setScrollLeft(100)
+    fireEvent.scroll(scroller)
+    const hiddenA = view.container.querySelector<HTMLElement>(
+      `[data-workspace-tab-id="${selectedId}"].chat-view-tab`
+    )!
+    expect(hiddenA.getBoundingClientRect().left).toBeLessThan(scroller.getBoundingClientRect().left)
+
+    view.rerender(<WorkspaceTabStrip {...props} activeTabId={null} />)
+    expect(view.container.querySelectorAll('[role="tab"][aria-selected="true"]')).toHaveLength(0)
+    expect(storeState.activeTabId).toBe(selectedId)
+
+    view.rerender(<WorkspaceTabStrip {...props} activeTabId={selectedId} />)
+    const returnedA = view.container.querySelector<HTMLElement>(
+      `[data-workspace-tab-id="${selectedId}"].chat-view-tab`
+    )!
+    const viewport = scroller.getBoundingClientRect()
+    const bounds = returnedA.getBoundingClientRect()
+    expect(bounds.left).toBeGreaterThanOrEqual(viewport.left - 1)
+    expect(bounds.right).toBeLessThanOrEqual(viewport.right + 1)
+    expect(layout.scrollLeft()).toBe(0)
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
   it('completes the committed Apps-to-Chat reveal within epsilon and preserves later manual scroll', () => {
     const storeState = makeFourAppTabs()
     const selectedId = storeState.activeTabId!

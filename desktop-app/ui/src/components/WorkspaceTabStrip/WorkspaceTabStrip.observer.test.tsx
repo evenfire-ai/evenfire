@@ -2,6 +2,7 @@
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import * as fc from 'fast-check'
 import {
   closeWorkspaceTab,
@@ -475,6 +476,83 @@ describe('WorkspaceTabStrip synthetic geometry and observer ownership', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
+  it('cancels policy-B handoff when pointer input reaches the same focused arrow', () => {
+    const state = makeTabs(4)
+    const selectedId = state.activeTabId!
+    const onSelect = vi.fn()
+    const view = render(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId={selectedId}
+        onSelect={onSelect}
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+      />
+    )
+    const layout = installSyntheticTabStripLayout(view.container, [96, 96, 96, 96], 248)
+    layout.measure()
+    observers.at(-1)!.notify(view.container.querySelector('.chat-view-tabs__scroller')!)
+    const right = screen.getByRole('button', { name: 'Scroll tabs right' })
+
+    fireEvent.keyDown(right, { key: 'Enter' })
+    right.focus()
+    expect(document.activeElement).toBe(right)
+
+    // Pointer input on the already-focused node emits no second focus event.
+    // It must cancel the pending keyboard-origin handoff before the node is removed.
+    fireEvent.pointerDown(right)
+    layout.resize(600)
+
+    expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
+    expect(document.activeElement).not.toBe(screen.getByRole('tab', { name: selectedId.slice(-1) }))
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('restores selected A focus and visibility after keyboard-closing inactive B', async () => {
+    const user = userEvent.setup()
+    let state = selectWorkspaceTab(makeTabs(4), 'observer-0')
+    const onSelect = vi.fn()
+    const onClose = (id: string) => {
+      state = closeWorkspaceTab(state, id)
+    }
+    const props = { onSelect, onClose, onReorder: vi.fn() }
+    const view = render(<WorkspaceTabStrip tabs={state.tabs} activeTabId="observer-0" {...props} />)
+    const scroller = view.container.querySelector('.chat-view-tabs__scroller') as HTMLElement
+    const layout = installSyntheticTabStripLayout(view.container, [96, 96, 96, 96], 160)
+    act(() => layout.resize(160))
+    observers.at(-1)!.notify(scroller)
+
+    const activeA = screen.getByRole('tab', { name: '0' })
+    fireEvent.keyDown(activeA, { key: 'ArrowRight' })
+    const inactiveB = screen.getByRole('tab', { name: '1' })
+    expect(document.activeElement).toBe(inactiveB)
+    const viewportBeforeClose = scroller.getBoundingClientRect()
+    const bBounds = view.container
+      .querySelector<HTMLElement>('[data-workspace-tab-id="observer-1"].chat-view-tab')!
+      .getBoundingClientRect()
+    expect(bBounds.left).toBeGreaterThanOrEqual(viewportBeforeClose.left - 1)
+    expect(bBounds.right).toBeLessThanOrEqual(viewportBeforeClose.right + 1)
+
+    await user.tab()
+    const closeB = screen.getByRole('button', { name: 'Close 1' })
+    expect(document.activeElement).toBe(closeB)
+    await user.keyboard('{Enter}')
+    view.rerender(
+      <WorkspaceTabStrip tabs={state.tabs} activeTabId={state.activeTabId} {...props} />
+    )
+
+    expect(state.tabs.map(tab => tab.id)).toEqual(['observer-0', 'observer-2', 'observer-3'])
+    expect(state.activeTabId).toBe('observer-0')
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: '0' }))
+    const viewportAfterClose = scroller.getBoundingClientRect()
+    const aBounds = view.container
+      .querySelector<HTMLElement>('[data-workspace-tab-id="observer-0"].chat-view-tab')!
+      .getBoundingClientRect()
+    expect(aBounds.left).toBeGreaterThanOrEqual(viewportAfterClose.left - 1)
+    expect(aBounds.right).toBeLessThanOrEqual(viewportAfterClose.right + 1)
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
   it('hands off a disappearing keyboard arrow to the roving tab with null selection', () => {
     const state = makeTabs(3)
     const onSelect = vi.fn()
@@ -505,15 +583,16 @@ describe('WorkspaceTabStrip synthetic geometry and observer ownership', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
-  it('lets a later committed selection C supersede a pending focus reveal B', () => {
-    const state = selectWorkspaceTab(makeTabs(3), 'observer-0')
+  it('lets a queued pre-rebind observer serve reordered committed C, not pending B', () => {
+    let state = selectWorkspaceTab(makeTabs(3), 'observer-0')
     const onSelect = vi.fn()
     const props = { onSelect, onClose: vi.fn(), onReorder: vi.fn() }
     const view = render(<WorkspaceTabStrip tabs={state.tabs} activeTabId="observer-0" {...props} />)
     const scroller = view.container.querySelector('.chat-view-tabs__scroller') as HTMLElement
-    const layout = installSyntheticTabStripLayout(view.container, [96, 96, 96], 248)
+    const layout = installSyntheticTabStripLayout(view.container, [96, 96, 96], 148)
     observers.at(-1)!.notify(scroller)
     const observer = observers.at(-1)!
+    layout.setScrollLeft(100)
     layout.setStripWidth(0)
 
     const focusedB = screen.getByRole('tab', { name: '1' })
@@ -521,8 +600,15 @@ describe('WorkspaceTabStrip synthetic geometry and observer ownership', () => {
     expect(document.activeElement).toBe(focusedB)
     expect(onSelect).not.toHaveBeenCalled()
 
-    view.rerender(<WorkspaceTabStrip tabs={state.tabs} activeTabId="observer-2" {...props} />)
-    layout.setStripWidth(248)
+    state = selectWorkspaceTab(state, 'observer-2')
+    state = reorderWorkspaceTab(state, 'observer-2', 1)
+    layout.setWidths([96, 96, 96])
+    view.rerender(
+      <WorkspaceTabStrip tabs={state.tabs} activeTabId={state.activeTabId} {...props} />
+    )
+    expect(state.tabs.map(tab => tab.id)).toEqual(['observer-0', 'observer-2', 'observer-1'])
+    layout.syncTabRects()
+    layout.setStripWidth(148)
     observer.deliverQueued(scroller)
 
     const viewport = scroller.getBoundingClientRect()
@@ -532,9 +618,31 @@ describe('WorkspaceTabStrip synthetic geometry and observer ownership', () => {
     const bounds = selectedC.getBoundingClientRect()
     expect(bounds.left).toBeGreaterThanOrEqual(viewport.left - 1)
     expect(bounds.right).toBeLessThanOrEqual(viewport.right + 1)
+    expect(layout.scrollLeft()).toBeGreaterThan(0)
     expect(document.activeElement).toBe(focusedB)
     expect(screen.getByRole('tab', { name: '1' }).getAttribute('aria-selected')).toBe('false')
     expect(screen.getByRole('tab', { name: '2' }).getAttribute('aria-selected')).toBe('true')
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('does not reveal an uncommitted Apps-to-Chat projection batch', () => {
+    const state = selectWorkspaceTab(makeTabs(4), 'observer-0')
+    const onSelect = vi.fn()
+    const props = { tabs: state.tabs, onSelect, onClose: vi.fn(), onReorder: vi.fn() }
+    const view = render(<WorkspaceTabStrip {...props} activeTabId="observer-0" />)
+    const scroller = view.container.querySelector('.chat-view-tabs__scroller') as HTMLElement
+    const layout = installSyntheticTabStripLayout(view.container, [96, 96, 96, 96], 248)
+    layout.measure()
+    layout.setScrollLeft(70)
+    fireEvent.scroll(scroller)
+
+    act(() => {
+      view.rerender(<WorkspaceTabStrip {...props} activeTabId={null} />)
+      view.rerender(<WorkspaceTabStrip {...props} activeTabId="observer-0" />)
+    })
+
+    expect(screen.getByRole('tab', { name: '0', selected: true })).toBeTruthy()
+    expect(layout.scrollLeft()).toBe(70)
     expect(onSelect).not.toHaveBeenCalled()
   })
 
