@@ -31,7 +31,8 @@ export class BrowserContextManager {
     // Launch fresh — headless: false so the browser is visible on the XFCE desktop
     const launchOptions: Record<string, unknown> = {
       headless: false,
-      args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--start-maximized'],
+      chromiumSandbox: true,
+      args: ['--disable-gpu', '--disable-dev-shm-usage', '--start-maximized'],
     }
     // Use system-installed Chromium when available (Docker desktop image)
     if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
