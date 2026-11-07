@@ -503,11 +503,15 @@ admin_create_team_for_user() {
   local name="$1"
   local user_id="$2"
   local body team_id
-  body=$(printf '{"name":"%s","userId":"%s"}' "$name" "$user_id")
+  body=$(printf '{"name":"%s"}' "$name")
   http_request POST "${CONTROL_URL}/api/v1/admin/teams" "$body" "$(authz_header "$ADMIN_TOKEN")"
   [[ "$HTTP_STATUS" == "200" ]] || fail "admin team create expected HTTP 200, got $HTTP_STATUS: $HTTP_BODY"
   team_id=$(json_field "$HTTP_BODY" "o.id")
   [[ "$team_id" =~ ^[0-9a-fA-F-]{36}$ ]] || fail "admin team create returned invalid id: $HTTP_BODY"
+  # POST /admin/teams creates the team only; membership is a separate call.
+  body=$(printf '{"userId":"%s","role":"admin"}' "$user_id")
+  http_request POST "${CONTROL_URL}/api/v1/admin/teams/${team_id}/members" "$body" "$(authz_header "$ADMIN_TOKEN")"
+  [[ "$HTTP_STATUS" == "200" ]] || fail "admin team member add expected HTTP 200, got $HTTP_STATUS: $HTTP_BODY"
   echo "$team_id"
 }
 

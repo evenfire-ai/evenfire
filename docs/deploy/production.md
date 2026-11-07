@@ -254,7 +254,11 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
    Control UI CSRF secret, the prompt-history encryption key, and the
    Secrets and public-key ConfigMaps that carry them. Then run
    [`deploy/scripts/apply-inter-service-tokens.sh`](../../deploy/scripts/apply-inter-service-tokens.sh)
-   for the service-to-service tokens. Know these before you run them:
+   for the service-to-service tokens with the same explicit context:
+   ```bash
+   CONTEXT="$KCTX" bash deploy/scripts/apply-inter-service-tokens.sh
+   ```
+   Know these before you run them:
    - `gen-jwt-keys.sh` generates **new** keys on every run. Running it again
      rotates every key, including the OAuth encryption key. Run it once and
      keep the output.

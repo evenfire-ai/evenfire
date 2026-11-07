@@ -109,10 +109,15 @@ export function assertSafeCatalogUrl(rawUrl: string): void {
   try {
     parsed = new URL(rawUrl)
   } catch {
-    throw new Error(`models.dev catalog URL is not a valid URL: ${rawUrl}`)
+    // The raw value may carry credentials, so it is never echoed.
+    throw new Error('models.dev catalog URL is not a valid URL')
   }
   if (parsed.protocol !== 'https:') {
     throw new Error(`models.dev catalog URL must be https:// (got "${parsed.protocol}//")`)
+  }
+  // fetch refuses a URL with userinfo and its error would log the whole URL.
+  if (parsed.username || parsed.password) {
+    throw new Error('models.dev catalog URL must not contain credentials')
   }
   // `URL.hostname` keeps IPv6 literals wrapped in brackets ("[::1]"); strip them
   // so both the bracketed form and net.isIP() see the bare address.

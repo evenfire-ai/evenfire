@@ -7,6 +7,10 @@ const directoryMock = vi.hoisted(() => ({
   createManagedInvitationForUser: vi.fn(),
   deleteManagedMemberForUser: vi.fn(),
   deleteManagedUserForUser: vi.fn(),
+  externalManagedInvitationResponse: vi.fn((value: Record<string, unknown>) => {
+    const { token: _token, ...safe } = value
+    return safe
+  }),
   listManageableTeamsForUser: vi.fn(),
   listManagedMembersForUser: vi.fn(),
   listManagedPendingInvitationsForUser: vi.fn(),
@@ -21,7 +25,10 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
     _res: express.Response,
     next: express.NextFunction
   ) => {
-    ;(req as express.Request & { externalAuth?: { userId: string } }).externalAuth = {
+    const externalReq = req as express.Request & {
+      externalAuth?: { userId: string }
+    }
+    externalReq.externalAuth = {
       userId: 'manager-1',
     }
     next()
@@ -29,6 +36,11 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
 }))
 
 vi.mock('../src/services/directory/index.js', () => directoryMock)
+
+const rateLimitMock = vi.hoisted(() => ({
+  checkAndIncrement: vi.fn(),
+}))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
 
 function makeApp() {
   const app = express()
@@ -45,11 +57,19 @@ function makeApp() {
 describe('external members routes', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    rateLimitMock.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      count: 1,
+      remaining: 29,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      backendAvailable: true,
+    })
   })
 
   it('passes invitee name through managed member invitations', async () => {
     directoryMock.createManagedInvitationForUser.mockResolvedValueOnce({
-      invitation: { id: 'inv-1' },
+      invitation: { id: 'inv-1', token: 'secret' },
     })
 
     await request(makeApp())
@@ -69,6 +89,73 @@ describe('external members routes', () => {
     )
   })
 
+  it('rejects raw invitation emails longer than 320 characters before directory work', async () => {
+    const overlongEmail = `${'a'.repeat(315)}@a.com`
+
+    await request(makeApp())
+      .post('/external/members/invitations')
+      .send({
+        email: overlongEmail,
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(400, { error: 'invalid_email' })
+
+    expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a missing domain dot', 'invitee@example'],
+    ['a second at sign', 'invitee@@example.com'],
+    ['whitespace', 'invitee @example.com'],
+    ['pathological dotted input', `!@!${'!.'.repeat(100)}@`],
+  ])('rejects bounded invitation email with %s before directory work', async (_case, email) => {
+    await request(makeApp())
+      .post('/external/members/invitations')
+      .send({
+        email,
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(400, { error: 'invalid_email' })
+
+    expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
+  })
+
+  it.each(['invitee@.example.com', 'invitee@example.com.', 'a@b.c'])(
+    'preserves bounded legacy domain-dot acceptance for %s',
+    async email => {
+      directoryMock.createManagedInvitationForUser.mockResolvedValueOnce({
+        invitation: { id: 'inv-compat', token: 'secret' },
+      })
+
+      await request(makeApp())
+        .post('/external/members/invitations')
+        .send({
+          email,
+          teams: [{ teamId: 'team-1', role: 'member' }],
+        })
+        .expect(201, { id: 'inv-compat' })
+
+      expect(directoryMock.createManagedInvitationForUser).toHaveBeenCalledWith(
+        'manager-1',
+        email,
+        [{ teamId: 'team-1', role: 'member' }],
+        ''
+      )
+    }
+  )
+
+  it('rejects non-string invitation email input before directory work', async () => {
+    await request(makeApp())
+      .post('/external/members/invitations')
+      .send({
+        email: { address: 'invitee@example.com' },
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(400, { error: 'invalid_email' })
+
+    expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
+  })
+
   it('rejects overlong invitee names', async () => {
     await request(makeApp())
       .post('/external/members/invitations')
@@ -80,6 +167,78 @@ describe('external members routes', () => {
       .expect(400, { error: 'invalid_name' })
 
     expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
+  })
+
+  it('lists managed members without an added user quota', async () => {
+    directoryMock.listManagedMembersForUser.mockResolvedValue([])
+    await request(makeApp()).get('/external/members').expect(200)
+    expect(directoryMock.listManagedMembersForUser).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
+  })
+
+  it('rejects managed self-role changes and self-removal before directory work', async () => {
+    await request(makeApp())
+      .patch('/external/members/manager-1/teams/team-1/role')
+      .send({ role: 'member' })
+      .expect(400, { error: 'invalid_target' })
+    expect(directoryMock.updateManagedMemberRoleForUser).not.toHaveBeenCalled()
+
+    await request(makeApp())
+      .delete('/external/members/manager-1/teams/team-1')
+      .expect(400, { error: 'invalid_target' })
+    expect(directoryMock.deleteManagedMemberForUser).not.toHaveBeenCalled()
+  })
+
+  it('rejects an upper-case copy of the caller id as a managed self target', async () => {
+    // One answer each, consumed by the witness requests below.
+    directoryMock.updateManagedMemberRoleForUser.mockResolvedValueOnce({
+      membership: { team_id: 'team-1', user_id: 'target-1', role: 'member', status: 'active' },
+    })
+    directoryMock.deleteManagedMemberForUser.mockResolvedValueOnce({
+      deleted: { team_id: 'team-1', user_id: 'target-1', role: 'member', status: 'deleted' },
+    })
+
+    await request(makeApp())
+      .patch('/external/members/MANAGER-1/teams/team-1/role')
+      .send({ role: 'member' })
+      .expect(400, { error: 'invalid_target' })
+    await request(makeApp())
+      .delete('/external/members/MANAGER-1/teams/team-1')
+      .expect(400, { error: 'invalid_target' })
+    expect(directoryMock.updateManagedMemberRoleForUser).not.toHaveBeenCalled()
+    expect(directoryMock.deleteManagedMemberForUser).not.toHaveBeenCalled()
+
+    // Witness: a different user's id reaches each service once.
+    await request(makeApp())
+      .patch('/external/members/target-1/teams/team-1/role')
+      .send({ role: 'member' })
+      .expect(200)
+    await request(makeApp()).delete('/external/members/target-1/teams/team-1').expect(200)
+    expect(directoryMock.updateManagedMemberRoleForUser).toHaveBeenCalledOnce()
+    expect(directoryMock.updateManagedMemberRoleForUser).toHaveBeenCalledWith(
+      'manager-1',
+      'target-1',
+      'team-1',
+      'member'
+    )
+    expect(directoryMock.deleteManagedMemberForUser).toHaveBeenCalledOnce()
+    expect(directoryMock.deleteManagedMemberForUser).toHaveBeenCalledWith(
+      'manager-1',
+      'target-1',
+      'team-1'
+    )
+  })
+
+  it('creates invitations without an added user quota', async () => {
+    directoryMock.createManagedInvitationForUser.mockResolvedValue({
+      invitation: { id: 'inv-parity' },
+    })
+    await request(makeApp())
+      .post('/external/members/invitations')
+      .send({ email: 'invitee@example.test', teams: [{ teamId: 'team-1', role: 'member' }] })
+      .expect(201)
+    expect(directoryMock.createManagedInvitationForUser).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
   it('requires an explicit reason and Idempotency-Key before retiring a managed user', async () => {

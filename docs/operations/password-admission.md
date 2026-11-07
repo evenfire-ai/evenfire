@@ -50,8 +50,11 @@ A password-reset invitation issued by the trusted member-registration flow can s
 new password without reserving the anonymous login pace. The reset credential is
 validated for signature, registered identity, email, invitation purpose, expiry and
 pending state. The password update and sibling reset-link revocation commit together.
-Only after that commit does Control API issue the normal signed session, which
-External REST stores in the profile session cookie.
+Control API returns no session from that mutation. External REST clears any
+invitation or recovery session cookie it receives and answers with
+`reauthenticationRequired: true`, so Profile UI shows a password-updated screen
+and a link to sign in. The person then authenticates through the ordinary login
+route; only that login issues a session.
 
 Recovery hashes use the existing durable `password_verification_work` singleton.
 Authenticated password changes and accepted-invitation password setup use that same

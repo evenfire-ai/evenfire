@@ -5,6 +5,7 @@ import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootRec
 import { rootLogger } from './observability/logger.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
+import { resolveEffectiveUserAccessPolicy } from './services/access/userAccessRuntimePolicy.js'
 import {
   startAdminRevokedTokenCleanup,
   stopAdminRevokedTokenCleanup,
@@ -149,6 +150,12 @@ async function main(): Promise<void> {
   await assertDbReady()
   ensureStartupActive()
   logger.info({ event: 'control_api_database_ready' }, 'Database schema ready')
+  const userAccessPolicy = await resolveEffectiveUserAccessPolicy()
+  logger.info(
+    { event: 'user_access_policy_ready', policyRevision: userAccessPolicy.policyRevision },
+    'User-access policy ready'
+  )
+  ensureStartupActive()
   startEntityChangeDispatcher()
 
   // Observability only (never fatal): report whether this self-hosted deployment

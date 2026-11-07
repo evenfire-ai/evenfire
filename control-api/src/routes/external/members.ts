@@ -9,6 +9,7 @@ import {
   createManagedInvitationForUser,
   deleteManagedMemberForUser,
   deleteManagedUserForUser,
+  externalManagedInvitationResponse,
   listManageableTeamsForUser,
   listManagedMembersForUser,
   listManagedPendingInvitationsForUser,
@@ -17,8 +18,8 @@ import {
   updateManagedMemberRoleForUser,
 } from '../../services/directory/index.js'
 import { normalizeTeamRoleInput } from '../../services/directory/types.js'
+import { normalizeInvitationEmail } from './invitationEmail.js'
 
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
 const MAX_INVITEE_NAME_LENGTH = 120
 
@@ -85,14 +86,12 @@ export function createExternalMembersRouter(): Router {
     try {
       const managerUserId = currentUserId(req)
       if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
-      const name = String(req.body?.name || '').trim()
-      const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
-      if (!EMAIL_PATTERN.test(email)) {
+      const email = normalizeInvitationEmail(req.body?.email)
+      if (!email) {
         return res.status(400).json({ error: 'invalid_email' })
       }
+      const name = String(req.body?.name || '').trim()
+      const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
       if (name.length > MAX_INVITEE_NAME_LENGTH) {
         return res.status(400).json({ error: 'invalid_name' })
       }
@@ -119,7 +118,9 @@ export function createExternalMembersRouter(): Router {
         if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
         return res.status(400).json({ error: 'invalid_payload' })
       }
-      return res.status(201).json(result.invitation)
+      return res
+        .status(201)
+        .json(externalManagedInvitationResponse(result.invitation as Record<string, unknown>))
     } catch (error) {
       return next(error)
     }
@@ -169,6 +170,9 @@ export function createExternalMembersRouter(): Router {
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
         const role = normalizeTeamRoleInput(req.body?.role)
         if (!role) return res.status(400).json({ error: 'invalid_role' })
+        if (managerUserId.trim().toLowerCase() === req.params.userId.trim().toLowerCase()) {
+          return res.status(400).json({ error: 'invalid_target' })
+        }
         const result = await updateManagedMemberRoleForUser(
           managerUserId,
           req.params.userId,
@@ -178,9 +182,6 @@ export function createExternalMembersRouter(): Router {
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
           if (result.error === 'not_found') return res.status(404).json({ error: 'not_found' })
-          if (result.error === 'invalid_target') {
-            return res.status(400).json({ error: 'invalid_target' })
-          }
           return res.status(400).json({ error: 'invalid_role' })
         }
         return res.status(200).json(result.membership)
@@ -230,6 +231,9 @@ export function createExternalMembersRouter(): Router {
       try {
         const managerUserId = currentUserId(req)
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
+        if (managerUserId.trim().toLowerCase() === req.params.userId.trim().toLowerCase()) {
+          return res.status(400).json({ error: 'invalid_target' })
+        }
         const result = await deleteManagedMemberForUser(
           managerUserId,
           req.params.userId,
@@ -237,9 +241,6 @@ export function createExternalMembersRouter(): Router {
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
-          if (result.error === 'invalid_target') {
-            return res.status(400).json({ error: 'invalid_target' })
-          }
           return res.status(404).json({ error: 'not_found' })
         }
         return res.status(200).json(result.deleted)

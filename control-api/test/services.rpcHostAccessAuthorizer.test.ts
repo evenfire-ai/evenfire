@@ -95,4 +95,34 @@ describe('authorizeRpcHostAccess', () => {
       authorizeRpcHostAccess(gateway, CLAIMS, 'user-1', 'host-a', directory)
     ).resolves.toEqual({ authorized: false, reason })
   })
+
+  it('propagates a Kubernetes 404 from the Host listing', async () => {
+    const notFound = Object.assign(new Error('namespaces "mcp-host" not found'), {
+      code: 404,
+      body: { kind: 'Status', status: 'Failure', reason: 'NotFound' },
+    })
+    const listResource = vi
+      .fn()
+      .mockRejectedValueOnce(notFound)
+      .mockResolvedValue([{ metadata: { name: 'host-a' }, spec: { enabled: true } }])
+    const gateway = { listResource } as unknown as K8sGateway
+    const { directory } = dependencies()
+
+    const rejection = authorizeRpcHostAccess(gateway, CLAIMS, 'user-1', 'host-a', directory)
+    await expect(rejection).rejects.toBe(notFound)
+
+    // Positive control in the same test: the same dependency path and Host
+    // resolution work normally once the listing answers.
+    await expect(
+      authorizeRpcHostAccess(gateway, CLAIMS, 'user-1', 'host-a', directory)
+    ).resolves.toEqual({
+      authorized: true,
+      connection: {
+        userId: 'user-1',
+        hostRef: 'host-a',
+        url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+      },
+    })
+    expect(listResource).toHaveBeenCalledTimes(2)
+  })
 })

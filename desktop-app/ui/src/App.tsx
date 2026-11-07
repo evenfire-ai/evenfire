@@ -3447,6 +3447,7 @@ export function App() {
     previousPrincipalIdentityRef.current = vm.authenticatedPrincipalIdentity
     if (previousIdentity === undefined) return
     setWorkspaceTabs(createWorkspaceTabsState('chat-tab-1'))
+    setPluginGfsPreview(null)
     vm.clearAppsPicker()
     setComposerFocusRequestId(0)
     setGlobalSearchFocusRequestId(0)
@@ -4455,12 +4456,6 @@ export function App() {
                                     />
                                   </TitlebarActionsPortal>
                                   <ToastStack items={vm.toasts} onDismiss={vm.dismissToast} />
-                                  {vm.isAuthenticated && !vm.currentTeamId ? (
-                                    <StatusBanner
-                                      tone="warn"
-                                      text="You’re signed in, but this session has no active team."
-                                    />
-                                  ) : null}
                                   {sessionInvalidation && sessionInvalidationReadFailed ? (
                                     <div
                                       data-testid="sandbox-ui-session-revalidation-pending"
