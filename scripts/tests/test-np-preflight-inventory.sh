@@ -13,15 +13,16 @@
 # Case g compares the helper's default constants with the literals in
 # host-context-controller/src/config.ts, so the two copies cannot drift apart.
 #
-# Cases m and n run np-enforce-preflight.sh itself against a stub kubectl placed
-# first on PATH. The stub serves `kustomize` and refuses everything else, so the
-# wrapper stops at its cluster check and no real kubectl runs.
+# Cases m, n and o run np-enforce-preflight.sh itself against a stub kubectl placed
+# first on PATH, so no real kubectl runs. The stub serves `kustomize` and refuses
+# everything else, so in m and n the wrapper stops at its cluster check. In o it also
+# answers `get nodes`, so the wrapper walks its checks over the derived namespaces.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 INV="$ROOT/deploy/scripts/np-preflight-inventory.rb"
 HCC_CONFIG="$ROOT/host-context-controller/src/config.ts"
-EXPECTED_PASSES=14
+EXPECTED_PASSES=15
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -221,6 +222,9 @@ if [ "$1" = "kustomize" ] && [ -n "${STUB_RENDER:-}" ]; then
   cat "$STUB_RENDER"
   exit 0
 fi
+if [ "$*" = "--context stub-context get nodes -o name" ] && [ -n "${STUB_NODES:-}" ]; then
+  exit 0
+fi
 echo "stub kubectl refused: $*" >&2
 exit 1
 SH
@@ -248,6 +252,32 @@ if [[ "$OUT" == *"[static] Rendered NetworkPolicy lint"* ]] && [ "$RC" -eq 2 ] &
   pass "n. the wrapper derives the inventory through the helper and goes on"
 else
   fail "n. good render: exit $RC, stdout: $OUT, stderr: $ERR"
+fi
+
+# The wrapper's checks walk the namespaces this render derives, not its hard-coded fallback
+# lists. Each list has a witness only the render can supply; webhook-ingress is only in the
+# fallback. The stub refuses the reads, so every per-namespace check reports a failure.
+RUNTIME_WITNESS='            - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
+              value: mcp-server,runtime-witness'
+fixture "$TMP/o.yaml" hcc "$RUNTIME_WITNESS" "$MINIMAL_BASE"
+cat >>"$TMP/o.yaml" <<'YAML'
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: all-witness
+  labels:
+    app.kubernetes.io/part-of: clerum
+YAML
+STUB_NODES=1 wrapper "$TMP/o.yaml"
+if [ "$RC" -eq 1 ] &&
+  [[ "$OUT" == *"FAIL  all-witness: cannot validate DNS egress"* ]] &&
+  [[ "$OUT" == *"FAIL  runtime-witness: allow-k8s-api-egress-runtime-witness not found"* ]] &&
+  [[ "$OUT" == *"no RBAC-empowered pod is missing the label in: mcp-server runtime-witness"* ]] &&
+  [[ "$OUT" != *"webhook-ingress"* ]]; then
+  pass "o. the wrapper's checks walk the inventory the helper derived"
+else
+  fail "o. derived lists not used: exit $RC, stdout: $OUT, stderr: $ERR"
 fi
 
 # shellcheck disable=SC2016 # Ruby source; $PROGRAM_NAME is a Ruby global.
