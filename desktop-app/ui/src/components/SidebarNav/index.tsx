@@ -38,17 +38,16 @@ import {
 } from './icons'
 import type { SidebarNavProps } from './types'
 
-const MOBILE_SIDEBAR_QUERY = '(max-width: 900px)'
-const MOBILE_SIDEBAR_OPEN_CLASS = 'mobile-sidebar-open'
+const COMPACT_SIDEBAR_OPEN_CLASS = 'compact-sidebar-open'
 const SESSION_KEY_SEPARATOR = '\u001f'
-
-function isMobileSidebarViewport() {
-  return typeof window !== 'undefined' && window.matchMedia(MOBILE_SIDEBAR_QUERY).matches
-}
 
 export function SidebarNav({
   navItem,
   collapsed,
+  compactMode,
+  compactMenuOpen,
+  onCompactMenuOpenChange,
+  resize,
   activeSandboxUiApp,
   availableSandboxUiApps,
   onCollapsedChange,
@@ -61,6 +60,7 @@ export function SidebarNav({
   pushToast,
   toggleRequestId = 0,
 }: SidebarNavProps) {
+  const isCollapsed = collapsed && !compactMode
   const { busy, me, handleLogout: onLogout } = useAuthContext()
   const { activeChatId, latestChatSessions, latestChatSessionsLoading, sessionStateByChatKey } =
     useChatListContext()
@@ -71,7 +71,6 @@ export function SidebarNav({
   } = useAgentChatActionsContext()
   const { selectedAgent, handleSelectChatAgent: onSelectChatAgent } = useNavigationContext()
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [chatSessionsOpen, setChatSessionsOpen] = useState(true)
   const [appsOpen, setAppsOpen] = useState(true)
   // Collapsed by default: opening it triggers the "Shared with me" discovery
@@ -104,6 +103,24 @@ export function SidebarNav({
     },
     [onSettingsMenuOpenChange]
   )
+  const closeCompactMenu = React.useCallback(
+    (closeFocus?: 'preserve-destination-focus') => {
+      updateSettingsMenuOpen(false)
+      onCompactMenuOpenChange(false, closeFocus)
+    },
+    [onCompactMenuOpenChange, updateSettingsMenuOpen]
+  )
+  const previousCompactModeRef = useRef(compactMode)
+
+  useEffect(() => {
+    if (compactMode && !previousCompactModeRef.current && !compactMenuOpen) {
+      updateSettingsMenuOpen(false)
+    }
+    if (!compactMode && previousCompactModeRef.current) {
+      updateSettingsMenuOpen(false)
+    }
+    previousCompactModeRef.current = compactMode
+  }, [compactMenuOpen, compactMode, updateSettingsMenuOpen])
 
   const requestDeleteSession = React.useCallback(
     async (session: { agentRef: string; id: string; title: string }) => {
@@ -126,18 +143,23 @@ export function SidebarNav({
   useClickOutside(settingsMenuRef, settingsMenuOpen, () => {
     updateSettingsMenuOpen(false)
   })
-  useClickOutside(sidebarRef, mobileMenuOpen, () => setMobileMenuOpen(false))
   useClickOutside(sessionsRef, Boolean(sessionMenuId), () => setSessionMenuId(null))
 
   useEffect(() => {
     if (toggleRequestId <= lastToggleRequestIdRef.current) return
     lastToggleRequestIdRef.current = toggleRequestId
-    if (isMobileSidebarViewport()) {
-      setMobileMenuOpen(open => !open)
-    } else {
-      onCollapsedChange(!collapsed)
-    }
-  }, [collapsed, onCollapsedChange, toggleRequestId])
+    if (compactMode && compactMenuOpen) closeCompactMenu()
+    else if (compactMode) onCompactMenuOpenChange(true)
+    else onCollapsedChange(!collapsed)
+  }, [
+    collapsed,
+    compactMenuOpen,
+    compactMode,
+    closeCompactMenu,
+    onCollapsedChange,
+    onCompactMenuOpenChange,
+    toggleRequestId,
+  ])
 
   const email = me?.email
   const displayName = me?.name || email?.split('@')[0] || 'Unknown'
@@ -164,11 +186,26 @@ export function SidebarNav({
 
   useEffect(() => {
     if (typeof document === 'undefined') return
-    document.body.classList.toggle(MOBILE_SIDEBAR_OPEN_CLASS, mobileMenuOpen)
+    const previousOverflow = document.body.style.overflow
+    document.body.classList.toggle(COMPACT_SIDEBAR_OPEN_CLASS, compactMenuOpen)
+    if (compactMenuOpen) document.body.style.overflow = 'hidden'
     return () => {
-      document.body.classList.remove(MOBILE_SIDEBAR_OPEN_CLASS)
+      document.body.classList.remove(COMPACT_SIDEBAR_OPEN_CLASS)
+      document.body.style.overflow = previousOverflow
     }
-  }, [mobileMenuOpen])
+  }, [compactMenuOpen])
+
+  useEffect(() => {
+    if (!compactMenuOpen) return undefined
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      closeCompactMenu()
+    }
+    document.addEventListener('keydown', handleEscape)
+    return () => document.removeEventListener('keydown', handleEscape)
+  }, [closeCompactMenu, compactMenuOpen])
 
   const primaryItems: Array<{ id: NavItem; label: string; testId: string; icon: React.ReactNode }> =
     useMemo(
@@ -248,8 +285,7 @@ export function SidebarNav({
 
   const handleSelect = (item: NavItem) => {
     onSelect(item)
-    setMobileMenuOpen(false)
-    updateSettingsMenuOpen(false)
+    closeCompactMenu()
     setSessionMenuId(null)
   }
 
@@ -261,7 +297,7 @@ export function SidebarNav({
     // tree the user just opened. Skip the reveal while the sidebar is
     // collapsed: the tree cannot render there, so the flag would have no
     // visible effect and only defer its discovery fetch to a later expand.
-    if (!collapsed) setFilesExplorerOpen(true)
+    if (!isCollapsed) setFilesExplorerOpen(true)
   }
 
   const startSessionRename = (session: (typeof latestChatSessions)[number]) => {
@@ -294,11 +330,6 @@ export function SidebarNav({
   }, [renamingSessionId])
 
   const handleLogoClick = () => {
-    if (isMobileSidebarViewport()) {
-      setMobileMenuOpen(open => !open)
-      updateSettingsMenuOpen(false)
-      return
-    }
     handleSelect(DESKTOP_ROUTES.chat)
   }
 
@@ -369,8 +400,7 @@ export function SidebarNav({
 
   const handleSettingsMenuClick: NonNullable<MenuProps['onClick']> = ({ key }) => {
     if (key === 'logout') {
-      updateSettingsMenuOpen(false)
-      setMobileMenuOpen(false)
+      closeCompactMenu()
       onLogout()
       return
     }
@@ -381,8 +411,11 @@ export function SidebarNav({
     <>
       <aside
         ref={sidebarRef}
-        className={`left-nav glass-card ${collapsed ? 'collapsed' : ''}${
-          mobileMenuOpen ? ' mobile-open' : ''
+        id="desktop-sidebar-navigation"
+        aria-hidden={compactMode && !compactMenuOpen ? true : undefined}
+        inert={compactMode && !compactMenuOpen ? true : undefined}
+        className={`left-nav glass-card ${isCollapsed ? 'collapsed' : ''}${
+          compactMenuOpen ? ' compact-open' : ''
         }`}
       >
         <Button
@@ -391,8 +424,7 @@ export function SidebarNav({
           className="sidebar-mobile-backdrop"
           aria-label="Close navigation menu"
           onClick={() => {
-            setMobileMenuOpen(false)
-            updateSettingsMenuOpen(false)
+            closeCompactMenu()
           }}
         />
         <div className="sidebar-logo">
@@ -401,8 +433,7 @@ export function SidebarNav({
             type="text"
             className="sidebar-logo-link"
             onClick={handleLogoClick}
-            aria-label={isMobileSidebarViewport() ? 'Open navigation menu' : 'Go to Chat'}
-            aria-expanded={mobileMenuOpen}
+            aria-label="Go to Chat"
             title={desktopVersionTooltip}
           >
             <img className="sidebar-logo-mark" src="./logo.svg" alt="" aria-hidden="true" />
@@ -417,23 +448,32 @@ export function SidebarNav({
               src="./logotype-dark.svg"
               alt="Evenfire"
             />
-            <span className="sidebar-mobile-menu-indicator" aria-hidden="true">
-              <svg viewBox="0 0 16 16">
-                <path d="m4.5 6 3.5 3.5L11.5 6" />
-              </svg>
-            </span>
           </Button>
+          <Button
+            htmlType="button"
+            type="text"
+            shape="circle"
+            className="sidebar-compact-close"
+            aria-label="Close navigation menu"
+            title="Close navigation menu"
+            onClick={() => closeCompactMenu()}
+            icon={
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="m4 4 8 8M12 4l-8 8" />
+              </svg>
+            }
+          />
           <Button
             htmlType="button"
             type="text"
             size="small"
             shape="circle"
             className="sidebar-collapse-toggle"
-            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             icon={
               <svg
-                className={`sidebar-collapse-icon${collapsed ? ' expanded' : ''}`}
+                className={`sidebar-collapse-icon${isCollapsed ? ' expanded' : ''}`}
                 viewBox="0 0 16 16"
                 aria-hidden="true"
               >
@@ -444,15 +484,36 @@ export function SidebarNav({
           />
         </div>
 
+        {!isCollapsed && !compactMode && resize ? (
+          <div
+            aria-label="Resize sidebar"
+            aria-orientation="vertical"
+            aria-valuemax={resize.maxWidth}
+            aria-valuemin={192}
+            aria-valuenow={resize.width}
+            className="sidebar-resize-handle"
+            onKeyDown={resize.onKeyDown}
+            onLostPointerCapture={resize.onLostPointerCapture}
+            onPointerCancel={resize.onPointerCancel}
+            onPointerDown={resize.onPointerDown}
+            onPointerMove={resize.onPointerMove}
+            onPointerUp={resize.onPointerUp}
+            role="separator"
+            tabIndex={0}
+          />
+        ) : null}
+
         <div className="sidebar-menu-surface">
           <nav className="nav-links">
             {primaryItems.map(item => (
               <React.Fragment key={item.id}>
                 <div
                   className={`nav-link nav-link--with-toggle${
-                    item.id === DESKTOP_ROUTES.chat && !collapsed ? ' nav-link--with-new-chat' : ''
+                    item.id === DESKTOP_ROUTES.chat && !isCollapsed
+                      ? ' nav-link--with-new-chat'
+                      : ''
                   } ${navItem === item.id ? 'active' : ''}`}
-                  title={collapsed ? item.label : undefined}
+                  title={isCollapsed ? item.label : undefined}
                   data-tooltip={item.label}
                 >
                   <Button
@@ -464,12 +525,12 @@ export function SidebarNav({
                     onClick={() => handleSelect(item.id)}
                     aria-label={item.label}
                     aria-current={navItem === item.id ? 'page' : undefined}
-                    title={collapsed ? item.label : undefined}
+                    title={isCollapsed ? item.label : undefined}
                     icon={item.icon}
                   >
-                    {collapsed ? null : item.label}
+                    {isCollapsed ? null : item.label}
                   </Button>
-                  {item.id === DESKTOP_ROUTES.chat && !collapsed && (
+                  {item.id === DESKTOP_ROUTES.chat && !isCollapsed && (
                     <Button
                       htmlType="button"
                       type="text"
@@ -483,6 +544,7 @@ export function SidebarNav({
                       onClick={event => {
                         event.stopPropagation()
                         onNewChat()
+                        closeCompactMenu('preserve-destination-focus')
                       }}
                     />
                   )}
@@ -556,7 +618,7 @@ export function SidebarNav({
                                 data-chat-id={session.id}
                                 aria-current={isActive ? 'true' : undefined}
                                 className={`nav-latest-session${isActive ? ' active' : ''}`}
-                                title={collapsed ? session.title : undefined}
+                                title={isCollapsed ? session.title : undefined}
                               >
                                 {isRenaming ? (
                                   <div className="nav-latest-session__main nav-latest-session__main--editing">
@@ -596,7 +658,7 @@ export function SidebarNav({
                                         isRemote: session.remote === true,
                                         title: session.title,
                                       })
-                                      setMobileMenuOpen(false)
+                                      closeCompactMenu()
                                       setSessionMenuId(null)
                                     }}
                                   >
@@ -681,7 +743,7 @@ export function SidebarNav({
                 )}
 
                 {item.id === DESKTOP_ROUTES.apps &&
-                  !collapsed &&
+                  !isCollapsed &&
                   appsOpen &&
                   availableSandboxUiApps.length > 0 && (
                     <div className="nav-available-apps">
@@ -698,7 +760,7 @@ export function SidebarNav({
                             aria-current={isActive ? 'page' : undefined}
                             onClick={() => {
                               onOpenSandboxUiApp(app)
-                              setMobileMenuOpen(false)
+                              closeCompactMenu()
                             }}
                           >
                             <span className="nav-available-app__label">{app.label}</span>
@@ -714,7 +776,7 @@ export function SidebarNav({
               className={`nav-link nav-link--with-toggle${
                 navItem === DESKTOP_ROUTES.files ? ' active' : ''
               }`}
-              title={collapsed ? 'Files' : undefined}
+              title={isCollapsed ? 'Files' : undefined}
               data-tooltip="Files"
             >
               <Button
@@ -758,11 +820,17 @@ export function SidebarNav({
               />
             </div>
 
-            {!collapsed && filesExplorerOpen && (
+            {!isCollapsed && filesExplorerOpen && (
               <div className="nav-file-explorer">
                 <FileExplorerTree
-                  onOpenFolder={onOpenFilesSection}
-                  onOpenPreview={onOpenPreviewSection}
+                  onOpenFolder={uri => {
+                    onOpenFilesSection(uri)
+                    closeCompactMenu()
+                  }}
+                  onOpenPreview={preview => {
+                    onOpenPreviewSection(preview)
+                    closeCompactMenu()
+                  }}
                   pushToast={pushToast}
                 />
               </div>
@@ -787,7 +855,7 @@ export function SidebarNav({
                 }}
                 onOpenChange={updateSettingsMenuOpen}
                 open={settingsMenuOpen}
-                placement={mobileMenuOpen ? 'bottomLeft' : 'topLeft'}
+                placement={compactMode ? 'bottomLeft' : 'topLeft'}
                 popupRender={menu => (
                   <Flex vertical gap="small">
                     <div className="sidebar-settings-profile" aria-label="Signed in account">

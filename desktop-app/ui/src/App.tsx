@@ -26,6 +26,7 @@ import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { RightRailShell } from '@components/RightRailShell'
 import { SidebarNav } from '@components/SidebarNav'
+import type { CompactMenuCloseFocus } from '@components/SidebarNav/types'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { WORKSPACE_TABS_ID, WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
@@ -46,6 +47,7 @@ import {
   useChatDrawerResize,
 } from '@hooks/useChatDrawerResize'
 import { useEmbedOwnership } from '@hooks/useEmbedOwnership'
+import { useSidebarResize } from '@hooks/useSidebarResize'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
@@ -328,6 +330,21 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed
   )
+  const [compactNavigation, setCompactNavigation] = React.useState(() =>
+    window.matchMedia ? window.matchMedia('(max-width: 759px)').matches : window.innerWidth <= 759
+  )
+  const sidebarResize = useSidebarResize(compactNavigation)
+  const [compactSidebarOpen, setCompactSidebarOpen] = React.useState(false)
+  const compactSidebarTriggerRef = React.useRef<HTMLButtonElement | null>(null)
+  const compactSidebarWasOpenRef = React.useRef(false)
+  const compactSidebarCloseFocusRef = React.useRef<CompactMenuCloseFocus | null>(null)
+  const compactNavigationControlOwnedFocusRef = React.useRef(false)
+  const settledCompactDismissalOwnsFocusRef = React.useRef(false)
+  const compactNavigationWasCompactRef = React.useRef(compactNavigation)
+  const compactNavigationRef = React.useRef(compactNavigation)
+  const compactSidebarOpenRef = React.useRef(compactSidebarOpen)
+  compactNavigationRef.current = compactNavigation
+  compactSidebarOpenRef.current = compactSidebarOpen
   const [sandboxUiConversationOrigin, setSandboxUiConversationOrigin] =
     React.useState<SandboxUiConversationOrigin | null>(null)
   const [sidebarSettingsMenuOpen, setSidebarSettingsMenuOpen] = React.useState(false)
@@ -1194,15 +1211,15 @@ export function App() {
 
   /**
    * Plugin permission prompts. Main hides the plugin's
-   * `WebContentsView` before pushing the request and restores it once the user
-   * answers, so the plugin can neither fake the prompt nor paint over it. The
+   * `WebContentsView` before pushing the request. SandboxUiPage restores it only
+   * after this and every other blocking owner has cleared, so the plugin can
+   * neither fake the prompt nor paint over it. The
    * prompt is centered over — and its backdrop scoped to — the plugin's embed
    * rect, not the whole window; the rest of the trusted app chrome stays visible.
    */
   const [pluginConsentPrompt, setPluginConsentPrompt] = React.useState<PluginConsentRequest | null>(
     null
   )
-
   React.useEffect(() => {
     const offRequested = window.clerum.pluginSdk?.onConsentRequested?.(request => {
       setPluginConsentPrompt(request)
@@ -1666,7 +1683,6 @@ export function App() {
 
   const closePluginGfsPreview = React.useCallback(() => {
     setPluginGfsPreview(null)
-    void window.clerum.sandboxUi.setVisible(true).catch(() => undefined)
   }, [])
 
   const resolvePluginConsent = React.useCallback((promptId: string, allowed: string[]) => {
@@ -1698,6 +1714,136 @@ export function App() {
       // Ignore storage failures in restricted environments.
     }
   }, [])
+
+  const handleCompactSidebarOpenChange = React.useCallback(
+    (open: boolean, closeFocus?: CompactMenuCloseFocus) => {
+      compactSidebarCloseFocusRef.current = open ? null : (closeFocus ?? null)
+      if (!open) setSidebarSettingsMenuOpen(false)
+      setCompactSidebarOpen(open)
+    },
+    []
+  )
+
+  React.useEffect(() => {
+    const updateCompactMode = (nextCompact: boolean) => {
+      if (nextCompact && !compactNavigationRef.current) {
+        sidebarResize.cancelActiveDrag()
+        if (!compactSidebarOpenRef.current) setSidebarSettingsMenuOpen(false)
+      }
+      if (!nextCompact && compactSidebarOpenRef.current) {
+        handleCompactSidebarOpenChange(false)
+      }
+      compactNavigationRef.current = nextCompact
+      setCompactNavigation(nextCompact)
+    }
+
+    const media = window.matchMedia?.('(max-width: 759px)')
+    if (!media) {
+      const update = () => updateCompactMode(window.innerWidth <= 759)
+      window.addEventListener('resize', update)
+      return () => window.removeEventListener('resize', update)
+    }
+    updateCompactMode(media.matches)
+    if (media.addEventListener) {
+      const update = (event: MediaQueryListEvent) => updateCompactMode(event.matches)
+      media.addEventListener('change', update)
+      return () => media.removeEventListener('change', update)
+    }
+    const update = (event: MediaQueryListEvent) => updateCompactMode(event.matches)
+    media.addListener(update)
+    return () => media.removeListener(update)
+  }, [handleCompactSidebarOpenChange, sidebarResize.cancelActiveDrag])
+
+  React.useEffect(() => {
+    if (!compactNavigation && compactSidebarOpen) {
+      handleCompactSidebarOpenChange(false)
+    }
+  }, [compactNavigation, compactSidebarOpen, handleCompactSidebarOpenChange])
+
+  React.useEffect(() => {
+    const handleFocusIn = (event: FocusEvent) => {
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+      for (const owner of document.querySelectorAll<HTMLElement>(
+        '[data-compact-navigation-focus-owner="true"]'
+      )) {
+        if (owner !== target) owner.removeAttribute('data-compact-navigation-focus-owner')
+      }
+      const compactSettingsItem =
+        compactNavigationRef.current &&
+        target.closest(
+          '#desktop-sidebar-navigation .sidebar-settings-menu, #desktop-sidebar-navigation .sidebar-settings-antd-menu'
+        ) !== null
+      if (
+        target.matches('.sidebar-compact-close, .compact-navigation-toggle') ||
+        compactSettingsItem
+      ) {
+        compactNavigationControlOwnedFocusRef.current = true
+      } else if (target !== document.body) {
+        compactNavigationControlOwnedFocusRef.current = false
+        settledCompactDismissalOwnsFocusRef.current = false
+      }
+    }
+    document.addEventListener('focusin', handleFocusIn)
+    return () => document.removeEventListener('focusin', handleFocusIn)
+  }, [])
+
+  React.useEffect(() => {
+    const enteredDesktopMode = compactNavigationWasCompactRef.current && !compactNavigation
+    const focusDesktopNavigationOwner = () => {
+      const sidebar = document.getElementById('desktop-sidebar-navigation')
+      const currentRouteItem = sidebar?.querySelector<HTMLElement>(
+        '.nav-link.active .nav-link-main, .nav-available-app.active'
+      )
+      const navigationLandmark = sidebar?.querySelector<HTMLElement>('.nav-links')
+      const isVisibleOwner = (element: HTMLElement | null | undefined): element is HTMLElement =>
+        Boolean(
+          element &&
+          element.isConnected &&
+          element.getClientRects().length > 0 &&
+          getComputedStyle(element).visibility !== 'hidden' &&
+          !element.closest('[inert], [aria-hidden="true"]')
+        )
+      if (isVisibleOwner(currentRouteItem)) {
+        currentRouteItem.setAttribute('data-compact-navigation-focus-owner', 'true')
+        currentRouteItem.focus()
+      } else if (isVisibleOwner(navigationLandmark)) {
+        if (!navigationLandmark.hasAttribute('tabindex')) {
+          navigationLandmark.setAttribute('tabindex', '-1')
+        }
+        navigationLandmark.setAttribute('data-compact-navigation-focus-owner', 'true')
+        navigationLandmark.focus()
+      }
+    }
+    if (compactSidebarWasOpenRef.current && !compactSidebarOpen) {
+      if (compactNavigation) {
+        const activeElement = document.activeElement
+        const sidebar = document.getElementById('desktop-sidebar-navigation')
+        const destinationOwnsFocus =
+          compactSidebarCloseFocusRef.current === 'preserve-destination-focus' &&
+          activeElement !== null &&
+          activeElement.isConnected &&
+          activeElement !== document.body &&
+          !sidebar?.contains(activeElement)
+        if (!destinationOwnsFocus) {
+          compactSidebarTriggerRef.current?.focus()
+          settledCompactDismissalOwnsFocusRef.current = true
+        }
+      } else if (compactNavigationControlOwnedFocusRef.current) {
+        focusDesktopNavigationOwner()
+      }
+    }
+    if (enteredDesktopMode && settledCompactDismissalOwnsFocusRef.current) {
+      focusDesktopNavigationOwner()
+      settledCompactDismissalOwnsFocusRef.current = false
+    }
+    if (!compactSidebarOpen) {
+      compactSidebarCloseFocusRef.current = null
+      compactNavigationControlOwnedFocusRef.current = false
+    }
+    compactSidebarWasOpenRef.current = compactSidebarOpen
+    compactNavigationWasCompactRef.current = compactNavigation
+  }, [compactNavigation, compactSidebarOpen])
 
   React.useEffect(() => {
     void window.clerum.app.rendererReady().catch(error => {
@@ -3607,6 +3753,8 @@ export function App() {
   }, [executeDesktopCommand])
 
   const sandboxUiBoundsRefreshKey = `${sidebarCollapsed ? 'collapsed' : 'expanded'}:${
+    sidebarResize.width
+  }:${compactNavigation ? 'compact' : 'desktop'}:${
     appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
   }:${chatDrawerVisible ? 'chat-drawer-open' : 'chat-drawer-closed'}`
 
@@ -4210,10 +4358,28 @@ export function App() {
         onDownload={vm.handleOpenDesktopRelease}
       />
     ) : null
+  const appRootOverlayOpen = Boolean(
+    desktopUpdateRequiredDialog ||
+    environmentSetupConfirmationDialog ||
+    environmentSwitchConfirmationDialog ||
+    environmentSetupSuccessDialog ||
+    pluginConsentPrompt ||
+    pluginGfsPreview
+  )
 
   return (
     <AuthContext.Provider value={authValue}>
-      <div className="app-frame" data-sidebar-collapsed={sidebarCollapsed || undefined}>
+      <div
+        className="app-frame"
+        data-sidebar-collapsed={sidebarCollapsed || undefined}
+        style={
+          {
+            '--sidebar-width': compactNavigation
+              ? '0px'
+              : `${sidebarCollapsed ? 74 : sidebarResize.width}px`,
+          } as React.CSSProperties
+        }
+      >
         <WindowTitleBar actionsRef={setTitlebarActionsRoot} leadingRef={setTitlebarLeadingRoot} />
         <div className="app-root" inert={bootSplashLoading || undefined}>
           {vm.isAuthenticated ? (
@@ -4236,6 +4402,10 @@ export function App() {
                                 activeSandboxUiApp={activeSandboxUiApp}
                                 availableSandboxUiApps={availableSandboxUiApps}
                                 collapsed={sidebarCollapsed}
+                                compactMode={compactNavigation}
+                                compactMenuOpen={compactSidebarOpen}
+                                onCompactMenuOpenChange={handleCompactSidebarOpenChange}
+                                resize={sidebarResize}
                                 onCollapsedChange={handleSidebarCollapsedChange}
                                 onNewChat={handleNewWorkspaceChatTab}
                                 onOpenSandboxUiApp={handleOpenSandboxUiApp}
@@ -4246,7 +4416,10 @@ export function App() {
                                 pushToast={vm.pushToast}
                                 toggleRequestId={sidebarToggleRequestId}
                               />
-                              <section className="workspace-layout">
+                              <section
+                                className="workspace-layout"
+                                inert={compactSidebarOpen || undefined}
+                              >
                                 <section
                                   ref={contentPanelRef}
                                   className={`content-panel glass-card${
@@ -4270,6 +4443,27 @@ export function App() {
                                     window title bar via the same portal — the search
                                     pill and notification bell live in the title bar on
                                     all routes, never floating inline over the panel. */}
+                                  <TitlebarActionsPortal container={titlebarLeadingRoot}>
+                                    <Button
+                                      htmlType="button"
+                                      type="text"
+                                      ref={compactSidebarTriggerRef}
+                                      className="compact-navigation-toggle"
+                                      data-testid="compact-navigation-toggle"
+                                      aria-label="Open navigation"
+                                      title="Open navigation"
+                                      aria-controls="desktop-sidebar-navigation"
+                                      aria-expanded={compactSidebarOpen}
+                                      onClick={() =>
+                                        handleCompactSidebarOpenChange(!compactSidebarOpen)
+                                      }
+                                      icon={
+                                        <svg viewBox="0 0 16 16" aria-hidden="true">
+                                          <path d="M2 4h12M2 8h12M2 12h12" />
+                                        </svg>
+                                      }
+                                    />
+                                  </TitlebarActionsPortal>
                                   <TitlebarActionsPortal container={titlebarActionsRoot}>
                                     <AppHeader
                                       placement="titlebar"
@@ -4462,9 +4656,12 @@ export function App() {
                                       headerShellOverlayOpen={
                                         headerShellOverlayOpen || commandPaletteOpen
                                       }
-                                      sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
+                                      sidebarShellOverlayOpen={
+                                        sidebarSettingsMenuOpen || compactSidebarOpen
+                                      }
                                       toastShellOverlayOpen={vm.toasts.length > 0}
                                       deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
+                                      appRootOverlayOpen={appRootOverlayOpen}
                                       localSearchRequestId={sandboxLocalSearchRequestId}
                                       titlebarLeadingContainer={titlebarLeadingRoot}
                                       onLaunchApp={handleOpenSandboxUiApp}

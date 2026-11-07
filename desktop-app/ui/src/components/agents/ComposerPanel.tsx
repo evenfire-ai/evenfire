@@ -215,6 +215,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     workspaceChatTabId
   )
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const autoFocusFrameRef = useRef<number | null>(null)
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -362,9 +363,25 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Auto-focus composer after sending
   useEffect(() => {
     if (!activeChatId || activeMessageCount > 0 || agentSending) return
-    window.requestAnimationFrame(() => {
+    autoFocusFrameRef.current = window.requestAnimationFrame(() => {
+      autoFocusFrameRef.current = null
+      const activeElement = document.activeElement
+      if (
+        activeElement instanceof HTMLElement &&
+        activeElement.matches(
+          '.compact-navigation-toggle, .sidebar-compact-close, [data-compact-navigation-focus-owner="true"]'
+        )
+      ) {
+        return
+      }
       composerInputRef.current?.focus()
     })
+    return () => {
+      if (autoFocusFrameRef.current !== null) {
+        window.cancelAnimationFrame(autoFocusFrameRef.current)
+        autoFocusFrameRef.current = null
+      }
+    }
   }, [activeChatId, activeMessageCount, agentSending])
 
   useEffect(() => {

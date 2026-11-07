@@ -87,6 +87,8 @@ const ALLOWED_DESKTOP_CSS = new Set([
 const INLINE_STYLE_DYNAMIC_HINTS = [
   // Anything containing `--da-grid-cols` is the documented exception.
   '--da-grid-cols',
+  // User-resized sidebar width published to the app-frame grid.
+  '--sidebar-width',
   // Popup positioning at runtime coords:
   'fleetMenuPosition',
   'sessionMenuPosition',
@@ -373,7 +375,7 @@ export const rules = [
     id: 'da-no-static-inline-style',
     severity: 'warn',
     description:
-      'JSX inline styles are reserved for genuinely dynamic values and documented layout geometry. Static styling belongs in src/styles.css.',
+      'JSX inline styles are reserved for genuinely dynamic values and documented layout geometry. Static styling belongs in src/styles.css. Documented uses include `--da-grid-cols`, live layout values, and `--sidebar-width`.',
     applies(file) {
       return isTsxTarget(file)
     },
