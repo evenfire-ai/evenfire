@@ -60,6 +60,16 @@ function isBranchScopedLocalContext(context: string): boolean {
   return /^clerum-(codex|detached)-/.test(context) || isBranchProfileContext(context)
 }
 
+/**
+ * For a lane that disrupts the cluster it runs against: admits only a branch-owned local
+ * profile, which excludes production and the shared `clerum-test` context.
+ */
+export function assertBranchOwnedContext(context: string): void {
+  if (isProductionContext(context) || !isBranchScopedLocalContext(context)) {
+    throw new Error(`[E2E-GUARD] "${context}" is not a branch-owned local profile.`)
+  }
+}
+
 function urlPort(url: string): string {
   try {
     return new URL(url).port

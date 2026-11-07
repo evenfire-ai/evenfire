@@ -1,9 +1,10 @@
 // What Desktop shows when a session has no team, during an outage, and when a session ends.
-// Needs a seeded branch profile. It stops control-api, so it refuses any other context.
+// Needs a seeded branch profile. It stops control-api, so it refuses any other context:
+// playwright.session-team-ux.config.ts admits only a branch-owned profile, by opt-in.
 import { type Page, expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { isLocalPortForwardContext } from './global-setup'
+import { assertBranchOwnedContext } from './global-setup'
 import { openResourcesNavItem } from './navigationHelpers'
 import {
   E2E_DESKTOP_PASSWORD,
@@ -27,9 +28,7 @@ const SECTIONS: Array<[testId: string, heading: string]> = [
 test.describe.configure({ mode: 'serial' })
 
 test.beforeAll(() => {
-  if (!isLocalPortForwardContext(K8S_CONTEXT)) {
-    throw new Error(`Refusing to stop control-api on context ${K8S_CONTEXT}`)
-  }
+  assertBranchOwnedContext(K8S_CONTEXT)
   if (E2E_EMAIL === SECOND_EMAIL) throw new Error('The two E2E users must differ')
 })
 
@@ -56,22 +55,44 @@ function runSql(statement: string): string {
   )
 }
 
-function setMembership(email: string, member: boolean): void {
-  const address = email.replace(/'/g, "''")
-  if (!member) {
-    runSql(`DELETE FROM team_members WHERE user_id=(SELECT id FROM users WHERE email='${address}')`)
-    return
-  }
+function sqlLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+function userIdSql(email: string): string {
+  return `(SELECT id FROM users WHERE email=${sqlLiteral(email)})`
+}
+
+function readMemberships(email: string): unknown[] {
+  return JSON.parse(
+    runSql(
+      `SELECT coalesce(json_agg(m ORDER BY m.team_id),'[]') FROM team_members m
+        WHERE m.user_id=${userIdSql(email)}`
+    )
+  )
+}
+
+/** The user's full rows, so a restore puts back the same teams, roles and timestamps. */
+function snapshotMemberships(email: string): unknown[] {
+  const snapshot = readMemberships(email)
+  expect(snapshot.length, `witness: ${email} has seeded memberships`).toBeGreaterThan(0)
+  return snapshot
+}
+
+function removeMemberships(email: string): void {
+  runSql(`DELETE FROM team_members WHERE user_id=${userIdSql(email)}`)
+  expect(readMemberships(email), `${email} has no membership left`).toEqual([])
+}
+
+function restoreMemberships(email: string, snapshot: unknown[]): void {
   runSql(
-    `INSERT INTO team_members(team_id,user_id,role,status)
-     SELECT t.id,u.id,'admin','active' FROM users u JOIN teams t ON t.name=u.name||' team'
-      WHERE u.email='${address}'
-        AND NOT EXISTS (SELECT 1 FROM team_members m WHERE m.user_id=u.id AND m.team_id=t.id)`
+    `BEGIN;
+     DELETE FROM team_members WHERE user_id=${userIdSql(email)};
+     INSERT INTO team_members
+       SELECT * FROM json_populate_recordset(NULL::team_members, ${sqlLiteral(JSON.stringify(snapshot))});
+     COMMIT`
   )
-  const count = runSql(
-    `SELECT count(*) FROM team_members m JOIN users u ON u.id=m.user_id WHERE u.email='${address}'`
-  )
-  expect(Number(count), `membership of ${email}`).toBeGreaterThan(0)
+  expect(readMemberships(email), `memberships of ${email} are back as they were`).toEqual(snapshot)
 }
 
 async function sessionTeamId(page: Page): Promise<string | null> {
@@ -108,7 +129,8 @@ async function expectNoTeamNoticeInSections(page: Page): Promise<void> {
 }
 
 test('a user without a team enters and sees no team notice anywhere', async () => {
-  setMembership(SECOND_EMAIL, false)
+  const memberships = snapshotMemberships(SECOND_EMAIL)
+  removeMemberships(SECOND_EMAIL)
   try {
     const { app, page } = await launchAndLogin(SECOND_EMAIL)
     try {
@@ -119,12 +141,11 @@ test('a user without a team enters and sees no team notice anywhere', async () =
       await app.close()
     }
   } finally {
-    setMembership(SECOND_EMAIL, true)
+    restoreMemberships(SECOND_EMAIL, memberships)
   }
 })
 
 test('a team member enters and sees no team notice anywhere', async () => {
-  setMembership(SECOND_EMAIL, true)
   const { app, page } = await launchAndLogin(SECOND_EMAIL)
   try {
     expect(await sessionTeamId(page), 'witness: the session has its team').toBeTruthy()
@@ -189,7 +210,6 @@ async function spendSourceAttempts(): Promise<void> {
 }
 
 test('an outage keeps the Desktop session, and a real session end returns to sign-in', async () => {
-  setMembership(E2E_EMAIL, true)
   const { app, page } = await launchAndLogin(E2E_EMAIL)
   try {
     const signInForm = page.locator('#email-input')
@@ -197,6 +217,8 @@ test('an outage keeps the Desktop session, and a real session end returns to sig
     expect(teamId, 'witness: the session has its team').toBeTruthy()
     expect((await workflowsList(page)).ok, 'witness: the call works before the outage').toBe(true)
 
+    const replicas = kubectl(['get', 'deployment/control-api', '-o', 'jsonpath={.spec.replicas}'])
+    expect(Number(replicas), 'witness: control-api is running').toBeGreaterThan(0)
     kubectl(['scale', 'deployment/control-api', '--replicas=0'])
     try {
       await expect
@@ -213,7 +235,7 @@ test('an outage keeps the Desktop session, and a real session end returns to sig
       await expect(signInForm, 'an outage does not sign the user out').toBeHidden()
       await expect(page.getByText('Your session ended')).toHaveCount(0)
     } finally {
-      kubectl(['scale', 'deployment/control-api', '--replicas=1'])
+      kubectl(['scale', 'deployment/control-api', `--replicas=${replicas}`])
       kubectl(['rollout', 'status', 'deployment/control-api', '--timeout=180s'])
     }
     await expect
@@ -273,7 +295,10 @@ test('an outage keeps the Desktop session, and a real session end returns to sig
     await expect(page.getByText('Check your email and password')).toHaveCount(0)
     await expect(signInForm, 'the user stays on the sign-in screen').toBeVisible()
   } finally {
-    await app.close()
-    seedPasswordForEmail(E2E_EMAIL)
+    try {
+      await app.close()
+    } finally {
+      seedPasswordForEmail(E2E_EMAIL)
+    }
   }
 })
