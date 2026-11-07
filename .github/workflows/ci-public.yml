@@ -49,6 +49,11 @@ jobs:
       - name: Validate service versions against the merge base (pull requests into dev)
         if: github.event_name == 'pull_request' && github.base_ref == 'dev'
         run: node scripts/release/validate-release-version-bumps.mjs --previous HEAD^1 --all-services
+      # Also here because the ruleset requires this job: this test pins the step above and the
+      # service list against the pre-commit hook's roots, so a red pin blocks the merge.
+      - name: Test the service version bump validator (pull requests into dev)
+        if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+        run: bash scripts/tests/test-validate-release-version-bumps.sh
 
   node-runtime-images:
     name: Node image runtime (${{ matrix.variant.name }}, ${{ matrix.arch }})
@@ -933,9 +938,6 @@ jobs:
 
       - name: Validate service version bumps
         run: node scripts/release/validate-release-version-bumps.mjs --previous "${{ github.event.pull_request.base.sha || github.event.before }}"
-
-      - name: Test the service version bump validator
-        run: bash scripts/tests/test-validate-release-version-bumps.sh
 
       - name: Test the image manifest
         run: bash scripts/tests/test-images-manifest.sh
