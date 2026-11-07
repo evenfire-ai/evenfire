@@ -200,7 +200,7 @@ async function spendSourceAttempts(): Promise<void> {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         email: `no-such-user-${randomBytes(6).toString('hex')}@example.test`,
-        password: 'not-a-real-password',
+        password: 'synthetic-wrong-password',
       }),
     })
     lastStatus = response.status

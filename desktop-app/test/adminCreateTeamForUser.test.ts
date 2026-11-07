@@ -14,7 +14,7 @@ function stubAdminApi(memberStatus: number) {
       authorization: new Headers(init.headers).get('authorization'),
     })
     if (url.pathname === '/api/v1/admin/auth/login') {
-      return new Response(JSON.stringify({ token: 'admin-token' }), { status: 200 })
+      return new Response(JSON.stringify({ token: 'synthetic-admin-token' }), { status: 200 })
     }
     if (url.pathname === '/api/v1/admin/teams') {
       return new Response(JSON.stringify({ id: TEAM_ID }), { status: 200 })
@@ -45,11 +45,11 @@ describe('adminCreateTeamForUser', () => {
     ])
     expect(requests[1]).toMatchObject({
       body: { name: 'e2e team' },
-      authorization: 'Bearer admin-token',
+      authorization: 'Bearer synthetic-admin-token',
     })
     expect(requests[2]).toMatchObject({
       body: { userId: USER_ID, role: 'admin' },
-      authorization: 'Bearer admin-token',
+      authorization: 'Bearer synthetic-admin-token',
     })
   })
 
