@@ -405,7 +405,6 @@ async function globalSetup(): Promise<void> {
 
   let loginResp: Response
   const loginPath = '/api/v1/auth/password-login'
-  let loginBody: Record<string, string> = { email }
   try {
     if (authPreflight !== 'password') {
       throw new Error(
@@ -417,12 +416,11 @@ async function globalSetup(): Promise<void> {
       process.env.E2E_TEST_PASSWORD ||
       process.env.ADMIN_PASSWORD ||
       'changeme123!'
-    loginBody = { email, password }
 
     loginResp = await fetch(`${externalRest}${loginPath}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(loginBody),
+      body: JSON.stringify({ email, password }),
     })
   } catch (err) {
     throw new Error(

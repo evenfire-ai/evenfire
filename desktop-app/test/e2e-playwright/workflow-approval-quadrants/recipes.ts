@@ -269,7 +269,7 @@ ${inputContractYaml}
 ${allowedActorsYaml}
   steps:
     - id: approval-contract
-      instruction: "${instruction.replace(/"/g, '\\"')}"
+      instruction: ${JSON.stringify(instruction)}
       timeoutSeconds: 60
 `
   kubectlOut(['apply', '-f', '-'], yaml, 30_000)
