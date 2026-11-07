@@ -3447,6 +3447,7 @@ export function App() {
     previousPrincipalIdentityRef.current = vm.authenticatedPrincipalIdentity
     if (previousIdentity === undefined) return
     setWorkspaceTabs(createWorkspaceTabsState('chat-tab-1'))
+    setPluginGfsPreview(null)
     vm.clearAppsPicker()
     setComposerFocusRequestId(0)
     setGlobalSearchFocusRequestId(0)
