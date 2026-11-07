@@ -36,6 +36,7 @@ import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandl
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
+import { type PinnedPluginSurface, resolvePluginSurface } from './pluginSurfaceRegistry.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
 import { RpcTokenManager } from './rpcTokenManager.js'
 import {
@@ -6344,6 +6345,14 @@ export class AppService {
   async setSandboxUiVisible(visible: boolean): Promise<void> {
     const { setSandboxUiVisible } = await import('./sandboxUiDriver.js')
     setSandboxUiVisible(visible)
+  }
+
+  /** Hide only the sandbox view that still belongs to the requesting plugin mount. */
+  async hideSandboxUiForPluginMount(mount: PinnedPluginSurface): Promise<boolean> {
+    if (mount.surface !== 'sandbox-ui-embed') return false
+    const { setSandboxUiVisibleForWebContents } = await import('./sandboxUiDriver.js')
+    if (resolvePluginSurface(mount.webContentsId) !== mount) return false
+    return setSandboxUiVisibleForWebContents(mount.webContentsId, false)
   }
 
   async captureSandboxUiPreview(): Promise<string | null> {
