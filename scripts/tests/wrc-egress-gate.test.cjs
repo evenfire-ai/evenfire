@@ -15,10 +15,9 @@ const {
   deploymentReady,
   policyObservation,
   acceptPolicyIntentChange,
-  GATE_RECOVERY_CAP_MS,
-  GATE_RECOVERY_SLACK_MS,
   DNS_FIXTURE_TTL_SECONDS,
   maxSupportedExternalEgressOverlapSeconds,
+  assertRecoveryBudgetFitsCap,
 } = require('../e2e/_lib/wrc-egress-gate.cjs')
 const {
   Journal,
@@ -282,13 +281,21 @@ function uiFixture(t, { assigned = true, children = true } = {}) {
   return { ...fixtureState, parent, parentObject, physicalName, uiObjects }
 }
 
-test('the supported overlap is the largest one whose recovery budget fits the cap', () => {
+test('the supported overlap is the largest one the gate does not refuse', () => {
   const max = maxSupportedExternalEgressOverlapSeconds()
   // deploy/overlays/minikube/patches/wrc-external-egress-overlap.yaml names this bound.
   assert.equal(max, 505)
-  const budgetMs = overlap => (overlap + DNS_FIXTURE_TTL_SECONDS) * 1000 + GATE_RECOVERY_SLACK_MS
-  assert.ok(budgetMs(max) <= GATE_RECOVERY_CAP_MS)
-  assert.ok(budgetMs(max + 1) > GATE_RECOVERY_CAP_MS)
+  const now = 1_000_000
+  // The window WRC stores: now + TTL + overlap (packages/network-policy-core/index.cjs).
+  const expiryFor = overlap => now + (overlap + DNS_FIXTURE_TTL_SECONDS) * 1000
+  assert.doesNotThrow(() => assertRecoveryBudgetFitsCap(expiryFor(max), now))
+  assert.throws(
+    () => assertRecoveryBudgetFitsCap(expiryFor(max + 1), now),
+    /DNS_WINDOW_EXCEEDS_GATE_RECOVERY_BUDGET/
+  )
+  // The flow that calls it needs a cluster, so this pins its only call site.
+  const gateSource = fs.readFileSync(require.resolve('../e2e/_lib/wrc-egress-gate.cjs'), 'utf8')
+  assert.ok(gateSource.includes('assertRecoveryBudgetFitsCap(latestExpiry, Date.now())'))
 })
 
 test('foreground recipe deletion cannot leave UI children after its finalizer swallows DELETE503', async t => {

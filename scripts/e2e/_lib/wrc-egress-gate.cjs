@@ -36,6 +36,13 @@ const GATE_RECOVERY_SLACK_MS = 90_000
 const DNS_FIXTURE_TTL_SECONDS = 5
 const maxSupportedExternalEgressOverlapSeconds = () =>
   (GATE_RECOVERY_CAP_MS - GATE_RECOVERY_SLACK_MS) / 1000 - DNS_FIXTURE_TTL_SECONDS
+const assertRecoveryBudgetFitsCap = (latestExpiry, now) => {
+  const recoveryBudget = Math.max(
+    GATE_RECOVERY_SLACK_MS,
+    latestExpiry - now + GATE_RECOVERY_SLACK_MS
+  )
+  invariant(recoveryBudget <= GATE_RECOVERY_CAP_MS, 'DNS_WINDOW_EXCEEDS_GATE_RECOVERY_BUDGET')
+}
 const LOOPBACK = [127, 0, 0, 1].join('.')
 const endpointHost = 'example.com' // Existing mock-MCP fixture public endpoint contract.
 const deploymentReady = object =>
@@ -1029,11 +1036,7 @@ async function exercise(config, kube, journal) {
   // or mistaking a DNS packet / old active phase for accepted convergence.
   const latestExpiry = Math.max(...lanes.map(lane => lane.latestExpiry))
   invariant(Number.isFinite(latestExpiry), 'MISSING_ACCEPTED_DNS_WINDOW')
-  const recoveryBudget = Math.max(
-    GATE_RECOVERY_SLACK_MS,
-    latestExpiry - Date.now() + GATE_RECOVERY_SLACK_MS
-  )
-  invariant(recoveryBudget <= GATE_RECOVERY_CAP_MS, 'DNS_WINDOW_EXCEEDS_GATE_RECOVERY_BUDGET')
+  assertRecoveryBudgetFitsCap(latestExpiry, Date.now())
   for (const lane of lanes) {
     invariant(Number.isFinite(lane.lastAcceptedAt), 'MISSING_ACCEPTED_DNS_OBSERVATION')
     lane.recoveryAfter = lane.lastAcceptedAt
@@ -1228,10 +1231,9 @@ module.exports = {
   policyObservation,
   acceptPolicyIntentChange,
   main,
-  GATE_RECOVERY_CAP_MS,
-  GATE_RECOVERY_SLACK_MS,
   DNS_FIXTURE_TTL_SECONDS,
   maxSupportedExternalEgressOverlapSeconds,
+  assertRecoveryBudgetFitsCap,
 }
 if (require.main === module)
   main(process.argv.slice(2)).catch(() => {
