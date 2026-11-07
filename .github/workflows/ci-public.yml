@@ -1139,6 +1139,9 @@ jobs:
       - name: Test the seed's LLM model ensure through the admin API
         run: bash scripts/tests/test-e2e-llm-model-ensure.sh
 
+      - name: Test the workflow-trigger E2E team helper adds the member
+        run: bash scripts/tests/test-e2e-workflow-triggers-team-helper.sh
+
       - name: Test the E2E LLM model manifest covers every E2E model literal
         run: bash scripts/tests/test-e2e-llm-models-manifest.sh
 
