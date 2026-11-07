@@ -730,8 +730,9 @@ assert_eq "the deploy/base overlap is not a leftover override" 1 \
   "$(overlap_leftover_rc '[{"name":"HCC_EXTERNAL_EGRESS_OVERLAP_SEC","value":"3600"}]')"
 assert_eq "an env without the overlap is not a leftover override" 1 \
   "$(overlap_leftover_rc '[{"name":"HCC_TEST_ENV","value":"original"}]')"
-assert_eq "phase 1's overlap is a leftover override" 0 \
-  "$(overlap_leftover_rc "[{\"name\":\"HCC_EXTERNAL_EGRESS_OVERLAP_SEC\",\"value\":\"${HCC_TEST_OVERLAP_SEC}\"}]")"
+phase1_overlap_env="$(jq -cn --arg value "$HCC_TEST_OVERLAP_SEC" \
+  '[{name: "HCC_EXTERNAL_EGRESS_OVERLAP_SEC", value: $value}]')"
+assert_eq "phase 1's overlap is a leftover override" 0 "$(overlap_leftover_rc "$phase1_overlap_env")"
 # Phase 0 needs a cluster, so this pins the only call site of the predicate.
 assert_contains "phase 0 refuses through the leftover predicate" \
   "$HARNESS_ROOT/scripts/e2e/e2e-egress-cdn-rotation.sh" 'if hcc_env_has_test_overlap "$HCC_ENV_ORIGINAL" ||'
