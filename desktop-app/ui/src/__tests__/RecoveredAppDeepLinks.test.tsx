@@ -26,7 +26,7 @@ import {
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '@clerum/desktop-app-links'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
-import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
+import { DESKTOP_ROUTES } from '@constants/navigation'
 import type { PushNotificationInput } from '@hooks/domain/types'
 import { type ActiveChatVisibility, useChatNotifications } from '@hooks/domain/useChatNotifications'
 import { useAppController } from '@hooks/useAppController'

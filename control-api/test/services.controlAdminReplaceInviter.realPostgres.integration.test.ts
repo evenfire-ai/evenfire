@@ -4,7 +4,6 @@ import { Pool } from 'pg'
 import { config } from '../src/config.js'
 import { initDb, pool } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
-import { rootLogger } from '../src/observability/logger.js'
 import type { RpcAccessClaims } from '../src/profileTypes.js'
 import { authorizeRpcHostAccess } from '../src/services/access/rpcHostAccessAuthorizer.js'
 import {

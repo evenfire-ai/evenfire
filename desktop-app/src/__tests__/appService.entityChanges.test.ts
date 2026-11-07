@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AppService } from '../appService.js'
-import { config } from '../config.js'
 import { ApiError } from '../httpClient.js'
 import type { EntityChangeStreamEvent } from '../types.js'
 
