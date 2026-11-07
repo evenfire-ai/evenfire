@@ -116,6 +116,9 @@ before this release.
   bounded at 15 s (`statement_timeout`); the online index builds have their own
   120 s bound (below). The whole Job is bounded at 300 s
   (`activeDeadlineSeconds`).
+- For a database at `0130` through `0135`, the missing versions through `0136`
+  commit in one transaction under the 10 s lock and 15 s statement bounds, with
+  no fence, then `0137`, then `0138`.
 - An existing database below `0130` must already have `0126` to `0128`; the
   Job stops with an error otherwise. For such a database the 10 s lock bound
   does not hold before `0137`. The Job first sets the `0130` password-login
@@ -167,8 +170,8 @@ before this release.
   the backfill.
 - After the Job, `verify_db_migration_state` checks the grants of
   `workflow_recipes_runtime` against
-  `deploy/scripts/workflow-recipes-runtime-access-profiles.tsv` (104 relation
-  rows; `dev` had 7) and
+  `deploy/scripts/workflow-recipes-runtime-access-profiles.tsv` (one row per
+  relation; `dev` had 7) and
   `deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv` (6
   column rows; new in this release). A mismatch stops the deploy after `0137`
   and `0138` have committed, while the old control-api keeps serving. Compare

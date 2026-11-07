@@ -98,7 +98,12 @@ async function runBoundedTransaction(db: DbClient, work: () => Promise<void>): P
  * commit once both hold: this release's migration Job has completed on
  * clerum-dev and production, and no branch registers an
  * EARLIER_PR1_MIGRATION_NAMES migration other than PR1_MIGRATION_VERSIONS
- * (today #594, until it is reconciled with this change). Remove it sooner, in
+ * (today #594, until it is reconciled with this change). The same commit removes
+ * the upgrade tests from the pinned producers in
+ * test/migrationExecutionPolicy.realPostgres.integration.test.ts and the producers
+ * in tests/contracts/certification-inputs.json, unless a later change owns them:
+ * once this change is on dev, latestDev stays at the last dev commit before it.
+ * Remove it sooner, in
  * the same commit, if a migration creates a function or table this probe
  * matches: the guard runs on every initDb and would stop every later Job.
  * If PR1_MIGRATION_VERSIONS are renumbered after a shared database recorded

@@ -71,9 +71,9 @@
     },
     "latestDev": {
       "env": "TASK106_R61_B1_LATEST_DEV_SOURCE_DIR",
-      "commit": "87f962fb999ed5dbcab90bd52562de0eba4aa564",
+      "commit": "31abc80d8d69200f3df8ac6e7118ffb781e69136",
       "sourceHashes": {
-        "control-api/src/db.ts": "616678c106f762a8b82ea45f42e01ddc42fb90dda935d62fd0f4b72c2a2eeebc",
+        "control-api/src/db.ts": "1f8e1890a4e5efd42e7c6350e103fdeaa7ef897c764771f175904e0e58a826b8",
         "control-api/src/migrate.ts": "2b582252753c6455fc85d7cb4563313e3b63ecf7c7630aa6252f70f0bb286a81"
       },
       "buildPackages": [

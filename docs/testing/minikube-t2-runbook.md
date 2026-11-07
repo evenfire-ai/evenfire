@@ -381,8 +381,13 @@ non-T2 scope guard.
 
 ### Pinned producer inputs
 
-T1 runs migration-compatibility suites against two historical Control API
-builds pinned in `tests/contracts/certification-inputs.json`. `make
+T1 runs migration-compatibility suites against two Control API builds pinned in
+`tests/contracts/certification-inputs.json`. `observedDev` is an immutable
+pre-fence `dev` commit. `latestDev` is the `dev` tip of the last merge of `dev`
+into the change, the state a shared database starts from, so every such merge
+moves its commit and source hashes in the contract. Once the change is on `dev`,
+the pin stays at the last `dev` commit before it and means "`dev` before this
+change". `make
 minikube-t2` (with T1 enabled) and the standalone Real PostgreSQL lane refuse
 before T0 unless `TASK106_R61_B1_DEV_SOURCE_DIR` and
 `TASK106_R61_B1_LATEST_DEV_SOURCE_DIR` name clean checkouts of those commits
@@ -411,11 +416,22 @@ export TASK106_R61_B1_LATEST_DEV_SOURCE_DIR="$PRODUCERS/latest-dev"
 `build-producer` refuses a checkout whose `HEAD` is not the pinned commit, a
 dirty checkout, or source files whose hashes differ from the contract, and
 writes the receipt only after its own builds. The receipt binds the lockfiles
-and build outputs, so rebuild a producer after any change inside it. The
-producer worktrees are detached at fixed commits: do not fetch, pull or check
-out inside them, and do not run `git fetch` in any worktree of the repository
-while a lane runs. Confirm the inputs with
+and build outputs, so rebuild a producer after any change inside it. While a
+lane runs, do not fetch, pull or check out inside the producer worktrees, and
+do not run `git fetch` in any worktree of the repository. Confirm the inputs with
 `node scripts/ci/certification-inputs.mjs check --scope t1` before launching.
+
+After the `latestDev` pin moves, `check` and the lane refuse an existing
+`latest-dev` worktree with `producer commit mismatch`. Between lanes, re-point
+it to the new `latest_commit`, install and rebuild:
+
+```bash
+git -C "$PRODUCERS/latest-dev" checkout --detach <latest_commit>
+(cd "$PRODUCERS/latest-dev/packages/workflow-runtime-core" && npm ci && npm run build)
+(cd "$PRODUCERS/latest-dev/control-api" && npm ci)
+TASK106_R61_B1_LATEST_DEV_SOURCE_DIR="$PRODUCERS/latest-dev" \
+  node scripts/ci/certification-inputs.mjs build-producer --producer latestDev
+```
 
 ## T0, T1, and T2 boundaries
 

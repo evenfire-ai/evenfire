@@ -454,6 +454,13 @@ describe('PR1 earlier-head guard', () => {
         '0126_user_access_foundation',
         '0133_catalog_utf8_ordering',
         '0137_user_access_foundation',
+        // The versions earlier heads recorded just below the current PR1 numbers.
+        '0131_user_access_foundation',
+        '0132_legacy_password_security_epoch_backfill',
+        // Dev's own migrations under those same numbers: the exact message below
+        // proves the guard reads the name, not the number.
+        '0131_llm_provider_catalog_settings',
+        '0132_llm_catalog_dismissed',
         // Earlier heads also recorded hexadecimal prefixes.
         '010a_invitation_delivery_commands',
         '012b_user_access_foundation_definer_temp_shadow_hardening',
@@ -465,7 +472,7 @@ describe('PR1 earlier-head guard', () => {
     })
 
     await expect(rejection).rejects.toThrow(
-      'recorded versions [010a_invitation_delivery_commands, 0126_user_access_foundation, 012b_user_access_foundation_definer_temp_shadow_hardening, 0133_catalog_utf8_ordering]; functions []; tables []; ' +
+      'recorded versions [010a_invitation_delivery_commands, 0126_user_access_foundation, 012b_user_access_foundation_definer_temp_shadow_hardening, 0131_user_access_foundation, 0132_legacy_password_security_epoch_backfill, 0133_catalog_utf8_ordering]; functions []; tables []; ' +
         EARLIER_HEAD_DOC_REFERENCE
     )
     // Liveness witness: the guard ran its catalog probe once, with the table list.

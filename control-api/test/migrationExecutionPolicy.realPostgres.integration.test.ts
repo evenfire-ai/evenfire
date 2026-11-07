@@ -30,23 +30,13 @@ const observedProducer = certificationInputs.producers.observedDev
 const latestProducer = certificationInputs.producers.latestDev
 const OBSERVED_DEV_SOURCE_COMMIT = observedProducer.commit
 const OBSERVED_DEV_DB_SOURCE_SHA256 = observedProducer.sourceHashes['control-api/src/db.ts']
-const OBSERVED_DEV_RECEIPT_COUNT = 133
 const OBSERVED_DEV_RECEIPT_SET_SHA256 =
   'acb72ad12e1d342310832cf7628ab8351a80cee7311111039b4c2b9720077307'
 const LATEST_DEV_SOURCE_COMMIT = latestProducer.commit
 const LATEST_DEV_DB_SOURCE_SHA256 = latestProducer.sourceHashes['control-api/src/db.ts']
 const LATEST_DEV_MIGRATION_ENTRY_SOURCE_SHA256 =
   latestProducer.sourceHashes['control-api/src/migrate.ts']
-const LATEST_DEV_RECEIPT_COUNT = 134
 const DEV_PASSWORD_SUCCESS_ADMISSION_VERSION = '0130_password_login_success_admission'
-// Dev migrations after 0106 that both pinned DEV producers predate or include.
-const DEV_POST_0106_THROUGH_0129 = CONTROL_API_MIGRATIONS.map(
-  migration => migration.version
-).filter(
-  version =>
-    version > '0106_oauth_grants_owner_generalization' &&
-    version <= '0129_workflow_schedules_concurrency_policy'
-)
 
 const OBSERVED_DEV_SOURCE_DIR = process.env[observedProducer.env]
 const LATEST_DEV_SOURCE_DIR = process.env[latestProducer.env]
@@ -254,6 +244,24 @@ async function versions(pool: Pool): Promise<string[]> {
     'SELECT version FROM schema_migrations ORDER BY version'
   )
   return result.rows.map(row => row.version)
+}
+
+// The upgrade delta is derived from head, so a dev merge that brings migrations needs
+// no edit here: the pinned producer describes the start, and head describes the rest.
+async function upgradeFromProducerReceipts(
+  pool: Pool,
+  producerReceipts: readonly string[]
+): Promise<{ pending: string[] }> {
+  const headVersions = CONTROL_API_MIGRATIONS.map(migration => migration.version)
+  const pending = headVersions.filter(version => !producerReceipts.includes(version))
+  // Witness: the derived delta ends in the versions this change owns.
+  expect(pending.slice(-PR1_MIGRATION_VERSIONS.length)).toEqual([...PR1_MIGRATION_VERSIONS])
+  const upgrade = await withMigrationApplyObserver(new Set(headVersions), async () =>
+    initDb({ connect: () => pool.connect() })
+  )
+  expect(upgrade.applyOrder).toEqual(pending)
+  expect(new Set(await versions(pool))).toEqual(new Set(headVersions))
+  return { pending }
 }
 
 async function removeMigrationReceiptForReplay(pool: Pool, version: string): Promise<void> {
@@ -766,11 +774,14 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         '0133_catalog_utf8_ordering',
         '0126_user_access_foundation',
         '010a_invitation_delivery_commands',
+        '0131_user_access_foundation',
+        '0132_legacy_password_security_epoch_backfill',
       ]) {
         await pool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [earlierVersion])
         const rejection = initDb({ connect: () => pool.connect() })
-        await expect(rejection).rejects.toThrow(earlierVersion)
-        await expect(rejection).rejects.toThrow(EARLIER_HEAD_DOC_REFERENCE)
+        await expect(rejection).rejects.toThrow(
+          `recorded versions [${earlierVersion}]; functions []; tables []; ${EARLIER_HEAD_DOC_REFERENCE}`
+        )
         await pool.query('DELETE FROM schema_migrations WHERE version = $1', [earlierVersion])
       }
       // Witness that the rejections came from the recorded versions alone.
@@ -902,7 +913,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     })
   })
 
-  it('installs the exact fetched DEV graph and upgrades it without replay', async () => {
+  it('upgrades a database from the latest DEV producer with only this change and accepts its migrator', async () => {
     const databaseName = `r61_latest_dev_${randomBytes(6).toString('hex')}`
     const isolatedUrl = databaseUrl(adminUrl!, databaseName)
     await adminPool.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`)
@@ -922,23 +933,25 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       expect(legacyAdminRun.rowCount).toBe(1)
 
       const latestDevReceipts = await versions(isolatedPool)
-      expect(latestDevReceipts).toHaveLength(LATEST_DEV_RECEIPT_COUNT)
-      expect(DEV_POST_0106_THROUGH_0129).toContain('0129_workflow_schedules_concurrency_policy')
-      for (const version of DEV_POST_0106_THROUGH_0129) {
-        expect(latestDevReceipts, `${version} latest DEV producer receipt`).toContain(version)
-      }
-      expect(latestDevReceipts).not.toContain(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)
+      expect(
+        CONTROL_API_MIGRATIONS.map(migration => migration.version).filter(
+          version => !latestDevReceipts.includes(version)
+        ),
+        'latestDev is stale: move it in tests/contracts/certification-inputs.json to the merge base with dev'
+      ).toEqual([...PR1_MIGRATION_VERSIONS])
+      expect(latestDevReceipts).toContain(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)
 
-      const beforeUpgrade = new Set(latestDevReceipts)
-      const observedVersions = new Set<string>([
-        ...PR1_MIGRATION_VERSIONS,
-        ...DEV_POST_0106_THROUGH_0129,
-        DEV_PASSWORD_SUCCESS_ADMISSION_VERSION,
-      ])
-      const upgrade = await withMigrationApplyObserver(observedVersions, async () =>
-        initDb({ connect: () => isolatedPool.connect() })
+      const { pending } = await upgradeFromProducerReceipts(isolatedPool, latestDevReceipts)
+      expect(pending).toEqual([...PR1_MIGRATION_VERSIONS])
+      // Each PR1 migration commits in its own bounded transaction.
+      const receiptTransactions = await isolatedPool.query<{ version: string; xmin: string }>(
+        'SELECT version, xmin::text AS xmin FROM schema_migrations WHERE version = ANY($1::text[])',
+        [[...PR1_MIGRATION_VERSIONS]]
       )
-      const upgradedReceipts = await versions(isolatedPool)
+      expect(receiptTransactions.rows).toHaveLength(PR1_MIGRATION_VERSIONS.length)
+      expect(new Set(receiptTransactions.rows.map(row => row.xmin)).size).toBe(
+        PR1_MIGRATION_VERSIONS.length
+      )
       expect(
         (
           await isolatedPool.query(
@@ -956,32 +969,6 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
           ])
         ).rowCount
       ).toBe(1)
-      expect(upgradedReceipts).toHaveLength(
-        LATEST_DEV_RECEIPT_COUNT + PR1_MIGRATION_VERSIONS.length + 1
-      )
-      expect(upgradedReceipts.filter(version => !beforeUpgrade.has(version))).toEqual(
-        [...PR1_MIGRATION_VERSIONS, DEV_PASSWORD_SUCCESS_ADMISSION_VERSION].sort()
-      )
-      expect(upgradedReceipts.filter(version => beforeUpgrade.has(version))).toEqual(
-        latestDevReceipts
-      )
-      for (const version of PR1_MIGRATION_VERSIONS) {
-        expect(upgrade.applyCounts.get(version), `${version} Task 106 execution`).toBe(1)
-      }
-      expect(
-        upgrade.applyCounts.get('0129_workflow_schedules_concurrency_policy') ?? 0,
-        'latest DEV migration body replay'
-      ).toBe(0)
-      expect(upgrade.applyCounts.get(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)).toBe(1)
-      const foundationIndex = upgrade.applyOrder.indexOf('0137_user_access_foundation')
-      const passwordAdmissionIndex = upgrade.applyOrder.indexOf(
-        DEV_PASSWORD_SUCCESS_ADMISSION_VERSION
-      )
-      expect(passwordAdmissionIndex).toBeGreaterThanOrEqual(0)
-      expect(passwordAdmissionIndex).toBeLessThan(foundationIndex)
-      expect(upgrade.applyOrder[foundationIndex + 1]).toBe(
-        '0138_legacy_password_security_epoch_backfill'
-      )
       await assertDbReady(isolatedPool)
 
       // Rollback: the DEV image's migrator runs against the upgraded database.
@@ -991,8 +978,9 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       await assertDbReady(isolatedPool)
 
       const firstReceipts = await versions(isolatedPool)
-      const replay = await withMigrationApplyObserver(observedVersions, async () =>
-        initDb({ connect: () => isolatedPool.connect() })
+      const replay = await withMigrationApplyObserver(
+        new Set(CONTROL_API_MIGRATIONS.map(migration => migration.version)),
+        async () => initDb({ connect: () => isolatedPool.connect() })
       )
       expect(await versions(isolatedPool)).toEqual(firstReceipts)
       expect([...replay.applyCounts.values()]).toEqual([])
@@ -1002,7 +990,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     }
   })
 
-  it('upgrades the exact observed DEV migration identity set with real migration producers', async () => {
+  it('upgrades a database from the pinned pre-fence DEV producer without replay', async () => {
     const databaseName = `r61_observed_dev_${randomBytes(6).toString('hex')}`
     const isolatedUrl = databaseUrl(adminUrl!, databaseName)
     await adminPool.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`)
@@ -1012,7 +1000,6 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       await runPinnedMigrationProducer(OBSERVED_DEV_RUNNER, isolatedUrl)
 
       const observedDevReceipts = await versions(isolatedPool)
-      expect(observedDevReceipts).toHaveLength(OBSERVED_DEV_RECEIPT_COUNT)
       expect(receiptSetSha256(observedDevReceipts)).toBe(OBSERVED_DEV_RECEIPT_SET_SHA256)
       for (const version of [
         '0126_bug192_password_admission',
@@ -1021,63 +1008,11 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       ]) {
         expect(observedDevReceipts).toContain(version)
       }
+      // This start reaches the password-login fence, which no later DEV state can.
+      expect(observedDevReceipts).not.toContain(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)
 
-      const observedDevSet = new Set(observedDevReceipts)
-      const firstRun = await withMigrationApplyObserver(
-        new Set<string>([
-          ...PR1_MIGRATION_VERSIONS,
-          '0126_bug192_password_admission',
-          '0127_password_evaluation_retention',
-          '0128_password_work_ownership',
-          '0129_workflow_schedules_concurrency_policy',
-          DEV_PASSWORD_SUCCESS_ADMISSION_VERSION,
-        ]),
-        async () => initDb({ connect: () => isolatedPool.connect() })
-      )
-      const upgradedReceipts = await versions(isolatedPool)
-      const upgradedSet = new Set(upgradedReceipts)
-      expect(upgradedReceipts).toHaveLength(
-        OBSERVED_DEV_RECEIPT_COUNT + PR1_MIGRATION_VERSIONS.length + 2
-      )
-      expect(upgradedReceipts.filter(version => !observedDevSet.has(version))).toEqual(
-        [
-          ...PR1_MIGRATION_VERSIONS,
-          '0129_workflow_schedules_concurrency_policy',
-          DEV_PASSWORD_SUCCESS_ADMISSION_VERSION,
-        ].sort()
-      )
-      expect(upgradedReceipts.filter(version => observedDevSet.has(version))).toEqual(
-        observedDevReceipts
-      )
-      for (const version of PR1_MIGRATION_VERSIONS) {
-        expect(firstRun.applyCounts.get(version), `${version} applies from DEV`).toBe(1)
-        expect(upgradedSet.has(version), `${version} current receipt`).toBe(true)
-      }
-      for (const version of [
-        '0126_bug192_password_admission',
-        '0127_password_evaluation_retention',
-        '0128_password_work_ownership',
-      ]) {
-        expect(firstRun.applyCounts.get(version) ?? 0, `${version} DEV body replay`).toBe(0)
-      }
-      expect(
-        firstRun.applyCounts.get('0129_workflow_schedules_concurrency_policy'),
-        'new latest DEV migration applies exactly once from the observed DEV state'
-      ).toBe(1)
-      expect(firstRun.applyCounts.get(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)).toBe(1)
-      const foundationIndex = firstRun.applyOrder.indexOf('0137_user_access_foundation')
-      const scheduleIndex = firstRun.applyOrder.indexOf(
-        '0129_workflow_schedules_concurrency_policy'
-      )
-      const passwordAdmissionIndex = firstRun.applyOrder.indexOf(
-        DEV_PASSWORD_SUCCESS_ADMISSION_VERSION
-      )
-      expect(scheduleIndex).toBeGreaterThanOrEqual(0)
-      expect(scheduleIndex).toBeLessThan(passwordAdmissionIndex)
-      expect(passwordAdmissionIndex).toBeLessThan(foundationIndex)
-      expect(firstRun.applyOrder[foundationIndex + 1]).toBe(
-        '0138_legacy_password_security_epoch_backfill'
-      )
+      const { pending } = await upgradeFromProducerReceipts(isolatedPool, observedDevReceipts)
+      expect(pending).toContain(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)
       await assertDbReady(isolatedPool)
 
       const afterUpgrade = await versions(isolatedPool)
