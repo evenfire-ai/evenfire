@@ -242,9 +242,6 @@ describe('workspace overflow genuine focus transitions (R4-L3)', () => {
     )
     expect(tabIds.length).toBeGreaterThan(1)
     expect(
-      await tabs.evaluateAll(nodes => nodes.filter(node => (node as HTMLElement).tabIndex === 0))
-    ).toHaveLength(1)
-    expect(
       await tabs.evaluateAll(nodes =>
         nodes.filter(node => node.getAttribute('aria-selected') === 'true')
       )
@@ -258,6 +255,9 @@ describe('workspace overflow genuine focus transitions (R4-L3)', () => {
     expect(
       await page.evaluate(() => document.activeElement?.getAttribute('data-workspace-tab-id'))
     ).toBe(tabIds[0])
+    expect(
+      await tabs.evaluateAll(nodes => nodes.filter(node => (node as HTMLElement).tabIndex === 0))
+    ).toHaveLength(1)
 
     await page.keyboard.press('Shift+Tab')
     expect(await focused()).toBe('Scroll tabs left')
