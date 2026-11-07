@@ -201,9 +201,9 @@ failed (for example the database was briefly unreachable), the replica keeps
 fetching models.dev with exponential backoff, from 30 seconds up to one hour
 between attempts, and runs the sync again only once it gets a live, plausible
 catalog. If another replica was already syncing at boot, there is no retry.
-control-api refuses to start when `MODELS_DEV_API_URL` is not `https://` or
-points at an internal host, so a misconfigured URL fails the rollout instead of
-being retried.
+control-api refuses to start when `MODELS_DEV_API_URL` is not `https://`, points
+at an internal host or contains credentials, so a misconfigured URL fails the
+rollout instead of being retried.
 
 **Offline installations.** Without egress to models.dev every run is
 `vendored` (the bundled snapshot). Such a run cannot decide, so it inserts
