@@ -485,20 +485,41 @@ test('a duplicated HCC env entry resolves to the last one, as Kubernetes does', 
   }
 })
 
-for (const setting of [
-  'CONTEXT_MAPPER_HOST_IMAGE',
-  'CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY',
-  'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET',
+const unresolved = name => ({ name, valueFrom: { secretKeyRef: { name: 's', key: 'k' } } })
+const withoutHostImage = () => {
+  const deployment = hcc()
+  deployment.spec.template.spec.containers[0].env = []
+  return deployment
+}
+for (const [setting, shown, deployment] of [
+  ['CONTEXT_MAPPER_HOST_IMAGE', '<valueFrom>', () => hcc([unresolved('CONTEXT_MAPPER_HOST_IMAGE')])],
+  ['CONTEXT_MAPPER_HOST_IMAGE', '<unset>', withoutHostImage],
+  ['CONTEXT_MAPPER_HOST_IMAGE', '', () => hcc([{ name: 'CONTEXT_MAPPER_HOST_IMAGE', value: '' }])],
+  [
+    'CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY',
+    '<valueFrom>',
+    () => hcc([unresolved('CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY')]),
+  ],
+  [
+    'CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY',
+    '',
+    () => hcc([{ name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY', value: '' }]),
+  ],
+  [
+    'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET',
+    '<valueFrom>',
+    () => hcc([unresolved('CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET')]),
+  ],
 ]) {
-  test(`an unresolvable ${setting} stops the run before the orphan check Pod`, () => {
+  test(`${setting} read as "${shown}" stops the run before the orphan check Pod`, () => {
     const f = fleet()
-    f.hcc = hcc([{ name: setting, valueFrom: { secretKeyRef: { name: 's', key: 'k' } } }])
+    f.hcc = deployment()
     f.pvcs.push(pvc('delta'))
     f.checks['delta-workspace'] = { output: 'WILL_MERGE\n' }
     const r = verify(f)
     // Witness: the run reached hcc_host_image and stopped there.
     assert.equal(r.status, 2, r.stdout + r.stderr)
-    assert.match(r.stderr, new RegExp(`cannot resolve ${setting} \\(<valueFrom>\\)`))
+    assert.ok(r.stderr.includes(`cannot resolve ${setting} (${shown})`), r.stderr)
     const claims = creates(r.calls).map(m => m.spec.volumes[0].persistentVolumeClaim.claimName)
     assert.ok(!claims.includes('delta-workspace'), claims.join(','))
     assert.doesNotMatch(r.stdout, /^HOST_LAYOUT_VERIFY=/m)
