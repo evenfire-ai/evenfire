@@ -423,14 +423,16 @@ else
 fi
 
 # The CI steps: in the job the dev ruleset requires, with no filter that could skip them, exactly
-# these commands and nothing that softens them, and with history enough to read HEAD^1. Depth
-# comes from the workflow, so the clone below proves it.
+# these commands and nothing that softens them, on the merge result, and with history enough to
+# read HEAD^1. Depth comes from the workflow, so the clone below proves it.
 # shellcheck disable=SC2016 # Ruby source.
 if depth="$(RUBYOPT=--disable=gems ruby -ryaml -e '
   doc = YAML.load_file(ARGV.fetch(0))
   # YAML 1.1 reads the bare key `on` as true.
   triggers = doc.fetch(true)
   abort("pull_request has a filter: #{triggers["pull_request"]}") unless triggers.key?("pull_request") && triggers["pull_request"].nil?
+  # These two reach every step from the top of the file: a shell or a BASH_ENV could soften them.
+  %w[defaults env].each { |key| abort("the workflow sets #{key}: #{doc[key]}") if doc.key?(key) }
   check = "node scripts/release/validate-release-version-bumps.mjs --previous HEAD^1 --all-services"
   own_test = "bash scripts/tests/test-validate-release-version-bumps.sh"
   [check, own_test].each do |command|
@@ -451,7 +453,15 @@ if depth="$(RUBYOPT=--disable=gems ruby -ryaml -e '
   [gate, pin, node].each { |i| abort("step #{i} runs on: #{steps[i]["if"]}") unless steps[i]["if"] == wanted }
   # Exactly these keys: continue-on-error, shell, env or working-directory could soften them.
   [gate, pin].each { |i| abort("step #{i} has other keys: #{steps[i].keys}") unless steps[i].keys.sort == %w[if name run] }
-  puts steps.first.fetch("with").fetch("fetch-depth")
+  # One checkout, first, setting only the depth: a ref moves HEAD off the merge result, so HEAD^1
+  # stops being the base and a collision with it goes green.
+  checkouts = steps.select { |s| s["uses"].to_s.start_with?("actions/checkout@") }
+  abort("want one checkout, as the first step: #{checkouts}") unless checkouts == [steps.first]
+  with = steps.first.fetch("with")
+  abort("the checkout sets other keys: #{with.keys}") unless with.keys == ["fetch-depth"]
+  depth = with.fetch("fetch-depth")
+  abort("fetch-depth #{depth}: the clone below needs a positive integer") unless depth.is_a?(Integer) && depth > 0
+  puts depth
 ' "$REPO_ROOT/.github/workflows/ci-public.yml" 2>&1)"; then
   pass
   git_q -c advice.detachedHead=false clone -q --depth "$depth" --branch collision "file://$WORK/repo" "$WORK/shallow"
