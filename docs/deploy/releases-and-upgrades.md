@@ -53,12 +53,17 @@ The check covers `channel-reader`, `control-api`, `control-ui`, `external-rest-a
 and at `packages/jwt-key-policy/` for the three services that declare it (`control-api`,
 `external-rest-api`, `rpc-proxy`), and it leaves out
 `external-rest-api/src/releaseManifest.ts`, which the release script writes. Unlike the
-hook, it counts both sides of a rename and leaves out what no running image contains:
-test code (`test/`, `tests/` and `e2e/` at the
-service's root, `__tests__/`, `*.test.*`, `*.spec.*`, `*.testFixtures.ts`), Markdown,
-the dev-only files `Makefile`, `makefile`, `vitest.config.*` and `.env.example` at the
-service's root, and `scripts/` in `control-api`, `mcp-host` and `workflow-recipes`. The
-same names lower down still count, and so does `scripts/` in any other service.
+hook, it counts both sides of a rename, so a file moved out of a service with nothing
+else changed there fails the check with no hook bump: set that service's version by
+hand. It also leaves out what a running service does not load: test code (`test/`,
+`tests/` and `e2e/` at the service's root, `__tests__/`, JavaScript and TypeScript files
+named `*.test.*` or `*.spec.*`, `*.testFixtures.ts`), Markdown, the dev-only files
+`Makefile`, `makefile`, `vitest.config.*` and `.env.example` at the service's root, and
+`scripts/` in `control-api`, `mcp-host` and `workflow-recipes`. The same names lower down
+still count, and so does `scripts/` in any other service. `channel-reader` and
+`external-rest-api` compile the test files under `src/` into `dist/`, so for those two one
+version can name two `dist/` trees that differ only in test modules no production module
+imports.
 
 It covers nothing else, so a change elsewhere can still leave one version on two
 trees: services the hook does not bump (`workflow-approval-request-reader`,

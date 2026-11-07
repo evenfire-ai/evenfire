@@ -24,12 +24,14 @@ const PROJECTS = [
   },
 ]
 
-// Test code and Markdown under a service. No running image contains them, so a change to them
-// alone leaves what the service does as it was.
-const NOT_SHIPPED = /(^|\/)__tests__\/|\.(test|spec)\.[cm]?[jt]sx?$|\.testFixtures\.ts$|\.md$/
+// Test code and Markdown under a service. A running service loads neither, so a change to them
+// alone leaves what the service does as it was. channel-reader and external-rest-api compile
+// the test files under src/ into dist/, so their images hold them; no production module imports
+// them.
+const NOT_LOADED = /(^|\/)__tests__\/|\.(test|spec)\.[cm]?[jt]sx?$|\.testFixtures\.ts$|\.md$/
 const TEST_DIRECTORIES = ['test/', 'tests/', 'e2e/']
-// Dev-only files at a service's root. No running image contains them either; the same names
-// lower down count. SERVICES names the services whose scripts/ is dev-only as well. Every other
+// Dev-only files at a service's root. No running image contains them; the same names lower
+// down count. SERVICES names the services whose scripts/ is dev-only as well. Every other
 // file under a service counts, as it does for the pre-commit hook: lockfiles, Dockerfiles,
 // next.config.js and public/ all reach the image.
 const DEV_ONLY_ROOT_FILE = /^(Makefile|makefile|vitest\.config\.[^/]+|\.env\.example)$/
@@ -65,7 +67,7 @@ const SERVICES = [
   ignoredPrefixes: [...TEST_DIRECTORIES, ...devDirectories].map(
     directory => `${root}/${directory}`
   ),
-  ignoredPattern: NOT_SHIPPED,
+  ignoredPattern: NOT_LOADED,
   ignoredRootFile: DEV_ONLY_ROOT_FILE,
 }))
 
