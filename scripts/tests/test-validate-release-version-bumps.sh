@@ -311,20 +311,22 @@ expect_run 'a revert with the version above the base passes' 0 'are valid' --pre
 # Pinned by behavior: a change to each shipped path of each service must fail, naming that
 # service only. This table is separate from the validator's list on purpose. Every service also
 # ships COMMON_SHIPPED. The check counts a service's files apart from its exclusions, so a path
-# that stops counting here means an exclusion reached something an image needs.
-SERVICES='channel-reader src
-control-api src
-control-ui app components lib public next.config.js
+# that stops counting here means an exclusion reached something an image needs. A directory is
+# probed with a .ts file, so the kinds an exclusion could reach by name are listed as real files
+# too: a stylesheet, images, Dockerfile variants the release builds, and build ignore files.
+SERVICES='channel-reader src .dockerignore
+control-api src Dockerfile.dockerignore
+control-ui app components lib public next.config.js app/globals.css public/brand/logo.svg
 external-rest-api src
 host-context-controller src
-mcp-host src 50-mcp-host-service
+mcp-host src 50-mcp-host-service Dockerfile.full
 mcp-proxy src
 mcp-servers/doc-generator src
 mcp-servers/web-search src
-profile-ui app lib public next.config.js
+profile-ui app lib public next.config.js public/brand/logo.png
 rpc-proxy src
 stdio-bridge src
-workflow-recipes src'
+workflow-recipes src Dockerfile.coordinator'
 COMMON_SHIPPED='Dockerfile package-lock.json tsconfig.json'
 
 # Roots the hook bumps that the check leaves out, each for the reason given.
@@ -473,5 +475,5 @@ else
 fi
 
 printf 'validate-release-version-bumps: %d checks, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
-[ "$TESTS_RUN" -eq 244 ] || { echo "FAIL: expected 244 checks, ran $TESTS_RUN" >&2; exit 1; }
+[ "$TESTS_RUN" -eq 265 ] || { echo "FAIL: expected 265 checks, ran $TESTS_RUN" >&2; exit 1; }
 [ "$TESTS_FAILED" -eq 0 ]
