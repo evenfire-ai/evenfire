@@ -794,6 +794,15 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(obsoleteGfsSubjectRevision.rows).toEqual([{ function_name: null }])
     // RP-12: the session-revocation ledger is append-only for the runtime.
     expectPrivileges([...privileges.external_v1_session_revocations], ['SELECT', 'INSERT'])
+    // The runtime never deletes an epoch: the user-deletion cascade runs as the owner.
+    expectPrivileges(
+      [...privileges.external_user_session_security_epochs],
+      ['SELECT', 'INSERT', 'UPDATE']
+    )
+    expectPrivileges(
+      [...privileges.external_user_sessions],
+      ['SELECT', 'INSERT', 'UPDATE', 'DELETE']
+    )
     try {
       await dbPool.query('GRANT UPDATE ON password_verification_work TO control_api_runtime')
       expect(await violations(relationQuery)).toBe(1)

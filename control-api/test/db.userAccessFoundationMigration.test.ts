@@ -78,7 +78,7 @@ describe('user-access foundation migration', () => {
     )
 
     const expected = new Map<string, string>([
-      ['external_user_session_security_epochs', 'legacy_dml'],
+      ['external_user_session_security_epochs', 'upsert'],
       ['external_user_sessions', 'legacy_dml'],
       ['external_v1_session_revocations', 'append'],
     ])

@@ -30,7 +30,7 @@ sentinels=(
   $'password_verification_pace\tlegacy_dml'
   $'password_verification_work\tinsert_delete'
   $'external_user_sessions\tlegacy_dml'
-  $'external_user_session_security_epochs\tlegacy_dml'
+  $'external_user_session_security_epochs\tupsert'
   $'external_v1_session_revocations\tappend'
 )
 missing_sentinels=()

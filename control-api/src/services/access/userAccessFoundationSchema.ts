@@ -95,9 +95,10 @@ async function applyUserAccessRuntimePrivileges(db: DbClient): Promise<void> {
       external_v1_session_revocations
       FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
 
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
-      external_user_sessions,
-      external_user_session_security_epochs
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE external_user_sessions TO control_api_runtime;
+
+    -- The runtime never deletes an epoch. The user-deletion cascade runs as the table owner.
+    GRANT SELECT, INSERT, UPDATE ON TABLE external_user_session_security_epochs
       TO control_api_runtime;
 
     -- Append-only ledger: the runtime records a revocation but never rewrites or
