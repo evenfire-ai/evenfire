@@ -421,7 +421,7 @@ describe('HostReconciler wake fast-path — wake × state transition matrix', ()
     expect(ensureBootstrap).toHaveBeenCalledWith(expect.anything(), {
       forceFreshForWake: false,
       targetSuspended: false,
-      prepareForResourceChange: true,
+      prepareForTemplateChange: expect.any(Function),
     })
     // The guard re-ran the durable wake transition.
     const writes = lifecycleStatusWrites(customApi)
@@ -457,8 +457,20 @@ describe('HostReconciler wake fast-path — wake × state transition matrix', ()
     expect(ensureBootstrap).toHaveBeenCalledWith(expect.anything(), {
       forceFreshForWake: false,
       targetSuspended: false,
-      prepareForResourceChange: true,
+      prepareForTemplateChange: expect.any(Function),
     })
+    // The template-change check uses the woken (active) lifecycle, not the
+    // cached suspended one: a suspended target would never prepare for it.
+    const [, options] = ensureBootstrap.mock.calls.at(-1)! as unknown as [
+      HostCRD,
+      { prepareForTemplateChange: (deployment: k8s.V1Deployment) => boolean },
+    ]
+    const written = hostDeploymentBody(appsApi, 'stateless-host')
+    const otherImage = structuredClone(written)
+    otherImage.spec!.template.spec!.containers.find(c => c.name === 'mcp-host')!.image =
+      'registry.test/mcp-host:other'
+    expect(options.prepareForTemplateChange(otherImage)).toBe(true)
+    expect(options.prepareForTemplateChange(written)).toBe(false)
   })
 
   it('wake in active records the generation only: no scale, no writes beyond the generation', async () => {

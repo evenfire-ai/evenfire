@@ -175,7 +175,7 @@ When a `Host` CRD is created, modified, or deleted in the host namespace, the ho
   - `Deployment/<host-name>`
   - `Service/<host-name>`
   - `PersistentVolumeClaim/<host-name>-workspace`
-  - `Secret/host-<host-name>-mcp-host-runtime-tokens` (runtime credentials, rotated by the reconciler)
+  - `Secret/host-<host-name>-mcp-host-runtime-tokens` (runtime credentials, rotated by the reconciler and minted again before HCC changes the pod template)
   - `ServiceAccount/`, `Role/` and `RoleBinding/` scoping the pod to its own Host CRD and Secrets
   - `NetworkPolicy/allow-rpc-proxy-desktop-<host-name>` for desktop hosts
   - `NetworkPolicy/mcp-host-<host-name>-egress-codex-proxy` / `-egress-grok-proxy` for Hosts configured for a Codex or Grok subscription ([guide](../docs/how-to/connect-llm-subscription.md))

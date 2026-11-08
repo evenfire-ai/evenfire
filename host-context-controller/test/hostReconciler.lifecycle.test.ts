@@ -1038,6 +1038,108 @@ describe('HostReconciler resource rollout bootstrap', () => {
     expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
   })
 
+  describe('non-resource template changes (#1378 class B)', () => {
+    const initialHostImage = config.hostImage
+    const NEW_IMAGE = 'registry.test/mcp-host:sha-next'
+    const image = (deployment: k8s.V1Deployment) =>
+      deployment.spec!.template.spec!.containers.find(c => c.name === 'mcp-host')!.image
+    const deploymentReads = (fixture: Awaited<ReturnType<typeof runtime>>) =>
+      fixture.appsApi.readNamespacedDeployment.mock.calls.filter(
+        ([request]) => (request as { name?: string }).name === fixture.host.name
+      ).length
+
+    afterEach(() => {
+      config.hostImage = initialHostImage
+      // Drop one-shot rejections a test did not consume; the outer hook then
+      // restores the default issuer.
+      issue.mockReset()
+    })
+
+    it('mints before writing a new image to a Ready runtime, then settles', async () => {
+      const fixture = await runtime()
+      const consumedRevision = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      config.hostImage = NEW_IMAGE
+
+      await fixture.reconcile()
+
+      // The new pod reads fresh material: the Secret is replaced before the
+      // template that points at it.
+      expect(issue).toHaveBeenCalledOnce()
+      expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+      const prepared = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      expect(prepared).not.toBe(consumedRevision)
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+      expect(image(fixture.deployment())).toBe(NEW_IMAGE)
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        prepared
+      )
+
+      // Later passes see an equal template and do not mint again.
+      for (let pass = 0; pass < 3; pass++) {
+        fixture.advance()
+        const reads = deploymentReads(fixture)
+        await fixture.reconcile()
+        expect(deploymentReads(fixture)).toBeGreaterThan(reads)
+      }
+      expect(issue).toHaveBeenCalledOnce()
+      expect(fixture.templateChanges()).toBe(1)
+      // Witness: the new pod consumed the prepared material.
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+    })
+
+    it('does not mint for an equal template', async () => {
+      const fixture = await runtime()
+      const reads = deploymentReads(fixture)
+      await fixture.reconcile()
+      await fixture.reconcile()
+      expect(deploymentReads(fixture)).toBeGreaterThan(reads)
+      expect(issue).not.toHaveBeenCalled()
+      expect(fixture.events).toEqual([])
+    })
+
+    it('does not count a replica-only difference as a template change', async () => {
+      const fixture = await runtime()
+      fixture.deployment().spec!.replicas = 2
+      fixture.advance()
+      const reads = deploymentReads(fixture)
+      await fixture.reconcile()
+      expect(deploymentReads(fixture)).toBeGreaterThan(reads)
+      expect(issue).not.toHaveBeenCalled()
+      expect(fixture.templateChanges()).toBe(0)
+    })
+
+    it('keeps the running pod when the mint fails, and retries on a later pass', async () => {
+      const fixture = await runtime()
+      config.hostImage = NEW_IMAGE
+      const unavailable = new Error('synthetic control-api unavailable')
+      issue
+        .mockRejectedValueOnce(unavailable)
+        .mockRejectedValueOnce(unavailable)
+        .mockRejectedValueOnce(unavailable)
+
+      await fixture.reconcile().catch(() => undefined)
+
+      // Witness: three mint attempts. No Secret or Deployment write followed.
+      expect(issue).toHaveBeenCalledTimes(3)
+      expect(fixture.events).toEqual([])
+      expect(image(fixture.deployment())).toBe(initialHostImage)
+
+      await fixture.reconcile()
+      expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+      expect(image(fixture.deployment())).toBe(NEW_IMAGE)
+      expect(issue).toHaveBeenCalledTimes(4)
+    }, 30_000)
+
+    it('does not mint for a template change while the stateless runtime is draining', async () => {
+      const fixture = await runtime({ stateless: true, draining: true })
+      config.hostImage = NEW_IMAGE
+      await fixture.reconcile()
+      // Witness: the pass reached the Deployment write.
+      expect(image(fixture.deployment())).toBe(NEW_IMAGE)
+      expect(issue).not.toHaveBeenCalled()
+    })
+  })
+
   it.each([false, undefined] as const)(
     'blocks an active resource change with an unprepared provision (%s), then resumes with persisted preparation',
     async proof => {
