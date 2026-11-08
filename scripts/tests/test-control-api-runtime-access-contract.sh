@@ -14,8 +14,9 @@ name_diff="$(comm -3 \
   <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$PROFILE_FILE" | sort) \
   <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$PEER_FILE" | sort))"
 
-# Existing sentinel rows, plus the three session rows. The expected relation
-# count is the peer workflow-recipes profile, not a handwritten literal.
+# Existing sentinel rows, plus the three session rows and the three PR2
+# authority rows. The expected relation count is the peer workflow-recipes
+# profile, not a handwritten literal.
 sentinels=(
   $'dynamic_clients\tlegacy_dml'
   $'entity_change_feed\tnone'
@@ -32,6 +33,9 @@ sentinels=(
   $'external_user_sessions\tlegacy_dml'
   $'external_user_session_security_epochs\tupsert'
   $'external_v1_session_revocations\tappend'
+  $'workflow_authority_bindings\tappend'
+  $'pr2_readiness_activations\tupsert'
+  $'pr2_readiness_evidence\tupsert'
 )
 missing_sentinels=()
 for sentinel in "${sentinels[@]}"; do

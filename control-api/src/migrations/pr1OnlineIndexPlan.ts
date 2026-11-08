@@ -1,6 +1,6 @@
 import type { DbClient } from '../db.js'
 import { MIGRATION_EXECUTION_POLICY } from './migrationExecutionPolicy.js'
-import type { RUNNER_MIGRATION_VERSIONS } from './migrationRunner.js'
+import { type RUNNER_MIGRATION_VERSIONS, runBoundedTransaction } from './migrationRunner.js'
 
 export type OnlineIndexDefinition = Readonly<{
   migrationVersion: (typeof RUNNER_MIGRATION_VERSIONS)[number]
@@ -112,7 +112,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
 
 export const PR2_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
   onlineIndex({
-    migrationVersion: '0137_workflow_authority_bindings',
+    migrationVersion: '0139_workflow_authority_bindings',
     phase: 'after-schema',
     name: 'workflow_runs_initiating_authority_binding',
     table: 'workflow_runs',
@@ -143,6 +143,77 @@ const ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
   ...PR1_ONLINE_INDEX_PLAN,
   ...PR2_ONLINE_INDEX_PLAN,
 ])
+
+export type PostSchemaConstraintValidation = Readonly<{
+  migrationVersion: (typeof RUNNER_MIGRATION_VERSIONS)[number]
+  table: string
+  constraint: string
+}>
+
+function constraintValidation(
+  entry: PostSchemaConstraintValidation
+): PostSchemaConstraintValidation {
+  for (const [role, value] of [
+    ['table', entry.table],
+    ['constraint', entry.constraint],
+  ] as const) {
+    if (!PLAIN_IDENTIFIER.test(value)) {
+      throw new Error(
+        `Constraint validation ${entry.constraint} has a non-plain ${role}: ${JSON.stringify(value)}`
+      )
+    }
+  }
+  return Object.freeze({ ...entry })
+}
+
+// Constraints that PR2 adds NOT VALID to tables readers already use. Adding a
+// constraint NOT VALID skips the scan that a validating ADD CONSTRAINT runs
+// under ACCESS EXCLUSIVE; each is validated after its migration's schema
+// transaction commits, under SHARE UPDATE EXCLUSIVE, so reads and writes
+// continue during the scan.
+export const PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS: readonly PostSchemaConstraintValidation[] =
+  Object.freeze([
+    constraintValidation({
+      migrationVersion: '0139_workflow_authority_bindings',
+      table: 'workflow_runs',
+      constraint: 'workflow_runs_initiating_authority_binding_id_fkey',
+    }),
+    constraintValidation({
+      migrationVersion: '0139_workflow_authority_bindings',
+      table: 'workflow_approval_requests',
+      constraint: 'workflow_approval_requests_trigger_authority_binding_id_fkey',
+    }),
+    constraintValidation({
+      migrationVersion: '0139_workflow_authority_bindings',
+      table: 'workflow_approval_requests',
+      constraint: 'workflow_approval_requests_decision_authority_binding_id_fkey',
+    }),
+    constraintValidation({
+      migrationVersion: '0139_workflow_authority_bindings',
+      table: 'workflow_approval_requests',
+      constraint: 'workflow_approval_requests_consume_authority_binding_id_fkey',
+    }),
+    constraintValidation({
+      migrationVersion: '0140_gfs_upload_authority_bindings',
+      table: 'gfs_upload_sessions',
+      constraint: 'gfs_upload_sessions_action_authority_object',
+    }),
+    constraintValidation({
+      migrationVersion: '0144_workflow_run_failure_reason',
+      table: 'workflow_runs',
+      constraint: 'workflow_runs_failure_reason_check',
+    }),
+    constraintValidation({
+      migrationVersion: '0145_workflow_authorization_pause',
+      table: 'workflow_runs',
+      constraint: 'workflow_runs_phase_check',
+    }),
+    constraintValidation({
+      migrationVersion: '0145_workflow_authorization_pause',
+      table: 'workflow_runs',
+      constraint: 'workflow_runs_failure_reason_check',
+    }),
+  ])
 
 type IndexState = {
   schema_name: string
@@ -212,16 +283,26 @@ export async function ensureOnlineIndex(db: DbClient, entry: OnlineIndexDefiniti
   if (!created.indisvalid) throw new Error(`Online index is invalid after creation: ${entry.name}`)
 }
 
-export function hasPostSchemaOnlineIndexes(version: string): boolean {
-  return ONLINE_INDEX_PLAN.some(
-    entry => entry.migrationVersion === version && entry.phase === 'after-schema'
+/**
+ * True when a migration has work that must follow its schema transaction: an
+ * after-schema online index or a constraint validation.
+ */
+export function hasPostSchemaWork(version: string): boolean {
+  return (
+    ONLINE_INDEX_PLAN.some(
+      entry => entry.migrationVersion === version && entry.phase === 'after-schema'
+    ) || PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.some(entry => entry.migrationVersion === version)
   )
 }
 
 /**
- * Builds the planned indexes of one migration and phase. With no phase it
- * builds the indexes that precede the schema transaction; with 'after-schema'
- * it builds the ones that follow it and then drops each index they replace.
+ * Runs the planned online work of one migration and phase. With no phase it
+ * builds the indexes that precede the schema transaction. With 'after-schema'
+ * it builds the ones that follow it, drops each index they replace, and then
+ * validates the migration's NOT VALID constraints, each in its own bounded
+ * transaction. VALIDATE CONSTRAINT takes SHARE UPDATE EXCLUSIVE, so it must
+ * run after the schema transaction has released the ACCESS EXCLUSIVE lock its
+ * ADD CONSTRAINT took; on a valid constraint it is a no-op, so a rerun passes.
  */
 export async function preparePr1Migration(
   db: DbClient,
@@ -231,7 +312,6 @@ export async function preparePr1Migration(
   const indexes = ONLINE_INDEX_PLAN.filter(
     entry => entry.migrationVersion === version && entry.phase === phase
   )
-  if (indexes.length === 0) return
   for (const index of indexes) {
     await ensureOnlineIndex(db, index)
     const replaced = index.replaces
@@ -241,5 +321,20 @@ export async function preparePr1Migration(
         await db.query(`DROP INDEX CONCURRENTLY IF EXISTS ${replaced}`)
       })
     }
+  }
+  if (phase !== 'after-schema') return
+  const validations = PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.filter(
+    entry => entry.migrationVersion === version
+  )
+  for (const validation of validations) {
+    await runBoundedTransaction(db, async () => {
+      // The online bound, scoped to this transaction: a session-level reset
+      // after a failed VALIDATE would itself fail in the aborted transaction
+      // and replace the VALIDATE error.
+      await db.query(
+        `SET LOCAL statement_timeout = '${MIGRATION_EXECUTION_POLICY.onlineIndexStatementTimeoutMs}ms'`
+      )
+      await db.query(`ALTER TABLE ${validation.table} VALIDATE CONSTRAINT ${validation.constraint}`)
+    })
   }
 }

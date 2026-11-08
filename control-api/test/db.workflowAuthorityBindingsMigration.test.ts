@@ -8,7 +8,7 @@ describe('workflow authority bindings migration', () => {
   it('adds normalized immutable provenance and workflow links without rewriting legacy rows', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0137_workflow_authority_bindings'
+      candidate => candidate.version === '0139_workflow_authority_bindings'
     )
     expect(migration).toBeDefined()
 
@@ -35,6 +35,22 @@ describe('workflow authority bindings migration', () => {
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS decision_authority_binding_id')
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS consume_authority_binding_id')
     expect(sql).toContain('REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT')
+    // The four links on pre-existing tables are added without a scan: a plain
+    // nullable column, then its foreign key NOT VALID.
+    for (const [table, column] of [
+      ['workflow_runs', 'initiating_authority_binding_id'],
+      ['workflow_approval_requests', 'trigger_authority_binding_id'],
+      ['workflow_approval_requests', 'decision_authority_binding_id'],
+      ['workflow_approval_requests', 'consume_authority_binding_id'],
+    ]) {
+      expect(sql).toContain(`ADD COLUMN IF NOT EXISTS ${column} UUID NULL;`)
+      expect(sql).toMatch(
+        new RegExp(
+          `ADD CONSTRAINT ${table}_${column}_fkey\\s+FOREIGN KEY \\(${column}\\)\\s+` +
+            'REFERENCES workflow_authority_bindings\\(id\\) ON DELETE RESTRICT NOT VALID;'
+        )
+      )
+    }
     expect(sql).not.toContain(
       'CREATE INDEX IF NOT EXISTS workflow_runs_initiating_authority_binding'
     )

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   PR1_ONLINE_INDEX_PLAN,
+  PR2_ONLINE_INDEX_PLAN,
   expectedIndexDefinition,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
 
@@ -35,7 +36,9 @@ describe('runtime access migrations', () => {
         return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
       }
       if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
-        const entry = PR1_ONLINE_INDEX_PLAN.find(candidate => candidate.createSql === sql)
+        const entry = [...PR1_ONLINE_INDEX_PLAN, ...PR2_ONLINE_INDEX_PLAN].find(
+          candidate => candidate.createSql === sql
+        )
         if (entry) {
           indexStates.set(entry.name, {
             schema_name: 'public',

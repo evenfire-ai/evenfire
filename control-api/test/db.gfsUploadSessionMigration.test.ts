@@ -79,10 +79,12 @@ describe('0097_gfs_upload_sessions', () => {
       'utf8'
     )
 
-    expect(source).toContain("version: '0138_gfs_upload_authority_bindings'")
+    expect(source).toContain("version: '0140_gfs_upload_authority_bindings'")
     expect(schema).toContain('ADD COLUMN IF NOT EXISTS action_authority JSONB NULL')
     expect(schema).toContain('gfs_upload_sessions_action_authority_object')
     expect(schema).toContain("jsonb_typeof(action_authority) = 'object'")
+    // Added without a scan; the migration runner validates it after the commit.
+    expect(schema).toMatch(/jsonb_typeof\(action_authority\) = 'object'\)\s+NOT VALID;/)
     expect(schema).not.toMatch(/UPDATE\s+gfs_upload_sessions\s+SET\s+action_authority/i)
   })
 })

@@ -3266,18 +3266,61 @@ async function applyWorkflowAuthorityBindingsSchema(db: DbClient): Promise<void>
       ON workflow_authority_bindings
       FOR EACH ROW EXECUTE FUNCTION enforce_workflow_authority_binding_parent();
 
+    -- Readers already use these two tables, so each column is added without a
+    -- default (metadata only) and its foreign key NOT VALID (no scan). The
+    -- runner validates the keys after this transaction commits
+    -- (PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS).
     ALTER TABLE workflow_runs
-      ADD COLUMN IF NOT EXISTS initiating_authority_binding_id UUID NULL
-      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+      ADD COLUMN IF NOT EXISTS initiating_authority_binding_id UUID NULL;
     ALTER TABLE workflow_approval_requests
-      ADD COLUMN IF NOT EXISTS trigger_authority_binding_id UUID NULL
-      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+      ADD COLUMN IF NOT EXISTS trigger_authority_binding_id UUID NULL;
     ALTER TABLE workflow_approval_requests
-      ADD COLUMN IF NOT EXISTS decision_authority_binding_id UUID NULL
-      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+      ADD COLUMN IF NOT EXISTS decision_authority_binding_id UUID NULL;
     ALTER TABLE workflow_approval_requests
-      ADD COLUMN IF NOT EXISTS consume_authority_binding_id UUID NULL
-      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+      ADD COLUMN IF NOT EXISTS consume_authority_binding_id UUID NULL;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'workflow_runs_initiating_authority_binding_id_fkey'
+           AND conrelid = 'workflow_runs'::regclass
+      ) THEN
+        ALTER TABLE workflow_runs
+          ADD CONSTRAINT workflow_runs_initiating_authority_binding_id_fkey
+          FOREIGN KEY (initiating_authority_binding_id)
+          REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT NOT VALID;
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'workflow_approval_requests_trigger_authority_binding_id_fkey'
+           AND conrelid = 'workflow_approval_requests'::regclass
+      ) THEN
+        ALTER TABLE workflow_approval_requests
+          ADD CONSTRAINT workflow_approval_requests_trigger_authority_binding_id_fkey
+          FOREIGN KEY (trigger_authority_binding_id)
+          REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT NOT VALID;
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'workflow_approval_requests_decision_authority_binding_id_fkey'
+           AND conrelid = 'workflow_approval_requests'::regclass
+      ) THEN
+        ALTER TABLE workflow_approval_requests
+          ADD CONSTRAINT workflow_approval_requests_decision_authority_binding_id_fkey
+          FOREIGN KEY (decision_authority_binding_id)
+          REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT NOT VALID;
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'workflow_approval_requests_consume_authority_binding_id_fkey'
+           AND conrelid = 'workflow_approval_requests'::regclass
+      ) THEN
+        ALTER TABLE workflow_approval_requests
+          ADD CONSTRAINT workflow_approval_requests_consume_authority_binding_id_fkey
+          FOREIGN KEY (consume_authority_binding_id)
+          REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT NOT VALID;
+      END IF;
+    END $$;
     DO $$
     BEGIN
       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'workflow_recipes_runtime') THEN
@@ -3314,6 +3357,8 @@ async function applyWorkflowRecipeAuthorityEntitySchema(db: DbClient): Promise<v
   `)
 }
 
+// The CHECK is added NOT VALID (no scan under ACCESS EXCLUSIVE); the runner
+// validates it after this transaction commits (PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS).
 async function applyWorkflowRunFailureReasonSchema(db: DbClient): Promise<void> {
   await db.query(`
     ALTER TABLE workflow_runs
@@ -3328,10 +3373,15 @@ async function applyWorkflowRunFailureReasonSchema(db: DbClient): Promise<void> 
           'workflow_authority_access_path_stale',
           'workflow_authority_invalid_binding'
         )
-      );
+      ) NOT VALID;
   `)
 }
 
+// Both CHECKs are added NOT VALID and validated after this transaction commits
+// (PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS). The phase indexes that admit
+// AuthorizationPaused are built online, after the commit, as idx_wr_phase_v2
+// and idx_wr_owner_v2, which replace idx_wr_phase and idx_wr_owner
+// (PR2_ONLINE_INDEX_PLAN).
 async function applyWorkflowRunAuthorizationPauseSchema(db: DbClient): Promise<void> {
   await db.query(`
     ALTER TABLE workflow_runs
@@ -3339,7 +3389,7 @@ async function applyWorkflowRunAuthorizationPauseSchema(db: DbClient): Promise<v
     ALTER TABLE workflow_runs
       ADD CONSTRAINT workflow_runs_phase_check CHECK (
         phase IN ('Pending', 'Running', 'AuthorizationPaused', 'Succeeded', 'Failed', 'Canceled')
-      );
+      ) NOT VALID;
     ALTER TABLE workflow_runs
       DROP CONSTRAINT IF EXISTS workflow_runs_failure_reason_check;
     ALTER TABLE workflow_runs
@@ -3351,31 +3401,8 @@ async function applyWorkflowRunAuthorizationPauseSchema(db: DbClient): Promise<v
           'workflow_authority_invalid_binding',
           'workflow_authority_unavailable'
         )
-      );
-    DROP INDEX IF EXISTS idx_wr_phase;
-    CREATE INDEX idx_wr_phase
-      ON workflow_runs(phase) WHERE phase IN ('Pending', 'Running', 'AuthorizationPaused');
-    DROP INDEX IF EXISTS idx_wr_owner;
-    CREATE INDEX idx_wr_owner
-      ON workflow_runs(owner_instance_id) WHERE phase IN ('Running', 'AuthorizationPaused');
+      ) NOT VALID;
   `)
-}
-
-async function applyR31RuntimeBehaviorSourcesSchema(db: DbClient): Promise<void> {
-  for (const table of ['operational_resource_index', 'operational_resource_index_staging']) {
-    await db.query(
-      `ALTER TABLE ${table}
-         ADD COLUMN IF NOT EXISTS behavior_sources JSONB NOT NULL DEFAULT '{}'::JSONB`
-    )
-    await db.query(`
-      DO $$ BEGIN
-        ALTER TABLE ${table}
-          ADD CONSTRAINT ${table}_behavior_sources_object
-          CHECK (jsonb_typeof(behavior_sources) = 'object');
-      EXCEPTION WHEN duplicate_object THEN NULL;
-      END $$;
-    `)
-  }
 }
 
 // Exported (read-only) as the canonical migration registry. The baseline
@@ -6349,7 +6376,6 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   },
   {
     version: '0115_llm_allowed_models_image_input',
-    legacyVersions: ['011b_llm_allowed_models_image_input'],
     apply: async db => {
       await db.query(`
         ALTER TABLE llm_allowed_models
@@ -6590,79 +6616,30 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: backfillLegacyPasswordSecurityEpochs,
   },
   {
-    // The frozen parent now owns every slot through 0130. Preserve each previously
-    // published PR2 identity so re-slotting records a canonical version without replaying DDL.
-    version: '0137_workflow_authority_bindings',
-    legacyVersions: [
-      '0136_workflow_authority_bindings',
-      '0131_workflow_authority_bindings',
-      '0115_workflow_authority_bindings',
-      '010f_workflow_authority_bindings',
-    ],
+    // PR2 follows dev's last migration, 0138, in consecutive slots. No shared
+    // database recorded an earlier PR2 name, so none is carried as an alias.
+    version: '0139_workflow_authority_bindings',
     apply: applyWorkflowAuthorityBindingsSchema,
   },
   {
-    version: '0138_gfs_upload_authority_bindings',
-    legacyVersions: [
-      '0137_gfs_upload_authority_bindings',
-      '0132_gfs_upload_authority_bindings',
-      '0116_gfs_upload_authority_bindings',
-      '0110_gfs_upload_authority_bindings',
-    ],
+    version: '0140_gfs_upload_authority_bindings',
     apply: applyGfsUploadAuthorityBindingSchema,
   },
   {
-    version: '0139_pr2_readiness_evidence',
-    legacyVersions: [
-      '0138_pr2_readiness_evidence',
-      '0133_pr2_readiness_evidence',
-      '0119_pr2_readiness_evidence',
-      '0117_pr2_readiness_evidence',
-      '0111_pr2_readiness_evidence',
-    ],
+    version: '0141_pr2_readiness_evidence',
     apply: applyPr2ReadinessEvidenceSchema,
   },
   {
-    version: '0140_pr2_runtime_privileges',
-    legacyVersions: [
-      '0139_pr2_runtime_privileges',
-      '0134_pr2_runtime_privileges',
-      '011a_pr2_runtime_privileges',
-      '0118_pr2_runtime_privileges',
-      '0112_pr2_runtime_privileges',
-    ],
+    version: '0142_pr2_runtime_privileges',
     apply: applyPr2RuntimePrivilegesSchema,
   },
   {
-    version: '0141_workflow_recipe_authority_entity',
-    legacyVersions: [
-      '0140_workflow_recipe_authority_entity',
-      '0135_workflow_recipe_authority_entity',
-      '011b_workflow_recipe_authority_entity',
-      '0119_workflow_recipe_authority_entity',
-      '0113_workflow_recipe_authority_entity',
-    ],
+    version: '0143_workflow_recipe_authority_entity',
     apply: applyWorkflowRecipeAuthorityEntitySchema,
   },
   {
-    version: '0142_workflow_run_failure_reason',
-    legacyVersions: [
-      '0141_workflow_run_failure_reason',
-      '0136_workflow_run_failure_reason',
-      '011c_workflow_run_failure_reason',
-      '011a_workflow_run_failure_reason',
-      '0114_workflow_run_failure_reason',
-    ],
+    version: '0144_workflow_run_failure_reason',
     apply: applyWorkflowRunFailureReasonSchema,
-  },
-  {
-    version: '0143_r31_runtime_behavior_sources',
-    legacyVersions: [
-      '0142_r31_runtime_behavior_sources',
-      '0137_r31_runtime_behavior_sources',
-      '0120_r31_runtime_behavior_sources',
-    ],
-    apply: applyR31RuntimeBehaviorSourcesSchema,
   },
   {
     version: '0145_workflow_authorization_pause',

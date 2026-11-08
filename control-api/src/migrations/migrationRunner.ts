@@ -1,6 +1,6 @@
 import type { DbClient } from '../db.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
-import { hasPostSchemaOnlineIndexes, preparePr1Migration } from './pr1OnlineIndexPlan.js'
+import { hasPostSchemaWork, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0137_user_access_foundation',
@@ -53,13 +53,12 @@ const EARLIER_PR1_HEAD_CLEANUP_REFERENCE =
   'see docs/deploy/user-access-foundation-upgrade.md#databases-that-ran-an-earlier-head-of-this-change'
 
 export const PR2_MIGRATION_VERSIONS = Object.freeze([
-  '0137_workflow_authority_bindings',
-  '0138_gfs_upload_authority_bindings',
-  '0139_pr2_readiness_evidence',
-  '0140_pr2_runtime_privileges',
-  '0141_workflow_recipe_authority_entity',
-  '0142_workflow_run_failure_reason',
-  '0143_r31_runtime_behavior_sources',
+  '0139_workflow_authority_bindings',
+  '0140_gfs_upload_authority_bindings',
+  '0141_pr2_readiness_evidence',
+  '0142_pr2_runtime_privileges',
+  '0143_workflow_recipe_authority_entity',
+  '0144_workflow_run_failure_reason',
   '0145_workflow_authorization_pause',
 ])
 
@@ -81,7 +80,10 @@ type ApplyPendingPr1MigrationsInput = {
   recordMigration: (db: DbClient, version: string) => Promise<void>
 }
 
-async function runBoundedTransaction(db: DbClient, work: () => Promise<void>): Promise<void> {
+export async function runBoundedTransaction(
+  db: DbClient,
+  work: () => Promise<void>
+): Promise<void> {
   let started = false
   try {
     await db.query('BEGIN')
@@ -220,7 +222,7 @@ export async function applyPendingPr1Migrations({
       continue
     }
 
-    if (hasPostSchemaOnlineIndexes(version)) {
+    if (hasPostSchemaWork(version)) {
       await runBoundedTransaction(db, async () => migration.apply(db))
       await preparePr1Migration(db, version, 'after-schema')
       await runBoundedTransaction(db, async () => {

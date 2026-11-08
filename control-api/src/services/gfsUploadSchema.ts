@@ -46,11 +46,8 @@ export async function applyGfsUploadSessionSchema(db: DbClient): Promise<void> {
       completed_at TIMESTAMPTZ NULL,
       finalizing_started_at TIMESTAMPTZ NULL,
       cleanup_at TIMESTAMPTZ NULL,
-      action_authority JSONB NULL,
       CONSTRAINT gfs_upload_sessions_owner_idempotency_unique
-        UNIQUE (owner_subject, drive, idempotency_key),
-      CONSTRAINT gfs_upload_sessions_action_authority_object
-        CHECK (action_authority IS NULL OR jsonb_typeof(action_authority) = 'object')
+        UNIQUE (owner_subject, drive, idempotency_key)
     );
 
     CREATE TABLE IF NOT EXISTS gfs_upload_parts (
@@ -102,7 +99,9 @@ export async function applyGfsUploadFinalizingSchema(db: DbClient): Promise<void
 /**
  * Persist immutable, non-bearer v2 provenance for resumable upload sessions.
  * Existing rows remain explicit legacy rows (NULL); controller code refuses to
- * cross between legacy and v2 session modes.
+ * cross between legacy and v2 session modes. The CHECK is added NOT VALID, so
+ * it takes no scan under ACCESS EXCLUSIVE; the migration runner validates it
+ * after this transaction commits.
  */
 export async function applyGfsUploadAuthorityBindingSchema(db: DbClient): Promise<void> {
   await db.query(`
@@ -120,7 +119,8 @@ export async function applyGfsUploadAuthorityBindingSchema(db: DbClient): Promis
          ) THEN
         ALTER TABLE gfs_upload_sessions
           ADD CONSTRAINT gfs_upload_sessions_action_authority_object
-          CHECK (action_authority IS NULL OR jsonb_typeof(action_authority) = 'object');
+          CHECK (action_authority IS NULL OR jsonb_typeof(action_authority) = 'object')
+          NOT VALID;
       END IF;
     END
     $$;

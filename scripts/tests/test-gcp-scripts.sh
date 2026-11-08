@@ -1595,6 +1595,9 @@ assert_control_api_runtime_access_contract_is_exact() {
     $'external_user_sessions\tlegacy_dml'
     $'external_user_session_security_epochs\tupsert'
     $'external_v1_session_revocations\tappend'
+    $'workflow_authority_bindings\tappend'
+    $'pr2_readiness_activations\tupsert'
+    $'pr2_readiness_evidence\tupsert'
   )
   for sentinel in "${sentinels[@]}"; do
     if ! grep -qx "$sentinel" "$profile_file"; then

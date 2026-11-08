@@ -2,8 +2,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { initDb } from '../src/db.js'
-import { PR1_MIGRATION_VERSIONS } from '../src/migrations/migrationRunner.js'
-import { PR1_ONLINE_INDEX_PLAN } from '../src/migrations/pr1OnlineIndexPlan.js'
+import {
+  PR1_MIGRATION_VERSIONS,
+  PR2_MIGRATION_VERSIONS,
+} from '../src/migrations/migrationRunner.js'
+import {
+  PR1_ONLINE_INDEX_PLAN,
+  PR2_ONLINE_INDEX_PLAN,
+  PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS,
+} from '../src/migrations/pr1OnlineIndexPlan.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 /*
@@ -107,18 +114,61 @@ async function triggerDefinitions(pool: Pool): Promise<string[]> {
   return result.rows.map(row => row.definition)
 }
 
+type ConstraintValidationSnapshot = {
+  table: string
+  constraint: string
+  // pg_constraint.convalidated read from another session just before the
+  // runner's VALIDATE CONSTRAINT runs, that is, after the schema commit.
+  convalidatedBefore: boolean | null
+}
+
 type MigrationRun = {
   preExistingTables: Set<string>
   commits: CommitSnapshot[]
+  // Tables committed when the last PR1 receipt commits: every table PR2 finds.
+  pr2PreExistingTables: Set<string>
+  // Each statement PR2 runs inside a transaction, and the locks each PR2
+  // transaction holds just before it commits.
+  pr2TransactionSql: string[]
+  pr2Commits: RelationLock[][]
+  pr2Validations: ConstraintValidationSnapshot[]
+  // Runner events after PR1, in order: `validate:<constraint>` and `receipt:<version>`.
+  pr2Events: string[]
+}
+
+const VALIDATE_CONSTRAINT = /^ALTER TABLE (\w+) VALIDATE CONSTRAINT (\w+)$/
+const LAST_PR1_VERSION = PR1_MIGRATION_VERSIONS.at(-1)!
+
+async function convalidated(
+  observer: Pool,
+  table: string,
+  constraint: string
+): Promise<boolean | null> {
+  const result = await observer.query<{ convalidated: boolean }>(
+    `SELECT con.convalidated
+       FROM pg_constraint con
+       JOIN pg_class rel ON rel.oid = con.conrelid
+       JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+      WHERE ns.nspname = current_schema() AND rel.relname = $1 AND con.conname = $2`,
+    [table, constraint]
+  )
+  return result.rows[0]?.convalidated ?? null
 }
 
 async function migrate(pool: Pool, observer: Pool): Promise<MigrationRun> {
   const run: MigrationRun = {
     preExistingTables: new Set(),
     commits: [],
+    pr2PreExistingTables: new Set(),
+    pr2TransactionSql: [],
+    pr2Commits: [],
+    pr2Validations: [],
+    pr2Events: [],
   }
   const pendingVersions: string[] = []
   let accessFoundationSeen = false
+  let pr2Started = false
+  let inTransaction = false
 
   const connector = {
     connect: async () => {
@@ -133,15 +183,39 @@ async function migrate(pool: Pool, observer: Pool): Promise<MigrationRun> {
             // committed catalog holds exactly the tables that predate PR1.
             run.preExistingTables = await committedTables(observer)
           }
+          const statement = text.trim()
           if (text.includes('INSERT INTO schema_migrations')) {
             pendingVersions.push(String(values?.[0]))
+            if (pr2Started) run.pr2Events.push(`receipt:${String(values?.[0])}`)
           }
-          if (text.trim() === 'COMMIT') {
+          const validation = VALIDATE_CONSTRAINT.exec(statement)
+          if (pr2Started && validation) {
+            run.pr2Events.push(`validate:${validation[2]}`)
+            run.pr2Validations.push({
+              table: validation[1]!,
+              constraint: validation[2]!,
+              convalidatedBefore: await convalidated(observer, validation[1]!, validation[2]!),
+            })
+          }
+          if (pr2Started && inTransaction && statement !== 'COMMIT') {
+            run.pr2TransactionSql.push(statement)
+          }
+          if (statement === 'COMMIT') {
             const versions = pendingVersions.splice(0)
             if (versions.some(version => PR1_VERSIONS.has(version))) {
               run.commits.push({ versions, locks: await relationLocks(observer, pid) })
             }
+            if (pr2Started) run.pr2Commits.push(await relationLocks(observer, pid))
+            const result = await client.query(text, values)
+            inTransaction = false
+            if (!pr2Started && versions.includes(LAST_PR1_VERSION)) {
+              pr2Started = true
+              run.pr2PreExistingTables = await committedTables(observer)
+            }
+            return result
           }
+          if (statement === 'BEGIN') inTransaction = true
+          if (statement === 'ROLLBACK') inTransaction = false
           return client.query(text, values)
         },
       }
@@ -292,5 +366,97 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
       [[...REMOVED_CATALOG_INDEXES]]
     )
     expect(relations.rows).toEqual([])
+  })
+
+  it('adds the eight PR2 constraints NOT VALID on a fresh database and validates each after its schema commit', async () => {
+    const planned = PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => ({
+      table: entry.table,
+      constraint: entry.constraint,
+    }))
+    expect(planned).toHaveLength(8)
+    // Liveness: the runner validated every planned constraint once, in order,
+    // after the PR1 receipts.
+    expect(fresh.pr2Validations.map(({ table, constraint }) => ({ table, constraint }))).toEqual(
+      planned
+    )
+    // Read from another session after each schema commit: not yet validated.
+    expect(
+      fresh.pr2Validations.map(({ constraint, convalidatedBefore }) => [
+        constraint,
+        convalidatedBefore,
+      ])
+    ).toEqual(planned.map(({ constraint }) => [constraint, false]))
+
+    const final = await freshPool.query<{ name: string; valid: boolean }>(
+      `SELECT rel.relname || '.' || con.conname AS name, con.convalidated AS valid
+         FROM pg_constraint con
+         JOIN pg_class rel ON rel.oid = con.conrelid
+        WHERE (rel.relname::text, con.conname::text) IN (
+          SELECT * FROM unnest($1::text[], $2::text[])
+        )
+        ORDER BY 1`,
+      [planned.map(entry => entry.table), planned.map(entry => entry.constraint)]
+    )
+    expect(final.rows).toEqual(
+      [...new Set(planned.map(entry => `${entry.table}.${entry.constraint}`))]
+        .sort()
+        .map(name => ({ name, valid: true }))
+    )
+
+    // Each version's validations come before its receipt, and after the
+    // receipt of the version before it.
+    for (const [index, version] of PR2_MIGRATION_VERSIONS.entries()) {
+      const receipt = fresh.pr2Events.indexOf(`receipt:${version}`)
+      expect(receipt, version).toBeGreaterThanOrEqual(0)
+      const previous = index > 0 ? PR2_MIGRATION_VERSIONS[index - 1] : undefined
+      const after = previous ? fresh.pr2Events.indexOf(`receipt:${previous}`) : -1
+      const ownValidations = PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.filter(
+        entry => entry.migrationVersion === version
+      ).map(entry => `validate:${entry.constraint}`)
+      expect(fresh.pr2Events.slice(after + 1, receipt), version).toEqual(ownValidations)
+    }
+  })
+
+  it('builds no index on a pre-existing table inside a PR2 schema transaction', async () => {
+    // Liveness: PR2's transactions were recorded, including 0139's own table
+    // and the in-transaction index on it, which the pattern below must see.
+    const transactionSql = fresh.pr2TransactionSql.join('\n')
+    expect(transactionSql).toContain('CREATE TABLE IF NOT EXISTS workflow_authority_bindings')
+    expect(fresh.pr2PreExistingTables.has('workflow_runs')).toBe(true)
+    expect(fresh.pr2PreExistingTables.has('workflow_approval_requests')).toBe(true)
+    expect(fresh.pr2PreExistingTables.has('gfs_upload_sessions')).toBe(true)
+    expect(fresh.pr2PreExistingTables.has('workflow_authority_bindings')).toBe(false)
+    const indexTargets = [
+      ...transactionSql.matchAll(
+        /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF NOT EXISTS\s+)?\w+\s+ON\s+(\w+)/gi
+      ),
+    ].map(match => match[1]!)
+    expect(indexTargets).toContain('workflow_authority_bindings')
+    expect(indexTargets.filter(table => fresh.pr2PreExistingTables.has(table))).toEqual([])
+
+    // In-transaction CREATE INDEX takes ShareLock on its table; no PR2
+    // transaction holds one on a table that predates PR2.
+    expect(fresh.pr2Commits.length).toBeGreaterThan(PR2_MIGRATION_VERSIONS.length)
+    expect(
+      fresh.pr2Commits
+        .flat()
+        .filter(lock => fresh.pr2PreExistingTables.has(lock.relname) && lock.mode === 'ShareLock')
+    ).toEqual([])
+
+    const indexes = await freshPool.query<{ name: string; valid: boolean | null }>(
+      `SELECT index_name AS name, i.indisvalid AS valid
+         FROM unnest($1::text[]) AS index_name
+         LEFT JOIN pg_class c ON c.relname = index_name AND c.relkind = 'i'
+         LEFT JOIN pg_index i ON i.indexrelid = c.oid
+        ORDER BY 1`,
+      [[...PR2_ONLINE_INDEX_PLAN.map(entry => entry.name), 'idx_wr_owner', 'idx_wr_phase']]
+    )
+    expect(indexes.rows).toEqual([
+      { name: 'idx_wr_owner', valid: null },
+      { name: 'idx_wr_owner_v2', valid: true },
+      { name: 'idx_wr_phase', valid: null },
+      { name: 'idx_wr_phase_v2', valid: true },
+      { name: 'workflow_runs_initiating_authority_binding', valid: true },
+    ])
   })
 })

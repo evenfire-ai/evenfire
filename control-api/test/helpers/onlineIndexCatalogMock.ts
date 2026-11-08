@@ -1,15 +1,18 @@
 import type { Mock } from 'vitest'
 import {
   PR1_ONLINE_INDEX_PLAN,
+  PR2_ONLINE_INDEX_PLAN,
   expectedIndexDefinition,
 } from '../../src/migrations/pr1OnlineIndexPlan.js'
+
+const PLANNED_INDEXES = [...PR1_ONLINE_INDEX_PLAN, ...PR2_ONLINE_INDEX_PLAN]
 
 type QueryResult = { rows: unknown[]; rowCount: number | null }
 
 /**
  * Adds the minimum PostgreSQL catalog behavior to legacy initDb mocks: the
- * D34 index-state read and the PR1 earlier-head guard, which finds no
- * earlier-head object. The wrapped mock still records and owns every
+ * D34 index-state read for every planned PR1 and PR2 online index and the PR1
+ * earlier-head guard, which finds no earlier-head object. The wrapped mock still records and owns every
  * query/result outside these catalog boundaries.
  */
 export function onlineIndexAwareQuery(
@@ -39,7 +42,7 @@ export function onlineIndexAwareQuery(
       states.delete(sql.trim().split(/\s+/).at(-1) ?? '')
     }
     if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
-      const entry = PR1_ONLINE_INDEX_PLAN.find(candidate => candidate.createSql === sql)
+      const entry = PLANNED_INDEXES.find(candidate => candidate.createSql === sql)
       if (entry) {
         states.set(entry.name, {
           schema_name: 'public',
