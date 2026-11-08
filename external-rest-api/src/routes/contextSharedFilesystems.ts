@@ -68,7 +68,7 @@ export function createContextSharedFilesystemsRouter(): Router {
         )
         res.status(200).json(data)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )

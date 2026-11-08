@@ -35,7 +35,7 @@ export function createExternalWorkflowsRouter(): Router {
         })
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -62,7 +62,7 @@ export function createExternalWorkflowsRouter(): Router {
         )
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -89,7 +89,7 @@ export function createExternalWorkflowsRouter(): Router {
         )
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -125,7 +125,7 @@ export function createExternalWorkflowsRouter(): Router {
         )
         res.status(status).json(data)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -155,7 +155,7 @@ export function createExternalWorkflowsRouter(): Router {
         )
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -183,7 +183,7 @@ export function createExternalWorkflowsRouter(): Router {
         )
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -216,7 +216,7 @@ export function createExternalWorkflowsRouter(): Router {
         }
         res.end(result.body)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )

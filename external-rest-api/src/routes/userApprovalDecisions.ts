@@ -32,7 +32,7 @@ export function createUserApprovalDecisionsRouter(): Router {
       }
       res.status(200).json(await listPendingUserApprovalDecisions(sessionToken, parsedLimit))
     } catch (error) {
-      next(error)
+      forwardControlApiError(error, res, next)
     }
   })
 
@@ -70,7 +70,7 @@ export function createUserApprovalDecisionsRouter(): Router {
           : await decideUserApprovalDecision(sessionToken, approvalId, decision, note)
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
