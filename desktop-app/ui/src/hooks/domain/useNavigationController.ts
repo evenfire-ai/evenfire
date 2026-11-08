@@ -61,6 +61,8 @@ interface FilesPathOwner {
   mutationEpoch: number
   pendingEpoch: number | null
   inFlight: boolean
+  inFlightSessionGeneration: number | null
+  latestSessionGeneration: number | null
   rerunAfterFlight: boolean
 }
 
@@ -126,6 +128,8 @@ export function useNavigationController() {
         mutationEpoch: filesMutationEpochRef.current,
         pendingEpoch: null,
         inFlight: false,
+        inFlightSessionGeneration: null,
+        latestSessionGeneration: null,
         rerunAfterFlight: false,
       }
       filesPathOwnersRef.current.set(tabId, owner)
@@ -220,6 +224,7 @@ export function useNavigationController() {
         filesPathOwnersRef.current.delete(tabId)
         return
       }
+      owner.latestSessionGeneration = sessionGeneration
       const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === tabId)
       const savedPath = tab?.kind === 'files' ? (tab.files?.path ?? null) : null
       if (!savedPath) {
@@ -228,7 +233,10 @@ export function useNavigationController() {
       }
       if (owner.intentPending) return
       if (owner.inFlight) {
-        owner.rerunAfterFlight = true
+        if (owner.inFlightSessionGeneration !== sessionGeneration) {
+          owner.pendingEpoch ??= filesMutationEpochRef.current
+          owner.rerunAfterFlight = true
+        }
         return
       }
       const captured = {
@@ -236,9 +244,11 @@ export function useNavigationController() {
         pathRevision: owner.pathRevision,
         mutationEpoch: owner.pendingEpoch ?? filesMutationEpochRef.current,
         intentSequence: owner.intentSequence,
+        sessionGeneration,
       }
       owner.pendingEpoch = null
       owner.inFlight = true
+      owner.inFlightSessionGeneration = sessionGeneration
       try {
         const result = await resolve(savedPath, sessionGeneration)
         const latest = filesPathOwnerFor(tabId)
@@ -251,7 +261,9 @@ export function useNavigationController() {
         const intentUnchanged =
           latest.intentSequence === captured.intentSequence && !latest.intentPending
         const epochUnchanged = filesMutationEpochRef.current === captured.mutationEpoch
-        if (sameSavedPath && intentUnchanged && epochUnchanged) {
+        const sessionGenerationUnchanged =
+          latest.latestSessionGeneration === captured.sessionGeneration
+        if (sameSavedPath && intentUnchanged && epochUnchanged && sessionGenerationUnchanged) {
           if (result.available) {
             setWorkspaceTabs(state =>
               setFilesTabPath(state, tabId, result.location.gfsUri, result.location.name)
@@ -262,7 +274,10 @@ export function useNavigationController() {
           } else {
             setWorkspaceTabs(state => setFilesTabUnavailable(state, tabId, true))
           }
-        } else if (filesMutationEpochRef.current > captured.mutationEpoch) {
+        } else if (
+          filesMutationEpochRef.current > captured.mutationEpoch ||
+          !sessionGenerationUnchanged
+        ) {
           latest.pendingEpoch = filesMutationEpochRef.current
           latest.rerunAfterFlight = true
         }
@@ -275,7 +290,8 @@ export function useNavigationController() {
           (latestTab.files?.path ?? null) === captured.path &&
           latest.pathRevision === captured.pathRevision &&
           latest.intentSequence === captured.intentSequence &&
-          filesMutationEpochRef.current === captured.mutationEpoch
+          filesMutationEpochRef.current === captured.mutationEpoch &&
+          latest.latestSessionGeneration === captured.sessionGeneration
         ) {
           setWorkspaceTabs(state => setFilesTabUnavailable(state, tabId, true))
         }
@@ -283,10 +299,12 @@ export function useNavigationController() {
         const latest = filesPathOwnersRef.current.get(tabId)
         if (!latest) return
         latest.inFlight = false
+        latest.inFlightSessionGeneration = null
         const shouldRerun = latest.rerunAfterFlight || latest.pendingEpoch !== null
         latest.rerunAfterFlight = false
         if (shouldRerun && !latest.intentPending && latest.pendingEpoch !== null) {
-          void runFilesConvergenceRef.current?.(tabId, sessionGeneration, resolve)
+          const nextGeneration = latest.latestSessionGeneration ?? sessionGeneration
+          void runFilesConvergenceRef.current?.(tabId, nextGeneration, resolve)
         }
       }
     },
@@ -299,6 +317,11 @@ export function useNavigationController() {
       for (const tab of workspaceTabsRef.current.tabs) {
         if (tab.kind !== 'files') continue
         const owner = filesPathOwnerFor(tab.id)
+        if (owner) owner.latestSessionGeneration = sessionGeneration
+        if (owner?.inFlight && owner.inFlightSessionGeneration !== sessionGeneration) {
+          owner.pendingEpoch ??= filesMutationEpochRef.current
+          owner.rerunAfterFlight = true
+        }
         if (owner?.pendingEpoch !== null && owner?.pendingEpoch !== undefined) {
           void runFilesConvergence(tab.id, sessionGeneration, resolve)
         }

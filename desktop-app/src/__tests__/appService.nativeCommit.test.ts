@@ -92,6 +92,7 @@ describe('AppService native auth and environment commit ordering', () => {
         expect(JSON.stringify(receipt)).toBe(frozen)
       } finally {
         releaseRead.resolve()
+        await saving.catch(() => undefined)
         await fs.rm(directory, { recursive: true, force: true })
       }
     }
@@ -162,12 +163,15 @@ describe('AppService native auth and environment commit ordering', () => {
           }
         )
 
-        const callerOutcome = caller.then(
-          () => new Promise<never>(() => undefined),
-          error => Promise.reject(error)
-        )
         await vi.waitFor(() => expect(saveDialog).toHaveBeenCalledOnce(), { timeout: 5000 })
-        await Promise.race([readStarted.promise, callerOutcome])
+        const firstSettlement = await Promise.race([
+          readStarted.promise.then(() => 'reconciliation-started' as const),
+          caller.then(
+            () => 'caller-settled' as const,
+            () => 'caller-rejected' as const
+          ),
+        ])
+        expect(firstSettlement).toBe('reconciliation-started')
         expect((await fs.readFile(filePath)).equals(Buffer.from(bytes))).toBe(true)
         expect((await fs.readdir(directory)).some(name => name.endsWith('.partial'))).toBe(true)
         expect(order).toEqual([])

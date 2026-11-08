@@ -327,7 +327,8 @@ describe('trusted GFS save owner', () => {
           ownerSid: string
           daclSddl: string
           daclProtected: boolean
-          length: number
+          bytesWritten: number
+          physicalLength: number
           hidden: boolean
           identity: string
         }
@@ -363,7 +364,8 @@ describe('trusted GFS save owner', () => {
     expect(stagePath).toBeTruthy()
     expect(restrictedObservation?.inspectStage()).toMatchObject({
       daclSddl: `D:P(A;;FA;;;${restrictedObservation?.ownerSid})(A;;FA;;;SY)`,
-      length: 5,
+      bytesWritten: 5,
+      physicalLength: 5,
       daclProtected: true,
     })
     releaseStage?.()
@@ -371,7 +373,8 @@ describe('trusted GFS save owner', () => {
     expect(result.status).toBe('saved_access_verified')
     expect(restrictedObservation).toMatchObject({
       daclProtected: true,
-      length: 0,
+      bytesWritten: 0,
+      physicalLength: 5,
       hidden: false,
     })
     expect(restrictedObservation?.ownerSid).toMatch(/^S-1-[0-9-]+$/)
@@ -414,5 +417,73 @@ $result | ConvertTo-Json -Compress
     }>
     expect(saved?.Sddl).toBe(reference?.Sddl)
     expect(saved?.Attributes).not.toContain('Hidden')
+  })
+
+  it('S146 freezes access-unverified after one reconciliation and Q remains denied after close', async () => {
+    if (process.platform !== 'win32') return
+    const directory = makeDirectory()
+    const controlPath = path.join(directory, 'q-readable-control.bin')
+    writeFileSync(controlPath, 'Q token control')
+    const powershell = path.join(
+      process.env.SystemRoot ?? 'C:\\Windows',
+      'System32',
+      'WindowsPowerShell',
+      'v1.0',
+      'powershell.exe'
+    )
+    const qProbe = path.join(__dirname, '../../native/test-q-token-access.ps1')
+    const probeQ = (filePath: string, grantRead = false) => {
+      const args = [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        qProbe,
+        '-Path',
+        filePath,
+      ]
+      if (grantRead) args.push('-GrantRead')
+      const result = spawnSync(powershell, args, {
+        encoding: 'utf8',
+        windowsHide: true,
+        shell: false,
+      })
+      expect(result.error).toBeUndefined()
+      expect(result.status).toBe(0)
+      const match = result.stdout.match(/Q_EXIT=(\d+)/)
+      expect(match?.[1]).toBeTruthy()
+      return Number(match![1])
+    }
+    expect(probeQ(controlPath, true)).toBe(0)
+
+    const filePath = path.join(directory, 's146-access-unknown.txt')
+    const accessAttempts: string[] = []
+    const receipt = await saveGfsReceiptToPath({
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      version: 146,
+      filePath,
+      bytes: new TextEncoder().encode('s146 published bytes').buffer,
+      publishFence: async finish => finish(),
+      readWindowsFinalAccess: attempt => {
+        accessAttempts.push(attempt)
+        expect(probeQ(filePath)).toBe(5)
+        throw new Error(`injected ${attempt} access read failure`)
+      },
+    })
+
+    expect(receipt).toMatchObject({
+      status: 'published_access_unverified',
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      version: 146,
+      filePath,
+      publication: 'confirmed_by_native_return',
+      identity: 'verified',
+      access: 'unverified',
+      stageCleanup: 'complete',
+    })
+    expect(accessAttempts).toEqual(['primary', 'reconciliation'])
+    expect(readFileSync(filePath, 'utf8')).toBe('s146 published bytes')
+    expect(probeQ(filePath)).toBe(5)
   })
 })

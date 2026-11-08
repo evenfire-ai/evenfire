@@ -117,6 +117,7 @@ declare global {
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
         onExternalLogout: (callback: () => void) => () => void
+        onSessionCleared: (callback: () => void) => () => void
         logout: () => Promise<{ ok: true; sessionGeneration: number }>
       }
       team: {

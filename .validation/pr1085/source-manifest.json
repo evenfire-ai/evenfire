@@ -1,0 +1,357 @@
+{
+  "candidateBase": "02b1c63ea3d8668f3354a27d7785443ba3621fb9",
+  "files": [
+    {
+      "path": "desktop-app\\native\\binding.gyp",
+      "sha256": "d6965618731f3c7951a6d05e0075c13f20bf7134d43eb374e1b42bf4cceeb9c4"
+    },
+    {
+      "path": "desktop-app\\native\\gfs_save_bridge.cc",
+      "sha256": "42e436df21b90667b35dded3c29f9cb42a8a709e96e060983a28e7e603ef8ad5"
+    },
+    {
+      "path": "desktop-app\\native\\gfs_save_bridge.test.cjs",
+      "sha256": "8591fe9ca9c1c2670254f7c7fd62007d365d80595c82b9bd49588d95b5bc31fa"
+    },
+    {
+      "path": "desktop-app\\native\\gfs_save_bridge_win.cc",
+      "sha256": "4798754c09b1a79ca199dcc3bcf17154f0d2c6605e08a9c67d665f5fc3db26e6"
+    },
+    {
+      "path": "desktop-app\\native\\test-q-token-access.ps1",
+      "sha256": "3e9d8ddb68c4ca387ad095704d88ff812591fba2ac197af9c186aa286e58d569"
+    },
+    {
+      "path": "desktop-app\\package-lock.json",
+      "sha256": "646bed3007a17ecb50ca4b5b5f09d8506ff5b9916adf6bdf2e68062e2296c340"
+    },
+    {
+      "path": "desktop-app\\package.json",
+      "sha256": "6c7392b8ef5f567689f83e4ed192007eb079fa65971d6545f0ddf72b163bcc06"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\appService.bootstrap.test.ts",
+      "sha256": "156aff9f66e8e1b5d10b5811ccad607f726934ff881386e8ba2e7fc7896e8efc"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\appService.devEdgeCompatibility.test.ts",
+      "sha256": "85f506a8660d1a33a73b00276d85e14f81c5f32729c959102a5d1270fe5d11fa"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\appService.entityChanges.test.ts",
+      "sha256": "32239ca89c08adb7243c9404f6929a5d9725e97ed891b2f2a29f563bd057e08d"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\appService.gfsPresenterMutation.test.ts",
+      "sha256": "17c394e9d20e8eb2b9b8eb5deb946bb1cf6df63108cb8ee54e7b690530771494"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\appService.hostWaking.test.ts",
+      "sha256": "7fad4a203383488cdeb49b103ebfb0b726b3cc619b60eb28032e12f2a4d1fd16"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\appService.nativeCommit.test.ts",
+      "sha256": "0961ffd2b4f4c45133cddd8c2cff4c952c1c8fa75ac9e990419b16c7fcc52024"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\appService.sandboxUiApps.test.ts",
+      "sha256": "73255316a5b6afcef567fd25d5c6000bb7d06814e86a6ee204887a9f917d861e"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\appService.sessionRejection.test.ts",
+      "sha256": "8b4fc9d696c900390ec69a0984f75a2c78c694803be4a1ee0a6a6e3d211d9562"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\appService.sessionRejectionClosing.test.ts",
+      "sha256": "ece4782b9ecfd74112b671accee2545db1e984d91522ce7ac87f2861e691f3f5"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\appService.sessionRejectionLogin.test.ts",
+      "sha256": "7443def268bce09000a2e6bfe9ddebb99f3e3217e368a7ab4401e1375681e02f"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\authClient.passwordLogin.test.ts",
+      "sha256": "aefb655136e7132c0c576be5dcee2e81876170b02bc22fc2fff74c99888f70cf"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\gfsSaveOwner.test.ts",
+      "sha256": "6783d9705886cff9a0c56236624e5cbf2240c70692cbaabbc37ad5ace50a5922"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\gfsSaveS147.integration.test.ts",
+      "sha256": "453c1493d932fbcadfcd0e3342d7470a73f44422eb4210791e6c15e3228a6f8b"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\ipc.gfsDeepLinkCopy.test.ts",
+      "sha256": "701e3d90500ea79345a054bcd0e72c8499a730da62192cd5360b6482ba579957"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\ipc.gfsSaveToDisk.test.ts",
+      "sha256": "bac74fc7131cb17925d932579f2805b838d0bdd1dfe4df0c7740fb31be38ab1e"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\mainGfsNavigationIpc.test.ts",
+      "sha256": "31ee9ac251998d097042f0e391ec7a5578db0d47d2747911726cff02cf150a1e"
+    },
+    {
+      "path": "desktop-app\\src\\__tests__\\rpcProxyClient.test.ts",
+      "sha256": "1271336eff6e14a9051293f4aa182ab71f3e7a87f89c9067278bf0a82c3f867b"
+    },
+    {
+      "path": "desktop-app\\src\\appService.ts",
+      "sha256": "67bed6e285054a29e2fc413620e71a6f34905e9f3c80d1d7ed936e701d42ac1b"
+    },
+    {
+      "path": "desktop-app\\src\\authClient.ts",
+      "sha256": "f76f8af14179f390caeb7bf437555a39526c48f26f8a20876dd85000e5cad19c"
+    },
+    {
+      "path": "desktop-app\\src\\gfs\\boundedDownload.ts",
+      "sha256": "959d134c9f4c6a82bfe1ee6f68aa4eb60a8915c0949c9df464675d6dda31a5be"
+    },
+    {
+      "path": "desktop-app\\src\\gfs\\saveOwner.ts",
+      "sha256": "2b2d9adc6e01eed610013721521bf3f7fc4a13a74a2798a02ce57f63ee9d2c2d"
+    },
+    {
+      "path": "desktop-app\\src\\gfs\\uriHandler.ts",
+      "sha256": "cefa0863513f35f724f4b951c17abe5d105e1a792aa502aa0d9f57a58ad96a81"
+    },
+    {
+      "path": "desktop-app\\src\\ipc.ts",
+      "sha256": "8d6ce366d013889a765c963ac07f8d3695f45d348f0d0043821db9a20ebf1f65"
+    },
+    {
+      "path": "desktop-app\\src\\main.ts",
+      "sha256": "b2441157d8a1d5d5734ab25e5981fe8946fef9108eda901e51d784d56a5a8a40"
+    },
+    {
+      "path": "desktop-app\\src\\preload.ts",
+      "sha256": "3c63ebb83303bd8e73642b0f73b6141fdf4fc8ac875765e2ec5559dd8f4c9d46"
+    },
+    {
+      "path": "desktop-app\\src\\renderer.d.ts",
+      "sha256": "0c0d18d660576db595e6600ddf1ec8aa3395abeb9a016841603b66aacad5c508"
+    },
+    {
+      "path": "desktop-app\\test\\adminCreateTeamForUser.test.ts",
+      "sha256": "46e60139fec2b9ee0d9d5ca578d36c9a4fe2d9568aab2c0f9887a9ac465e633e"
+    },
+    {
+      "path": "desktop-app\\test\\e2e-playwright\\chat-open-ab.spec.ts",
+      "sha256": "2ee888ed648aa3d3deb3a21df85234fb4b5384cb37ce1c44ea7b7985b130de6b"
+    },
+    {
+      "path": "desktop-app\\test\\e2e-playwright\\figure-b-sandbox-mcphost-flow.test.ts",
+      "sha256": "f56c9d65a887bb87c069fc75f0518ca157722741017cf689eb019263fe2a313c"
+    },
+    {
+      "path": "desktop-app\\test\\e2e-playwright\\fixtures.ts",
+      "sha256": "456445aa1ce7ffaf7690bd77806f52a45081ec1852d7680144861925f23aa1de"
+    },
+    {
+      "path": "desktop-app\\test\\e2e-playwright\\global-setup.ts",
+      "sha256": "20322e8b5e47d64aadbfa6bf48b4a7ee33aa947e083986837907768f4869d5fd"
+    },
+    {
+      "path": "desktop-app\\test\\e2e-playwright\\playwright.config.ts",
+      "sha256": "cfa9d5086503587dff6a1ce56b49ec9c7664968ab0736e1109f9c0195327802c"
+    },
+    {
+      "path": "desktop-app\\test\\e2e-playwright\\playwright.session-team-ux.config.ts",
+      "sha256": "c4033e73e8ee53b1443e503473d090b29e62c2ce3f54f5f3ef0c8d541f251ced"
+    },
+    {
+      "path": "desktop-app\\test\\e2e-playwright\\session-team-ux.test.ts",
+      "sha256": "4aadf2e6bf5339211aef170d4f9054ba3f70c9672f4ac914a6d5632b6664f74f"
+    },
+    {
+      "path": "desktop-app\\test\\e2e-playwright\\workflow-approval-quadrants\\recipes.ts",
+      "sha256": "291bdab2eab98c0f6a72e493e2c8e0b8e50186c1d9858d5ea8d78e18b07158ce"
+    },
+    {
+      "path": "desktop-app\\test\\e2e-playwright\\workflow-trigger-approval-bound.test.ts",
+      "sha256": "65bfb813554fab7b2a41f106b1f5d6dbdf004edfc6b2df3a309a2f85e309bc26"
+    },
+    {
+      "path": "desktop-app\\test\\e2e-playwright\\workflowUi.ts",
+      "sha256": "f7ba5b38069cf29650dfeb90b47c720d0eb1bf88b85afc11a4a9ea91e042b9b3"
+    },
+    {
+      "path": "desktop-app\\test\\gfsBoundedDownload.test.ts",
+      "sha256": "3facdfe8fb2bf9c86af8f840817d7167b8f37424685f430ce50d19aed0c2ae26"
+    },
+    {
+      "path": "desktop-app\\test\\gfsUriHandler.test.ts",
+      "sha256": "47a4d82e7adfb0779c98a1f16647f3f0583f8def0a759642696e5d19e7b573e0"
+    },
+    {
+      "path": "desktop-app\\test\\globalSetupGuard.test.ts",
+      "sha256": "617df0897b105ee368e503a7f6893e739bad3cba4a4bbe8f99aacc38a0fcecf8"
+    },
+    {
+      "path": "desktop-app\\test\\signInFailure.test.ts",
+      "sha256": "4e29e1c4fe7558586fc6a49a284c73048337d2fc9d93c7b6d4b3ba472a7340ab"
+    },
+    {
+      "path": "desktop-app\\testSupport\\appService.nativeCommitTestHarness.ts",
+      "sha256": "4c775fcd0ceaa0bd61e9649e8fcd83595382ab91351db5679b4b603acc645e24"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\App.tsx",
+      "sha256": "0f0fe65251a02d0291f3048eed547a4018368a3cf116fc446674627d7fd49471"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\__tests__\\App.activationSeam.test.tsx",
+      "sha256": "7a71f7264a5a187638f88193be7ee8b8dea02f918692a090f280aec5fc68cf8c"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\__tests__\\App.chatDrawer.test.tsx",
+      "sha256": "e35d6a55b4aff899c50c1912419d7f5c6429a187b33a30000f872d06e6b26a49"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\__tests__\\App.deepLinks.test.tsx",
+      "sha256": "80f460812e31c48434046a2496d9ba16b09bf636eb2ef39ef6089602d4a4193e"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\__tests__\\App.pluginPreviewSessionEnd.test.tsx",
+      "sha256": "8999185101a6d35a8f00859ce2fa8f97c281773c7c4cb282262331d93a7b0b59"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\__tests__\\App.sandboxUiOwnership.test.tsx",
+      "sha256": "72bd4c49be270bbb5028e9a08846ee129b22c59ce4c77d14216a15af917f43ca"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\__tests__\\AppFilesActionLifecycle.integration.test.tsx",
+      "sha256": "97d45226fd6e074cd8afea505abb3473492aeb3bb0389dfe386b2866a398248a"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\__tests__\\RecoveredAppDeepLinks.test.tsx",
+      "sha256": "16b03c9f5fae917b5827921808d61057e79603ad4346dc59dd1d278acf0ff70e"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\components\\SidebarNav\\FileExplorerTree\\__tests__\\FileExplorerTree.test.tsx",
+      "sha256": "cce39615eed5276d9244420c683166db3a702cfd17f02e6b310c003cf4d0684f"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\components\\SidebarNav\\FileExplorerTree\\index.tsx",
+      "sha256": "252a0e790e4016739d3abcb240fc9024e4d8832177389900f1c1ed5c767eaa57"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\components\\SidebarNav\\FileExplorerTree\\types.ts",
+      "sha256": "feaaa9592fa312c8f1e84699d50fe87a66b2147099d4b9a81eefee69696d4033"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\components\\SidebarNav\\types.ts",
+      "sha256": "61ed8e747c42a145629f3ee8ed2b4908b9bf147285c2902fd8abcce392d3d132"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\gfs\\__tests__\\moveCommit.test.ts",
+      "sha256": "3941692d2a9b051547b77c4edc04d0ecf5fb577c1c5cd3eb6f0b060ad38f8f43"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\gfs\\moveCommit.ts",
+      "sha256": "1d2ff1b9b8a801b8458cb7384533c5c61782bae07d761813ee5db8491387fd9e"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\gfs\\moveCommitRunner.ts",
+      "sha256": "76f3f3255e55e6d5af9c34816f8c36f6ffd2d8d5fa2166cee7b7bbe7fffcc1d4"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\gfs\\moveDialog.tsx",
+      "sha256": "8f77d18c09867a552cd60d2bb9ff83a53b18ed6ff112f333d41b5a4273afb36c"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\__tests__\\useAppController.sessionCleared.test.tsx",
+      "sha256": "3b9969f382773635cfca6610f6ccda71c3e7ca3696438e3ef093100762091dc0"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\__tests__\\useWorkspaceController.test.tsx",
+      "sha256": "26e9872df90e049c60ef9b4108b38705f7b47329f8b9441367c35d985135bee1"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\domain\\__tests__\\__fixtures__\\appControllerHarness.tsx",
+      "sha256": "409d70673a84f9aa17b7dd9586c5d138af4f6ae084bccf7bc60716da70251afd"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\domain\\__tests__\\useAuthController.desktopEnvironment.test.tsx",
+      "sha256": "ee4f060343e65c7a7bdfaaced82f252121c1c375b2aacb8f11b282e3c1fadcbf"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\domain\\__tests__\\useAuthController.sessionCleared.test.tsx",
+      "sha256": "3cdee06ede2d83260d9d99a6801582bacaeb70035fed9f63faa346c3bcf6b846"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\domain\\__tests__\\useAuthController.signInFailure.test.tsx",
+      "sha256": "2eff19922d1ccd18efe337e9b5880aad16e5fafad060609e6fb1e6cb64fc35e9"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\domain\\__tests__\\useNavigationController.test.ts",
+      "sha256": "5c0171b94f1d9cafa76a5d4dc620b40e138d7de44ac2bc8027b97c9f3b4621f7"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\domain\\useAuthController.ts",
+      "sha256": "b50084c0fd5a9a266c2260ce54100eb4c43db1fc5e211a50add6256f6d914c2e"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\domain\\useGfsBrowserController.ts",
+      "sha256": "3f992cb93c2edbdf7923d175d5b5cf1a68e8d22e95b9a06002dbc81deecd9ff2"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\domain\\useNavigationController.ts",
+      "sha256": "893bcaf5d40f8384b981db3be22dbe2d1d64f27695b2d48bbc9ea84e7a535a52"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\hooks\\useAppController.ts",
+      "sha256": "ba14807ff08c87cba16a05758ac8d5349a3f398f0147ed956cad5a4421868773"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\lib\\__tests__\\workspaceTabs.test.ts",
+      "sha256": "c3b3f228495709b9decf3d8d3bdfde070c3b633c53e37817fe8d256fbf7abc62"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\lib\\gfsDownload.ts",
+      "sha256": "56fd2d19c8092ba3c4548a5ea806896de0b6d4444dd5c7e38d1c0300318193e6"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\lib\\signInFailure.ts",
+      "sha256": "3f8f047a539dc974bde41caca0984362577b128d02261a967a576792175a65f6"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\lib\\workspaceTabs.ts",
+      "sha256": "bac83e02f5080b502408185cb3c2dd5fba002e4de2b86f46c06441250f65d41a"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\lib\\workspaceTabs.types.ts",
+      "sha256": "4649522496ebf122df1aebdc7aa1e59aeec7c9957353b2a85de867a620e9a20c"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\pages\\FilePreviewPage.tsx",
+      "sha256": "b21c588e4e6ca45fbef0b6176a77adcfb6f366a36389b2ad990223cf59a31a98"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\pages\\FilesPage.tsx",
+      "sha256": "fba8b59f448a9dfce5fa174cd87b22f392cb992b57936d406ba2366925b89acd"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\pages\\FilesPage.types.ts",
+      "sha256": "be6e3fcd3fa397306e1804c4117c818e1dc8ec9404080ce350353d7b3bddf567"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\pages\\__tests__\\FilePreviewPage.test.tsx",
+      "sha256": "07a60ac7b591605e91bca4d3eb02cda411063a080d2240212132a597e8dddba4"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\pages\\__tests__\\FilesPage.seedLocation.test.tsx",
+      "sha256": "a6f406642ff5c7267143ec7c7fadb6bab36b6839215c64ce762f9a8e26d7ff51"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\pages\\__tests__\\FilesPage.test.tsx",
+      "sha256": "6021e69793aa1ab3f12bd41e542aed38dd97b08c34f825e01a4b2d89e5757ce8"
+    },
+    {
+      "path": "desktop-app\\ui\\src\\pages\\useFilePreviewResourceActions.tsx",
+      "sha256": "cce770e18cae74f821cc316ad13b43aa4cce6b3be89b7fba5214a63f25ef9469"
+    }
+  ]
+}

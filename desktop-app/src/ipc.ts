@@ -2752,7 +2752,7 @@ let ipcGfsSaveReadbackTestHook:
   | ((
       stage: GfsSaveStage,
       attempt: 'primary' | 'reconciliation'
-    ) => string | null | Promise<string | null>)
+    ) => string | null | undefined | Promise<string | null | undefined>)
   | undefined
 
 /** Internal seam for the registered IPC save-owner queue integration test. */

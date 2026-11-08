@@ -1732,8 +1732,31 @@ describe('App deep-link orchestration', () => {
     })
   })
 
+  // A mounted real controller defers its menu data to a post-paint task
+  // (refreshAuthenticatedData → scheduleAfterFirstPaintForSession). Unmounting does
+  // not retire it: it later resolves `window.clerum` and reaches the next test's
+  // bridge. End the session the way main does, so the controller's own identity
+  // guard drops every post-paint task this test scheduled.
+  function retireRealControllerSession(): void {
+    if (!realController) return
+    const listeners = vi
+      .mocked(window.clerum.auth.onExternalLogout)
+      .mock.calls.map(([listener]) => listener)
+    if (listeners.length === 0) {
+      throw new Error('a real App controller mounted without an external-logout listener')
+    }
+    act(() => {
+      for (const listener of listeners) listener()
+    })
+  }
+
   async function cleanupAppDeepLinkSuite(): Promise<void> {
-    cleanup()
+    try {
+      retireRealControllerSession()
+    } finally {
+      // Unmount even when retirement throws, so its error is the one reported.
+      cleanup()
+    }
     unmountRealApp = null
     const bodyChildElementCount = document.body.childElementCount
     vi.useRealTimers()
@@ -7051,7 +7074,10 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(getController().isAuthenticated).toBe(true))
     await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
     await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
-    await waitFor(() => expect(handle.teamDirectory).toHaveBeenCalledOnce())
+    // The post-paint bootstrap has published this App's directory; by then it
+    // has read the bridge exactly once.
+    await waitFor(() => expect(getController().teamDirectoryHydrated).toBe(true))
+    expect(handle.teamDirectory).toHaveBeenCalledOnce()
 
     act(() => {
       getController().handleSelectChatAgent('agent-x', {

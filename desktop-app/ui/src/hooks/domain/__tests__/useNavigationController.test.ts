@@ -572,6 +572,43 @@ describe('Files path convergence coordination', () => {
     ])
   })
 
+  it('does not let an older session mark Files unavailable and reruns with the latest generation', async () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-session-generation', path: savedPath })
+      )
+    )
+    const old = deferred<{ available: false }>()
+    const resolver = vi
+      .fn()
+      .mockImplementationOnce(() => old.promise)
+      .mockResolvedValueOnce({ available: true, location, breadcrumbs: [location] })
+    act(() => result.current.recordFilesMutation())
+    await act(async () => result.current.reconcileFilesConvergence(11, resolver))
+    expect(resolver).toHaveBeenCalledWith(savedPath, 11)
+
+    await act(async () => result.current.reconcileFilesConvergence(12, resolver))
+    expect(resolver).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      old.resolve({ available: false })
+      await old.promise
+    })
+
+    await waitFor(() => expect(resolver).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      const tab = result.current.workspaceTabs.tabs.find(
+        candidate => candidate.id === 'files-session-generation'
+      )
+      expect(tab?.kind === 'files' && tab.files?.path).toBe(canonicalPath)
+      expect(tab?.kind === 'files' && tab.files?.unavailable).not.toBe(true)
+    })
+    expect(resolver.mock.calls).toEqual([
+      [savedPath, 11],
+      [savedPath, 12],
+    ])
+  })
+
   it('coalesces a burst of mutations into one trailing latest-state resolution', async () => {
     const { result } = renderHook(() => useNavigationController())
     act(() =>

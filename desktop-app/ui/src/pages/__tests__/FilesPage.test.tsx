@@ -2522,62 +2522,66 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Renamed to report-renamed.txt', 'success')
   })
 
-  it('uses the visible team directory for user delegation subjects', async () => {
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: {
-        team: {
-          directory: vi.fn(async () => ({
-            currentTeamId: 'team-1',
-            items: [
-              {
-                team: { id: 'team-1', name: 'Core Team', role: 'admin' },
-                members: [
-                  {
-                    id: 'user-2',
-                    email: 'test2@clerum.io',
-                    name: 'Test Two',
-                    role: 'member',
-                    status: 'active',
-                  },
-                ],
-                contextIds: [],
-                agentNames: [],
-              },
-            ],
-          })),
+  it.each(['admin', 'inviter', 'member'] as const)(
+    'shows selectable teammates from the directory for a current %s',
+    async role => {
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          team: {
+            directory: vi.fn(async () => ({
+              currentTeamId: 'team-1',
+              items: [
+                {
+                  team: { id: 'team-1', name: 'Core Team', role },
+                  members: [
+                    {
+                      id: 'user-2',
+                      email: 'test2@clerum.io',
+                      name: 'Test Two',
+                      role: 'member',
+                      status: 'active',
+                    },
+                  ],
+                  contextIds: [],
+                  agentNames: [],
+                },
+              ],
+            })),
+          },
         },
-      },
-    })
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder',
-        name: 'Team folder',
-        kind: 'directory',
-      },
-      affordances: {
-        held: ['read', 'manage_acl'],
-        canDelegate: true,
-        grantableBits: ['read'],
-        canCreateShare: false,
-      },
-    })
+      })
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        current: {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder',
+          name: 'Team folder',
+          kind: 'directory',
+        },
+        affordances: {
+          held: ['read', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: ['read'],
+          canCreateShare: false,
+        },
+      })
 
-    renderFilesPage()
+      renderFilesPage()
 
-    await openManageDialog('Team folder')
+      await openManageDialog('Team folder')
 
-    const subjectPicker = await screen.findByRole('combobox', {
-      name: 'Add people, teams, or agents',
-    })
-    await waitFor(() => expect(subjectPicker).toHaveProperty('disabled', false))
-    fireEvent.focus(subjectPicker)
-    const userLabel = await screen.findByText('Test Two')
-    expect(userLabel.closest('[role="option"]')).toBeTruthy()
-    expect(screen.queryByPlaceholderText(/uuid/i)).toBeNull()
-  })
+      const subjectPicker = await screen.findByRole('combobox', {
+        name: 'Add people, teams, or agents',
+      })
+      await waitFor(() => expect(subjectPicker).toHaveProperty('disabled', false))
+      fireEvent.focus(subjectPicker)
+      const teammate = await screen.findByRole('option', { name: /Test Two/ })
+      fireEvent.click(teammate)
+      expect(screen.getByRole('button', { name: 'Remove Test Two' })).toBeTruthy()
+      expect(screen.queryByPlaceholderText(/uuid/i)).toBeNull()
+    }
+  )
 
   it('loads my agents when the manage dialog opens and offers only valid gfs subjects', async () => {
     const listMine = vi.fn(async () => [

@@ -110,6 +110,8 @@ export interface GfsSaveStage {
   windowsOriginalDaclProtected?: boolean
 }
 
+type WindowsFinalAccessReadAttempt = 'primary' | 'reconciliation'
+
 const WINDOWS_NATIVE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $standardInput = [Console]::OpenStandardInput()
@@ -412,7 +414,8 @@ interface WindowsNativeStageObservation {
   ownerSid: string
   daclSddl: string
   daclProtected: boolean
-  length: number
+  bytesWritten: number
+  physicalLength: number
   hidden: boolean
   identity: string
 }
@@ -822,7 +825,12 @@ export async function saveGfsReceiptToPath(options: {
   readPublishedIdentity?: (
     stage: GfsSaveStage,
     attempt: 'primary' | 'reconciliation'
-  ) => string | null | Promise<string | null>
+  ) => string | null | undefined | Promise<string | null | undefined>
+  /** Internal native-acceptance seam; never supplied by renderer or IPC callers. */
+  readWindowsFinalAccess?: (attempt: WindowsFinalAccessReadAttempt) =>
+    | 'intended'
+    | 'private'
+    | 'unknown'
 }): Promise<GfsSaveTerminalReceipt> {
   if (options.signal?.aborted) {
     return { status: 'cancelled_no_publication', uri: options.uri, filePath: null }
@@ -860,9 +868,10 @@ export async function saveGfsReceiptToPath(options: {
 
       let windowsAccess: 'intended' | 'private' | 'unknown' | undefined
       let windowsAccessReadAttempts = 0
-      const readWindowsAccess = () => {
+      const readWindowsAccess = (attempt: WindowsFinalAccessReadAttempt) => {
         if (!stage.nativeSession || !windowsGfsSaveNative) return 'unknown' as const
         windowsAccessReadAttempts += 1
+        if (options.readWindowsFinalAccess) return options.readWindowsFinalAccess(attempt)
         return windowsGfsSaveNative.inspectFinalAccess(stage.nativeSession)
       }
       if (process.platform === 'win32' && stage.nativeSession && windowsGfsSaveNative) {
@@ -874,7 +883,7 @@ export async function saveGfsReceiptToPath(options: {
           // The following retained-Hpub readback determines the actual state.
         }
         try {
-          windowsAccess = readWindowsAccess()
+          windowsAccess = readWindowsAccess('primary')
         } catch {
           windowsAccess = 'unknown'
         }
@@ -882,7 +891,8 @@ export async function saveGfsReceiptToPath(options: {
 
       const readIdentity = async (attempt: 'primary' | 'reconciliation') => {
         if (options.readPublishedIdentity) {
-          return options.readPublishedIdentity(stage, attempt)
+          const injected = await options.readPublishedIdentity(stage, attempt)
+          if (injected !== undefined) return injected
         }
         if (process.platform === 'win32' && stage.nativeSession && windowsGfsSaveNative)
           return windowsGfsSaveNative.inspectFinal(stage.nativeSession)
@@ -903,7 +913,7 @@ export async function saveGfsReceiptToPath(options: {
           finalIdentity = await readIdentity('reconciliation')
           if (process.platform === 'win32' && stage.nativeSession && windowsGfsSaveNative) {
             try {
-              windowsAccess = readWindowsAccess()
+              windowsAccess = readWindowsAccess('reconciliation')
             } catch {
               windowsAccess = 'unknown'
             }
@@ -923,7 +933,7 @@ export async function saveGfsReceiptToPath(options: {
         // At most one read-only same-Hpub ACL reconciliation. No pathname reopen
         // or permission setter retry is permitted after publication.
         try {
-          windowsAccess = readWindowsAccess()
+          windowsAccess = readWindowsAccess('reconciliation')
         } catch {
           windowsAccess = 'unknown'
         }
@@ -1067,9 +1077,10 @@ export async function saveGfsReceiptToPath(options: {
         publication: 'confirmed_by_native_return',
         identity: 'unverified',
         access: 'unverified',
-        stageCleanup: 'retained',
-        residualStagePath: stage.stagePath,
-        residualStageIdentity: stage.fileIdentity,
+        stageCleanup: process.platform === 'win32' ? 'complete' : 'retained',
+        ...(process.platform === 'win32'
+          ? {}
+          : { residualStagePath: stage.stagePath, residualStageIdentity: stage.fileIdentity }),
       }
       closeGfsSaveStage(stage)
       return receipt

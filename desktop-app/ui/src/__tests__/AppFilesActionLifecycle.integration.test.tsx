@@ -673,6 +673,13 @@ function installClerum(
     moveResource,
     dispatchFileExplorerMutation,
     copyDeepLink: vi.fn(async () => ({ url: 'https://profile.fixture.test/link' })),
+    saveToDisk: vi.fn(async (uri: string) => ({
+      status: 'saved_access_verified' as const,
+      uri,
+      version: 1,
+      filePath: '/fixture/saved.bin',
+      stageCleanup: 'complete' as const,
+    })),
     download: vi.fn(),
     downloadPreview: vi.fn(async (gfsUri: string, _maxBytes: number) => {
       const resource = resources.find(candidate => candidate.gfsUri === gfsUri)
@@ -732,6 +739,7 @@ function installClerum(
     createFileFromPath,
     moveResource,
     dispatchFileExplorerMutation,
+    saveToDisk: gfs.saveToDisk,
   }
 }
 
@@ -2693,6 +2701,54 @@ describe('App → Files action lifecycle integration', () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(targetA.gfsUri))
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(chatTab?.id)
     expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
+  })
+
+  it('downloads the exact sidebar target from Chat without changing the selected tab', async () => {
+    const { gfs, saveToDisk } = installClerum([targetA])
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    const chatTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+    expect(chatTab?.kind).toBe('chat')
+
+    await chooseRowAction('target-a.txt', 'Download')
+    await waitFor(() => expect(saveToDisk).toHaveBeenCalledWith(targetA.gfsUri, 1))
+    await waitFor(() =>
+      expect(appHarness.controller.pushToast).toHaveBeenCalledWith(
+        'Downloaded target-a.txt',
+        'success'
+      )
+    )
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(chatTab?.id)
+    expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
+  })
+
+  it('routes sidebar Share through the existing ACL presenter from Chat', async () => {
+    const resource = await resolveResource(
+      resolvedFile('77777777777777777777777777777777', 'acl-target.txt')
+    )
+    const { gfs } = installClerum([resource], new Map(), {
+      affordanceBits: ['manage_acl'],
+    })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /acl-target\.txt/ })
+    const resolvedBeforeShare = gfs.resolve.mock.calls.length
+    const chatTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+    expect(chatTab?.kind).toBe('chat')
+    await openRowActions('acl-target.txt')
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', {
+      name: 'Share options for acl-target.txt',
+    })
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+
+    expect(await screen.findByRole('dialog', { name: 'Share file acl-target.txt' })).toBeTruthy()
+    expect(gfs.affordances).toHaveBeenCalled()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(chatTab?.id)
+    expect(gfs.resolve).toHaveBeenCalledTimes(resolvedBeforeShare)
   })
 
   it('dispatches the newer clicked row after the earlier action is canceled', async () => {

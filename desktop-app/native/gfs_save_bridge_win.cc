@@ -1,5 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <aclapi.h>
 #include <sddl.h>
@@ -104,7 +106,7 @@ std::string FileIdentity(HANDLE handle) {
   FILE_ID_INFO info{};
   if (!GetFileInformationByHandleEx(handle, FileIdInfo, &info, sizeof(info)))
     return {};
-  char text[8 + 1 + 32 + 1]{};
+  char text[16 + 1 + 32 + 1]{};
   std::snprintf(text, sizeof(text), "%016llX:",
       static_cast<unsigned long long>(info.VolumeSerialNumber));
   size_t offset = std::strlen(text);
@@ -200,7 +202,6 @@ bool CreatePrivateDescriptor(PSECURITY_DESCRIPTOR* descriptor, std::wstring* own
 }
 
 bool CreateIntendedDescriptor(HANDLE directory, PSECURITY_DESCRIPTOR* descriptor) {
-  PSID owner = nullptr;
   HANDLE token = nullptr;
   PSECURITY_DESCRIPTOR parent = nullptr;
   bool ok = false;
@@ -235,6 +236,19 @@ bool DaclMatches(HANDLE handle, const std::string& expected) {
   const std::string actual = DescriptorSddl(descriptor);
   LocalFree(descriptor);
   return !actual.empty() && actual == expected;
+}
+
+bool IsDaclProtected(HANDLE handle, bool* protected_dacl) {
+  PACL dacl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (!GetDacl(handle, &dacl, &descriptor)) return false;
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  const bool ok = GetSecurityDescriptorControl(descriptor, &control, &revision) == TRUE;
+  LocalFree(descriptor);
+  if (!ok) return false;
+  *protected_dacl = (control & SE_DACL_PROTECTED) != 0;
+  return true;
 }
 
 bool ParentIsSupported(HANDLE directory, std::string* filesystem) {
@@ -341,7 +355,7 @@ napi_value OpenDestination(napi_env env, napi_callback_info info) {
     CloseSession(session, true); delete session;
     return ThrowWin(env, "identify private GFS stage");
   }
-  session->writer = CreateFileW(session->stage_path.c_str(), GENERIC_WRITE,
+  session->writer = CreateFileW(session->stage_path.c_str(), FILE_WRITE_DATA | SYNCHRONIZE,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
       FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
   if (session->writer == INVALID_HANDLE_VALUE || !SameHandle(session->published_file, session->writer)) {
@@ -377,15 +391,21 @@ napi_value StageObservation(napi_env env, napi_callback_info info) {
   if (!GetFileInformationByHandleEx(session->published_file, FileStandardInfo,
                                     &standard, sizeof(standard)))
     return ThrowWin(env, "inspect private stage length");
+  bool dacl_protected = false;
+  if (!IsDaclProtected(session->published_file, &dacl_protected))
+    return ThrowWin(env, "inspect private stage DACL protection");
   napi_value result, value;
   napi_create_object(env, &result);
   napi_create_string_utf8(env, WideToUtf8(owner_sid).c_str(), NAPI_AUTO_LENGTH, &value);
   napi_set_named_property(env, result, "ownerSid", value);
   napi_create_string_utf8(env, session->private_sddl.c_str(), NAPI_AUTO_LENGTH, &value);
   napi_set_named_property(env, result, "daclSddl", value);
-  napi_get_boolean(env, true, &value); napi_set_named_property(env, result, "daclProtected", value);
+  napi_get_boolean(env, dacl_protected, &value);
+  napi_set_named_property(env, result, "daclProtected", value);
+  napi_create_double(env, static_cast<double>(session->bytes_written), &value);
+  napi_set_named_property(env, result, "bytesWritten", value);
   napi_create_double(env, static_cast<double>(standard.EndOfFile.QuadPart), &value);
-  napi_set_named_property(env, result, "length", value);
+  napi_set_named_property(env, result, "physicalLength", value);
   napi_get_boolean(env, false, &value); napi_set_named_property(env, result, "hidden", value);
   napi_create_string_utf8(env, session->identity.c_str(), NAPI_AUTO_LENGTH, &value);
   napi_set_named_property(env, result, "identity", value);
@@ -430,7 +450,8 @@ napi_value SettleWriter(napi_env env, napi_callback_info info) {
       FileIdentity(session->published_file) != session->identity ||
       !DaclMatches(session->published_file, session->private_sddl))
     return ThrowState(env, "ERR_GFS_WRITER_SETTLEMENT", "settled stage identity, length, or DACL changed");
-  CloseHandle(session->writer);
+  if (!CloseHandle(session->writer))
+    return ThrowWin(env, "close settled GFS writer handle");
   session->writer = INVALID_HANDLE_VALUE;
   session->writer_settled = true;
   napi_value result; napi_get_undefined(env, &result); return result;
@@ -452,7 +473,7 @@ napi_value PublishNoReplace(napi_env env, napi_callback_info info) {
   if (file_id.VolumeSerialNumber != directory_id.VolumeSerialNumber)
     return ThrowState(env, "ERR_GFS_CROSS_VOLUME", "stage and accepted destination are on different volumes");
   const auto name_bytes = session->target_name.size() * sizeof(wchar_t);
-  const size_t total = offsetof(FILE_RENAME_INFO, FileName) + name_bytes;
+  const size_t total = sizeof(FILE_RENAME_INFO) + name_bytes;
   std::vector<uint8_t> storage(total, 0);
   auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
   rename->ReplaceIfExists = FALSE;

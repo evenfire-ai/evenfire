@@ -6,19 +6,32 @@ const { after, test } = require('node:test')
 
 const bridge = require('./build/Release/evenfire_gfs_save_bridge.node')
 const roots = []
+const sessions = new Set()
 
 after(() => {
+  for (const session of sessions) bridge.closeSession(session)
   for (const root of roots) fs.rmSync(root, { recursive: true, force: true })
 })
 
+function openDestination(destination) {
+  const session = bridge.openDestination(destination)
+  sessions.add(session)
+  return session
+}
+
 function tempRoot() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'evenfire-gfs-native-'))
+  const configuredRoot = process.env.EVENFIRE_GFS_SAVE_TEST_ROOT
+  const parent = configuredRoot ?? os.tmpdir()
+  if (!path.isAbsolute(parent) || !fs.statSync(parent).isDirectory()) {
+    throw new Error('GFS native test root must be an existing absolute directory')
+  }
+  const root = fs.mkdtempSync(path.join(parent, 'evenfire-gfs-native-'))
   roots.push(root)
   return root
 }
 
 function stage(destination, body) {
-  const session = bridge.openDestination(destination)
+  const session = openDestination(destination)
   const stagePath = bridge.stagePath(session)
   const bytes = Buffer.from(body)
   assert.equal(fs.statSync(path.dirname(stagePath)).mode & 0o777, 0o700)
@@ -27,6 +40,38 @@ function stage(destination, body) {
   bridge.settleWriter(session, bytes.length)
   assert.throws(() => bridge.writeChunk(session, Buffer.from('late')))
   return { session, stagePath, bytes }
+}
+
+function qTokenReadExit(filePath, grantRead = false) {
+  const powershell = path.join(
+    process.env.SystemRoot ?? 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe'
+  )
+  const probe = path.join(__dirname, 'test-q-token-access.ps1')
+  const args = [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    probe,
+    '-Path',
+    filePath,
+  ]
+  if (grantRead) args.push('-GrantRead')
+  const result = require('node:child_process').spawnSync(powershell, args, {
+    encoding: 'utf8',
+    windowsHide: true,
+    shell: false,
+  })
+  assert.equal(result.error, undefined, result.error?.message)
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  const match = result.stdout.match(/Q_EXIT=(\d+)/)
+  assert.ok(match, `secondary-principal probe omitted its exit code: ${result.stdout}`)
+  return Number(match[1])
 }
 
 test(
@@ -113,16 +158,24 @@ test(
     const selected = path.join(root, 'selected')
     const accepted = path.join(root, 'accepted-object')
     fs.mkdirSync(selected)
-    const session = bridge.openDestination(path.join(selected, 'saved.bin'))
+    const session = openDestination(path.join(selected, 'saved.bin'))
     const stagePath = bridge.stagePath(session)
     const observation = bridge.stageObservation(session)
     assert.equal(observation.daclProtected, true)
-    assert.equal(observation.length, 0)
+    assert.equal(observation.bytesWritten, 0)
+    assert.equal(observation.physicalLength, 0)
     assert.match(observation.identity, /^[0-9A-F]{16}:[0-9A-F]{32}$/i)
     const body = Buffer.from('accepted Hdir')
     assert.equal(bridge.writeChunk(session, body), body.length)
+    const afterWrite = bridge.stageObservation(session)
+    assert.equal(afterWrite.bytesWritten, body.length)
+    assert.equal(afterWrite.physicalLength, body.length)
     bridge.settleWriter(session, body.length)
+    const afterSettlement = bridge.stageObservation(session)
+    assert.equal(afterSettlement.bytesWritten, body.length)
+    assert.equal(afterSettlement.physicalLength, body.length)
     assert.throws(() => fs.readFileSync(stagePath))
+    assert.equal(qTokenReadExit(stagePath), 5, 'Q-token denial must hold for the private stage')
 
     fs.renameSync(selected, accepted)
     fs.mkdirSync(selected)
@@ -150,7 +203,7 @@ test(
     fs.mkdirSync(selected)
     fs.renameSync(selected, prior)
     fs.mkdirSync(selected)
-    const session = bridge.openDestination(path.join(selected, 'saved.bin'))
+    const session = openDestination(path.join(selected, 'saved.bin'))
     const stagePath = bridge.stagePath(session)
     const body = Buffer.from('option two')
     bridge.writeChunk(session, body)
@@ -167,6 +220,32 @@ test(
 )
 
 test(
+  'Windows private DACL denies a distinct Q token after retained handles close',
+  {
+    skip: process.platform !== 'win32',
+  },
+  () => {
+    const root = tempRoot()
+    const controlPath = path.join(root, 'q-readable-control.bin')
+    fs.writeFileSync(controlPath, 'Q token control')
+    assert.equal(qTokenReadExit(controlPath, true), 0, 'Q-token positive control must read')
+
+    const finalPath = path.join(root, 'private-after-close.bin')
+    const session = bridge.openDestination(finalPath)
+    const observation = bridge.stageObservation(session)
+    const bytes = Buffer.from('private after close')
+    assert.equal(bridge.writeChunk(session, bytes), bytes.length)
+    bridge.settleWriter(session, bytes.length)
+    assert.equal(bridge.publishNoReplace(session), true)
+    assert.equal(bridge.inspectFinal(session), observation.identity)
+    bridge.closeSession(session)
+
+    assert.equal(fs.readFileSync(finalPath, 'utf8'), 'private after close')
+    assert.equal(qTokenReadExit(finalPath), 5, 'Q-token denial must be DACL access denied')
+  }
+)
+
+test(
   'Windows no-replace collision preserves destination bytes',
   {
     skip: process.platform !== 'win32',
@@ -175,7 +254,7 @@ test(
     const root = tempRoot()
     const destination = path.join(root, 'saved.bin')
     fs.writeFileSync(destination, 'sentinel')
-    const session = bridge.openDestination(destination)
+    const session = openDestination(destination)
     const body = Buffer.from('new bytes')
     bridge.writeChunk(session, body)
     bridge.settleWriter(session, body.length)
