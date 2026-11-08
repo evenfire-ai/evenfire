@@ -69,11 +69,27 @@ export interface CreateRunInput {
   max_duration_seconds?: number | null
   ttl_seconds_after_finished?: number | null
   authority?: WorkflowAuthorityBinding | null
-  reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
-  validateCurrentInTransaction?: (
-    db: DbClient,
-    authority: WorkflowAuthorityBinding
-  ) => Promise<WorkflowAuthorityBinding>
+  validateCurrentInTransaction?: WorkflowTriggerAuthorityValidator
+}
+
+export type WorkflowTriggerAuthorityValidator = (
+  db: DbClient,
+  authority: WorkflowAuthorityBinding
+) => Promise<WorkflowAuthorityBinding>
+
+/**
+ * A V2 trigger authority is persisted only after its bound rows are re-checked
+ * inside the insert transaction, so a caller that supplies an authority
+ * without that row-check validator is a wiring defect: it fails before any
+ * database work.
+ */
+export function requireTriggerAuthorityValidator(
+  validateCurrentInTransaction: WorkflowTriggerAuthorityValidator | undefined
+): WorkflowTriggerAuthorityValidator {
+  if (!validateCurrentInTransaction) {
+    throw new Error('workflow_trigger_current_authority_validator_required')
+  }
+  return validateCurrentInTransaction
 }
 
 export interface CreateApprovedRunInput extends CreateRunInput {
@@ -219,22 +235,13 @@ export function computeWorkflowRunPayloadHash(params: {
  * If `idempotency_key` is null, the caller always gets a new run.
  */
 export async function createRun(input: CreateRunInput, db?: DbClient): Promise<CreateRunResult> {
-  if ((input.authority || input.reauthorize) && !db) {
-    const authority = input.reauthorize ? await input.reauthorize() : input.authority
-    if (input.authority && authority?.bindingHash !== input.authority.bindingHash) {
-      throw new WorkflowRunIdempotencyConflictError()
-    }
-    if (input.reauthorize && authority && !input.validateCurrentInTransaction) {
-      throw new Error('workflow_trigger_current_authority_validator_required')
-    }
-    return withTransaction(transaction =>
-      createRun({ ...input, authority, reauthorize: undefined }, transaction)
-    )
+  const validateCurrentInTransaction = input.authority
+    ? requireTriggerAuthorityValidator(input.validateCurrentInTransaction)
+    : null
+  if (input.authority && !db) {
+    return withTransaction(transaction => createRun(input, transaction))
   }
   const client = getDb(db)
-  if (input.reauthorize) {
-    throw new Error('workflow_trigger_reauthorization_must_precede_transaction')
-  }
   if (input.authority && input.idempotency_key) {
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
       `workflow_run:${input.recipe_namespace}:${input.recipe_name}:${input.idempotency_key}`,
@@ -256,9 +263,9 @@ export async function createRun(input: CreateRunInput, db?: DbClient): Promise<C
     }
   }
   const authority =
-    input.authority && input.validateCurrentInTransaction
-      ? await input.validateCurrentInTransaction(client, input.authority)
-      : input.authority
+    input.authority && validateCurrentInTransaction
+      ? await validateCurrentInTransaction(client, input.authority)
+      : null
   if (input.authority && authority?.bindingHash !== input.authority.bindingHash) {
     throw new WorkflowRunIdempotencyConflictError()
   }

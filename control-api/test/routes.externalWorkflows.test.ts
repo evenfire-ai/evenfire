@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { hashActionTarget } from '@clerum/action-context-contracts'
 import { createExternalWorkflowsRouter } from '../src/routes/external/workflows/index.js'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 import { MockGateway } from './mockGateway.js'
@@ -21,7 +22,6 @@ const mockVerifyInternalControlJwt = vi.fn()
 const mockIsAdminTokenRevoked = vi.fn()
 const mockVerifyUserDelegationV2 = vi.fn()
 const mockCheckpointActionAuthority = vi.fn()
-const mockCaptureWorkflowTriggerAuthorityFence = vi.fn()
 const mockRequireCurrentWorkflowTriggerAuthority = vi.fn()
 
 vi.mock('../src/db.js', () => ({
@@ -84,8 +84,6 @@ vi.mock('../src/services/workflows/workflowAuthorityBindingService.js', async im
   ...(await importOriginal<
     typeof import('../src/services/workflows/workflowAuthorityBindingService.js')
   >()),
-  captureWorkflowTriggerAuthorityFence: (...args: unknown[]) =>
-    mockCaptureWorkflowTriggerAuthorityFence(...args),
   requireCurrentWorkflowTriggerAuthority: (...args: unknown[]) =>
     mockRequireCurrentWorkflowTriggerAuthority(...args),
 }))
@@ -172,7 +170,6 @@ describe('routes/external/workflows', () => {
     mockIsAdminTokenRevoked.mockReset()
     mockVerifyUserDelegationV2.mockReset()
     mockCheckpointActionAuthority.mockReset()
-    mockCaptureWorkflowTriggerAuthorityFence.mockReset()
     mockRequireCurrentWorkflowTriggerAuthority.mockReset()
     gateway = new MockGateway(RECIPE_NS)
 
@@ -286,7 +283,6 @@ describe('routes/external/workflows', () => {
     mockRequireCurrentWorkflowTriggerAuthority.mockImplementation(
       async ({ authority }: { authority: unknown }) => authority
     )
-    mockCaptureWorkflowTriggerAuthorityFence.mockResolvedValue({ fingerprint: 'current-fence' })
   })
 
   describe('Caller-kind gate (allowedCallerKinds: ["user-session"])', () => {
@@ -583,17 +579,47 @@ describe('routes/external/workflows', () => {
         .mockResolvedValueOnce({ rows: [{ id: 'binding-1' }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [dbRow], rowCount: 1 })
 
-      const response = await request(makeApp(gateway))
-        .post(`/external/workflows/${RECIPE_NS}/test-recipe/trigger`)
-        .set('x-user-session-token', 'user-session-token-v2')
-        .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
-        .set('Idempotency-Key', 'external-v2-key')
-        .send({ inputs: {} })
+      const createBudget = vi.spyOn(AccessExecutionBudget, 'create')
+      const closeBudget = vi.spyOn(AccessExecutionBudget.prototype, 'close')
+      let response
+      try {
+        response = await request(makeApp(gateway))
+          .post(`/external/workflows/${RECIPE_NS}/test-recipe/trigger`)
+          .set('x-user-session-token', 'user-session-token-v2')
+          .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
+          .set('Idempotency-Key', 'external-v2-key')
+          .send({ inputs: {} })
+
+        // X5: the one V2 checkpoint owns one action budget and closes it.
+        expect(createBudget).toHaveBeenCalledTimes(1)
+        expect(createBudget).toHaveBeenCalledWith('action')
+        const budget = createBudget.mock.results[0]?.value
+        expect(budget).toBeInstanceOf(AccessExecutionBudget)
+        expect(mockCheckpointActionAuthority).toHaveBeenCalledWith(
+          expect.objectContaining({ budget })
+        )
+        expect(closeBudget).toHaveBeenCalledTimes(1)
+        expect(closeBudget.mock.contexts[0]).toBe(budget)
+      } finally {
+        createBudget.mockRestore()
+        closeBudget.mockRestore()
+      }
 
       expect(response.status, JSON.stringify(response.body)).toBe(201)
       expect(response.body.id).toBe('external-v2-run')
-      expect(mockVerifyUserDelegationV2).toHaveBeenCalledTimes(2)
-      expect(mockCheckpointActionAuthority).toHaveBeenCalledTimes(2)
+      // WF-10/15: one authority checkpoint per request, then the bound-row
+      // check inside the insert transaction, with no captured fence.
+      expect(mockVerifyUserDelegationV2).toHaveBeenCalledTimes(1)
+      expect(mockCheckpointActionAuthority).toHaveBeenCalledTimes(1)
+      expect(mockRequireCurrentWorkflowTriggerAuthority).toHaveBeenCalledTimes(1)
+      const [rowCheckInput] = mockRequireCurrentWorkflowTriggerAuthority.mock.calls[0] as [
+        Record<string, unknown>,
+      ]
+      expect(Object.keys(rowCheckInput).sort()).toEqual(['authority', 'db'])
+      expect(rowCheckInput.authority).toMatchObject({
+        binding: { operationId: 'workflow.trigger', target },
+      })
+      expect(mockWithTransaction).toHaveBeenCalledTimes(1)
       expect(
         mockPoolQuery.mock.calls.some(([sql]) =>
           String(sql).includes('INSERT INTO workflow_authority_bindings')

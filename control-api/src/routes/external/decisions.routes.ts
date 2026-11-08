@@ -1,13 +1,13 @@
 import { NextFunction, Request, Response, Router } from 'express'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
-import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { requireApprovalDecisionAccess } from '../../middleware/approvalDecisionAccess.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import { requireValidExternalSessionToken } from '../../middleware/externalSessionAuth.js'
 import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
 import { mcpHostHttpMetrics } from '../../middleware/mcpHostHttpMetrics.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { AccessExecutionBudget } from '../../services/access/accessExecutionBudget.js'
 import {
   ApprovalConsumeError,
   ApprovalTriggerRunIdempotencyConflictError,
@@ -115,7 +115,6 @@ export function createExternalUserApprovalDecisionsRouter(gateway: K8sGateway): 
       onBackendUnavailable: 'process-memory',
     }),
     requireApprovalDecisionAccess(),
-    attachAccessExecutionBudget,
     (req, res, next) => {
       void (async () => {
         try {
@@ -167,13 +166,21 @@ export function createExternalUserApprovalDecisionsRouter(gateway: K8sGateway): 
                 authority,
                 {
                   authorizeBeforeLock: () => requireWorkflowActionAuthority(authorityInput),
-                  validateCurrentInTransaction: db =>
-                    requireCurrentWorkflowApprovalAuthority({
-                      db,
-                      authority,
-                      budget: extReq.accessExecutionBudget!,
-                      correlationId: extReq.correlationId,
-                    }),
+                  validateCurrentInTransaction: async db => {
+                    // The V2 decision owns one action budget for this
+                    // in-transaction check; V1 decisions never allocate one.
+                    const budget = AccessExecutionBudget.create('action')
+                    try {
+                      return await requireCurrentWorkflowApprovalAuthority({
+                        db,
+                        authority,
+                        budget,
+                        correlationId: extReq.correlationId,
+                      })
+                    } finally {
+                      budget.close()
+                    }
+                  },
                 }
               )
             : await recordDecision(approval.id, decision, decisionActor, note, decisionAudit)

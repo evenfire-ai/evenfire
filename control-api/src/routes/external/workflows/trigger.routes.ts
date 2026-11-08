@@ -5,7 +5,6 @@ import { rootLogger } from '../../../observability/logger.js'
 import type { TriggerBody } from '../../../services/workflows/types.js'
 import {
   WorkflowAuthorityError,
-  captureWorkflowTriggerAuthorityFence,
   requireCurrentWorkflowTriggerAuthority,
   requireWorkflowActionAuthority,
 } from '../../../services/workflows/workflowAuthorityBindingService.js'
@@ -46,9 +45,9 @@ export function createExternalWorkflowTriggerRoutes(gateway: K8sGateway): Router
           target: Object.freeze({ recipeNamespace: ns, recipeName: name }),
           gateway,
         } as const
+        // One authority checkpoint per request (WF-10/15); the insert
+        // transaction then re-checks only the bound rows.
         const authority = await requireWorkflowActionAuthority(authorityInput)
-        let phaseOneFence: Awaited<ReturnType<typeof captureWorkflowTriggerAuthorityFence>> | null =
-          null
         const result = await triggerWorkflow({
           gateway,
           caller,
@@ -58,30 +57,8 @@ export function createExternalWorkflowTriggerRoutes(gateway: K8sGateway): Router
           idempotencyKey,
           correlationId: req.correlationId,
           authority,
-          reauthorize: async () => {
-            if (!authority) return null
-            const before = await captureWorkflowTriggerAuthorityFence({ authority })
-            const current = await requireWorkflowActionAuthority(authorityInput)
-            if (!current || current.bindingHash !== authority.bindingHash) {
-              throw new WorkflowAuthorityError(409, 'access_path_stale')
-            }
-            const after = await captureWorkflowTriggerAuthorityFence({ authority: current })
-            if (before.fingerprint !== after.fingerprint) {
-              throw new WorkflowAuthorityError(409, 'access_path_stale')
-            }
-            phaseOneFence = after
-            return current
-          },
-          validateCurrentInTransaction: (db, phaseOneAuthority) => {
-            if (!phaseOneFence) {
-              throw new WorkflowAuthorityError(409, 'access_path_stale')
-            }
-            return requireCurrentWorkflowTriggerAuthority({
-              db,
-              authority: phaseOneAuthority,
-              expectedFence: phaseOneFence,
-            })
-          },
+          validateCurrentInTransaction: (db, boundAuthority) =>
+            requireCurrentWorkflowTriggerAuthority({ db, authority: boundAuthority }),
         })
 
         if (result.kind === 'approval') {

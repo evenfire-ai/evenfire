@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { DbClient } from '../src/db.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
@@ -12,7 +12,6 @@ import {
   issueUserDelegationV2,
   verifyUserDelegationV2,
 } from '../src/utils/auth/userDelegationV2Token.js'
-import { stableStringify } from '../src/utils/stableStringify.js'
 
 const userId = randomUUID()
 const sid = randomUUID()
@@ -31,38 +30,7 @@ const sessionRows = [
     absolute_expires_at: absoluteExpiresAt,
   },
 ]
-const membershipRows: unknown[] = []
-const resourceRevisionRows = [{ revision: 1 }]
-const sourceStateRows = [
-  { generation: 1, resource_version: 'rv1', status: 'current', safe_error_code: null },
-]
-const resourceRows = [
-  {
-    source_generation: 1,
-    provider_uid: 'provider-1',
-    provider_resource_version: 'rv1',
-    enabled: true,
-    deleted_at: null,
-  },
-]
-const relationshipRows: unknown[] = []
 const grantRows = [{ user_id: userId, recipe_namespace: recipeNamespace, recipe_name: recipeName }]
-
-function expectedFingerprint(): string {
-  return createHash('sha256')
-    .update(
-      stableStringify({
-        session: sessionRows,
-        memberships: membershipRows,
-        resourceRevision: resourceRevisionRows,
-        sourceState: sourceStateRows,
-        resource: resourceRows,
-        relationships: relationshipRows,
-        grant: grantRows,
-      })
-    )
-    .digest('hex')
-}
 
 async function createAuthority() {
   const resource = canonicalResourceIdentity({
@@ -116,37 +84,19 @@ function expiryDb(input: {
         queryOrder.push('session')
         return response(sessionRows)
       }
-      if (sql.includes('SELECT tm.team_id')) {
-        queryOrder.push('memberships')
-        return response(membershipRows)
-      }
-      if (sql.includes('SELECT revision')) {
-        queryOrder.push('resource-revision')
-        return response(resourceRevisionRows)
-      }
-      if (sql.includes('SELECT generation, resource_version')) {
-        queryOrder.push('source-state')
-        return response(sourceStateRows)
-      }
-      if (sql.includes('SELECT source_generation')) {
-        queryOrder.push('resource')
-        return response(resourceRows)
-      }
-      if (sql.includes('SELECT source_type')) {
-        queryOrder.push('relationships')
-        return response(relationshipRows)
-      }
       if (sql.includes('SELECT user_id, recipe_namespace')) {
         queryOrder.push('grant')
         return response(grantRows)
       }
+      // The row check reads only the bound session and grant rows; any other
+      // statement (a revision counter or an index table) fails the test.
       throw new Error(`Unexpected workflow authority query: ${sql}`)
     },
   }
   return { db: db as unknown as DbClient, queryOrder }
 }
 
-describe('workflow trigger final expiry fence', () => {
+describe('workflow trigger row check final expiry', () => {
   it.each([
     {
       field: 'delegation',
@@ -169,15 +119,11 @@ describe('workflow trigger final expiry fence', () => {
   ])('rejects $field expiry observed after final authority reads', async status => {
     const authority = await createAuthority()
     const { db, queryOrder } = expiryDb(status)
-    await expect(
-      requireCurrentWorkflowTriggerAuthority({
-        db,
-        authority,
-        expectedFence: { fingerprint: expectedFingerprint() },
-      })
-    ).rejects.toMatchObject({ status: 409, code: 'access_path_stale' })
-    expect(queryOrder.at(-1)).toBe('final-expiry-check')
-    expect(queryOrder.indexOf('final-expiry-check')).toBeGreaterThan(queryOrder.indexOf('grant'))
+    await expect(requireCurrentWorkflowTriggerAuthority({ db, authority })).rejects.toMatchObject({
+      status: 409,
+      code: 'access_path_stale',
+    })
+    expect(queryOrder).toEqual(['session', 'grant', 'final-expiry-check'])
   })
 
   it('preserves a matching, current authority', async () => {
@@ -187,13 +133,7 @@ describe('workflow trigger final expiry fence', () => {
       idleSessionCurrentAtFinalFence: true,
       absoluteSessionCurrentAtFinalFence: true,
     })
-    await expect(
-      requireCurrentWorkflowTriggerAuthority({
-        db,
-        authority,
-        expectedFence: { fingerprint: expectedFingerprint() },
-      })
-    ).resolves.toBe(authority)
-    expect(queryOrder.at(-1)).toBe('final-expiry-check')
+    await expect(requireCurrentWorkflowTriggerAuthority({ db, authority })).resolves.toBe(authority)
+    expect(queryOrder).toEqual(['session', 'grant', 'final-expiry-check'])
   })
 })

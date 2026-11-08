@@ -46,7 +46,6 @@ export function createExternalWorkflowResumeRoutes(gateway: K8sGateway): Router 
           recipeNamespace: ns,
           recipeName: name,
           authority,
-          gateway,
           db: pool,
         })
         res.json({ run: mapDbRun(row) })

@@ -31,7 +31,6 @@ import {
 } from '../../gfs/tree.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
-import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import {
   type ExternalGfsOperationClass,
   externalGfsClassRlPerMin,
@@ -504,7 +503,6 @@ export function createExternalGfsRouter(gateway?: Pick<K8sGateway, 'getResourceE
   // Every gfs user route is on the Session-JWT plane: the user session token
   // (x-user-session-token, forwarded by external-rest-api) is required.
   router.use('/external/gfs', requireValidExternalSessionToken)
-  router.use('/external/gfs', attachAccessExecutionBudget)
   router.use('/external/gfs', attachExternalGfsRequestId)
   // This boundary deliberately precedes attachExternalGfsAuthority. A rate
   // rejection therefore performs no operator-link lookup or route-specific

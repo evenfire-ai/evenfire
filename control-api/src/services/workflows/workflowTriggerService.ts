@@ -1,4 +1,3 @@
-import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import { getMcpHostCallerKey } from '../../utils/auth/mcpHostJwtToken.js'
 import {
@@ -11,6 +10,7 @@ import {
   type WorkflowRunActorType,
   WorkflowRunIdempotencyConflictError,
   type WorkflowRunRow,
+  type WorkflowTriggerAuthorityValidator,
   computeWorkflowRunPayloadHash,
   createApprovedRun,
   createRun,
@@ -260,11 +260,7 @@ export async function triggerWorkflow(params: {
   idempotencyKey: string
   correlationId?: string
   authority?: WorkflowAuthorityBinding | null
-  reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
-  validateCurrentInTransaction?: (
-    db: DbClient,
-    authority: WorkflowAuthorityBinding
-  ) => Promise<WorkflowAuthorityBinding>
+  validateCurrentInTransaction?: WorkflowTriggerAuthorityValidator
 }): Promise<WorkflowTriggerResult> {
   const { gateway, caller, recipeNamespace: ns, recipeName: name, body } = params
   const idempotencyKey = params.idempotencyKey.trim()
@@ -414,7 +410,6 @@ export async function triggerWorkflow(params: {
         ttlSecondsAfterFinished,
       },
       authority: params.authority,
-      reauthorize: params.reauthorize,
       validateCurrentInTransaction: params.validateCurrentInTransaction,
     })
 
@@ -516,7 +511,6 @@ export async function triggerWorkflow(params: {
       max_duration_seconds: maxRunDurationSeconds,
       ttl_seconds_after_finished: ttlSecondsAfterFinished,
       authority: params.authority,
-      reauthorize: params.reauthorize,
       validateCurrentInTransaction: params.validateCurrentInTransaction,
     })
     return { kind: 'run', ...result }

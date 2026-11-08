@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { hashActionTarget } from '@clerum/action-context-contracts'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 import {
   WORKFLOW_ACTION_DELEGATION_HEADER,
@@ -38,7 +39,6 @@ const resource = canonicalResourceIdentity({
 function request(rawHeaders = [WORKFLOW_ACTION_DELEGATION_HEADER, 'opaque-delegation']) {
   return {
     rawHeaders,
-    accessExecutionBudget: {},
     correlationId: 'corr-1',
   } as never
 }
@@ -158,6 +158,11 @@ describe('workflow authority binding ingress', () => {
       operationId: 'workflow.trigger',
       target,
     })
+    // X5: the V2 checkpoint runs under its own action budget, closed on return.
+    const [{ budget }] = mocks.checkpoint.mock.calls[0] as [{ budget: unknown }]
+    expect(budget).toBeInstanceOf(AccessExecutionBudget)
+    expect((budget as AccessExecutionBudget).signal.aborted).toBe(true)
+    expect((budget as AccessExecutionBudget).signal.reason).toBe('closed')
   })
 
   it('accepts canonically identical resource fields regardless of property order', async () => {

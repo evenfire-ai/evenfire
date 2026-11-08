@@ -1,9 +1,7 @@
 import type { Pool } from 'pg'
 import { type DbClient, pool, withTransaction } from '../../db.js'
-import type { K8sGateway } from '../../k8s.js'
 import { runAccessDatabaseQuery } from '../access/accessDatabaseQuery.js'
 import { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
-import { type ActionAuthorizationV2Result, authorizeActionV2 } from '../access/actionAuthorizer.js'
 import type { WorkflowRunRow } from '../workflowRunService.js'
 import {
   type WorkflowAuthorityBinding,
@@ -36,12 +34,11 @@ type LockedRun = {
 
 export class WorkflowRunResumeError extends Error {
   constructor(
-    readonly status: 403 | 404 | 409 | 503,
+    readonly status: 403 | 404 | 409,
     readonly code:
       | 'workflow_run_not_found'
       | 'workflow_run_not_paused'
       | 'workflow_run_path_mismatch'
-      | 'workflow_authority_unavailable'
   ) {
     super(code)
     this.name = 'WorkflowRunResumeError'
@@ -221,7 +218,6 @@ export async function resumeWorkflowRun(input: {
   recipeNamespace: string
   recipeName: string
   authority: WorkflowAuthorityBinding
-  gateway: Pick<K8sGateway, 'getResourceExact'>
   db?: Pool
 }): Promise<WorkflowRunRow> {
   const budget = AccessExecutionBudget.create('action')
@@ -259,57 +255,11 @@ export async function resumeWorkflowRun(input: {
         throw new WorkflowRunResumeError(403, 'workflow_run_path_mismatch')
       }
 
-      // Recheck the same selected path inside the run transaction. The row
-      // locks below serialize grant/session revocation with this resume write.
-      let currentAuthority: ActionAuthorizationV2Result
-      try {
-        currentAuthority = await authorizeActionV2(
-          {
-            session: Object.freeze({
-              contract: 'v2',
-              authorityMode: 'logical_session_checkpoint',
-              userId: input.authority.binding.userId,
-              sid: input.authority.binding.sid,
-              sessionVersion: input.authority.binding.sessionVersion,
-            }),
-            requested: {
-              version: 2,
-              requestedAccessPathId: input.authority.binding.accessPathId,
-              expectedAuthorizationRevision: input.authority.binding.authorizationRevision,
-            },
-            operationId: 'workflow.run.manage',
-            resource: input.authority.binding.resource,
-            operationTarget: input.authority.binding.target,
-            allocateChatMessageId: false,
-            budget,
-            gateway: input.gateway,
-          },
-          {
-            authorizationOptions: {
-              transaction: async work => work(db as DbClient),
-              configureTransaction: false,
-            },
-          }
-        )
-      } catch {
-        throw new WorkflowRunResumeError(503, 'workflow_authority_unavailable')
-      }
-      if (
-        currentAuthority.status !== 'allowed' ||
-        currentAuthority.context.accessPathId !== input.authority.binding.accessPathId ||
-        currentAuthority.context.authorizationRevision !==
-          input.authority.binding.authorizationRevision ||
-        currentAuthority.context.behaviorBindingHash !==
-          input.authority.binding.behaviorBindingHash ||
-        currentAuthority.context.targetHash !== input.authority.binding.targetHash ||
-        currentAuthority.context.pathKind !== input.authority.binding.pathKind ||
-        currentAuthority.context.effectiveTeamId !== input.authority.binding.effectiveTeamId
-      ) {
-        if (currentAuthority.status === 'authority_unavailable') {
-          throw new WorkflowRunResumeError(503, 'workflow_authority_unavailable')
-        }
-        throw new WorkflowRunResumeError(403, 'workflow_run_path_mismatch')
-      }
+      // The route's single authority checkpoint already ran the live resolver
+      // and compared the path's authorization revision (WF-10/15). Here only
+      // the Postgres lineage is re-checked: the session, user, grant and
+      // membership rows are locked so a revocation serializes with this
+      // resume write.
       await lockResumeAuthorityLineage({
         db: db as DbClient,
         budget,

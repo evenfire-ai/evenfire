@@ -402,9 +402,17 @@ describe('services/workflowRunService.createRun authority idempotency', () => {
       rowCount: 1,
     })
 
-    await expect(createRun({ ...input, authority }, db as never)).rejects.toBeInstanceOf(
-      WorkflowRunIdempotencyConflictError
-    )
+    // A V2 authority always carries the row-check validator; the idempotency
+    // hit is decided before the row check runs.
+    const validateCurrentInTransaction = vi.fn()
+
+    await expect(
+      createRun({ ...input, authority, validateCurrentInTransaction }, db as never)
+    ).rejects.toBeInstanceOf(WorkflowRunIdempotencyConflictError)
+    // Witness: the advisory lock and the existing-run read both ran.
+    expect(db.query).toHaveBeenCalledTimes(2)
+    expect(String(db.query.mock.calls[1]?.[0])).toContain('FROM workflow_runs wr')
+    expect(validateCurrentInTransaction).not.toHaveBeenCalled()
   })
 
   it('rejects a legacy retry of an existing v2 run', async () => {

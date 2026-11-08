@@ -8,7 +8,7 @@ import {
   type CanonicalActionTarget,
   hashActionTarget,
 } from '@clerum/action-context-contracts'
-import { type DbClient, withTransaction } from '../../db.js'
+import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
 import {
@@ -16,7 +16,7 @@ import {
   verifyUserDelegationV2,
 } from '../../utils/auth/userDelegationV2Token.js'
 import { stableStringify } from '../../utils/stableStringify.js'
-import type { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
+import { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
 import { checkpointActionAuthority } from '../access/actionAuthorityCheckpoint.js'
 import { authorizeActionV2 } from '../access/actionAuthorizer.js'
 import { requestedActionContextV2 } from '../access/actionContextV2.js'
@@ -179,12 +179,20 @@ export async function requireWorkflowActionAuthority(input: {
     behaviorBindingHash: claims.behaviorBindingHash,
     domain: Object.freeze({ service: 'external-rest-api', resource, targetHash }),
   })
-  const checkpoint = await checkpointActionAuthority({
-    request,
-    gateway: input.gateway,
-    budget: input.req.accessExecutionBudget!,
-    correlationId: input.req.correlationId,
-  })
+  // The checkpoint owns one action budget for this V2 call; V1 requests
+  // returned above and never allocate one.
+  const budget = AccessExecutionBudget.create('action')
+  let checkpoint: Awaited<ReturnType<typeof checkpointActionAuthority>>
+  try {
+    checkpoint = await checkpointActionAuthority({
+      request,
+      gateway: input.gateway,
+      budget,
+      correlationId: input.req.correlationId,
+    })
+  } finally {
+    budget.close()
+  }
   if (checkpoint.status !== 'allowed') throw mapCheckpointFailure(checkpoint.status)
   const attribution = checkpoint.attribution
   if (
@@ -209,10 +217,8 @@ export async function requireWorkflowActionAuthority(input: {
  * transaction, then takes the user row before the session row and locks the
  * session. `users` comes first so a decision serialises behind
  * `revokeAllUserSessions`, which locks the same two tables in that order.
- * Revision subjects are fenced by the caller: the approve path holds the
- * approval prelock, and either decision's own `UPDATE` bumps the target under
- * repeatable read. It performs no connection acquisition or external
- * destination lookup while the caller holds the approval row lock.
+ * It performs no connection acquisition or external destination lookup while
+ * the caller holds the approval row lock.
  */
 export async function requireCurrentWorkflowApprovalAuthority(input: {
   db: DbClient
@@ -329,16 +335,6 @@ export async function requireCurrentWorkflowApprovalAuthority(input: {
   return input.authority
 }
 
-export type WorkflowTriggerAuthorityFence = Readonly<{
-  fingerprint: string
-}>
-
-type WorkflowTriggerAuthorityFenceSnapshot = WorkflowTriggerAuthorityFence &
-  Readonly<{
-    idleExpiresAt: Date
-    absoluteExpiresAt: Date
-  }>
-
 function workflowTriggerIdentity(authority: WorkflowAuthorityBinding): {
   recipeNamespace: string
   recipeName: string
@@ -359,23 +355,28 @@ function workflowTriggerIdentity(authority: WorkflowAuthorityBinding): {
   return { recipeNamespace, recipeName }
 }
 
-async function readWorkflowTriggerAuthorityFence(input: {
+/**
+ * The trigger row check, run inside the run or approval insert transaction.
+ * The route's single `requireWorkflowActionAuthority` checkpoint already
+ * selected the path and compared its authorization revision, so this check
+ * captures nothing beforehand and compares no fingerprint: it locks and
+ * re-reads only the rows the selected path is bound to. A session or user
+ * failure answers 401 `invalid_session`; a missing grant or active membership
+ * answers 409 `access_path_stale`; delegation, idle or absolute session expiry
+ * observed after those reads answers 409 `access_path_stale`.
+ */
+export async function requireCurrentWorkflowTriggerAuthority(input: {
   db: DbClient
   authority: WorkflowAuthorityBinding
-  lock: boolean
-}): Promise<WorkflowTriggerAuthorityFenceSnapshot> {
+}): Promise<WorkflowAuthorityBinding> {
   const { binding } = input.authority
   const { recipeNamespace, recipeName } = workflowTriggerIdentity(input.authority)
-  const lock = input.lock ? ' FOR SHARE' : ''
-  // Only the membership rows are locked. The team revision counter they join
-  // is a derived value, and `FOR SHARE` without `OF` would lock that table too.
-  const membershipLock = input.lock ? ' FOR SHARE OF tm' : ''
   const session = await input.db.query(
     `SELECT u.lifecycle_state, s.session_version, s.current_jti, s.revoked_at,
             s.idle_expires_at, s.absolute_expires_at
        FROM users u
        JOIN external_user_sessions s ON s.user_id = u.id AND s.sid = $2
-      WHERE u.id = $1 AND s.session_version = $3${lock}`,
+      WHERE u.id = $1 AND s.session_version = $3 FOR SHARE`,
     [binding.userId, binding.sid, binding.sessionVersion]
   )
   const sessionRow = session.rows[0] as
@@ -395,66 +396,12 @@ async function readWorkflowTriggerAuthorityFence(input: {
     throw new WorkflowAuthorityError(401, 'invalid_session')
   }
 
-  const memberships = await input.db.query(
-    `SELECT tm.team_id, tm.role, tm.status, tm.updated_at, atr.revision AS team_revision
-       FROM team_members tm
-       JOIN authorization_team_revisions atr ON atr.team_id = tm.team_id
-      WHERE tm.user_id = $1 AND tm.status = 'active'
-      ORDER BY tm.team_id${membershipLock}`,
-    [binding.userId]
-  )
-  const resourceRevision = await input.db.query(
-    `SELECT revision
-       FROM authorization_resource_revisions
-      WHERE environment_id = $1 AND resource_type = 'workflow_recipe' AND resource_id = $2`,
-    [binding.resource.environmentId, binding.resource.logicalId]
-  )
-  if ((resourceRevision.rowCount ?? 0) !== 1) {
-    throw new WorkflowAuthorityError(409, 'access_path_stale')
-  }
-
-  const sourceState = await input.db.query(
-    `SELECT generation, resource_version, status, safe_error_code
-       FROM operational_catalog_source_state
-      WHERE environment_id = $1 AND source_family = 'workflow_recipe'${lock}`,
-    [binding.resource.environmentId]
-  )
-  const resource = await input.db.query(
-    `SELECT source_generation, provider_uid, provider_resource_version, enabled, deleted_at
-       FROM operational_resource_index
-      WHERE environment_id = $1 AND resource_type = 'workflow_recipe' AND logical_id = $2${lock}`,
-    [binding.resource.environmentId, binding.resource.logicalId]
-  )
-  const sourceStateRow = sourceState.rows[0] as { status?: unknown } | undefined
-  const resourceRow = resource.rows[0] as { enabled?: unknown; deleted_at?: unknown } | undefined
-  if (
-    (sourceState.rowCount ?? 0) !== 1 ||
-    sourceStateRow?.status !== 'current' ||
-    (resource.rowCount ?? 0) !== 1 ||
-    resourceRow?.enabled !== true ||
-    resourceRow?.deleted_at !== null
-  ) {
-    throw new WorkflowAuthorityError(409, 'access_path_stale')
-  }
-  const relationships = await input.db.query(
-    `SELECT source_type, source_id, relationship_type, target_type, target_id,
-            relationship_instance_id, behavior_attributes, source_provider_uid,
-            source_resource_version, source_generation
-       FROM operational_resource_relationships
-      WHERE environment_id = $1
-        AND ((source_type = 'workflow_recipe' AND source_id = $2)
-          OR (target_type = 'workflow_recipe' AND target_id = $2))
-      ORDER BY source_type, source_id, relationship_type, target_type, target_id,
-               relationship_instance_id${lock}`,
-    [binding.resource.environmentId, binding.resource.logicalId]
-  )
-
   let grant
   if (binding.pathKind === 'direct' && binding.effectiveTeamId === null) {
     grant = await input.db.query(
       `SELECT user_id, recipe_namespace, recipe_name
          FROM user_workflow_triggers
-        WHERE user_id = $1 AND recipe_namespace = $2 AND recipe_name = $3${lock}`,
+        WHERE user_id = $1 AND recipe_namespace = $2 AND recipe_name = $3 FOR SHARE`,
       [binding.userId, recipeNamespace, recipeName]
     )
   } else if (binding.pathKind === 'team' && binding.effectiveTeamId) {
@@ -464,7 +411,7 @@ async function readWorkflowTriggerAuthorityFence(input: {
          FROM team_workflow_triggers twt
          JOIN team_members tm ON tm.team_id = twt.team_id AND tm.user_id = $1
         WHERE twt.team_id = $2 AND twt.recipe_namespace = $3 AND twt.recipe_name = $4
-          AND tm.status = 'active'${lock}`,
+          AND tm.status = 'active' FOR SHARE`,
       [binding.userId, binding.effectiveTeamId, recipeNamespace, recipeName]
     )
   } else {
@@ -474,58 +421,6 @@ async function readWorkflowTriggerAuthorityFence(input: {
     throw new WorkflowAuthorityError(409, 'access_path_stale')
   }
 
-  // This fence deliberately snapshots authority inputs rather than the broad
-  // authorization_user_revisions activity counter. A workflow_runs insert bumps
-  // that counter for the actor, so including it would make an equivalent
-  // contender stale solely because the idempotency winner committed. Session,
-  // membership, grant, resource, relationship, and source-state remain fenced
-  // here; target, behavior, and expiry are retained by the validated
-  // delegation and phase-one authority verification. Revision counters are read
-  // unlocked because every writer of theirs blocks on the raw rows above.
-  const snapshot = JSON.parse(
-    JSON.stringify({
-      session: session.rows,
-      memberships: memberships.rows,
-      resourceRevision: resourceRevision.rows,
-      sourceState: sourceState.rows,
-      resource: resource.rows,
-      relationships: relationships.rows,
-      grant: grant.rows,
-    })
-  )
-  return Object.freeze({
-    fingerprint: createHash('sha256').update(stableStringify(snapshot)).digest('hex'),
-    idleExpiresAt,
-    absoluteExpiresAt,
-  })
-}
-
-export function captureWorkflowTriggerAuthorityFence(input: {
-  authority: WorkflowAuthorityBinding
-}): Promise<WorkflowTriggerAuthorityFence> {
-  return withTransaction(async db => {
-    const snapshot = await readWorkflowTriggerAuthorityFence({
-      db,
-      authority: input.authority,
-      lock: false,
-    })
-    return Object.freeze({ fingerprint: snapshot.fingerprint })
-  })
-}
-
-export async function requireCurrentWorkflowTriggerAuthority(input: {
-  db: DbClient
-  authority: WorkflowAuthorityBinding
-  expectedFence: WorkflowTriggerAuthorityFence
-}): Promise<WorkflowAuthorityBinding> {
-  const current = await readWorkflowTriggerAuthorityFence({
-    db: input.db,
-    authority: input.authority,
-    lock: true,
-  })
-  if (current.fingerprint !== input.expectedFence.fingerprint) {
-    throw new WorkflowAuthorityError(409, 'access_path_stale')
-  }
   const currentTime = await input.db.query(
     `WITH fence_time AS MATERIALIZED (
        SELECT clock_timestamp() AS observed_at
@@ -534,7 +429,7 @@ export async function requireCurrentWorkflowTriggerAuthority(input: {
             observed_at < $2::timestamptz AS "idleSessionCurrent",
             observed_at < $3::timestamptz AS "absoluteSessionCurrent"
        FROM fence_time`,
-    [input.authority.sourceExpiresAt, current.idleExpiresAt, current.absoluteExpiresAt]
+    [input.authority.sourceExpiresAt, idleExpiresAt, absoluteExpiresAt]
   )
   const currentTimeRow = currentTime.rows[0] as
     | {

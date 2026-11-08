@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { config } from '../../config.js'
-import { type DbClient, withTransaction } from '../../db.js'
+import { withTransaction } from '../../db.js'
 import { approvalsCreatedTotal } from '../../observability/metrics.js'
 import { stableStringify } from '../../utils/stableStringify.js'
 import { emitNotification } from '../notificationEmitter.js'
@@ -13,7 +13,9 @@ import {
 import {
   type WorkflowRunActorType,
   type WorkflowRunRow,
+  type WorkflowTriggerAuthorityValidator,
   computeWorkflowRunPayloadHash,
+  requireTriggerAuthorityValidator,
 } from '../workflowRunService.js'
 import {
   type WorkflowAuthorityBinding,
@@ -81,11 +83,7 @@ export async function createWorkflowTriggerApprovalRequest(params: {
   correlation?: { taskId?: string; stepId?: string }
   runIntent: WorkflowTriggerApprovalRunIntent
   authority?: WorkflowAuthorityBinding | null
-  reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
-  validateCurrentInTransaction?: (
-    db: DbClient,
-    authority: WorkflowAuthorityBinding
-  ) => Promise<WorkflowAuthorityBinding>
+  validateCurrentInTransaction?: WorkflowTriggerAuthorityValidator
 }): Promise<WorkflowTriggerApprovalRequestResult> {
   const ttlSeconds = config.userApprovalRequestDefaultTtlSec
   const payloadHash = computePayloadHash({
@@ -96,13 +94,10 @@ export async function createWorkflowTriggerApprovalRequest(params: {
     ttlSeconds,
   })
 
-  const phaseOneAuthority = params.reauthorize ? await params.reauthorize() : params.authority
-  if (params.authority && phaseOneAuthority?.bindingHash !== params.authority.bindingHash) {
-    throw new Error('workflow_trigger_authority_changed')
-  }
-  if (params.reauthorize && phaseOneAuthority && !params.validateCurrentInTransaction) {
-    throw new Error('workflow_trigger_current_authority_validator_required')
-  }
+  const phaseOneAuthority = params.authority ?? null
+  const validateCurrentInTransaction = phaseOneAuthority
+    ? requireTriggerAuthorityValidator(params.validateCurrentInTransaction)
+    : null
 
   const result = await withTransaction(async db => {
     let existingBeforeFence = { rowCount: 0 as number | null }
@@ -120,9 +115,9 @@ export async function createWorkflowTriggerApprovalRequest(params: {
     let inserted: { rows: unknown[]; rowCount: number | null } = { rows: [], rowCount: 0 }
     if ((existingBeforeFence.rowCount ?? 0) === 0) {
       authority =
-        phaseOneAuthority && params.validateCurrentInTransaction
-          ? await params.validateCurrentInTransaction(db, phaseOneAuthority)
-          : phaseOneAuthority
+        phaseOneAuthority && validateCurrentInTransaction
+          ? await validateCurrentInTransaction(db, phaseOneAuthority)
+          : null
       if (phaseOneAuthority && authority?.bindingHash !== phaseOneAuthority.bindingHash) {
         throw new Error('workflow_trigger_authority_changed')
       }
