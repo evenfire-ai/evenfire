@@ -40,7 +40,7 @@ const REJECTED_PATHS = [
 ] as const
 
 const ACCEPTED_PATHS = [
-  ['capabilities', '/external/access/capabilities'],
+  ['member invitations', '/external/members/invitations'],
   [
     'invitation resend',
     '/external/members/invitations/7f9c2bce-1a2b-4c3d-8e4f-0123456789ab/resend',
@@ -63,7 +63,7 @@ const ACCEPTED_RAW_QUERIES = [
 ] as const
 
 const REJECTED_PATH = '/external/members/invitations/../../access/resolve?/resend'
-const ACCEPTED_PATH = '/external/access/capabilities'
+const ACCEPTED_PATH = '/external/members/invitations'
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -151,7 +151,7 @@ describe('control-api path guard', () => {
     await expect(controlApiRequest('GET', ACCEPTED_PATH)).resolves.toEqual({ served: true })
     expect(fetchMock).toHaveBeenCalledTimes(2)
     for (const callIndex of [0, 1]) {
-      expect(fetchedUrl(fetchMock, callIndex).pathname).toBe('/api/v1/external/access/capabilities')
+      expect(fetchedUrl(fetchMock, callIndex).pathname).toBe('/api/v1/external/members/invitations')
     }
   })
 
@@ -172,7 +172,7 @@ describe('control-api path guard', () => {
     const result = await controlApiBinaryRequestWithStatus('GET', ACCEPTED_PATH)
     expect(result.body.equals(Buffer.from('binary-body'))).toBe(true)
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(fetchedUrl(fetchMock, 0).pathname).toBe('/api/v1/external/access/capabilities')
+    expect(fetchedUrl(fetchMock, 0).pathname).toBe('/api/v1/external/members/invitations')
   })
 
   it('fails closed in the stream client before fetch, then forwards a raw query unchanged', async () => {

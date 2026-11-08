@@ -8,14 +8,20 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
-const OBSERVED_DEV_SOURCE_DIR = process.env.TASK106_R61_B1_DEV_SOURCE_DIR
-const OBSERVED_DEV_SOURCE_COMMIT = '0b26101eb247adcc44f70d39451f3e82c3225d47'
-const OBSERVED_DEV_DB_SOURCE_SHA256 =
-  '1948ad306fe56b368f120edbc70ddbac6cb9b981d9fd218e7ded2575ed3b2beb'
+const certificationInputs = JSON.parse(
+  readFileSync(new URL('../../tests/contracts/certification-inputs.json', import.meta.url), 'utf8')
+) as {
+  producers: Record<string, { env: string; commit: string; sourceHashes: Record<string, string> }>
+}
+const observedProducer = certificationInputs.producers.observedDev
+const latestProducer = certificationInputs.producers.latestDev
+const OBSERVED_DEV_SOURCE_DIR = process.env[observedProducer.env]
+const OBSERVED_DEV_SOURCE_COMMIT = observedProducer.commit
+const OBSERVED_DEV_DB_SOURCE_SHA256 = observedProducer.sourceHashes['control-api/src/db.ts']
 
 if (
   process.env.CONTROL_API_REAL_PG_REQUIRED === '1' &&
-  (!OBSERVED_DEV_SOURCE_DIR || !process.env.TASK106_R61_B1_LATEST_DEV_SOURCE_DIR)
+  (!OBSERVED_DEV_SOURCE_DIR || !process.env[latestProducer.env])
 ) {
   throw new Error(
     'R61-B1 real PostgreSQL lane requires both pinned DEV producer source directories'
@@ -432,11 +438,9 @@ describeRealPostgres('PR334 S2 workflow run visibility and V1 approval replay', 
       session: {} as never,
     }
 
-    await expect(reader.canCallerReadWorkflowRun(caller, ownerRow)).resolves.toBe(true)
     await expect(reader.canCallerReadWorkflowRunWithApprovalTarget(caller, ownerRow)).resolves.toBe(
       true
     )
-    await expect(reader.canCallerReadWorkflowRun(caller, otherRow)).resolves.toBe(false)
     await expect(reader.canCallerReadWorkflowRunWithApprovalTarget(caller, otherRow)).resolves.toBe(
       false
     )
@@ -649,5 +653,132 @@ describeRealPostgres('PR334 S2 workflow run visibility and V1 approval replay', 
       idempotencyKey: key,
     })
     expect(replay).toMatchObject({ kind: 'approval', existing: true })
+  })
+
+  it('shows a team-scheduled run to a non-author only while the membership and the team grant are live', async () => {
+    const teamId = randomUUID()
+    const memberId = randomUUID()
+    const recipeName = `s2-live-team-grant-${randomUUID()}`
+    const liveRunId = randomUUID()
+    const auditRunId = randomUUID()
+
+    await databasePool.query(
+      `INSERT INTO users(id, email, name)
+       VALUES ($1, 'pr334-s2-team-reader@example.invalid', 'PR334 S2 Team Reader')`,
+      [memberId]
+    )
+    await databasePool.query(
+      `INSERT INTO teams(id, name) VALUES ($1, 'PR334 S2 Live Grant Team')`,
+      [teamId]
+    )
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [teamId, memberId]
+    )
+    await databasePool.query(
+      `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [teamId, NS, recipeName]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_runs(
+         run_id, recipe_namespace, recipe_name, phase, actor_type, team_id,
+         usage_team_id, actor_id, trigger_source, created_at
+       ) VALUES ($1, $2, $3, 'Running', 'scheduled', $4, NULL, NULL, 'schedule', NOW())`,
+      [liveRunId, NS, recipeName, teamId]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_runs_audit(
+         run_id, run_namespace, run_name, recipe_namespace, recipe_name,
+         triggerer_team_id, usage_team_id, triggerer_user_id, triggerer_actor_type,
+         trigger_source, idempotency_key, triggered_at, started_at, completed_at,
+         final_phase, step_count, snapshot_sha
+       ) VALUES (
+         $1, $2, $3, $2, $3, $4, NULL, NULL, 'scheduled', 'schedule',
+         'pr334-s2-live-team-grant-audit', NOW() - interval '2 hours',
+         NOW() - interval '2 hours', NOW() - interval '1 hour', 'Succeeded', 0,
+         'synthetic-snapshot-sha'
+       )`,
+      [auditRunId, NS, recipeName, teamId]
+    )
+
+    const caller = {
+      kind: 'user-session' as const,
+      claims: v1Claims(memberId, teamId),
+      session: {} as never,
+    }
+
+    async function observe(): Promise<{
+      unscopedList: string[]
+      list: string[]
+      single: boolean
+      audit: string[]
+    }> {
+      const liveRow = (
+        await databasePool.query('SELECT * FROM workflow_runs WHERE run_id = $1', [liveRunId])
+      ).rows[0]
+      expect(liveRow, 'seeded team-scheduled live run').toBeDefined()
+      return {
+        unscopedList: (await reader.listCanonicalRuns(NS, recipeName, 10))
+          .map(run => `${run.source}:${run.id}`)
+          .sort(),
+        list: (await reader.listCanonicalRuns(NS, recipeName, 10, caller))
+          .map(run => `${run.source}:${run.id}`)
+          .sort(),
+        single: await reader.canCallerReadWorkflowRunWithApprovalTarget(caller, liveRow),
+        audit: (await reader.listAuditRunsByRecipe(NS, recipeName, 10, caller)).map(run => run.id),
+      }
+    }
+
+    const bothRuns = [`audit:${auditRunId}`, `live:${liveRunId}`].sort()
+    const hidden = { unscopedList: bothRuns, list: [], single: false, audit: [] }
+
+    // Live membership and live team grant: the non-author member sees the run in every read.
+    expect(await observe()).toEqual({
+      unscopedList: bothRuns,
+      list: bothRuns,
+      single: true,
+      audit: [auditRunId],
+    })
+
+    // Membership removed, grant still present: hidden from every scoped read. The unscoped
+    // list is the witness that both rows are still stored and returned by the reader.
+    await databasePool.query(
+      `UPDATE team_members SET status = 'deleted' WHERE team_id = $1 AND user_id = $2`,
+      [teamId, memberId]
+    )
+    expect(
+      (
+        await databasePool.query(
+          'SELECT status FROM team_members WHERE team_id = $1 AND user_id = $2',
+          [teamId, memberId]
+        )
+      ).rows
+    ).toEqual([{ status: 'deleted' }])
+    expect(await observe()).toEqual(hidden)
+
+    // Membership live again, team grant deleted: hidden from every scoped read.
+    await databasePool.query(
+      `UPDATE team_members SET status = 'active' WHERE team_id = $1 AND user_id = $2`,
+      [teamId, memberId]
+    )
+    await databasePool.query(
+      `DELETE FROM team_workflow_triggers
+        WHERE team_id = $1 AND recipe_namespace = $2 AND recipe_name = $3`,
+      [teamId, NS, recipeName]
+    )
+    expect(
+      (
+        await databasePool.query(
+          `SELECT tm.status,
+                  (SELECT count(*)::int FROM team_workflow_triggers WHERE team_id = $1) AS grants
+             FROM team_members tm
+            WHERE tm.team_id = $1 AND tm.user_id = $2`,
+          [teamId, memberId]
+        )
+      ).rows
+    ).toEqual([{ status: 'active', grants: 0 }])
+    expect(await observe()).toEqual(hidden)
   })
 })

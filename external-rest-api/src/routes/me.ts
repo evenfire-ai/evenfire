@@ -6,6 +6,7 @@ import {
   extractAuthToken,
   requireAuth,
   requireSelf,
+  requireSessionAuth,
 } from '../middleware/auth.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
@@ -68,7 +69,7 @@ export function createMeRouter(): Router {
         return
       }
 
-      const result = await switchTeam(auth.userId, auth.email, nextTeamId, sessionToken, req.ip)
+      const result = await switchTeam(auth.userId, auth.email, nextTeamId, sessionToken)
       if (!result) {
         res.status(403).json({ error: 'You are not a member of this team' })
         return
@@ -81,7 +82,10 @@ export function createMeRouter(): Router {
     }
   })
 
-  router.get('/me', requireAuth, async (req: AuthedRequest, res, next) => {
+  // The session probe: an ended session leaves this route as a 401 with the
+  // `invalid_session` envelope, from this edge's token check or forwarded from
+  // control-api. Clients decide by the status, not by the envelope.
+  router.get('/me', requireSessionAuth, async (req: AuthedRequest, res, next) => {
     try {
       const auth = req.auth!
       const sessionToken = extractAuthToken(req)

@@ -5,11 +5,11 @@ import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { externalRestPublicErrorHandler } from '../src/app.js'
 import { config } from '../src/config.js'
-import { controlApiRequest } from '../src/controlApiClient.js'
+import { ControlApiError, ControlApiPathError, controlApiRequest } from '../src/controlApiClient.js'
 
 type ProducerResponse = {
   status: number
-  body: Record<string, unknown>
+  body: unknown
   headers?: Record<string, string>
 }
 
@@ -42,6 +42,8 @@ function createControlApiWireProducer() {
 
 function createRelayApp() {
   const app = express()
+  // Every case below travels the real control-api client and the real global
+  // handler; only the wire producer is a stub.
   app.get('/relay', async (_req, res, next) => {
     try {
       await controlApiRequest('GET', '/external/test-error')
@@ -50,26 +52,26 @@ function createRelayApp() {
       next(error)
     }
   })
+  app.get('/path-error', () => {
+    throw new ControlApiPathError()
+  })
+  app.get('/control-api-400', () => {
+    throw new ControlApiError('wrapper must not be public', 400, { error: 'invalid_email' })
+  })
+  app.get('/client-error', () => {
+    throw Object.assign(new SyntaxError('Unexpected token in request body'), { status: 400 })
+  })
+  app.get('/plain-error', () => {
+    throw new Error('internal-detail-sentinel-not-for-clients')
+  })
   app.use(externalRestPublicErrorHandler)
   return app
 }
 
-const acceptedStatuses = [
-  [408, 'request_timeout', 'The request timed out.', true],
-  [409, 'conflict', 'The request conflicts with current state.', false],
-  [410, 'gone', 'The resource is no longer available.', false],
-  [411, 'length_required', 'A content length is required.', false],
-  [412, 'precondition_failed', 'The request precondition did not match current state.', false],
-  [413, 'payload_too_large', 'The request payload is too large.', false],
-  [425, 'too_early', 'The request is not ready to be processed.', true],
-  [502, 'upstream_unavailable', 'The upstream service is temporarily unavailable.', true],
-  [504, 'upstream_timeout', 'The upstream service timed out.', true],
-  [
-    507,
-    'insufficient_storage',
-    'The requested operation cannot be completed because storage is full.',
-    false,
-  ],
+const forwardedObjectBodies = [
+  [400, { error: 'invalid_email' }],
+  [409, { error: 'conflict', detail: 'invitation already accepted' }],
+  [422, { error: { code: 'invalid_teams', message: 'one team is required' } }],
 ] as const
 
 describe('global External REST public error handler', () => {
@@ -100,63 +102,111 @@ describe('global External REST public error handler', () => {
     })
   })
 
-  it.each(acceptedStatuses)(
-    'preserves canonical public semantics for Control API status %i',
-    async (status, code, message, retryable) => {
-      producer.respondWith({
-        status,
-        body: {
-          error: {
-            code: 'private_upstream_code',
-            message: 'private upstream detail',
-            correlationId: 'unsafe/upstream-correlation',
-          },
-        },
-        headers: {
-          'retry-after': '17',
-          'upload-length': '2048',
-          'x-private-upstream': 'secret',
-        },
-      })
+  it.each(forwardedObjectBodies)(
+    'forwards the control-api body verbatim with status %i',
+    async (status, body) => {
+      producer.respondWith({ status, body })
 
       const response = await request(createRelayApp())
         .get('/relay')
         .set('x-correlation-id', requestCorrelationId)
 
+      // Two statuses in one table: the body follows the upstream status instead
+      // of a fixed envelope.
       expect(response.status).toBe(status)
-      expect(response.body).toEqual({
-        error: {
-          code,
-          message,
-          correlationId: requestCorrelationId,
-          retryable,
-        },
-      })
-      expect(JSON.stringify(response.body)).not.toMatch(/private_upstream|unsafe\/upstream/)
-      expect(response.headers['x-private-upstream']).toBeUndefined()
-      expect(response.headers['retry-after']).toBe(retryable ? '17' : undefined)
-      expect(response.headers['upload-length']).toBe(status === 413 ? '2048' : undefined)
+      expect(response.body).toEqual(body)
+      expect(JSON.stringify(response.body)).not.toContain('Control API')
     }
   )
 
-  it('keeps unaccepted 426 semantics outside the PR1 canonical status vocabulary', async () => {
+  it('keeps the 503 outage headers only when control-api sent them', async () => {
     producer.respondWith({
-      status: 426,
-      body: { error: { code: 'upgrade_required', message: 'private upgrade policy' } },
+      status: 503,
+      body: { error: 'session_backend_unavailable' },
+      headers: { 'retry-after': '2', 'cache-control': 'no-store' },
     })
+
+    const withHeaders = await request(createRelayApp()).get('/relay')
+
+    expect(withHeaders.status).toBe(503)
+    expect(withHeaders.body).toEqual({ error: 'session_backend_unavailable' })
+    expect(withHeaders.headers['retry-after']).toBe('2')
+    expect(withHeaders.headers['cache-control']).toBe('no-store')
+
+    producer.respondWith({ status: 503, body: { error: 'authority_unavailable' } })
+
+    const withoutHeaders = await request(createRelayApp()).get('/relay')
+
+    expect(withoutHeaders.status).toBe(503)
+    expect(withoutHeaders.body).toEqual({ error: 'authority_unavailable' })
+    expect(withoutHeaders.headers['retry-after']).toBeUndefined()
+    expect(withoutHeaders.headers['cache-control']).toBeUndefined()
+  })
+
+  it('never exposes the internal request wrapper for a non-object body', async () => {
+    producer.respondWith({ status: 502, body: null })
 
     const response = await request(createRelayApp())
       .get('/relay')
       .set('x-correlation-id', requestCorrelationId)
 
-    expect(response.status).toBe(426)
-    expect(response.body).toEqual({
+    // The 502 status proves the ControlApiError rule ran; the body is the status
+    // sentence, not `Control API GET /external/... failed (...)`.
+    expect(response.status).toBe(502)
+    expect(response.body).toEqual({ error: 'Bad Gateway' })
+    expect(JSON.stringify(response.body)).not.toMatch(/Control API|\/external\/|GET/)
+  })
+
+  it('answers a non-control-api client error with its own message and a plain error with 500', async () => {
+    const clientError = await request(createRelayApp()).get('/client-error')
+
+    expect(clientError.status).toBe(400)
+    expect(clientError.body).toEqual({ error: 'Unexpected token in request body' })
+
+    const serverError = await request(createRelayApp())
+      .get('/plain-error')
+      .set('x-correlation-id', requestCorrelationId)
+
+    expect(serverError.status).toBe(500)
+    expect(serverError.body).toEqual({
       error: {
-        code: 'invalid_request',
+        code: 'internal_error',
         message: 'The request could not be completed.',
         correlationId: requestCorrelationId,
         retryable: false,
       },
     })
+  })
+
+  it('keeps the invalid-request envelope for a path error and not for a plain control-api 400', async () => {
+    const pathError = await request(createRelayApp())
+      .get('/path-error')
+      .set('x-correlation-id', requestCorrelationId)
+
+    expect(pathError.status).toBe(400)
+    expect(pathError.body).toEqual({
+      error: {
+        code: 'invalid_request',
+        message: 'The request is not valid.',
+        correlationId: requestCorrelationId,
+        retryable: false,
+      },
+    })
+
+    const controlApi400 = await request(createRelayApp()).get('/control-api-400')
+
+    expect(controlApi400.status).toBe(400)
+    expect(controlApi400.body).toEqual({ error: 'invalid_email' })
+  })
+
+  it('does not leak an internal error message in the sanitized 500', async () => {
+    const response = await request(createRelayApp())
+      .get('/plain-error')
+      .set('x-correlation-id', requestCorrelationId)
+
+    expect(response.status).toBe(500)
+    expect(JSON.stringify(response.body)).not.toContain('internal-detail-sentinel-not-for-clients')
+    expect(response.body.error.code).toBe('internal_error')
+    expect(typeof response.body.error.correlationId).toBe('string')
   })
 })

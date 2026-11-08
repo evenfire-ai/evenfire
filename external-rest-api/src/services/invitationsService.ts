@@ -83,13 +83,18 @@ export async function acceptInvitation(
     })
     return { data }
   } catch (error) {
-    if (!(error instanceof ControlApiError)) throw error
-    if (error.status === 400) return { error: 'invalid' }
-    if (error.status === 404) return { error: 'not_found' }
-    if (error.status === 403) return { error: 'forbidden' }
-    if (error.status === 410) return { error: 'expired' }
-    if (error.status === 409) return { error: 'not_pending' }
-    throw error
+    // A typed 503 is the class-B authority outage: it must keep its status and
+    // body instead of becoming "not pending".
+    if (error instanceof ControlApiError && error.status === 503) throw error
+    if (error instanceof ControlApiError) {
+      if (error.status === 400) return { error: 'invalid' }
+      if (error.status === 404) return { error: 'not_found' }
+      if (error.status === 403) return { error: 'forbidden' }
+      if (error.status === 410) return { error: 'expired' }
+    }
+    // Every other failure, including a revoked session's upstream 401, is a
+    // not-pending invitation, as in dev.
+    return { error: 'not_pending' }
   }
 }
 

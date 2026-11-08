@@ -38,7 +38,7 @@ const legacyPolicy = { issueV1: true, acceptV1: true } as EffectiveUserAccessPol
 // These full source snapshots are verbatim from the deployed reader/writer base
 // at 74e0d81d9b70bbc0e123ed2bad89f08d3e13e99e; the hashes prevent drift.
 describe('pinned deployed-base V1 source snapshot at 74e0d81d9b70bbc0e123ed2bad89f08d3e13e99e', () => {
-  it('matches the exact synchronized-dev reader and signer sources', () => {
+  it('matches the exact pinned deployed-base reader and signer sources', () => {
     const snapshots = [
       [
         './fixtures/legacyV1Base/src/middleware/externalSessionAuth.ts',
@@ -201,7 +201,7 @@ describeRealPostgres('legacy V1 generation ordering on real PostgreSQL', () => {
     )
     expect(successorClaims.iat).toBeLessThanOrEqual(Math.floor(Date.now() / 1000))
     expect(successorClaims.exp - successorClaims.iat).toBeGreaterThan(0)
-    expect(successorClaims.exp - successorClaims.iat).toBeLessThanOrEqual(60 * 60 * 12)
+    expect(successorClaims.exp - successorClaims.iat).toBe(60 * 60 * 24 * 7)
     const basePredecessorClaims = verifyBaseExternalSessionToken(predecessor)
     expect(basePredecessorClaims).not.toBeNull()
     await expect(

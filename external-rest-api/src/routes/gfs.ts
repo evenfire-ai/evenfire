@@ -2,16 +2,17 @@ import { Router } from 'express'
 import type { NextFunction, Request, Response } from 'express'
 import { type AugmentedRequest, ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { randomUUID } from 'node:crypto'
+import { STATUS_CODES } from 'node:http'
 import { isIP } from 'node:net'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { config } from '../config.js'
-import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import {
-  publicCorrelationId,
-  sanitizeControlApiPublicError,
-  sendSanitizedControlApiPublicError,
-} from '../http/publicApiError.js'
+  ControlApiError,
+  ControlApiPathError,
+  controlApiRequest,
+  controlApiStreamRequest,
+} from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   sendWorkflowActionDelegationTransportError,
@@ -40,6 +41,15 @@ type GfsRouterOptions = {
 // explicit; every 5xx is safe to forward because it is already a ControlApiError
 // produced by the authenticated control-plane request.
 const PROPAGATED = new Set([400, 401, 403, 404, 408, 409, 410, 411, 412, 413, 422, 425, 429, 507])
+const CONTROL_API_ERROR_HEADERS = [
+  'retry-after',
+  'ratelimit',
+  'ratelimit-policy',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+  'x-request-id',
+] as const
 const STREAM_HEADERS = [
   'content-type',
   'content-length',
@@ -140,17 +150,32 @@ function gfsControlApiRequest<T>(
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
   if (sendWorkflowActionDelegationTransportError(error, res)) return
-  const statuses =
-    error instanceof Error &&
-    'status' in error &&
-    typeof (error as { status?: unknown }).status === 'number' &&
-    (error as { status: number }).status >= 500 &&
-    (error as { status: number }).status <= 599
-      ? new Set([...PROPAGATED, (error as { status: number }).status])
-      : PROPAGATED
-  const sanitized = sanitizeControlApiPublicError(error, statuses, publicCorrelationId(res.req))
-  if (sanitized) {
-    sendSanitizedControlApiPublicError(res, sanitized)
+  // A caller-influenced path stays the edge's own 400 envelope (rule 1 of the
+  // global handler) instead of the flat `{error:'invalid_request'}` body.
+  if (error instanceof ControlApiPathError) {
+    next(error)
+    return
+  }
+  const shouldPropagate =
+    error instanceof ControlApiError &&
+    (PROPAGATED.has(error.status) || (error.status >= 500 && error.status <= 599))
+  if (shouldPropagate) {
+    // The internal client has already filtered this map. Keep the allowlist at
+    // this last hop too so a hand-constructed/mocked ControlApiError cannot
+    // accidentally turn arbitrary internal response headers into public ones.
+    for (const name of CONTROL_API_ERROR_HEADERS) {
+      const value = error.headers?.[name]
+      if (value) res.setHeader(name, value)
+    }
+    const body =
+      error.body && typeof error.body === 'object'
+        ? error.body
+        : { error: STATUS_CODES[error.status] }
+    for (const header of STREAM_HEADERS) {
+      const value = error.headers?.[header]
+      if (value) res.setHeader(header, value)
+    }
+    res.status(error.status).json(body)
     return
   }
   next(error)

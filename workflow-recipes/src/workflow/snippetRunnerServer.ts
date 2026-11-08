@@ -2,7 +2,11 @@ import { timingSafeEqual } from 'node:crypto'
 import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import http from 'node:http'
-import { executeSnippetInWorker } from './snippetRuntime'
+import {
+  assertNodePermissionModel,
+  executeSnippetInWorker,
+  resolveSnippetOutputDir,
+} from './snippetRuntime'
 import type {
   SnippetExecuteRequest,
   SnippetResolvedMcpServer,
@@ -94,6 +98,7 @@ export function createSnippetRunnerServer(): http.Server {
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(`SNIPPET_RUNNER_TOKEN_FILE is unreadable: ${message}`)
   }
+  assertNodePermissionModel(resolveSnippetOutputDir())
 
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') {

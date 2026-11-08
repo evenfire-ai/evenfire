@@ -28,11 +28,9 @@ export {
   listAllTeams,
   listTeams,
   renameTeam,
-  renameTeamForUser,
 } from './teams.js'
 
 export {
-  acceptInvitation,
   acceptInvitationById,
   acceptInvitationForEmail,
   acceptInvitationForEmailInTransaction,
@@ -62,7 +60,6 @@ export {
   listMembers,
   listPendingInvitations,
   searchDirectory,
-  DirectorySearchCursorError,
   DIRECTORY_SEARCH_MAX_QUERY_LENGTH,
   softDeleteMember,
   startDraftInvitationCleanup,

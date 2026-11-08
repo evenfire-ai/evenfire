@@ -1,6 +1,6 @@
 import { type CSSProperties, useLayoutEffect, useState } from 'react'
 
-const MOBILE_SIDEBAR_QUERY = '(max-width: 900px)'
+const MOBILE_SIDEBAR_QUERY = '(max-width: 759px)'
 
 function readWorkspaceLeft(): number {
   if (typeof window === 'undefined' || typeof document === 'undefined') return 0

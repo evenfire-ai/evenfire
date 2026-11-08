@@ -568,6 +568,8 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
 
     const revoked = await request(publicApp).get('/api/v1/me').set('cookie', sessionCookie)
     expect(revoked.status).toBe(401)
+    // control-api declares the revoked session with its envelope, and the edge forwards it.
+    expect(revoked.body).toMatchObject({ error: { code: 'invalid_session' } })
 
     await db.pool.query(
       "UPDATE password_verification_pace SET next_permit = clock_timestamp() - interval '1 second'"

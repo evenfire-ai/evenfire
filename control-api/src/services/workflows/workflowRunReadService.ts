@@ -114,20 +114,6 @@ function auditRunMatchesUserScope(row: Record<string, unknown>, scope: UserRunSc
   return false
 }
 
-export async function canCallerReadWorkflowRun(
-  caller: WorkflowRouteCaller,
-  row: WorkflowRunRow,
-  db: Pick<DbClient, 'query'> = pool
-): Promise<boolean> {
-  const scope = userRunScope(caller)
-  if (!scope) return true
-  if (row.actor_type === 'user' && row.actor_id && scope.principalIds.includes(row.actor_id)) {
-    return true
-  }
-  if (!runMatchesUserScope(row, scope)) return false
-  return hasLiveWorkflowTeamGrant(scope, row.recipe_namespace, row.recipe_name, db)
-}
-
 export async function canCallerReadWorkflowRunWithApprovalTarget(
   caller: WorkflowRouteCaller,
   row: WorkflowRunRow,

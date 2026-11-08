@@ -184,6 +184,87 @@ create_job() {
   return "$status"
 }
 
+# Shared by verify_active_job_identity and build_job_manifest.
+# read -d '' returns 1 at EOF under set -e; an empty body still fails below.
+read -r -d '' JOB_IDENTITY_RUBY <<'RUBY' || true
+def deep_sort(value)
+  case value
+  when Hash
+    value.keys.sort.each_with_object({}) do |key, acc|
+      acc[key] = deep_sort(value[key])
+    end
+  when Array
+    value.map { |entry| deep_sort(entry) }.sort_by { |entry| JSON.generate(entry) }
+  else
+    value
+  end
+end
+def normalize_container(value)
+  container = Marshal.load(Marshal.dump(value))
+  container.delete("terminationMessagePath") if
+    [nil, "/dev/termination-log"].include?(container["terminationMessagePath"])
+  container.delete("terminationMessagePolicy") if
+    [nil, "File"].include?(container["terminationMessagePolicy"])
+  %w[env envFrom ports volumeDevices volumeMounts].each do |key|
+    container.delete(key) if container[key] == []
+  end
+  %w[resources securityContext].each do |key|
+    container.delete(key) if container[key].nil? || container[key] == {}
+  end
+  container
+end
+def normalize_pod(value)
+  pod = Marshal.load(Marshal.dump(value))
+  containers = pod["containers"] || []
+  abort("migration Job must contain exactly one migrate container") unless
+    containers.length == 1 && containers.first["name"] == "migrate"
+  pod["containers"] = containers.map { |item| normalize_container(item) }
+  %w[initContainers ephemeralContainers imagePullSecrets tolerations topologySpreadConstraints
+     readinessGates resourceClaims schedulingGates volumes].each do |key|
+    pod.delete(key) if pod[key] == []
+  end
+  pod.delete("securityContext") if pod["securityContext"].nil? || pod["securityContext"] == {}
+  pod.delete("serviceAccount") if pod["serviceAccount"] == pod["serviceAccountName"]
+  pod.delete("dnsPolicy") if [nil, "ClusterFirst"].include?(pod["dnsPolicy"])
+  pod.delete("schedulerName") if [nil, "default-scheduler"].include?(pod["schedulerName"])
+  pod.delete("terminationGracePeriodSeconds") if
+    [nil, 30].include?(pod["terminationGracePeriodSeconds"])
+  pod.delete("enableServiceLinks") if [nil, true].include?(pod["enableServiceLinks"])
+  pod.delete("preemptionPolicy") if [nil, "PreemptLowerPriority"].include?(pod["preemptionPolicy"])
+  %w[hostNetwork hostPID hostIPC shareProcessNamespace setHostnameAsFQDN].each do |key|
+    pod.delete(key) if [nil, false].include?(pod[key])
+  end
+  pod
+end
+def normalize_job_spec(value)
+  spec = Marshal.load(Marshal.dump(value))
+  spec.delete("selector")
+  spec.delete("manualSelector") if [nil, false].include?(spec["manualSelector"])
+  spec.delete("parallelism") if [nil, 1].include?(spec["parallelism"])
+  spec.delete("completions") if [nil, 1].include?(spec["completions"])
+  spec.delete("completionMode") if [nil, "NonIndexed"].include?(spec["completionMode"])
+  # API server default without a podFailurePolicy (Kubernetes 1.34+ stores it).
+  spec.delete("podReplacementPolicy") if
+    [nil, "TerminatingOrFailed"].include?(spec["podReplacementPolicy"])
+  spec.delete("suspend") if [nil, false].include?(spec["suspend"])
+  template = spec.fetch("template")
+  metadata = Marshal.load(Marshal.dump(template["metadata"] || {}))
+  labels = Marshal.load(Marshal.dump(metadata["labels"] || {}))
+  %w[batch.kubernetes.io/controller-uid batch.kubernetes.io/job-name
+     controller-uid job-name].each { |key| labels.delete(key) }
+  metadata["labels"] = labels
+  metadata.delete("annotations") if metadata["annotations"] == {}
+  template["metadata"] = metadata
+  template["spec"] = normalize_pod(template["spec"] || {})
+  spec["template"] = template
+  spec
+end
+RUBY
+if [ -z "$JOB_IDENTITY_RUBY" ]; then
+  printf '%s\n' "migration Job identity normalizer is empty" >&2
+  exit 1
+fi
+
 verify_active_job_identity() {
   local expected_file actual_file status
   expected_file="$(mktemp)"
@@ -194,83 +275,9 @@ verify_active_job_identity() {
     rm -f "$expected_file" "$actual_file"
     return 1
   fi
-  ruby -rjson -rdigest -e '
-    # Same canonical form as build_job_manifest: the API server does not keep
-    # the submitted key order, so the identity digest must not depend on it.
-    def deep_sort(value)
-      case value
-      when Hash
-        value.keys.sort.each_with_object({}) do |key, acc|
-          acc[key] = deep_sort(value[key])
-        end
-      when Array
-        value.map { |entry| deep_sort(entry) }.sort_by { |entry| JSON.generate(entry) }
-      else
-        value
-      end
-    end
-    normalize_container = lambda do |value|
-      container = Marshal.load(Marshal.dump(value))
-      container.delete("terminationMessagePath") if
-        [nil, "/dev/termination-log"].include?(container["terminationMessagePath"])
-      container.delete("terminationMessagePolicy") if
-        [nil, "File"].include?(container["terminationMessagePolicy"])
-      %w[env envFrom ports volumeDevices volumeMounts].each do |key|
-        container.delete(key) if container[key] == []
-      end
-      %w[resources securityContext].each do |key|
-        container.delete(key) if container[key].nil? || container[key] == {}
-      end
-      container
-    end
-    normalize_pod = lambda do |value|
-      pod = Marshal.load(Marshal.dump(value))
-      containers = pod["containers"] || []
-      abort("migration Job must contain exactly one migrate container") unless
-        containers.length == 1 && containers.first["name"] == "migrate"
-      pod["containers"] = containers.map { |item| normalize_container.call(item) }
-      %w[initContainers ephemeralContainers imagePullSecrets tolerations topologySpreadConstraints
-         readinessGates resourceClaims schedulingGates volumes].each do |key|
-        pod.delete(key) if pod[key] == []
-      end
-      pod.delete("securityContext") if pod["securityContext"].nil? || pod["securityContext"] == {}
-      pod.delete("serviceAccount") if pod["serviceAccount"] == pod["serviceAccountName"]
-      pod.delete("dnsPolicy") if [nil, "ClusterFirst"].include?(pod["dnsPolicy"])
-      pod.delete("schedulerName") if [nil, "default-scheduler"].include?(pod["schedulerName"])
-      pod.delete("terminationGracePeriodSeconds") if
-        [nil, 30].include?(pod["terminationGracePeriodSeconds"])
-      pod.delete("enableServiceLinks") if [nil, true].include?(pod["enableServiceLinks"])
-      pod.delete("preemptionPolicy") if [nil, "PreemptLowerPriority"].include?(pod["preemptionPolicy"])
-      %w[hostNetwork hostPID hostIPC shareProcessNamespace setHostnameAsFQDN].each do |key|
-        pod.delete(key) if [nil, false].include?(pod[key])
-      end
-      pod
-    end
-    normalize_job_spec = lambda do |value|
-      spec = Marshal.load(Marshal.dump(value))
-      spec.delete("selector")
-      spec.delete("manualSelector") if [nil, false].include?(spec["manualSelector"])
-      spec.delete("parallelism") if [nil, 1].include?(spec["parallelism"])
-      spec.delete("completions") if [nil, 1].include?(spec["completions"])
-      spec.delete("completionMode") if [nil, "NonIndexed"].include?(spec["completionMode"])
-      # API server default without a podFailurePolicy (Kubernetes 1.34+ stores it).
-      spec.delete("podReplacementPolicy") if
-        [nil, "TerminatingOrFailed"].include?(spec["podReplacementPolicy"])
-      spec.delete("suspend") if [nil, false].include?(spec["suspend"])
-      template = spec.fetch("template")
-      metadata = Marshal.load(Marshal.dump(template["metadata"] || {}))
-      labels = Marshal.load(Marshal.dump(metadata["labels"] || {}))
-      %w[batch.kubernetes.io/controller-uid batch.kubernetes.io/job-name
-         controller-uid job-name].each { |key| labels.delete(key) }
-      metadata["labels"] = labels
-      metadata.delete("annotations") if metadata["annotations"] == {}
-      template["metadata"] = metadata
-      template["spec"] = normalize_pod.call(template["spec"] || {})
-      spec["template"] = template
-      spec
-    end
+  ruby -rjson -rdigest -e "$JOB_IDENTITY_RUBY" -e '
     execution_contract = lambda do |job|
-      { "jobSpec" => normalize_job_spec.call(job["spec"] || {}) }
+      { "jobSpec" => normalize_job_spec(job["spec"] || {}) }
     end
     expected = JSON.parse(File.read(ARGV.fetch(0)))
     actual = JSON.parse(File.read(ARGV.fetch(1)))
@@ -298,29 +305,27 @@ verify_active_job_identity() {
   return "$status"
 }
 
-terminate_migration_job() {
-  local deadline now remaining body_file delete_output delete_status
-  [ "$JOB_ROLE" = owner ] || return 1
-  [ -n "$JOB_UID" ] || return 1
+# Sends a foreground DELETE for the Job named $JOB_NAME that only the API
+# server's UID precondition lets through: a Job another caller created under
+# the same name is never deleted. Prints kubectl's output and returns its
+# status; the caller classifies a failure.
+delete_job_with_uid_precondition() {
+  local uid="$1" body_file delete_status=0
   body_file="$(mktemp)"
   printf '%s' \
-    '{"apiVersion":"v1","kind":"DeleteOptions","propagationPolicy":"Foreground","preconditions":{"uid":"'"$JOB_UID"'"}}' \
+    '{"apiVersion":"v1","kind":"DeleteOptions","propagationPolicy":"Foreground","preconditions":{"uid":"'"$uid"'"}}' \
     >"$body_file"
-  set +e
-  delete_output="$(kctl delete --raw \
-    "/apis/batch/v1/namespaces/control-plane/jobs/$JOB_NAME" -f "$body_file" 2>&1)"
-  delete_status=$?
-  set -e
+  kctl delete --raw \
+    "/apis/batch/v1/namespaces/control-plane/jobs/$JOB_NAME" -f "$body_file" 2>&1 || \
+    delete_status=$?
   rm -f "$body_file"
-  if [ "$delete_status" -ne 0 ]; then
-    if [[ "$delete_output" == *"Precondition failed"* || "$delete_output" == *"NotFound"* ]]; then
-      die "migration Job was replaced or removed by another caller; not deleting it"
-    fi
-    if [ -n "$delete_output" ]; then
-      printf '%s\n' "$delete_output" >&2
-    fi
-    return 1
-  fi
+  return "$delete_status"
+}
+
+# Waits until the Job and its pods are gone, within one shared
+# MIGRATION_TERMINATION_PROOF_SECONDS deadline.
+prove_job_and_pods_deleted() {
+  local deadline now remaining
   deadline="$(( SECONDS + MIGRATION_TERMINATION_PROOF_SECONDS ))"
   now="$SECONDS"
   remaining="$(( deadline - now ))"
@@ -336,6 +341,54 @@ terminate_migration_job() {
     -l "job-name=$JOB_NAME" -n control-plane >/dev/null; then
     return 1
   fi
+}
+
+terminate_migration_job() {
+  local delete_output delete_status
+  [ "$JOB_ROLE" = owner ] || return 1
+  [ -n "$JOB_UID" ] || return 1
+  if delete_output="$(delete_job_with_uid_precondition "$JOB_UID")"; then
+    delete_status=0
+  else
+    delete_status=$?
+  fi
+  if [ "$delete_status" -ne 0 ]; then
+    if [[ "$delete_output" == *"Precondition failed"* || "$delete_output" == *"NotFound"* ]]; then
+      die "migration Job was replaced or removed by another caller; not deleting it"
+    fi
+    if [ -n "$delete_output" ]; then
+      printf '%s\n' "$delete_output" >&2
+    fi
+    return 1
+  fi
+  prove_job_and_pods_deleted
+}
+
+# Replaces a Job that was terminal when its status was read. The delete is
+# bound to that Job's UID, so a running Job another caller created under the
+# same name in the meantime is never deleted.
+delete_terminal_job_by_uid() {
+  local uid="$1" delete_output delete_status
+  if delete_output="$(delete_job_with_uid_precondition "$uid")"; then
+    delete_status=0
+  else
+    delete_status=$?
+  fi
+  if [ "$delete_status" -ne 0 ]; then
+    if [[ "$delete_output" == *"Precondition failed"* ]]; then
+      die "migration Job was replaced by another caller; not deleting it"
+    fi
+    if [[ "$delete_output" == *"NotFound"* ]]; then
+      log "Previous terminal migration job $JOB_NAME is already gone"
+      return 0
+    fi
+    if [ -n "$delete_output" ]; then
+      printf '%s\n' "$delete_output" >&2
+    fi
+    die "could not delete previous terminal migration Job $JOB_NAME"
+  fi
+  prove_job_and_pods_deleted || \
+    die "previous terminal migration Job deletion could not be proven within ${MIGRATION_TERMINATION_PROOF_SECONDS}s"
 }
 
 OVERLAY=""
@@ -522,23 +575,11 @@ extract_control_api_image() {
 }
 
 build_job_manifest() {
-  ruby -ryaml -rjson -rdigest -e '
-    # Canonical form for the configuration digest, shared with
-    # verify_active_job_identity (copied from verify-networkpolicies.sh).
-    # Array order is not part of the digest; verify_active_job_identity still
-    # compares the normalized contracts directly, which keeps it significant.
-    def deep_sort(value)
-      case value
-      when Hash
-        value.keys.sort.each_with_object({}) do |key, acc|
-          acc[key] = deep_sort(value[key])
-        end
-      when Array
-        value.map { |entry| deep_sort(entry) }.sort_by { |entry| JSON.generate(entry) }
-      else
-        value
-      end
-    end
+  ruby -ryaml -rjson -rdigest -e "$JOB_IDENTITY_RUBY" -e '
+    # Canonical form for the configuration digest is JOB_IDENTITY_RUBY, shared
+    # with verify_active_job_identity. Array order is not part of the digest;
+    # verify_active_job_identity still compares the normalized contracts
+    # directly, which keeps it significant.
     job_name = ENV.fetch("JOB_NAME")
     docs = []
     YAML.load_stream(File.read(ARGV[0])) do |doc|
@@ -645,73 +686,7 @@ build_job_manifest() {
       job["spec"]["template"]["spec"][key] = value if value
     end
 
-    normalize_container = lambda do |value|
-      normalized = Marshal.load(Marshal.dump(value))
-      normalized.delete("terminationMessagePath") if
-        [nil, "/dev/termination-log"].include?(normalized["terminationMessagePath"])
-      normalized.delete("terminationMessagePolicy") if
-        [nil, "File"].include?(normalized["terminationMessagePolicy"])
-      %w[env envFrom ports volumeDevices volumeMounts].each do |key|
-        normalized.delete(key) if normalized[key] == []
-      end
-      %w[resources securityContext].each do |key|
-        normalized.delete(key) if normalized[key].nil? || normalized[key] == {}
-      end
-      normalized
-    end
-    normalize_pod = lambda do |value|
-      normalized = Marshal.load(Marshal.dump(value))
-      containers = normalized["containers"] || []
-      abort("migration Job must contain exactly one migrate container") unless
-        containers.length == 1 && containers.first["name"] == "migrate"
-      normalized["containers"] = containers.map { |item| normalize_container.call(item) }
-      %w[initContainers ephemeralContainers imagePullSecrets tolerations topologySpreadConstraints
-         readinessGates resourceClaims schedulingGates volumes].each do |key|
-        normalized.delete(key) if normalized[key] == []
-      end
-      normalized.delete("securityContext") if
-        normalized["securityContext"].nil? || normalized["securityContext"] == {}
-      normalized.delete("serviceAccount") if
-        normalized["serviceAccount"] == normalized["serviceAccountName"]
-      normalized.delete("dnsPolicy") if [nil, "ClusterFirst"].include?(normalized["dnsPolicy"])
-      normalized.delete("schedulerName") if
-        [nil, "default-scheduler"].include?(normalized["schedulerName"])
-      normalized.delete("terminationGracePeriodSeconds") if
-        [nil, 30].include?(normalized["terminationGracePeriodSeconds"])
-      normalized.delete("enableServiceLinks") if
-        [nil, true].include?(normalized["enableServiceLinks"])
-      normalized.delete("preemptionPolicy") if
-        [nil, "PreemptLowerPriority"].include?(normalized["preemptionPolicy"])
-      %w[hostNetwork hostPID hostIPC shareProcessNamespace setHostnameAsFQDN].each do |key|
-        normalized.delete(key) if [nil, false].include?(normalized[key])
-      end
-      normalized
-    end
-    normalize_job_spec = lambda do |value|
-      normalized = Marshal.load(Marshal.dump(value))
-      normalized.delete("selector")
-      normalized.delete("manualSelector") if [nil, false].include?(normalized["manualSelector"])
-      normalized.delete("parallelism") if [nil, 1].include?(normalized["parallelism"])
-      normalized.delete("completions") if [nil, 1].include?(normalized["completions"])
-      normalized.delete("completionMode") if
-        [nil, "NonIndexed"].include?(normalized["completionMode"])
-      # API server default without a podFailurePolicy (Kubernetes 1.34+ stores it).
-      normalized.delete("podReplacementPolicy") if
-        [nil, "TerminatingOrFailed"].include?(normalized["podReplacementPolicy"])
-      normalized.delete("suspend") if [nil, false].include?(normalized["suspend"])
-      template = normalized.fetch("template")
-      metadata = Marshal.load(Marshal.dump(template["metadata"] || {}))
-      labels = Marshal.load(Marshal.dump(metadata["labels"] || {}))
-      %w[batch.kubernetes.io/controller-uid batch.kubernetes.io/job-name
-         controller-uid job-name].each { |key| labels.delete(key) }
-      metadata["labels"] = labels
-      metadata.delete("annotations") if metadata["annotations"] == {}
-      template["metadata"] = metadata
-      template["spec"] = normalize_pod.call(template["spec"] || {})
-      normalized["template"] = template
-      normalized
-    end
-    configuration_contract = { "jobSpec" => normalize_job_spec.call(job.fetch("spec")) }
+    configuration_contract = { "jobSpec" => normalize_job_spec(job.fetch("spec")) }
     job["metadata"]["annotations"]["clerum.io/migration-configuration-sha256"] =
       Digest::SHA256.hexdigest(JSON.generate(deep_sort(configuration_contract)))
 
@@ -1534,18 +1509,27 @@ if job_exists; then
       terminal = conditions.any? do |condition|
         %w[Complete Failed].include?(condition["type"]) && condition["status"] == "True"
       end
-      puts(terminal ? "terminal" : "nonterminal")
+      if terminal
+        uid = job.dig("metadata", "uid").to_s
+        abort("terminal migration Job has no metadata.uid") if uid.empty?
+        puts("terminal #{uid}")
+      else
+        puts("nonterminal")
+      end
     ')"; then
     die "could not determine existing migration Job status"
   fi
+  read -r job_state terminal_job_uid <<<"$job_state"
   if [ "$job_state" = "nonterminal" ]; then
     verify_active_job_identity || die "active migration Job identity does not match the current deployment"
     log "Migration job $JOB_NAME is queued or active; waiting for the existing run"
-  else
-    log "Deleting previous terminal migration job $JOB_NAME"
-    kctl delete job "$JOB_NAME" -n control-plane --ignore-not-found >/dev/null 2>&1 || true
+  elif [ "$job_state" = "terminal" ] && [ -n "$terminal_job_uid" ]; then
+    log "Deleting previous terminal migration job $JOB_NAME (uid $terminal_job_uid)"
+    delete_terminal_job_by_uid "$terminal_job_uid"
     log "Starting migration job $JOB_NAME"
     create_job
+  else
+    die "could not determine existing migration Job status"
   fi
 else
   log "Starting migration job $JOB_NAME"

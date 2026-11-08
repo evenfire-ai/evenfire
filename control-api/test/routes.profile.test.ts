@@ -474,20 +474,45 @@ describe('routes/profile', () => {
     ).expect(403)
   })
 
-  it('does not allow an ordinary team member to rename a team', async () => {
+  it('refuses a live member and lets a live admin rename a team', async () => {
     svc.renameTeam.mockResolvedValue({ id: 't1', name: 'Renamed' })
     const app = express()
     app.use(express.json())
     mountInternalRoutes(app, accessCatalogGateway())
 
+    // The live team row says `member` (default fixture), so the live role
+    // check refuses before the writer.
     await withInternalServiceAuthAndUserSession(
       request(app).put('/external/teams/t1/name').send({ name: 'Renamed' })
     ).expect(403)
+    // Witness: the refusal came after the live membership lookup.
+    expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledWith(
+      'u1',
+      't1',
+      expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
+    )
+    expect(svc.renameTeam).not.toHaveBeenCalled()
 
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue({
+      teamId: 't1',
+      role: 'admin',
+    })
+    await withInternalServiceAuthAndUserSession(
+      request(app).put('/external/teams/t1/name').send({ name: 'Renamed' })
+    ).expect(200, { id: 't1', name: 'Renamed' })
+    expect(svc.renameTeam).toHaveBeenCalledWith('t1', 'Renamed')
+
+    // Witness: a removed member is still refused by the live team matcher and
+    // the writer is never reached.
+    svc.renameTeam.mockClear()
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue(null)
+    await withInternalServiceAuthAndUserSession(
+      request(app).put('/external/teams/t1/name').send({ name: 'Renamed' })
+    ).expect(403)
     expect(svc.renameTeam).not.toHaveBeenCalled()
   })
 
-  it('does not expose the member directory to an ordinary member', async () => {
+  it('exposes the member directory to an ordinary live member', async () => {
     svc.listMembers.mockResolvedValue([{ id: 'u2', email: 'peer@example.com', role: 'member' }])
     const app = express()
     app.use(express.json())
@@ -495,9 +520,14 @@ describe('routes/profile', () => {
 
     await withInternalServiceAuthAndUserSession(
       request(app).get('/external/teams/t1/members')
-    ).expect(403)
+    ).expect(200, { items: [{ id: 'u2', email: 'peer@example.com', role: 'member' }] })
 
-    expect(svc.listMembers).not.toHaveBeenCalled()
+    expect(svc.listMembers).toHaveBeenCalledWith('t1')
+    expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledWith(
+      'u1',
+      't1',
+      expect.objectContaining({ onDatabaseFailure: expect.any(Function) })
+    )
   })
 
   it('does not allow an inviter to create an admin invitation', async () => {
@@ -526,8 +556,7 @@ describe('routes/profile', () => {
       'u1',
       'target@example.com',
       [{ teamId: 't1', role: 'admin' }],
-      'target',
-      expect.objectContaining({ contract: 'v1', userId: 'u1' })
+      'target'
     )
   })
 
@@ -605,7 +634,15 @@ describe('routes/profile', () => {
       items: [
         {
           team: { id: 't1', name: 'Alpha', role: 'member' },
-          members: [],
+          members: [
+            {
+              id: 'u1',
+              email: 'u@example.com',
+              name: 'User',
+              role: 'member',
+              status: 'active',
+            },
+          ],
           contextIds: ['ctx-a'],
           agentNames: ['agent-a'],
         },
@@ -628,7 +665,7 @@ describe('routes/profile', () => {
     expect(svc.getTeamContexts).toHaveBeenCalledWith('t2')
     expect(svc.getTeamAgents).toHaveBeenCalledWith('t2')
     expect(svc.listMembers).toHaveBeenCalledWith('t2')
-    expect(svc.listMembers).not.toHaveBeenCalledWith('t1')
+    expect(svc.listMembers).toHaveBeenCalledWith('t1')
   })
 
   it('logs team-directory partial failures through the structured request logger', async () => {
@@ -694,7 +731,8 @@ describe('routes/profile', () => {
     expect(res.body.partialErrors).toEqual([])
     expect(res.body.items).toHaveLength(50)
     expect(res.body.items.at(-1)?.team.id).toBe('t50')
-    expect(svc.listMembers).not.toHaveBeenCalled()
+    expect(svc.listMembers).toHaveBeenCalledTimes(50)
+    expect(svc.listMembers).not.toHaveBeenCalledWith('t51')
     expect(svc.getTeamContexts).toHaveBeenCalledTimes(50)
     expect(svc.getTeamAgents).toHaveBeenCalledTimes(50)
   })
@@ -885,6 +923,106 @@ describe('routes/profile', () => {
       ['mcp:servers:list'],
       ['host-a'],
       [] // extraGrantedScopes — no UI-bearing recipe in this mock
+    )
+  })
+
+  it('signs the live team role for rpc tokens, not the session token role', async () => {
+    const sessionToken = signExternalSessionToken({
+      userId: 'user-live-role',
+      email: 'live-role@example.com',
+      teamId: 't1',
+      role: 'admin',
+      authGeneration: 1,
+    })
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue({
+      teamId: 't1',
+      role: 'member',
+    })
+    svc.getUserAgents.mockResolvedValue({ userId: 'user-live-role', agentNames: [] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['team-host'] })
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'synthetic-rpc-token',
+      accessScope: 'team',
+      teamId: 't1',
+      scopes: ['mcp:servers:list'],
+      hostRefs: ['team-host'],
+      expiresInSeconds: 300,
+    })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/rpc/token'))
+      .send({ sessionToken, scopes: ['mcp:servers:list'], hostRefs: ['team-host'] })
+      .expect(200)
+
+    // Witness: the role decision came from the live membership lookup.
+    expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledWith(
+      'user-live-role',
+      't1',
+      expect.anything()
+    )
+    expect(svc.getTeamAgents).toHaveBeenCalledWith('t1')
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledWith(
+      { userId: 'user-live-role', teamId: 't1', role: 'member' },
+      ['mcp:servers:list'],
+      ['team-host'],
+      []
+    )
+  })
+
+  it('keeps only direct host grants for rpc tokens once the live team membership is gone', async () => {
+    const sessionToken = signExternalSessionToken({
+      userId: 'user-removed',
+      email: 'removed@example.com',
+      teamId: 't1',
+      role: 'admin',
+      authGeneration: 1,
+    })
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue(null)
+    svc.getUserAgents.mockResolvedValue({ userId: 'user-removed', agentNames: ['direct-host'] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['team-host'] })
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'synthetic-rpc-token',
+      accessScope: 'user',
+      teamId: null,
+      scopes: ['mcp:servers:list'],
+      hostRefs: ['direct-host'],
+      expiresInSeconds: 300,
+    })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/rpc/token'))
+      .send({ sessionToken, scopes: ['mcp:servers:list'], hostRefs: ['team-host'] })
+      .expect(403)
+      .expect({ error: 'direct_host_access_required' })
+
+    expect(svc.getTeamAgents).not.toHaveBeenCalled()
+    expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
+    // Witness: the request reached the live lookup and the grant decision.
+    expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledTimes(1)
+    expect(liveTeamAuthorizationMock.getLiveTeamMembership).toHaveBeenCalledWith(
+      'user-removed',
+      't1',
+      expect.anything()
+    )
+    expect(svc.getUserAgents).toHaveBeenCalledTimes(1)
+
+    await withInternalServiceAuth(request(app).post('/external/rpc/token'))
+      .send({ sessionToken, scopes: ['mcp:servers:list'], hostRefs: ['direct-host'] })
+      .expect(200)
+
+    expect(svc.getTeamAgents).not.toHaveBeenCalled()
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledTimes(1)
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledWith(
+      { userId: 'user-removed', teamId: null, role: 'member' },
+      ['mcp:servers:list'],
+      ['direct-host'],
+      []
     )
   })
 
@@ -1189,7 +1327,7 @@ describe('routes/profile', () => {
 
     await withInternalServiceAuth(request(app).post('/external/auth/google-login'))
       .send({ idToken: 'retired-google-token' })
-      .expect(403, { error: 'membership_not_found' })
+      .expect(401, { error: 'Unauthorized' })
 
     await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
       .send({ email: 'retired@example.com', password: 'synthetic-correct-password' })

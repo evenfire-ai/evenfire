@@ -18,6 +18,9 @@ import {
 import { TEAM_ROLES, TeamRole } from '../types.js'
 
 const MAX_INVITATION_EMAIL_LENGTH = 320
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
+const MAX_INVITEE_NAME_LENGTH = 120
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const MEMBER_RETIREMENT_EDGE_RATE_LIMIT_PER_MINUTE = 30
 const MEMBER_RETIREMENT_SUBJECT_RATE_LIMIT_PER_MINUTE = 30
@@ -106,12 +109,6 @@ function validateMemberRetirementRequest(
   next()
 }
 
-function isControlApiBadRequest(error: unknown, code: string): boolean {
-  if (!(error instanceof ControlApiError) || error.status !== 400) return false
-  if (!error.body || typeof error.body !== 'object') return false
-  return (error.body as { error?: unknown }).error === code
-}
-
 export function createMembersRouter(): Router {
   const router = Router()
 
@@ -154,34 +151,44 @@ export function createMembersRouter(): Router {
 
   router.post('/members/invite', requireAuth, async (req: AuthedRequest, res, next) => {
     try {
+      // The 320-character bound comes first: EMAIL_PATTERN alone accepts longer
+      // addresses, and control-api rejects them.
       const rawEmail = req.body?.email
       if (typeof rawEmail !== 'string' || rawEmail.length > MAX_INVITATION_EMAIL_LENGTH) {
         res.status(400).json({ error: 'Valid email is required' })
         return
       }
       const email = rawEmail.trim().toLowerCase()
-      res
-        .status(201)
-        .json(
-          await inviteManagedMember(email, req.body?.name, req.body?.teams, extractAuthToken(req))
-        )
-    } catch (error) {
-      if (isControlApiBadRequest(error, 'invalid_email')) {
+      const name = String(req.body?.name || '').trim()
+      const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
+      if (!EMAIL_PATTERN.test(email)) {
         res.status(400).json({ error: 'Valid email is required' })
         return
       }
-      if (isControlApiBadRequest(error, 'invalid_payload')) {
-        res.status(400).json({ error: 'Email and at least one team are required' })
-        return
-      }
-      if (isControlApiBadRequest(error, 'invalid_name')) {
+      if (name.length > MAX_INVITEE_NAME_LENGTH) {
         res.status(400).json({ error: 'Name is too long' })
         return
       }
-      if (isControlApiBadRequest(error, 'too_many_teams')) {
+      if (teams.length > MAX_INVITATION_TEAM_ASSIGNMENTS) {
         res.status(400).json({ error: 'Too many teams selected' })
         return
       }
+      const assignments = teams
+        .map((item: unknown) => {
+          const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
+          const teamId = String(row.teamId || row.id || '').trim()
+          const role = String(row.role || 'member').trim() as TeamRole
+          return teamId && TEAM_ROLES.includes(role) ? { teamId, role } : null
+        })
+        .filter((item): item is { teamId: string; role: TeamRole } => Boolean(item))
+      if (!email || assignments.length === 0) {
+        res.status(400).json({ error: 'Email and at least one team are required' })
+        return
+      }
+      res
+        .status(201)
+        .json(await inviteManagedMember(email, name, assignments, extractAuthToken(req)))
+    } catch (error) {
       const message = error instanceof Error ? error.message : ''
       if (message.includes('(403)')) {
         res.status(403).json({ error: 'You are not allowed to invite with those permissions' })

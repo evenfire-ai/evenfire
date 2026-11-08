@@ -9,6 +9,7 @@ import {
   createToolSearchTool,
 } from '../../capabilities/toolCatalogTools'
 import {
+  buildGfsAttachmentSaveTools,
   buildGfsCopyTools,
   buildGfsReadTools,
   buildGfsWriteTools,
@@ -33,6 +34,7 @@ import {
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
 import type { AttachmentReadLedger } from '../attachments/attachmentReadBudget'
+import { attachmentSaveAvailable } from '../attachments/attachmentSave'
 import { type ExecutionContext, NativeToolConfig, Tool, ToolRegistry } from '../interfaces'
 import { BasicSafety } from '../safety/safety'
 import type { SessionSearchService } from '../sessionSearch'
@@ -362,6 +364,9 @@ export class NativeToolRegistry implements ToolRegistry {
             })
           : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
+        ...(attachmentSaveAvailable(gfsScopes, sourceMessage?.attachments)
+          ? buildGfsAttachmentSaveTools(gfsClient, sourceMessage?.attachments ?? [])
+          : []),
         ...(gfsScopes.has('gfs.read') && gfsScopes.has('gfs.write')
           ? buildGfsCopyTools(gfsClient)
           : []),

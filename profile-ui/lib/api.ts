@@ -1,6 +1,7 @@
 'use client'
 
 import {
+  EVENFIRE_RELEASES_URL,
   EXTERNAL_REST_API_BASE_URL,
   EXTERNAL_SESSION_TOKEN_EXPIRES_AT_KEY,
   EXTERNAL_SESSION_TOKEN_KEY,
@@ -33,10 +34,13 @@ type ApiRequestOptions = {
   silentUnauthorized?: boolean
   /**
    * Allows one invitation-proof request through the unconfirmed-logout fence.
-   * Only a password-reset submission uses it: that route ignores the surviving
-   * cookie and clears it server-side, so the fence can be released after the
-   * server accepts the recovery action. Ordinary session requests must not
-   * bypass the fence.
+   * Two token-plus-email proofs use it, and neither reads the surviving cookie:
+   * - a password-reset submission clears that cookie server-side, so the screen
+   *   releases the fence after the server accepts the recovery action;
+   * - an invitation acceptance that is not a replay sets a new session cookie
+   *   for the invitee, which replaces the fenced cookie, so `acceptInvitation`
+   *   releases the fence; a replay sets no cookie and keeps it.
+   * Ordinary session requests must not bypass the fence.
    */
   allowUnconfirmedLogout?: boolean
 }
@@ -68,8 +72,9 @@ function markLogoutUnconfirmed(): boolean {
 
 /**
  * Clears the logout fence. The fence is released only after a successful
- * password login, a confirmed logout, or an accepted recovery submission; a
- * recovery page view never releases it.
+ * password login (parsed response), a confirmed logout, an accepted recovery submission, or a
+ * non-replay invitation acceptance that set a new session cookie; a recovery page view never
+ * releases it.
  */
 export function clearUnconfirmedLogout(): void {
   if (typeof window === 'undefined') return
@@ -282,23 +287,33 @@ export async function loginWithPassword(
     const detail = publicErrorFields(text).detail || res.statusText
     throw new Error(`${res.status} ${res.statusText} - ${detail}`)
   }
+  const body = (await res.json()) as PasswordLoginResponse
   clearToken()
   clearUnconfirmedLogout()
-  return (await res.json()) as PasswordLoginResponse
+  return body
 }
 
 export async function logoutProfileUI(): Promise<{
   revocationConfirmed: boolean
   fencePersisted: boolean
+  sessionAbsent: boolean
 }> {
   const fencePersisted = markLogoutUnconfirmed()
   let revocationConfirmed = false
+  let sessionAbsent = false
   try {
     const response = await fetch(`${EXTERNAL_REST_API_BASE_URL}/api/v1/auth/logout`, {
       method: 'POST',
       credentials: 'include',
     })
-    revocationConfirmed = response.ok
+    if (response.ok) {
+      // The edge also answers 200 when the request carried no session, for example after
+      // an earlier failed logout expired the cookie. Only an answer for a presented
+      // session confirms revocation; a missing field confirms nothing.
+      const body = (await response.json()) as { sessionPresented?: unknown }
+      revocationConfirmed = body.sessionPresented === true
+      sessionAbsent = body.sessionPresented === false
+    }
   } catch {
     // The browser cannot expire an HttpOnly cookie without a server response.
     // The local marker prevents that cookie from restoring or authorizing Profile state.
@@ -306,7 +321,7 @@ export async function logoutProfileUI(): Promise<{
     clearToken()
   }
   if (revocationConfirmed) clearUnconfirmedLogout()
-  return { revocationConfirmed, fencePersisted }
+  return { revocationConfirmed, fencePersisted, sessionAbsent }
 }
 
 export async function requestPasswordReset(email: string): Promise<{ requested: true }> {
@@ -331,11 +346,18 @@ export async function acceptInvitation(
   invitationUrlId: string,
   email: string
 ): Promise<AcceptInvitationResponse> {
-  const response = (await apiSend('POST', '/api/v1/invitations/accept', {
-    token: invitationUrlId,
-    email,
-  })) as AcceptInvitationResponse
+  const response = (await apiSend(
+    'POST',
+    '/api/v1/invitations/accept',
+    { token: invitationUrlId, email },
+    {},
+    {},
+    { allowUnconfirmedLogout: true }
+  )) as AcceptInvitationResponse
   clearToken()
+  // A non-replay accept set a new session cookie for the invitee, replacing the
+  // cookie the fence protected. A replay sets no cookie, so the fence stays.
+  if (!response.replay) clearUnconfirmedLogout()
   return response
 }
 
@@ -540,4 +562,8 @@ export function getConfiguredExternalRestApiBaseUrl(): string {
   } catch {
     return EXTERNAL_REST_API_BASE_URL.replace(/\/+$/, '')
   }
+}
+
+export function getEvenfireDownloadUrl(): string {
+  return EVENFIRE_RELEASES_URL
 }

@@ -7,11 +7,7 @@ import { type DbClient, initDb } from '../src/db.js'
 import { createExternalMembersRouter } from '../src/routes/external/members.js'
 import { createExternalTeamsRouter } from '../src/routes/external/teams.js'
 import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
-import { revokeAllUserSessions } from '../src/services/auth/userSessionService.js'
-import {
-  acceptInvitationForEmail,
-  createManagedInvitationForUser,
-} from '../src/services/directory/index.js'
+import { createManagedInvitationForUser } from '../src/services/directory/index.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -28,15 +24,8 @@ const runtimePolicy = vi.hoisted(() => ({
   issueV2: false,
   renewV2: false,
   switchCompatibility: true,
-  computeCatalogShadow: false,
-  serveCatalog: false,
-  actionContextV2: false,
-  rpcDelegationV2: false,
-  desktopAllTeamMode: false,
-  profileV2Mode: false,
   minimumClientVersion: null,
   enforceMinimumClient: false,
-  advertisedCatalogFamilies: [],
 }))
 
 vi.mock('../src/db.js', async importOriginal => {
@@ -255,65 +244,6 @@ describeRealPostgres('external team mutations final source authority on real Pos
   function mutations(): readonly AdminMutation[] {
     return [
       {
-        name: 'team rename',
-        invoke: server =>
-          request(server).put(`/external/teams/${teamId}/name`).send({ name: 'Renamed' }),
-        assertMutation: async () => {
-          const result = await databasePool.query<{ name: string }>(
-            `SELECT name FROM teams WHERE id = $1`,
-            [teamId]
-          )
-          expect(result.rows[0]?.name).toBe('Renamed')
-        },
-        assertNoMutation: async () => {
-          const result = await databasePool.query<{ name: string }>(
-            `SELECT name FROM teams WHERE id = $1`,
-            [teamId]
-          )
-          expect(result.rows[0]?.name).toBe('Original')
-        },
-      },
-      {
-        name: 'member role change',
-        invoke: server =>
-          request(server)
-            .patch(`/external/teams/${teamId}/members/${targetUserId}/role`)
-            .send({ role: 'inviter' }),
-        assertMutation: async () => {
-          const result = await databasePool.query<{ role: string }>(
-            `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2`,
-            [teamId, targetUserId]
-          )
-          expect(result.rows[0]?.role).toBe('inviter')
-        },
-        assertNoMutation: async () => {
-          const result = await databasePool.query<{ role: string }>(
-            `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2`,
-            [teamId, targetUserId]
-          )
-          expect(result.rows[0]?.role).toBe('member')
-        },
-      },
-      {
-        name: 'member removal',
-        invoke: server =>
-          request(server).delete(`/external/teams/${teamId}/members/${targetUserId}`),
-        assertMutation: async () => {
-          const result = await databasePool.query<{ status: string }>(
-            `SELECT status FROM team_members WHERE team_id = $1 AND user_id = $2`,
-            [teamId, targetUserId]
-          )
-          expect(result.rows[0]?.status).toBe('deleted')
-        },
-        assertNoMutation: async () => {
-          const result = await databasePool.query<{ status: string }>(
-            `SELECT status FROM team_members WHERE team_id = $1 AND user_id = $2`,
-            [teamId, targetUserId]
-          )
-          expect(result.rows[0]?.status).toBe('active')
-        },
-      },
-      {
         name: 'managed invitation creation',
         expectedStatus: 201,
         invoke: server =>
@@ -362,29 +292,18 @@ describeRealPostgres('external team mutations final source authority on real Pos
       },
       {
         name: 'managed invitation resend',
-        prepare: prepareInvitation,
+        prepare: async () => {
+          await prepareInvitation()
+          // Preparation already delivers one email; count only the resend.
+          invitationDelivery.registerAndSendInvitation.mockClear()
+        },
         invoke: server =>
           request(server).post(`/external/members/invitations/${invitationId}/resend`),
         assertMutation: async () => {
-          const result = await databasePool.query(
-            `SELECT 1
-               FROM invitation_delivery_commands
-              WHERE invitation_id = $1
-                AND delivery_kind = 'resend'
-                AND status = 'delivered'`,
-            [invitationId]
-          )
-          expect(result.rowCount).toBe(1)
+          expect(invitationDelivery.registerAndSendInvitation).toHaveBeenCalledOnce()
         },
         assertNoMutation: async () => {
-          const result = await databasePool.query(
-            `SELECT 1
-               FROM invitation_delivery_commands
-              WHERE invitation_id = $1
-                AND delivery_kind = 'resend'`,
-            [invitationId]
-          )
-          expect(result.rowCount).toBe(0)
+          expect(invitationDelivery.registerAndSendInvitation).not.toHaveBeenCalled()
         },
       },
       {
@@ -515,6 +434,35 @@ describeRealPostgres('external team mutations final source authority on real Pos
     expect(result.rows[0]?.status).toBe('active')
   })
 
+  it('refuses a managed role change on a retired user who keeps an active membership', async () => {
+    await resetPrincipal('managed-role-retired-target')
+    // Witness: the same manager, route and membership change the active target's role.
+    await request(app())
+      .patch(`/external/members/${targetUserId}/teams/${teamId}/role`)
+      .set('x-user-session-token', token)
+      .send({ role: 'inviter' })
+      .expect(200)
+    const before = await databasePool.query<{ role: string; status: string }>(
+      `SELECT role, status FROM team_members WHERE team_id = $1 AND user_id = $2`,
+      [teamId, targetUserId]
+    )
+    expect(before.rows[0]).toEqual({ role: 'inviter', status: 'active' })
+
+    // Retirement leaves team_members.status = 'active'.
+    await retireAdmin(databasePool, targetUserId, retirementActorId)
+    const response = await request(app())
+      .patch(`/external/members/${targetUserId}/teams/${teamId}/role`)
+      .set('x-user-session-token', token)
+      .send({ role: 'member' })
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({ error: 'not_found' })
+    const after = await databasePool.query<{ role: string; status: string }>(
+      `SELECT role, status FROM team_members WHERE team_id = $1 AND user_id = $2`,
+      [teamId, targetUserId]
+    )
+    expect(after.rows[0]).toEqual({ role: 'inviter', status: 'active' })
+  })
+
   it('activates a managed invitation after delivery', async () => {
     await resetPrincipal('managed-invitation-activation')
     await prepareInvitation()
@@ -524,59 +472,6 @@ describeRealPostgres('external team mutations final source authority on real Pos
     )
     expect(invitationDelivery.registerAndSendInvitation).toHaveBeenCalledTimes(1)
     expect(result.rows[0]?.status).toBe('pending')
-  })
-
-  it('denies managed invitation activation when source-session invalidation wins during delivery', async () => {
-    await resetPrincipal('managed-invitation-post-delivery-revoke')
-
-    let markDeliveryStarted!: () => void
-    const deliveryStarted = new Promise<void>(resolve => {
-      markDeliveryStarted = resolve
-    })
-    let releaseDelivery!: () => void
-    const deliveryGate = new Promise<void>(resolve => {
-      releaseDelivery = resolve
-    })
-    invitationDelivery.registerAndSendInvitation.mockImplementationOnce(async () => {
-      markDeliveryStarted()
-      await deliveryGate
-    })
-
-    const pending = request(app())
-      .post('/external/members/invitations')
-      .set('x-user-session-token', token)
-      .send({
-        email: invitationEmail,
-        name: 'Invitee',
-        teams: [{ teamId, role: 'member' }],
-      })
-      .then(response => response)
-
-    await deliveryStarted
-    const draft = await databasePool.query<{ id: string; status: string; token: string }>(
-      `SELECT id::text AS id, status, token
-         FROM invitations
-        WHERE email = $1`,
-      [invitationEmail]
-    )
-    expect(draft.rows[0]?.status).toBe('draft')
-
-    await revokeAllUserSessions(adminUserId, 'test')
-    releaseDelivery()
-
-    const response = await pending
-    expect(response.status).toBe(403)
-    const finalState = await databasePool.query<{ status: string; command_status: string }>(
-      `SELECT i.status, c.status AS command_status
-         FROM invitations i
-         JOIN invitation_delivery_commands c ON c.invitation_id = i.id
-        WHERE i.id = $1`,
-      [draft.rows[0]!.id]
-    )
-    expect(finalState.rows[0]).toEqual({ status: 'revoked', command_status: 'cancelled' })
-    await expect(
-      acceptInvitationForEmail(invitationEmail, draft.rows[0]!.token, draft.rows[0]!.id)
-    ).resolves.toEqual({ error: 'not_pending' })
   })
 
   for (const mutation of mutations()) {
@@ -610,36 +505,6 @@ describeRealPostgres('external team mutations final source authority on real Pos
           .then(response => response)
         await waitForBlockedBy(databasePool, gatePid)
         await retireAdmin(gate, adminUserId, retirementActorId)
-        await gate.query('COMMIT')
-        const response = await pending
-        expect(response.status).toBe(403)
-        await mutation.assertNoMutation()
-      } finally {
-        await gate.query('ROLLBACK').catch(() => undefined)
-        gate.release()
-      }
-    })
-
-    it(`denies ${mutation.name} when source-session invalidation wins after admission`, async () => {
-      await resetPrincipal(`revoke-${mutation.name.replaceAll(' ', '-')}`)
-      await mutation.prepare?.()
-      const gate = await databasePool.connect()
-      try {
-        await gate.query('BEGIN')
-        await gate.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [adminUserId])
-        const gatePid = await backendPid(gate)
-        const pending = mutation
-          .invoke(app())
-          .set('x-user-session-token', token)
-          .then(response => response)
-        await waitForBlockedBy(databasePool, gatePid)
-        await gate.query(
-          `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason)
-           VALUES ($1, NOW() + INTERVAL '1 second', 'test')
-           ON CONFLICT (user_id) DO UPDATE
-             SET valid_after = EXCLUDED.valid_after, reason = EXCLUDED.reason`,
-          [adminUserId]
-        )
         await gate.query('COMMIT')
         const response = await pending
         expect(response.status).toBe(403)

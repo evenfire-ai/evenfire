@@ -4,6 +4,7 @@ import type { Request } from 'express'
 import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
+import { ExternalSessionIssuanceUnavailableError } from '../src/services/auth/externalSessionIssuanceError.js'
 import { K8sNotFoundError } from '../src/services/resourceService.js'
 
 /**
@@ -69,20 +70,25 @@ describe('clerumErrorHandler — K8s status forwarding (UT-2a)', () => {
     expect(res.status).toBe(404)
   })
 
-  it('preserves the external public 4xx error contract after handler extraction', async () => {
-    const res = await request(externalAppThrowing({ status: 401, message: 'upstream detail' })).get(
-      '/api/v1/external/boom'
-    )
+  it("forwards a thrown 4xx on /api/v1/external as dev's flat body", async () => {
+    const res = await request(
+      externalAppThrowing(Object.assign(new Error('upstream detail'), { status: 401 }))
+    ).get('/api/v1/external/boom')
 
     expect(res.status).toBe(401)
-    expect(res.body).toMatchObject({
-      error: {
-        code: 'invalid_session',
-        message: 'The request could not be completed.',
-        retryable: false,
-      },
-    })
-    expect(JSON.stringify(res.body)).not.toContain('upstream detail')
+    expect(res.body.error).toBe('upstream detail')
+    expect(typeof res.body.correlationId).toBe('string')
+    expect(res.body.error.code).toBeUndefined()
+  })
+
+  it('keeps the typed 503 envelope and Retry-After for session issuance', async () => {
+    const res = await request(
+      externalAppThrowing(new ExternalSessionIssuanceUnavailableError())
+    ).get('/api/v1/external/boom')
+
+    expect(res.status).toBe(503)
+    expect(res.headers['retry-after']).toBe('2')
+    expect(res.body.error.code).toBe('session_issuance_temporarily_unavailable')
   })
 
   /**

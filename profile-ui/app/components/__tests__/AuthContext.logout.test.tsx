@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { AuthProvider, useAuth } from '@components/AuthContext'
@@ -24,15 +25,53 @@ vi.mock('@lib/api', () => ({
 
 vi.mock('@lib/profileAccess', () => ({ resetProfileAccessCache: mocks.resetProfileAccessCache }))
 
-function AuthProbe() {
-  const { authState, login, logout, signOutIncomplete, retrySignOut } = useAuth()
+type LogoutResult = {
+  revocationConfirmed: boolean
+  fencePersisted: boolean
+  sessionAbsent: boolean
+}
+
+const unsavedFailure: LogoutResult = {
+  revocationConfirmed: false,
+  fencePersisted: false,
+  sessionAbsent: false,
+}
+
+const noSessionReached: LogoutResult = {
+  revocationConfirmed: false,
+  fencePersisted: false,
+  sessionAbsent: true,
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(next => {
+    resolve = next
+  })
+  return { promise, resolve }
+}
+
+function AuthProbe({ expectLoginFailure = false }: { expectLoginFailure?: boolean }) {
+  const { authState, login, logout, signOutIncomplete, signOutPending, retrySignOut } = useAuth()
+  const [loginFailure, setLoginFailure] = useState<string | null>(null)
+  const startLogin = () => {
+    const attempt = login('user@example.invalid', 'password')
+    if (expectLoginFailure) {
+      // The login screen catches a rejected login; the probe records it as the witness.
+      void attempt.catch((error: Error) => setLoginFailure(error.message))
+    } else {
+      void attempt
+    }
+  }
   return (
     <div>
       <span>{authState.isLoggedIn ? 'signed-in' : 'signed-out'}</span>
+      <span>{signOutPending ? 'sign-out-pending' : 'sign-out-idle'}</span>
+      {loginFailure ? <span>login-failed: {loginFailure}</span> : null}
       <button type="button" onClick={logout}>
         Log out
       </button>
-      <button type="button" onClick={() => void login('user@example.invalid', 'password')}>
+      <button type="button" onClick={startLogin}>
         Log in
       </button>
       {signOutIncomplete ? <p role="alert">Sign-out is not complete</p> : null}
@@ -57,6 +96,7 @@ describe('Profile logout consumer', () => {
     mocks.logoutProfileUI.mockResolvedValueOnce({
       revocationConfirmed: false,
       fencePersisted: true,
+      sessionAbsent: false,
     })
     render(
       <ToastProvider>
@@ -98,10 +138,7 @@ describe('Profile logout consumer', () => {
     )
   })
 
-  it('keeps the local sign-out and offers a retry when the fence cannot be saved', async () => {
-    mocks.logoutProfileUI
-      .mockResolvedValueOnce({ revocationConfirmed: false, fencePersisted: false })
-      .mockResolvedValueOnce({ revocationConfirmed: true, fencePersisted: false })
+  function renderSignedIn() {
     render(
       <ToastProvider>
         <AuthProvider>
@@ -109,7 +146,9 @@ describe('Profile logout consumer', () => {
         </AuthProvider>
       </ToastProvider>
     )
+  }
 
+  async function logOutWithUnsavedFence() {
     await screen.findByText('signed-in')
     fireEvent.click(screen.getByRole('button', { name: 'Log out' }))
 
@@ -120,16 +159,178 @@ describe('Profile logout consumer', () => {
     expect(screen.queryByText(/signed out here/i)).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry sign-out' }))
-
     expect(mocks.logoutProfileUI).toHaveBeenCalledTimes(2)
+  }
+
+  it('keeps the local sign-out and confirms a retry that revoked the session', async () => {
+    mocks.logoutProfileUI
+      .mockResolvedValueOnce({
+        revocationConfirmed: false,
+        fencePersisted: false,
+        sessionAbsent: false,
+      })
+      .mockResolvedValueOnce({
+        revocationConfirmed: true,
+        fencePersisted: false,
+        sessionAbsent: false,
+      })
+    renderSignedIn()
+
+    await logOutWithUnsavedFence()
+
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
     expect(screen.getByText('signed-out')).toBeInTheDocument()
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('reports an unconfirmed revocation when the retry reached no session', async () => {
+    mocks.logoutProfileUI
+      .mockResolvedValueOnce({
+        revocationConfirmed: false,
+        fencePersisted: false,
+        sessionAbsent: false,
+      })
+      .mockResolvedValueOnce({
+        revocationConfirmed: false,
+        fencePersisted: false,
+        sessionAbsent: true,
+      })
+    renderSignedIn()
+
+    await logOutWithUnsavedFence()
+
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /server could not confirm that your session was revoked/i
+      )
+    )
+    expect(screen.getByText('signed-out')).toBeInTheDocument()
+  })
+
+  it('keeps offering the retry when the retry fails while the cookie may remain', async () => {
+    const retry = deferred<LogoutResult>()
+    mocks.logoutProfileUI.mockResolvedValueOnce(unsavedFailure).mockReturnValueOnce(retry.promise)
+    renderSignedIn()
+
+    await logOutWithUnsavedFence()
+    expect(screen.getByText('sign-out-pending')).toBeInTheDocument()
+
+    await act(async () => retry.resolve(unsavedFailure))
+
+    // Liveness: the retry's answer was processed, not only requested.
+    await screen.findByText('sign-out-idle')
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.getByText('signed-out')).toBeInTheDocument()
+  })
+
+  it('sends one retry at a time, so overlapping answers cannot show the banner and the notice together', async () => {
+    const retry = deferred<LogoutResult>()
+    const secondRetry = deferred<LogoutResult>()
+    mocks.logoutProfileUI
+      .mockResolvedValueOnce(unsavedFailure)
+      .mockReturnValueOnce(retry.promise)
+      .mockReturnValueOnce(secondRetry.promise)
+    renderSignedIn()
+
+    await logOutWithUnsavedFence()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry sign-out' }))
+
+    // The answer without a session arrives first; a failure for a second request would follow.
+    await act(async () => retry.resolve(noSessionReached))
+    await act(async () => secondRetry.resolve(unsavedFailure))
+
+    // Liveness: the first retry's answer reached the screen.
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /server could not confirm that your session was revoked/i
+      )
+    )
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(mocks.logoutProfileUI).toHaveBeenCalledTimes(2)
+  })
+
+  it('ignores a sign-out answer that arrives after a new login', async () => {
+    const retry = deferred<LogoutResult>()
+    mocks.logoutProfileUI.mockResolvedValueOnce(unsavedFailure).mockReturnValueOnce(retry.promise)
+    mocks.loginWithPassword.mockResolvedValueOnce({
+      token: 'test-token',
+      me: { id: 'user-1', email: 'user@example.invalid' },
+    })
+    renderSignedIn()
+
+    await logOutWithUnsavedFence()
+    fireEvent.click(screen.getByRole('button', { name: 'Log in' }))
+    await screen.findByText('signed-in')
+    expect(mocks.loginWithPassword).toHaveBeenCalledOnce()
+
+    await act(async () => retry.resolve(noSessionReached))
+
+    // Liveness: the late answer was delivered to the provider before the checks below.
+    await expect(mocks.logoutProfileUI.mock.results[1]?.value).resolves.toEqual(noSessionReached)
+    await act(async () => {})
+    expect(screen.getByText('signed-in')).toBeInTheDocument()
+    expect(screen.queryByText(/signed out here/i)).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByText('sign-out-idle')).toBeInTheDocument()
+  })
+
+  async function failLoginDuringPendingSignOut() {
+    const signOut = deferred<LogoutResult>()
+    mocks.logoutProfileUI.mockReturnValueOnce(signOut.promise)
+    mocks.loginWithPassword.mockRejectedValueOnce(new Error('invalid credentials'))
+    render(
+      <ToastProvider>
+        <AuthProvider>
+          <AuthProbe expectLoginFailure />
+        </AuthProvider>
+      </ToastProvider>
+    )
+
+    await screen.findByText('signed-in')
+    fireEvent.click(screen.getByRole('button', { name: 'Log out' }))
+    expect(screen.getByText('sign-out-pending')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Log in' }))
+    // Liveness: the login ran and its rejection reached the login screen.
+    await screen.findByText('login-failed: invalid credentials')
+    expect(mocks.loginWithPassword).toHaveBeenCalledOnce()
+    expect(screen.getByText('signed-out')).toBeInTheDocument()
+    // The failed login did not supersede the sign-out whose answer is still due.
+    expect(screen.getByText('sign-out-pending')).toBeInTheDocument()
+    return signOut
+  }
+
+  it('keeps a pending sign-out when the login that started during it fails', async () => {
+    const signOut = await failLoginDuringPendingSignOut()
+
+    await act(async () => signOut.resolve(unsavedFailure))
+
+    await screen.findByText('sign-out-idle')
+    expect(screen.getByRole('alert')).toHaveTextContent('Sign-out is not complete')
+    expect(mocks.logoutProfileUI).toHaveBeenCalledOnce()
+  })
+
+  it('reports the unconfirmed revocation when the login that started during the sign-out fails', async () => {
+    const signOut = await failLoginDuringPendingSignOut()
+
+    await act(async () => signOut.resolve(noSessionReached))
+
+    await screen.findByText('sign-out-idle')
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /server could not confirm that your session was revoked/i
+      )
+    )
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('a new login clears the incomplete sign-out', async () => {
     mocks.logoutProfileUI.mockResolvedValueOnce({
       revocationConfirmed: false,
       fencePersisted: false,
+      sessionAbsent: false,
     })
     mocks.loginWithPassword.mockResolvedValueOnce({
       token: 'test-token',
@@ -165,6 +366,7 @@ describe('Profile logout consumer', () => {
     mocks.logoutProfileUI.mockResolvedValueOnce({
       revocationConfirmed: true,
       fencePersisted: true,
+      sessionAbsent: false,
     })
     render(
       <ToastProvider>

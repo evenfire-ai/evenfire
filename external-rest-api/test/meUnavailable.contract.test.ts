@@ -30,7 +30,7 @@ describe('External REST /me unavailable producer contract', () => {
 
   afterEach(() => vi.restoreAllMocks())
 
-  it('preserves a Control API outage through the sanitized public error handler', async () => {
+  it('forwards a Control API outage body verbatim through the public error handler', async () => {
     mocks.controlApiRequest.mockRejectedValue(
       new ControlApiError(
         'private Control API failure',
@@ -50,16 +50,108 @@ describe('External REST /me unavailable producer contract', () => {
       .set('authorization', 'Bearer synthetic-session-token')
 
     expect(response.status).toBe(503)
-    expect(response.body.error).toMatchObject({ code: 'authority_unavailable', retryable: true })
+    expect(response.body).toEqual({ error: 'authority_failure' })
     expect(response.headers['retry-after']).toBe('60')
     expect(JSON.stringify(response.body)).not.toMatch(
-      /private Control API failure|authority_failure|synthetic-member-id|synthetic-session-token/
+      /private Control API failure|synthetic-member-id|synthetic-session-token/
     )
     expect(mocks.controlApiRequest).toHaveBeenCalledWith(
       'GET',
       '/external/users/synthetic-member-id/me',
       expect.objectContaining({ userSessionToken: 'synthetic-session-token' })
     )
+  })
+
+  it('forwards a revoked upstream session envelope as 401 so the client re-authenticates', async () => {
+    const envelope = {
+      error: {
+        code: 'invalid_session',
+        message: 'The session is not valid.',
+        correlationId: 'upstream-correlation',
+        retryable: false,
+      },
+    }
+    mocks.controlApiRequest.mockRejectedValue(
+      new ControlApiError('private upstream detail', 401, envelope)
+    )
+    const app = express()
+    app.use(createMeRouter())
+    app.use(externalRestPublicErrorHandler)
+
+    const response = await request(app)
+      .get('/me')
+      .set('authorization', 'Bearer synthetic-session-token')
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual(envelope)
+    expect(JSON.stringify(response.body)).not.toMatch(/private upstream detail/)
+    expect(mocks.controlApiRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/users/synthetic-member-id/me',
+      expect.objectContaining({ userSessionToken: 'synthetic-session-token' })
+    )
+  })
+
+  it('answers a bare upstream 401 as dev did (404)', async () => {
+    mocks.controlApiRequest.mockRejectedValue(
+      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+    )
+    const app = express()
+    app.use(createMeRouter())
+    app.use(externalRestPublicErrorHandler)
+
+    const response = await request(app)
+      .get('/me')
+      .set('authorization', 'Bearer synthetic-session-token')
+
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({ error: 'User not found' })
+    expect(JSON.stringify(response.body)).not.toMatch(/private upstream detail/)
+    expect(mocks.controlApiRequest).toHaveBeenCalledTimes(1)
+    expect(mocks.controlApiRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/users/synthetic-member-id/me',
+      expect.objectContaining({ userSessionToken: 'synthetic-session-token' })
+    )
+  })
+
+  it('answers a rejected edge token on /me with the invalid_session envelope', async () => {
+    mocks.verifyToken.mockReturnValue(null)
+    const app = express()
+    app.use(createMeRouter())
+    app.use(externalRestPublicErrorHandler)
+
+    const missing = await request(app).get('/me')
+    const rejected = await request(app)
+      .get('/me')
+      .set('authorization', 'Bearer synthetic-expired-token')
+
+    for (const response of [missing, rejected]) {
+      expect(response.status).toBe(401)
+      expect(response.body).toEqual({
+        error: {
+          code: 'invalid_session',
+          message: 'The session is not valid.',
+          correlationId: expect.any(String),
+          retryable: false,
+        },
+      })
+    }
+    // The edge verified the presented token itself and never reached control-api.
+    expect(mocks.verifyToken).toHaveBeenCalledWith('synthetic-expired-token')
+    expect(mocks.controlApiRequest).not.toHaveBeenCalled()
+  })
+
+  it('keeps the bare 401 on the other /me routes', async () => {
+    const app = express()
+    app.use(createMeRouter())
+    app.use(externalRestPublicErrorHandler)
+
+    const response = await request(app).get('/me/contexts')
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(mocks.controlApiRequest).not.toHaveBeenCalled()
   })
 
   it('preserves an authenticated /me response with no active team', async () => {

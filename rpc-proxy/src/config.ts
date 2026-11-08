@@ -165,12 +165,19 @@ export function parseArtifactDownloadMaxBytes(rawMb: string): number {
 /** Largest delay setTimeout/AbortSignal.timeout accept; above it they fire immediately. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
-export function parsePositiveIntMs(name: string, raw: string): number {
+/** Positive integer count (not a duration): no timer bound applies to it. */
+export function parsePositiveInt(name: string, raw: string): number {
   const trimmed = raw.trim()
   const n = Number(trimmed)
   if (!Number.isInteger(n) || n < 1) {
     throw new Error(`${name} contains invalid value "${trimmed}" (must be a positive integer)`)
   }
+  return n
+}
+
+export function parsePositiveIntMs(name: string, raw: string): number {
+  const trimmed = raw.trim()
+  const n = parsePositiveInt(name, raw)
   if (n > MAX_TIMER_DELAY_MS) {
     throw new Error(
       `${name} contains invalid value "${trimmed}" (must be at most ${MAX_TIMER_DELAY_MS} ms)`
@@ -257,19 +264,44 @@ export const config: Config = {
     process.env.NODE_ENV === 'production'
   ),
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
+  // The Host refuses artifact files above 50 MiB (MAX_ARTIFACT_BYTES in
+  // mcp-host/src/workflow/artifactPaths.ts) and checks that size before it redacts
+  // the file. Redaction replaces every occurrence of a secret with a
+  // `[REDACTED:<name>]` marker (mcp-host/src/artifacts/artifactRedaction.ts), so the
+  // response can be longer than the file, and with this default a file at the Host's
+  // cap can still be rejected here; a value below 50 rejects files the Host serves.
   artifactDownloadMaxBytes: parseArtifactDownloadMaxBytes(
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB || '50'
   ),
+  // rpc-proxy sends nothing to the client until the whole artifact body is buffered,
+  // so the edge waits for the Host lookup and the Host's response headers (each bounded
+  // by upstreamTimeoutMs) and then for this body timer. With the default upstream
+  // timeout that is at most 8 + 8 + 100 = 116 s, below the public edge's origin read
+  // timeout (Cloudflare's default is 125 s): a slow transfer then ends as rpc-proxy's
+  // own 504, not an edge 524.
   artifactDownloadTimeoutMs: parsePositiveIntMs(
     'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
-    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS || '60000'
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS || '100000'
   ),
   streamMaxLifetimeMs: Number(process.env.RPC_PROXY_STREAM_MAX_LIFETIME_MS || 600000),
   streamIntervalMs: Number(process.env.RPC_PROXY_STREAM_INTERVAL_MS || 3000),
   streamKeepaliveMs: Number(process.env.RPC_PROXY_STREAM_KEEPALIVE_MS || 15000),
-  streamMaxConcurrent: Number(process.env.RPC_PROXY_STREAM_MAX_CONCURRENT || 1000),
-  streamMaxPerUser: Number(process.env.RPC_PROXY_STREAM_MAX_PER_USER || 3),
-  streamMaxPerUserHost: Number(process.env.RPC_PROXY_STREAM_MAX_PER_USER_HOST || 1),
+  // Stream admission caps (status and activity streams): each route rejects with 429
+  // when a count is `>=` its cap, so NaN would turn a cap off and 0 would reject
+  // every stream. A value that does not read as a whole number of at least 1
+  // (`Number()`, as for the timeouts) stops startup.
+  streamMaxConcurrent: parsePositiveInt(
+    'RPC_PROXY_STREAM_MAX_CONCURRENT',
+    process.env.RPC_PROXY_STREAM_MAX_CONCURRENT || '1000'
+  ),
+  streamMaxPerUser: parsePositiveInt(
+    'RPC_PROXY_STREAM_MAX_PER_USER',
+    process.env.RPC_PROXY_STREAM_MAX_PER_USER || '3'
+  ),
+  streamMaxPerUserHost: parsePositiveInt(
+    'RPC_PROXY_STREAM_MAX_PER_USER_HOST',
+    process.env.RPC_PROXY_STREAM_MAX_PER_USER_HOST || '1'
+  ),
   streamIdleTimeoutMs: Number(process.env.RPC_PROXY_STREAM_IDLE_TIMEOUT_MS || 60000),
   activityStreamMaxLifetimeMs: Number(
     process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_LIFETIME_MS || 600000
@@ -278,10 +310,17 @@ export const config: Config = {
   activityStreamIdleTimeoutMs: Number(
     process.env.RPC_PROXY_ACTIVITY_STREAM_IDLE_TIMEOUT_MS || 60000
   ),
-  activityStreamMaxConcurrent: Number(process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT || 1000),
-  activityStreamMaxPerUser: Number(process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER || 3),
-  activityStreamMaxPerUserHost: Number(
-    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST || 1
+  activityStreamMaxConcurrent: parsePositiveInt(
+    'RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT',
+    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT || '1000'
+  ),
+  activityStreamMaxPerUser: parsePositiveInt(
+    'RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER',
+    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER || '3'
+  ),
+  activityStreamMaxPerUserHost: parsePositiveInt(
+    'RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST',
+    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST || '1'
   ),
   wakeMaxHoldMs: parseWakeMaxHoldMs(process.env.RPC_PROXY_WAKE_MAX_HOLD_MS || '48000'),
   wakePollMs: parsePositiveIntMs(

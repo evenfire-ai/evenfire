@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  legacySecurityCutoffRejects,
-  legacySecurityCutoffRejectsSql,
-} from '../src/services/auth/legacySecurityCutoff.js'
+import { legacySecurityCutoffRejects } from '../src/services/auth/legacySecurityCutoff.js'
 
 describe('V1 security cutoff rule', () => {
   it('rejects an iat at or before the cutoff instant and accepts the next second', () => {
@@ -32,12 +29,6 @@ describe('V1 security cutoff rule', () => {
     )
     expect(() => legacySecurityCutoffRejects(1, 'not-a-timestamp')).toThrow(
       'invalid V1 security cutoff'
-    )
-  })
-
-  it('builds the same comparison in SQL', () => {
-    expect(legacySecurityCutoffRejectsSql('$7::bigint', 'epoch.valid_after')).toBe(
-      '$7::bigint <= EXTRACT(EPOCH FROM epoch.valid_after)'
     )
   })
 })

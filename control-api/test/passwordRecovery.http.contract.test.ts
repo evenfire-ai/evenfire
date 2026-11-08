@@ -76,14 +76,8 @@ vi.mock('../src/middleware/rateLimitMiddleware.js', async importOriginal => {
         next(),
   }
 })
-vi.mock('../src/middleware/externalSessionAuth.js', () => ({
-  requireExternalUserParamMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
-  rejectBodyUserTeamMismatch: (
-    _req: express.Request,
-    _res: express.Response,
-    next: express.NextFunction
-  ) => next(),
-  requireValidExternalSessionToken: (
+vi.mock('../src/middleware/externalSessionAuth.js', () => {
+  const authenticate = (
     req: express.Request,
     _res: express.Response,
     next: express.NextFunction
@@ -96,8 +90,20 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
       authGeneration: 1,
     }
     next()
-  },
-}))
+  }
+  return {
+    requireExternalUserParamMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+    rejectBodyUserTeamMismatch: (
+      _req: express.Request,
+      _res: express.Response,
+      next: express.NextFunction
+    ) => next(),
+    requireValidExternalSessionToken: authenticate,
+    // The users router registers `/external/users/:userId/me` with this
+    // factory, so it must return the same middleware.
+    requireExternalSessionRateLimitContext: () => authenticate,
+  }
+})
 const preview = {
   id: 'r6-reset-row',
   email: 'r6-member@example.invalid',

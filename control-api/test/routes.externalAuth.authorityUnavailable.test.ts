@@ -2,12 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
+import { rootLogger } from '../src/observability/logger.js'
 import { createExternalAuthRouter } from '../src/routes/external/auth.js'
-import { ExternalSessionBackendUnavailableError } from '../src/services/auth/sessionDatabaseFailure.js'
+import { createExternalDirectoryRouter } from '../src/routes/external/directory.js'
+import {
+  ExternalSessionBackendUnavailableError,
+  externalSessionDatabaseFailure,
+} from '../src/services/auth/sessionDatabaseFailure.js'
 
 const sessions = vi.hoisted(() => ({
   authenticateExternalUserSession: vi.fn(),
-  authenticateExternalUserSessionIdentity: vi.fn(),
   renewExternalUserSession: vi.fn(),
 }))
 const revocations = vi.hoisted(() => ({
@@ -26,6 +30,8 @@ const directory = vi.hoisted(() => ({
   getUserAgents: vi.fn(),
   googleLoginData: vi.fn(),
   requestProfilePasswordReset: vi.fn(),
+  searchDirectory: vi.fn(),
+  DIRECTORY_SEARCH_MAX_QUERY_LENGTH: 200,
 }))
 const database = vi.hoisted(() => ({ query: vi.fn() }))
 
@@ -92,6 +98,26 @@ function unavailable(): ExternalSessionBackendUnavailableError {
   return new ExternalSessionBackendUnavailableError(new Error('private pg-pool sentinel'))
 }
 
+const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined)
+
+/**
+ * The handler-level 503 is marked as a retryable outage: both headers, and one
+ * warn log naming the event and carrying the outage cause (the witness that the
+ * marking path ran, not only the response).
+ */
+function expectMarkedAuthorityUnavailable(response: request.Response, event: string): void {
+  expect(response.headers['retry-after']).toBe('2')
+  expect(response.headers['cache-control']).toBe('no-store')
+  expect(warn).toHaveBeenCalledOnce()
+  expect(warn).toHaveBeenCalledWith(
+    expect.objectContaining({
+      event,
+      err: expect.objectContaining({ message: 'private pg-pool sentinel' }),
+    }),
+    'external authority is unavailable'
+  )
+}
+
 function app() {
   const value = express()
   value.use(express.json())
@@ -151,6 +177,7 @@ describe('external auth authority unavailability parity', () => {
         },
       })
       expect(JSON.stringify(response.body)).not.toContain('private pg-pool sentinel')
+      expectMarkedAuthorityUnavailable(response, 'external_auth_authority_unavailable')
     })
 
     it('keeps a plain dependency error on the sanitized 500 path', async () => {
@@ -181,6 +208,7 @@ describe('external auth authority unavailability parity', () => {
         },
       })
       expect(JSON.stringify(response.body)).not.toContain('private pg-pool sentinel')
+      expectMarkedAuthorityUnavailable(response, 'external_auth_authority_unavailable')
     })
   })
 
@@ -209,6 +237,7 @@ describe('external auth authority unavailability parity', () => {
           retryable: true,
         },
       })
+      expectMarkedAuthorityUnavailable(response, 'external_auth_authority_unavailable')
     })
 
     it('keeps a plain dependency error on the sanitized 500 path', async () => {
@@ -249,6 +278,7 @@ describe('external auth authority unavailability parity', () => {
           retryable: true,
         },
       })
+      expectMarkedAuthorityUnavailable(response, 'external_auth_authority_unavailable')
     })
 
     it('keeps a plain dependency error on the sanitized 500 path', async () => {
@@ -285,6 +315,7 @@ describe('external auth authority unavailability parity', () => {
           retryable: true,
         },
       })
+      expectMarkedAuthorityUnavailable(response, 'external_auth_authority_unavailable')
     })
 
     it('keeps a plain dependency error on the sanitized 500 path', async () => {
@@ -325,6 +356,7 @@ describe('external auth authority unavailability parity', () => {
           retryable: true,
         },
       })
+      expectMarkedAuthorityUnavailable(response, 'external_auth_authority_unavailable')
     })
 
     it('keeps a plain dependency error on the sanitized 500 path', async () => {
@@ -365,6 +397,7 @@ describe('external auth authority unavailability parity', () => {
           retryable: true,
         },
       })
+      expectMarkedAuthorityUnavailable(response, 'external_auth_authority_unavailable')
     })
 
     it('keeps a plain live-membership error on the sanitized 500 path', async () => {
@@ -377,6 +410,63 @@ describe('external auth authority unavailability parity', () => {
       expect(response.body).toMatchObject({ error: 'Internal Server Error' })
       expect(JSON.stringify(response.body)).not.toContain('boom')
       expect(response.headers['retry-after']).toBeUndefined()
+    })
+
+    it('answers the session backend 503 for a classified outage in the session stage', async () => {
+      sessions.authenticateExternalUserSession.mockRejectedValue(unavailable())
+
+      const response = await rpcTokenRequest()
+
+      expect(response.status).toBe(503)
+      expect(response.body).toEqual({
+        error: 'session_backend_unavailable',
+        retryAfterSeconds: 2,
+      })
+      expect(response.headers['retry-after']).toBe('2')
+      expect(response.headers['cache-control']).toBe('no-store')
+      expect(sessions.authenticateExternalUserSession).toHaveBeenCalledOnce()
+      expect(liveTeam.getLiveTeamMembership).not.toHaveBeenCalled()
+    })
+
+    it('keeps a plain session-stage error on the sanitized 500 path', async () => {
+      vi.stubEnv('NODE_ENV', 'production')
+      sessions.authenticateExternalUserSession.mockRejectedValue(new Error('boom'))
+
+      const response = await rpcTokenRequest()
+
+      expect(response.status).toBe(500)
+      expect(response.body).toMatchObject({ error: 'Internal Server Error' })
+      expect(JSON.stringify(response.body)).not.toContain('boom')
+      expect(response.headers['retry-after']).toBeUndefined()
+      expect(sessions.authenticateExternalUserSession).toHaveBeenCalledOnce()
+    })
+  })
+
+  describe('GET /external/directory/search (team parameter authorization)', () => {
+    function directoryApp() {
+      const value = express()
+      value.use(express.json())
+      value.use(createExternalDirectoryRouter())
+      value.use(clerumErrorHandler)
+      return value
+    }
+
+    it('answers the flat 503 authority_unavailable marked as a retryable outage', async () => {
+      liveTeam.getLiveTeamMembership.mockRejectedValue(unavailable())
+
+      const response = await request(directoryApp())
+        .get('/external/directory/search')
+        .query({ teamId: 'team-1', q: 'synthetic' })
+        .set('x-forwarded-for', '203.0.113.44')
+        .set('x-user-session-token', 'synthetic-session-token')
+
+      expect(response.status).toBe(503)
+      expect(response.body).toEqual({ error: 'authority_unavailable' })
+      expectMarkedAuthorityUnavailable(response, 'external_team_authority_unavailable')
+      expect(liveTeam.getLiveTeamMembership).toHaveBeenCalledWith('user-1', 'team-1', {
+        onDatabaseFailure: externalSessionDatabaseFailure,
+      })
+      expect(directory.searchDirectory).not.toHaveBeenCalled()
     })
   })
 })

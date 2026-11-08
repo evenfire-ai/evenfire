@@ -77,7 +77,12 @@ describe('retireDesktopUser', () => {
 
   it('retires an active linked user atomically with exact control-admin actor and audit correlation', async () => {
     const { retireDesktopUser } = await import('../src/services/directory/users.js')
-    const authorize = vi.fn(async () => undefined)
+    const authorize = vi.fn(async () => {
+      const [sql, params] = mocks.txQuery.mock.calls.at(-1) ?? []
+      expect(String(sql)).toContain('FROM users')
+      expect(String(sql)).toContain('FOR UPDATE')
+      expect(params).toEqual([USER_ID])
+    })
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())

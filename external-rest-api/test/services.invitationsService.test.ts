@@ -41,6 +41,22 @@ describe('invitation service error and token boundaries', () => {
     }
   })
 
+  it('classifies every non-outage acceptance failure as not pending', async () => {
+    for (const status of [401, 500]) {
+      client.request.mockRejectedValueOnce(
+        new ControlApiError(
+          `Control API POST /external/invitations/accept failed (${status})`,
+          status,
+          { error: status === 401 ? 'Unauthorized' : 'internal_error' }
+        )
+      )
+
+      await expect(acceptInvitation('flow-token', 'user@example.com', 'v2')).resolves.toEqual({
+        error: 'not_pending',
+      })
+    }
+  })
+
   it('classifies a producer password_already_set rejection as a terminal domain error', async () => {
     client.request.mockRejectedValueOnce(
       new ControlApiError(

@@ -1,14 +1,11 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
-import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   type OauthGrantSummary,
   listOauthGrants,
   revokeOauthGrant,
 } from '../services/oauthGrantsService.js'
-
-const PROPAGATED_STATUSES = new Set([400, 401, 403, 404, 409, 422])
 
 /**
  * Project a control-api grant onto the exact public wire shape (spec 04 U2).
@@ -30,19 +27,6 @@ function toGrantView(g: OauthGrantSummary): OauthGrantSummary {
   return view
 }
 
-function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  const sanitized = sanitizeControlApiPublicError(
-    error,
-    PROPAGATED_STATUSES,
-    publicCorrelationId(res.req)
-  )
-  if (sanitized) {
-    res.status(sanitized.status).json(sanitized.body)
-    return
-  }
-  next(error)
-}
-
 export function createOauthGrantsRouter(): Router {
   const router = Router()
 
@@ -51,7 +35,7 @@ export function createOauthGrantsRouter(): Router {
       const { grants } = await listOauthGrants(extractAuthToken(req))
       res.json({ grants: grants.map(toGrantView) })
     } catch (err) {
-      forwardControlApiError(err, res, next)
+      next(err)
     }
   })
 
@@ -71,7 +55,7 @@ export function createOauthGrantsRouter(): Router {
         )
         res.status(204).send()
       } catch (err) {
-        forwardControlApiError(err, res, next)
+        next(err)
       }
     }
   )

@@ -3,7 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { externalRestPublicErrorHandler } from '../app.js'
 import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
-import { sanitizeControlApiPublicError, selectPublicCorrelationId } from '../http/publicApiError.js'
+import { selectPublicCorrelationId } from '../http/publicApiError.js'
 
 function appThrowing(error: Error) {
   const app = express()
@@ -20,9 +20,7 @@ describe('External REST public error contract', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('preserves only bounded public correlation IDs through the mounted global handler', async () => {
-    const valid = await request(
-      appThrowing(new ControlApiError('private', 400, { error: { code: 'invalid_request' } }))
-    )
+    const valid = await request(appThrowing(new Error('private')))
       .get('/failure')
       .set('x-correlation-id', 'request_ID-42')
     expect(valid.body.error.correlationId).toBe('request_ID-42')
@@ -58,24 +56,19 @@ describe('External REST public error contract', () => {
     expect(JSON.stringify(response.body)).not.toContain('/var/run/internal')
   })
 
-  it('preserves authority unavailability without reflecting the Control API body', async () => {
+  it('forwards a control-api 503 body verbatim and never the internal wrapper', async () => {
     const response = await request(
       appThrowing(
-        new ControlApiError('raw postgres failure', 503, {
-          error: `raw failure at ${privatePostgresSentinel()}`,
+        new ControlApiError('raw postgres failure at ' + privatePostgresSentinel(), 503, {
+          error: 'session_backend_unavailable',
         })
       )
     ).get('/failure')
 
     expect(response.status).toBe(503)
-    expect(response.body.error).toEqual({
-      code: 'authority_unavailable',
-      message: 'Authorization is temporarily unavailable.',
-      correlationId: expect.any(String),
-      retryable: true,
-    })
+    expect(response.body).toEqual({ error: 'session_backend_unavailable' })
     expect(JSON.stringify(response.body)).not.toContain('postgres')
-    expect(JSON.stringify(response.body)).not.toContain('secret')
+    expect(JSON.stringify(response.body)).not.toContain('Control API')
   })
 
   it('preserves bounded retry guidance for inadmissible V1 session issuance', async () => {
@@ -114,17 +107,19 @@ describe('External REST public error contract', () => {
     expect(response.status).toBe(503)
     expect(response.headers['retry-after']).toBe('2')
     expect(response.headers['cache-control']).toBe('no-store')
-    expect(response.body.error).toEqual({
-      code: 'session_issuance_temporarily_unavailable',
-      message: 'A session could not be issued right now. Try again in two seconds.',
-      correlationId: 'correlation_123',
-      retryable: true,
+    expect(response.body).toEqual({
+      error: {
+        code: 'session_issuance_temporarily_unavailable',
+        message: 'private upstream message',
+        correlationId: 'correlation_123',
+        retryable: true,
+      },
     })
     expect(response.headers['x-internal-secret']).toBeUndefined()
-    expect(JSON.stringify(response.body)).not.toContain('private upstream')
+    expect(JSON.stringify(response.body)).not.toContain('Control API')
   })
 
-  it('maps upstream throttling to the stable retryable rate-limit error', async () => {
+  it('forwards an upstream throttling body verbatim with its quota headers and no private state', async () => {
     const upstream = new ControlApiError(
       'raw rate limiter state',
       429,
@@ -136,185 +131,119 @@ describe('External REST public error contract', () => {
       },
       {
         'retry-after': '17',
+        ratelimit: 'limit=30, remaining=0, reset=17',
+        'ratelimit-policy': '30;w=60',
         'x-ratelimit-limit': '30',
         'x-ratelimit-remaining': '0',
         'x-ratelimit-reset': '1900000000',
+        'x-request-id': 'upstream-request-7',
         'x-internal-bucket': 'secret-internal-bucket',
       }
     )
     const response = await request(appThrowing(upstream)).get('/failure')
 
     expect(response.status).toBe(429)
-    expect(response.body.error).toEqual({
-      code: 'rate_limited',
-      message: 'Too many requests; retry later.',
-      correlationId: expect.any(String),
-      retryable: true,
-      details: { retryAfterSeconds: 17 },
+    expect(response.body).toEqual({
+      error: {
+        code: 'rate_limited',
+        details: { retryAfterSeconds: 17, bucket: 'secret-internal-bucket' },
+      },
     })
     expect(response.headers['retry-after']).toBe('17')
+    expect(response.headers.ratelimit).toBe('limit=30, remaining=0, reset=17')
+    expect(response.headers['ratelimit-policy']).toBe('30;w=60')
     expect(response.headers['x-ratelimit-limit']).toBe('30')
     expect(response.headers['x-ratelimit-remaining']).toBe('0')
     expect(response.headers['x-ratelimit-reset']).toBe('1900000000')
+    // The request id stays a GFS-route relay; the internal bucket never crosses.
+    expect(response.headers['x-request-id']).toBeUndefined()
     expect(response.headers['x-internal-bucket']).toBeUndefined()
-    expect(JSON.stringify(response.body)).not.toContain('secret-internal-bucket')
   })
 
-  it('preserves only a bounded retry delay from legacy rate-limit bodies', () => {
-    const sanitized = sanitizeControlApiPublicError(
-      new ControlApiError('raw', 429, {
-        error: 'Too Many Requests',
-        retryAfterSeconds: 17,
-        bucket: 'secret-internal-bucket',
-      }),
-      new Set([429])
+  it('drops throttling header values outside the numeric public bounds', async () => {
+    const upstream = new ControlApiError(
+      'raw rate limiter state',
+      429,
+      { error: 'rate_limited' },
+      {
+        'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT',
+        'x-ratelimit-limit': '-1',
+        'x-ratelimit-remaining': '12345678901',
+        'x-ratelimit-reset': '1900000000',
+      }
     )
+    const response = await request(appThrowing(upstream)).get('/failure')
 
-    expect(sanitized?.body).toMatchObject({
-      error: {
-        code: 'rate_limited',
-        details: { retryAfterSeconds: 17 },
-      },
-    })
-    expect(JSON.stringify(sanitized?.body)).not.toContain('secret-internal-bucket')
-  })
+    expect(response.status).toBe(429)
+    expect(response.body).toEqual({ error: 'rate_limited' })
+    // Witness: the one in-bounds value of the same response is relayed.
+    expect(response.headers['x-ratelimit-reset']).toBe('1900000000')
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['x-ratelimit-limit']).toBeUndefined()
+    expect(response.headers['x-ratelimit-remaining']).toBeUndefined()
 
-  it('preserves only allowlisted GFS denial details from legacy bodies', () => {
-    const sanitized = sanitizeControlApiPublicError(
-      new ControlApiError('raw', 400, {
-        error: 'subjects_invalid',
-        invalidIndexes: [0, 2],
-        sql: 'SELECT secret',
-      }),
-      new Set([400])
-    )
-
-    expect(sanitized?.body).toMatchObject({
-      error: {
-        code: 'invalid_request',
-        details: { reason: 'subjects_invalid', invalidIndexes: [0, 2] },
-      },
-    })
-    expect(JSON.stringify(sanitized?.body)).not.toContain('SELECT secret')
-  })
-
-  it('rebuilds every forwarded route class from a bounded typed envelope', () => {
-    const sentinel = privatePostgresSentinel('/var/run/service.sock')
-    for (const status of [
-      400, 401, 403, 404, 408, 409, 410, 411, 412, 413, 422, 425, 429, 500, 502, 503, 504, 507,
-    ]) {
-      const sanitized = sanitizeControlApiPublicError(
-        new ControlApiError(sentinel, status, {
-          error: {
-            code: status === 409 ? 'access_path_required' : 'made_up_internal_code',
-            message: sentinel,
-            correlationId: `bad/${sentinel}`,
-            details: { sql: sentinel, path: sentinel, secret: sentinel },
-          },
-        }),
-        new Set([status])
-      )
-
-      expect(sanitized?.status).toBe(status)
-      expect(JSON.stringify(sanitized?.body)).not.toContain(sentinel)
-      expect(JSON.stringify(sanitized?.body)).not.toContain('made_up_internal_code')
+    for (const outOfRange of ['0', '86401']) {
+      const outage = await request(
+        appThrowing(
+          new ControlApiError(
+            'raw outage',
+            503,
+            { error: 'session_backend_unavailable' },
+            { 'retry-after': outOfRange, 'cache-control': 'no-store' }
+          )
+        )
+      ).get('/failure')
+      expect(outage.status).toBe(503)
+      expect(outage.headers['cache-control']).toBe('no-store')
+      expect(outage.headers['retry-after']).toBeUndefined()
     }
   })
 
-  it.each([
-    [408, 'request_timeout', true, { 'retry-after': '7' }],
-    [411, 'length_required', false, {}],
-    [413, 'payload_too_large', false, { 'upload-length': '209715200' }],
-    [425, 'too_early', true, { 'retry-after': '7' }],
-    [507, 'insufficient_storage', false, {}],
-  ] as const)(
-    'preserves the safe typed public GFS contract for %s',
-    (status, expectedCode, retryable, expectedHeaders) => {
-      const sentinel = `private upstream detail at ${privatePostgresSentinel()}`
-      const sanitized = sanitizeControlApiPublicError(
-        new ControlApiError(
-          sentinel,
-          status,
-          { error: { code: expectedCode, message: sentinel, details: { secret: sentinel } } },
-          {
-            'retry-after': '7',
-            'upload-length': '209715200',
-            'x-ratelimit-limit': '16',
-            'x-internal-secret': sentinel,
-          }
-        ),
-        new Set([status])
-      )
-
-      expect(sanitized).toMatchObject({
+  it.each([408, 425, 502, 504])(
+    'relays retry guidance, and no quota state, on a retryable %i',
+    async status => {
+      const upstream = new ControlApiError(
+        'raw upstream failure',
         status,
-        headers: expectedHeaders,
-        body: { error: { code: expectedCode, retryable } },
-      })
-      expect(JSON.stringify(sanitized)).not.toContain(sentinel)
+        { error: 'temporarily_unavailable' },
+        {
+          'retry-after': '5',
+          ratelimit: 'limit=30, remaining=0, reset=5',
+          'x-ratelimit-limit': '30',
+          'cache-control': 'no-store',
+        }
+      )
+      const response = await request(appThrowing(upstream)).get('/failure')
+
+      expect(response.status).toBe(status)
+      expect(response.body).toEqual({ error: 'temporarily_unavailable' })
+      expect(response.headers['retry-after']).toBe('5')
+      expect(response.headers.ratelimit).toBeUndefined()
+      expect(response.headers['x-ratelimit-limit']).toBeUndefined()
+      expect(response.headers['cache-control']).toBeUndefined()
     }
   )
 
-  it('preserves bounded upload size through the real Control API client and sanitizer boundary', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            error: {
-              code: 'payload_too_large',
-              message: 'private upstream upload detail',
-            },
-          }),
-          {
-            status: 413,
-            headers: {
-              'content-type': 'application/json',
-              'upload-length': '209715200',
-              'x-internal-secret': 'must-not-cross',
-            },
-          }
-        )
-      )
+  it('relays no retry or quota header on a non-retryable client error', async () => {
+    const upstream = new ControlApiError(
+      'raw validation failure',
+      400,
+      { error: { code: 'invalid_request', message: 'name is required' } },
+      {
+        'retry-after': '5',
+        ratelimit: 'limit=30, remaining=29, reset=5',
+        'x-ratelimit-limit': '30',
+      }
     )
+    const response = await request(appThrowing(upstream)).get('/failure')
 
-    const upstream = await controlApiRequest('PUT', '/external/gfs/resources/id/content').catch(
-      (error: unknown) => error
-    )
-    expect(upstream).toBeInstanceOf(ControlApiError)
-
-    const sanitized = sanitizeControlApiPublicError(upstream, new Set([413]))
-    expect(sanitized).toMatchObject({
-      status: 413,
-      headers: { 'upload-length': '209715200' },
-      body: { error: { code: 'payload_too_large', retryable: false } },
+    // Witness: the handler ran the ControlApiError branch and forwarded the body.
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({
+      error: { code: 'invalid_request', message: 'name is required' },
     })
-    expect(JSON.stringify(sanitized)).not.toContain('private upstream')
-    expect(JSON.stringify(sanitized)).not.toContain('must-not-cross')
-  })
-
-  it('preserves only bounded access-path descriptors for an ambiguity response', () => {
-    const pathId = `ap1_${'a'.repeat(43)}`
-    const sanitized = sanitizeControlApiPublicError(
-      new ControlApiError('raw', 409, {
-        error: {
-          code: 'access_path_required',
-          message: 'raw',
-          details: {
-            paths: [{ id: pathId, kind: 'team', teamId: 'team-safe' }],
-            sql: 'SELECT secret',
-          },
-        },
-      }),
-      new Set([409])
-    )
-
-    expect(sanitized?.body).toMatchObject({
-      error: {
-        code: 'access_path_required',
-        details: { paths: [{ id: pathId, kind: 'team', teamId: 'team-safe' }] },
-      },
-    })
-    expect(JSON.stringify(sanitized?.body)).not.toContain('SELECT secret')
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers.ratelimit).toBeUndefined()
+    expect(response.headers['x-ratelimit-limit']).toBeUndefined()
   })
 })

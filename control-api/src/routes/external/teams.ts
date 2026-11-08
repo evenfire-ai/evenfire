@@ -1,7 +1,6 @@
 import { Router } from 'express'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
-import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
 import {
@@ -27,7 +26,7 @@ import {
   getTeamAgents,
   getTeamContexts,
   listMembers,
-  renameTeamForUser,
+  renameTeam,
   updateManagedMemberRoleForUser,
 } from '../../services/directory/index.js'
 import { normalizeTeamRoleInput } from '../../services/directory/types.js'
@@ -51,12 +50,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     config.approvalRlExternalClientIpPerMin,
     config.approvalRlExternalEdgePerMin
   )
-  router.use(
-    '/external/teams',
-    ...externalTeamsRateLimits,
-    requireValidExternalSessionToken,
-    attachAccessExecutionBudget
-  )
+  router.use('/external/teams', ...externalTeamsRateLimits, requireValidExternalSessionToken)
 
   router.get(
     '/external/teams/:teamId/users/:userId/current',
@@ -94,17 +88,9 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
       try {
         const name = String(req.body?.name || '').trim()
         if (!name) return res.status(400).json({ error: 'name is required' })
-        const result = await renameTeamForUser(
-          (req as ExternalAuthedRequest).externalAuth!.userId,
-          req.params.teamId,
-          name,
-          (req as ExternalAuthedRequest).externalSessionAuthority
-        )
-        if ('error' in result) {
-          if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
-          return res.status(404).json({ error: 'not_found' })
-        }
-        return res.status(200).json(result.team)
+        const updated = await renameTeam(req.params.teamId, name)
+        if (!updated) return res.status(404).json({ error: 'not_found' })
+        return res.status(200).json(updated)
       } catch (error) {
         return next(error)
       }
@@ -114,7 +100,6 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.get(
     '/external/teams/:teamId/members',
     requireExternalTeamParamMatch(),
-    requireExternalRole(['admin', 'inviter']),
     async (req, res, next) => {
       try {
         return res.status(200).json({ items: await listMembers(req.params.teamId) })
@@ -193,7 +178,6 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.get(
     '/external/teams/:teamId/members/:userId/role',
     requireExternalTeamParamMatch(),
-    requireExternalRole(['admin', 'inviter']),
     async (req, res, next) => {
       try {
         const role = await findMemberRole(req.params.teamId, req.params.userId)
@@ -218,8 +202,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           (req as ExternalAuthedRequest).externalAuth!.userId,
           req.params.userId,
           req.params.teamId,
-          role,
-          (req as ExternalAuthedRequest).externalSessionAuthority
+          role
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
@@ -253,8 +236,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           (req as ExternalAuthedRequest).externalAuth!.userId,
           email,
           [{ teamId: req.params.teamId, role }],
-          name || fallbackName,
-          (req as ExternalAuthedRequest).externalSessionAuthority
+          name || fallbackName
         )
         if ('error' in result) {
           return res.status(result.error === 'forbidden' ? 403 : 400).json({ error: result.error })
@@ -283,8 +265,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
         const result = await deleteManagedMemberForUser(
           (req as ExternalAuthedRequest).externalAuth!.userId,
           req.params.userId,
-          req.params.teamId,
-          (req as ExternalAuthedRequest).externalSessionAuthority
+          req.params.teamId
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })

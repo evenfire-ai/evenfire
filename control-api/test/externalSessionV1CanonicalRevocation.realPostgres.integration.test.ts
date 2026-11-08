@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
+import { GFS_READ_SCOPE } from '../src/auth/gfsToken.js'
 import { type DbClient, initDb } from '../src/db.js'
+import {
+  type ExternalGfsUserTokenInput,
+  signCurrentExternalGfsUserToken,
+} from '../src/gfs/externalAuthority.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import { authenticateExternalUserSession } from '../src/services/auth/externalSessionAuthentication.js'
 import { revokeLegacyUserSession } from '../src/services/auth/userSessionService.js'
@@ -44,15 +49,8 @@ const policy = {
   issueV2: true,
   renewV2: true,
   switchCompatibility: true,
-  computeCatalogShadow: false,
-  serveCatalog: false,
-  actionContextV2: false,
-  rpcDelegationV2: false,
-  desktopAllTeamMode: false,
-  profileV2Mode: false,
   minimumClientVersion: null,
   enforceMinimumClient: false,
-  advertisedCatalogFamilies: [],
 } as EffectiveUserAccessPolicy
 
 function databaseUrl(baseUrl: string, database: string): string {
@@ -196,5 +194,42 @@ describeRealPostgres('V1 canonical external session token on real PostgreSQL', (
       status: 'authenticated',
       contract: 'v1',
     })
+  })
+
+  it('refuses a GFS mint for a V1 token logged out after the session middleware authenticated it', async () => {
+    const principal = await createPrincipal('v1-gfs-mint')
+    const token = signFor(principal)
+    const claims = verifyExternalSessionToken(token)
+    if (!claims) throw new Error('the canonical token did not verify')
+
+    // The session middleware's own call, taken before the logout commits. The
+    // route path cannot cover this window: after the logout the middleware
+    // itself refuses the token, with or without the mint's revocation read.
+    const authentication = await authenticate(token)
+    if (authentication.status !== 'authenticated') {
+      throw new Error(`the V1 token did not authenticate: ${authentication.status}`)
+    }
+    const input: ExternalGfsUserTokenInput = {
+      subject: principal.userId,
+      drive: 'user',
+      scopes: [GFS_READ_SCOPE],
+    }
+
+    // Liveness witness: the same authentication mints while the token is live.
+    await expect(signCurrentExternalGfsUserToken(authentication, input)).resolves.toMatchObject({
+      token: expect.any(String),
+      expiresInSeconds: expect.any(Number),
+    })
+
+    await expect(revokeLegacyUserSession(token, claims, 'logout')).resolves.toBe(true)
+    const revocation = await databasePool.query(
+      `SELECT 1
+         FROM external_v1_session_revocations
+        WHERE token_hash = $1 AND user_id = $2 AND expires_at > clock_timestamp()`,
+      [tokenHash(token), principal.userId]
+    )
+    expect(revocation.rowCount).toBe(1)
+
+    await expect(signCurrentExternalGfsUserToken(authentication, input)).resolves.toBeNull()
   })
 })

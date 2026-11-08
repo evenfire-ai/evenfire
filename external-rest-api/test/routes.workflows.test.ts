@@ -1,17 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { externalRestPublicErrorHandler } from '../src/app.js'
 import { createExternalWorkflowsRouter } from '../src/routes/workflows.js'
 
 const authTokenMock = vi.hoisted(() => ({
   verifyToken: vi.fn(),
 }))
 
-const controlApiClientMock = vi.hoisted(() => ({
-  controlApiRequest: vi.fn(),
-  controlApiRequestWithStatus: vi.fn(),
-  controlApiBinaryRequestWithStatus: vi.fn(),
-  ControlApiError: class ControlApiError extends Error {
+const controlApiClientMock = vi.hoisted(() => {
+  class ControlApiError extends Error {
     status: number
     body: unknown
     constructor(message: string, status: number, body: unknown) {
@@ -19,8 +17,20 @@ const controlApiClientMock = vi.hoisted(() => ({
       this.status = status
       this.body = body
     }
-  },
-}))
+  }
+  class ControlApiPathError extends ControlApiError {
+    constructor() {
+      super('Control API request path is not allowed', 400, { error: 'invalid_request' })
+    }
+  }
+  return {
+    controlApiRequest: vi.fn(),
+    controlApiRequestWithStatus: vi.fn(),
+    controlApiBinaryRequestWithStatus: vi.fn(),
+    ControlApiError,
+    ControlApiPathError,
+  }
+})
 
 vi.mock('../src/authToken.js', () => authTokenMock)
 vi.mock('../src/controlApiClient.js', () => controlApiClientMock)
@@ -45,6 +55,7 @@ describe('routes/workflows', () => {
     const app = express()
     app.use(express.json())
     app.use('/api/v1', createExternalWorkflowsRouter())
+    app.use(externalRestPublicErrorHandler)
     return app
   }
 
@@ -109,7 +120,7 @@ describe('routes/workflows', () => {
     )
   })
 
-  it('uses the bounded request correlation ID when a route-local upstream error has none', async () => {
+  it('forwards a route-local upstream error body verbatim', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     controlApiClientMock.controlApiRequest.mockRejectedValueOnce(
       new controlApiClientMock.ControlApiError('private', 404, { error: { code: 'not_found' } })
@@ -121,7 +132,12 @@ describe('routes/workflows', () => {
       .set('x-correlation-id', 'workflow_ID-42')
 
     expect(res.status).toBe(404)
-    expect(res.body.error.correlationId).toBe('workflow_ID-42')
+    expect(res.body).toEqual({ error: { code: 'not_found' } })
+    expect(controlApiClientMock.controlApiRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/workflows/sandbox-recipes/recipe-a/runs/run-123/artifacts',
+      { userSessionToken: 'user-session-token' }
+    )
   })
 
   it('proxies run-scoped workflow artifact downloads without using latest-run routes', async () => {

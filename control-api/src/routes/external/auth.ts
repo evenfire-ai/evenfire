@@ -3,10 +3,11 @@ import { createHash } from 'node:crypto'
 import { pool } from '../../db.js'
 import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
-import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import {
   type ExternalAuthedRequest,
+  extractRouteSessionToken,
   handleExternalSessionBackendFailure,
+  markAuthorityUnavailable,
   requireExternalSessionRateLimitContext,
 } from '../../middleware/externalSessionAuth.js'
 import { requireAuthenticatedExternalUserRateLimitContext } from '../../middleware/externalUserRateLimitPolicy.js'
@@ -71,12 +72,9 @@ function externalSessionClient(req: { body?: unknown; header(name: string): stri
   }
 }
 
-function sessionTokenFromRequest(req: {
-  body?: unknown
-  header(name: string): string | undefined
-}): string {
-  const body = (req.body ?? {}) as { token?: unknown; sessionToken?: unknown }
-  return String(req.header('x-user-session-token') || body.token || body.sessionToken || '').trim()
+/** A non-string body field is an invalid value, never one to coerce with String(). */
+function trimmedBodyString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 function requireLegacySessionTokenPayload(req: Request, res: Response, next: NextFunction): void {
@@ -86,11 +84,11 @@ function requireLegacySessionTokenPayload(req: Request, res: Response, next: Nex
     teamId?: unknown
     role?: unknown
   }
-  const userId = String(body.userId || '').trim()
-  const email = String(body.email || '').trim()
-  const teamId = String(body.teamId || '').trim()
-  const role = String(body.role || '').trim()
-  const token = sessionTokenFromRequest(req)
+  const userId = trimmedBodyString(body.userId)
+  const email = trimmedBodyString(body.email)
+  const teamId = trimmedBodyString(body.teamId)
+  const role = trimmedBodyString(body.role)
+  const token = extractRouteSessionToken(req)
   if (
     !userId ||
     !email ||
@@ -129,6 +127,7 @@ function handleExternalAuthorityUnavailable(
     next(error)
     return
   }
+  markAuthorityUnavailable(req, res, error, 'external_auth_authority_unavailable')
   sendPublicApiError(req, res, 503, 'authority_unavailable', message, true)
 }
 
@@ -160,11 +159,10 @@ async function requireLegacyRpcSessionRateLimitContext(
       return
     }
     req.externalAuth = authentication.claims
-    req.externalSessionAuthority = authentication.authorityContext
     req.externalSessionAuthentication = authentication
     next()
   } catch (error) {
-    next(error)
+    handleExternalSessionBackendFailure(error, req, res, next)
   }
 }
 
@@ -194,7 +192,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         name: google.name,
         picture: google.picture,
       })
-      if ('error' in login) return sendExternalLoginError(res, login.error)
+      if ('error' in login) return res.status(401).json({ error: 'Unauthorized' })
       const role = login.membership.role
       const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
       if (selection.status !== 'selected') {
@@ -318,7 +316,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post('/external/auth/verify', async (req, res, next) => {
     try {
-      const token = String(req.body?.token || '').trim()
+      const token = typeof req.body?.token === 'string' ? req.body.token.trim() : ''
       if (!token || token.length > 4096) return res.status(401).json({ error: 'Unauthorized' })
       const authentication = await authenticateExternalUserSession(token, {
         purpose: 'verify',
@@ -350,7 +348,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           .toLowerCase()
         const teamId = String(req.body?.teamId || '').trim()
         const role = String(req.body?.role || '').trim()
-        const currentToken = sessionTokenFromRequest(req)
+        const currentToken = extractRouteSessionToken(req)
         if (
           !userId ||
           !email ||
@@ -377,6 +375,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
               userId,
               email,
               teamId,
+              role: role as AuthClaims['role'],
             },
             {
               policy: authentication.policy,
@@ -416,7 +415,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
             | { role?: 'admin' | 'inviter' | 'member'; lifecycle_version?: number | string }
             | undefined
         )?.role
-        if (!liveRole) {
+        if (!liveRole || liveRole !== role) {
           return res.status(403).json({ error: 'membership_not_found' })
         }
         return res.status(200).json({
@@ -442,7 +441,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     requireAuthenticatedExternalUserRateLimitContext,
     async (req: ExternalAuthedRequest, res, next) => {
       try {
-        const token = sessionTokenFromRequest(req)
+        const token = extractRouteSessionToken(req)
         if (!token || token.length > 4096) {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
@@ -488,7 +487,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     requireAuthenticatedExternalUserRateLimitContext,
     async (req: ExternalAuthedRequest, res, next) => {
       try {
-        const token = sessionTokenFromRequest(req)
+        const token = extractRouteSessionToken(req)
         if (!token || token.length > 4096) {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
@@ -526,7 +525,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     requireAuthenticatedExternalUserRateLimitContext,
     async (req: ExternalAuthedRequest, res, next) => {
       try {
-        const token = sessionTokenFromRequest(req)
+        const token = extractRouteSessionToken(req)
         if (!token || token.length > 4096) {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
@@ -587,7 +586,6 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/rpc/token',
-    attachAccessExecutionBudget,
     requireLegacyRpcSessionRateLimitContext,
     requireAuthenticatedExternalUserRateLimitContext,
     async (req: ExternalAuthedRequest, res, next) => {
@@ -598,7 +596,6 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         try {
           liveTeam = claims.teamId
             ? await getLiveTeamMembership(claims.userId, claims.teamId, {
-                budget: req.accessExecutionBudget,
                 onDatabaseFailure: externalSessionDatabaseFailure,
               })
             : null

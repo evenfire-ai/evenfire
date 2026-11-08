@@ -3,20 +3,36 @@ import express from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { DatabaseError } from 'pg'
 import request from 'supertest'
-import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 
 const poolQuery = vi.hoisted(() => vi.fn())
 const poolConnect = vi.hoisted(() => vi.fn())
+// Statements sent on a client checked out with pool.connect(), and its release.
+const clientQuery = vi.hoisted(() => vi.fn())
+const clientRelease = vi.hoisted(() => vi.fn())
+const withTransaction = vi.hoisted(() => vi.fn())
 const verifyToken = vi.hoisted(() => vi.fn())
 let authorityRows: Array<Record<string, unknown>> = []
 const loggerWarn = vi.hoisted(() => vi.fn())
 
-vi.mock('../src/db.js', () => ({
-  pool: {
+type MockTransactionClient = {
+  query: (...args: unknown[]) => Promise<unknown>
+  release: () => void
+}
+type MockPool = { connect: () => Promise<MockTransactionClient> }
+
+vi.mock('../src/db.js', () => {
+  const pool = {
     query: (...args: unknown[]) => poolQuery(...args),
     connect: (...args: unknown[]) => poolConnect(...args),
-  },
-}))
+  }
+  return {
+    pool,
+    // Same signature as the real helper: the transaction runs on a client of
+    // txPool, which defaults to the core pool.
+    withTransaction: (work: unknown, txPool: unknown = pool, options?: unknown) =>
+      withTransaction(work, txPool, options),
+  }
+})
 vi.mock('../src/observability/logger.js', () => ({
   rootLogger: {
     warn: (...args: unknown[]) => loggerWarn(...args),
@@ -43,23 +59,22 @@ function databaseError(sqlstate: string): DatabaseError {
   return error
 }
 
-function app(budget?: AccessExecutionBudget) {
+function app() {
   const server = express()
   server.get(
     '/protected',
     rateLimit({ windowMs: 60_000, limit: 100, standardHeaders: 'draft-7', legacyHeaders: false }),
     async (req, res, next) => {
-      if (budget) {
-        const budgetedRequest = req as express.Request & {
-          accessExecutionBudget?: AccessExecutionBudget
-        }
-        budgetedRequest.accessExecutionBudget = budget
-      }
       const { requireValidExternalSessionToken } =
         await import('../src/middleware/externalSessionAuth.js')
       await requireValidExternalSessionToken(req as never, res, next)
     },
-    (_req, res) => res.status(200).json({ ok: true })
+    (req, res) =>
+      res.status(200).json({
+        ok: true,
+        userId: (req as express.Request & { externalAuth?: { userId: string } }).externalAuth
+          ?.userId,
+      })
   )
   server.use(
     (_err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -73,6 +88,9 @@ describe('external session lifecycle gate', () => {
   beforeEach(() => {
     poolQuery.mockReset()
     poolConnect.mockReset()
+    clientQuery.mockReset()
+    clientRelease.mockReset()
+    withTransaction.mockReset()
     verifyToken.mockReset()
     loggerWarn.mockReset()
     authorityRows = [
@@ -84,10 +102,35 @@ describe('external session lifecycle gate', () => {
         token_revoked: false,
       },
     ]
-    poolQuery.mockImplementation(async (sql: string) =>
-      sql.includes('clock_timestamp()')
-        ? { rows: [{ db_now: new Date() }], rowCount: 1 }
-        : { rows: authorityRows, rowCount: authorityRows.length }
+    const authorityResult = async () => ({
+      rows: authorityRows,
+      rowCount: authorityRows.length,
+    })
+    poolQuery.mockImplementation(authorityResult)
+    // A checked-out client answers like the pool, so validation moved into a
+    // transaction still succeeds and the test reaches its transaction assertions.
+    clientQuery.mockImplementation(authorityResult)
+    poolConnect.mockImplementation(
+      async (): Promise<MockTransactionClient> => ({
+        query: (...args: unknown[]) => clientQuery(...args),
+        release: () => clientRelease(),
+      })
+    )
+    withTransaction.mockImplementation(
+      async (work: (client: MockTransactionClient) => Promise<unknown>, txPool: MockPool) => {
+        const client = await txPool.connect()
+        try {
+          await client.query('BEGIN')
+          const result = await work(client)
+          await client.query('COMMIT')
+          return result
+        } catch (error) {
+          await client.query('ROLLBACK')
+          throw error
+        } finally {
+          client.release()
+        }
+      }
     )
   })
 
@@ -123,9 +166,9 @@ describe('external session lifecycle gate', () => {
     expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
     expect(response.headers['cache-control']).toBe('no-store')
-    // Witness: session validation reached the database-authoritative clock.
+    // Witness: session validation reached the lifecycle query that carries the database clock.
     expect(poolQuery).toHaveBeenCalledTimes(1)
-    expect(String(poolQuery.mock.calls[0]?.[0])).toContain('clock_timestamp()')
+    expect(String(poolQuery.mock.calls[0]?.[0])).toContain("date_trunc('second', now())")
     expect(loggerWarn).toHaveBeenCalledTimes(1)
     expect(loggerWarn.mock.calls[0]?.[0]).toMatchObject({
       event: 'external_session_backend_unavailable',
@@ -136,36 +179,64 @@ describe('external session lifecycle gate', () => {
   it('answers 503 for a no-SQLSTATE database connection-acquire failure', async () => {
     verifyToken.mockReturnValueOnce(claims)
     const acquireFailure = new Error('private pg-pool acquire timeout sentinel')
-    poolConnect.mockRejectedValueOnce(acquireFailure)
-    const budget = AccessExecutionBudget.create('action')
+    poolQuery.mockRejectedValueOnce(acquireFailure)
 
-    const response = await request(app(budget))
+    const response = await request(app())
       .get('/protected')
-      .set('x-user-session-token', 'session-with-budget')
-    budget.close()
+      .set('x-user-session-token', 'session-without-budget')
 
     expect(response.status).toBe(503)
     expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
     expect(JSON.stringify(response.body)).not.toContain(acquireFailure.message)
     expect(JSON.stringify(response.headers)).not.toContain(acquireFailure.message)
-    expect(poolConnect).toHaveBeenCalledTimes(1)
-    expect(verifyToken).toHaveBeenCalledWith('session-with-budget')
+    expect(poolConnect).not.toHaveBeenCalled()
+    expect(poolQuery).toHaveBeenCalledOnce()
+    expect(verifyToken).toHaveBeenCalledWith('session-without-budget')
     expect(loggerWarn).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps a successful-query session clock invariant failure on the ordinary 500 path', async () => {
+  it('validates a V1 session without opening a transaction when no budget is attached', async () => {
     verifyToken.mockReturnValueOnce(claims)
-    poolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
 
-    const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
+    const response = await request(app())
+      .get('/protected')
+      .set('x-user-session-token', 'session-without-budget')
 
-    expect(response.status).toBe(500)
-    expect(response.body).toEqual({ error: 'internal' })
-    expect(JSON.stringify(response.body)).not.toContain('database session clock unavailable')
-    expect(response.headers['retry-after']).toBeUndefined()
-    expect(response.headers['cache-control']).toBeUndefined()
-    expect(String(poolQuery.mock.calls[0]?.[0])).toContain('clock_timestamp()')
+    expect(response.status).toBe(200)
+    // Witness: next() ran and the middleware fixed req.externalAuth.
+    expect(response.body.userId).toBe(claims.userId)
+    expect(poolConnect).not.toHaveBeenCalled()
+    expect(withTransaction).not.toHaveBeenCalled()
+    // Witness: the lifecycle row was read once, on the pool, with the database clock.
+    expect(poolQuery).toHaveBeenCalledTimes(1)
+    expect(String(poolQuery.mock.calls[0]?.[0])).toContain("date_trunc('second', now())")
+    const statements = [...poolQuery.mock.calls, ...clientQuery.mock.calls]
+      .map(call => String(call[0]))
+      .join('\n')
+    expect(statements).not.toContain('statement_timeout')
+    expect(statements).not.toContain('READ ONLY')
+  })
+
+  it('keeps a successful-query session clock invariant failure an ordinary error at session creation', async () => {
+    const { createUserSession } = await import('../src/services/auth/userSessionService.js')
+    const { ExternalSessionBackendUnavailableError } =
+      await import('../src/services/auth/sessionDatabaseFailure.js')
+    poolQuery
+      .mockResolvedValueOnce({ rows: [{ id: claims.userId }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+
+    const failure = await createUserSession(
+      { userId: claims.userId, email: claims.email, authenticationMethods: ['pwd'] },
+      { db: { query: (...args: unknown[]) => poolQuery(...args) } as never }
+    ).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe('database session clock unavailable')
+    expect(failure).not.toBeInstanceOf(ExternalSessionBackendUnavailableError)
+    // Witness: creation locked the user and then read the database clock.
+    expect(poolQuery).toHaveBeenCalledTimes(2)
+    expect(String(poolQuery.mock.calls[1]?.[0])).toContain('clock_timestamp()')
     expect(loggerWarn).not.toHaveBeenCalled()
   })
 

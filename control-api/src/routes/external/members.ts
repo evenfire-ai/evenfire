@@ -112,8 +112,7 @@ export function createExternalMembersRouter(): Router {
         managerUserId,
         email,
         teamAssignments,
-        name,
-        req.externalSessionAuthority
+        name
       )
       if ('error' in result) {
         if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
@@ -133,11 +132,7 @@ export function createExternalMembersRouter(): Router {
       try {
         const managerUserId = currentUserId(req)
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
-        const result = await resendManagedInvitationForUser(
-          managerUserId,
-          req.params.invitationId,
-          req.externalSessionAuthority
-        )
+        const result = await resendManagedInvitationForUser(managerUserId, req.params.invitationId)
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
           return res.status(404).json({ error: 'not_found' })
@@ -155,11 +150,7 @@ export function createExternalMembersRouter(): Router {
       try {
         const managerUserId = currentUserId(req)
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
-        const result = await revokeManagedInvitationForUser(
-          managerUserId,
-          req.params.invitationId,
-          req.externalSessionAuthority
-        )
+        const result = await revokeManagedInvitationForUser(managerUserId, req.params.invitationId)
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
           return res.status(404).json({ error: 'not_found' })
@@ -179,15 +170,14 @@ export function createExternalMembersRouter(): Router {
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
         const role = normalizeTeamRoleInput(req.body?.role)
         if (!role) return res.status(400).json({ error: 'invalid_role' })
-        if (managerUserId.trim() === req.params.userId.trim()) {
+        if (managerUserId.trim().toLowerCase() === req.params.userId.trim().toLowerCase()) {
           return res.status(400).json({ error: 'invalid_target' })
         }
         const result = await updateManagedMemberRoleForUser(
           managerUserId,
           req.params.userId,
           req.params.teamId,
-          role,
-          req.externalSessionAuthority
+          role
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
@@ -209,20 +199,12 @@ export function createExternalMembersRouter(): Router {
       if (!reason) return res.status(400).json({ error: 'reason_required' })
       const idempotencyKey = String(req.header('Idempotency-Key') || '').trim()
       if (!idempotencyKey) return res.status(400).json({ error: 'idempotency_key_required' })
-      const result = await deleteManagedUserForUser(
-        managerUserId,
-        req.params.userId,
-        {
-          reason,
-          idempotencyKey,
-          requestId: req.correlationId ?? null,
-        },
-        req.externalSessionAuthority
-      )
+      const result = await deleteManagedUserForUser(managerUserId, req.params.userId, {
+        reason,
+        idempotencyKey,
+        requestId: req.correlationId ?? null,
+      })
       if ('error' in result) {
-        if (result.error === 'forbidden') {
-          return res.status(403).json({ error: 'forbidden' })
-        }
         if (result.error === 'forbidden_uncontrolled_teams') {
           return res.status(403).json({ error: 'forbidden_uncontrolled_teams' })
         }
@@ -249,14 +231,13 @@ export function createExternalMembersRouter(): Router {
       try {
         const managerUserId = currentUserId(req)
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
-        if (managerUserId.trim() === req.params.userId.trim()) {
+        if (managerUserId.trim().toLowerCase() === req.params.userId.trim().toLowerCase()) {
           return res.status(400).json({ error: 'invalid_target' })
         }
         const result = await deleteManagedMemberForUser(
           managerUserId,
           req.params.userId,
-          req.params.teamId,
-          req.externalSessionAuthority
+          req.params.teamId
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })

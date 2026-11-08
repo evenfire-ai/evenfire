@@ -281,7 +281,7 @@ async function completePasswordReset(
     return
   }
   if (!result.data) {
-    res.status(502).json({ error: 'Password recovery service returned an invalid response' })
+    res.status(502).json({ error: 'Failed to restore account session' })
     return
   }
   clearProfileSessionCookie(req, res)

@@ -16,12 +16,16 @@ function buildApp() {
   return app
 }
 
+const SESSION_ISSUANCE_SENTENCE =
+  'A session could not be issued right now. Try again in two seconds.'
+
 function stubControlApiError(
   status: number,
   code: PublicApiErrorCode,
-  headers: Record<string, string>
+  headers: Record<string, string>,
+  message = 'private upstream message'
 ) {
-  const body = publicApiErrorBody('issuance_ID-42', code, 'private upstream message', true)
+  const body = publicApiErrorBody('issuance_ID-42', code, message, true)
   vi.stubGlobal(
     'fetch',
     vi.fn().mockResolvedValue(
@@ -37,10 +41,15 @@ describe('password admission error forwarding', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('preserves the typed temporary V1 session issuance contract', async () => {
-    stubControlApiError(503, 'session_issuance_temporarily_unavailable', {
-      'retry-after': '2',
-      'cache-control': 'no-store',
-    })
+    stubControlApiError(
+      503,
+      'session_issuance_temporarily_unavailable',
+      {
+        'retry-after': '2',
+        'cache-control': 'no-store',
+      },
+      SESSION_ISSUANCE_SENTENCE
+    )
 
     const response = await request(buildApp())
       .post('/api/v1/auth/password-login')
@@ -50,15 +59,16 @@ describe('password admission error forwarding', () => {
     expect(response.headers['cache-control']).toBe('no-store')
     expect(response.headers['retry-after']).toBe('2')
     expect(response.headers['set-cookie']).toBeUndefined()
-    expect(response.body).toEqual({
-      error: {
-        code: 'session_issuance_temporarily_unavailable',
-        message: 'A session could not be issued right now. Try again in two seconds.',
-        correlationId: 'issuance_ID-42',
-        retryable: true,
-      },
-    })
-    expect(JSON.stringify(response.body)).not.toContain('private upstream message')
+    // The producer's own sentence reaches the client: the edge no longer
+    // rebuilds a fixed copy for a forwarded 503.
+    expect(response.body).toEqual(
+      publicApiErrorBody(
+        'issuance_ID-42',
+        'session_issuance_temporarily_unavailable',
+        SESSION_ISSUANCE_SENTENCE,
+        true
+      )
+    )
   })
 
   it('keeps generic authority failures on the bounded admission response', async () => {

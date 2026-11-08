@@ -42,56 +42,7 @@ type PrivilegeExpectation = Record<string, Set<string>>
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
-const accessFoundationDefinerSignatures = [
-  'authorization_bump_user_revision(pg_catalog.uuid)',
-  'authorization_bump_team_revision(pg_catalog.uuid)',
-  'authorization_bump_subject_revision(pg_catalog.text, pg_catalog.text)',
-  'authorization_prelock_workflow_run_revisions(pg_catalog.uuid[])',
-  'authorization_prelock_workflow_approval_revisions(pg_catalog.uuid[])',
-  'authorization_prelock_workflow_approval_trigger_revisions(pg_catalog.uuid)',
-  'authorization_prelock_workflow_recipe_policy_revisions(pg_catalog.text, pg_catalog.text)',
-  'authorization_bump_user_row_revision()',
-  'authorization_bump_team_row_revision()',
-  'authorization_bump_workflow_run_revision()',
-  'authorization_bump_workflow_run_audit_revision()',
-  'authorization_bump_workflow_approval_revision()',
-  'authorization_bump_notification_revision()',
-  'authorization_bump_gfs_resource_component(pg_catalog.uuid)',
-  'authorization_bump_gfs_authority_revision()',
-  'authorization_bump_gfs_resource_subjects(pg_catalog.uuid)',
-  'authorization_bump_gfs_resource_revision()',
-  'authorization_bump_resource_revision(pg_catalog.text, pg_catalog.text, pg_catalog.text)',
-  'authorization_bump_team_membership_revision()',
-  'authorization_bump_user_grant_revision()',
-  'authorization_bump_team_grant_revision()',
-  'authorization_bump_operational_resource_revision()',
-  'authorization_bump_operational_relationship_revision()',
-] as const
-const accessFoundationDefinerNames = accessFoundationDefinerSignatures.map(signature =>
-  signature.slice(0, signature.indexOf('('))
-)
 
-type AccessFoundationDefinerState = {
-  function_name: string
-  config: string[] | null
-  owner: string
-  acl: string[] | null
-}
-
-async function readAccessFoundationDefinerState(pool: Pool) {
-  return pool.query<AccessFoundationDefinerState>(
-    `SELECT procedure.proname AS function_name,
-            procedure.proconfig AS config,
-            pg_get_userbyid(procedure.proowner) AS owner,
-            procedure.proacl AS acl
-       FROM pg_proc procedure
-       JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
-      WHERE namespace.nspname = 'public'
-        AND procedure.prosecdef
-        AND procedure.proname LIKE 'authorization_%'
-      ORDER BY procedure.proname`
-  )
-}
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
   url.pathname = `/${database}`
@@ -841,121 +792,17 @@ describeRealPostgres('control-api real Postgres migrations', () => {
          AS function_name`
     )
     expect(obsoleteGfsSubjectRevision.rows).toEqual([{ function_name: null }])
-    // Revision rows are written only by SECURITY DEFINER bump functions.
-    for (const relation of [
-      'authorization_user_revisions',
-      'authorization_team_revisions',
-      'authorization_resource_revisions',
-    ]) {
-      expectPrivileges([...privileges[relation]], ['SELECT'])
-    }
     // RP-12: the session-revocation ledger is append-only for the runtime.
     expectPrivileges([...privileges.external_v1_session_revocations], ['SELECT', 'INSERT'])
-    const runtimeClient = await dbPool.connect()
-    try {
-      await runtimeClient.query('BEGIN')
-      await runtimeClient.query('SET LOCAL ROLE control_api_runtime')
-      const team = await runtimeClient.query<{ id: string }>(
-        `INSERT INTO teams(name) VALUES ('Synthetic revision grant team') RETURNING id`
-      )
-      const teamId = team.rows[0].id
-      // Liveness witness: the runtime's own team write advances the revision
-      // through the trigger.
-      const bumped = await runtimeClient.query<{ revision: string }>(
-        'SELECT revision::text FROM authorization_team_revisions WHERE team_id = $1',
-        [teamId]
-      )
-      expect(bumped.rows).toHaveLength(1)
-      for (const statement of [
-        'INSERT INTO authorization_team_revisions(team_id) VALUES ($1)',
-        'UPDATE authorization_team_revisions SET revision = revision + 1 WHERE team_id = $1',
-      ]) {
-        await runtimeClient.query('SAVEPOINT direct_revision_write')
-        await expect(runtimeClient.query(statement, [teamId])).rejects.toMatchObject({
-          code: '42501',
-        })
-        await runtimeClient.query('ROLLBACK TO SAVEPOINT direct_revision_write')
-      }
-      const directBumpResults: Array<string | undefined> = []
-      for (const statement of [
-        'SELECT authorization_bump_user_revision($1::uuid)',
-        'SELECT authorization_bump_team_revision($1::uuid)',
-        "SELECT authorization_bump_resource_revision('synthetic-od6', 'gfs_resource', $1::text)",
-      ]) {
-        await runtimeClient.query('SAVEPOINT direct_revision_bump')
-        try {
-          await runtimeClient.query(statement, [teamId])
-          directBumpResults.push('allowed')
-        } catch (error) {
-          directBumpResults.push((error as { code?: string }).code)
-        }
-        await runtimeClient.query('ROLLBACK TO SAVEPOINT direct_revision_bump')
-      }
-      expect(directBumpResults).toEqual(['42501', '42501', '42501'])
-      const revisionExecute = await runtimeClient.query<{ function_name: string }>(`
-        SELECT routine.proname AS function_name
-          FROM pg_proc routine
-          JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
-         WHERE namespace.nspname = 'public'
-           AND routine.prosecdef
-           AND routine.proname LIKE 'authorization_%'
-           AND has_function_privilege('control_api_runtime', routine.oid, 'EXECUTE')
-         ORDER BY routine.proname
-      `)
-      expect(revisionExecute.rows).toEqual([
-        { function_name: 'authorization_prelock_workflow_approval_revisions' },
-        { function_name: 'authorization_prelock_workflow_approval_trigger_revisions' },
-        { function_name: 'authorization_prelock_workflow_run_revisions' },
-      ])
-      const prelockGrants = await runtimeClient.query<{ grantee: string }>(`
-        SELECT routine.proname AS function_name, pg_get_userbyid(privilege.grantee) AS grantee
-          FROM pg_proc routine
-          CROSS JOIN LATERAL aclexplode(routine.proacl) privilege
-         WHERE routine.oid IN (
-                 'public.authorization_prelock_workflow_run_revisions(uuid[])'::regprocedure,
-                 'public.authorization_prelock_workflow_approval_revisions(uuid[])'::regprocedure,
-                 'public.authorization_prelock_workflow_approval_trigger_revisions(uuid)'::regprocedure,
-                 'public.authorization_prelock_workflow_recipe_policy_revisions(text, text)'::regprocedure
-               )
-           AND privilege.grantee <> routine.proowner
-           AND privilege.privilege_type = 'EXECUTE'
-         ORDER BY grantee, function_name
-      `)
-      expect(prelockGrants.rows).toEqual([
-        {
-          function_name: 'authorization_prelock_workflow_approval_revisions',
-          grantee: 'control_api_runtime',
-        },
-        {
-          function_name: 'authorization_prelock_workflow_approval_trigger_revisions',
-          grantee: 'control_api_runtime',
-        },
-        {
-          function_name: 'authorization_prelock_workflow_run_revisions',
-          grantee: 'control_api_runtime',
-        },
-        {
-          function_name: 'authorization_prelock_workflow_approval_revisions',
-          grantee: 'workflow_recipes_runtime',
-        },
-        {
-          function_name: 'authorization_prelock_workflow_recipe_policy_revisions',
-          grantee: 'workflow_recipes_runtime',
-        },
-      ])
-      expect(
-        (
-          await runtimeClient.query(
-            'SELECT revision::text FROM authorization_team_revisions WHERE team_id = $1',
-            [teamId]
-          )
-        ).rows
-      ).toEqual(bumped.rows)
-    } finally {
-      await runtimeClient.query('ROLLBACK')
-      runtimeClient.release()
-    }
-
+    // The runtime never deletes an epoch: the user-deletion cascade runs as the owner.
+    expectPrivileges(
+      [...privileges.external_user_session_security_epochs],
+      ['SELECT', 'INSERT', 'UPDATE']
+    )
+    expectPrivileges(
+      [...privileges.external_user_sessions],
+      ['SELECT', 'INSERT', 'UPDATE', 'DELETE']
+    )
     try {
       await dbPool.query('GRANT UPDATE ON password_verification_work TO control_api_runtime')
       expect(await violations(relationQuery)).toBe(1)
@@ -1869,13 +1716,6 @@ describeRealPostgres('control-api real Postgres migrations', () => {
          AS function_name`
     )
     expect(obsoleteCatalogRevision.rows).toEqual([{ function_name: null }])
-    const freshAccessFoundationFunctions = await readAccessFoundationDefinerState(dbPool)
-    expect(freshAccessFoundationFunctions.rows.map(row => row.function_name)).toEqual(
-      [...accessFoundationDefinerNames].sort()
-    )
-    for (const { config } of freshAccessFoundationFunctions.rows) {
-      expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
-    }
 
     const firstVersions = await dbPool.query<{ version: string }>(
       'SELECT version FROM schema_migrations ORDER BY version'
@@ -2200,7 +2040,6 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const exactControlApiRelations = [
       'administrative_events',
       'agent_run_events',
-      'authorization_catalog_environment',
       'governed_event_read_v1',
       'governed_event_stream',
       'governed_approval_prompt_history',
@@ -2227,7 +2066,6 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const expectedControlApiRelations: Record<string, string[]> = {
       administrative_events: ['INSERT', 'SELECT'],
       agent_run_events: ['INSERT', 'SELECT'],
-      authorization_catalog_environment: ['SELECT'],
       governed_event_read_v1: ['SELECT'],
       governed_event_stream: ['INSERT', 'SELECT'],
       governed_approval_prompt_history: ['INSERT', 'SELECT'],
@@ -3132,37 +2970,11 @@ describeRealPostgres('control-api real Postgres migrations', () => {
        VALUES ($1, 'sandbox-recipes', 'runtime-cleanup-test')`,
       [cleanupTeamId]
     )
-    const cleanupApprovalId = randomUUID()
-    await dbPool.query(
-      `INSERT INTO workflow_approval_requests(
-         id, recipe_namespace, recipe_name, expires_at, status, target_user_id,
-         payload, idempotency_key, requested_at
-       ) VALUES ($1, 'sandbox-recipes', 'runtime-cleanup-test', NOW() + INTERVAL '1 hour',
-         'pending', $2, '{}'::jsonb, $3, NOW())`,
-      [cleanupApprovalId, cleanupUserId, `runtime-cleanup-${cleanupApprovalId}`]
-    )
 
     const cleanupClient = await dbPool.connect()
     try {
       await cleanupClient.query('BEGIN')
       await cleanupClient.query('SET LOCAL ROLE workflow_recipes_runtime')
-      // The real cleanup transaction first locks the approval rows it cancels,
-      // then runs the prelock. Both statements need the runtime grants the
-      // deployment pins here; a missing EXECUTE or UPDATE would roll back the
-      // recipe deletion in production and be swallowed there.
-      const approvalLock = await cleanupClient.query(
-        `SELECT id FROM workflow_approval_requests
-          WHERE recipe_namespace = $1 AND recipe_name = $2
-            AND status IN ('pending', 'approved')
-          ORDER BY id
-            FOR UPDATE`,
-        ['sandbox-recipes', 'runtime-cleanup-test']
-      )
-      expect(approvalLock.rowCount).toBe(1)
-      await cleanupClient.query(
-        'SELECT authorization_prelock_workflow_recipe_policy_revisions($1, $2)',
-        ['sandbox-recipes', 'runtime-cleanup-test']
-      )
       for (const table of [
         'user_workflow_triggers',
         'team_workflow_triggers',
@@ -3206,23 +3018,6 @@ describeRealPostgres('control-api real Postgres migrations', () => {
          AND has_function_privilege('workflow_recipes_runtime', routine.oid, 'EXECUTE')
     `)
     expect(functionAccess.rows[0]?.violations).toBe('')
-
-    // The Workflow Recipes runtime may execute exactly two authorization
-    // functions: the stuck-run sweep's approval prelock and the recipe-delete
-    // prelock. Every other one stays owner-only.
-    const recipePolicyFunctionAccess = await dbPool.query<{ function_name: string }>(`
-      SELECT routine.proname AS function_name
-        FROM pg_proc routine
-        JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
-       WHERE namespace.nspname = 'public'
-         AND routine.proname LIKE 'authorization_%'
-         AND has_function_privilege('workflow_recipes_runtime', routine.oid, 'EXECUTE')
-       ORDER BY routine.proname
-    `)
-    expect(recipePolicyFunctionAccess.rows).toEqual([
-      { function_name: 'authorization_prelock_workflow_approval_revisions' },
-      { function_name: 'authorization_prelock_workflow_recipe_policy_revisions' },
-    ])
 
     const traceService = new AgentRunEventService({
       transaction: async () => {
@@ -3996,14 +3791,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     }
   })
 
-  it('prevents temp-type shadowing in access-foundation SECURITY DEFINER triggers', async () => {
-    const definerFunctions = await readAccessFoundationDefinerState(dbPool)
-    expect(definerFunctions.rows.map(row => row.function_name)).toEqual(
-      [...accessFoundationDefinerNames].sort()
-    )
-    for (const { config } of definerFunctions.rows) {
-      expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
-    }
+  it('prevents temp-type shadowing in entity-change SECURITY DEFINER triggers', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
 
     const attackerRole = `entity_change_shadow_${randomBytes(5).toString('hex')}`
     const attackerPassword = randomBytes(24).toString('hex')
@@ -4049,19 +3839,6 @@ describeRealPostgres('control-api real Postgres migrations', () => {
           resourceId,
         ])
         expect(stored.rowCount).toBe(1)
-        const revision = await dbPool.query<{ revision: string }>(
-          `SELECT revision::text
-             FROM authorization_resource_revisions
-            WHERE environment_id = (
-                    SELECT environment_id
-                      FROM authorization_catalog_environment
-                     WHERE singleton = TRUE
-                  )
-              AND resource_type = 'gfs_resource'
-              AND resource_id = $1`,
-          [resourceId]
-        )
-        expect(revision.rows).toEqual([{ revision: '1' }])
       } finally {
         attacker.release()
       }

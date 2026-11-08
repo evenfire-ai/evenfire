@@ -8,11 +8,6 @@ import {
   USER_SESSION_V2_VERSION,
   signUserSessionV2Token,
 } from '../../utils/auth/userSessionV2Token.js'
-import {
-  runAccessDatabaseQuery,
-  withAccessDatabaseTransaction,
-} from '../access/accessDatabaseQuery.js'
-import type { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
 import type { ExternalSessionAuthorityContext } from './externalSessionAuthentication.js'
 import { legacySecurityCutoffRejects } from './legacySecurityCutoff.js'
 import { legacyExternalSessionAuthGeneration } from './legacyV1Generation.js'
@@ -62,16 +57,6 @@ export type IssuedUserSession = {
   token: string
   expiresInSeconds: number
   identity: UserSessionIdentity
-}
-
-function budgetedSessionDatabase(
-  db: SessionDatabase,
-  budget: AccessExecutionBudget,
-  onDatabaseFailure?: (error: unknown) => unknown
-): SessionDatabase {
-  const query = (text: string, values?: unknown[]) =>
-    runAccessDatabaseQuery(db, budget, text, values ?? [], { onDatabaseFailure })
-  return Object.assign(Object.create(db), { query }) as SessionDatabase
 }
 
 function sessionDatabaseWithFailureProvenance(
@@ -227,14 +212,23 @@ export async function createUserSession(
     authenticationMethods: string[]
     authenticatedAt?: Date
   },
-  options: { db?: SessionDatabase } = {}
+  // userLocked: the caller already holds this user's row lock (`FOR NO KEY
+  // UPDATE` or stronger) in the transaction of `db`; that lock serializes the
+  // session cap below, so only this function's own lock statement is skipped.
+  options:
+    | { db?: SessionDatabase; userLocked?: false }
+    | { db: SessionDatabase; userLocked: true } = {}
 ): Promise<IssuedUserSession> {
   const sid = randomUUID()
   const jti = randomUUID()
 
   const work = async (db: SessionDatabase) => {
-    const user = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [input.userId])
-    if ((user.rowCount ?? 0) === 0) throw new Error('user session principal does not exist')
+    if (!options.userLocked) {
+      const user = await db.query(`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, [
+        input.userId,
+      ])
+      if ((user.rowCount ?? 0) === 0) throw new Error('user session principal does not exist')
+    }
     const now = await loadSessionDatabaseNow(db)
     const authenticatedAt = atSecond(input.authenticatedAt ?? now)
     const idleExpiresAt = plusSeconds(now, USER_SESSION_IDLE_LIFETIME_SECONDS)
@@ -304,7 +298,6 @@ export async function validateUserSessionClaims(
   claims: UserSessionV2Claims,
   options: {
     db?: SessionDatabase
-    budget?: AccessExecutionBudget
     touch?: boolean
     onDatabaseFailure?: (error: unknown) => unknown
   } = {}
@@ -315,25 +308,15 @@ export async function validateUserSessionClaims(
     return validateLoadedSession(db, row, claims, now, options.touch !== false)
   }
   if (options.db) {
-    return work(
-      options.budget
-        ? budgetedSessionDatabase(options.db, options.budget, options.onDatabaseFailure)
-        : sessionDatabaseWithFailureProvenance(options.db, options.onDatabaseFailure)
-    )
+    return work(sessionDatabaseWithFailureProvenance(options.db, options.onDatabaseFailure))
   }
-  return options.budget
-    ? withAccessDatabaseTransaction(options.budget, work, {
-        mode: 'read_write',
-        onDatabaseFailure: options.onDatabaseFailure,
-      })
-    : withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
+  return withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
 }
 
 export async function renewUserSession(
   claims: UserSessionV2Claims,
   options: {
     db?: SessionDatabase
-    budget?: AccessExecutionBudget
     onDatabaseFailure?: (error: unknown) => unknown
   } = {}
 ): Promise<IssuedUserSession | UserSessionValidation> {
@@ -411,18 +394,9 @@ export async function renewUserSession(
     }
   }
   if (options.db) {
-    return work(
-      options.budget
-        ? budgetedSessionDatabase(options.db, options.budget, options.onDatabaseFailure)
-        : sessionDatabaseWithFailureProvenance(options.db, options.onDatabaseFailure)
-    )
+    return work(sessionDatabaseWithFailureProvenance(options.db, options.onDatabaseFailure))
   }
-  return options.budget
-    ? withAccessDatabaseTransaction(options.budget, work, {
-        mode: 'read_write',
-        onDatabaseFailure: options.onDatabaseFailure,
-      })
-    : withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
+  return withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
 }
 
 export async function revokeUserSession(
@@ -474,12 +448,11 @@ export async function revokeAllUserSessions(
   options: { onDatabaseFailure?: (error: unknown) => unknown } = {}
 ): Promise<number> {
   const work = async (transaction: SessionDatabase) => {
-    const userLock = expectedLifecycleVersion === undefined ? 'FOR UPDATE' : 'FOR NO KEY UPDATE'
     const user = await transaction.query(
       `SELECT id, lifecycle_version
          FROM users
         WHERE id = $1
-        ${userLock}`,
+        FOR NO KEY UPDATE`,
       [userId]
     )
     if ((user.rowCount ?? 0) === 0) {
@@ -572,7 +545,7 @@ export async function validateExternalSessionAuthorityContext(
            FROM users
           WHERE id = $1
             AND lifecycle_state = 'active'
-          FOR UPDATE`,
+          FOR NO KEY UPDATE`,
         [context.userId]
       )
       if ((principal.rowCount ?? 0) === 0) {
@@ -599,7 +572,7 @@ export async function validateExternalSessionAuthorityContext(
       `SELECT id, email, lifecycle_state, lifecycle_version
          FROM users
         WHERE id = $1
-        FOR UPDATE`,
+        FOR NO KEY UPDATE`,
       [context.userId]
     )
     const user = principal.rows[0] as
@@ -671,7 +644,6 @@ export async function validateLegacyUserSession(
   claims: AuthClaims,
   options: {
     db?: SessionDatabase
-    budget?: AccessExecutionBudget
     lockUser?: boolean
     onDatabaseFailure?: (error: unknown) => unknown
   } = {}
@@ -684,27 +656,28 @@ export async function validateLegacyUserSession(
   }
   const work = async (db: SessionDatabase): Promise<UserSessionValidation> => {
     if (options.lockUser) {
-      const locked = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+      const locked = await db.query(`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, [
         claims.userId,
       ])
       if ((locked.rowCount ?? 0) === 0) return { status: 'revoked', reason: 'user_unavailable' }
     }
-    const now = await loadSessionDatabaseNow(db)
     const result = await db.query(
-      `SELECT u.id, u.lifecycle_state, u.lifecycle_version,
+      `WITH observed_clock AS (SELECT date_trunc('second', now()) AS db_now)
+       SELECT u.id, u.lifecycle_state, u.lifecycle_version,
             epoch.valid_after,
             EXISTS (
               SELECT 1
                 FROM external_v1_session_revocations revoked
                WHERE revoked.token_hash = $2
                  AND revoked.user_id = u.id
-                 AND revoked.expires_at > $3
+                 AND revoked.expires_at > observed_clock.db_now
             ) AS token_revoked
        FROM users u
+       CROSS JOIN observed_clock
        LEFT JOIN external_user_session_security_epochs epoch ON epoch.user_id = u.id
       WHERE u.id = $1
       LIMIT 1`,
-      [claims.userId, legacySessionFingerprint(token), now]
+      [claims.userId, legacySessionFingerprint(token)]
     )
     const row = result.rows[0] as
       | {
@@ -738,15 +711,7 @@ export async function validateLegacyUserSession(
     }
   }
   const db = options.db ?? pool
-  if (!options.budget)
-    return work(sessionDatabaseWithFailureProvenance(db, options.onDatabaseFailure))
-  if (options.db) {
-    return work(budgetedSessionDatabase(db, options.budget, options.onDatabaseFailure))
-  }
-  return withAccessDatabaseTransaction(options.budget, work, {
-    mode: 'read_only',
-    onDatabaseFailure: options.onDatabaseFailure,
-  })
+  return work(sessionDatabaseWithFailureProvenance(db, options.onDatabaseFailure))
 }
 
 export async function revokeLegacyUserSession(
@@ -757,7 +722,7 @@ export async function revokeLegacyUserSession(
   options: { onDatabaseFailure?: (error: unknown) => unknown } = {}
 ): Promise<boolean> {
   const work = async (transaction: SessionDatabase): Promise<boolean> => {
-    const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+    const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, [
       claims.userId,
     ])
     if ((user.rowCount ?? 0) === 0) return false

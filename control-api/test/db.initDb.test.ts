@@ -34,13 +34,14 @@ describe('db.initDb', () => {
 
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql).trim())
 
-    expect(sqls.slice(0, 3)).toEqual([
+    expect(sqls.slice(0, 4)).toEqual([
       "SET lock_timeout = '10000ms'",
       "SET statement_timeout = '15000ms'",
       "SET idle_in_transaction_session_timeout = '15000ms'",
+      "SET client_connection_check_interval = '1s'",
     ])
-    expect(sqls[3]).toContain('SELECT pg_advisory_lock')
-    expect(sqls[4]).toBe('BEGIN')
+    expect(sqls[4]).toContain('SELECT pg_advisory_lock')
+    expect(sqls[5]).toBe('BEGIN')
     expect(sqls).toContainEqual(
       expect.stringContaining('CREATE TABLE IF NOT EXISTS schema_migrations')
     )
@@ -67,11 +68,9 @@ describe('db.initDb', () => {
     expect(sqls.some(sql => sql.includes('DROP TABLE IF EXISTS workflow_run_outputs'))).toBe(false)
     expect(sqls).not.toContain('ROLLBACK')
     // The committed password-admission rollout fence, one dev batch through
-    // 0130_password_login_success_admission (as in dev), then five PR1 versions
-    // plus the 0133 function transaction.
-    // PR2 adds eight versions, and 0137 builds its online index between the schema and receipt transactions.
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(17)
-    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(17)
+    // 0136_llm_catalog_dismissed_backfill (as in dev), then two PR1 versions.
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(4)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(4)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)
@@ -90,12 +89,13 @@ describe('db.initDb', () => {
     for (const version of [
       '0107_llm_provider_attempts_sdk_link',
       '0130_password_login_success_admission',
+      '0136_llm_catalog_dismissed_backfill',
     ]) {
       const index = receiptIndex(version)
       expect(index, version).toBeGreaterThan(devBatchBegin)
       expect(index, version).toBeLessThan(devBatchCommit)
     }
-    expect(receiptIndex('0131_user_access_foundation')).toBeGreaterThan(devBatchCommit)
+    expect(receiptIndex('0137_user_access_foundation')).toBeGreaterThan(devBatchCommit)
   })
 
   it('applies the triggered_at audit index migration on top of an already-migrated baseline', async () => {
@@ -996,8 +996,8 @@ describe('db.initDb', () => {
 
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql).trim())
 
-    expect(sqls[3]).toContain('SELECT pg_advisory_lock')
-    expect(sqls[4]).toBe('BEGIN')
+    expect(sqls[4]).toContain('SELECT pg_advisory_lock')
+    expect(sqls[5]).toBe('BEGIN')
     expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(1)
     expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2)
     expect(sqls).toContainEqual(

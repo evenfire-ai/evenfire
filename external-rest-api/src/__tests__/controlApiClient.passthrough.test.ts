@@ -85,7 +85,7 @@ describe('controlApiPassthroughGet', () => {
     )
 
     expect(error).toBeInstanceOf(ControlApiError)
-    expect((error as ControlApiError).responseHeaders).toEqual({
+    expect((error as ControlApiError).headers).toEqual({
       'retry-after': '17',
       'x-ratelimit-limit': '30',
       'x-ratelimit-remaining': '0',

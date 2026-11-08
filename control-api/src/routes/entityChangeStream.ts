@@ -34,12 +34,6 @@ function authorizationStatus(
     : observation.status
 }
 
-function sendSessionBackendUnavailable(res: Response): void {
-  res.setHeader('retry-after', '2')
-  res.setHeader('cache-control', 'no-store')
-  res.status(503).json({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
-}
-
 type EntityChangeStreamMessage =
   | {
       schemaVersion: 1
@@ -313,11 +307,13 @@ export function streamEntityChanges(
     }
 
     try {
-      const initialAuthorization = authorizationStatus(await isAuthorized())
+      const initialObservation = await isAuthorized()
+      const initialAuthorization = authorizationStatus(initialObservation)
       if (initialAuthorization === 'unavailable') {
-        sendSessionBackendUnavailable(res)
-        cleanup()
-        return
+        // Rethrow so the catch below answers dev's fixed 500 body; the head 503
+        // is not in the approved typed-503 scope.
+        const error = typeof initialObservation === 'boolean' ? undefined : initialObservation.error
+        throw error ?? new Error('session authority unavailable')
       }
       if (initialAuthorization === 'denied') {
         res.status(401).end()

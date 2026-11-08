@@ -27,15 +27,8 @@ const runtimePolicy = vi.hoisted(() => ({
   issueV2: false,
   renewV2: false,
   switchCompatibility: true,
-  computeCatalogShadow: false,
-  serveCatalog: false,
-  actionContextV2: false,
-  rpcDelegationV2: false,
-  desktopAllTeamMode: false,
-  profileV2Mode: false,
   minimumClientVersion: null,
   enforceMinimumClient: false,
-  advertisedCatalogFamilies: [],
 }))
 const directory = vi.hoisted(() => ({
   createManagedInvitationForUser: vi.fn(),
@@ -46,7 +39,7 @@ const directory = vi.hoisted(() => ({
   getTeamAgents: vi.fn(),
   getTeamContexts: vi.fn(),
   listMembers: vi.fn(),
-  renameTeamForUser: vi.fn(),
+  renameTeam: vi.fn(),
   updateManagedMemberRoleForUser: vi.fn(),
 }))
 
@@ -73,7 +66,7 @@ type AdminMutation = Readonly<{
   invoke: (server: express.Express) => request.Test
   handler: keyof Pick<
     typeof directory,
-    'renameTeamForUser' | 'updateManagedMemberRoleForUser' | 'deleteManagedMemberForUser'
+    'renameTeam' | 'updateManagedMemberRoleForUser' | 'deleteManagedMemberForUser'
   >
 }>
 
@@ -82,7 +75,7 @@ const mutations: readonly AdminMutation[] = [
     name: 'rename team',
     invoke: server =>
       request(server).put(`/external/teams/${teamId}/name`).send({ name: 'Renamed' }),
-    handler: 'renameTeamForUser',
+    handler: 'renameTeam',
   },
   {
     name: 'change member role',
@@ -211,7 +204,7 @@ describeRealPostgres('legacy V1 live-admin revocation on real external team rout
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
     })
-    directory.renameTeamForUser.mockResolvedValue({ team: { id: teamId, name: 'Renamed' } })
+    directory.renameTeam.mockResolvedValue({ id: teamId, name: 'Renamed' })
     directory.updateManagedMemberRoleForUser.mockResolvedValue({
       membership: { userId: targetUserId, teamId, role: 'member' },
     })

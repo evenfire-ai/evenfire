@@ -54,7 +54,7 @@ function legacyAuthorityDatabase() {
         state.revokedFingerprints.add(values[0] as string)
         return { rows: [{ token_hash: values[0] }], rowCount: 1 }
       }
-      if (sql.includes('FROM users') && sql.includes('FOR UPDATE')) {
+      if (sql.includes('FROM users') && sql.includes('FOR NO KEY UPDATE')) {
         return {
           rows: [{ id: state.userId, lifecycle_version: state.lifecycleVersion }],
           rowCount: 1,
@@ -101,6 +101,37 @@ async function issueLegacy(
       { db, policy: legacyPolicy }
     )
   ).token
+}
+
+// Records every statement V1 issuance sends. Its own users row reports
+// generation 7, so a caller-supplied locked row (generation 3) is distinguishable
+// from a second read of the user row.
+function recordingIssuanceDatabase() {
+  const now = new Date(Math.floor(Date.now() / 1000) * 1000)
+  const statements: string[] = []
+  const db = {
+    query: async (sql: string) => {
+      statements.push(sql)
+      if (sql.includes('clock_timestamp()')) return { rows: [{ db_now: now }], rowCount: 1 }
+      if (sql.includes('external_user_session_security_epochs')) return { rows: [], rowCount: 0 }
+      if (sql.includes('FROM users')) {
+        return { rows: [{ lifecycle_state: 'active', lifecycle_version: 7 }], rowCount: 1 }
+      }
+      throw new Error(`unexpected V1 issuance query: ${sql}`)
+    },
+  }
+  return { db, statements }
+}
+
+const issuanceInput = {
+  contract: 'v1' as const,
+  userId: randomUUID(),
+  email: 'locked@example.test',
+  teamId: 'team-1',
+  role: 'member' as const,
+  // Observed before any lock; issuance must never sign it.
+  authGeneration: 1,
+  authenticationMethods: ['pwd'],
 }
 
 function verified(token: string) {
@@ -157,5 +188,50 @@ describe('legacy V1 security-event generation and representation identity', () =
     ).resolves.toMatchObject({
       status: 'valid',
     })
+  })
+})
+
+describe('V1 issuance reuses the user row its caller already locked', () => {
+  it('signs the locked row generation without reading or locking the user again', async () => {
+    const { db, statements } = recordingIssuanceDatabase()
+
+    const issued = await issueExternalUserSession(issuanceInput, {
+      db,
+      policy: legacyPolicy,
+      lockedUser: { lifecycleState: 'active', lifecycleVersion: 3 },
+    })
+
+    // Witness: issuance ran its clock and epoch reads and signed a token.
+    expect(verified(issued.token).authGeneration).toBe(3)
+    expect(statements).toHaveLength(2)
+    expect(statements[0]).toContain('clock_timestamp()')
+    expect(statements[1]).toContain('external_user_session_security_epochs')
+    expect(statements.filter(sql => sql.includes('FROM users'))).toEqual([])
+  })
+
+  it('refuses a locked row that is no longer active', async () => {
+    const { db, statements } = recordingIssuanceDatabase()
+
+    await expect(
+      issueExternalUserSession(issuanceInput, {
+        db,
+        policy: legacyPolicy,
+        lockedUser: { lifecycleState: 'retired', lifecycleVersion: 4 },
+      })
+    ).rejects.toThrow('legacy user-session issuance requires an active lifecycle generation')
+    // The fake users row is active: only the locked row can have refused issuance.
+    expect(statements).toEqual([])
+  })
+
+  it('locks the user row itself when the caller holds no lock', async () => {
+    const { db, statements } = recordingIssuanceDatabase()
+
+    const issued = await issueExternalUserSession(issuanceInput, { db, policy: legacyPolicy })
+
+    expect(verified(issued.token).authGeneration).toBe(7)
+    const userReads = statements.filter(sql => sql.includes('FROM users'))
+    expect(userReads).toHaveLength(1)
+    expect(userReads[0]).toContain('FOR NO KEY UPDATE')
+    expect(userReads[0]).not.toMatch(/\bFOR UPDATE\b/)
   })
 })

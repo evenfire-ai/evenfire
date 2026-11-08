@@ -65,31 +65,18 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       '0128_password_work_ownership',
     ]
     const incomingDev = '0129_workflow_schedules_concurrency_policy'
-    const lastDev = '0130_password_login_success_admission'
-    const task106 = [
-      '0131_user_access_foundation',
-      '0132_invitation_delivery_commands',
-      '0133_catalog_utf8_ordering',
-      '0134_composable_catalog_revisions',
-      '0135_legacy_password_security_epoch_backfill',
-      '0137_workflow_authority_bindings',
-      '0138_gfs_upload_authority_bindings',
-      '0139_pr2_readiness_evidence',
-      '0140_pr2_runtime_privileges',
-      '0141_workflow_recipe_authority_entity',
-      '0142_workflow_run_failure_reason',
-      '0143_r31_runtime_behavior_sources',
-      '0145_workflow_authorization_pause',
-    ]
+    const passwordAdmission = '0130_password_login_success_admission'
+    const lastDev = '0136_llm_catalog_dismissed_backfill'
+    const task106 = ['0137_user_access_foundation', '0138_legacy_password_security_epoch_backfill']
 
     expect(
       versions.slice(versions.indexOf(parentDev[0]!), versions.indexOf(parentDev[0]!) + 3)
     ).toEqual(parentDev)
     expect(versions[versions.indexOf(parentDev.at(-1)!) + 1]).toBe(incomingDev)
-    expect(versions[versions.indexOf(incomingDev) + 1]).toBe(lastDev)
+    expect(versions[versions.indexOf(incomingDev) + 1]).toBe(passwordAdmission)
     expect(versions[versions.indexOf(lastDev) + 1]).toBe(task106[0])
     expect(
-      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 13)
+      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 2)
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
     expect(versions.at(-1)).toBe(task106.at(-1))

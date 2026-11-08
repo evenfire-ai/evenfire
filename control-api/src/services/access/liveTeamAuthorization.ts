@@ -1,22 +1,24 @@
 import { type DbClient, pool } from '../../db.js'
 import type { TeamRole } from '../../profileTypes.js'
-import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
-import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 
 export type LiveTeamMembership = {
   teamId: string
   role: TeamRole
 }
 
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export async function getLiveTeamMembership(
   userId: string,
   teamId: string,
   options: {
     db?: Pick<DbClient, 'query'>
-    budget?: AccessExecutionBudget
     onDatabaseFailure?: (error: unknown) => unknown
   } = {}
 ): Promise<LiveTeamMembership | null> {
+  // team_members.user_id and team_id are UUID columns: a value that is not a
+  // UUID cannot name a team or user row, so it has no membership.
+  if (!CANONICAL_UUID_RE.test(teamId) || !CANONICAL_UUID_RE.test(userId)) return null
   const db = options.db ?? pool
   const text = `SELECT tm.team_id, tm.role
        FROM team_members tm
@@ -26,11 +28,7 @@ export async function getLiveTeamMembership(
       LIMIT 1`
   const values = [userId, teamId]
   let result
-  if (options.budget) {
-    result = await runAccessDatabaseQuery(db, options.budget, text, values, {
-      onDatabaseFailure: options.onDatabaseFailure,
-    })
-  } else if (options.onDatabaseFailure) {
+  if (options.onDatabaseFailure) {
     try {
       result = await db.query(text, values)
     } catch (error) {

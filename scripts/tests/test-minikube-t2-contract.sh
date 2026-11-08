@@ -92,10 +92,14 @@ finally:
         pass
 PY
 grep -Fq 't0.sh' "$T2"
+# T1 keeps durable reporter evidence (structure and results, no free text) and
+# fails when it cannot be written.
+grep -Fq 't1-reporter-projection.py' "$T1"
+grep -Fq 'T1 reporter evidence could not be persisted' "$T1"
 grep -Fq 'T0_SHELLCHECK=PASS' "$T0"
 grep -Fq 'npm run build' "$T0"
 grep -Fq 'npm test' "$T0"
-grep -Fq 'if [ "${#package_dirs[@]}" -gt 0 ]' "$T0"
+grep -Fq 'if [ -n "$package_list" ]' "$T0"
 grep -Fq 'Ready pod owner ReplicaSet could not be verified' "$ROOT/deploy/scripts/lib/gfs-credential-rollout.sh"
 grep -Fq 'treating marker as stale' "$ROOT/scripts/minikube/pre-gate-sync.sh"
 for identity_file in "$COMMON" "$ROOT/scripts/minikube/sync-auth-key.sh" "$ROOT/scripts/minikube/require-t2-mutation-lock.sh" "$ROOT/scripts/minikube/pre-gate-sync.sh"; do
@@ -441,6 +445,52 @@ cleanup() {
   rm -rf "$tmp"
 }
 trap cleanup EXIT
+
+# The parent T2 record names the T1 evidence it relies on: a stubbed T1 child
+# prints a passing result, the real run_t1 parses it, and the PASS detail that
+# t2_evidence_init's record receives must end with that evidence path.
+ops6_project="$tmp/t1-evidence-project"
+mkdir -p "$ops6_project/scripts/e2e"
+cp "$T1_LOCAL_PREFLIGHT" "$ops6_project/scripts/e2e/real-postgres-local-preflight.sh"
+cat >"$ops6_project/scripts/e2e/minikube-real-postgres.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'invoked\n' >"$OPS6_STUB_MARKER"
+printf 'T1_STATUS=PASS\nT1_TESTS=3\nT1_PASSED_TESTS=3\nT1_PENDING_TESTS=0\n'
+printf 'T1_EXPECTED_FILES=2\nT1_REPORTED_FILES=2\nT1_DURATION_SECONDS=1\n'
+printf 'T1_EVIDENCE=%s\n' "$OPS6_CHILD_EVIDENCE"
+EOF
+ops6_child_evidence="$ops6_project/child-evidence/evidence.json"
+if ! T2_PROJECT_DIR="$ops6_project" T2_EVIDENCE_ROOT="$tmp/t1-evidence-records" T2_TMP_ROOT="$tmp" \
+  T2_HEAD=0123456789abcdef T2_RUN_T1=true MINIKUBE_PROFILE=clerum-t1-evidence T2_CONTEXT=clerum-t1-evidence \
+  OPS6_STUB_MARKER="$tmp/t1-evidence-stub-invoked" OPS6_CHILD_EVIDENCE="$ops6_child_evidence" \
+  bash -c '
+    source "$1"
+    t2_evidence_init
+    run_t1
+    printf "%s\n" "$T2_EVIDENCE_FILE" >"$2"
+  ' bash "$T2" "$tmp/t1-evidence-record-path" >"$tmp/t1-evidence-run.out" 2>&1; then
+  cat "$tmp/t1-evidence-run.out" >&2
+  echo 'FAIL: run_t1 did not accept the stubbed passing T1 result' >&2
+  exit 1
+fi
+if [ ! -f "$tmp/t1-evidence-stub-invoked" ] || ! grep -Fxq "T1_EVIDENCE=$ops6_child_evidence" "$tmp/t1-evidence-run.out"; then
+  echo 'FAIL: the stubbed T1 child did not run or did not print T1_EVIDENCE=' >&2
+  exit 1
+fi
+python3 - "$(cat "$tmp/t1-evidence-record-path")" "$ops6_child_evidence" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+record = json.loads(Path(sys.argv[1]).read_text())
+expected_suffix = "; t1Evidence=" + sys.argv[2]
+last = record["phases"][-1]
+assert last["name"] == "T1" and last["status"] == "PASS", last
+assert last["detail"].endswith(expected_suffix), last["detail"]
+assert record["phase"] == "T1" and record["detail"] == last["detail"], record
+PY
+
 T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=clerum-test-contract T2_CONTEXT=clerum-test-contract \
 T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
 T2_ORIGIN_DEV=0123456789abcdef T2_MERGE_BASE=0123456789abcdef \
@@ -654,6 +704,8 @@ for exit_code in 1 2 7 126 137; do
     source "$1"
     PROJECT_DIR="$T1_EXIT_ROOT"
     T1_TMP_DIR="$(mktemp -d)"
+    # Production T1 always calls t2_evidence_init before any suite runs.
+    T2_EVIDENCE_DIR="$T1_TMP_DIR/evidence"
     trap '\''rm -rf "$T1_TMP_DIR"'\'' EXIT
     list_real_pg_files() {
       printf "%s\\n" "$T1_EXIT_ROOT/control-api/test/fake.realPostgres.test.ts"

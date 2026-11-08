@@ -53,7 +53,6 @@ import {
 } from '../../middleware/gfsUploadAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
-import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { getUserAgents } from '../../services/directory/index.js'
 import {
   WorkflowAuthorityError,
@@ -1036,18 +1035,6 @@ export function createExternalGfsRouter(gateway?: Pick<K8sGateway, 'getResourceE
       }>
       const page = rows.length > limit ? rows.slice(0, limit) : rows
       const last = page[page.length - 1]
-      scheduleAccessCatalogShadow({
-        session: req.externalSessionAuthority,
-        family: 'gfs_resource',
-        legacyLogicalIds: page.map(row => String(row.resource_id)),
-        legacyComplete: rows.length <= limit && after === undefined,
-        scope: {
-          kind: 'behavior-json',
-          dimension: 'filesystemScope',
-          field: 'drive',
-          equals: drive,
-        },
-      })
       res.status(200).json({
         ok: true,
         data: {

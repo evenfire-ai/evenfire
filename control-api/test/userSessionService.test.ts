@@ -94,11 +94,45 @@ describe('user session state machine', () => {
       jti: values[2],
       sv: 1,
     })
-    expect(String(query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(String(query.mock.calls[0]?.[0])).toContain('SELECT id FROM users')
+    expect(String(query.mock.calls[0]?.[0])).toContain('FOR NO KEY UPDATE')
+    expect(String(query.mock.calls[0]?.[0])).not.toMatch(/\bFOR UPDATE\b/)
     expect(String(query.mock.calls[1]?.[0])).toContain('clock_timestamp()')
     expect(String(query.mock.calls[2]?.[0])).toContain('DELETE FROM external_user_sessions')
     expect(String(query.mock.calls[3]?.[0])).toContain('OFFSET $3')
     expect(query.mock.calls[3]?.[1]?.[2]).toBe(USER_SESSION_MAX_ACTIVE_PER_USER - 1)
+  })
+
+  it('skips only its own user lock when the caller already holds it', async () => {
+    const inserted = row()
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('FROM users')) return { rows: [{ id: inserted.user_id }], rowCount: 1 }
+      if (sql.includes('clock_timestamp()')) return { rows: [{ db_now: now }], rowCount: 1 }
+      if (sql.includes('INSERT INTO external_user_sessions')) {
+        return {
+          rows: [{ ...inserted, sid: values?.[0], user_id: values?.[1], current_jti: values?.[2] }],
+          rowCount: 1,
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+
+    const issued = await createUserSession(
+      {
+        userId: String(inserted.user_id),
+        email: 'User@Example.com',
+        authenticationMethods: ['pwd'],
+      },
+      { db: { query }, userLocked: true }
+    )
+
+    // Witness: the session was inserted and signed, and the cap still ran.
+    expect(verifyUserSessionV2Token(issued.token)).toMatchObject({ sub: inserted.user_id })
+    const statements = query.mock.calls.map(([sql]) => String(sql))
+    expect(statements[0]).toContain('clock_timestamp()')
+    expect(statements.some(sql => sql.includes('OFFSET $3'))).toBe(true)
+    expect(statements.some(sql => sql.includes('INSERT INTO external_user_sessions'))).toBe(true)
+    expect(statements.filter(sql => /SELECT id FROM users[\s\S]*\bFOR\b/.test(sql))).toEqual([])
   })
 
   it('rotates once and returns the same successor to an overlapping renewal', async () => {
@@ -229,7 +263,8 @@ describe('user session state machine', () => {
         .mockResolvedValueOnce({ rows: [], rowCount: 2 }),
     }
     await expect(revokeAllUserSessions(userId, 'password_changed', db)).resolves.toBe(2)
-    expect(String(db.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(String(db.query.mock.calls[0]?.[0])).toContain('FOR NO KEY UPDATE')
+    expect(String(db.query.mock.calls[0]?.[0])).not.toMatch(/\bFOR UPDATE\b/)
     expect(String(db.query.mock.calls[1]?.[0])).toContain('clock_timestamp()')
     expect(String(db.query.mock.calls[2]?.[0])).toContain(
       'lifecycle_version = lifecycle_version + 1'
@@ -313,5 +348,50 @@ describe('user session state machine', () => {
     )
     expect(current.status).toBe('valid')
     expect(db.query).toHaveBeenCalled()
+  })
+
+  it('decides a legacy session from one lifecycle query that carries the database clock', async () => {
+    const claims: AuthClaims = {
+      userId: randomUUID(),
+      email: 'legacy@example.com',
+      teamId: null,
+      role: 'member',
+      authGeneration: 1,
+      exp: Math.floor(now.getTime() / 1000) + 3600,
+      iat: Math.floor(now.getTime() / 1000) - 1,
+    }
+    let tokenRevoked = false
+    const db = {
+      query: vi.fn(async () => ({
+        rows: [
+          {
+            id: claims.userId,
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+            valid_after: null,
+            token_revoked: tokenRevoked,
+          },
+        ],
+        rowCount: 1,
+      })),
+    }
+
+    const current = await validateLegacyUserSession('legacy-v1-token', claims, { db })
+    expect(current.status).toBe('valid')
+    expect(db.query).toHaveBeenCalledTimes(1)
+    const [sql, values] = db.query.mock.calls[0] as unknown as [string, unknown[]]
+    expect(sql).toContain("WITH observed_clock AS (SELECT date_trunc('second', now()) AS db_now)")
+    expect(sql).toContain('CROSS JOIN observed_clock')
+    expect(sql).toContain('revoked.expires_at > observed_clock.db_now')
+    expect(values).toHaveLength(2)
+    expect(values[0]).toBe(claims.userId)
+
+    // The same single query decides: flipping its revocation flag flips the verdict.
+    tokenRevoked = true
+    await expect(validateLegacyUserSession('legacy-v1-token', claims, { db })).resolves.toEqual({
+      status: 'revoked',
+      reason: 'logout',
+    })
+    expect(db.query).toHaveBeenCalledTimes(2)
   })
 })

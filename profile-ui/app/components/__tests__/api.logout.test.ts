@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   AuthExpiredError,
   ProfileApiError,
+  acceptInvitation,
   apiGet,
   clearUnconfirmedLogout,
   loginWithPassword,
@@ -22,6 +23,7 @@ describe('Profile logout client boundary', () => {
 
   it.each([
     ['503 response', () => Promise.resolve(new Response('', { status: 503 }))],
+    ['404 response', () => Promise.resolve(new Response('{"error":"Not Found"}', { status: 404 }))],
     ['transport failure', () => Promise.reject(new TypeError('network unavailable'))],
   ])('abandons local credentials after a logout %s', async (_caseName, response) => {
     vi.mocked(fetch).mockImplementationOnce(response)
@@ -30,8 +32,10 @@ describe('Profile logout client boundary', () => {
     await expect(logoutProfileUI()).resolves.toEqual({
       revocationConfirmed: false,
       fencePersisted: true,
+      sessionAbsent: false,
     })
 
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
     expect(window.localStorage.getItem('external_session_token')).toBeNull()
     await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
     expect(fetch).toHaveBeenCalledOnce()
@@ -59,6 +63,7 @@ describe('Profile logout client boundary', () => {
       await expect(logoutProfileUI()).resolves.toEqual({
         revocationConfirmed: false,
         fencePersisted: false,
+        sessionAbsent: false,
       })
 
       // Liveness: the API boundary wrote through the stubbed browser storage.
@@ -74,6 +79,109 @@ describe('Profile logout client boundary', () => {
       expect(fetch).toHaveBeenCalledOnce()
     }
   )
+
+  const jsonResponse = (body: string) =>
+    new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+
+  it('confirms revocation only when the edge answered for a presented session', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse('{"ok":true,"sessionPresented":true}'))
+      .mockResolvedValueOnce(jsonResponse('{"id":"user-1"}'))
+
+    await expect(logoutProfileUI()).resolves.toEqual({
+      revocationConfirmed: true,
+      fencePersisted: true,
+      sessionAbsent: false,
+    })
+
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBeNull()
+    // Liveness: the released fence lets the next session request reach the network.
+    await expect(apiGet('/api/v1/me')).resolves.toEqual({ id: 'user-1' })
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    [
+      'no presented session',
+      '{"ok":true,"sessionPresented":false}',
+      { revocationConfirmed: false, fencePersisted: true, sessionAbsent: true },
+    ],
+    [
+      'an edge without the field',
+      '{"ok":true}',
+      { revocationConfirmed: false, fencePersisted: true, sessionAbsent: false },
+    ],
+    [
+      'an empty body',
+      '',
+      { revocationConfirmed: false, fencePersisted: true, sessionAbsent: false },
+    ],
+    [
+      'the field as the string "true"',
+      '{"ok":true,"sessionPresented":"true"}',
+      { revocationConfirmed: false, fencePersisted: true, sessionAbsent: false },
+    ],
+    [
+      'the field as the number 1',
+      '{"ok":true,"sessionPresented":1}',
+      { revocationConfirmed: false, fencePersisted: true, sessionAbsent: false },
+    ],
+  ])('does not confirm revocation for a 200 with %s', async (_caseName, body, expected) => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(body))
+
+    await expect(logoutProfileUI()).resolves.toEqual(expected)
+
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+    // Liveness: the logout request was sent; the fence then blocks session requests.
+    expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain('/api/v1/auth/logout')
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]?.method).toBe('POST')
+    await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('does not confirm a retry that reached the edge after the first failure expired the cookie', async () => {
+    const storage = {
+      length: 0,
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(() => {
+        throw new DOMException('Quota exceeded', 'QuotaExceededError')
+      }),
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+      key: vi.fn(() => null),
+    }
+    vi.stubGlobal('localStorage', storage)
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        new Response('{"error":"Unauthorized"}', {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse('{"ok":true,"sessionPresented":false}'))
+
+    await expect(logoutProfileUI()).resolves.toEqual({
+      revocationConfirmed: false,
+      fencePersisted: false,
+      sessionAbsent: false,
+    })
+    await expect(logoutProfileUI()).resolves.toEqual({
+      revocationConfirmed: false,
+      fencePersisted: false,
+      sessionAbsent: true,
+    })
+
+    // Liveness: both logout requests were sent with the browser's credentials.
+    expect(fetch).toHaveBeenCalledTimes(2)
+    for (const call of vi.mocked(fetch).mock.calls) {
+      expect(String(call[0])).toContain('/api/v1/auth/logout')
+      expect(call[1]?.method).toBe('POST')
+      expect(call[1]?.credentials).toBe('include')
+    }
+    // The in-memory fence still holds after the unconfirmed retry.
+    await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
 
   it('restores session requests only after a successful new login', async () => {
     vi.mocked(fetch)
@@ -98,6 +206,37 @@ describe('Profile logout client boundary', () => {
     expect(vi.mocked(fetch).mock.calls[2]?.[1]?.credentials).toBe('include')
   })
 
+  it('keeps the logout fence when a successful login response cannot be parsed', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('', { status: 503 }))
+      .mockResolvedValueOnce(
+        new Response('{"token":', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 'user-1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+
+    await expect(logoutProfileUI()).resolves.toEqual({
+      revocationConfirmed: false,
+      fencePersisted: true,
+      sessionAbsent: false,
+    })
+    await expect(loginWithPassword('user@example.invalid', 'new-password')).rejects.toThrow()
+
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+    await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
+    // Liveness: the login reached its 200 branch (logout + login), and the fenced
+    // session request never reached the network.
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(String(vi.mocked(fetch).mock.calls[1]?.[0])).toContain('/api/v1/auth/password-login')
+  })
+
   it('clears the in-memory and stored logout fence', async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response('', { status: 503 }))
@@ -111,6 +250,7 @@ describe('Profile logout client boundary', () => {
     await expect(logoutProfileUI()).resolves.toEqual({
       revocationConfirmed: false,
       fencePersisted: true,
+      sessionAbsent: false,
     })
     expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
     await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
@@ -184,6 +324,69 @@ describe('Profile logout client boundary', () => {
     expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
 
     // Liveness: the surviving session is still fenced after the rejection.
+    await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  const acceptedInvitation = {
+    accepted: true,
+    id: 'invitation-row-1',
+    teamId: 'team-1',
+    teamName: 'Team One',
+    role: 'member',
+    status: 'accepted',
+    expiresAt: '2026-12-01T00:00:00.000Z',
+    acceptedAt: '2026-11-05T00:00:00.000Z',
+    userId: 'user-2',
+    passwordPending: true,
+    email: 'invitee@example.invalid',
+  }
+
+  it('sends a token-proof invitation acceptance through the fence and releases it', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('', { status: 503 }))
+      .mockResolvedValueOnce(jsonResponse(JSON.stringify(acceptedInvitation)))
+      .mockResolvedValueOnce(jsonResponse('{"id":"user-2"}'))
+
+    await logoutProfileUI()
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+
+    await expect(
+      acceptInvitation('synthetic-invitation-proof', 'invitee@example.invalid')
+    ).resolves.toEqual(acceptedInvitation)
+
+    // Liveness: the acceptance reached the edge with the token-plus-email proof.
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(String(vi.mocked(fetch).mock.calls[1]?.[0])).toContain('/api/v1/invitations/accept')
+    expect(vi.mocked(fetch).mock.calls[1]?.[1]?.method).toBe('POST')
+    expect(vi.mocked(fetch).mock.calls[1]?.[1]?.body).toBe(
+      JSON.stringify({ token: 'synthetic-invitation-proof', email: 'invitee@example.invalid' })
+    )
+    // The edge set the invitee's session cookie, so the fence is released.
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBeNull()
+    await expect(apiGet('/api/v1/me')).resolves.toEqual({ id: 'user-2' })
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps the fence after a replayed invitation acceptance, which sets no session', async () => {
+    const replayed = { ...acceptedInvitation, replay: true }
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('', { status: 503 }))
+      .mockResolvedValueOnce(jsonResponse(JSON.stringify(replayed)))
+
+    await logoutProfileUI()
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+
+    await expect(
+      acceptInvitation('synthetic-replayed-invitation-proof', 'invitee@example.invalid')
+    ).resolves.toEqual(replayed)
+
+    // Liveness: the replayed acceptance reached the edge through the fence.
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(String(vi.mocked(fetch).mock.calls[1]?.[0])).toContain('/api/v1/invitations/accept')
+    expect(vi.mocked(fetch).mock.calls[1]?.[1]?.method).toBe('POST')
+    // No new cookie replaced the surviving one, so session requests stay fenced.
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
     await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
     expect(fetch).toHaveBeenCalledTimes(2)
   })

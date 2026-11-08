@@ -121,7 +121,7 @@ describe('POST /external/auth/google-login credential rejections', () => {
     expect(body).not.toContain(payloadEmail)
   })
 
-  it('does not answer 401 for a verified Google identity', async () => {
+  it("answers dev's 401 for a retired Google account", async () => {
     googleVerify.verifyIdToken.mockResolvedValue({
       getPayload: () => ({
         email: 'User@Example.invalid',
@@ -133,8 +133,8 @@ describe('POST /external/auth/google-login credential rejections', () => {
 
     const response = await googleLogin('verified-token')
 
-    expect(response.status).toBe(403)
-    expect(response.body).toEqual({ error: 'membership_not_found' })
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
     expect(directory.googleLoginData).toHaveBeenCalledWith({
       email: 'user@example.invalid',
       name: 'User',

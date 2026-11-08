@@ -12,7 +12,7 @@ const directory = vi.hoisted(() => ({
   getTeamAgents: vi.fn(),
   getTeamContexts: vi.fn(),
   listMembers: vi.fn(),
-  renameTeamForUser: vi.fn(),
+  renameTeam: vi.fn(),
   updateManagedMemberRoleForUser: vi.fn(),
 }))
 

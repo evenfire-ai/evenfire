@@ -27,23 +27,9 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
   ) => {
     const externalReq = req as express.Request & {
       externalAuth?: { userId: string }
-      externalSessionAuthority?: {
-        contract: 'v1'
-        userId: string
-        authGeneration: number
-        issuedAt: number
-        tokenHash: string
-      }
     }
     externalReq.externalAuth = {
       userId: 'manager-1',
-    }
-    externalReq.externalSessionAuthority = {
-      contract: 'v1',
-      userId: 'manager-1',
-      authGeneration: 1,
-      issuedAt: 1_787_931_018,
-      tokenHash: 'external-members-test-token',
     }
     next()
   },
@@ -99,8 +85,7 @@ describe('external members routes', () => {
       'manager-1',
       'invitee@example.com',
       [{ teamId: 'team-1', role: 'admin' }],
-      'Full Name',
-      expect.objectContaining({ contract: 'v1', userId: 'manager-1' })
+      'Full Name'
     )
   })
 
@@ -135,7 +120,7 @@ describe('external members routes', () => {
     expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
   })
 
-  it.each(['invitee@.example.com', 'invitee@example.com.'])(
+  it.each(['invitee@.example.com', 'invitee@example.com.', 'a@b.c'])(
     'preserves bounded legacy domain-dot acceptance for %s',
     async email => {
       directoryMock.createManagedInvitationForUser.mockResolvedValueOnce({
@@ -154,8 +139,7 @@ describe('external members routes', () => {
         'manager-1',
         email,
         [{ teamId: 'team-1', role: 'member' }],
-        '',
-        expect.objectContaining({ contract: 'v1', userId: 'manager-1' })
+        ''
       )
     }
   )
@@ -205,6 +189,46 @@ describe('external members routes', () => {
     expect(directoryMock.deleteManagedMemberForUser).not.toHaveBeenCalled()
   })
 
+  it('rejects an upper-case copy of the caller id as a managed self target', async () => {
+    // One answer each, consumed by the witness requests below.
+    directoryMock.updateManagedMemberRoleForUser.mockResolvedValueOnce({
+      membership: { team_id: 'team-1', user_id: 'target-1', role: 'member', status: 'active' },
+    })
+    directoryMock.deleteManagedMemberForUser.mockResolvedValueOnce({
+      deleted: { team_id: 'team-1', user_id: 'target-1', role: 'member', status: 'deleted' },
+    })
+
+    await request(makeApp())
+      .patch('/external/members/MANAGER-1/teams/team-1/role')
+      .send({ role: 'member' })
+      .expect(400, { error: 'invalid_target' })
+    await request(makeApp())
+      .delete('/external/members/MANAGER-1/teams/team-1')
+      .expect(400, { error: 'invalid_target' })
+    expect(directoryMock.updateManagedMemberRoleForUser).not.toHaveBeenCalled()
+    expect(directoryMock.deleteManagedMemberForUser).not.toHaveBeenCalled()
+
+    // Witness: a different user's id reaches each service once.
+    await request(makeApp())
+      .patch('/external/members/target-1/teams/team-1/role')
+      .send({ role: 'member' })
+      .expect(200)
+    await request(makeApp()).delete('/external/members/target-1/teams/team-1').expect(200)
+    expect(directoryMock.updateManagedMemberRoleForUser).toHaveBeenCalledOnce()
+    expect(directoryMock.updateManagedMemberRoleForUser).toHaveBeenCalledWith(
+      'manager-1',
+      'target-1',
+      'team-1',
+      'member'
+    )
+    expect(directoryMock.deleteManagedMemberForUser).toHaveBeenCalledOnce()
+    expect(directoryMock.deleteManagedMemberForUser).toHaveBeenCalledWith(
+      'manager-1',
+      'target-1',
+      'team-1'
+    )
+  })
+
   it('creates invitations without an added user quota', async () => {
     directoryMock.createManagedInvitationForUser.mockResolvedValue({
       invitation: { id: 'inv-parity' },
@@ -242,16 +266,11 @@ describe('external members routes', () => {
       .send({ reason: 'manager retirement' })
       .expect(200, { ok: true, id: 'target-1' })
 
-    expect(directoryMock.deleteManagedUserForUser).toHaveBeenCalledWith(
-      'manager-1',
-      'target-1',
-      {
-        reason: 'manager retirement',
-        idempotencyKey: 'external-delete-1',
-        requestId: 'request-external-members',
-      },
-      expect.objectContaining({ contract: 'v1', userId: 'manager-1' })
-    )
+    expect(directoryMock.deleteManagedUserForUser).toHaveBeenCalledWith('manager-1', 'target-1', {
+      reason: 'manager retirement',
+      idempotencyKey: 'external-delete-1',
+      requestId: 'request-external-members',
+    })
   })
 
   it.each([

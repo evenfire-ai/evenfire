@@ -732,7 +732,6 @@ describe('routes/admin/workflows', () => {
           rowCount: 1,
         })
         .mockResolvedValueOnce({ rows: [{}], rowCount: 1 })
-        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         .mockResolvedValueOnce({ rows: [{ teamId: null }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [row], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: null })
@@ -843,14 +842,6 @@ describe('routes/admin/workflows', () => {
         'test-recipe',
         `${RECIPE_NS}/test-recipe`,
       ])
-      // The consume prelock runs before the UPDATE that bumps the target.
-      const statements = txQuery.mock.calls.map(([sql]) => String(sql))
-      const prelock = statements.findIndex(sql =>
-        sql.includes('authorization_prelock_workflow_approval_trigger_revisions')
-      )
-      const consumed = statements.findIndex(sql => sql.includes("SET status = 'consumed'"))
-      expect(prelock).toBeGreaterThan(-1)
-      expect(prelock).toBeLessThan(consumed)
     })
 
     it('rejects mcp-host-control triggers without approvalRequestId', async () => {

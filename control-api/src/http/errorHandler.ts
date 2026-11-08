@@ -128,7 +128,7 @@ function clientErrorMessage(err: unknown, status: number): string {
  * status text, never headers); non-K8s errors keep their author-controlled
  * detail. Used for EVERY branch that logs an error message, not just the 4xx one.
  */
-function safeErrorLogMessage(err: unknown): string {
+export function safeErrorLogMessage(err: unknown): string {
   if (isK8sApiException(err)) return clientErrorMessage(err, extractErrorStatus(err) ?? 500)
   return err instanceof Error ? err.message : String(err)
 }
@@ -137,7 +137,7 @@ function safeErrorLogMessage(err: unknown): string {
  * Log-safe stack: a K8s ApiException's `.stack` begins with its `.message`, so it
  * leaks the same headers — drop it for K8s exceptions and keep it otherwise.
  */
-function safeErrorLogStack(err: unknown): string | undefined {
+export function safeErrorLogStack(err: unknown): string | undefined {
   if (isK8sApiException(err)) return undefined
   return err instanceof Error ? err.stack : undefined
 }
@@ -240,31 +240,6 @@ export function clerumErrorHandler(
       },
       'forwarded client error from upstream'
     )
-    if (req.originalUrl.startsWith('/api/v1/external')) {
-      const publicCode =
-        errStatus === 401
-          ? 'invalid_session'
-          : errStatus === 403
-            ? 'forbidden'
-            : errStatus === 404
-              ? 'not_found'
-              : errStatus === 429
-                ? 'rate_limited'
-                : 'invalid_request'
-      sendPublicApiError(
-        req,
-        res,
-        errStatus as number,
-        publicCode,
-        errStatus === 404
-          ? 'The resource was not found.'
-          : errStatus === 429
-            ? 'Too many requests; retry later.'
-            : 'The request could not be completed.',
-        errStatus === 429
-      )
-      return
-    }
     res.status(errStatus as number).json({
       error: clientErrorMessage(err, errStatus as number),
       ...(forwardedCode ? { code: forwardedCode } : {}),

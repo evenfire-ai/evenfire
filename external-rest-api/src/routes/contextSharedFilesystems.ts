@@ -1,7 +1,6 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
 import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
-import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   sendWorkflowActionDelegationTransportError,
@@ -26,7 +25,6 @@ export type ContextSharedFilesystemSummary = {
   message: string | null
 }
 
-const PROPAGATED_STATUSES = new Set([400, 403, 404, 409, 410, 422])
 const PASSTHROUGH_HEADERS = [
   'retry-after',
   'ratelimit',
@@ -39,15 +37,6 @@ const PASSTHROUGH_HEADERS = [
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
   if (sendWorkflowActionDelegationTransportError(error, res)) return
-  const sanitized = sanitizeControlApiPublicError(
-    error,
-    PROPAGATED_STATUSES,
-    publicCorrelationId(res.req)
-  )
-  if (sanitized) {
-    res.status(sanitized.status).json(sanitized.body)
-    return
-  }
   next(error)
 }
 
@@ -79,7 +68,7 @@ export function createContextSharedFilesystemsRouter(): Router {
         )
         res.status(200).json(data)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -118,6 +107,14 @@ export function createContextSharedFilesystemsRouter(): Router {
         for (const name of PASSTHROUGH_HEADERS) {
           const value = upstreamRes.headers.get(name)
           if (value) res.setHeader(name, value)
+        }
+        // throwOnHttpError is off, so the generic relay of an outage's no-store
+        // (app.ts) never sees this response.
+        if (
+          upstreamRes.status === 503 &&
+          upstreamRes.headers.get('cache-control')?.trim().toLowerCase() === 'no-store'
+        ) {
+          res.setHeader('cache-control', 'no-store')
         }
         const ct = upstreamRes.headers.get('content-type')
         if (ct) res.setHeader('content-type', ct)

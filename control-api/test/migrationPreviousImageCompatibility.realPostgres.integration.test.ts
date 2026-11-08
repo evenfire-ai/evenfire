@@ -8,7 +8,7 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 const PRE_D34_TEAMS_WRITER_SHA256 =
-  'b91e7c4cec80a4c4e7be7d92b380d1a28fda2493e96a6047aca9be864c9cde5b'
+  '3f73f787acd4b7aac85b9a489c540403518256460d34c5ae2761121b3ff69843'
 
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
@@ -74,7 +74,7 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
     }
   })
 
-  it('runs the byte-identical pre-D34 team writer against the final additive schema', async () => {
+  it("runs dev's team writer against the PR1 schema", async () => {
     const writerSource = readFileSync(
       new URL('../src/services/directory/teams.ts', import.meta.url)
     )
@@ -103,42 +103,6 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
       [team.id, userId]
     )
     expect(membership.rows).toEqual([{ role: 'admin', status: 'active' }])
-    const revision = await databasePool.query<{ count: string }>(
-      `SELECT count(*)::text AS count
-         FROM authorization_team_revisions
-        WHERE team_id = $1`,
-      [team.id]
-    )
-    expect(Number(revision.rows[0]?.count ?? 0)).toBeGreaterThan(0)
-  })
-
-  it('installs deletion-compatible revision functions on fresh initialization', async () => {
-    const functionState = await databasePool.query<{
-      name: string
-      config: string[] | null
-      definition: string
-    }>(`SELECT proname AS name, proconfig AS config, pg_get_functiondef(oid) AS definition
-         FROM pg_proc
-        WHERE oid = ANY(ARRAY[
-          'public.authorization_bump_team_revision(uuid)'::regprocedure,
-          'public.authorization_bump_user_revision(uuid)'::regprocedure
-        ])
-        ORDER BY proname`)
-    expect(functionState.rows.map(row => row.name)).toEqual([
-      'authorization_bump_team_revision',
-      'authorization_bump_user_revision',
-    ])
-    for (const [name, parentTable, targetId] of [
-      ['authorization_bump_team_revision', 'teams', 'target_team_id'],
-      ['authorization_bump_user_revision', 'users', 'target_user_id'],
-    ]) {
-      const state = functionState.rows.find(row => row.name === name)
-      expect(state?.config).toContain('search_path=pg_catalog, public, pg_temp')
-      expect(state?.definition).toMatch(
-        new RegExp(`SELECT ${parentTable}\\.id[\\s\\S]*FROM ${parentTable}`, 'i')
-      )
-      expect(state?.definition).not.toMatch(new RegExp(`VALUES\\s*\\(${targetId}`, 'i'))
-    }
   })
 
   it('lets the runtime role delete a user and a team with a deleted membership', async () => {

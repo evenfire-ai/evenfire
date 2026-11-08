@@ -38,8 +38,9 @@ Surfaces](README.md) for how the three consoles divide the platform.
    /api/v1/invitations/password-reset`) follows the same post-password
    contract.
 5. **The person signs in with the new password** and lands on the profile home.
-   Profile UI does not hand off automatically; the member starts the
-   [Desktop App](desktop-app.md) and completes step 6 from there.
+   Profile UI offers a Download Evenfire link — not an automatic handoff. The
+   member installs the [Desktop App](desktop-app.md) themselves and completes
+   step 6 from there.
 6. **The Desktop App completes the handoff later**, from its own sign-in
    screen: entering the invited email there makes the Desktop App look up
    the invitation profile and open Profile UI's `/desktop-setup?email=...`
@@ -70,6 +71,13 @@ for what breaks without it.
 - `/invitations/[token]` and `/forgot-password` — reachable without a
   session.
 - `/desktop-setup` — the Desktop App handoff, above.
+
+## Sign-out
+
+If the server does not confirm a sign-out (a 404 during a rollout window, a 503,
+or a network failure), Profile UI stops using the session cookie until the next
+successful sign-in, a confirmed sign-out, or an accepted password reset, and
+tells the member.
 
 ## Deploy
 

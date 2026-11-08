@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { PR1_ONLINE_INDEX_PLAN } from '../src/migrations/pr1OnlineIndexPlan.js'
+import {
+  PR1_ONLINE_INDEX_PLAN,
+  expectedIndexDefinition,
+} from '../src/migrations/pr1OnlineIndexPlan.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -18,6 +21,7 @@ describe('runtime access migrations', () => {
     const indexStates = new Map<
       string,
       {
+        schema_name: string
         table_name: string
         indisunique: boolean
         indisvalid: boolean
@@ -25,6 +29,7 @@ describe('runtime access migrations', () => {
       }
     >()
     clientQuery.mockImplementation(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('/* pr1-earlier-head-guard */')) return { rows: [], rowCount: 0 }
       if (sql.includes('FROM pg_class index_rel')) {
         const state = indexStates.get(String(values?.[0]))
         return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
@@ -33,10 +38,11 @@ describe('runtime access migrations', () => {
         const entry = PR1_ONLINE_INDEX_PLAN.find(candidate => candidate.createSql === sql)
         if (entry) {
           indexStates.set(entry.name, {
+            schema_name: 'public',
             table_name: entry.table,
             indisunique: Boolean(entry.unique),
             indisvalid: true,
-            definition: entry.createSql,
+            definition: expectedIndexDefinition(entry, 'public'),
           })
         }
       }

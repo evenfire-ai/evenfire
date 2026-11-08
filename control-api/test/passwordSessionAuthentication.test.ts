@@ -56,12 +56,18 @@ describe('password session issuance serialization', () => {
     releasePasswordChange()
 
     await expect(login).resolves.toBeNull()
-    expect(String(mocks.transactionQuery.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    const credentialLock = String(mocks.transactionQuery.mock.calls[0]?.[0])
+    expect(credentialLock).toContain('lifecycle_state, lifecycle_version')
+    expect(credentialLock).toContain('FOR NO KEY UPDATE')
+    expect(credentialLock).not.toMatch(/\bFOR UPDATE\b/)
     expect(mocks.issueExternalUserSession).not.toHaveBeenCalled()
   })
 
   it('issues in the locked transaction while the verified credential is current', async () => {
-    mocks.transactionQuery.mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
+    mocks.transactionQuery.mockResolvedValueOnce({
+      rows: [{ id: 'user-1', lifecycle_state: 'active', lifecycle_version: 5 }],
+      rowCount: 1,
+    })
 
     await expect(
       authenticatePasswordAndIssueSession({
@@ -71,9 +77,15 @@ describe('password session issuance serialization', () => {
       })
     ).resolves.toMatchObject({ issued: { token: 'synthetic-v2-token', contract: 'v2' } })
 
+    // The issuer reuses the credential lock's row instead of locking the user again.
     expect(mocks.issueExternalUserSession).toHaveBeenCalledWith(
       expect.objectContaining({ userId: 'user-1', authenticationMethods: ['pwd'] }),
-      { db: { query: mocks.transactionQuery } }
+      expect.objectContaining({
+        db: { query: mocks.transactionQuery },
+        lockedUser: { lifecycleState: 'active', lifecycleVersion: 5 },
+      })
     )
+    expect(mocks.transactionQuery).toHaveBeenCalledTimes(1)
+    expect(String(mocks.transactionQuery.mock.calls[0]?.[0])).toContain('FOR NO KEY UPDATE')
   })
 })

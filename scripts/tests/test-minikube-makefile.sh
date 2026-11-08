@@ -33,6 +33,22 @@ assert_contains() {
   fi
 }
 
+assert_electron_materialized_before_lock() {
+  local target="$1"
+  local out before_lock
+  out="$(make -n "$target" 2>&1 || true)"
+  before_lock="${out%%with-t2-mutation-lock.sh*}"
+  if [[ "$out" == *"with-t2-mutation-lock.sh"* && "$before_lock" == *"npm --prefix desktop-app run verify:electron"* ]]; then
+    echo "PASS: make -n $target materializes Electron before the mutation lock"
+  else
+    echo "FAIL: make -n $target does not materialize Electron before the mutation lock"
+    echo "---"
+    echo "$out"
+    echo "---"
+    FAIL=1
+  fi
+}
+
 assert_file_contains() {
   local path="$1" needle="$2"
   if grep -Fq -- "$needle" "$REPO_ROOT/$path"; then
@@ -303,6 +319,11 @@ assert_succeeds_dry minikube-sync-codex-subscription-url
 assert_contains minikube-sync-codex-subscription-url "scripts/minikube/sync-codex-subscription-control-ui-url.sh"
 assert_contains minikube-verify-networkpolicies "verify-networkpolicies.sh --overlay minikube"
 assert_contains minikube-sync-auth-key-if-present "rpc-proxy-secrets"
+assert_electron_materialized_before_lock minikube-run-image-capabilities
+assert_electron_materialized_before_lock minikube-run-document-upload
+assert_electron_materialized_before_lock minikube-run-attachment-gfs-save
+assert_electron_materialized_before_lock minikube-prepare-codex-approved-tools
+assert_electron_materialized_before_lock minikube-run-codex-approved-tools
 assert_file_contains Makefile "T2_MUTATION_LOCK_WRAPPED"
 # Literal Make syntax, not shell expansion.
 # shellcheck disable=SC2016

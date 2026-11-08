@@ -14,7 +14,6 @@ function addExternalClientIdentity(headers: Record<string, string>): void {
 export class ControlApiError extends Error {
   status: number
   body: unknown
-  responseHeaders: Record<string, string>
   headers: Record<string, string>
   constructor(
     message: string,
@@ -26,7 +25,6 @@ export class ControlApiError extends Error {
     this.name = 'ControlApiError'
     this.status = status
     this.body = body
-    this.responseHeaders = responseHeaders
     this.headers = responseHeaders
   }
 
@@ -42,6 +40,28 @@ export class ControlApiError extends Error {
     }
     return null
   }
+}
+
+/**
+ * control-api sends the public `401 {error:{code:'invalid_session'}}` envelope from
+ * `/external/users/:id/me` and the `/external/auth/*` session routes; `/external/auth/verify`
+ * is the exception and answers a bare 401. Every route behind
+ * its `requireValidExternalSessionToken` (`/external/users/*` except `/me`,
+ * `/external/teams/*`, `/external/members/*` and the other session-plane routes) answers
+ * an ended session with a bare 401, the same body its service-credential guard sends when
+ * it refuses this edge's credential; the two cannot be told apart.
+ */
+export function isControlApiInvalidSession(error: unknown): error is ControlApiError {
+  if (!(error instanceof ControlApiError) || error.status !== 401) return false
+  const body = error.body
+  if (body === null || typeof body !== 'object' || !('error' in body)) return false
+  const envelope = body.error
+  return (
+    typeof envelope === 'object' &&
+    envelope !== null &&
+    'code' in envelope &&
+    envelope.code === 'invalid_session'
+  )
 }
 
 export type ControlApiTransportOperation = 'read' | 'mutation'
@@ -67,9 +87,8 @@ export class ControlApiUnexpectedResponseError extends Error {
 /**
  * A caller-influenced control-api path would have selected a route other than
  * the one the edge intended. It is a client error, not an upstream failure:
- * extend ControlApiError so the existing public invalid-request mapping
- * (sanitizeControlApiPublicError and the app's 4xx handler) handles it without
- * a new status scheme.
+ * extend ControlApiError so the app's existing 4xx handler maps it to a public
+ * invalid-request error without a new status scheme.
  */
 export class ControlApiPathError extends ControlApiError {
   constructor() {
@@ -126,36 +145,25 @@ export function assertControlApiRawQueryAllowed(rawQueryString: string): void {
   if (RAW_QUERY_CONTROL_CHARACTER.test(rawQueryString)) throw new ControlApiPathError()
 }
 
-const SAFE_RATE_LIMIT_RESPONSE_HEADERS = [
+const FORWARDABLE_RESPONSE_HEADERS = [
   'retry-after',
+  'ratelimit',
+  'ratelimit-policy',
   'x-ratelimit-limit',
   'x-ratelimit-remaining',
   'x-ratelimit-reset',
+  'x-request-id',
 ] as const
 
-function safeForwardableResponseHeaders(headers: Headers, status: number): Record<string, string> {
+function forwardableResponseHeaders(headers: Headers, status: number): Record<string, string> {
   const result: Record<string, string> = {}
-  for (const name of SAFE_RATE_LIMIT_RESPONSE_HEADERS) {
-    const raw = headers.get(name)
-    if (!raw || !/^\d{1,10}$/.test(raw)) continue
-    const value = Number(raw)
-    if (!Number.isSafeInteger(value) || value < 0) continue
-    if (name === 'retry-after' && (value < 1 || value > 86_400)) continue
-    result[name] = String(value)
+  for (const name of FORWARDABLE_RESPONSE_HEADERS) {
+    const value = headers.get(name)
+    if (value) result[name] = value
   }
-  const requestId = headers.get('x-request-id')
-  if (requestId && /^[A-Za-z0-9_-]{1,128}$/.test(requestId)) {
-    result['x-request-id'] = requestId
-  }
-  if (status === 413) {
-    const rawUploadLength = headers.get('upload-length')
-    if (rawUploadLength && /^\d{1,16}$/.test(rawUploadLength)) {
-      const uploadLength = Number(rawUploadLength)
-      if (Number.isSafeInteger(uploadLength) && uploadLength >= 0) {
-        result['upload-length'] = String(uploadLength)
-      }
-    }
-  }
+  // Caching guidance is an outage contract, not free-form metadata: control-api
+  // sends `no-store` on a session-backend 503 so no intermediary caches a
+  // transient authority failure. Only that literal value is relayed.
   if (status === 503 && headers.get('cache-control')?.trim().toLowerCase() === 'no-store') {
     result['cache-control'] = 'no-store'
   }
@@ -263,7 +271,7 @@ export async function controlApiRequestWithStatus<T>(
       `Control API ${method} ${path} returned non-JSON body (status=${response.status})`,
       502,
       { error: 'Upstream returned non-JSON body', status: response.status },
-      safeForwardableResponseHeaders(response.headers, 502)
+      forwardableResponseHeaders(response.headers, 502)
     )
   }
 
@@ -276,7 +284,7 @@ export async function controlApiRequestWithStatus<T>(
       `Control API ${method} ${path} failed (${response.status}): ${errorMessage}`,
       response.status,
       parsed,
-      safeForwardableResponseHeaders(response.headers, response.status)
+      forwardableResponseHeaders(response.headers, response.status)
     )
   }
 
@@ -333,7 +341,7 @@ export async function controlApiBinaryRequestWithStatus(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
       parsed,
-      safeForwardableResponseHeaders(response.headers, response.status)
+      forwardableResponseHeaders(response.headers, response.status)
     )
   }
 
@@ -401,7 +409,7 @@ export async function controlApiStreamRequest(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
       parsed,
-      safeForwardableResponseHeaders(response.headers, response.status)
+      forwardableResponseHeaders(response.headers, response.status)
     )
   }
   return response

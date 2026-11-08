@@ -1,8 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
-import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
-import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
-import { validateExternalSessionAuthorityContext } from '../auth/userSessionService.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
 import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 import {
@@ -22,7 +18,6 @@ import {
   insertInvitationForTeams,
   invitationForTeamsResponse,
   invitationResponse,
-  invitationUserIsRetired,
   loadInvitationTeams,
   normalizeInvitationPurpose,
   normalizeInvitationTeamAssignments,
@@ -155,7 +150,12 @@ async function applyInvitationMemberships(
   return teams
 }
 
-async function acceptPendingMembershipInvitation(
+/**
+ * The single-use transition of a pending invitation. Its predicates are the
+ * last guard against consuming a revoked, expired or password-reset row, so
+ * they hold even when a caller skipped its own refusals.
+ */
+export async function acceptPendingMembershipInvitation(
   db: Pick<DbClient, 'query'>,
   invitation: InvitationRow,
   userId: string
@@ -430,43 +430,6 @@ export async function addMemberToTeam(
   })
 }
 
-async function recordInvitationDeliveryCommand(
-  db: Pick<DbClient, 'query'>,
-  invitationId: string,
-  authorizedBy: string,
-  deliveryKind: 'create' | 'resend'
-): Promise<string> {
-  const result = await db.query(
-    `INSERT INTO invitation_delivery_commands(invitation_id, authorized_by, delivery_kind)
-     VALUES($1, $2, $3)
-     RETURNING id`,
-    [invitationId, authorizedBy.trim(), deliveryKind]
-  )
-  const commandId = String((result.rows[0] as { id?: string } | undefined)?.id || '')
-  if (!commandId) throw new Error('Failed to persist invitation delivery command')
-  return commandId
-}
-
-async function finishInvitationDeliveryCommand(
-  db: Pick<DbClient, 'query'>,
-  commandId: string,
-  status: 'delivered' | 'failed' | 'cancelled',
-  failureCode?: string
-): Promise<void> {
-  const result = await db.query(
-    `UPDATE invitation_delivery_commands
-        SET status = $2,
-            completed_at = NOW(),
-            failure_code = $3
-      WHERE id = $1
-        AND status = 'authorized'`,
-    [commandId, status, failureCode || null]
-  )
-  if ((result.rowCount ?? 0) === 0) {
-    throw new Error('Invitation delivery command is no longer authorized')
-  }
-}
-
 export function externalManagedInvitationResponse(
   invitation: Record<string, unknown>
 ): Record<string, unknown> {
@@ -503,87 +466,6 @@ async function deliverAndActivateInvitation(
     },
     inserted.teams
   )
-}
-
-async function deliverAndActivateManagedInvitation(
-  inserted: InvitationWithTeams,
-  commandId: string,
-  managerUserId: string,
-  authority?: ExternalSessionAuthorityContext
-) {
-  try {
-    await registerAndSendInvitation(
-      inserted.invitation.email,
-      inserted.invitation.token,
-      inserted.teams.length > 0
-        ? inserted.teams.map(team => team.team_name).join(', ')
-        : inserted.invitation.team_name,
-      inserted.invitation.created_at.toISOString(),
-      inserted.invitation.expires_at.toISOString(),
-      {
-        purpose: 'member_invitation',
-        teamNames: inserted.teams.map(team => team.team_name),
-      }
-    )
-  } catch (error) {
-    await withTransaction(async db => {
-      await finishInvitationDeliveryCommand(db, commandId, 'failed', 'delivery_failed')
-      await db.query(
-        `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'draft'`,
-        [inserted.invitation.id]
-      )
-    }).catch(() => undefined)
-    throw error
-  }
-
-  return withTransaction(async db => {
-    const sourceAuthorityValid = await hasValidManagedMutationAuthority(
-      db,
-      managerUserId,
-      authority
-    )
-    const locked = await db.query(
-      `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose,
-              i.created_at, i.expires_at, i.accepted_at, i.accepted_user_id,
-              t.name AS team_name
-         FROM invitation_delivery_commands c
-         JOIN invitations i ON i.id = c.invitation_id
-    LEFT JOIN teams t ON t.id = i.team_id
-        WHERE c.id = $1
-          AND c.invitation_id = $2
-          AND c.authorized_by = $3
-          AND c.delivery_kind = 'create'
-          AND c.status = 'authorized'
-          AND i.status = 'draft'
-        LIMIT 1
-        FOR UPDATE OF c, i`,
-      [commandId, inserted.invitation.id, managerUserId.trim()]
-    )
-    const invitation = (locked.rows[0] as InvitationRow | undefined) || null
-    if (!invitation) return { error: 'not_found' as const }
-    if (!sourceAuthorityValid) {
-      await finishInvitationDeliveryCommand(db, commandId, 'cancelled', 'authority_changed')
-      await db.query(
-        `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'draft'`,
-        [invitation.id]
-      )
-      return { error: 'forbidden' as const }
-    }
-    const teams = await loadInvitationTeams(db, invitation.id, invitation)
-    if (!(await managerCanControlAllInvitationTeams(db, managerUserId, teams, true))) {
-      await finishInvitationDeliveryCommand(db, commandId, 'cancelled', 'authority_changed')
-      await db.query(
-        `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'draft'`,
-        [invitation.id]
-      )
-      return { error: 'forbidden' as const }
-    }
-
-    const pending = await activateDraftInvitation(db, invitation.id)
-    if (!pending) throw new Error('Failed to activate authorized invitation')
-    await finishInvitationDeliveryCommand(db, commandId, 'delivered')
-    return invitationForTeamsResponse({ ...pending, team_name: invitation.team_name }, teams)
-  })
 }
 
 async function createInvitationForTeamsRecord(
@@ -913,86 +795,76 @@ export async function getInvitationByToken(token: string) {
   return invitationResponse(invitation, user, teams)
 }
 
-export async function acceptInvitation(
-  userId: string,
-  email: string,
-  token: string,
-  invitationId: string
-) {
-  return withTransaction(async db => {
-    const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId, {
-      lock: true,
-    })
-    if (!invitation) {
-      return { error: 'not_found' as const }
-    }
-    if (invitation.email.toLowerCase() !== email.toLowerCase()) {
-      return { error: 'forbidden' as const }
-    }
-    if (invitation.purpose === 'password_reset') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'revoked' || invitation.status === 'draft') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
-      return { error: 'expired' as const }
-    }
+type InvitationAcceptanceLookup =
+  | { by: 'token_or_id'; token: string; invitationId: string }
+  | { by: 'id'; invitationId: string }
 
-    const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
-    if (user.id !== userId) {
-      return { error: 'forbidden' as const }
-    }
+type InvitationAcceptanceRefusal = 'not_found' | 'forbidden' | 'not_pending' | 'expired'
 
-    const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
-    if (acceptance && 'error' in acceptance) return acceptance
-    const replay = acceptance?.replay === true
-
-    const refreshed = await getInvitationRecordByToken(db, invitation.token)
-    if (!refreshed) {
-      return { error: 'not_found' as const }
-    }
-    const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
-    const payload = invitationResponse(refreshed, user, teams)
-
-    return {
-      data: {
-        accepted: true as const,
-        ...payload,
-        ...(replay ? { replay: true as const } : {}),
-      },
-    }
-  })
+function readInvitationForAcceptance(
+  db: Pick<DbClient, 'query'>,
+  lookup: InvitationAcceptanceLookup,
+  lock: boolean
+): Promise<InvitationRow | null> {
+  return lookup.by === 'id'
+    ? getInvitationRecordById(db, lookup.invitationId, { lock })
+    : getInvitationRecordByTokenOrId(db, lookup.token, lookup.invitationId, { lock })
 }
 
-export async function acceptInvitationForEmailInTransaction(
+function invitationAcceptanceRefusal(
+  invitation: InvitationRow,
+  email: string
+): InvitationAcceptanceRefusal | null {
+  if (invitation.email.toLowerCase() !== email.toLowerCase()) return 'forbidden'
+  if (invitation.purpose === 'password_reset') return 'not_pending'
+  if (invitation.status === 'revoked' || invitation.status === 'draft') return 'not_pending'
+  if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
+    return 'expired'
+  }
+  return null
+}
+
+/**
+ * Accepts an invitation for `email` inside the caller's transaction.
+ *
+ * Lock order: the user row, then the invitation, then that user's
+ * team_members. Every transaction that writes an invitation and a user of the
+ * same person takes the user first (user deletion with its ON DELETE SET NULL
+ * on invitations.accepted_user_id, Google login, password reset, first
+ * password setup, managed resend and revoke), so acceptance must not hold the
+ * invitation row while it waits for the user. The unlocked first read only
+ * spares the user insert on an obviously refused call: every refusal is
+ * decided again on the locked invitation row, and the lifecycle decision, the
+ * response and session issuance use the locked user row.
+ */
+async function acceptInvitationInTransaction(
   db: Pick<DbClient, 'query'>,
   email: string,
-  token: string,
-  invitationId = ''
+  lookup: InvitationAcceptanceLookup
 ) {
-  const invitation = await getInvitationRecordByTokenOrId(db, token, invitationId, {
-    lock: true,
-  })
-  if (!invitation) {
-    return { error: 'not_found' as const }
-  }
-  if (invitation.email.toLowerCase() !== email.toLowerCase()) {
-    return { error: 'forbidden' as const }
-  }
-  if (invitation.purpose === 'password_reset') {
-    return { error: 'not_pending' as const }
-  }
-  if (invitation.status === 'revoked' || invitation.status === 'draft') {
-    return { error: 'not_pending' as const }
-  }
-  if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
-    return { error: 'expired' as const }
-  }
+  const candidate = await readInvitationForAcceptance(db, lookup, false)
+  if (!candidate) return { error: 'not_found' as const }
+  const candidateRefusal = invitationAcceptanceRefusal(candidate, email)
+  if (candidateRefusal) return { error: candidateRefusal }
 
-  const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-  if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
+  // ensureInvitationUser locks the user before the profile insert (users ->
+  // profiles, the order Google login uses). This by-id read re-locks the row
+  // this transaction already holds and stays the authoritative lifecycle read.
+  const ensured = await ensureInvitationUser(db, candidate.email, candidate.invitee_name)
+  const locked = await db.query(
+    `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version FROM users WHERE id = $1 FOR NO KEY UPDATE`,
+    [ensured.id]
+  )
+  const user = locked.rows[0] as InvitationUserRow | undefined
+  if (!user) return { error: 'not_found' as const }
+  // A retirement that committed while this transaction waited on the lock wins
+  // before any invitation or membership write.
+  if (user.lifecycle_state !== 'active') return { error: 'user_retired' as const }
+
+  const invitation = await readInvitationForAcceptance(db, lookup, true)
+  if (!invitation) return { error: 'not_found' as const }
+  const refusal = invitationAcceptanceRefusal(invitation, email)
+  if (refusal) return { error: refusal }
 
   const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
   if (acceptance && 'error' in acceptance) return acceptance
@@ -1012,7 +884,21 @@ export async function acceptInvitationForEmailInTransaction(
       userId: user.id,
       ...(replay ? { replay: true as const } : {}),
     },
+    // Session issuance reuses this locked row instead of locking it again.
+    lockedUser: {
+      lifecycleState: user.lifecycle_state,
+      lifecycleVersion: user.lifecycle_version,
+    },
   }
+}
+
+export async function acceptInvitationForEmailInTransaction(
+  db: Pick<DbClient, 'query'>,
+  email: string,
+  token: string,
+  invitationId = ''
+) {
+  return acceptInvitationInTransaction(db, email, { by: 'token_or_id', token, invitationId })
 }
 
 export async function acceptInvitationForEmail(email: string, token: string, invitationId = '') {
@@ -1022,121 +908,22 @@ export async function acceptInvitationForEmail(email: string, token: string, inv
 }
 
 export async function acceptInvitationById(email: string, invitationId: string) {
-  return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, invitationId, { lock: true })
-    if (!invitation) {
-      return { error: 'not_found' as const }
-    }
-    if (invitation.email.toLowerCase() !== email.toLowerCase()) {
-      return { error: 'forbidden' as const }
-    }
-    if (invitation.purpose === 'password_reset') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'revoked' || invitation.status === 'draft') {
-      return { error: 'not_pending' as const }
-    }
-    if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
-      return { error: 'expired' as const }
-    }
-
-    const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
-
-    const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
-    if (acceptance && 'error' in acceptance) return acceptance
-    const replay = acceptance?.replay === true
-
-    const refreshed = await getInvitationRecordByToken(db, invitation.token)
-    if (!refreshed) {
-      return { error: 'not_found' as const }
-    }
-    const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
-    const payload = invitationResponse(refreshed, user, teams)
-
-    return {
-      data: {
-        accepted: true as const,
-        ...payload,
-        userId: user.id,
-        ...(replay ? { replay: true as const } : {}),
-      },
-    }
-  })
+  return withTransaction(db => acceptInvitationInTransaction(db, email, { by: 'id', invitationId }))
 }
 
 export const DIRECTORY_SEARCH_MAX_QUERY_LENGTH = 100
-export const DIRECTORY_SEARCH_PAGE_SIZE = 25
-
-export class DirectorySearchCursorError extends Error {
-  constructor() {
-    super('invalid directory search cursor')
-    this.name = 'DirectorySearchCursorError'
-  }
-}
 
 function escapeLikeLiteral(value: string): string {
   return value.replace(/[\\%_]/g, character => `\\${character}`)
 }
 
-function directorySearchCursorSignature(value: string): string {
-  return createHmac('sha256', config.sessionJwtPrivateKey).update(value).digest('base64url')
-}
-
-function encodeDirectorySearchCursor(input: {
-  teamId: string
-  query: string
-  sortKey: string
-  userId: string
-}): string {
-  const body = Buffer.from(JSON.stringify(input)).toString('base64url')
-  return `ds1.${body}.${directorySearchCursorSignature(body)}`
-}
-
-function decodeDirectorySearchCursor(
-  value: string,
-  teamId: string,
-  query: string
-): { sortKey: string; userId: string } {
-  const [prefix, body, signature, extra] = value.split('.')
-  if (prefix !== 'ds1' || !body || !signature || extra) throw new DirectorySearchCursorError()
-  const expected = directorySearchCursorSignature(body)
-  const suppliedBytes = Buffer.from(signature)
-  const expectedBytes = Buffer.from(expected)
-  if (
-    suppliedBytes.length !== expectedBytes.length ||
-    !timingSafeEqual(suppliedBytes, expectedBytes)
-  ) {
-    throw new DirectorySearchCursorError()
-  }
-  try {
-    const parsed = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Record<
-      string,
-      unknown
-    >
-    const sortKey = typeof parsed.sortKey === 'string' ? parsed.sortKey : ''
-    const userId = typeof parsed.userId === 'string' ? parsed.userId : ''
-    if (parsed.teamId !== teamId || parsed.query !== query || !sortKey || !userId) {
-      throw new Error('cursor mismatch')
-    }
-    return { sortKey, userId }
-  } catch {
-    throw new DirectorySearchCursorError()
-  }
-}
-
-export async function searchDirectory(teamId: string, q: string, cursor?: string) {
+export async function searchDirectory(teamId: string, q: string) {
   const query = q.trim()
-  if (!query) return { items: [], nextCursor: null }
-  if (query.length > DIRECTORY_SEARCH_MAX_QUERY_LENGTH) {
-    throw new DirectorySearchCursorError()
-  }
-  const after = cursor ? decodeDirectorySearchCursor(cursor, teamId, query) : null
+  if (!query) return { items: [] }
   const pattern = `%${escapeLikeLiteral(query)}%`
 
   const result = await pool.query(
-    `SELECT u.id, u.email, u.name, p.display_name,
-            LOWER(COALESCE(NULLIF(p.display_name, ''), NULLIF(u.name, ''), u.email)) AS sort_key
+    `SELECT u.id, u.email, u.name, p.display_name
        FROM team_members tm
        JOIN users u ON u.id = tm.user_id
   LEFT JOIN profiles p ON p.user_id = u.id
@@ -1148,43 +935,12 @@ export async function searchDirectory(teamId: string, q: string, cursor?: string
           OR COALESCE(u.name, '') ILIKE $2 ESCAPE '\\'
           OR COALESCE(p.display_name, '') ILIKE $2 ESCAPE '\\'
         )
-        AND (
-          $3::text IS NULL
-          OR (
-            LOWER(COALESCE(NULLIF(p.display_name, ''), NULLIF(u.name, ''), u.email)),
-            u.id
-          ) > ($3, $4::uuid)
-        )
-   ORDER BY sort_key ASC, u.id ASC
-      LIMIT $5`,
-    [teamId, pattern, after?.sortKey ?? null, after?.userId ?? null, DIRECTORY_SEARCH_PAGE_SIZE + 1]
+   ORDER BY LOWER(COALESCE(NULLIF(p.display_name, ''), NULLIF(u.name, ''), u.email)) ASC,
+            u.id ASC
+      LIMIT 25`,
+    [teamId, pattern]
   )
-  const rows = result.rows as Array<{
-    id: string
-    email: string
-    name: string | null
-    display_name: string | null
-    sort_key: string
-  }>
-  const page = rows.slice(0, DIRECTORY_SEARCH_PAGE_SIZE)
-  const last = page[page.length - 1]
-  return {
-    items: page.map(row => ({
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      displayName: row.display_name,
-    })),
-    nextCursor:
-      rows.length > DIRECTORY_SEARCH_PAGE_SIZE && last
-        ? encodeDirectorySearchCursor({
-            teamId,
-            query,
-            sortKey: last.sort_key,
-            userId: last.id,
-          })
-        : null,
-  }
+  return { items: result.rows }
 }
 
 export async function listManageableTeamsForUser(userId: string) {
@@ -1354,6 +1110,10 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
   }))
 }
 
+async function lockManagerUser(db: Pick<DbClient, 'query'>, managerUserId: string): Promise<void> {
+  await db.query(`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, [managerUserId.trim()])
+}
+
 async function getManagerRolesForTeams(
   db: Pick<DbClient, 'query'>,
   managerUserId: string,
@@ -1361,6 +1121,13 @@ async function getManagerRolesForTeams(
   lock = false
 ): Promise<Map<string, TeamRole>> {
   if (teamIds.length === 0) return new Map()
+  if (lock) {
+    // Lock order: the manager's user row before its team_members rows, as the
+    // team-session exchange does. A single FOR UPDATE over the join would lock
+    // each team_members row before the user row. A caller that already locked
+    // the manager re-issues a no-op lock here.
+    await lockManagerUser(db, managerUserId)
+  }
   const result = await db.query(
     `SELECT tm.team_id, tm.role
        FROM team_members tm
@@ -1370,22 +1137,12 @@ async function getManagerRolesForTeams(
         AND tm.status = 'active'
         AND u.lifecycle_state = 'active'
       ORDER BY tm.team_id
-      ${lock ? 'FOR UPDATE' : ''}`,
+      ${lock ? 'FOR UPDATE OF tm' : ''}`,
     [managerUserId.trim(), teamIds]
   )
   return new Map(
     (result.rows as Array<{ team_id: string; role: TeamRole }>).map(row => [row.team_id, row.role])
   )
-}
-
-async function hasValidManagedMutationAuthority(
-  db: DbClient,
-  managerUserId: string,
-  authority?: ExternalSessionAuthorityContext
-): Promise<boolean> {
-  if (!authority) return true
-  const session = await validateExternalSessionAuthorityContext(authority, { db })
-  return session.status === 'valid' && session.identity.userId === managerUserId.trim()
 }
 
 function canManagerInviteAssignment(
@@ -1477,8 +1234,7 @@ export async function createManagedInvitationForUser(
   managerUserId: string,
   email: string,
   teamAssignments: readonly InvitationTeamAssignment[],
-  inviteeName = '',
-  authority?: ExternalSessionAuthorityContext
+  inviteeName = ''
 ) {
   const normalizedEmail = email.trim().toLowerCase()
   const normalizedInviteeName = inviteeName.trim()
@@ -1488,10 +1244,7 @@ export async function createManagedInvitationForUser(
   }
 
   const fallbackName = normalizedEmail.split('@')[0] || normalizedEmail
-  const authorized = await withTransaction(async db => {
-    if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
-      return { error: 'forbidden' as const }
-    }
+  const inserted = await withTransaction(async db => {
     const managerRoles = await getManagerRolesForTeams(
       db,
       managerUserId.trim(),
@@ -1504,7 +1257,7 @@ export async function createManagedInvitationForUser(
       }
     }
 
-    const inserted = await insertInvitationForTeams(db, {
+    return insertInvitationForTeams(db, {
       inviteeName: normalizedInviteeName || fallbackName,
       email: normalizedEmail,
       purpose: 'member_invitation',
@@ -1512,22 +1265,9 @@ export async function createManagedInvitationForUser(
       fallbackRole: 'member',
       status: 'draft',
     })
-    const commandId = await recordInvitationDeliveryCommand(
-      db,
-      inserted.invitation.id,
-      managerUserId,
-      'create'
-    )
-    return { inserted, commandId }
   })
-  if ('error' in authorized && authorized.error) return { error: authorized.error }
-  const delivered = await deliverAndActivateManagedInvitation(
-    authorized.inserted,
-    authorized.commandId,
-    managerUserId,
-    authority
-  )
-  if ('error' in delivered) return { error: delivered.error }
+  if ('error' in inserted) return { error: inserted.error }
+  const delivered = await deliverAndActivateInvitation(inserted, 'member_invitation')
   return {
     invitation: externalManagedInvitationResponse(delivered),
   }
@@ -1537,26 +1277,34 @@ export async function updateManagedMemberRoleForUser(
   managerUserId: string,
   targetUserId: string,
   teamId: string,
-  role: TeamRole,
-  authority?: ExternalSessionAuthorityContext
+  role: TeamRole
 ) {
   const normalizedRole = normalizeTeamRoleInput(role)
   if (!normalizedRole) {
     return { error: 'invalid_role' as const }
   }
+  // The lock map is keyed by the database's lower-case UUID text, so every id
+  // is normalised once and the same value is used for lookups and events.
+  const managerId = managerUserId.trim().toLowerCase()
+  const targetId = targetUserId.trim().toLowerCase()
+  const normalizedTeamId = teamId.trim().toLowerCase()
   return withTransaction(async db => {
-    if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
-      return { error: 'forbidden' as const }
-    }
+    // A retired user keeps team_members.status = 'active'; as in dev's
+    // findMemberRole, only users whose lifecycle is active hold a role here.
+    // Global lock order for team_members rows: (team_id, user_id), shared
+    // with deleteManagedMemberForUser and the deleteManagedUserForUser
+    // authorization; one team, so ORDER BY user_id follows it.
     const locked = await db.query(
-      `SELECT user_id::text AS user_id, role
-         FROM team_members
-        WHERE team_id = $1
-          AND user_id = ANY($2::uuid[])
-          AND status = 'active'
-        ORDER BY user_id
-        FOR UPDATE`,
-      [teamId.trim(), [managerUserId.trim(), targetUserId.trim()]]
+      `SELECT tm.user_id::text AS user_id, tm.role
+         FROM team_members tm
+         JOIN users u ON u.id = tm.user_id
+        WHERE tm.team_id = $1
+          AND tm.user_id = ANY($2::uuid[])
+          AND tm.status = 'active'
+          AND u.lifecycle_state = 'active'
+        ORDER BY tm.user_id
+        FOR UPDATE OF tm`,
+      [normalizedTeamId, [managerId, targetId]]
     )
     const memberships = new Map(
       (locked.rows as Array<{ user_id: string; role: TeamRole }>).map(row => [
@@ -1564,10 +1312,10 @@ export async function updateManagedMemberRoleForUser(
         row.role,
       ])
     )
-    if (!roleCanDeleteMembers(memberships.get(managerUserId.trim()))) {
+    if (!roleCanDeleteMembers(memberships.get(managerId))) {
       return { error: 'forbidden' as const }
     }
-    const previousRole = memberships.get(targetUserId.trim())
+    const previousRole = memberships.get(targetId)
     if (!previousRole) return { error: 'not_found' as const }
 
     const result = await db.query(
@@ -1578,28 +1326,28 @@ export async function updateManagedMemberRoleForUser(
           AND user_id = $2
           AND status = 'active'
       RETURNING team_id, user_id, role, status`,
-      [teamId.trim(), targetUserId.trim(), normalizedRole]
+      [normalizedTeamId, targetId, normalizedRole]
     )
     const membership = result.rows[0]
     if (!membership) return { error: 'not_found' as const }
     if (previousRole !== normalizedRole) {
       await appendControlApiPermissionEventsInTransaction(db, {
-        operatorSub: managerUserId.trim(),
+        operatorSub: managerId,
         changes: [
           {
             action: 'revoke',
             resourceClass: 'team_membership',
-            resourceRef: `team_membership:${teamId}:role:${previousRole}`,
-            subject: { kind: 'user', id: targetUserId.trim() },
-            teamId: teamId.trim(),
+            resourceRef: `team_membership:${normalizedTeamId}:role:${previousRole}`,
+            subject: { kind: 'user', id: targetId },
+            teamId: normalizedTeamId,
             status: 'role_replaced',
           },
           {
             action: 'grant',
             resourceClass: 'team_membership',
-            resourceRef: `team_membership:${teamId}:role:${normalizedRole}`,
-            subject: { kind: 'user', id: targetUserId.trim() },
-            teamId: teamId.trim(),
+            resourceRef: `team_membership:${normalizedTeamId}:role:${normalizedRole}`,
+            subject: { kind: 'user', id: targetId },
+            teamId: normalizedTeamId,
             status: 'role_assigned',
           },
         ],
@@ -1612,13 +1360,17 @@ export async function updateManagedMemberRoleForUser(
 export async function deleteManagedMemberForUser(
   managerUserId: string,
   targetUserId: string,
-  teamId: string,
-  authority?: ExternalSessionAuthorityContext
+  teamId: string
 ) {
+  // The lock map is keyed by the database's lower-case UUID text, so every id
+  // is normalised once and the same value is used for lookups and events.
+  const managerId = managerUserId.trim().toLowerCase()
+  const targetId = targetUserId.trim().toLowerCase()
+  const normalizedTeamId = teamId.trim().toLowerCase()
   return withTransaction(async db => {
-    if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
-      return { error: 'forbidden' as const }
-    }
+    // Global lock order for team_members rows: (team_id, user_id), shared
+    // with updateManagedMemberRoleForUser and the deleteManagedUserForUser
+    // authorization; one team, so ORDER BY user_id follows it.
     const locked = await db.query(
       `SELECT user_id::text AS user_id, role
          FROM team_members
@@ -1627,7 +1379,7 @@ export async function deleteManagedMemberForUser(
           AND status = 'active'
         ORDER BY user_id
         FOR UPDATE`,
-      [teamId.trim(), [managerUserId.trim(), targetUserId.trim()]]
+      [normalizedTeamId, [managerId, targetId]]
     )
     const memberships = new Map(
       (locked.rows as Array<{ user_id: string; role: TeamRole }>).map(row => [
@@ -1635,10 +1387,10 @@ export async function deleteManagedMemberForUser(
         row.role,
       ])
     )
-    if (!roleCanDeleteMembers(memberships.get(managerUserId.trim()))) {
+    if (!roleCanDeleteMembers(memberships.get(managerId))) {
       return { error: 'forbidden' as const }
     }
-    const targetRole = memberships.get(targetUserId.trim())
+    const targetRole = memberships.get(targetId)
     if (!targetRole) return { error: 'not_found' as const }
 
     const result = await db.query(
@@ -1649,19 +1401,19 @@ export async function deleteManagedMemberForUser(
           AND user_id = $2
           AND status = 'active'
       RETURNING team_id, user_id, role, status`,
-      [teamId.trim(), targetUserId.trim()]
+      [normalizedTeamId, targetId]
     )
     const deleted = result.rows[0]
     if (!deleted) return { error: 'not_found' as const }
     await appendControlApiPermissionEventsInTransaction(db, {
-      operatorSub: managerUserId.trim(),
+      operatorSub: managerId,
       changes: [
         {
           action: 'revoke',
           resourceClass: 'team_membership',
-          resourceRef: `team_membership:${teamId}:role:${targetRole}`,
-          subject: { kind: 'user', id: targetUserId.trim() },
-          teamId: teamId.trim(),
+          resourceRef: `team_membership:${normalizedTeamId}:role:${targetRole}`,
+          subject: { kind: 'user', id: targetId },
+          teamId: normalizedTeamId,
           status: 'membership_removed',
         },
       ],
@@ -1673,15 +1425,16 @@ export async function deleteManagedMemberForUser(
 export async function deleteManagedUserForUser(
   managerUserId: string,
   targetUserId: string,
-  retirement: { reason: string; idempotencyKey: string; requestId: string | null },
-  authority?: ExternalSessionAuthorityContext
+  retirement: { reason: string; idempotencyKey: string; requestId: string | null }
 ) {
   const normalizedManagerUserId = managerUserId.trim()
   const normalizedTargetUserId = targetUserId.trim()
   if (!normalizedManagerUserId || !normalizedTargetUserId) {
     return { error: 'not_found' as const }
   }
-  if (normalizedManagerUserId === normalizedTargetUserId) {
+  // UUIDs compare case-insensitively in the database, so an upper-case copy of
+  // the caller's own id is still the caller.
+  if (normalizedManagerUserId.toLowerCase() === normalizedTargetUserId.toLowerCase()) {
     return { error: 'invalid_target' as const }
   }
 
@@ -1695,7 +1448,7 @@ export async function deleteManagedUserForUser(
     return await withTransaction(async db => {
       // Reciprocal retirements must not each lock their own actor before the
       // other request's target. Lock the existing principal pair in the same
-      // database UUID order before revalidating authority or locking teams.
+      // database UUID order before locking teams.
       // Filter malformed ids before the UUID cast so the indexed lookup does
       // not change their existing later validation/error path.
       const principalIds = [...new Set([normalizedManagerUserId, normalizedTargetUserId])]
@@ -1709,9 +1462,6 @@ export async function deleteManagedUserForUser(
           FOR UPDATE`,
         [principalIds]
       )
-      if (!(await hasValidManagedMutationAuthority(db, normalizedManagerUserId, authority))) {
-        return { error: 'forbidden' as const }
-      }
       const outcome = await retireDesktopUser(
         { kind: 'platform_user', desktopUserId: normalizedManagerUserId },
         normalizedTargetUserId,
@@ -1721,24 +1471,42 @@ export async function deleteManagedUserForUser(
         {
           db,
           authorize: async retirementDb => {
-            const teamsResult = await retirementDb.query(
-              `SELECT team_id
-                 FROM team_members
-                WHERE user_id = $1
-                  AND status = 'active'
-                ORDER BY team_id
-                FOR UPDATE`,
-              [normalizedTargetUserId]
+            // Global lock order for team_members rows: (team_id, user_id).
+            // The member writers lock one team's rows ORDER BY user_id, so
+            // the manager's and the target's rows across every team of the
+            // target are locked in one statement in that same order. Two
+            // statements (target rows, then manager rows) can hold a target
+            // row while waiting for a manager row that a member writer holds
+            // while it waits for that target row: a deadlock. The lifecycle
+            // filter keeps the manager filter dev applied; retireDesktopUser
+            // has already refused a target whose lifecycle is not active.
+            // The ids are compared with the database's lower-case UUID text.
+            const managerId = normalizedManagerUserId.toLowerCase()
+            const targetId = normalizedTargetUserId.toLowerCase()
+            const locked = await retirementDb.query(
+              `SELECT tm.team_id::text AS team_id, tm.user_id::text AS user_id, tm.role
+                 FROM team_members tm
+                 JOIN users u ON u.id = tm.user_id
+                WHERE tm.status = 'active'
+                  AND u.lifecycle_state = 'active'
+                  AND tm.user_id = ANY($1::uuid[])
+                  AND tm.team_id IN (
+                    SELECT team_id
+                      FROM team_members
+                     WHERE user_id = $2
+                       AND status = 'active'
+                  )
+                ORDER BY tm.team_id, tm.user_id
+                FOR UPDATE OF tm`,
+              [[managerId, targetId], targetId]
             )
-            const teamIds = (teamsResult.rows as Array<{ team_id: string }>).map(row => row.team_id)
+            const rows = locked.rows as Array<{ team_id: string; user_id: string; role: TeamRole }>
+            const teamIds = rows.filter(row => row.user_id === targetId).map(row => row.team_id)
             if (teamIds.length === 0) {
               throw new ManagedRetirementAuthorizationError('not_found')
             }
-            const managerRoles = await getManagerRolesForTeams(
-              retirementDb,
-              normalizedManagerUserId,
-              teamIds,
-              true
+            const managerRoles = new Map(
+              rows.filter(row => row.user_id === managerId).map(row => [row.team_id, row.role])
             )
             if (!teamIds.every(teamId => roleCanDeleteMembers(managerRoles.get(teamId)))) {
               throw new ManagedRetirementAuthorizationError('forbidden_uncontrolled_teams')
@@ -1762,15 +1530,11 @@ export async function deleteManagedUserForUser(
   }
 }
 
-export async function resendManagedInvitationForUser(
-  managerUserId: string,
-  invitationId: string,
-  authority?: ExternalSessionAuthorityContext
-) {
+export async function resendManagedInvitationForUser(managerUserId: string, invitationId: string) {
   const authorized = await withTransaction(async db => {
-    if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
-      return { error: 'forbidden' as const }
-    }
+    // Lock order: users before invitations. The manager may be the invitee,
+    // and an acceptance holds that user while it waits for the invitation.
+    await lockManagerUser(db, managerUserId)
     const result = await db.query(
       `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
@@ -1792,48 +1556,29 @@ export async function resendManagedInvitationForUser(
       return { error: 'forbidden' as const }
     }
 
-    const commandId = await recordInvitationDeliveryCommand(
-      db,
-      invitation.id,
-      managerUserId,
-      'resend'
-    )
-    return { invitation, teams, commandId }
+    return { invitation, teams }
   })
   if ('error' in authorized) return authorized
-  const { invitation, teams, commandId } = authorized
+  const { invitation, teams } = authorized
 
-  try {
-    await registerAndSendInvitation(
-      invitation.email,
-      invitation.token,
-      teams.length > 0 ? teams.map(team => team.team_name).join(', ') : invitation.team_name,
-      new Date().toISOString(),
-      invitation.expires_at.toISOString(),
-      {
-        purpose: invitation.purpose,
-        teamNames: teams.map(team => team.team_name),
-      }
-    )
-  } catch (error) {
-    await withTransaction(db =>
-      finishInvitationDeliveryCommand(db, commandId, 'failed', 'delivery_failed')
-    ).catch(() => undefined)
-    throw error
-  }
-  await withTransaction(db => finishInvitationDeliveryCommand(db, commandId, 'delivered'))
+  await registerAndSendInvitation(
+    invitation.email,
+    invitation.token,
+    teams.length > 0 ? teams.map(team => team.team_name).join(', ') : invitation.team_name,
+    new Date().toISOString(),
+    invitation.expires_at.toISOString(),
+    {
+      purpose: invitation.purpose,
+      teamNames: teams.map(team => team.team_name),
+    }
+  )
   return { resent: true as const, id: invitation.id, email: invitation.email }
 }
 
-export async function revokeManagedInvitationForUser(
-  managerUserId: string,
-  invitationId: string,
-  authority?: ExternalSessionAuthorityContext
-) {
+export async function revokeManagedInvitationForUser(managerUserId: string, invitationId: string) {
   return withTransaction(async db => {
-    if (!(await hasValidManagedMutationAuthority(db, managerUserId, authority))) {
-      return { error: 'forbidden' as const }
-    }
+    // Lock order: users before invitations, as in resendManagedInvitationForUser.
+    await lockManagerUser(db, managerUserId)
     const result = await db.query(
       `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,

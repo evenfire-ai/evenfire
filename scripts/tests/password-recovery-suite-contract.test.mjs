@@ -394,3 +394,48 @@ for (const mode of ['local', 'configured']) {
     })
   }
 }
+
+
+test('hosted real-PostgreSQL job enforces the same public inventory as Minikube', () => {
+  const workflow = readFileSync(join(root, '.github/workflows/ci-public.yml'), 'utf8')
+  const job = workflow.split(/^  control-api-migration:\s*$/m)[1]?.split(/^  [a-zA-Z0-9_-]+:\s*$/m)[0]
+  assert.ok(job, 'control-api-migration job must exist')
+  const step = job.split(/^      - name: Run control-api real Postgres suites \(migration \+ GFS\)\s*$/m)[1]?.split(/^      - /m)[0]
+  assert.ok(step, 'real PostgreSQL step must exist')
+  const commands = step.split('\n').filter(line => !/^\s*#/.test(line)).join('\n')
+  const verify = commands.indexOf('node ../scripts/ci/password-recovery-suite-contract.mjs verify')
+  const privateSelection = commands.indexOf('node ../scripts/ci/password-recovery-suite-contract.mjs private all')
+  const run = commands.indexOf('npm test -- --run realPostgres')
+  const report = commands.indexOf('node ../scripts/ci/password-recovery-suite-contract.mjs report publicPostgres "$report"')
+  assert.ok(verify >= 0 && verify < privateSelection && privateSelection < run && run < report,
+    'CI must validate the inventory, exclude the declared private suites, run PostgreSQL, and verify the exact public report')
+  assert.match(commands, /"\$\{exclude_args\[@\]\}"/)
+  const pinBlock = commands.split('node ../scripts/ci/assert-pinned-vitest-suites.mjs "$report"')[1]
+  assert.ok(pinBlock, 'pinned security suites must still be checked')
+  const pins = pinBlock.match(/[A-Za-z0-9_.-]+realPostgres[A-Za-z0-9_.-]*\.test\.ts/g) || []
+  const publicNames = new Set(manifest.publicPostgres.map(path => path.split('/').pop()))
+  assert.ok(pins.length > 0, 'the pinned suite list must not be empty')
+  assert.equal(new Set(pins).size, pins.length, 'pinned suites must be unique')
+  assert.deepEqual(pins.filter(pin => !publicNames.has(pin)), [], 'every pinned suite must be in the public inventory')
+})
+
+test('hosted contract step runs its node test files through the zero-test-refusing runner', () => {
+  const workflow = readFileSync(join(root, '.github/workflows/ci-public.yml'), 'utf8')
+  const job = workflow.split(/^  control-api-migration:\s*$/m)[1]?.split(/^  [a-zA-Z0-9_-]+:\s*$/m)[0]
+  assert.ok(job, 'control-api-migration job must exist')
+  const step = job
+    .split(/^      - name: Validate recovery suite selection, certification input and T1 evidence contracts\s*$/m)[1]
+    ?.split(/^      - /m)[0]
+  assert.ok(step, 'contract validation step must exist')
+  const files = [
+    'scripts/tests/password-recovery-suite-contract.test.mjs',
+    'scripts/tests/certification-inputs.test.mjs',
+    'scripts/tests/t1-reporter-projection.test.mjs',
+  ]
+  for (const file of files) assert.ok(step.includes(file), `contract step must list ${file}`)
+  const run = step.split(/^\s+run: >-\s*$/m)[1]
+  assert.ok(run, 'contract step must use a folded run command')
+  const command = run.trim().split(/\s+/).join(' ')
+  assert.equal(command, ['node scripts/tests/run-node-test-files.mjs', ...files].join(' '))
+  assert.doesNotMatch(step, /node --test/)
+})

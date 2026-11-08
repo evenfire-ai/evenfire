@@ -223,6 +223,10 @@ require_t1_commands() {
     T1_NEXT_COMMAND='repair the reported local prerequisite, then re-run the standalone Real PostgreSQL lane'
     die_t1 "$REAL_PG_PREFLIGHT_ERROR_CODE" "$REAL_PG_PREFLIGHT_ERROR_MESSAGE"
   fi
+  if ! node "$SCRIPT_DIR/../ci/certification-inputs.mjs" check --root "$PROJECT_DIR" --scope t1; then
+    T1_NEXT_COMMAND='prepare the reported local inputs explicitly (pinned producers: docs/testing/minikube-t2-runbook.md "Pinned producer inputs"), then re-run the standalone Real PostgreSQL lane'
+    die_t1 LOCAL_DEPENDENCY_MISSING 'certification input preflight failed before T1'
+  fi
 }
 
 secret_field() {
@@ -565,6 +569,15 @@ PY
   fi
   read -r total_suites passed_suites failed_suites passed_tests failed_tests \
     pending_files pending_tests total_tests success expected_files reported_files <<< "$stats"
+  # Durable evidence: the structure and results of this reporter, without its
+  # free-text messages. Written before the verdict so a failing lane keeps it
+  # too; a lane whose evidence cannot be kept does not pass.
+  if [ -z "${T2_EVIDENCE_DIR:-}" ] || ! python3 "$SCRIPT_DIR/t1-reporter-projection.py" \
+    "$json_file" "$PROJECT_DIR/$package" "$package" "$lane" \
+    "$T2_EVIDENCE_DIR/logs/t1-$(printf '%s' "$package-$lane" | tr / _).results.json"; then
+    T1_NEXT_COMMAND='restore a writable evidence directory, then re-run T1'
+    die_t1 REAL_PG_REPORT_INCOMPLETE "T1 reporter evidence could not be persisted for $package ($lane)"
+  fi
   T1_EXPECTED_FILES=$((T1_EXPECTED_FILES + expected_files))
   T1_REPORTED_FILES=$((T1_REPORTED_FILES + reported_files))
   T1_TOTAL_TESTS=$((T1_TOTAL_TESTS + total_tests))

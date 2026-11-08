@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import express, { type NextFunction, type Request, type Response } from 'express'
+import express from 'express'
 import { DatabaseError } from 'pg'
 import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
@@ -8,13 +8,17 @@ import {
   requireExternalTeamParamMatch,
   requireValidExternalSessionToken,
 } from '../src/middleware/externalSessionAuth.js'
-import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 
 const session = vi.hoisted(() => ({ authenticateExternalUserSession: vi.fn() }))
 const db = vi.hoisted(() => ({ query: vi.fn() }))
 
 vi.mock('../src/services/auth/externalSessionAuthentication.js', () => session)
 vi.mock('../src/db.js', () => ({ pool: db }))
+
+// team_members.user_id and team_id are UUID columns, so the ids are UUIDs.
+const USER_ID = '1d2e3f4a-5b6c-4d7e-8f9a-0b1c2d3e4f5a'
+const TEAM_ID = '7e6d5c4b-3a29-4f18-8e7d-6c5b4a392817'
+const OTHER_TEAM_ID = 'c0ffee00-1234-4abc-9def-0123456789ab'
 
 /** A server-side error as pg raises it: a DatabaseError carrying a SQLSTATE. */
 function databaseError(sqlstate: string): DatabaseError {
@@ -23,15 +27,8 @@ function databaseError(sqlstate: string): DatabaseError {
   return error
 }
 
-function app(budget?: AccessExecutionBudget) {
+function app() {
   const value = express()
-  if (budget) {
-    value.use((req: Request, _res: Response, next: NextFunction) => {
-      ;(req as Request & { accessExecutionBudget?: AccessExecutionBudget }).accessExecutionBudget =
-        budget
-      next()
-    })
-  }
   value.get(
     '/teams/:teamId',
     requireValidExternalSessionToken,
@@ -50,9 +47,9 @@ describe('external team authorization', () => {
       status: 'authenticated',
       contract: 'v1',
       claims: {
-        userId: 'user-1',
+        userId: USER_ID,
         email: 'user@example.com',
-        teamId: 'team-1',
+        teamId: TEAM_ID,
         role: 'admin',
         exp: Math.floor(Date.now() / 1000) + 3600,
       },
@@ -61,18 +58,18 @@ describe('external team authorization', () => {
 
   it('uses the current database role instead of the token role', async () => {
     db.query.mockResolvedValue({
-      rows: [{ team_id: 'team-1', role: 'member' }],
+      rows: [{ team_id: TEAM_ID, role: 'member' }],
       rowCount: 1,
     })
 
     await request(app())
-      .get('/teams/team-1')
+      .get(`/teams/${TEAM_ID}`)
       .set('x-user-session-token', 'stale-admin-token')
       .expect(403)
 
     expect(db.query).toHaveBeenCalledWith(expect.stringContaining("tm.status = 'active'"), [
-      'user-1',
-      'team-1',
+      USER_ID,
+      TEAM_ID,
     ])
   })
 
@@ -81,20 +78,20 @@ describe('external team authorization', () => {
       status: 'authenticated',
       contract: 'v1',
       claims: {
-        userId: 'user-1',
+        userId: USER_ID,
         email: 'user@example.com',
-        teamId: 'other-team',
+        teamId: OTHER_TEAM_ID,
         role: 'member',
         exp: Math.floor(Date.now() / 1000) + 3600,
       },
     })
     db.query.mockResolvedValue({
-      rows: [{ team_id: 'team-1', role: 'admin' }],
+      rows: [{ team_id: TEAM_ID, role: 'admin' }],
       rowCount: 1,
     })
 
     await request(app())
-      .get('/teams/team-1')
+      .get(`/teams/${TEAM_ID}`)
       .set('x-user-session-token', 'stale-member-token')
       .expect(200)
   })
@@ -103,7 +100,7 @@ describe('external team authorization', () => {
     db.query.mockRejectedValue(new Error('database unavailable'))
 
     await request(app())
-      .get('/teams/team-1')
+      .get(`/teams/${TEAM_ID}`)
       .set('x-user-session-token', 'stale-admin-token')
       .expect(503)
       .expect({ error: 'authority_unavailable' })
@@ -111,8 +108,8 @@ describe('external team authorization', () => {
     // Liveness witness: the live membership query reached the pool, so the
     // database-outage provenance came from the real boundary.
     expect(db.query).toHaveBeenCalledWith(expect.stringContaining('team_members'), [
-      'user-1',
-      'team-1',
+      USER_ID,
+      TEAM_ID,
     ])
   })
 
@@ -120,7 +117,7 @@ describe('external team authorization', () => {
     db.query.mockRejectedValue(databaseError('42P01'))
 
     const response = await request(app())
-      .get('/teams/team-1')
+      .get(`/teams/${TEAM_ID}`)
       .set('x-user-session-token', 'stale-admin-token')
 
     expect(response.status).toBe(500)
@@ -128,24 +125,8 @@ describe('external team authorization', () => {
     expect(response.headers['retry-after']).toBeUndefined()
     // Liveness witness: the live membership query reached the pool.
     expect(db.query).toHaveBeenCalledWith(expect.stringContaining('team_members'), [
-      'user-1',
-      'team-1',
+      USER_ID,
+      TEAM_ID,
     ])
-  })
-
-  it('keeps an exhausted access budget on the sanitized 500 path', async () => {
-    const budget = AccessExecutionBudget.create('action', { limits: { producerCalls: 1 } })
-    budget.charge({ kind: 'producerCalls' })
-
-    const response = await request(app(budget))
-      .get('/teams/team-1')
-      .set('x-user-session-token', 'stale-admin-token')
-    budget.close()
-
-    expect(response.status).toBe(500)
-    expect(response.body.error).toBe('Internal Server Error')
-    expect(response.headers['retry-after']).toBeUndefined()
-    // A budget refusal is not a database outage: the query never ran.
-    expect(db.query).not.toHaveBeenCalled()
   })
 })

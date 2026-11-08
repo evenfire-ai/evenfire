@@ -51,6 +51,15 @@ describe('InviteMemberPage email validation', () => {
     expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled()
   })
 
+  it("keeps dev's one-character top-level domain usable", () => {
+    render(<InviteMemberPage />)
+
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Invitee' } })
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'a@b.c' } })
+
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled()
+  })
+
   it('rejects a plausible invitation email longer than 320 characters', () => {
     render(<InviteMemberPage />)
 

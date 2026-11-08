@@ -1,16 +1,20 @@
-import { Router } from 'express'
+import { type Response, Router } from 'express'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
-import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
+  markAuthorityUnavailable,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
-import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
 import { relationshipInstanceId } from '../../services/access/operationalAccessProjection.js'
+import {
+  type ExternalSessionBackendUnavailableError,
+  externalSessionDatabaseFailure,
+  isExternalSessionBackendUnavailableError,
+} from '../../services/auth/sessionDatabaseFailure.js'
 import {
   listActiveContextIds,
   partitionAccessValues,
@@ -67,7 +71,7 @@ class ContextAccessReconciliationError extends Error {
 }
 
 class ContextAuthorizationUnavailableError extends Error {
-  constructor(cause: unknown) {
+  constructor(cause: ExternalSessionBackendUnavailableError) {
     super('Context authorization is unavailable')
     this.name = 'ContextAuthorizationUnavailableError'
     this.cause = cause
@@ -77,15 +81,14 @@ class ContextAuthorizationUnavailableError extends Error {
 async function loadAccessibleContextIds(
   gateway: K8sGateway,
   userId: string,
-  teamId: string | null,
-  budget: NonNullable<ExternalAuthedRequest['accessExecutionBudget']>
+  teamId: string | null
 ): Promise<Set<string>> {
   const accessible = new Set<string>()
   let activeContextIds: string[]
   try {
     activeContextIds = await listActiveContextIds(gateway)
   } catch (err) {
-    console.warn('[external/shared-filesystems] context reconciliation failed:', err)
+    // Logged once, where the 503 is answered (resolveAccessibleContextIdsForRequest).
     throw new ContextAccessReconciliationError(err)
   }
   const userCtx = await getUserContexts(userId)
@@ -97,8 +100,13 @@ async function loadAccessibleContextIds(
     const compatibilityTeamId = teamId.trim()
     let membership
     try {
-      membership = await getLiveTeamMembership(userId, compatibilityTeamId, { budget })
+      membership = await getLiveTeamMembership(userId, compatibilityTeamId, {
+        onDatabaseFailure: externalSessionDatabaseFailure,
+      })
     } catch (err) {
+      // Only the database-outage provenance is an outage. Anything else (a
+      // programmer or policy failure) keeps the global handler's sanitized 500.
+      if (!isExternalSessionBackendUnavailableError(err)) throw err
       throw new ContextAuthorizationUnavailableError(err)
     }
     if (membership) {
@@ -126,31 +134,30 @@ function loadAccessibleContextIdsForRequest(
 ): Promise<Set<string>> {
   const cache = requestCache(res)
   const claims = req.externalAuth!
-  cache.accessibleContextIds ??= loadAccessibleContextIds(
-    gateway,
-    claims.userId,
-    claims.teamId,
-    req.accessExecutionBudget!
-  )
+  cache.accessibleContextIds ??= loadAccessibleContextIds(gateway, claims.userId, claims.teamId)
   return cache.accessibleContextIds
 }
 
 async function resolveAccessibleContextIdsForRequest(
   gateway: K8sGateway,
   req: ExternalAuthedRequest,
-  res: {
-    locals: Record<string, unknown>
-    status: (code: number) => { json: (body: unknown) => void }
-  }
+  res: Response
 ): Promise<Set<string> | null> {
   try {
     return await loadAccessibleContextIdsForRequest(gateway, req, res)
   } catch (err) {
     if (err instanceof ContextAccessReconciliationError) {
+      markAuthorityUnavailable(
+        req,
+        res,
+        err,
+        'external_shared_filesystems_context_reconciliation_failed'
+      )
       res.status(503).json({ error: 'context_reconciliation_unavailable' })
       return null
     }
     if (!(err instanceof ContextAuthorizationUnavailableError)) throw err
+    markAuthorityUnavailable(req, res, err, 'external_shared_filesystems_authority_unavailable')
     res.status(503).json({ error: 'authority_unavailable' })
     return null
   }
@@ -228,8 +235,7 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
   router.use(
     '/external/contexts/:contextId/shared-filesystems',
     ...externalSharedFilesystemsRateLimits,
-    requireValidExternalSessionToken,
-    attachAccessExecutionBudget
+    requireValidExternalSessionToken
   )
 
   // Reject anything but GET/HEAD up-front so the proxy below can never be
@@ -319,19 +325,6 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
           // reach this end-user-facing API. See curatedSfsMessage().
           message: curatedSfsMessage(phase),
         }
-      })
-
-      scheduleAccessCatalogShadow({
-        session: req.externalSessionAuthority,
-        family: 'shared_filesystem',
-        legacyLogicalIds: items.map(item => `${sfsNs}/${item.name}`),
-        legacyComplete: true,
-        scope: {
-          kind: 'behavior-json',
-          dimension: 'filesystemScope',
-          field: 'contextId',
-          equals: `${ctxNs}/${contextId}`,
-        },
       })
 
       res.status(200).json({ items })

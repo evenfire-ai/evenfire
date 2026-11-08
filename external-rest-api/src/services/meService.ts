@@ -1,4 +1,8 @@
-import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
+import {
+  ControlApiError,
+  controlApiRequest,
+  isControlApiInvalidSession,
+} from '../controlApiClient.js'
 import { ChannelMapping, TeamDirectoryResult, TeamRole, UserAgentsResponse } from '../types.js'
 
 export function normalizeChannels(input: unknown): ChannelMapping {
@@ -73,8 +77,7 @@ export async function switchTeam(
   userId: string,
   email: string,
   nextTeamId: string,
-  sessionToken: string,
-  clientIp?: string
+  sessionToken: string
 ) {
   let membership: { team_id: string; role: TeamRole; team_name: string }
   try {
@@ -84,8 +87,13 @@ export async function switchTeam(
       { userSessionToken: sessionToken }
     )
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 404) return null
-    throw error
+    // control-api answers an ended session on this route with a bare 401
+    // (requireValidExternalSessionToken), the same body its service-credential guard
+    // sends; neither is "not a member". Both reach the client as that 401, a 503 as is.
+    if (error instanceof ControlApiError && (error.status === 401 || error.status === 503)) {
+      throw error
+    }
+    return null
   }
 
   const role = membership.role as TeamRole
@@ -100,7 +108,6 @@ export async function switchTeam(
         role,
       },
       userSessionToken: sessionToken,
-      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
     }
   )
   return {
@@ -133,8 +140,18 @@ export async function getMe(userId: string, teamId: string, sessionToken: string
       },
     }
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 404) return null
-    throw error
+    // Exceptions to the dev error mapping:
+    // - control-api's `invalid_session` envelope: the session was revoked (password
+    //   change, logout, revocation) and must reach the client as that 401, so it
+    //   re-authenticates instead of reading "not found";
+    // - a 503 outage is forwarded as is.
+    // Everything else, a bare 401 included, reads as "not found" as on dev. A bare
+    // 401 is dev control-api's answer for an ended session; this edge's control-api
+    // sends a bare 401 only when it refuses the edge's own service credential, and
+    // no header or body tells the two apart, so neither is answered as an outage.
+    if (isControlApiInvalidSession(error)) throw error
+    if (error instanceof ControlApiError && error.status === 503) throw error
+    return null
   }
 }
 

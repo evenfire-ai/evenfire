@@ -2,7 +2,6 @@ import { type Request, type Response, Router } from 'express'
 import { pool } from '../../../db.js'
 import { asyncHandler } from '../../../http/asyncHandler.js'
 import type { K8sGateway } from '../../../k8s.js'
-import { scheduleAccessCatalogShadow } from '../../../services/access/accessCatalogShadow.js'
 import { K8sNotFoundError } from '../../../services/resourceService.js'
 import {
   WorkflowAuthorityError,
@@ -98,19 +97,6 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
           kind: 'workflow_read',
           entityType: 'workflow_recipe',
           entityId: `${ns}/${name}`,
-        })
-      }
-      if (caller.kind === 'user-session') {
-        scheduleAccessCatalogShadow({
-          session: caller.session,
-          family: 'workflow_run',
-          legacyLogicalIds: items.map(item => item.id),
-          legacyComplete: items.length < limit,
-          scope: {
-            kind: 'relationship',
-            type: 'recipe',
-            targetResourceId: `workflow_recipe:${ns}/${name}`,
-          },
         })
       }
       res.json({ items, count: items.length })

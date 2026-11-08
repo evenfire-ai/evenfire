@@ -44,6 +44,48 @@ paths. Treat the absence of admission as an accepted parity decision, not as a
 false positive caused by an enforcing limiter. This document does not change
 GitHub alert state.
 
+### PR #334 External REST alerts — won't fix (dev parity)
+
+The analysis of `refs/pull/334/merge` reports two External REST routes that
+had no frequency limit on dev either. Under the parity decision above they
+keep none. Adding the edge's `createRateLimiter` would not clear the alerts:
+the stock query models `express-rate-limit`, not that in-process middleware,
+which is why alert #1767, on the invitation routes it guards, is recorded as a
+false positive (below).
+
+| Alert                                                                        | Location (PR head)      | Route                  | Dev location     |
+| ---------------------------------------------------------------------------- | ----------------------- | ---------------------- | ---------------- |
+| [#1971](https://github.com/evenfire-ai/evenfire/security/code-scanning/1971) | `routes/me.ts:89`       | `GET /me`              | `me.ts:81`       |
+| [#1972](https://github.com/evenfire-ai/evenfire/security/code-scanning/1972) | `routes/me.ts:89`       | `GET /me`              | `me.ts:81`       |
+| [#1973](https://github.com/evenfire-ai/evenfire/security/code-scanning/1973) | `routes/members.ts:152` | `POST /members/invite` | `members.ts:151` |
+| [#1974](https://github.com/evenfire-ai/evenfire/security/code-scanning/1974) | `routes/members.ts:152` | `POST /members/invite` | `members.ts:151` |
+
+Paths are under `external-rest-api/src/`. Neither dev route had a limiter. `GET /me` is reported anew because its
+handler changed (`requireSessionAuth` and the `503 authority_unavailable`
+response), not because a limit was removed. `POST /members/invite` carries the
+same finding as the open default-branch alerts
+[#252](https://github.com/evenfire-ai/evenfire/security/code-scanning/252) and
+[#253](https://github.com/evenfire-ai/evenfire/security/code-scanning/253) at
+`members.ts:151`; the route moved one line.
+
+`GET /me` is the session probe that Desktop and Profile UI call on every
+session restore; a limiter there would add a new `429` response to that probe.
+If a limit is wanted on either route later, the CodeQL-visible form is a
+per-user `express-rate-limit` bucket after `requireAuth`, as on member
+retirement (`routes/members.ts:44-56`); it is a behaviour change against dev.
+
+### PR #334 control-api alerts (analysis of `refs/pull/334/merge`)
+
+These alerts are open on the PR ref and not on `dev`. None of them marks a limit
+that this PR removed.
+
+| Alerts                       | Location (PR head)                                                                                          | Disposition                                                                                                                                                                                                |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #914, #916–#921, #932, #1981 | `control-api/src/routes/external/teams.ts:57-255`                                                           | False positive. `router.use('/external/teams', ...externalTeamsRateLimits, ...)` at `teams.ts:53` runs `express-rate-limit` first, as on `dev`. The query does not follow it.                              |
+| #1979                        | `control-api/src/routes/external/directory.ts:29`                                                           | False positive. `router.use('/external/directory', ...externalDirectoryRateLimits, ...)` at `directory.ts:21-25` applies the same limiters, as on `dev`.                                                   |
+| #1980                        | `control-api/src/routes/external/auth.ts:321` (`POST /external/auth/verify`)                                | Won't fix, dev parity. The route has no frequency limit here or on `dev` (`auth.ts:153`). It is reported anew because its handler now authenticates through the session service. The fix belongs to #1200. |
+| #1982, #1983                 | `control-api/test/externalSessionTeamAuthorization.test.ts:35`, `services.liveTeamAuthorization.test.ts:94` | Test only. Both are Express apps built inside a test; no deployed service serves them.                                                                                                                     |
+
 ## Approved patterns
 
 | Pattern                                                | Purpose                                                         |
@@ -98,15 +140,15 @@ Follow-up implementation tracked separately (`fix/codeql-control-api-rate-limit-
 
 ### False positive — PG limiter or non-route sink present
 
-| Alert                                                                        | Location                                                             | Evidence                                                                  |
-| ---------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| [#57](https://github.com/evenfire-ai/evenfire/security/code-scanning/57)     | `app.ts:131`                                                         | Middleware mount only; per-route limiters apply downstream                |
-| [#58](https://github.com/evenfire-ai/evenfire/security/code-scanning/58)     | `app.ts:219`                                                         | 404 guard for unknown `/gfs/*`; no expensive work                         |
-| [#60](https://github.com/evenfire-ai/evenfire/security/code-scanning/60)     | `auth.ts:572`                                                        | Handler under `publicAdminTokenRateLimit()` (`adminPublicTokenRlPerMin`)  |
-| [#171](https://github.com/evenfire-ai/evenfire/security/code-scanning/171)   | `registry.ts:24`                                                     | `rateLimitMiddleware` 30/min at `:28-35`                                  |
-| [#826](https://github.com/evenfire-ai/evenfire/security/code-scanning/826)   | `registryConnect.ts:321`                                             | `rateLimitMiddleware` 3/min at `:329-336`                                 |
-| [#803](https://github.com/evenfire-ai/evenfire/security/code-scanning/803)   | `gfs/grants.ts:849`                                                  | Internal DB helper, not an HTTP route handler                             |
-| [#1767](https://github.com/evenfire-ai/evenfire/security/code-scanning/1767) | `app.ts:73`                                                          | False positive — invitation error-response middleware; evidence below     |
+| Alert                                                                        | Location                                                             | Evidence                                                                                                        |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| [#57](https://github.com/evenfire-ai/evenfire/security/code-scanning/57)     | `app.ts:131`                                                         | Middleware mount only; per-route limiters apply downstream                                                      |
+| [#58](https://github.com/evenfire-ai/evenfire/security/code-scanning/58)     | `app.ts:219`                                                         | 404 guard for unknown `/gfs/*`; no expensive work                                                               |
+| [#60](https://github.com/evenfire-ai/evenfire/security/code-scanning/60)     | `auth.ts:572`                                                        | Handler under `publicAdminTokenRateLimit()` (`adminPublicTokenRlPerMin`)                                        |
+| [#171](https://github.com/evenfire-ai/evenfire/security/code-scanning/171)   | `registry.ts:24`                                                     | `rateLimitMiddleware` 30/min at `:28-35`                                                                        |
+| [#826](https://github.com/evenfire-ai/evenfire/security/code-scanning/826)   | `registryConnect.ts:321`                                             | `rateLimitMiddleware` 3/min at `:329-336`                                                                       |
+| [#803](https://github.com/evenfire-ai/evenfire/security/code-scanning/803)   | `gfs/grants.ts:849`                                                  | Internal DB helper, not an HTTP route handler                                                                   |
+| [#1767](https://github.com/evenfire-ai/evenfire/security/code-scanning/1767) | `app.ts:73`                                                          | False positive — invitation error-response middleware; evidence below                                           |
 | [#1769](https://github.com/evenfire-ai/evenfire/security/code-scanning/1769) | `passwordResetPayload.externalRest.realPostgres.integration.test.ts` | Test-only composition: Control API and External REST bind loopback; producer is task-local on an ephemeral port |
 
 Alert #1767 is attached to the invitation error-response middleware mount, which maps upstream

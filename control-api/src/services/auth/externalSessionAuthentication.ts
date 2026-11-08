@@ -4,7 +4,6 @@ import {
   type UserSessionV2Claims,
   verifyUserSessionV2Token,
 } from '../../utils/auth/userSessionV2Token.js'
-import type { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
 import {
   type EffectiveUserAccessPolicy,
   compareSemanticVersions,
@@ -58,9 +57,7 @@ type AuthenticationOptions = Readonly<{
   purpose: ExternalSessionPurpose
   client?: ExternalSessionClient
   policy?: EffectiveUserAccessPolicy
-  budget?: AccessExecutionBudget
   now?: Date
-  identity?: Extract<ExternalSessionIdentityAuthentication, { status: 'authenticated' }>
 }>
 
 export type ExternalSessionAuthorityContext = Readonly<
@@ -151,19 +148,20 @@ function normalizedV2Claims(
 }
 
 /**
- * The identity-only stage of the sole external-user authentication boundary.
- * It is sufficient to derive a trusted authenticated rate-limit subject, but
- * intentionally performs no effective-policy, rollout, or readiness lookup.
+ * The identity stage of the sole external-user authentication boundary. It
+ * validates the presented session and, for a V2 session, records its use (the
+ * idle-lifetime touch) unless the caller's own operation records it, as session
+ * renewal does when it rotates the session. It performs no effective-policy,
+ * rollout, or readiness lookup; authenticateExternalUserSession adds those.
  */
-export async function authenticateExternalUserSessionIdentity(
+async function authenticateExternalUserSessionIdentity(
   token: string,
-  options: Pick<AuthenticationOptions, 'budget' | 'now'> = {}
+  options: Pick<AuthenticationOptions, 'now'> & { touch?: boolean } = {}
 ): Promise<ExternalSessionIdentityAuthentication> {
   const v2Claims = verifyUserSessionV2Token(token)
   if (v2Claims) {
     const validation = await validateUserSessionClaims(v2Claims, {
-      budget: options.budget,
-      touch: false,
+      touch: options.touch !== false,
       onDatabaseFailure: externalSessionDatabaseFailure,
     })
     if (validation.status !== 'valid') return validation
@@ -185,7 +183,6 @@ export async function authenticateExternalUserSessionIdentity(
   const v1Claims = verifyExternalSessionToken(token)
   if (!v1Claims) return { status: 'invalid', reason: 'invalid_representation' }
   const validation = await validateLegacyUserSession(token, v1Claims, {
-    budget: options.budget,
     onDatabaseFailure: externalSessionDatabaseFailure,
   })
   if (validation.status !== 'valid') return validation
@@ -212,41 +209,6 @@ export async function authenticateExternalUserSessionIdentity(
 }
 
 /**
- * Rechecks mutable session authority after the authenticated limiter permits
- * the request. It reuses the Stage-A verified claims and does not re-verify
- * the bearer representation.
- */
-async function revalidateExternalUserSessionIdentity(
-  token: string,
-  identity: Extract<ExternalSessionIdentityAuthentication, { status: 'authenticated' }>,
-  options: Pick<AuthenticationOptions, 'budget' | 'now'>
-): Promise<ExternalSessionIdentityAuthentication> {
-  if (identity.contract === 'v2') {
-    const validation = await validateUserSessionClaims(
-      identity.tokenClaims as UserSessionV2Claims,
-      {
-        budget: options.budget,
-        onDatabaseFailure: externalSessionDatabaseFailure,
-      }
-    )
-    if (validation.status !== 'valid') return validation
-    const claims = identity.tokenClaims as UserSessionV2Claims
-    return {
-      ...identity,
-      claims: normalizedV2Claims(claims, validation.identity),
-    }
-  }
-
-  const claims = identity.tokenClaims as AuthClaims
-  const validation = await validateLegacyUserSession(token, claims, {
-    budget: options.budget,
-    onDatabaseFailure: externalSessionDatabaseFailure,
-  })
-  if (validation.status !== 'valid') return validation
-  return identity
-}
-
-/**
  * Sole external-user authentication boundary. No route or middleware may call
  * a low-level external-user token verifier directly.
  */
@@ -254,21 +216,7 @@ export async function authenticateExternalUserSession(
   token: string,
   options: AuthenticationOptions
 ): Promise<ExternalSessionAuthentication> {
-  const policy =
-    options.policy ??
-    (await resolveEffectiveUserAccessPolicy({
-      budget: options.budget,
-      databaseFailureMode: 'throw',
-      onDatabaseFailure: externalSessionDatabaseFailure,
-    }))
-  const identity = options.identity
-    ? await revalidateExternalUserSessionIdentity(token, options.identity, {
-        budget: options.budget,
-        now: options.now,
-      })
-    : null
-  if (identity && identity.status !== 'authenticated') return identity
-
+  const policy = options.policy ?? (await resolveEffectiveUserAccessPolicy())
   if (
     purposeRequiresMinimumClient(options.purpose) &&
     !clientMeetsMinimum(options.client, policy)
@@ -276,12 +224,12 @@ export async function authenticateExternalUserSession(
     return { status: 'upgrade_required', reason: 'minimum_client_version' }
   }
 
-  const authenticatedIdentity =
-    identity ??
-    (await authenticateExternalUserSessionIdentity(token, {
-      budget: options.budget,
-      now: options.now,
-    }))
+  // Renewal records the session's use itself when it rotates the session, so
+  // one accepted request is one touch.
+  const authenticatedIdentity = await authenticateExternalUserSessionIdentity(token, {
+    now: options.now,
+    touch: options.purpose !== 'renew',
+  })
   if (authenticatedIdentity.status !== 'authenticated') return authenticatedIdentity
 
   if (
@@ -300,8 +248,7 @@ export async function renewExternalUserSession(
     onDatabaseFailure?: (error: unknown) => unknown
   } = {}
 ): Promise<ExternalSessionRenewal> {
-  const policy =
-    options.policy ?? (await resolveEffectiveUserAccessPolicy({ budget: options.budget }))
+  const policy = options.policy ?? (await resolveEffectiveUserAccessPolicy())
   if (!clientMeetsMinimum(options.client, policy)) {
     return { status: 'upgrade_required', reason: 'minimum_client_version' }
   }
@@ -311,7 +258,6 @@ export async function renewExternalUserSession(
   const claims = verifyUserSessionV2Token(token)
   if (!claims) return { status: 'invalid', reason: 'invalid_representation' }
   const result = await renewUserSession(claims, {
-    budget: options.budget,
     onDatabaseFailure: options.onDatabaseFailure,
   })
   if (!('token' in result)) {

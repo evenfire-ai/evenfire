@@ -5,13 +5,13 @@ import { createExternalClientRateLimiters } from '../../middleware/externalClien
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
+  requireExternalSessionRateLimitContext,
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { sendPasswordAdmissionError } from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { type Logger, rootLogger } from '../../observability/logger.js'
-import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
   filterAccessValues,
@@ -79,6 +79,33 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
     config.approvalRlExternalClientIpPerMin,
     config.approvalRlExternalEdgePerMin
   )
+  // `/me` is the session probe clients use to decide whether a stored session
+  // has ended, so it is registered before the generic chain below and answers
+  // a rejected session with the `invalid_session` envelope instead of the bare
+  // 401 that the service-credential guard also sends. Every other users route
+  // keeps the bare 401. The edge sends this GET with no body, so the body-token
+  // fallback of `requireExternalSessionRateLimitContext` never selects a token
+  // here; an outdated client receives the `upgrade_required` envelope (426).
+  router.get(
+    '/external/users/:userId/me',
+    ...externalUsersRateLimits,
+    requireExternalSessionRateLimitContext({
+      purpose: 'protected',
+      client: req => ({ version: req.header('x-evenfire-client-version') || undefined }),
+    }),
+    requireExternalUserParamMatch(),
+    async (req, res, next) => {
+      try {
+        const teamId = String(req.query.teamId || '')
+        const data = await getMe(req.params.userId, teamId)
+        if (!data) return res.status(404).json({ error: 'not_found' })
+        return res.status(200).json(data)
+      } catch (error) {
+        return next(error)
+      }
+    }
+  )
+
   router.use('/external/users', ...externalUsersRateLimits, requireValidExternalSessionToken)
 
   router.get(
@@ -86,16 +113,9 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
     requireExternalUserParamMatch(),
     async (req, res, next) => {
       try {
-        const result = await listTeams(req.params.userId, String(req.query.currentTeamId || ''))
-        scheduleAccessCatalogShadow({
-          session: (req as ExternalAuthedRequest).externalSessionAuthority,
-          family: 'team',
-          legacyLogicalIds: Array.isArray(result.items)
-            ? result.items.map(item => String(item.id))
-            : [],
-          legacyComplete: true,
-        })
-        return res.status(200).json(result)
+        return res
+          .status(200)
+          .json(await listTeams(req.params.userId, String(req.query.currentTeamId || '')))
       } catch (error) {
         return next(error)
       }
@@ -140,9 +160,8 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         }
 
         const mapped = await mapWithConcurrencyLimit(teams, 4, async team => {
-          const canReadMembers = team.role === 'admin' || team.role === 'inviter'
           const [members, contexts, agents] = await Promise.allSettled([
-            canReadMembers ? listMembers(team.id) : Promise.resolve(null),
+            listMembers(team.id),
             getTeamContexts(team.id),
             getTeamAgents(team.id),
           ])
@@ -163,10 +182,7 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
           return {
             item: {
               team,
-              members:
-                canReadMembers && members.status === 'fulfilled'
-                  ? projectTeamMembers(members.value)
-                  : [],
+              members: members.status === 'fulfilled' ? projectTeamMembers(members.value) : [],
               contextIds:
                 contexts.status === 'fulfilled'
                   ? filterAccessValues(contexts.value?.contextIds, activeContextIds)
@@ -212,27 +228,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
   )
 
   router.get(
-    '/external/users/:userId/me',
-    requireExternalUserParamMatch(),
-    async (req, res, next) => {
-      try {
-        const teamId = String(req.query.teamId || '')
-        const data = await getMe(req.params.userId, teamId)
-        if (!data) return res.status(404).json({ error: 'not_found' })
-        scheduleAccessCatalogShadow({
-          session: (req as ExternalAuthedRequest).externalSessionAuthority,
-          family: 'user',
-          legacyLogicalIds: [req.params.userId],
-          legacyComplete: true,
-        })
-        return res.status(200).json(data)
-      } catch (error) {
-        return next(error)
-      }
-    }
-  )
-
-  router.get(
     '/external/users/:userId/contexts',
     requireExternalUserParamMatch(),
     async (req, res, next) => {
@@ -247,16 +242,9 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
             'external user context reconciliation failed'
           )
         }
-        const contextIds = filterAccessValues(base.contextIds, active)
-        scheduleAccessCatalogShadow({
-          session: (req as ExternalAuthedRequest).externalSessionAuthority,
-          family: 'context',
-          legacyLogicalIds: contextIds.map(id => `${config.contextsNamespace}/${id}`),
-          legacyComplete: active !== null,
-        })
         return res.status(200).json({
           ...base,
-          contextIds,
+          contextIds: filterAccessValues(base.contextIds, active),
         })
       } catch (error) {
         return next(error)
@@ -276,7 +264,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         const authorizedAgentNames = filterAccessValues(base.agentNames, null)
         let agents: Awaited<ReturnType<typeof resolveMcpServersForAgents>> = []
         let agentNames = authorizedAgentNames
-        let mcpEnrichmentComplete = true
         try {
           // Authorization model: authorizedAgentNames already reflects which agents
           // this user is allowed to use. resolveMcpServersForAgents treats agent
@@ -286,9 +273,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
             contextsNamespace: config.contextsNamespace,
             hostsNamespace: config.hostsNamespace,
             agentNames: authorizedAgentNames,
-            onPartial: () => {
-              mcpEnrichmentComplete = false
-            },
           })
           // A successful lookup can safely remove genuinely missing or invalid
           // Hosts. Only the DTOs resolved from the authorized input are used.
@@ -302,27 +286,7 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
             'external user MCP server enrichment failed'
           )
           agents = []
-          mcpEnrichmentComplete = false
         }
-        const session = (req as ExternalAuthedRequest).externalSessionAuthority
-        scheduleAccessCatalogShadow({
-          session,
-          family: 'host',
-          legacyLogicalIds: agentNames.map(name => `${config.hostsNamespace}/${name}`),
-          legacyComplete: agents.length === agentNames.length,
-        })
-        scheduleAccessCatalogShadow({
-          session,
-          family: 'mcp_server',
-          legacyLogicalIds: [
-            ...new Set(
-              agents.flatMap(agent =>
-                agent.mcpServers.map(server => `${config.mcpServersNamespace}/${server.name}`)
-              )
-            ),
-          ],
-          legacyComplete: mcpEnrichmentComplete && agents.length === agentNames.length,
-        })
         return res.status(200).json({ ...base, agentNames, agents })
       } catch (error) {
         return next(error)

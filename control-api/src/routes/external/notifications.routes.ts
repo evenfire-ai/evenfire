@@ -1,7 +1,6 @@
 import { Request, Response, Router } from 'express'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
-import { sendPublicApiError } from '../../http/publicApiError.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
@@ -18,7 +17,6 @@ import {
   notificationStreamEventsSentTotal,
   notificationStreamSnapshotSize,
 } from '../../observability/metrics.js'
-import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { observeExternalSessionCurrentness } from '../../services/auth/externalSessionCurrentnessObserver.js'
 import { acknowledgeDesktopNotificationDelivery } from '../../services/notificationAckService.js'
 import {
@@ -129,7 +127,7 @@ export function createExternalNotificationsRouter(): Router {
 
         const initialAuthority = await observeExternalSessionCurrentness(authentication)
         if (initialAuthority.status === 'denied') {
-          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          res.status(401).json({ error: 'Unauthorized' })
           return
         }
         if (initialAuthority.status === 'unavailable') {
@@ -146,6 +144,15 @@ export function createExternalNotificationsRouter(): Router {
 
         let closed = false
         let flushInFlight = false
+        // A wake-up that arrives while a flush is reading, observing authority
+        // or writing is recorded here; the flush runs once more when it ends,
+        // so a notification committed after its read is not left for the next
+        // heartbeat.
+        let flushRequested = false
+        // Delivery opens only once the snapshot frame is written. Listener
+        // notifications that arrive during startup read and write nothing; the
+        // first flush after the snapshot catches up from lastCursor.
+        let deliveryOpen = false
         let lastCursor: string | null = rawCursor || null
         let listener: Awaited<ReturnType<typeof openNotificationQueueListener>> | null = null
         let heartbeatTimer: NodeJS.Timeout | null = null
@@ -235,39 +242,30 @@ export function createExternalNotificationsRouter(): Router {
         )
 
         const flushNewEvents = async () => {
-          if (closed || flushInFlight) return
+          if (closed || !deliveryOpen) return
+          if (flushInFlight) {
+            flushRequested = true
+            return
+          }
           flushInFlight = true
+          flushRequested = false
           try {
-            if (!(await closeForAuthority())) return
-            const initialSnapshot = lastCursor === null
             const events = await listNotificationStreamEventsForUser(claims.userId, {
               limit: config.notificationStreamSnapshotLimit,
               after: lastCursor ? parseNotificationCursor(lastCursor) : null,
-            })
-            if (!(await closeForAuthority())) return
-            const legacyComplete =
-              initialSnapshot && events.length < config.notificationStreamSnapshotLimit
-            scheduleAccessCatalogShadow({
-              session: extReq.externalSessionAuthority,
-              family: 'notification',
-              legacyLogicalIds: events.map(event => event.id),
-              legacyComplete,
-            })
-            scheduleAccessCatalogShadow({
-              session: extReq.externalSessionAuthority,
-              family: 'workflow_approval',
-              legacyLogicalIds: events.flatMap(event =>
-                event.eventType === 'approval.requested' ? [event.approval.id] : []
-              ),
-              legacyComplete,
             })
             if (events.length === 0) {
               notificationStreamEventsFilteredTotal.inc({ reason: 'no_new_active_events' }, 1)
               return
             }
+            // One authority observation per non-empty batch, after the read and
+            // before the write. The writes below are synchronous, so this
+            // observation covers the whole batch. On a refusal the stream ends
+            // (with session_expired when denied) and lastCursor does not
+            // advance, so a reconnect re-reads the withheld events.
+            if (!(await closeForAuthority())) return
             for (const event of events) {
               if (closed) break
-              if (!(await closeForAuthority())) break
               if (event.eventType === 'approval.requested') {
                 writeStreamMessage(res, {
                   type: 'approval.requested',
@@ -320,6 +318,12 @@ export function createExternalNotificationsRouter(): Router {
             cleanup()
           } finally {
             flushInFlight = false
+            // One more flush per recorded wake-up. An error path above has
+            // already called cleanup(), so `closed` stops it from running.
+            if (flushRequested && !closed) {
+              flushRequested = false
+              void flushNewEvents()
+            }
           }
         }
 
@@ -368,17 +372,18 @@ export function createExternalNotificationsRouter(): Router {
           observedAt: new Date().toISOString(),
         })
         notificationStreamEventsSentTotal.inc({ event_type: 'notification.snapshot' }, 1)
+        deliveryOpen = true
         void flushNewEvents()
 
         heartbeatTimer = setInterval(() => {
           void (async () => {
-            void flushNewEvents()
             if (closed || !(await closeForAuthority())) return
             writeStreamMessage(res, {
               type: 'heartbeat',
               observedAt: new Date().toISOString(),
             })
             notificationStreamEventsSentTotal.inc({ event_type: 'heartbeat' }, 1)
+            void flushNewEvents()
           })()
         }, config.notificationStreamHeartbeatMs)
 

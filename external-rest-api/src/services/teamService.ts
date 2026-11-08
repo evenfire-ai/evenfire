@@ -29,15 +29,19 @@ export async function getCurrentTeam(auth: AuthContext) {
       { userSessionToken: auth.sessionToken }
     )
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 404) return null
-    throw error
+    // control-api answers an ended session on `/external/teams/*` with a bare 401, which
+    // reaches the client as that 401, like a 503. A 403 means the caller is no longer a
+    // live member of the token's team, so "no current team" is the answer.
+    if (error instanceof ControlApiError && (error.status === 401 || error.status === 503)) {
+      throw error
+    }
+    return null
   }
 }
 
 export async function createTeamForUser(
   auth: Pick<AuthContext, 'userId' | 'email' | 'sessionToken'>,
-  name: string,
-  clientIp?: string
+  name: string
 ) {
   const team = await controlApiRequest<{ id: string; name: string }>('POST', '/external/teams', {
     body: {
@@ -58,7 +62,6 @@ export async function createTeamForUser(
         role: 'admin',
       },
       userSessionToken: auth.sessionToken,
-      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
     }
   )
 
@@ -91,13 +94,14 @@ export async function renameTeam(
       }
     )
   } catch (error) {
+    if (error instanceof ControlApiError && (error.status === 401 || error.status === 503)) {
+      throw error
+    }
+    // control-api's live role check: the caller lost the admin role after the token was issued.
     if (error instanceof ControlApiError && error.status === 403) {
       return { error: 'forbidden' as const }
     }
-    if (error instanceof ControlApiError && error.status === 404) {
-      return { error: 'not_found' as const }
-    }
-    throw error
+    return { error: 'not_found' as const }
   }
 
   return {
@@ -154,13 +158,12 @@ export async function updateMemberRole(
       { userSessionToken: auth.sessionToken }
     )
   } catch (error) {
-    if (error instanceof ControlApiError && error.status === 403) {
-      return { error: 'forbidden' }
+    if (error instanceof ControlApiError && (error.status === 401 || error.status === 503)) {
+      throw error
     }
-    if (error instanceof ControlApiError && error.status === 404) {
-      return { error: 'not_found' }
-    }
-    throw error
+    // control-api's live role check: the caller lost the admin role after the token was issued.
+    if (error instanceof ControlApiError && error.status === 403) return { error: 'forbidden' }
+    return { error: 'not_found' }
   }
   const updated = await controlApiRequest<unknown>(
     'PATCH',
@@ -212,13 +215,14 @@ export async function deleteMember(auth: AuthContext, userId: string) {
       }
     )
   } catch (error) {
+    if (error instanceof ControlApiError && (error.status === 401 || error.status === 503)) {
+      throw error
+    }
+    // control-api's live role check: the caller lost the admin role after the token was issued.
     if (error instanceof ControlApiError && error.status === 403) {
       return { error: 'forbidden' as const }
     }
-    if (error instanceof ControlApiError && error.status === 404) {
-      return { error: 'not_found' as const }
-    }
-    throw error
+    return { error: 'not_found' as const }
   }
   return { deleted }
 }

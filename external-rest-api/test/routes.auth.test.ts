@@ -68,20 +68,9 @@ describe('routes/auth password-login', () => {
     expect(res.body).toEqual({ error: 'invalid_credentials' })
   })
 
-  it('keeps retired Google accounts indistinguishable across credential providers', async () => {
-    authServiceMock.loginWithGoogle.mockRejectedValueOnce(
-      new ControlApiError('private upstream detail', 403, { error: 'membership_not_found' })
-    )
-
-    const res = await request(buildApp())
-      .post('/api/v1/auth/google')
-      .send({ idToken: 'validly-shaped-test-token' })
-
-    expect(res.status).toBe(401)
-    expect(res.body).toEqual({ error: 'Unauthorized' })
-  })
-
-  it('answers a Google identity refused by control-api like a retired account', async () => {
+  it('answers a retired Google account with control-api own 401 Unauthorized', async () => {
+    // control-api google-login answers a user with no active membership with
+    // `401 {"error":"Unauthorized"}`; it never sends 403 on this route.
     authServiceMock.loginWithGoogle.mockReset()
     authServiceMock.loginWithGoogle.mockRejectedValueOnce(
       new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
@@ -89,14 +78,33 @@ describe('routes/auth password-login', () => {
 
     const res = await request(buildApp())
       .post('/api/v1/auth/google')
+      .send({ idToken: 'synthetic-google-id-token' })
+
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith({
+      idToken: 'synthetic-google-id-token',
+    })
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+    expect(JSON.stringify(res.body)).not.toContain('private upstream detail')
+  })
+
+  it('answers a control-api 403 on Google login with membership_not_found', async () => {
+    authServiceMock.loginWithGoogle.mockReset()
+    authServiceMock.loginWithGoogle.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 403, { error: 'private upstream code' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/google')
       .send({ idToken: 'validly-shaped-test-token' })
 
     expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
-    expect(res.status).toBe(401)
-    expect(res.body).toEqual({ error: 'Unauthorized' })
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'membership_not_found' })
   })
 
-  it('keeps any other Google login 401 on the sanitized public envelope', async () => {
+  it('forwards any other Google login 401 body verbatim', async () => {
     authServiceMock.loginWithGoogle.mockReset()
     authServiceMock.loginWithGoogle.mockRejectedValueOnce(
       new ControlApiError('private upstream detail', 401, { error: 'session_revoked' })
@@ -108,8 +116,8 @@ describe('routes/auth password-login', () => {
 
     expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
     expect(res.status).toBe(401)
-    expect(res.body).not.toEqual({ error: 'Unauthorized' })
-    expect(res.body.error).toEqual(expect.objectContaining({ code: expect.any(String) }))
+    expect(res.body).toEqual({ error: 'session_revoked' })
+    expect(JSON.stringify(res.body)).not.toContain('private upstream detail')
   })
 
   it('keeps password setup state opaque on password-login', async () => {
@@ -168,9 +176,10 @@ describe('routes/auth password-login', () => {
       'profile_session=profile-session-test-token'
     )
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
-    expect(String(res.headers['set-cookie'])).toContain('Max-Age=43200')
+    expect(String(res.headers['set-cookie'])).toContain('Max-Age=604800')
     expect(String(res.headers['set-cookie'])).toContain('Secure')
     expect(String(res.headers['set-cookie'])).toContain('SameSite=Lax')
+    expect(String(res.headers['set-cookie'])).toContain('Path=/')
   })
 
   it('returns the bearer token body for non-browser Desktop App login', async () => {
@@ -199,7 +208,7 @@ describe('routes/auth password-login', () => {
     )
   })
 
-  it('delegates Google verification with the trusted client IP', async () => {
+  it('delegates Google verification without an edge-supplied client IP', async () => {
     authServiceMock.loginWithGoogle.mockResolvedValueOnce({
       token: 'google-session-test-token',
       me: { id: 'user-1', email: 'user@example.test' },
@@ -211,10 +220,7 @@ describe('routes/auth password-login', () => {
       .send({ idToken: 'opaque-test-token' })
 
     expect(response.status).toBe(200)
-    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith(
-      { idToken: 'opaque-test-token' },
-      '198.51.100.52'
-    )
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith({ idToken: 'opaque-test-token' })
   })
 
   it('forwards more than ten session renewals without a local rate limit', async () => {
@@ -235,7 +241,29 @@ describe('routes/auth password-login', () => {
       expect(response.headers['x-ratelimit-limit']).toBeUndefined()
     }
     expect(authServiceMock.renewUserSession).toHaveBeenCalledTimes(12)
-    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(session, '198.51.100.89')
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(session)
+  })
+
+  it('keeps a V1 profile cookie when renewal is refused with 401', async () => {
+    const v1Session = 'synthetic-v1-profile-session'
+    authServiceMock.renewUserSession.mockRejectedValueOnce(
+      new ControlApiError('Control API POST /external/auth/session/renew failed (401)', 401, {
+        error: 'Unauthorized',
+      })
+    )
+
+    const response = await request(buildApp())
+      .post('/api/v1/auth/session/renew')
+      .set('cookie', `profile_session=${v1Session}`)
+      .expect(401)
+
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    // E-2: control-api renews V2 sessions only, so a 401 on a still-valid V1
+    // cookie must not delete it.
+    expect(String(response.headers['set-cookie'] ?? '')).not.toContain('profile_session')
+    // Witness: the route reached the renewal with the cookie's token.
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledOnce()
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(v1Session)
   })
 
   it('documents the password-reset limiter headers and client-IP contract', async () => {
@@ -303,7 +331,8 @@ describe('routes/auth password-login', () => {
       .set('x-forwarded-proto', 'https')
       .expect(200)
 
-    expect(response.body).toEqual({ ok: true })
+    expect(response.body).toEqual({ ok: true, sessionPresented: true })
+    expect(authServiceMock.logoutUserSession).toHaveBeenCalledWith('opaque-session')
     expect(String(response.headers['set-cookie'])).toContain(
       'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
     )
@@ -312,7 +341,14 @@ describe('routes/auth password-login', () => {
 
   it('keeps already-invalid logout idempotent and expires its cookie', async () => {
     authServiceMock.logoutUserSession.mockRejectedValueOnce(
-      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+      new ControlApiError('private upstream detail', 401, {
+        error: {
+          code: 'invalid_session',
+          message: 'The session is not valid.',
+          correlationId: 'synthetic-correlation',
+          retryable: false,
+        },
+      })
     )
 
     const response = await request(buildApp())
@@ -321,16 +357,86 @@ describe('routes/auth password-login', () => {
       .set('x-forwarded-proto', 'https')
       .expect(200)
 
-    expect(response.body).toEqual({ ok: true })
+    expect(response.body).toEqual({ ok: true, sessionPresented: true })
     expect(String(response.headers['set-cookie'])).toContain(
       'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
     )
+    expect(authServiceMock.logoutUserSession).toHaveBeenCalledWith('opaque-session')
   })
+
+  it('does not confirm logout when control-api rejects the edge service credential', async () => {
+    authServiceMock.logoutUserSession.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+    )
+
+    const response = await request(buildApp())
+      .post('/api/v1/auth/logout')
+      .set('Cookie', 'profile_session=opaque-session')
+      .set('x-forwarded-proto', 'https')
+      .expect(401)
+
+    expect(response.body.ok).toBeUndefined()
+    expect(String(response.headers['set-cookie'])).toContain(
+      'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+    )
+    expect(authServiceMock.logoutUserSession).toHaveBeenCalledWith('opaque-session')
+  })
+
+  it.each([
+    [401, { error: 'Unauthorized' }],
+    [429, { error: { code: 'rate_limited' } }],
+    [503, { error: { code: 'authority_unavailable' } }],
+  ] as const)(
+    'reports no presented session when a logout retry follows a failed logout (%s)',
+    async (status, body) => {
+      authServiceMock.loginWithPassword.mockResolvedValueOnce({
+        token: 'synthetic-composed-session-token',
+        me: {
+          id: 'user-1',
+          email: 'user@example.invalid',
+          name: null,
+          picture: null,
+          teamId: null,
+          teamName: null,
+          role: 'member',
+        },
+      })
+      authServiceMock.logoutUserSession.mockRejectedValueOnce(
+        new ControlApiError('private upstream detail', status, body)
+      )
+      // No x-forwarded-proto: a Secure cookie would not travel over plain http in the agent's jar.
+      const agent = request.agent(buildApp())
+
+      const login = await agent
+        .post('/api/v1/auth/password-login')
+        .set('origin', 'http://localhost:3001')
+        .send({ email: 'user@example.invalid', password: 'synthetic-correct-password' })
+        .expect(200)
+      expect(String(login.headers['set-cookie'])).toContain(
+        'profile_session=synthetic-composed-session-token'
+      )
+
+      const failed = await agent.post('/api/v1/auth/logout').expect(status)
+      // Send the retry before checking the failed answer's headers, so a kept cookie shows up
+      // as a retry that still presents a session rather than only as a missing header.
+      const retried = await agent.post('/api/v1/auth/logout').expect(200)
+
+      // The first logout carried the login cookie; the retry reached no session at all.
+      expect(authServiceMock.logoutUserSession.mock.calls).toEqual([
+        ['synthetic-composed-session-token'],
+      ])
+      expect(retried.body).toEqual({ ok: true, sessionPresented: false })
+      expect(failed.body.ok).toBeUndefined()
+      expect(String(failed.headers['set-cookie'])).toContain(
+        'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+      )
+    }
+  )
 
   it('does not call remote revocation or set a cookie when no session is present', async () => {
     const response = await request(buildApp()).post('/api/v1/auth/logout').expect(200)
 
-    expect(response.body).toEqual({ ok: true })
+    expect(response.body).toEqual({ ok: true, sessionPresented: false })
     expect(authServiceMock.logoutUserSession).not.toHaveBeenCalled()
     expect(String(response.headers['set-cookie'])).toContain(
       'Expires=Thu, 01 Jan 1970 00:00:00 GMT'

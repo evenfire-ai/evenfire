@@ -451,6 +451,10 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     expect(fixtureRevoked.status).toBe(realRevoked.status)
     expect(bodyShape(fixtureRevoked.body)).toEqual(bodyShape(realRevoked.body))
     expect(realRevoked.status).toBe(401)
+    // The session probe declares a revoked session with the public envelope, never the
+    // bare 401 that the service-credential guard also sends.
+    expect(realRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
+    expect(fixtureRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
   })
 
   it('parities reset completion, the revoked prior session and the fresh login session', async () => {
@@ -501,6 +505,10 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     expect(fixtureRevoked.status).toBe(realRevoked.status)
     expect(bodyShape(fixtureRevoked.body)).toEqual(bodyShape(realRevoked.body))
     expect(realRevoked.status).toBe(401)
+    // The session probe declares a revoked session with the public envelope, never the
+    // bare 401 that the service-credential guard also sends.
+    expect(realRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
+    expect(fixtureRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
 
     await openPasswordPace()
     const realLogin = await loginReal(
@@ -549,6 +557,41 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
       },
     })
 
+    // Liveness witness: the live session reads its own /me on both implementations, so the
+    // 403 below comes from the path-user check, not from a rejected session.
+    const realOwnMe = await requestReal(
+      'GET',
+      `/external/users/${fixtureModule.RECOVERY_USERS.logout.id}/me?teamId=`,
+      { sessionToken: realToken }
+    )
+    const fixtureOwnMe = await requestFixture(
+      'GET',
+      `/external/users/${fixtureModule.RECOVERY_USERS.logout.id}/me?teamId=`,
+      { sessionToken: fixtureToken }
+    )
+    expect(fixtureOwnMe.status).toBe(realOwnMe.status)
+    expect(bodyShape(fixtureOwnMe.body)).toEqual(bodyShape(realOwnMe.body))
+    expect(realOwnMe.status).toBe(200)
+
+    // A valid session asking for another user's /me is a 403 Forbidden on the real route
+    // (session authentication, then requireExternalUserParamMatch), never the
+    // invalid_session envelope that the edge forwards as a session end.
+    const realOtherMe = await requestReal(
+      'GET',
+      `/external/users/${fixtureModule.RECOVERY_USERS.recovery.id}/me?teamId=`,
+      { sessionToken: realToken }
+    )
+    const fixtureOtherMe = await requestFixture(
+      'GET',
+      `/external/users/${fixtureModule.RECOVERY_USERS.recovery.id}/me?teamId=`,
+      { sessionToken: fixtureToken }
+    )
+    expect(fixtureOtherMe.status).toBe(realOtherMe.status)
+    expect(bodyShape(fixtureOtherMe.body)).toEqual(bodyShape(realOtherMe.body))
+    expect(realOtherMe.status).toBe(403)
+    expect(realOtherMe.body).toEqual({ error: 'Forbidden' })
+    expect(fixtureOtherMe.body).toEqual({ error: 'Forbidden' })
+
     const realLogout = await requestReal('POST', '/external/auth/session/logout', {
       sessionToken: realToken,
     })
@@ -572,6 +615,24 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     expect(fixtureRevoked.status).toBe(realRevoked.status)
     expect(bodyShape(fixtureRevoked.body)).toEqual(bodyShape(realRevoked.body))
     expect(realRevoked.status).toBe(401)
+    // The session probe declares a revoked session with the public envelope, never the
+    // bare 401 that the service-credential guard also sends.
+    expect(realRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
+    expect(fixtureRevoked.body).toMatchObject({ error: { code: 'invalid_session' } })
+
+    // External REST treats only this envelope as an already-revoked logout; a bare 401 is
+    // its own service credential being rejected.
+    const realRepeatedLogout = await requestReal('POST', '/external/auth/session/logout', {
+      sessionToken: realToken,
+    })
+    expect(realRepeatedLogout.status).toBe(401)
+    expect(realRepeatedLogout.body).toMatchObject({ error: { code: 'invalid_session' } })
+    const fixtureRepeatedLogout = await requestFixture('POST', '/external/auth/session/logout', {
+      sessionToken: fixtureToken,
+    })
+    expect(fixtureRepeatedLogout.status).toBe(realRepeatedLogout.status)
+    expect(bodyShape(fixtureRepeatedLogout.body)).toEqual(bodyShape(realRepeatedLogout.body))
+    expect(fixtureRepeatedLogout.body).toMatchObject({ error: { code: 'invalid_session' } })
 
     await expectParity(
       'GET',

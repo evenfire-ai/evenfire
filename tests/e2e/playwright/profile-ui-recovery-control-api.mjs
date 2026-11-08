@@ -471,9 +471,28 @@ export async function createRecoveryControlApi({
     const meMatch = pathname.match(/^\/external\/users\/([^/]+)\/me$/)
     if (method === 'GET' && meMatch) {
       const session = activeSession(sessionToken(headers))
-      if (!session || session.user.id !== meMatch[1]) {
+      if (!session) {
         metrics.unauthorizedMeRequests.push({ userId: meMatch[1] })
-        return { status: 401, body: { error: 'Unauthorized' } }
+        // Same public envelope as the real producer (sendPublicApiError): External REST
+        // forwards only invalid_session as a session end and maps a bare 401 (its own
+        // service credential) to 503 authority_unavailable.
+        return {
+          status: 401,
+          body: {
+            error: {
+              code: 'invalid_session',
+              message: 'The session is not valid.',
+              correlationId: `fixture-me-${metrics.unauthorizedMeRequests.length}`,
+              retryable: false,
+            },
+          },
+        }
+      }
+      // The real route authenticates the session first and then checks the path user
+      // (requireExternalUserParamMatch): a valid session asking for another user's /me
+      // is a 403, never the session-end envelope the edge forwards as a logout.
+      if (session.user.id !== meMatch[1]) {
+        return { status: 403, body: { error: 'Forbidden' } }
       }
       const user = session.user
       const requestedTeamId = new URLSearchParams(search).get('teamId') || ''
@@ -509,7 +528,19 @@ export async function createRecoveryControlApi({
       metrics.logoutRequests.push({ hasToken: Boolean(token) })
       const session = sessions.get(token)
       if (!session || session.revoked) {
-        return { status: 401, body: { error: 'Unauthorized' } }
+        // Same public envelope as the real producer (sendPublicApiError): External REST
+        // treats only invalid_session as an already-revoked logout.
+        return {
+          status: 401,
+          body: {
+            error: {
+              code: 'invalid_session',
+              message: 'The session is not valid.',
+              correlationId: `fixture-logout-${metrics.logoutRequests.length}`,
+              retryable: false,
+            },
+          },
+        }
       }
       session.revoked = true
       return { status: 200, body: { revoked: true } }

@@ -5,7 +5,6 @@ import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootRec
 import { rootLogger } from './observability/logger.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
-import { OperationalAccessIndexer } from './services/access/operationalAccessIndexer.js'
 import {
   bootstrapConfiguredPr2Readiness,
   startControlApiPr2RuntimeEvidence,
@@ -24,8 +23,13 @@ import {
   stopEntityChangeDispatcher,
 } from './services/entityChangeService.js'
 import { syncDiscoveredModels } from './services/llmCatalogSync.js'
-import { startLlmCatalogSyncCron, stopLlmCatalogSyncCron } from './services/llmCatalogSyncCron.js'
+import {
+  startLlmCatalogBootSync,
+  startLlmCatalogSyncCron,
+  stopLlmCatalogSyncCron,
+} from './services/llmCatalogSyncCron.js'
 import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
+import type { ModelsDevCatalogResult } from './services/modelsDevClient.js'
 import {
   REACTIVE_REFRESH_BUFFER_MS,
   startOauthProactiveRefreshCron,
@@ -84,7 +88,6 @@ const logger = rootLogger.child({ module: 'control-api-shutdown' })
 let activeServer: ControlApiServer | null = null
 let requestedExitCode = 0
 let shutdownRequested = false
-let stopOperationalAccessIndexer: (() => void) | null = null
 let stopPr2RuntimeEvidence: (() => void) | null = null
 
 const shutdown = createShutdownHandler(async () => {
@@ -109,7 +112,6 @@ const shutdown = createShutdownHandler(async () => {
       'oauth-shared-grant-sweep': stopOauthSharedGrantSweepCron,
       'workflow-approval-trace-projector': stopWorkflowApprovalTraceProjector,
       'entity-change-dispatcher': stopEntityChangeDispatcher,
-      'operational-access-indexer': () => stopOperationalAccessIndexer?.(),
       'pr2-runtime-evidence': () => stopPr2RuntimeEvidence?.(),
       'core-database-pool': () => pool.end(),
       'rate-limit-database-pool': () => rateLimitPool.end(),
@@ -210,42 +212,23 @@ async function main(): Promise<void> {
 
   const gateway = new K8sGateway(config.namespace)
 
-  if (config.operationalAccessIndexerEnabled) {
-    const operationalIndexer = new OperationalAccessIndexer(gateway, undefined, {
-      retryDelayMs: config.operationalAccessIndexerRetryMs,
-    })
-    const runningIndexer = operationalIndexer.start()
-    stopOperationalAccessIndexer = runningIndexer.stop
-    void runningIndexer.completion.catch(error => {
-      rootLogger.error(
-        { err: error, event: 'operational_access_indexer_stopped' },
-        'operational access index stopped unexpectedly'
-      )
-    })
-    logger.info(
-      { event: 'operational_access_indexer_enabled' },
-      'Operational access indexer enabled'
-    )
-  } else {
-    logger.info(
-      { event: 'operational_access_indexer_disabled' },
-      'Operational access indexer disabled'
-    )
+  // LLM catalog discovery sync. One sync runs a few seconds after start, never
+  // awaited, since boot does not wait on models.dev. With
+  // LLM_CATALOG_SYNC_CRON_ENABLED (code default off, on in the base deploy) it
+  // is the cron's first tick; otherwise it runs alone unless
+  // LLM_CATALOG_BOOT_SYNC_ENABLED=false. A boot sync that could not decide or
+  // failed keeps probing models.dev with backoff. The sync never changes
+  // `enabled` on an existing row. It needs the gateway's ConfigMap writer:
+  // every run publishes the allowlist when it differs from Postgres.
+  const catalogSyncDeps = {
+    sync: (catalog?: ModelsDevCatalogResult) =>
+      syncDiscoveredModels({
+        materializer: gateway.llmAllowedModelsConfigMap(),
+        ...(catalog ? { loadCatalog: async () => catalog } : {}),
+      }),
   }
-
-  // LLM catalog discovery sync cron (Fase 4). Code default off; the base deploy
-  // sets LLM_CATALOG_SYNC_CRON_ENABLED=true. When on, the first sync runs a few
-  // seconds after start (not awaited — boot never waits on models.dev), then
-  // every interval. Non-destructive: inserts disabled discovery rows, only
-  // stale-flags vanished ones under the §4.5 guards.
-  // Started AFTER the gateway exists (#654): the sync publishes the allowlist
-  // ConfigMap when it changes image-input evidence on an enabled row, so it
-  // needs a materializer — the same one the admin routes use.
   if (config.llmCatalogSyncCronEnabled) {
-    startLlmCatalogSyncCron(
-      { sync: () => syncDiscoveredModels({ materializer: gateway.llmAllowedModelsConfigMap() }) },
-      config.llmCatalogSyncIntervalMs
-    )
+    startLlmCatalogSyncCron(catalogSyncDeps, config.llmCatalogSyncIntervalMs)
     logger.info(
       {
         event: 'control_api_llm_catalog_sync_enabled',
@@ -253,10 +236,16 @@ async function main(): Promise<void> {
       },
       'LLM catalog sync cron enabled'
     )
+  } else if (config.llmCatalogBootSyncEnabled) {
+    startLlmCatalogBootSync(catalogSyncDeps)
+    logger.info(
+      { event: 'control_api_llm_catalog_boot_sync_enabled' },
+      'LLM catalog sync cron disabled; boot sync enabled'
+    )
   } else {
     logger.info(
       { event: 'control_api_llm_catalog_sync_disabled' },
-      'LLM catalog sync cron disabled'
+      'LLM catalog sync cron and boot sync disabled'
     )
   }
 

@@ -343,10 +343,8 @@ export function createExternalInvitationsRouter(): Router {
           // capability. A replay must stay a success without minting a session,
           // because the token may already be public knowledge.
           if ('replay' in result.data) return { data: result.data, replay: true as const }
-          const lockedUser = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
-            result.data.userId,
-          ])
-          if ((lockedUser.rowCount ?? 0) === 0) return { error: 'not_found' as const }
+          // The acceptance locked the user row before its membership writes;
+          // issuance reuses that locked row instead of locking it again.
           const issued = await issueExternalUserSession(
             {
               contract: selection.contract,
@@ -357,7 +355,7 @@ export function createExternalInvitationsRouter(): Router {
               authGeneration: Number(result.data.authGeneration),
               authenticationMethods: ['invitation'],
             },
-            { db, policy }
+            { db, policy, lockedUser: result.lockedUser }
           )
           return { data: result.data, issued }
         })
