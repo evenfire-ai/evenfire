@@ -1595,11 +1595,17 @@ export class HostReconciler {
   /**
    * Whether writing the desired Deployment would change the observed pod
    * template (`spec.template`). Only a template change rolls out a new pod.
-   * Deployment metadata, `paused`, `strategy` and `progressDeadlineSeconds` do
-   * not, and `replicas` only scales (callers skip a Deployment at zero
-   * replicas; the wake path mints for it). Both sides go through the merge and
-   * the normalizer the Deployment write uses. The observed token revision is
-   * kept, so a token rotation alone is not a template change.
+   * Deployment metadata, `strategy` and `progressDeadlineSeconds` do not, and
+   * `replicas` only scales (callers skip a Deployment at zero replicas; the
+   * wake path mints for it). Both sides go through the merge and the
+   * normalizer the Deployment write uses. The observed token revision is kept,
+   * so a token rotation alone is not a template change.
+   *
+   * Known gap (accepted): HCC never writes `paused`, so its write unpauses a
+   * Deployment someone paused by hand. A template edit held by that pause, in
+   * a pod-template annotation HCC keeps from the live object, is invisible
+   * here and rolls out on the consumed material. Nothing in this repository
+   * pauses a Host Deployment.
    */
   private templateWillChange(
     observed: k8s.V1Deployment,
@@ -5704,11 +5710,14 @@ export class HostReconciler {
       return
     }
 
-    // Only an active Host mints for a template change. A suspended Host holds
-    // its template. A draining Host defers only its resource policy: any other
-    // template change is written with the material its running pod has already
-    // consumed (known gap, not changed here), unless an intrinsic credential
-    // recovery is delivering fresh material in the same pass.
+    // Only an active Host mints for a template change. A suspension-blocked
+    // Host, and a suspend with resource drift, hold the applied template. Any
+    // other template change on a suspended Host is written with zero replicas,
+    // so it starts no pod, and the wake mints before the pod starts. A draining
+    // Host defers only its resource policy: any other template change is
+    // written with the material its running pod has already consumed (known
+    // gap, not changed here), unless an intrinsic credential recovery is
+    // delivering fresh material in the same pass.
     const templateChangeFor =
       (effective: EffectiveHostLifecycle) =>
       (observed: k8s.V1Deployment): boolean =>
