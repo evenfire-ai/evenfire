@@ -1274,7 +1274,7 @@ export const config: Config = {
   // handler, and the hostWakeCoalesceWindowMs coalescer runs INSIDE the
   // handler (it coalesces annotation projections, not calls) — coalesced
   // calls therefore still consume rate-limit budget, so this budget must
-  // cover RAW calls (the arithmetic above counts raw calls). 30/min is >=3x
+  // cover RAW calls (the arithmetic above counts raw calls). 150/min is >=3x
   // the single-hold mechanism volume and covers one held wake plus prewarm
   // bursts from a few concurrent devices (4 x 3 = 12) plus a real message.
   // Derivation is regression-guarded by test/config.hostWakeRateLimit.test.ts.
