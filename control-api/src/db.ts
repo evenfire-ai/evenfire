@@ -6975,9 +6975,19 @@ const DB_WAIT_RETRY_CODES = new Set([
   'ECONNRESET',
   'EHOSTUNREACH',
   'ENETUNREACH',
+  '57P01', // admin_shutdown: the server began a shutdown after accepting the connection
   '57P03', // cannot_connect_now: starting up, shutting down or in recovery
 ])
-const DB_WAIT_RETRY_MESSAGE = 'Connection terminated due to connection timeout' // pg-pool
+// Errors pg raises with a message and no code, mapped to the code logged for them.
+const DB_WAIT_RETRY_MESSAGES = new Map([
+  ['Connection terminated due to connection timeout', 'connection_timeout'], // pg-pool
+  ['Connection terminated unexpectedly', 'connection_terminated'], // pg: the server closed the socket
+])
+
+/** Default bound of the boot wait. The control-api startupProbe budget must cover it. */
+export const DB_WAIT_DEADLINE_MS = 90_000
+/** Pause between boot-wait probes; the last probe can start one interval before the deadline. */
+export const DB_WAIT_INTERVAL_MS = 2_000
 
 export type WaitForDbConnectionOptions = {
   ensureActive: () => void
@@ -6991,7 +7001,7 @@ export type WaitForDbConnectionOptions = {
 function dbWaitRetryCode(error: unknown): string | null {
   const code = (error as { code?: unknown } | null)?.code
   if (typeof code === 'string' && DB_WAIT_RETRY_CODES.has(code)) return code
-  if (error instanceof Error && error.message === DB_WAIT_RETRY_MESSAGE) return 'connection_timeout'
+  if (error instanceof Error) return DB_WAIT_RETRY_MESSAGES.get(error.message) ?? null
   return null
 }
 
@@ -7007,8 +7017,8 @@ export async function waitForDbConnection({
   probe = () => pool.query('SELECT 1'),
   now = Date.now,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
-  deadlineMs = 90_000,
-  intervalMs = 2_000,
+  deadlineMs = DB_WAIT_DEADLINE_MS,
+  intervalMs = DB_WAIT_INTERVAL_MS,
 }: WaitForDbConnectionOptions): Promise<void> {
   const deadline = now() + deadlineMs
   for (let attempt = 1; ; attempt++) {

@@ -679,9 +679,9 @@ export async function verifyMcpHostRefreshJwt(token: string): Promise<McpHostRef
     return null
   }
 
-  // Outside the try: a database failure here is not a bad credential. It must
-  // reach the route's error handler (5xx), so the Host retries instead of
-  // treating its refresh token as rejected.
+  // Outside the try: a database failure here is not a bad credential, so it
+  // must not answer 401. It reaches the route's error handler (5xx) and the
+  // token stays unconsumed.
   if (await isRefreshJtiRevoked(claims.jti)) {
     return null
   }

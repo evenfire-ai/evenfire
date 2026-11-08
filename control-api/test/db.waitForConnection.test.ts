@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { parseAllDocuments } from 'yaml'
 
 const logger = vi.hoisted(() => {
   const log = {
@@ -14,7 +16,8 @@ const logger = vi.hoisted(() => {
 })
 vi.mock('../src/observability/logger.js', () => logger)
 
-const { waitForDbConnection } = await import('../src/db.js')
+const { DB_WAIT_DEADLINE_MS, DB_WAIT_INTERVAL_MS, corePoolBudget, pool, waitForDbConnection } =
+  await import('../src/db.js')
 
 function codeError(code: string, message = `synthetic ${code}`): Error {
   return Object.assign(new Error(message), { code })
@@ -87,11 +90,22 @@ describe('waitForDbConnection', () => {
     ['ECONNRESET'],
     ['EHOSTUNREACH'],
     ['ENETUNREACH'],
+    ['57P01'],
     ['57P03'],
   ])('retries %s', async code => {
     const h = harness([codeError(code)])
     await expect(waitForDbConnection(h)).resolves.toBeUndefined()
     expect(h.probe).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries a connection the server closed without an error message', async () => {
+    // pg's Client raises this when the socket ends without a client-side end().
+    const h = harness([new Error('Connection terminated unexpectedly')])
+    await expect(waitForDbConnection(h)).resolves.toBeUndefined()
+    expect(h.probe).toHaveBeenCalledTimes(2)
+    expect(warnings().map(([fields]) => (fields as { code: string }).code)).toEqual([
+      'connection_terminated',
+    ])
   })
 
   it.each([
@@ -119,13 +133,73 @@ describe('waitForDbConnection', () => {
   })
 
   it('logs the error code and never the error message', async () => {
-    const leaked = 'postgres://control:Synthetic-Password@10.0.0.1:5432/control'
-    const h = harness([codeError('ECONNREFUSED', `connect ECONNREFUSED ${leaked}`)])
+    const h = harness([codeError('ECONNREFUSED', 'connect ECONNREFUSED synthetic-leak-marker')])
     await waitForDbConnection(h)
-    expect(warnings()).toHaveLength(1)
-    const logged = JSON.stringify(warnings()[0])
-    expect(logged).toContain('ECONNREFUSED')
-    expect(logged).not.toContain('Synthetic-Password')
-    expect(logged).not.toContain('postgres://')
+    // The exact call: any added field (an `err`, the message, the error itself)
+    // fails here. JSON.stringify cannot see an Error's message, so it is not used.
+    expect(warnings()).toEqual([
+      [
+        { event: 'control_api_database_wait', attempt: 1, code: 'ECONNREFUSED' },
+        'Database not reachable yet; waiting',
+      ],
+    ])
+  })
+})
+
+describe('waitForDbConnection defaults', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('probes the core pool with SELECT 1 every 2 s and gives up at 90 s', async () => {
+    const query = vi.spyOn(pool, 'query').mockRejectedValue(codeError('ECONNREFUSED'))
+    let settled = false
+    const result = waitForDbConnection({ ensureActive: () => undefined }).finally(() => {
+      settled = true
+    })
+    result.catch(() => undefined)
+
+    // Literal times on purpose: this test pins the production defaults.
+    await vi.advanceTimersByTimeAsync(88_000)
+    // Probes at 0, 2, ..., 88 s: still waiting before the deadline.
+    expect(settled).toBe(false)
+    expect(query).toHaveBeenCalledTimes(45)
+    expect(query).toHaveBeenNthCalledWith(1, 'SELECT 1')
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    // The probe at 90 s is at the deadline and throws.
+    expect(settled).toBe(true)
+    await expect(result).rejects.toMatchObject({ code: 'ECONNREFUSED' })
+    expect(query).toHaveBeenCalledTimes(46)
+  })
+})
+
+describe('control-api startupProbe budget', () => {
+  it('covers the boot wait, one connection timeout and the boot work around it', () => {
+    const docs = parseAllDocuments(
+      readFileSync(
+        new URL('../../deploy/base/control-plane/control-api.yaml', import.meta.url),
+        'utf8'
+      )
+    ).map(doc => doc.toJS())
+    const deployment = docs.find(doc => doc?.kind === 'Deployment')
+    const container = deployment.spec.template.spec.containers.find(
+      (c: { name: string }) => c.name === 'control-api'
+    )
+    const { periodSeconds, failureThreshold } = container.startupProbe
+    // The manifest comment's own figures: ~5 s process start before the wait,
+    // ~1.5 s from database ready to running after it.
+    const bootWorkMs = 6_500
+    expect(periodSeconds * failureThreshold * 1000).toBeGreaterThan(
+      DB_WAIT_DEADLINE_MS +
+        DB_WAIT_INTERVAL_MS +
+        corePoolBudget().connectionTimeoutMillis +
+        bootWorkMs
+    )
   })
 })
