@@ -6,8 +6,9 @@
 import { createHash } from 'node:crypto'
 import client, { Counter } from 'prom-client'
 import { refreshRuntimeAuthFromPersistedState } from './mcpHostJwtState'
-import { getJwtRuntimeBinding } from './mcpHostRuntimeJwt'
+import { getJwtExpiry, getJwtRuntimeBinding } from './mcpHostRuntimeJwt'
 import {
+  recordRuntimeAuthRecoveryDeferred,
   recordRuntimeAuthRecoveryFailure,
   recordRuntimeAuthRecoverySuccess,
 } from './runtimeAuthHealth'
@@ -331,6 +332,13 @@ async function recoverTokenPair(auth: McpHostRuntimeAuth): Promise<void> {
   }
 }
 
+/**
+ * Every refresh attempt failed without an answer from control-api: a network
+ * error (status 0) or a 5xx. control-api did not judge the refresh token.
+ * Read only through `instanceof`; `name` stays `Error`, so logs are unchanged.
+ */
+class RefreshUnavailableError extends Error {}
+
 async function refreshWithRecoveryInner(auth: McpHostRuntimeAuth): Promise<void> {
   if (reloadPersistedAuthIfAvailable(auth)) {
     return
@@ -338,6 +346,7 @@ async function refreshWithRecoveryInner(auth: McpHostRuntimeAuth): Promise<void>
 
   let consecutive401 = 0
   let lastStatus: number | undefined
+  let onlyUnavailable = true
 
   for (let attempt = 1; attempt <= REFRESH_MAX_ATTEMPTS; attempt++) {
     const result = await attemptRefresh(auth)
@@ -346,6 +355,7 @@ async function refreshWithRecoveryInner(auth: McpHostRuntimeAuth): Promise<void>
     }
 
     lastStatus = result.status
+    if (result.status !== 0 && !isRetryableStatus(result.status)) onlyUnavailable = false
 
     if (result.status === 401) {
       if (reloadPersistedAuthIfAvailable(auth)) {
@@ -374,18 +384,44 @@ async function refreshWithRecoveryInner(auth: McpHostRuntimeAuth): Promise<void>
     }
   }
 
-  throw new Error(
-    `Token refresh failed after ${REFRESH_MAX_ATTEMPTS} attempts (last status=${lastStatus ?? 'unknown'})`
-  )
+  const message = `Token refresh failed after ${REFRESH_MAX_ATTEMPTS} attempts (last status=${lastStatus ?? 'unknown'})`
+  throw onlyUnavailable ? new RefreshUnavailableError(message) : new Error(message)
+}
+
+export type RefreshWithRecoveryOptions = {
+  /**
+   * Scheduled Host renewals only. A refresh that failed with
+   * RefreshUnavailableError does not count toward degraded while the current
+   * access token is valid for at least this many ms (the next retry); it is
+   * recorded as deferred. Every other failure counts.
+   */
+  deferUnavailableWhileAccessValidMs?: number
+}
+
+function accessTokenValidForAtLeast(auth: McpHostRuntimeAuth, ms: number): boolean {
+  const expSec = getJwtExpiry(auth.accessToken)
+  return expSec != null && expSec * 1000 - Date.now() >= ms
 }
 
 /** Refresh with retry; escalates to recoverTokenPair on persistent 401s. */
-export async function refreshWithRecovery(auth: McpHostRuntimeAuth): Promise<void> {
+export async function refreshWithRecovery(
+  auth: McpHostRuntimeAuth,
+  options: RefreshWithRecoveryOptions = {}
+): Promise<void> {
   try {
     await refreshWithRecoveryInner(auth)
     recordRuntimeAuthRecoverySuccess()
   } catch (err) {
-    recordRuntimeAuthRecoveryFailure('refresh_recovery_failed')
+    const deferMs = options.deferUnavailableWhileAccessValidMs
+    if (
+      deferMs !== undefined &&
+      err instanceof RefreshUnavailableError &&
+      accessTokenValidForAtLeast(auth, deferMs)
+    ) {
+      recordRuntimeAuthRecoveryDeferred('refresh_unavailable_token_valid')
+    } else {
+      recordRuntimeAuthRecoveryFailure('refresh_recovery_failed')
+    }
     throw err
   }
 }

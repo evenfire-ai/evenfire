@@ -21,6 +21,14 @@ import { type McpHostRuntimeAuth, refreshWithRecovery } from './userApprovalRequ
  * repeated failures flow through refreshWithRecovery into runtimeAuthHealth;
  * after the degraded threshold the readiness probe (/v1/runtime/health)
  * returns 503, the pod goes NotReady, and HCC rolls it.
+ *
+ * On a Host pod, a renewal that fails only because control-api is unavailable
+ * (network error or 5xx on every attempt) does not count toward that threshold
+ * while the current access token is still valid at the next retry
+ * (`minIntervalSec`): the pod still holds its authority. A refused refresh, a
+ * failed re-issue, a malformed answer, any failure once the token would not
+ * outlive the next retry, every reactive refresh and every recipe-pod renewal
+ * still count.
  */
 
 const DEFAULT_MARGIN_SEC = 600
@@ -111,7 +119,12 @@ export function startRuntimeAuthProactiveRefresh(
   if (!cfg.enabled || running) return
   running = true
 
-  const refresh = deps.refresh ?? refreshWithRecovery
+  const refresh =
+    deps.refresh ??
+    (cfg.accessHalfLife
+      ? (a: McpHostRuntimeAuth) =>
+          refreshWithRecovery(a, { deferUnavailableWhileAccessValidMs: cfg.minIntervalSec * 1000 })
+      : refreshWithRecovery)
   const now = deps.now ?? (() => Date.now())
 
   const arm = (delayMs: number): void => {
@@ -127,9 +140,10 @@ export function startRuntimeAuthProactiveRefresh(
         await refresh(auth)
         ok = true
       } catch {
-        // refreshWithRecovery already recorded the failure into runtimeAuthHealth.
-        // Swallow here so the loop survives and keeps accumulating failures until
-        // the readiness probe degrades and HCC rolls the pod.
+        // refreshWithRecovery already recorded the failure (or, on a Host pod,
+        // the deferral) into runtimeAuthHealth. Swallow here so the loop
+        // survives and keeps accumulating failures until the readiness probe
+        // degrades and HCC rolls the pod.
         ok = false
       }
       // Success: reschedule from the rotated token's fresh expiry. Failure: retry

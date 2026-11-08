@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { persistRuntimeAuthTokens } from '../mcpHostJwtState'
-import { resetRuntimeAuthHealthForTests, runtimeAuthHealthSnapshot } from '../runtimeAuthHealth'
+import {
+  resetRuntimeAuthHealthForTests,
+  runtimeAuthHealthSnapshot,
+  runtimeAuthRecoveryFailuresCounter,
+} from '../runtimeAuthHealth'
 import {
   type ApprovalGateParams,
   type McpHostRuntimeAuth,
@@ -16,6 +20,7 @@ import {
   gateStep,
   reIssueCounter,
   refreshFailureCounter,
+  refreshWithRecovery,
   workflowTokenRefreshCounter,
 } from '../userApprovalRequester'
 
@@ -541,5 +546,211 @@ describe('userApprovalRequester — refresh rotation crash recovery', () => {
     )
     await vi.advanceTimersByTimeAsync(3_000)
     await assertion
+  })
+})
+
+/**
+ * Scheduled Host renewal during a control-api outage. With
+ * `deferUnavailableWhileAccessValidMs` (the scheduler passes it on Host pods
+ * only), a refresh that fails only because control-api did not answer (network
+ * error or 5xx on every attempt) is not counted toward degraded while the
+ * current access token still outlives the next retry. Everything else counts.
+ */
+describe('refreshWithRecovery — scheduled renewal while control-api is unavailable', () => {
+  const NEXT_RETRY_MS = 60_000
+  const accessTokenValidFor = (seconds: number) =>
+    makeRuntimeJwt({
+      hostRefs: ['sandbox-recipes/recipe-test'],
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'recipe-test',
+      exp: Math.floor(Date.now() / 1000) + seconds,
+    })
+  const recoveryCount = async (reason: string): Promise<number> => {
+    const metric = await runtimeAuthRecoveryFailuresCounter.get()
+    return metric.values.find(v => v.labels.reason === reason)?.value ?? 0
+  }
+  const unavailable = () => textResponse(502, 'bad gateway')
+
+  async function settle(promise: Promise<void>, pattern: RegExp): Promise<void> {
+    const assertion = expect(promise).rejects.toThrow(pattern)
+    await vi.advanceTimersByTimeAsync(3_000)
+    await assertion
+  }
+
+  beforeEach(() => {
+    mockFetch.mockReset()
+    runtimeAuthRecoveryFailuresCounter.reset()
+    resetRuntimeAuthHealthForTests()
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_000_000_000)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllEnvs()
+  })
+
+  it.each([
+    ['5xx', () => [unavailable(), textResponse(503, 'unavailable'), textResponse(504, 'timeout')]],
+    [
+      'network errors',
+      () => [new Error('ECONNREFUSED'), new Error('ECONNRESET'), new Error('EAI_AGAIN')],
+    ],
+  ])(
+    'does not count %s while the access token outlives the next retry',
+    async (_label, answers) => {
+      vi.stubEnv('MCP_HOST_RUNTIME_AUTH_DEGRADED_AFTER_FAILURES', '1')
+      for (const answer of answers()) {
+        if (answer instanceof Error) mockFetch.mockRejectedValueOnce(answer)
+        else mockFetch.mockResolvedValueOnce(answer)
+      }
+      const auth = makeAuth({ accessToken: accessTokenValidFor(200) })
+
+      await settle(
+        refreshWithRecovery(auth, { deferUnavailableWhileAccessValidMs: NEXT_RETRY_MS }),
+        /Token refresh failed after 3 attempts/
+      )
+
+      // Witnesses: all three attempts reached the gateway, and the deferral was recorded.
+      expect(mockFetch).toHaveBeenCalledTimes(3)
+      expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(1)
+      expect(await recoveryCount('refresh_recovery_failed')).toBe(0)
+      // With the threshold at 1, a counted failure would already be degraded.
+      expect(runtimeAuthHealthSnapshot()).toMatchObject({ state: 'ok', consecutiveFailures: 0 })
+    }
+  )
+
+  it('counts the failure once the access token would not outlive the next retry', async () => {
+    mockFetch.mockResolvedValue(unavailable())
+    const auth = makeAuth({ accessToken: accessTokenValidFor(30) })
+
+    await settle(
+      refreshWithRecovery(auth, { deferUnavailableWhileAccessValidMs: NEXT_RETRY_MS }),
+      /Token refresh failed after 3 attempts/
+    )
+
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+    expect(runtimeAuthHealthSnapshot()).toMatchObject({
+      consecutiveFailures: 1,
+      lastFailureReason: 'refresh_recovery_failed',
+    })
+    expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(0)
+  })
+
+  it('counts the failure when the access token expiry cannot be read', async () => {
+    mockFetch.mockResolvedValue(unavailable())
+    const auth = makeAuth() // RECIPE_TEST_ACCESS_TOKEN carries no exp
+
+    await settle(
+      refreshWithRecovery(auth, { deferUnavailableWhileAccessValidMs: NEXT_RETRY_MS }),
+      /Token refresh failed after 3 attempts/
+    )
+
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+    expect(runtimeAuthHealthSnapshot().consecutiveFailures).toBe(1)
+    expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(0)
+  })
+
+  it('counts a refresh that control-api rejected once, even if later attempts got 5xx', async () => {
+    mockFetch
+      .mockResolvedValueOnce(textResponse(401, 'invalid_refresh_token'))
+      .mockResolvedValueOnce(unavailable())
+      .mockResolvedValueOnce(unavailable())
+    const auth = makeAuth({ accessToken: accessTokenValidFor(200) })
+
+    await settle(
+      refreshWithRecovery(auth, { deferUnavailableWhileAccessValidMs: NEXT_RETRY_MS }),
+      /Token refresh failed after 3 attempts \(last status=502\)/
+    )
+
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+    expect(auth.reIssueTokens).not.toHaveBeenCalled()
+    expect(runtimeAuthHealthSnapshot()).toMatchObject({
+      consecutiveFailures: 1,
+      lastFailureReason: 'refresh_recovery_failed',
+    })
+    expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(0)
+  })
+
+  it('counts a refused refresh whose re-issue fails (consumed bootstrap token)', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      mockFetch.mockResolvedValue(textResponse(401, 'invalid_refresh_token'))
+      const auth = makeAuth({ accessToken: accessTokenValidFor(200) })
+      auth.reIssueTokens.mockRejectedValueOnce(new Error('re-issue returned HTTP 503'))
+
+      await settle(
+        refreshWithRecovery(auth, { deferUnavailableWhileAccessValidMs: NEXT_RETRY_MS }),
+        /re-issue returned HTTP 503/
+      )
+
+      expect(mockFetch).toHaveBeenCalledTimes(2)
+      expect(auth.reIssueTokens).toHaveBeenCalledTimes(1)
+      expect(runtimeAuthHealthSnapshot()).toMatchObject({
+        consecutiveFailures: 1,
+        lastFailureReason: 'refresh_recovery_failed',
+      })
+      expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(0)
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it.each([429, 403, 400])('counts a refresh answered %i', async status => {
+    mockFetch.mockResolvedValue(textResponse(status, 'refused'))
+    const auth = makeAuth({ accessToken: accessTokenValidFor(200) })
+
+    await settle(
+      refreshWithRecovery(auth, { deferUnavailableWhileAccessValidMs: NEXT_RETRY_MS }),
+      new RegExp(`last status=${status}`)
+    )
+
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+    expect(runtimeAuthHealthSnapshot().consecutiveFailures).toBe(1)
+    expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(0)
+  })
+
+  it('counts a malformed refresh answer', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ refreshToken: 'only-refresh' }))
+    const auth = makeAuth({ accessToken: accessTokenValidFor(200) })
+
+    await settle(
+      refreshWithRecovery(auth, { deferUnavailableWhileAccessValidMs: NEXT_RETRY_MS }),
+      /missing accessToken/
+    )
+
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(runtimeAuthHealthSnapshot().consecutiveFailures).toBe(1)
+    expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(0)
+  })
+
+  it('counts an unavailable refresh from a reactive caller (no deferral option)', async () => {
+    mockFetch.mockResolvedValue(unavailable())
+    const auth = makeAuth({ accessToken: accessTokenValidFor(200) })
+
+    await settle(refreshWithRecovery(auth), /Token refresh failed after 3 attempts/)
+
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+    expect(runtimeAuthHealthSnapshot()).toMatchObject({
+      consecutiveFailures: 1,
+      lastFailureReason: 'refresh_recovery_failed',
+    })
+    expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(0)
+  })
+
+  it('keeps earlier counted failures when a later renewal is deferred', async () => {
+    mockFetch.mockResolvedValue(unavailable())
+    const auth = makeAuth({ accessToken: accessTokenValidFor(200) })
+
+    await settle(refreshWithRecovery(auth), /Token refresh failed/)
+    await settle(
+      refreshWithRecovery(auth, { deferUnavailableWhileAccessValidMs: NEXT_RETRY_MS }),
+      /Token refresh failed/
+    )
+
+    expect(mockFetch).toHaveBeenCalledTimes(6)
+    expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(1)
+    // A deferral neither adds to nor clears the count; only a success clears it.
+    expect(runtimeAuthHealthSnapshot().consecutiveFailures).toBe(1)
   })
 })

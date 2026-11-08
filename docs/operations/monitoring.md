@@ -169,7 +169,8 @@ your own NetworkPolicy that allows your Prometheus to reach those ports.
 | `clerum_llm_allowlist_missing_total`                  | mcp-host    | Times mcp-host saw the LLM allowlist ConfigMap absent and fell back to the Host-configured model only        |
 | `clerum_llm_model_not_allowed_total`                  | mcp-host    | The Host-configured model is outside the operator allowlist. Signal only; mcp-host does not reject the model |
 | `clerum_llm_fallback_total`                           | mcp-host    | mcp-host switched to a configured fallback provider/model, labelled `from`, `to`, `reason`                   |
-| `mcp_host_runtime_auth_degraded`                      | mcp-host    | Gauge. Runtime auth is degraded; readiness returns `503` while it is set. A control-api outage of about 129 s or more can set it through failed scheduled renewals |
+| `mcp_host_runtime_auth_degraded`                      | mcp-host    | Gauge. Runtime auth is degraded; readiness returns `503` while it is set. On a Host pod, a control-api outage sets it only once it outlasts the access token (about 300 s after a renewal), so the pod goes NotReady about a minute after the token expires: until then, scheduled renewals that fail with a network error or 5xx are deferred, not counted. A refused refresh counts at once |
+| `mcp_host_runtime_auth_recovery_failures_total`       | mcp-host    | Failed runtime-auth refreshes by `reason`: `refresh_recovery_failed` counts toward the degraded gauge; `refresh_unavailable_token_valid` is a Host renewal deferred because control-api was unavailable while the access token was still valid |
 | `clerum_llm_allowlist_configmap_write_failures_total` | control-api | Failed writes of the `clerum-llm-allowed-models` ConfigMap, by `phase` (`mutation`, `boot`, `sync`)          |
 
 For guardrail behaviour, see [Configure guardrails](../how-to/configure-guardrails.md).

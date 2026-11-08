@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ContextMapperClient } from '../../contextMapperClient'
 import {
+  resetRuntimeAuthHealthForTests,
+  runtimeAuthHealthSnapshot,
+  runtimeAuthRecoveryFailuresCounter,
+} from '../../workflow/runtimeAuthHealth'
+import {
   type ProactiveRefreshConfig,
   startRuntimeAuthProactiveRefresh,
   stopRuntimeAuthProactiveRefresh,
@@ -15,9 +20,13 @@ import { type McpHostRuntimeAuth, refreshWithRecovery } from '../../workflow/use
 // and control-api answers. HCC rejects a bearer whose `exp` has passed; the
 // refresh route answers 504 while control-api is down.
 //
-// Stated limit: readiness is not asserted. The accepted residual (an outage of
-// about 190 s or more after a tick can make the pod NotReady) is above the
-// 163 s outage of case A.
+// Readiness is modelled, not served: a probe every 10 s that fails while
+// runtimeAuthHealthSnapshot() is degraded (the state /v1/runtime/health
+// answers 503 on), NotReady after 6 failures and Ready after 1 success, as in
+// the Host Deployment HCC writes. A scheduled renewal that fails only because
+// control-api is unavailable is not counted while the access token outlives
+// the next retry, so an outage the fleet survives does not make the pod
+// NotReady. An outage longer than the token still degrades it and revokes.
 
 const HCC = 'http://hcc.test'
 const GATEWAY = 'http://gateway.test'
@@ -85,7 +94,53 @@ function scriptedBackends(outage: Outage) {
   return { fetchMock, counts }
 }
 
-async function runHost(outage: Outage, untilSec: number, config: ProactiveRefreshConfig) {
+/**
+ * Kubelet model of the Host readiness probe (period 10 s, failureThreshold 6,
+ * successThreshold 1; host-context-controller/src/hostReconciler.ts). The
+ * route answers 503 exactly when the snapshot is degraded (src/server.ts,
+ * pinned by server.interface.contract.test.ts).
+ */
+function readinessProbe(phaseSec: number) {
+  const result = { probes: 0, degradedProbes: 0, notReadySec: 0 }
+  let failing = 0
+  let notReadySince: number | null = null
+  const closeNotReady = () => {
+    if (notReadySince == null) return
+    result.notReadySec += nowSec() - notReadySince
+    notReadySince = null
+  }
+  const probe = () => {
+    result.probes += 1
+    if (runtimeAuthHealthSnapshot().state === 'degraded') {
+      result.degradedProbes += 1
+      failing += 1
+      if (failing >= 6 && notReadySince == null) notReadySince = nowSec()
+    } else {
+      failing = 0
+      closeNotReady()
+    }
+  }
+  let interval: ReturnType<typeof setInterval> | undefined
+  const start = setTimeout(() => {
+    probe()
+    interval = setInterval(probe, 10_000)
+  }, phaseSec * 1000)
+  return {
+    result,
+    stop: () => {
+      clearTimeout(start)
+      clearInterval(interval)
+      closeNotReady()
+    },
+  }
+}
+
+async function runHost(
+  outage: Outage,
+  untilSec: number,
+  config: ProactiveRefreshConfig,
+  probePhaseSec = 0
+) {
   const { fetchMock, counts } = scriptedBackends(outage)
   vi.stubGlobal('fetch', fetchMock)
   const auth = {
@@ -105,6 +160,7 @@ async function runHost(outage: Outage, untilSec: number, config: ProactiveRefres
     },
   })
   startRuntimeAuthProactiveRefresh(auth, { config, now: () => Date.now() })
+  const readiness = readinessProbe(probePhaseSec)
 
   // The inventory poll runs every 30 s, as in production. It stops after the
   // first revocation, as the Host does.
@@ -130,7 +186,10 @@ async function runHost(outage: Outage, untilSec: number, config: ProactiveRefres
     }
     polls += 1
   }
-  return { counts, onCallerAuthorizationFailure, polls }
+  // The renewal loop and the probe keep running after a revocation.
+  await vi.advanceTimersByTimeAsync(Math.max(0, untilSec * 1000 - Date.now()))
+  readiness.stop()
+  return { counts, onCallerAuthorizationFailure, polls, readiness: readiness.result }
 }
 
 describe('Host fleet continuity through a control-api outage', () => {
@@ -139,6 +198,8 @@ describe('Host fleet continuity through a control-api outage', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(0)
+    resetRuntimeAuthHealthForTests()
+    runtimeAuthRecoveryFailuresCounter.reset()
     stateDir = mkdtempSync(join(tmpdir(), 'continuity-state-'))
     vi.stubEnv('MCP_HOST_RUNTIME_AUTH_STATE_DIR', stateDir)
   })
@@ -154,8 +215,9 @@ describe('Host fleet continuity through a control-api outage', () => {
   it('keeps the fleet through a 163 s outage that covers the old expiry and a tick', async () => {
     // 163 s is the longest control-api outage measured. The first token
     // expires at 600 s, inside the outage (500-663 s). With the half-life
-    // rule it was renewed at 300 s (new expiry 900 s); the tick at 600 s and
-    // its retry at 660 s fail, and the retry at 720 s succeeds.
+    // rule it was renewed at 300 s (new expiry 900 s). The tick at 600 s
+    // fails (three attempts, about 3 s), and its retry at about 663 s, just
+    // after the outage ends, succeeds. Only one tick fails.
     const { counts, onCallerAuthorizationFailure, polls } = await runHost(
       { from: 500, to: 663 },
       900,
@@ -166,18 +228,57 @@ describe('Host fleet continuity through a control-api outage', () => {
     // Witnesses: HCC kept answering during the outage, a renewal was tried
     // inside it, and renewals succeeded before and after it.
     expect(counts.hcc200InOutage).toBeGreaterThanOrEqual(5)
-    expect(counts.refreshInOutage).toBeGreaterThanOrEqual(1)
-    expect(counts.refreshOk).toBeGreaterThanOrEqual(2)
+    // One failed tick of three attempts; renewals at 300 s and about 663 s.
+    expect(counts.refreshInOutage).toBe(3)
+    expect(counts.refreshOk).toBe(2)
   })
 
-  it('still revokes once an outage outlasts the token', async () => {
-    const { counts, onCallerAuthorizationFailure } = await runHost(
-      { from: 450, to: 1100 },
-      1100,
-      HALF_LIFE
-    )
-    expect(onCallerAuthorizationFailure).toHaveBeenCalledTimes(1)
-    expect(onCallerAuthorizationFailure).toHaveBeenCalledWith(401)
-    expect(counts.hcc401).toBeGreaterThanOrEqual(1)
-  })
+  it.each(
+    [131, 163, 200, 250, 299].flatMap(lengthSec => [0, 3, 7].map(phase => [lengthSec, phase]))
+  )(
+    'keeps the pod Ready through a %i s outage that starts at a renewal tick (probe phase %i s)',
+    async (lengthSec, phase) => {
+      // Renewed at 300 s (expiry 900 s); the next tick is at 600 s, one second
+      // into the outage. Failed ticks follow every ~63 s: 600, 663, 726, ...
+      const { counts, onCallerAuthorizationFailure, polls, readiness } = await runHost(
+        { from: 599, to: 599 + lengthSec },
+        1000,
+        HALF_LIFE,
+        phase
+      )
+      expect(onCallerAuthorizationFailure).not.toHaveBeenCalled()
+      expect(readiness.degradedProbes).toBe(0)
+      expect(readiness.notReadySec).toBe(0)
+      // Witnesses: the probe ran for the whole run; at least three ticks
+      // (enough for the degraded threshold) failed inside the outage, and each
+      // was recorded as deferred; renewals resumed after it.
+      expect(readiness.probes).toBeGreaterThanOrEqual(99)
+      expect(polls).toBeGreaterThanOrEqual(30)
+      expect(counts.refreshInOutage).toBeGreaterThanOrEqual(9)
+      const deferred = (await runtimeAuthRecoveryFailuresCounter.get()).values.find(
+        v => v.labels.reason === 'refresh_unavailable_token_valid'
+      )?.value
+      expect(deferred).toBeGreaterThanOrEqual(3)
+      expect(counts.refreshOk).toBeGreaterThanOrEqual(2)
+    }
+  )
+
+  it.each([0, 3, 7])(
+    'still degrades and revokes once an outage outlasts the token (probe phase %i s)',
+    async phase => {
+      const { counts, onCallerAuthorizationFailure, readiness } = await runHost(
+        { from: 450, to: 1100 },
+        1100,
+        HALF_LIFE,
+        phase
+      )
+      expect(onCallerAuthorizationFailure).toHaveBeenCalledTimes(1)
+      expect(onCallerAuthorizationFailure).toHaveBeenCalledWith(401)
+      expect(counts.hcc401).toBeGreaterThanOrEqual(1)
+      // The token expired at 900 s: the failures from about 850 s on count, the
+      // pod degrades and goes NotReady.
+      expect(readiness.degradedProbes).toBeGreaterThanOrEqual(6)
+      expect(readiness.notReadySec).toBeGreaterThan(0)
+    }
+  )
 })

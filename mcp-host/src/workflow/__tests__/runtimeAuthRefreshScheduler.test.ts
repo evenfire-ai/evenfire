@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  resetRuntimeAuthHealthForTests,
+  runtimeAuthHealthSnapshot,
+  runtimeAuthRecoveryFailuresCounter,
+} from '../runtimeAuthHealth'
+import {
   type ProactiveRefreshConfig,
   computeNextRefreshDelayMs,
   isRuntimeAuthProactiveRefreshRunning,
@@ -249,3 +254,149 @@ describe('startRuntimeAuthProactiveRefresh loop', () => {
     expect(isRuntimeAuthProactiveRefreshRunning()).toBe(false)
   })
 })
+
+describe('startRuntimeAuthProactiveRefresh: control-api outage, real refresh path', () => {
+  const GATEWAY = 'http://gateway.test'
+  const claims = { hostRefs: ['host-a'], recipeNamespace: 'mcp-host', recipeName: 'standalone' }
+  const signed = (payload: Record<string, unknown>) =>
+    `${b64url({ alg: 'none', typ: 'JWT' })}.${b64url({ ...claims, ...payload })}.sig`
+  const nowSec = () => Math.floor(Date.now() / 1000)
+
+  /** Gateway that answers 502 inside [from, to) and rotates tokens outside it. */
+  function gateway(outage: { from: number; to: number }, accessTtlSec: number) {
+    const calls = { inOutage: 0, ok: 0 }
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      if (String(input) !== `${GATEWAY}/api/v1/workflow-auth/refresh`) {
+        throw new Error(`unexpected fetch ${String(input)}`)
+      }
+      if (nowSec() >= outage.from && nowSec() < outage.to) {
+        calls.inOutage += 1
+        return new Response('bad gateway', { status: 502 })
+      }
+      calls.ok += 1
+      const t = nowSec()
+      return new Response(
+        JSON.stringify({
+          accessToken: signed({ iat: t, exp: t + accessTtlSec }),
+          refreshToken: signed({ iat: t, exp: t + 3600 }),
+        }),
+        { status: 200 }
+      )
+    })
+    return { fetchMock, calls }
+  }
+
+  /** Advance one second at a time and keep the worst health seen. */
+  async function runUntil(untilSec: number) {
+    let maxConsecutive = 0
+    let degradedAt: number | null = null
+    while (nowSec() < untilSec) {
+      await vi.advanceTimersByTimeAsync(1_000)
+      const snap = runtimeAuthHealthSnapshot()
+      maxConsecutive = Math.max(maxConsecutive, snap.consecutiveFailures)
+      if (snap.state === 'degraded' && degradedAt == null) degradedAt = nowSec()
+    }
+    return { maxConsecutive, degradedAt }
+  }
+
+  const deferred = async () =>
+    (await runtimeAuthRecoveryFailuresCounter.get()).values.find(
+      v => v.labels.reason === 'refresh_unavailable_token_valid'
+    )?.value ?? 0
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    resetRuntimeAuthHealthForTests()
+    runtimeAuthRecoveryFailuresCounter.reset()
+  })
+
+  afterEach(() => {
+    stopRuntimeAuthProactiveRefresh()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('a Host pod rides out a 250 s outage that starts at a renewal tick', async () => {
+    const { fetchMock, calls } = gateway({ from: 299, to: 549 }, 600)
+    vi.stubGlobal('fetch', fetchMock)
+    const auth = {
+      accessToken: signed({ iat: 0, exp: 600 }),
+      refreshToken: signed({ iat: 0, exp: 3600 }),
+      baseUrl: GATEWAY,
+      ...{ hostRef: 'host-a', recipeNamespace: 'mcp-host', recipeName: 'standalone' },
+    } as McpHostRuntimeAuth
+    startRuntimeAuthProactiveRefresh(auth, {
+      config: { ...CFG, accessHalfLife: true },
+      now: () => Date.now(),
+    })
+
+    const { maxConsecutive, degradedAt } = await runUntil(560)
+
+    // Witnesses: four failed ticks (300, 363, 426, 489; three attempts each)
+    // ran inside the outage, each was recorded as deferred, and the retry at
+    // about 552 s renewed the token.
+    expect(calls.inOutage).toBe(12)
+    expect(await deferred()).toBe(4)
+    expect(calls.ok).toBe(1)
+    expect(maxConsecutive).toBe(0)
+    expect(degradedAt).toBeNull()
+    expect(expOf(auth.accessToken)).toBeGreaterThan(1100)
+  })
+
+  it('a Host pod counts the tick whose token would not outlive the next retry', async () => {
+    // First token expires at 600 s; the outage outlasts it.
+    const { fetchMock, calls } = gateway({ from: 299, to: 700 }, 600)
+    vi.stubGlobal('fetch', fetchMock)
+    const auth = {
+      accessToken: signed({ iat: 0, exp: 600 }),
+      refreshToken: signed({ iat: 0, exp: 3600 }),
+      baseUrl: GATEWAY,
+      ...{ hostRef: 'host-a', recipeNamespace: 'mcp-host', recipeName: 'standalone' },
+    } as McpHostRuntimeAuth
+    startRuntimeAuthProactiveRefresh(auth, {
+      config: { ...CFG, accessHalfLife: true },
+      now: () => Date.now(),
+    })
+
+    // Ticks at 300, 363, 426 and 489 s end with 297-108 s of token left and are
+    // deferred. The tick at 552 s ends at 555 s with 45 s left (< the 60 s to
+    // the next retry), so it counts.
+    const early = await runUntil(551)
+    expect(early.maxConsecutive).toBe(0)
+    expect(await deferred()).toBe(4)
+    await runUntil(556)
+    expect(runtimeAuthHealthSnapshot()).toMatchObject({ state: 'ok', consecutiveFailures: 1 })
+    expect(calls.inOutage).toBe(15)
+    // After expiry every failure counts: the ticks at 615 s and 678 s reach the
+    // threshold when the second one ends, at 681 s.
+    const late = await runUntil(690)
+    expect(late.degradedAt).toBe(681)
+    expect(await deferred()).toBe(4)
+  })
+
+  it('a recipe pod (no half-life) still degrades on the same failures', async () => {
+    // Recipe pods renew on the refresh-token rule: first tick at 3600 - 600 = 3000 s.
+    const { fetchMock, calls } = gateway({ from: 2999, to: 3250 }, 3600)
+    vi.stubGlobal('fetch', fetchMock)
+    const auth = {
+      accessToken: signed({ iat: 0, exp: 3600 }),
+      refreshToken: signed({ iat: 0, exp: 3600 }),
+      baseUrl: GATEWAY,
+      ...{ hostRef: 'host-a', recipeNamespace: 'mcp-host', recipeName: 'standalone' },
+    } as McpHostRuntimeAuth
+    startRuntimeAuthProactiveRefresh(auth, { config: CFG, now: () => Date.now() })
+
+    const { degradedAt } = await runUntil(3150)
+
+    // Three failed ticks (3000, 3063, 3126) with 474 s or more of token left
+    // still reach the threshold: the deferral is for Host pods only.
+    expect(calls.inOutage).toBe(9)
+    expect(await deferred()).toBe(0)
+    expect(degradedAt).toBe(3129)
+  })
+})
+
+function expOf(token: string): number {
+  return JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString()).exp as number
+}
