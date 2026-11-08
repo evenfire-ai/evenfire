@@ -277,6 +277,13 @@ const auth = () =>
     status: 'authenticated',
     contract: 'v1',
     claims: SESSION,
+    authorityContext: {
+      contract: 'v1',
+      userId: SESSION.userId,
+      tokenHash: 'token-hash',
+      issuedAt: SESSION.exp - 3600,
+      authGeneration: SESSION.authGeneration,
+    },
   })
 
 const v2Auth = () =>
