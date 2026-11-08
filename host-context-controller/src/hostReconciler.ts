@@ -86,6 +86,7 @@ import {
   deploymentMatchesDesired,
   ensureResource,
   getErrorCode,
+  normalizeDeploymentForComparison,
   observeCreate,
   observeExistenceRead,
   preserveDeploymentAnnotations,
@@ -152,7 +153,7 @@ class HostMutationIdentityChangedError extends Error {
 
 class RuntimeBootstrapPreparationUnavailableError extends Error {
   constructor() {
-    super('Waiting for a prepared runtime bootstrap before changing resources')
+    super('Waiting for a prepared runtime bootstrap before changing the pod template')
     this.name = 'RuntimeBootstrapPreparationUnavailableError'
   }
 }
@@ -1593,9 +1594,12 @@ export class HostReconciler {
 
   /**
    * Whether writing the desired Deployment would change the observed pod
-   * template, judged by the comparator the Deployment write itself uses. The
-   * observed token revision and replica count are kept, so a token rotation
-   * or a scale alone is not a template change.
+   * template (`spec.template`). Only a template change rolls out a new pod.
+   * Deployment metadata, `paused`, `strategy` and `progressDeadlineSeconds` do
+   * not, and `replicas` only scales (callers skip a Deployment at zero
+   * replicas; the wake path mints for it). Both sides go through the merge and
+   * the normalizer the Deployment write uses. The observed token revision is
+   * kept, so a token rotation alone is not a template change.
    */
   private templateWillChange(
     observed: k8s.V1Deployment,
@@ -1611,7 +1615,6 @@ export class HostReconciler {
       lifecycle,
       grokExecutionEnabled
     )
-    desired.spec!.replicas = observed.spec?.replicas
     // The API server stores quantities in canonical form (1024Mi as 1Gi). Equal
     // amounts start no new pod, so they need no new credentials; every other
     // field, and any other resources key, stays an exact comparison.
@@ -1624,7 +1627,11 @@ export class HostReconciler {
         limits: structuredClone(live?.resources?.limits),
       }
     }
-    return !deploymentMatchesDesired(preserveHostDeploymentAnnotations(desired, observed), observed)
+    const template = (deployment: k8s.V1Deployment): string =>
+      JSON.stringify(
+        (normalizeDeploymentForComparison(deployment) as k8s.V1Deployment).spec?.template
+      )
+    return template(preserveHostDeploymentAnnotations(desired, observed)) !== template(observed)
   }
 
   private static deploymentReady(deployment: k8s.V1Deployment | null): boolean {
@@ -5697,8 +5704,11 @@ export class HostReconciler {
       return
     }
 
-    // Only an active Host writes a new template here; draining and suspended
-    // Hosts defer or hold theirs.
+    // Only an active Host mints for a template change. A suspended Host holds
+    // its template. A draining Host defers only its resource policy: any other
+    // template change is written with the material its running pod has already
+    // consumed (known gap, not changed here), unless an intrinsic credential
+    // recovery is delivering fresh material in the same pass.
     const templateChangeFor =
       (effective: EffectiveHostLifecycle) =>
       (observed: k8s.V1Deployment): boolean =>

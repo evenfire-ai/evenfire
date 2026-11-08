@@ -1130,13 +1130,105 @@ describe('HostReconciler resource rollout bootstrap', () => {
       expect(issue).toHaveBeenCalledTimes(4)
     }, 30_000)
 
-    it('does not mint for a template change while the stateless runtime is draining', async () => {
+    // Known gap, kept as is in this change: a draining Host defers only its
+    // resource policy, so a new image is written on the consumed material. This
+    // test records today's behavior; it is not the intended end state.
+    it('writes a draining Host image change on the consumed material, without a mint', async () => {
       const fixture = await runtime({ stateless: true, draining: true })
+      const consumedRevision = fixture.secret().metadata!.annotations![SECRET_REVISION]
       config.hostImage = NEW_IMAGE
       await fixture.reconcile()
       // Witness: the pass reached the Deployment write.
       expect(image(fixture.deployment())).toBe(NEW_IMAGE)
       expect(issue).not.toHaveBeenCalled()
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        consumedRevision
+      )
+    })
+
+    const FOREIGN_LABEL = 'policy.example/owner'
+    const stampForeignLabel = (fixture: Awaited<ReturnType<typeof runtime>>) => {
+      fixture.deployment().metadata!.labels = {
+        ...fixture.deployment().metadata!.labels,
+        [FOREIGN_LABEL]: 'team-a',
+      }
+    }
+
+    it('does not mint for a Deployment label that only the Deployment metadata carries', async () => {
+      const fixture = await runtime()
+      const revision = fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]
+      stampForeignLabel(fixture)
+      fixture.advance()
+      await fixture.reconcile()
+      // Witness: HCC wrote the Deployment and removed the foreign label.
+      expect(fixture.events).toEqual(['replace-deployment'])
+      expect(fixture.deployment().metadata!.labels![FOREIGN_LABEL]).toBeUndefined()
+      expect(issue).not.toHaveBeenCalled()
+      expect(fixture.templateChanges()).toBe(0)
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        revision
+      )
+    })
+
+    it('does not mint on every pass when a writer re-stamps a Deployment label', async () => {
+      const fixture = await runtime()
+      for (let pass = 0; pass < 3; pass++) {
+        stampForeignLabel(fixture)
+        fixture.advance()
+        await fixture.reconcile()
+      }
+      // Witness: one Deployment write per pass.
+      expect(fixture.events.filter(e => e === 'replace-deployment')).toHaveLength(3)
+      expect(issue).not.toHaveBeenCalled()
+      expect(fixture.templateChanges()).toBe(0)
+    })
+
+    it('does not mint for spec.paused, which starts no pod', async () => {
+      const fixture = await runtime()
+      fixture.deployment().spec!.paused = true
+      fixture.advance()
+      await fixture.reconcile()
+      // Witness: HCC wrote the Deployment and cleared paused.
+      expect(fixture.events).toEqual(['replace-deployment'])
+      expect(fixture.deployment().spec!.paused).not.toBe(true)
+      expect(issue).not.toHaveBeenCalled()
+      expect(fixture.templateChanges()).toBe(0)
+    })
+
+    it('refuses an image change without prepared material, then delivers it once prepared', async () => {
+      const fixture = await runtime()
+      const template = structuredClone(fixture.deployment().spec!.template)
+      config.hostImage = NEW_IMAGE
+      // A provision that reports no fresh material for the observed target: the
+      // Deployment write itself must refuse the new template.
+      const provision = vi
+        .spyOn(fixture.reconciler as any, 'provisionRuntimeTokenRevision')
+        .mockResolvedValue({
+          revision: template.metadata!.annotations![APPLIED_REVISION],
+          scopeHash: fixture.secret().metadata!.annotations!['clerum.io/runtime-token-scope-hash'],
+          deploymentUid: fixture.deployment().metadata!.uid,
+          freshBootstrapPrepared: false,
+        })
+      try {
+        const reads = deploymentReads(fixture)
+        await fixture.reconcile()
+        // Witness: the pass read the Deployment it then refused to write.
+        expect(deploymentReads(fixture)).toBeGreaterThan(reads)
+        expect(fixture.events).toEqual([])
+        expect(fixture.deployment().spec!.template).toEqual(template)
+        expect(fixture.reconciler.getStatus(fixture.host.name)).toMatchObject({
+          message: 'Waiting for a prepared runtime bootstrap before changing the pod template',
+        })
+      } finally {
+        provision.mockRestore()
+      }
+      await fixture.reconcile()
+      expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+      expect(image(fixture.deployment())).toBe(NEW_IMAGE)
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        fixture.secret().metadata!.annotations![SECRET_REVISION]
+      )
     })
   })
 
@@ -1168,7 +1260,7 @@ describe('HostReconciler resource rollout bootstrap', () => {
         expect(fixture.reconciler.getStatus(fixture.host.name)).toMatchObject({
           deployed: true,
           ready: false,
-          message: 'Waiting for a prepared runtime bootstrap before changing resources',
+          message: 'Waiting for a prepared runtime bootstrap before changing the pod template',
         })
       } finally {
         provision.mockRestore()
