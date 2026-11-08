@@ -100,6 +100,12 @@ test(
     fs.mkdirSync(selected)
     bridge.publishNoReplace(staged.session)
     assert.equal(bridge.isPublished(staged.session), true)
+    assert.equal(
+      fs.existsSync(path.join(accepted, 'saved.bin')),
+      true,
+      'the final entry must remain under the accepted directory object'
+    )
+    assert.equal(fs.existsSync(path.join(selected, 'saved.bin')), false)
 
     const acceptedAlias = path.join(accepted, aliasRelative)
     const aliasStat = fs.statSync(acceptedAlias)

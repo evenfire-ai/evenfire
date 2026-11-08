@@ -11,7 +11,7 @@
     },
     {
       "path": "desktop-app\\native\\gfs_save_bridge.test.cjs",
-      "sha256": "9520725157f1022d45949c99e5bf9a0c862a6557f057657de057ad0e38920517"
+      "sha256": "92665b67522479bb9296fb96639157cb651a23e208c009e5acff7a5804d1d3e9"
     },
     {
       "path": "desktop-app\\native\\gfs_save_bridge_win.cc",
