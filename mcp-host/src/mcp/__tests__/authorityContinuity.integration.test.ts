@@ -162,8 +162,12 @@ async function runHost(
   startRuntimeAuthProactiveRefresh(auth, { config, now: () => Date.now() })
   const readiness = readinessProbe(probePhaseSec)
 
-  // The inventory poll runs every 30 s, as in production. It stops after the
-  // first revocation, as the Host does.
+  // The inventory poll runs every 30 s, as in production. The harness stops
+  // polling at the first revocation, so the tests can assert that revocation.
+  // The Host does not stop: it revokes with restartPolling=true, so every later
+  // poll gets a 401 and counts one more reactive refresh. Inside the outage
+  // those refreshes fail, so stopping here only drops counted failures: the
+  // harness cannot degrade sooner than the Host.
   // A refresh inside a poll backs off on timers (1/2/4 s), so the clock keeps
   // moving while the poll is pending; the next poll still starts on the next
   // 30 s boundary.
