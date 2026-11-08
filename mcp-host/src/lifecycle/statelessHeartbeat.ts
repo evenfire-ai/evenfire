@@ -142,7 +142,7 @@ export interface StatelessHeartbeatOptions {
   /** Re-read the CURRENT runtime access token per request from the shared
    *  refreshing McpHostRuntimeAuth holder (updated in place by the runtime-auth
    *  refresh path) — NOT a static env var, which would freeze at boot and 401
-   *  once the ~300s access token expires. MUST throw when the token is
+   *  once the 600s access token expires. MUST throw when the token is
    *  unavailable — the tick catches it and logs loudly without killing the
    *  interval. */
   getAccessToken: () => string

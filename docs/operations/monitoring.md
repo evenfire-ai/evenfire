@@ -169,7 +169,7 @@ your own NetworkPolicy that allows your Prometheus to reach those ports.
 | `clerum_llm_allowlist_missing_total`                  | mcp-host    | Times mcp-host saw the LLM allowlist ConfigMap absent and fell back to the Host-configured model only        |
 | `clerum_llm_model_not_allowed_total`                  | mcp-host    | The Host-configured model is outside the operator allowlist. Signal only; mcp-host does not reject the model |
 | `clerum_llm_fallback_total`                           | mcp-host    | mcp-host switched to a configured fallback provider/model, labelled `from`, `to`, `reason`                   |
-| `mcp_host_runtime_auth_degraded`                      | mcp-host    | Gauge. Runtime auth is degraded; readiness returns `503` while it is set                                     |
+| `mcp_host_runtime_auth_degraded`                      | mcp-host    | Gauge. Runtime auth is degraded; readiness returns `503` while it is set. A control-api outage of about 129 s or more can set it through failed scheduled renewals |
 | `clerum_llm_allowlist_configmap_write_failures_total` | control-api | Failed writes of the `clerum-llm-allowed-models` ConfigMap, by `phase` (`mutation`, `boot`, `sync`)          |
 
 For guardrail behaviour, see [Configure guardrails](../how-to/configure-guardrails.md).

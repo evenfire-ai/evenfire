@@ -1,20 +1,26 @@
-import { getJwtExpiry } from './mcpHostRuntimeJwt'
+import { config } from '../config'
+import { getJwtExpiry, getJwtIssuedAt } from './mcpHostRuntimeJwt'
 import { type McpHostRuntimeAuth, refreshWithRecovery } from './userApprovalRequester'
 
 /**
  * Proactive runtime-auth refresh.
  *
- * The pod's runtime-auth chain is otherwise refreshed only reactively (on a
- * 401 from an approval/poll/usage call). An idle first-party mcp-host that
- * makes no gateway calls therefore lets its refresh token expire beyond the
- * reissue grace window, after which it cannot self-heal and HCC will not roll
- * it because the pod still reports ready.
+ * Without it the pod's runtime-auth chain is refreshed only reactively (on a
+ * 401 from an approval/poll/usage call), that is after the access token has
+ * already expired. An idle first-party mcp-host that makes no gateway calls
+ * would let its refresh token expire beyond the reissue grace window, after
+ * which it cannot self-heal and HCC will not roll it because the pod still
+ * reports ready.
  *
  * This scheduler refreshes the chain a margin BEFORE the refresh token expires,
- * keeping an idle pod alive indefinitely. When the chain becomes unrecoverable,
- * the repeated failures flow through refreshWithRecovery into
- * runtimeAuthHealth; after the degraded threshold the readiness probe
- * (/v1/runtime/health) returns 503, the pod goes NotReady, and HCC rolls it.
+ * keeping an idle pod alive indefinitely. On a Host pod (`runtimeKind`
+ * standalone) it also renews the access token at half its lifetime, so a token
+ * always has that half left when an identity-service outage starts: polls keep
+ * working through a shorter outage instead of refreshing inside it. Recipe pods
+ * keep the refresh-token rule only. When the chain becomes unrecoverable, the
+ * repeated failures flow through refreshWithRecovery into runtimeAuthHealth;
+ * after the degraded threshold the readiness probe (/v1/runtime/health)
+ * returns 503, the pod goes NotReady, and HCC rolls it.
  */
 
 const DEFAULT_MARGIN_SEC = 600
@@ -26,6 +32,8 @@ export type ProactiveRefreshConfig = {
   marginSec: number
   minIntervalSec: number
   fallbackSec: number
+  /** Also renew the access token at half its lifetime (Host pods only). */
+  accessHalfLife?: boolean
 }
 
 function envInt(name: string, fallback: number): number {
@@ -47,23 +55,37 @@ export function proactiveRefreshConfig(): ProactiveRefreshConfig {
       'MCP_HOST_RUNTIME_AUTH_PROACTIVE_REFRESH_FALLBACK_SEC',
       DEFAULT_FALLBACK_SEC
     ),
+    // Resolved from the environment at config load, so it is the same for
+    // every caller that arms the loop, whichever arms first.
+    accessHalfLife: config.runtimeKind === 'standalone',
   }
 }
 
 /**
- * Pure: ms until the next proactive refresh, derived from the refresh token's
- * `exp`. Refreshes `marginSec` before expiry, clamped to `minIntervalSec` so a
- * past-due or undecodable token retries promptly rather than hot-looping.
+ * Pure: ms until the next proactive refresh. Refreshes `marginSec` before the
+ * refresh token's `exp`; with `accessHalfLife`, at the access token's midpoint
+ * if that comes first. Clamped to `minIntervalSec` so a past-due token retries
+ * promptly rather than hot-looping. An undecodable access token falls back to
+ * the refresh-token rule; an undecodable refresh token to `fallbackSec`.
  */
 export function computeNextRefreshDelayMs(
   refreshToken: string,
   nowMs: number,
-  cfg: ProactiveRefreshConfig
+  cfg: ProactiveRefreshConfig,
+  accessToken?: string
 ): number {
   const minMs = cfg.minIntervalSec * 1000
   const expSec = getJwtExpiry(refreshToken)
-  if (expSec == null) return Math.max(cfg.fallbackSec * 1000, minMs)
-  const targetMs = expSec * 1000 - cfg.marginSec * 1000
+  let targetMs = expSec == null ? null : expSec * 1000 - cfg.marginSec * 1000
+  if (cfg.accessHalfLife && accessToken) {
+    const iat = getJwtIssuedAt(accessToken)
+    const exp = getJwtExpiry(accessToken)
+    if (iat != null && exp != null && exp > iat) {
+      const midpointMs = (iat + (exp - iat) / 2) * 1000
+      targetMs = targetMs == null ? midpointMs : Math.min(targetMs, midpointMs)
+    }
+  }
+  if (targetMs == null) return Math.max(cfg.fallbackSec * 1000, minMs)
   return Math.max(targetMs - nowMs, minMs)
 }
 
@@ -112,11 +134,15 @@ export function startRuntimeAuthProactiveRefresh(
       }
       // Success: reschedule from the rotated token's fresh expiry. Failure: retry
       // soon so consecutive failures reach the degraded threshold quickly.
-      arm(ok ? computeNextRefreshDelayMs(auth.refreshToken, now(), cfg) : cfg.minIntervalSec * 1000)
+      arm(
+        ok
+          ? computeNextRefreshDelayMs(auth.refreshToken, now(), cfg, auth.accessToken)
+          : cfg.minIntervalSec * 1000
+      )
     })()
   }
 
-  arm(computeNextRefreshDelayMs(auth.refreshToken, now(), cfg))
+  arm(computeNextRefreshDelayMs(auth.refreshToken, now(), cfg, auth.accessToken))
 }
 
 /** Stop the proactive refresh loop. Idempotent; used on shutdown and in tests. */

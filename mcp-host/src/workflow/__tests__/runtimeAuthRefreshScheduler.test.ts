@@ -3,10 +3,23 @@ import {
   type ProactiveRefreshConfig,
   computeNextRefreshDelayMs,
   isRuntimeAuthProactiveRefreshRunning,
+  proactiveRefreshConfig,
   startRuntimeAuthProactiveRefresh,
   stopRuntimeAuthProactiveRefresh,
 } from '../runtimeAuthRefreshScheduler'
 import { type McpHostRuntimeAuth } from '../userApprovalRequester'
+
+const runtimeKind = vi.hoisted(() => ({ value: 'standalone' as string }))
+vi.mock('../../config', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../config')>()
+  return {
+    ...actual,
+    config: new Proxy(actual.config, {
+      get: (target, prop, receiver) =>
+        prop === 'runtimeKind' ? runtimeKind.value : Reflect.get(target, prop, receiver),
+    }),
+  }
+})
 
 function b64url(value: unknown): string {
   return Buffer.from(JSON.stringify(value)).toString('base64url')
@@ -54,6 +67,84 @@ describe('computeNextRefreshDelayMs', () => {
   it('uses the fallback interval when exp cannot be decoded', () => {
     const delay = computeNextRefreshDelayMs(jwtWithExp(null), now, CFG)
     expect(delay).toBe(CFG.fallbackSec * 1000)
+  })
+})
+
+/** Unsigned access JWT with `iat` and `exp`, in seconds. */
+function accessJwt(iatSec: number | null, expSec: number | null): string {
+  const payload: Record<string, unknown> = { sub: 'x' }
+  if (iatSec != null) payload.iat = iatSec
+  if (expSec != null) payload.exp = expSec
+  return `${b64url({ alg: 'none', typ: 'JWT' })}.${b64url(payload)}.sig`
+}
+
+describe('computeNextRefreshDelayMs: access token half-life (Host pods)', () => {
+  const now = 1_000_000_000_000
+  const nowSec = now / 1000
+  const HALF: ProactiveRefreshConfig = { ...CFG, accessHalfLife: true }
+
+  it('renews at the access token midpoint', () => {
+    const delay = computeNextRefreshDelayMs(
+      jwtWithExp(nowSec + 3600),
+      now,
+      HALF,
+      accessJwt(nowSec, nowSec + 600)
+    )
+    expect(delay).toBe(300 * 1000)
+  })
+
+  it('keeps the refresh-token rule when it comes first', () => {
+    const delay = computeNextRefreshDelayMs(
+      jwtWithExp(nowSec + 700),
+      now,
+      HALF,
+      accessJwt(nowSec, nowSec + 600)
+    )
+    expect(delay).toBe(100 * 1000)
+  })
+
+  it('clamps to minIntervalSec once the midpoint has passed', () => {
+    const delay = computeNextRefreshDelayMs(
+      jwtWithExp(nowSec + 3600),
+      now,
+      HALF,
+      accessJwt(nowSec - 400, nowSec + 200)
+    )
+    expect(delay).toBe(CFG.minIntervalSec * 1000)
+  })
+
+  it('falls back to the refresh-token rule when the access token cannot be decoded', () => {
+    expect(computeNextRefreshDelayMs(jwtWithExp(nowSec + 3600), now, HALF, 'not-a-jwt')).toBe(
+      3000 * 1000
+    )
+    expect(
+      computeNextRefreshDelayMs(jwtWithExp(nowSec + 3600), now, HALF, accessJwt(null, nowSec + 600))
+    ).toBe(3000 * 1000)
+  })
+
+  it('ignores the access token when the half-life is off (recipe pods)', () => {
+    const delay = computeNextRefreshDelayMs(
+      jwtWithExp(nowSec + 3600),
+      now,
+      CFG,
+      accessJwt(nowSec, nowSec + 600)
+    )
+    expect(delay).toBe(3000 * 1000)
+  })
+})
+
+describe('proactiveRefreshConfig: half-life by runtime kind', () => {
+  afterEach(() => {
+    runtimeKind.value = 'standalone'
+  })
+
+  it.each([
+    ['standalone', true],
+    ['workflow', false],
+    ['sdk-only', false],
+  ])('%s gives accessHalfLife %s', (kind, expected) => {
+    runtimeKind.value = kind
+    expect(proactiveRefreshConfig().accessHalfLife).toBe(expected)
   })
 })
 
@@ -120,6 +211,34 @@ describe('startRuntimeAuthProactiveRefresh loop', () => {
 
     await vi.advanceTimersByTimeAsync(3000 * 1000)
     expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('renews a Host token at its midpoint, then at the new token’s midpoint', async () => {
+    const auth = {
+      refreshToken: jwtWithExp(3600),
+      accessToken: accessJwt(0, 600),
+    } as unknown as McpHostRuntimeAuth
+    const refresh = vi.fn().mockImplementation(async (a: McpHostRuntimeAuth) => {
+      const t = Math.floor(Date.now() / 1000)
+      a.accessToken = accessJwt(t, t + 600)
+      a.refreshToken = jwtWithExp(t + 3600)
+    })
+    startRuntimeAuthProactiveRefresh(auth, {
+      refresh,
+      config: { ...CFG, accessHalfLife: true },
+      now: () => Date.now(),
+    })
+
+    await vi.advanceTimersByTimeAsync(299 * 1000)
+    expect(refresh).toHaveBeenCalledTimes(0)
+    // Witness for the line above: the renewal does come, at 300 s.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(refresh).toHaveBeenCalledTimes(1)
+    // The rotated token was issued at 300 s, so the next renewal is at 600 s.
+    await vi.advanceTimersByTimeAsync(299 * 1000)
+    expect(refresh).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(refresh).toHaveBeenCalledTimes(2)
   })
 
   it('stops cleanly', () => {
