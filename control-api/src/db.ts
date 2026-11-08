@@ -6964,6 +6964,70 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
   }
 }
 
+// Errors that mean Postgres is not reachable yet, as seen while it moves to
+// another node. Anything else (authentication, a missing database, SQL errors)
+// is not a reason to wait and fails the boot at once.
+const DB_WAIT_RETRY_CODES = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  '57P03', // cannot_connect_now: starting up, shutting down or in recovery
+])
+const DB_WAIT_RETRY_MESSAGE = 'Connection terminated due to connection timeout' // pg-pool
+
+export type WaitForDbConnectionOptions = {
+  ensureActive: () => void
+  probe?: () => Promise<unknown>
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+  deadlineMs?: number
+  intervalMs?: number
+}
+
+function dbWaitRetryCode(error: unknown): string | null {
+  const code = (error as { code?: unknown } | null)?.code
+  if (typeof code === 'string' && DB_WAIT_RETRY_CODES.has(code)) return code
+  if (error instanceof Error && error.message === DB_WAIT_RETRY_MESSAGE) return 'connection_timeout'
+  return null
+}
+
+/**
+ * Wait, within a bound, until Postgres accepts a connection. Boot calls this
+ * before `assertDbReady` so a Postgres that is moving to another node does not
+ * turn into a crash loop. Past the deadline the last error is thrown and boot
+ * fails as before. The warning carries only the error code, never the message,
+ * which can include the connection string.
+ */
+export async function waitForDbConnection({
+  ensureActive,
+  probe = () => pool.query('SELECT 1'),
+  now = Date.now,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  deadlineMs = 90_000,
+  intervalMs = 2_000,
+}: WaitForDbConnectionOptions): Promise<void> {
+  const deadline = now() + deadlineMs
+  for (let attempt = 1; ; attempt++) {
+    ensureActive()
+    try {
+      await probe()
+      return
+    } catch (error) {
+      const code = dbWaitRetryCode(error)
+      if (!code || now() >= deadline) throw error
+      rootLogger.warn(
+        { event: 'control_api_database_wait', attempt, code },
+        'Database not reachable yet; waiting'
+      )
+    }
+    await sleep(intervalMs)
+  }
+}
+
 export async function assertDbReady(db: DbClient = pool): Promise<void> {
   if (!CONTROL_API_MIGRATIONS.length) {
     throw new Error('Control API database has no registered migrations')
