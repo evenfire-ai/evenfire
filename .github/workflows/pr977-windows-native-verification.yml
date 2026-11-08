@@ -31,7 +31,11 @@ jobs:
           $manifest = Get-Content .validation/pr1085/source-manifest.json -Raw | ConvertFrom-Json
           Write-Output "CANDIDATE_BASE=$($manifest.candidateBase)"
           foreach ($entry in $manifest.files) {
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry.path).Hash.ToLowerInvariant()
+            $content = [System.IO.File]::ReadAllText($entry.path, [System.Text.Encoding]::UTF8)
+            $normalized = $content.Replace("`r`n", "`n").Replace("`r", "`n")
+            $hashBytes = [System.Security.Cryptography.SHA256]::HashData(
+              [System.Text.Encoding]::UTF8.GetBytes($normalized))
+            $hash = [Convert]::ToHexString($hashBytes).ToLowerInvariant()
             if ($hash -ne $entry.sha256) { throw "Candidate source hash mismatch: $($entry.path)" }
           }
           Write-Output "CANDIDATE_FILES_VERIFIED=$($manifest.files.Count)"
@@ -152,13 +156,9 @@ jobs:
           $volume = Get-Volume -DriveLetter R -ErrorAction SilentlyContinue
           if ($volume) {
             mountvol R: /D | Out-Null
-            $diskpart = @"
-            select vdisk file=C:\gfs-r26-refs.vhdx
-            detach vdisk
-            exit
-            "@
             $diskpartPath = Join-Path $env:RUNNER_TEMP 'gfs-r26-detach.txt'
-            Set-Content -Path $diskpartPath -Value $diskpart -Encoding ASCII
+            @('select vdisk file=C:\gfs-r26-refs.vhdx', 'detach vdisk', 'exit') |
+              Set-Content -Path $diskpartPath -Encoding ASCII
             diskpart /s $diskpartPath | Out-Null
           }
           Remove-Item -Force -ErrorAction SilentlyContinue 'C:\gfs-r26-refs.vhdx'
