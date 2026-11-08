@@ -97,7 +97,13 @@ describe('R26 S147 registered GFS save IPC finalization', () => {
           return receipt
         })
 
-        const stage = await reconciliationStarted.promise
+        const postPublication = await Promise.race([
+          reconciliationStarted.promise.then(stage => ({ kind: 'reconciliation' as const, stage })),
+          caller!.then(receipt => ({ kind: 'settled' as const, receipt })),
+        ])
+        expect(postPublication.kind).toBe('reconciliation')
+        if (postPublication.kind !== 'reconciliation') return
+        const stage = postPublication.stage
         const finalBefore = await fs.stat(filePath)
         const identity = (stats: Awaited<ReturnType<typeof fs.stat>>) => `${stats.dev}:${stats.ino}`
         const retainedIdentity =
@@ -113,12 +119,16 @@ describe('R26 S147 registered GFS save IPC finalization', () => {
         expect(attempts).toEqual(['primary', 'reconciliation'])
         expect(order).toEqual([])
 
+        const generationBeforeLogout = app.getSessionGeneration()
         logout = service.logout().then(value => {
           order.push('logout-resolved')
           return value
         })
-        await Promise.resolve()
+        // Flush the queued operation's scheduling turn while the reconciliation
+        // barrier is still held; a queue-release mutant must become observable.
+        await new Promise(resolve => setImmediate(resolve))
         expect(order).toEqual([])
+        expect(app.getSessionGeneration()).toBe(generationBeforeLogout)
 
         releaseReconciliation.resolve()
         const receipt = (await caller) as Record<string, unknown>
@@ -161,7 +171,10 @@ describe('R26 S147 registered GFS save IPC finalization', () => {
           payload
         )
         expect(duplicate).toEqual(receipt)
-        ipcListeners.get('gfs:abort')?.({}, { requestId: payload.requestId })
+        ipcListeners.get('gfs:abort')?.(
+          { senderFrame: { url: 'file:///app/index.html' }, sender: {} },
+          { requestId: payload.requestId }
+        )
         await new Promise(resolve => setImmediate(resolve))
         expect(JSON.stringify(receipt)).toBe(receiptJson)
         expect(attempts).toEqual(['primary', 'reconciliation'])

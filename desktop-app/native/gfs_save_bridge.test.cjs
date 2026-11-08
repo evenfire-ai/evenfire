@@ -1,10 +1,17 @@
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { after, test } = require('node:test')
 
-const bridge = require('./build/Release/evenfire_gfs_save_bridge.node')
+const bridgePath = require.resolve('./build/Release/evenfire_gfs_save_bridge.node')
+const bridge = require(bridgePath)
+const bridgeSha256 = crypto.createHash('sha256').update(fs.readFileSync(bridgePath)).digest('hex')
+process.stdout.write(
+  `GFS_NATIVE_MODULE=${bridgePath} SHA256=${bridgeSha256} ` +
+    `NODE=${process.version} NAPI=${process.versions.napi}\n`
+)
 const roots = []
 const sessions = new Set()
 
@@ -99,8 +106,19 @@ test(
     assert.equal(bridge.inspectFinal(staged.session), `${aliasStat.dev}:${aliasStat.ino}`)
     assert.equal(fs.readFileSync(path.join(accepted, 'saved.bin'), 'utf8'), 'accepted handle')
     assert.equal(fs.existsSync(path.join(selected, 'saved.bin')), false)
-    assert.equal(bridge.applyFinalMode(staged.session, 0o640), 0o640)
-    assert.equal(fs.statSync(path.join(accepted, 'saved.bin')).mode & 0o777, 0o640)
+    let appliedMode
+    let finalModeError
+    try {
+      appliedMode = bridge.applyFinalMode(staged.session, 0o640)
+    } catch (error) {
+      finalModeError = error
+    }
+    assert.equal(
+      fs.statSync(path.join(accepted, 'saved.bin')).mode & 0o777,
+      0o640,
+      finalModeError?.message ?? 'retained-handle final mode was not applied'
+    )
+    assert.equal(appliedMode, 0o640)
     bridge.cleanupStage(staged.session)
     assert.equal(fs.existsSync(acceptedAlias), false)
     assert.equal(fs.readFileSync(path.join(accepted, 'saved.bin'), 'utf8'), 'accepted handle')
@@ -142,7 +160,10 @@ test(
     fs.writeFileSync(destination, 'sentinel')
     const staged = stage(destination, 'new bytes')
 
-    assert.throws(() => bridge.publishNoReplace(staged.session))
+    assert.throws(
+      () => bridge.publishNoReplace(staged.session),
+      /publish GFS file without replacement: .*file exists/i
+    )
     assert.equal(bridge.isPublished(staged.session), false)
     assert.equal(fs.readFileSync(destination, 'utf8'), 'sentinel')
     bridge.cleanupStage(staged.session)
@@ -163,18 +184,22 @@ test(
     const session = openDestination(path.join(selected, 'saved.bin'))
     const stagePath = bridge.stagePath(session)
     const observation = bridge.stageObservation(session)
+    process.stdout.write(`GFS_WINDOWS_RENAME_PRECONDITION=${JSON.stringify(observation)}\n`)
     assert.equal(observation.daclProtected, true)
     assert.equal(observation.bytesWritten, 0)
+    assert.equal(observation.bytesWrittenExact, '0')
     assert.equal(observation.physicalLength, 0)
     assert.match(observation.identity, /^[0-9A-F]{16}:[0-9A-F]{32}$/i)
     const body = Buffer.from('accepted Hdir')
     assert.equal(bridge.writeChunk(session, body), body.length)
     const afterWrite = bridge.stageObservation(session)
     assert.equal(afterWrite.bytesWritten, body.length)
+    assert.equal(afterWrite.bytesWrittenExact, String(body.length))
     assert.equal(afterWrite.physicalLength, body.length)
     bridge.settleWriter(session, body.length)
     const afterSettlement = bridge.stageObservation(session)
     assert.equal(afterSettlement.bytesWritten, body.length)
+    assert.equal(afterSettlement.bytesWrittenExact, String(body.length))
     assert.equal(afterSettlement.physicalLength, body.length)
     assert.throws(() => fs.readFileSync(stagePath))
     assert.equal(qTokenReadExit(stagePath), 5, 'Q-token denial must hold for the private stage')
@@ -184,6 +209,10 @@ test(
     assert.equal(bridge.publishNoReplace(session), true)
     assert.equal(bridge.isPublished(session), true)
     assert.equal(bridge.inspectFinal(session), observation.identity)
+    assert.equal(observation.directoryIsDiskHandle, true)
+    assert.equal(observation.targetNameBytes, Buffer.byteLength('saved.bin', 'utf16le'))
+    assert.ok(observation.directoryIdentity)
+    assert.ok(observation.renameFileNameOffset > 0)
     bridge.applyFinalAccess(session)
     assert.equal(bridge.inspectFinalAccess(session), 'intended')
     assert.equal(fs.existsSync(path.join(selected, 'saved.bin')), false)
@@ -260,7 +289,7 @@ test(
     const body = Buffer.from('new bytes')
     bridge.writeChunk(session, body)
     bridge.settleWriter(session, body.length)
-    assert.throws(() => bridge.publishNoReplace(session))
+    assert.throws(() => bridge.publishNoReplace(session), /Win32 error (80|183)\b/)
     assert.equal(bridge.isPublished(session), false)
     assert.equal(fs.readFileSync(destination, 'utf8'), 'sentinel')
     bridge.closeSession(session)

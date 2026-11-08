@@ -64,6 +64,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $qName = 'gfsq' + ([guid]::NewGuid().ToString('N').Substring(0, 8))
           $qPassword = ([guid]::NewGuid().ToString('N') + 'aA1!')
+          Write-Output "::add-mask::$qName"
+          Write-Output "::add-mask::$qPassword"
           $secure = ConvertTo-SecureString $qPassword -AsPlainText -Force
           New-LocalUser -Name $qName -Password $secure -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
           $qSid = (Get-LocalUser -Name $qName).SID.Value
@@ -133,9 +135,13 @@ jobs:
           if ((Get-Volume -DriveLetter C).FileSystem -ne 'NTFS') { throw 'NTFS precondition failed' }
           $env:EVENFIRE_GFS_SAVE_TEST_ROOT = 'C:\gfs-r26-ntfs'
           node --test native/gfs_save_bridge.test.cjs
-          if ($LASTEXITCODE -ne 0) { throw "NTFS native tests failed: $LASTEXITCODE" }
+          $nativeExit = $LASTEXITCODE
           npm exec -- vitest run src/__tests__/gfsSaveOwner.test.ts src/__tests__/gfsSaveS147.integration.test.ts src/__tests__/ipc.gfsSaveToDisk.test.ts src/__tests__/appService.nativeCommit.test.ts
-          if ($LASTEXITCODE -ne 0) { throw "NTFS owner tests failed: $LASTEXITCODE" }
+          $ownerExit = $LASTEXITCODE
+          "R26_NTFS_NATIVE_EXIT=$nativeExit" | Add-Content $env:GITHUB_ENV
+          "R26_NTFS_OWNER_EXIT=$ownerExit" | Add-Content $env:GITHUB_ENV
+          $global:LASTEXITCODE = 0
+          exit 0
       - name: Run native filesystem and owner tests on ReFS
         shell: pwsh
         working-directory: desktop-app
@@ -145,9 +151,23 @@ jobs:
           if ((Get-Volume -DriveLetter R).FileSystem -ne 'ReFS') { throw 'ReFS precondition failed' }
           $env:EVENFIRE_GFS_SAVE_TEST_ROOT = 'R:\gfs-r26-refs'
           node --test native/gfs_save_bridge.test.cjs
-          if ($LASTEXITCODE -ne 0) { throw "ReFS native tests failed: $LASTEXITCODE" }
+          $nativeExit = $LASTEXITCODE
           npm exec -- vitest run src/__tests__/gfsSaveOwner.test.ts src/__tests__/gfsSaveS147.integration.test.ts src/__tests__/ipc.gfsSaveToDisk.test.ts src/__tests__/appService.nativeCommit.test.ts
-          if ($LASTEXITCODE -ne 0) { throw "ReFS owner tests failed: $LASTEXITCODE" }
+          $ownerExit = $LASTEXITCODE
+          "R26_REFS_NATIVE_EXIT=$nativeExit" | Add-Content $env:GITHUB_ENV
+          "R26_REFS_OWNER_EXIT=$ownerExit" | Add-Content $env:GITHUB_ENV
+          $global:LASTEXITCODE = 0
+          exit 0
+      - name: Enforce native and owner test results from both filesystems
+        if: always()
+        shell: pwsh
+        run: |
+          $failures = @()
+          foreach ($name in @('R26_NTFS_NATIVE_EXIT', 'R26_NTFS_OWNER_EXIT', 'R26_REFS_NATIVE_EXIT', 'R26_REFS_OWNER_EXIT')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($null -eq $value -or $value -ne '0') { $failures += "$name=$value" }
+          }
+          if ($failures.Count -gt 0) { throw "Native acceptance failed: $($failures -join ', ')" }
       - name: Remove task-owned Windows test principal and ReFS volume
         if: always()
         shell: pwsh

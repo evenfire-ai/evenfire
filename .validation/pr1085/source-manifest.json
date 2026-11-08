@@ -11,15 +11,15 @@
     },
     {
       "path": "desktop-app\\native\\gfs_save_bridge.test.cjs",
-      "sha256": "2f1a081041987e5bd2dce543835e9470f34479a830973418281b6860632262a5"
+      "sha256": "9520725157f1022d45949c99e5bf9a0c862a6557f057657de057ad0e38920517"
     },
     {
       "path": "desktop-app\\native\\gfs_save_bridge_win.cc",
-      "sha256": "25cfc8c23eb74a9689b94813bd6c7c833d8fa94e722665403da2fb3a791c61ba"
+      "sha256": "ecb17f3ded210a6ef0f13049ba1867ca89f63fec4da27b6ef90a02bead5f3e8a"
     },
     {
       "path": "desktop-app\\native\\test-q-token-access.ps1",
-      "sha256": "c3efab3cd2eb90587caf348fe911be27be5ab869c740c816de0a1fefd56b9b09"
+      "sha256": "e1f2a67a36b5ffd937109ef925380384a3dcda2446daa29ac5405e1bbedf27d4"
     },
     {
       "path": "desktop-app\\package-lock.json",
@@ -75,11 +75,11 @@
     },
     {
       "path": "desktop-app\\src\\__tests__\\gfsSaveOwner.test.ts",
-      "sha256": "2e1f099379ca320f106be7c906f51aceffdfe30d4ae39b50642d66fbc20f104c"
+      "sha256": "20b844cca55609dc50a7f7dec6c12c36a21865d27a4fe75471c099851ab56eca"
     },
     {
       "path": "desktop-app\\src\\__tests__\\gfsSaveS147.integration.test.ts",
-      "sha256": "453c1493d932fbcadfcd0e3342d7470a73f44422eb4210791e6c15e3228a6f8b"
+      "sha256": "03c73a74235a3a3680ffd6057b2a7fe7b112117ac495f6b2ca083f455515381e"
     },
     {
       "path": "desktop-app\\src\\__tests__\\ipc.gfsDeepLinkCopy.test.ts",

@@ -17,7 +17,7 @@ if ($currentSid -eq $qSid) {
   throw 'The secondary Q principal must have a distinct Windows SID.'
 }
 if ($GrantRead) {
-  $icacls = Join-Path $env:SystemRoot 'System32\\icacls.exe'
+  $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
   $grant = "${account}:(R)"
   $output = & $icacls $Path /grant $grant 2>&1
   if ($LASTEXITCODE -ne 0) {
@@ -48,6 +48,19 @@ $powerShellHost = if ($env:EVENFIRE_GFS_POWERSHELL_PATH) {
 } else {
   Join-Path $PSHOME 'pwsh.exe'
 }
-$process = Start-Process -FilePath $powerShellHost `
-  -Credential $credential -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-Write-Output "Q_EXIT=$($process.ExitCode)"
+$startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = $powerShellHost
+$startInfo.Arguments = $arguments
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$startInfo.UserName = $env:GFS_Q_USERNAME
+$startInfo.Domain = $env:COMPUTERNAME
+$startInfo.Password = $credential.Password
+$startInfo.LoadUserProfile = $true
+$process = [System.Diagnostics.Process]::Start($startInfo)
+try {
+  $process.WaitForExit()
+  Write-Output "Q_EXIT=$($process.ExitCode)"
+} finally {
+  $process.Dispose()
+}

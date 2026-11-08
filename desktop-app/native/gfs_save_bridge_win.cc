@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -16,6 +17,19 @@
 #include <vector>
 
 namespace {
+
+// FILE_INFO_BY_HANDLE_CLASS value documented for FILE_RENAME_INFO_EX. Keep
+// this local layout so the bridge builds with SDKs that predate the alias.
+constexpr FILE_INFO_BY_HANDLE_CLASS kFileRenameInfoEx =
+    static_cast<FILE_INFO_BY_HANDLE_CLASS>(22);
+struct GfsFileRenameInfoEx {
+  DWORD Flags;
+  HANDLE RootDirectory;
+  DWORD FileNameLength;
+  WCHAR FileName[1];
+};
+static_assert(offsetof(GfsFileRenameInfoEx, FileName) ==
+              (sizeof(void*) == 8 ? 20u : 12u));
 
 struct SaveSession {
   HANDLE directory = INVALID_HANDLE_VALUE;
@@ -37,7 +51,7 @@ struct SaveSession {
 std::atomic<uint64_t> g_stage_counter{0};
 
 std::string WinMessage(const char* operation, DWORD error = GetLastError()) {
-  char buffer[256]{};
+  char buffer[640]{};
   std::snprintf(buffer, sizeof(buffer), "%s failed (Win32 error %lu)", operation,
                 static_cast<unsigned long>(error));
   return buffer;
@@ -419,11 +433,23 @@ napi_value StageObservation(napi_env env, napi_callback_info info) {
   napi_set_named_property(env, result, "daclProtected", value);
   napi_create_double(env, static_cast<double>(session->bytes_written), &value);
   napi_set_named_property(env, result, "bytesWritten", value);
+  const auto exact_written = std::to_string(session->bytes_written);
+  napi_create_string_utf8(env, exact_written.c_str(), exact_written.size(), &value);
+  napi_set_named_property(env, result, "bytesWrittenExact", value);
   napi_create_double(env, static_cast<double>(standard.EndOfFile.QuadPart), &value);
   napi_set_named_property(env, result, "physicalLength", value);
   napi_get_boolean(env, false, &value); napi_set_named_property(env, result, "hidden", value);
   napi_create_string_utf8(env, session->identity.c_str(), NAPI_AUTO_LENGTH, &value);
   napi_set_named_property(env, result, "identity", value);
+  napi_create_string_utf8(env, FileIdentity(session->directory).c_str(), NAPI_AUTO_LENGTH, &value);
+  napi_set_named_property(env, result, "directoryIdentity", value);
+  napi_get_boolean(env, GetFileType(session->directory) == FILE_TYPE_DISK, &value);
+  napi_set_named_property(env, result, "directoryIsDiskHandle", value);
+  const auto name_bytes = session->target_name.size() * sizeof(wchar_t);
+  napi_create_double(env, static_cast<double>(name_bytes), &value);
+  napi_set_named_property(env, result, "targetNameBytes", value);
+  napi_create_double(env, static_cast<double>(offsetof(FILE_RENAME_INFO, FileName)), &value);
+  napi_set_named_property(env, result, "renameFileNameOffset", value);
   return result;
 }
 
@@ -488,16 +514,42 @@ napi_value PublishNoReplace(napi_env env, napi_callback_info info) {
   if (file_id.VolumeSerialNumber != directory_id.VolumeSerialNumber)
     return ThrowState(env, "ERR_GFS_CROSS_VOLUME", "stage and accepted destination are on different volumes");
   const auto name_bytes = session->target_name.size() * sizeof(wchar_t);
-  const size_t total = sizeof(FILE_RENAME_INFO) + name_bytes;
+  const size_t name_offset = offsetof(GfsFileRenameInfoEx, FileName);
+  // Keep the SDK's variable trailing filename area and a zeroed WCHAR sentinel.
+  // FileNameLength excludes the sentinel.
+  const size_t total = sizeof(GfsFileRenameInfoEx) + name_bytes;
   std::vector<uint8_t> storage(total, 0);
-  auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
-  rename->ReplaceIfExists = FALSE;
+  auto* rename = reinterpret_cast<GfsFileRenameInfoEx*>(storage.data());
+  rename->Flags = 0;  // FileRenameInfoEx flag zero retains no-replace behavior.
   rename->RootDirectory = session->directory;
   rename->FileNameLength = static_cast<DWORD>(name_bytes);
   std::memcpy(rename->FileName, session->target_name.data(), name_bytes);
-  if (!SetFileInformationByHandle(session->published_file, FileRenameInfo, rename,
+  if (!SetFileInformationByHandle(session->published_file, kFileRenameInfoEx, rename,
                                   static_cast<DWORD>(total)))
-    return ThrowWin(env, "publish GFS file relative to retained destination handle");
+    {
+      const DWORD error = GetLastError();
+      char detail[512]{};
+      std::snprintf(detail, sizeof(detail),
+          "publish GFS file relative to retained destination handle; class=22; root=%s; "
+          "flags=0; header=%zu; nameOffset=%zu; nameBytes=%zu; supplied=%zu; "
+          "bufferAlignment=%zu; hdirAccess=0x%08lX; hdirShare=0x%08lX; "
+          "hpubAccess=0x%08lX; hpubShare=0x%08lX; "
+          "writerAccess=0x%08lX; writerShare=0x%08lX",
+          rename->RootDirectory == session->directory ? "accepted-hdir" : "invalid",
+          sizeof(GfsFileRenameInfoEx), name_offset, name_bytes, total,
+          reinterpret_cast<uintptr_t>(rename) % alignof(GfsFileRenameInfoEx),
+          static_cast<unsigned long>(FILE_LIST_DIRECTORY | FILE_ADD_FILE |
+                                    FILE_READ_ATTRIBUTES | READ_CONTROL),
+          static_cast<unsigned long>(FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                    FILE_SHARE_DELETE),
+          static_cast<unsigned long>(DELETE | READ_CONTROL | WRITE_DAC |
+                                    FILE_READ_ATTRIBUTES),
+          static_cast<unsigned long>(FILE_SHARE_WRITE),
+          static_cast<unsigned long>(FILE_WRITE_DATA | SYNCHRONIZE),
+          static_cast<unsigned long>(FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                    FILE_SHARE_DELETE));
+      return ThrowWin(env, detail, error);
+    }
   // Irreversible native-effect latch: no fallible work may precede this assignment.
   session->published = true;
   napi_value result; napi_get_boolean(env, true, &result); return result;

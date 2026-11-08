@@ -69,17 +69,27 @@ describe('trusted GFS save owner', () => {
     const directory = makeDirectory()
     const filePath = path.join(directory, 'existing.txt')
     writeFileSync(filePath, 'original')
+    const original = statSync(filePath)
 
-    await expect(
-      saveGfsReceiptToPath({
+    let publicationError: unknown
+    try {
+      await saveGfsReceiptToPath({
         uri: 'gfs://main/0123456789abcdef0123456789abcdef',
         version: 1,
         filePath,
         bytes: new TextEncoder().encode('replacement').buffer,
         publishFence: async publish => publish(),
       })
-    ).rejects.toThrow()
+    } catch (error) {
+      publicationError = error
+    }
+    expect(publicationError).toBeInstanceOf(Error)
+    expect(String(publicationError)).toMatch(
+      process.platform === 'win32' ? /Win32 error (80|183)\b/ : /file exists/i
+    )
     expect(readFileSync(filePath, 'utf8')).toBe('original')
+    const final = statSync(filePath)
+    expect(`${final.dev}:${final.ino}`).toBe(`${original.dev}:${original.ino}`)
     expect(readdirSync(directory)).toEqual(['existing.txt'])
   })
 
@@ -171,23 +181,29 @@ describe('trusted GFS save owner', () => {
     const filePath = path.join(directory, 's144.txt')
     const readAttempts: string[] = []
     let publishedIdentity: string | undefined
-    const receipt = await saveGfsReceiptToPath({
-      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
-      version: 11,
-      filePath,
-      bytes: new TextEncoder().encode('s144 bytes').buffer,
-      publishFence: async finalize => finalize(),
-      onStageWriteChunk: (_written, stagePath) => {
-        if (!stagePath) throw new Error('stage path missing from producer test seam')
-        const stat = statSync(stagePath)
-        publishedIdentity = `${stat.dev}:${stat.ino}`
-      },
-      readPublishedIdentity: async (_stage, attempt) => {
-        readAttempts.push(attempt)
-        if (attempt === 'primary') throw new Error('injected primary read failure')
-        return publishedIdentity ?? null
-      },
-    })
+    const settled = await Promise.allSettled([
+      saveGfsReceiptToPath({
+        uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+        version: 11,
+        filePath,
+        bytes: new TextEncoder().encode('s144 bytes').buffer,
+        publishFence: async finalize => finalize(),
+        onStageWriteChunk: (_written, stagePath) => {
+          if (!stagePath) throw new Error('stage path missing from producer test seam')
+          const stat = statSync(stagePath)
+          publishedIdentity = `${stat.dev}:${stat.ino}`
+        },
+        readPublishedIdentity: async (_stage, attempt) => {
+          readAttempts.push(attempt)
+          if (attempt === 'primary') throw new Error('injected primary read failure')
+          return publishedIdentity ?? null
+        },
+      }),
+    ])
+
+    expect(settled[0]?.status).toBe('fulfilled')
+    if (settled[0]?.status !== 'fulfilled') return
+    const receipt = settled[0].value
 
     expect(receipt).toMatchObject({
       status: 'saved_access_verified',
