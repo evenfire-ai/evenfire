@@ -59,6 +59,27 @@ describe('BrowserContextManager', () => {
     expect(mockBrowser.newContext).toHaveBeenCalledTimes(1)
   })
 
+  it('enables the Chromium sandbox without a disabling launch argument', async () => {
+    const { chromium } = await import('playwright')
+
+    await manager.getPage()
+
+    expect(chromium.launch).toHaveBeenCalledTimes(1)
+    const options = vi.mocked(chromium.launch).mock.calls[0]?.[0]
+    expect(options?.chromiumSandbox).toBe(true)
+    expect(options?.args).not.toContain('--no-sandbox')
+  })
+
+  it('fails without retrying unsandboxed when Chromium cannot start', async () => {
+    const { chromium } = await import('playwright')
+    vi.mocked(chromium.launch).mockRejectedValueOnce(new Error('Chromium sandbox unavailable'))
+
+    await expect(manager.getPage()).rejects.toThrow('Chromium sandbox unavailable')
+
+    expect(chromium.launch).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(chromium.launch).mock.calls[0]?.[0]?.chromiumSandbox).toBe(true)
+  })
+
   it('reuses same page on subsequent calls', async () => {
     const page1 = await manager.getPage()
     const page2 = await manager.getPage()
