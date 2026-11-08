@@ -231,6 +231,15 @@ export class K8sGateway {
     return this.resources.listResource(plural, namespace)
   }
 
+  async getResourceExact(
+    plural: ClerumResourceType,
+    name: string,
+    namespace: string,
+    options: { timeoutSeconds: number; signal: AbortSignal }
+  ): Promise<unknown> {
+    return this.resources.getResourceExact(plural, name, namespace, options)
+  }
+
   async getResource(
     plural: ClerumResourceType,
     name: string,

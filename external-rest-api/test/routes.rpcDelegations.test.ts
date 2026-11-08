@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { externalRestPublicErrorHandler } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createRpcDelegationsRouter } from '../src/routes/rpcDelegations.js'
 
@@ -14,6 +15,7 @@ function app() {
   const value = express()
   value.use(express.json())
   value.use(createRpcDelegationsRouter())
+  value.use(externalRestPublicErrorHandler)
   return value
 }
 
@@ -58,18 +60,46 @@ describe('POST /rpc/delegations', () => {
     expect(service.issueRpcDelegationV2).toHaveBeenCalledWith({
       sessionToken: 'session-v2',
       requestBody: body,
-      clientIp: '127.0.0.1',
       clientVersion: '2.1.0',
       accessPathId: `ap1_${'a'.repeat(43)}`,
       authorizationRevision: `ar1_${'b'.repeat(43)}`,
     })
   })
 
-  it.each([400, 403, 404, 409, 429, 503])('sanitizes the Control API %s response', async status => {
+  // M-10: this route forwards Control API errors through next(error) to the edge's
+  // public error handler, which relays Control API's own status and body. The
+  // edge allowlist this route used to apply is gone; Control API's handler is
+  // the only filter.
+  it.each([400, 403, 404, 409, 429, 503])(
+    'forwards the Control API %s status and body unchanged',
+    async status => {
+      const body = {
+        error: {
+          code: status === 409 ? 'access_path_required' : 'forbidden',
+          message: 'Choose an access path for this operation.',
+          correlationId: 'corr-1',
+          retryable: status === 503,
+          ...(status === 409 ? { details: { paths: [{ id: 'ap1_x', kind: 'direct' }] } } : {}),
+        },
+      }
+      service.issueRpcDelegationV2.mockRejectedValue(
+        new ControlApiError('POST /external/rpc/delegations failed', status, body)
+      )
+
+      const response = await request(app())
+        .post('/rpc/delegations')
+        .set('authorization', 'Bearer session-v2')
+        .send({})
+
+      expect(service.issueRpcDelegationV2).toHaveBeenCalledTimes(1)
+      expect(response.status).toBe(status)
+      expect(response.body).toEqual(body)
+    }
+  )
+
+  it('answers a failure that is not a Control API response with the public 500 envelope', async () => {
     service.issueRpcDelegationV2.mockRejectedValue(
-      new ControlApiError('internal', status, {
-        error: { code: status === 409 ? 'access_path_stale' : 'secret', message: '/secret' },
-      })
+      new Error('connect ECONNREFUSED control-api.internal:8080/external/rpc/delegations')
     )
 
     const response = await request(app())
@@ -77,8 +107,10 @@ describe('POST /rpc/delegations', () => {
       .set('authorization', 'Bearer session-v2')
       .send({})
 
-    expect(response.status).toBe(status)
-    expect(JSON.stringify(response.body)).not.toContain('/secret')
+    expect(service.issueRpcDelegationV2).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(500)
+    expect(response.body.error).toMatchObject({ code: 'internal_error', retryable: false })
+    expect(JSON.stringify(response.body)).not.toContain('control-api.internal')
   })
 
   it('rejects malformed authority selectors before forwarding', async () => {

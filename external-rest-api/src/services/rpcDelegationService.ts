@@ -50,7 +50,6 @@ function parseRpcDelegationResponse(value: unknown, requestBody: unknown): RpcDe
 export async function issueRpcDelegationV2(input: {
   sessionToken: string
   requestBody: unknown
-  clientIp?: string
   clientVersion?: string
   accessPathId?: string
   authorizationRevision?: string
@@ -59,7 +58,6 @@ export async function issueRpcDelegationV2(input: {
     userSessionToken: input.sessionToken,
     body: input.requestBody,
     extraHeaders: {
-      ...(input.clientIp ? { 'x-evenfire-client-ip': input.clientIp } : {}),
       ...(input.clientVersion ? { 'x-evenfire-client-version': input.clientVersion } : {}),
       ...(input.accessPathId ? { 'x-evenfire-access-path-id': input.accessPathId } : {}),
       ...(input.authorizationRevision

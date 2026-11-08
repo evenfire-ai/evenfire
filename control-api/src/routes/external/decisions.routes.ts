@@ -137,7 +137,7 @@ export function createExternalUserApprovalDecisionsRouter(gateway: K8sGateway): 
             caller: {
               kind: 'user-session',
               claims: extReq.externalAuth!,
-              session: extReq.externalSessionAuthority!,
+              session: extReq.externalSessionAuthentication!.authorityContext,
             },
             operationId: 'workflow.approval.decide',
             resourceType: 'workflow_approval',

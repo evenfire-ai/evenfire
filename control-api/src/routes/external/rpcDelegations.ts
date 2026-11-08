@@ -170,7 +170,7 @@ export function createExternalRpcDelegationsRouter(gateway: K8sGateway): Router 
           return
         }
         const result = await authorizeActionV2({
-          session: req.externalSessionAuthority!,
+          session: req.externalSessionAuthentication!.authorityContext,
           requested: parsed.requested,
           operationId: parsed.operationId,
           resource: parsed.resource,

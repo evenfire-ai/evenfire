@@ -1,21 +1,31 @@
 import type { DbClient } from '../db.js'
 import { MIGRATION_EXECUTION_POLICY } from './migrationExecutionPolicy.js'
+import type { RUNNER_MIGRATION_VERSIONS } from './migrationRunner.js'
 
 export type OnlineIndexDefinition = Readonly<{
-  migrationVersion: '0137_user_access_foundation'
+  migrationVersion: (typeof RUNNER_MIGRATION_VERSIONS)[number]
+  // An after-schema index is built once its migration's schema transaction has
+  // committed, because it indexes a column that transaction adds.
+  phase?: 'after-schema'
   name: string
   table: string
   unique?: boolean
   keys: readonly string[]
   include?: readonly string[]
+  // The predicate exactly as PostgreSQL 16's pg_get_indexdef prints it,
+  // parentheses included. It is also the predicate the index is created with.
+  where?: string
+  // An index this one supersedes; it is dropped once this one is valid.
+  replaces?: string
   createSql: string
 }>
 
 type OnlineIndexStructure = Omit<OnlineIndexDefinition, 'createSql'>
 
-// Every planned index is a plain btree over bare columns. Quoted identifiers,
-// expressions and predicates are unrepresentable, so PostgreSQL's deparsed
-// definition can be compared byte for byte without a normalizer.
+// Every planned index is a btree over bare columns. Quoted identifiers and
+// expressions are unrepresentable, and a predicate is stored in its deparsed
+// form, so PostgreSQL's definition can be compared byte for byte without a
+// normalizer.
 const PLAIN_IDENTIFIER = /^[a-z_][a-z0-9_]*$/
 
 function assertPlainIdentifier(value: string, role: string, indexName: string): void {
@@ -26,7 +36,8 @@ function assertPlainIdentifier(value: string, role: string, indexName: string): 
 
 function indexColumnsSql(entry: OnlineIndexStructure): string {
   const include = entry.include ? ` INCLUDE (${entry.include.join(', ')})` : ''
-  return `(${entry.keys.join(', ')})${include}`
+  const where = entry.where === undefined ? '' : ` WHERE ${entry.where}`
+  return `(${entry.keys.join(', ')})${include}${where}`
 }
 
 export function onlineIndex(structure: OnlineIndexStructure): OnlineIndexDefinition {
@@ -39,6 +50,15 @@ export function onlineIndex(structure: OnlineIndexStructure): OnlineIndexDefinit
   }
   for (const column of structure.include ?? []) {
     assertPlainIdentifier(column, 'INCLUDE column', structure.name)
+  }
+  if (
+    structure.where !== undefined &&
+    (!structure.where.startsWith('(') || !structure.where.endsWith(')'))
+  ) {
+    throw new Error(`Online index ${structure.name} has a predicate outside its deparsed form`)
+  }
+  if (structure.replaces !== undefined) {
+    assertPlainIdentifier(structure.replaces, 'replaced index', structure.name)
   }
   const unique = structure.unique ? 'UNIQUE ' : ''
   return Object.freeze({
@@ -88,6 +108,40 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
     table: 'team_agents',
     keys: ['agent_name', 'team_id'],
   }),
+])
+
+export const PR2_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
+  onlineIndex({
+    migrationVersion: '0137_workflow_authority_bindings',
+    phase: 'after-schema',
+    name: 'workflow_runs_initiating_authority_binding',
+    table: 'workflow_runs',
+    keys: ['initiating_authority_binding_id'],
+    where: '(initiating_authority_binding_id IS NOT NULL)',
+  }),
+  onlineIndex({
+    migrationVersion: '0145_workflow_authorization_pause',
+    phase: 'after-schema',
+    name: 'idx_wr_phase_v2',
+    table: 'workflow_runs',
+    keys: ['phase'],
+    where: "(phase = ANY (ARRAY['Pending'::text, 'Running'::text, 'AuthorizationPaused'::text]))",
+    replaces: 'idx_wr_phase',
+  }),
+  onlineIndex({
+    migrationVersion: '0145_workflow_authorization_pause',
+    phase: 'after-schema',
+    name: 'idx_wr_owner_v2',
+    table: 'workflow_runs',
+    keys: ['owner_instance_id'],
+    where: "(phase = ANY (ARRAY['Running'::text, 'AuthorizationPaused'::text]))",
+    replaces: 'idx_wr_owner',
+  }),
+])
+
+const ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
+  ...PR1_ONLINE_INDEX_PLAN,
+  ...PR2_ONLINE_INDEX_PLAN,
 ])
 
 type IndexState = {
@@ -158,8 +212,34 @@ export async function ensureOnlineIndex(db: DbClient, entry: OnlineIndexDefiniti
   if (!created.indisvalid) throw new Error(`Online index is invalid after creation: ${entry.name}`)
 }
 
-export async function preparePr1Migration(db: DbClient, version: string): Promise<void> {
-  const indexes = PR1_ONLINE_INDEX_PLAN.filter(entry => entry.migrationVersion === version)
+export function hasPostSchemaOnlineIndexes(version: string): boolean {
+  return ONLINE_INDEX_PLAN.some(
+    entry => entry.migrationVersion === version && entry.phase === 'after-schema'
+  )
+}
+
+/**
+ * Builds the planned indexes of one migration and phase. With no phase it
+ * builds the indexes that precede the schema transaction; with 'after-schema'
+ * it builds the ones that follow it and then drops each index they replace.
+ */
+export async function preparePr1Migration(
+  db: DbClient,
+  version: string,
+  phase?: 'after-schema'
+): Promise<void> {
+  const indexes = ONLINE_INDEX_PLAN.filter(
+    entry => entry.migrationVersion === version && entry.phase === phase
+  )
   if (indexes.length === 0) return
-  for (const index of indexes) await ensureOnlineIndex(db, index)
+  for (const index of indexes) {
+    await ensureOnlineIndex(db, index)
+    const replaced = index.replaces
+    if (replaced !== undefined) {
+      // IF EXISTS: a rerun after a crash between the build and the drop must pass.
+      await withOnlineStatementBound(db, async () => {
+        await db.query(`DROP INDEX CONCURRENTLY IF EXISTS ${replaced}`)
+      })
+    }
+  }
 }

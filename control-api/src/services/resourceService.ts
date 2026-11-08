@@ -58,6 +58,37 @@ export class K8sConflictError extends Error {
   }
 }
 
+type BoundedKubernetesRequest = Readonly<{
+  signal: AbortSignal
+  timeoutSeconds: number
+}>
+
+type KubernetesCallOptions = k8s.ConfigurationOptions<k8s.ObservableMiddleware>
+
+function kubernetesAbortOptions(signal: AbortSignal): KubernetesCallOptions {
+  const middleware: k8s.ObservableMiddleware = {
+    pre: context => {
+      context.setSignal(signal)
+      return new k8s.Observable(Promise.resolve(context))
+    },
+    post: context => new k8s.Observable(Promise.resolve(context)),
+  }
+  return {
+    middleware: [middleware],
+    middlewareMergeStrategy: 'append',
+  }
+}
+
+async function runKubernetesTransportCall<T>(
+  signal: AbortSignal,
+  invoke: (options: KubernetesCallOptions) => Promise<T>
+): Promise<T> {
+  if (signal.aborted) throw signal.reason ?? new Error('request aborted')
+  const result = await invoke(kubernetesAbortOptions(signal))
+  if (signal.aborted) throw signal.reason ?? new Error('request aborted')
+  return result
+}
+
 export type MutableResourceSnapshot = {
   metadata?: {
     annotations?: Record<string, string>
@@ -237,6 +268,41 @@ export class ResourceService {
     )) as unknown as ResourceListResponse
     signal?.throwIfAborted()
     return res.items || []
+  }
+
+  async getResourceExact(
+    plural: ClerumResourceType,
+    name: string,
+    namespace: string,
+    options: BoundedKubernetesRequest
+  ): Promise<unknown> {
+    if (
+      !Number.isSafeInteger(options.timeoutSeconds) ||
+      options.timeoutSeconds < 1 ||
+      options.timeoutSeconds > 60
+    ) {
+      throw new Error('Kubernetes request timeout must be between 1 and 60 seconds')
+    }
+    const resolvedNamespace = this.resolveNamespace(plural, namespace)
+    try {
+      return await runKubernetesTransportCall(options.signal, callOptions =>
+        this.customApi.getNamespacedCustomObject(
+          {
+            group: CLERUM_GROUP,
+            version: CLERUM_VERSION,
+            namespace: resolvedNamespace,
+            plural,
+            name,
+          },
+          callOptions
+        )
+      )
+    } catch (error) {
+      if (extractK8sStatus(error) === 404) {
+        throw new K8sNotFoundError(`${plural}/${name} not found in namespace ${resolvedNamespace}`)
+      }
+      throw error
+    }
   }
 
   async getResource(

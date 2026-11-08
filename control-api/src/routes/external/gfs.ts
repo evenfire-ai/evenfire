@@ -579,7 +579,7 @@ export function createExternalGfsRouter(gateway?: Pick<K8sGateway, 'getResourceE
         return
       }
       let actionAuthority
-      if (req.externalSessionAuthority?.contract === 'v2') {
+      if (req.externalSessionAuthentication?.authorityContext.contract === 'v2') {
         if (!gateway) {
           res.status(503).json({ error: 'authority_unavailable' })
           return
@@ -603,7 +603,7 @@ export function createExternalGfsRouter(gateway?: Pick<K8sGateway, 'getResourceE
             caller: {
               kind: 'user-session',
               claims,
-              session: req.externalSessionAuthority,
+              session: req.externalSessionAuthentication?.authorityContext,
             },
             operationId,
             resourceType: 'gfs_resource',
@@ -646,7 +646,7 @@ export function createExternalGfsRouter(gateway?: Pick<K8sGateway, 'getResourceE
   // which currently mints an unbound GFS write token even though GFSC only
   // returns protocol metadata. V1 remains on its existing path.
   router.use('/external/gfs', (req: ExternalAuthedRequest, res, next) => {
-    if (req.externalSessionAuthority?.contract !== 'v2') {
+    if (req.externalSessionAuthentication?.authorityContext.contract !== 'v2') {
       next()
       return
     }

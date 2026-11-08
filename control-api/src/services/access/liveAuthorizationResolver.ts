@@ -1,0 +1,663 @@
+import type { DbClient } from '../../db.js'
+import type { K8sGateway } from '../../k8s.js'
+import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
+import { loadResourceAuthority } from './accessAuthorityStore.js'
+import { configureAccessAuthorityTransaction } from './accessAuthorityTransaction.js'
+import { runAccessDatabaseQuery, withAccessDatabaseTransaction } from './accessDatabaseQuery.js'
+import {
+  AccessBudgetExceededError,
+  AccessExecutionBudget,
+  AccessExecutionCancelledError,
+} from './accessExecutionBudget.js'
+import {
+  type AccessPath,
+  accessPathHandleEquals,
+  buildAccessPath,
+  selectEquivalentAccessPath,
+} from './accessPath.js'
+import {
+  type ActionOperationId,
+  ActionOperationTargetError,
+  getActionOperationDefinition,
+  validateActionOperationTarget,
+} from './actionOperationRegistry.js'
+import { type AuthorityCandidate, type OperationalPathBinding } from './authorityCandidates.js'
+import {
+  authorizationRevision,
+  canonicalAccessPathSeeds,
+  databaseRelationshipsRevision,
+  revisionOfValues,
+} from './authorizationRevision.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
+import { type AccessCapability, isAccessCapability } from './capabilityRegistry.js'
+import { validateExactOperationalBindings } from './exactOperationalAuthorization.js'
+import { type ValidatedOperationTarget, stableOperationTarget } from './operationTarget.js'
+import { canonicalEnvironmentId } from './operationalAccessProjection.js'
+import {
+  type OperationalResourceGraphResult,
+  isOperationalAccessResourceType,
+  loadOperationalResourceGraph,
+} from './operationalAccessReader.js'
+import {
+  type AccessAuthoritySession,
+  loadPrincipalAuthoritySnapshot,
+} from './principalAuthoritySnapshot.js'
+import {
+  type CanonicalResourceIdentity,
+  canonicalResourceIdentity,
+  resourceIdentityKey,
+} from './resourceIdentity.js'
+
+export type LiveAuthorizationInput = Readonly<{
+  session: AccessAuthoritySession
+  requiredCapability: unknown
+  resource: CanonicalResourceIdentity
+  operationId?: ActionOperationId
+  operationTarget?: unknown
+  requestedAccessPathId?: string
+}>
+
+export type LiveActionAuthorizationInput = Readonly<{
+  session: AccessAuthoritySession
+  operationId: ActionOperationId
+  /**
+   * The signed operation resource remains authoritative for target validation.
+   * Runtime actions may resolve grants through an exact Host ancestor instead.
+   */
+  resource: CanonicalResourceIdentity
+  authorizationResource?: CanonicalResourceIdentity
+  operationTarget?: unknown
+  requestedAccessPathId?: string
+}>
+
+export type LiveAuthorizationResult =
+  | Readonly<{
+      status: 'allowed'
+      effectiveCapabilities: readonly AccessCapability[]
+      paths: readonly AccessPath[]
+      selectedPath: AccessPath
+      operationalBindings: readonly OperationalPathBinding[]
+      authorizationRevision: string
+      validUntil: string | null
+    }>
+  | Readonly<{
+      status: 'denied'
+      code: 'forbidden' | 'unknown_capability' | 'session_not_live'
+    }>
+  | Readonly<{ status: 'invalid'; code: 'invalid_resource' | 'invalid_operation_target' }>
+  | Readonly<{ status: 'not_found'; code: 'not_found' }>
+  | Readonly<{
+      status: 'access_path_required'
+      code: 'access_path_required'
+      authorizationRevision: string
+      safePathDescriptors: readonly Readonly<{
+        id: string
+        kind: 'direct' | 'team'
+        teamId?: string
+      }>[]
+    }>
+  | Readonly<{
+      status: 'access_path_stale'
+      code: 'access_path_stale'
+      currentAuthorizationRevision: string
+    }>
+  | Readonly<{
+      status: 'unavailable'
+      dependencyClass: 'authorization_store' | 'operational_resource_store' | 'capacity'
+      retryable: true
+      correlationId?: string
+    }>
+
+type ResolverTransaction = <T>(work: (db: DbClient) => Promise<T>) => Promise<T>
+
+const HOST_GRAPH_ACTIONS = new Set<ActionOperationId>([
+  'host.status.read',
+  'host.health.read',
+  'host.wake',
+  'host.manage',
+  'host.activity.read',
+  'host.activity.read_all',
+  'remote_desktop.status',
+  'remote_desktop.open',
+  'remote_desktop.reconnect',
+])
+
+export type LiveAuthorizationOptions = Readonly<{
+  gateway?: Pick<K8sGateway, 'getResourceExact'>
+  budget?: AccessExecutionBudget
+  memo?: AuthorizationRequestMemo
+  transaction?: ResolverTransaction
+  configureTransaction?: boolean
+  correlationId?: string
+}>
+
+function validPathHandle(value: string | undefined): value is string {
+  return typeof value === 'string' && /^ap1_[A-Za-z0-9_-]{43}$/.test(value)
+}
+
+function dependencyForError(
+  error: unknown
+): 'authorization_store' | 'operational_resource_store' | 'capacity' {
+  if (
+    error instanceof AccessBudgetExceededError ||
+    error instanceof AccessExecutionCancelledError
+  ) {
+    return 'capacity'
+  }
+  return 'authorization_store'
+}
+
+function candidateForPath(
+  path: AccessPath,
+  candidates: readonly AuthorityCandidate[]
+): AuthorityCandidate | undefined {
+  return candidates.find(
+    candidate =>
+      candidate.kind === path.kind &&
+      candidate.grantId === path.grantId &&
+      candidate.teamId === path.teamId
+  )
+}
+
+export class AuthorizationRequestMemo {
+  private readonly values = new Map<string, Promise<LiveAuthorizationResult>>()
+
+  constructor(private readonly budget: AccessExecutionBudget) {}
+
+  getOrCreate(
+    input: LiveAuthorizationInput,
+    targetKey: string,
+    factory: () => Promise<LiveAuthorizationResult>
+  ): Promise<LiveAuthorizationResult> {
+    const key = JSON.stringify([
+      input.session,
+      input.requiredCapability,
+      resourceIdentityKey(input.resource),
+      input.operationId ?? null,
+      targetKey,
+      input.requestedAccessPathId ?? null,
+    ])
+    const existing = this.values.get(key)
+    if (existing) return existing
+    this.budget.charge({ kind: 'memoEntries' })
+    this.budget.charge({ kind: 'memoBytes', amount: Buffer.byteLength(key, 'utf8') })
+    const created = factory()
+    this.values.set(key, created)
+    void created.catch(() => this.values.delete(key))
+    return created
+  }
+}
+
+export function selectActionOperationalDependencies(
+  graph: OperationalResourceGraphResult,
+  operationId: ActionOperationId | undefined,
+  operationTarget?: ValidatedOperationTarget
+): OperationalResourceGraphResult {
+  if (graph.status !== 'current' || !operationId) return graph
+  const root = graph.resource
+  if (
+    root.resourceType !== 'host' ||
+    !HOST_GRAPH_ACTIONS.has(operationId) ||
+    operationTarget?.hostRef !== root.logicalId
+  ) {
+    return graph
+  }
+
+  const hostContextEdges = graph.relationships.filter(
+    relationship =>
+      relationship.sourceType === 'host' &&
+      relationship.sourceId === root.logicalId &&
+      relationship.relationshipType === 'uses_context' &&
+      relationship.targetType === 'context'
+  )
+  if (hostContextEdges.length > 1) {
+    return { status: 'unavailable', safeCode: 'operational_related_resource_incomplete' }
+  }
+  const selectedContextId = hostContextEdges[0]?.targetId
+  const relationships = graph.relationships.filter(
+    relationship =>
+      hostContextEdges.includes(relationship) ||
+      (selectedContextId !== undefined &&
+        relationship.sourceType === 'context' &&
+        relationship.sourceId === selectedContextId &&
+        relationship.relationshipType !== 'includes_mcp_server')
+  )
+
+  const selectedKeys = new Set<string>([JSON.stringify([root.resourceType, root.logicalId])])
+  for (const relationship of relationships) {
+    for (const [resourceType, logicalId] of [
+      [relationship.sourceType, relationship.sourceId],
+      [relationship.targetType, relationship.targetId],
+    ] as const) {
+      if (
+        ['host', 'context', 'mcp_server', 'workflow_recipe', 'shared_filesystem'].includes(
+          resourceType
+        )
+      ) {
+        selectedKeys.add(JSON.stringify([resourceType, logicalId]))
+      }
+    }
+  }
+  const selectedResources = graph.resources.filter(resource =>
+    selectedKeys.has(JSON.stringify([resource.resourceType, resource.logicalId]))
+  )
+  if (selectedResources.length !== selectedKeys.size) {
+    return { status: 'unavailable', safeCode: 'operational_related_resource_incomplete' }
+  }
+  const resources = graph.resources
+    .filter(resource =>
+      selectedKeys.has(JSON.stringify([resource.resourceType, resource.logicalId]))
+    )
+    .sort((left, right) =>
+      compareCanonicalUtf8Text(
+        JSON.stringify([left.resourceType, left.logicalId]),
+        JSON.stringify([right.resourceType, right.logicalId])
+      )
+    )
+  const orderedRelationships = [...relationships].sort((left, right) =>
+    compareCanonicalUtf8Text(
+      JSON.stringify([
+        left.sourceType,
+        left.sourceId,
+        left.relationshipType,
+        left.targetType,
+        left.targetId,
+        left.relationshipInstanceId,
+      ]),
+      JSON.stringify([
+        right.sourceType,
+        right.sourceId,
+        right.relationshipType,
+        right.targetType,
+        right.targetId,
+        right.relationshipInstanceId,
+      ])
+    )
+  )
+  const relationshipsRevision = revisionOfValues(
+    orderedRelationships.map(relationship => [
+      relationship.sourceType,
+      relationship.sourceId,
+      relationship.relationshipType,
+      relationship.targetType,
+      relationship.targetId,
+      relationship.relationshipInstanceId,
+      relationship.behaviorAttributes,
+      relationship.sourceProviderUid,
+      relationship.sourceResourceVersion,
+    ])
+  )
+  return Object.freeze({
+    ...graph,
+    resources: Object.freeze(resources),
+    relationships: Object.freeze(orderedRelationships),
+    relationshipsRevision,
+  })
+}
+
+async function requireSelectedSourceFamiliesCurrent(input: {
+  graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
+  db: DbClient
+  budget: AccessExecutionBudget
+}): Promise<OperationalResourceGraphResult> {
+  const families = [...new Set(input.graph.resources.map(resource => resource.sourceFamily))].sort(
+    compareCanonicalUtf8Text
+  )
+  const states = await runAccessDatabaseQuery(
+    input.db,
+    input.budget,
+    `SELECT source_family, generation, status
+       FROM operational_catalog_source_state
+      WHERE environment_id = $1
+        AND source_family = ANY($2::text[])
+      ORDER BY source_family`,
+    [input.graph.resource.environmentId, families]
+  )
+  const rows = states.rows as Array<Record<string, unknown>>
+  if (
+    rows.length !== families.length ||
+    rows.some((row, index) => row.source_family !== families[index] || row.status !== 'current')
+  ) {
+    return { status: 'unavailable', safeCode: 'operational_source_not_current' }
+  }
+  return Object.freeze({
+    ...input.graph,
+    sourceStateRevision: revisionOfValues(
+      rows.map(row => [row.source_family, row.generation, row.status])
+    ),
+  })
+}
+
+async function resolveInTransaction(input: {
+  request: LiveAuthorizationInput
+  capability: AccessCapability
+  operationTarget: ValidatedOperationTarget
+  db: DbClient
+  gateway?: Pick<K8sGateway, 'getResourceExact'>
+  budget: AccessExecutionBudget
+  configureTransaction: boolean
+}): Promise<LiveAuthorizationResult> {
+  if (input.configureTransaction) {
+    await configureAccessAuthorityTransaction(input.db, input.budget)
+  }
+  const snapshot = await loadPrincipalAuthoritySnapshot({
+    db: input.db,
+    budget: input.budget,
+    session: input.request.session,
+    resource: input.request.resource,
+  })
+  if (!snapshot) return { status: 'not_found', code: 'not_found' }
+  if (!snapshot.sessionLive) return { status: 'denied', code: 'session_not_live' }
+
+  let graph: OperationalResourceGraphResult | null = null
+  if (isOperationalAccessResourceType(input.request.resource.type)) {
+    try {
+      const hostAction =
+        input.request.resource.type === 'host' &&
+        input.request.operationId !== undefined &&
+        HOST_GRAPH_ACTIONS.has(input.request.operationId) &&
+        input.operationTarget?.hostRef === input.request.resource.logicalId
+      graph = await loadOperationalResourceGraph({
+        db: input.db,
+        budget: input.budget,
+        environmentId: input.request.resource.environmentId,
+        resourceType: input.request.resource.type,
+        logicalId: input.request.resource.logicalId,
+        ...(hostAction
+          ? {
+              requiredSourceFamilies: ['host'],
+              allowIncompleteRelatedResources: true,
+            }
+          : {}),
+      })
+      graph = selectActionOperationalDependencies(
+        graph,
+        input.request.operationId,
+        input.operationTarget
+      )
+      if (hostAction && graph.status === 'current') {
+        graph = await requireSelectedSourceFamiliesCurrent({
+          graph,
+          db: input.db,
+          budget: input.budget,
+        })
+      }
+    } catch (error) {
+      if (
+        error instanceof AccessBudgetExceededError ||
+        error instanceof AccessExecutionCancelledError
+      ) {
+        throw error
+      }
+      return {
+        status: 'unavailable',
+        dependencyClass: 'operational_resource_store',
+        retryable: true,
+      }
+    }
+    if (graph.status === 'unavailable') {
+      return {
+        status: 'unavailable',
+        dependencyClass: 'operational_resource_store',
+        retryable: true,
+      }
+    }
+    if (graph.status === 'not_found') return { status: 'not_found', code: 'not_found' }
+  }
+
+  const authority = await loadResourceAuthority({
+    db: input.db,
+    budget: input.budget,
+    snapshot,
+    resource: input.request.resource,
+    operationTarget: input.operationTarget,
+    operationalGraph: graph,
+  })
+  if (!authority.exists) return { status: 'not_found', code: 'not_found' }
+  const identitySeeds = canonicalAccessPathSeeds(authority.candidates)
+  if (identitySeeds.length === 0) return { status: 'denied', code: 'forbidden' }
+  input.budget.charge({ kind: 'accessPaths', amount: identitySeeds.length })
+  const capable = Object.freeze(
+    identitySeeds.filter(candidate => candidate.behavior.capabilities.includes(input.capability))
+  )
+  if (capable.length === 0) return { status: 'denied', code: 'forbidden' }
+
+  const revision = authorizationRevision({
+    principalUserId: snapshot.userId,
+    sessionContract: snapshot.sessionContract,
+    sessionRevision: snapshot.sessionRevision,
+    userRevision: snapshot.userRevision,
+    memberships: snapshot.memberships,
+    resource: input.request.resource,
+    resourceRevision:
+      graph?.status === 'current'
+        ? revisionOfValues([graph.resource.providerUid, graph.resource.providerResourceVersion])
+        : snapshot.resourceRevision,
+    sourceStateRevision:
+      graph?.status === 'current' ? graph.sourceStateRevision : 'database-resource',
+    relationshipsRevision:
+      graph?.status === 'current'
+        ? graph.relationshipsRevision
+        : databaseRelationshipsRevision(authority.relationships),
+    candidates: identitySeeds,
+  })
+  const paths = Object.freeze(
+    capable.map(seed =>
+      buildAccessPath({
+        principalUserId: snapshot.userId,
+        resource: input.request.resource,
+        seed,
+        authorizationRevision: revision,
+      })
+    )
+  )
+
+  let selectedPath: AccessPath | undefined
+  if (input.request.requestedAccessPathId) {
+    selectedPath = paths.find(path =>
+      accessPathHandleEquals(path.id, input.request.requestedAccessPathId!)
+    )
+    if (!selectedPath) {
+      return {
+        status: 'access_path_stale',
+        code: 'access_path_stale',
+        currentAuthorizationRevision: revision,
+      }
+    }
+  } else {
+    selectedPath = selectEquivalentAccessPath(paths) ?? undefined
+    if (!selectedPath) {
+      return {
+        status: 'access_path_required',
+        code: 'access_path_required',
+        authorizationRevision: revision,
+        safePathDescriptors: Object.freeze(
+          paths.map(path =>
+            Object.freeze({
+              id: path.id,
+              kind: path.kind,
+              ...(path.teamId ? { teamId: path.teamId } : {}),
+            })
+          )
+        ),
+      }
+    }
+  }
+
+  const selectedCandidate = candidateForPath(selectedPath, capable)
+  if (!selectedCandidate) {
+    return {
+      status: 'access_path_stale',
+      code: 'access_path_stale',
+      currentAuthorizationRevision: revision,
+    }
+  }
+  const exact = await validateExactOperationalBindings({
+    gateway: input.gateway,
+    budget: input.budget,
+    bindings: selectedCandidate.operationalBindings,
+  })
+  if (exact.status === 'not_found') return { status: 'not_found', code: 'not_found' }
+  if (exact.status === 'stale') {
+    return input.request.requestedAccessPathId
+      ? {
+          status: 'access_path_stale',
+          code: 'access_path_stale',
+          currentAuthorizationRevision: revision,
+        }
+      : {
+          status: 'unavailable',
+          dependencyClass: 'operational_resource_store',
+          retryable: true,
+        }
+  }
+  if (exact.status === 'unavailable') {
+    return {
+      status: 'unavailable',
+      dependencyClass: 'operational_resource_store',
+      retryable: true,
+    }
+  }
+  return Object.freeze({
+    status: 'allowed',
+    effectiveCapabilities: Object.freeze([...selectedPath.behavior.capabilities]),
+    paths,
+    selectedPath,
+    operationalBindings: Object.freeze([...selectedCandidate.operationalBindings]),
+    authorizationRevision: revision,
+    validUntil: authority.validUntil?.toISOString() ?? null,
+  })
+}
+
+async function resolveLiveAuthorizationUsing(
+  input: LiveAuthorizationInput,
+  options: LiveAuthorizationOptions,
+  operationTarget: ValidatedOperationTarget
+): Promise<LiveAuthorizationResult> {
+  const ownedBudget = options.budget ? null : AccessExecutionBudget.create('action')
+  const budget = options.budget ?? ownedBudget!
+  try {
+    if (!isAccessCapability(input.requiredCapability)) {
+      return { status: 'denied', code: 'unknown_capability' }
+    }
+    if (
+      input.session.userId.trim().length === 0 ||
+      input.session.userId !== input.session.userId.trim() ||
+      input.resource.environmentId !== canonicalEnvironmentId()
+    ) {
+      return { status: 'invalid', code: 'invalid_resource' }
+    }
+    let resource: CanonicalResourceIdentity
+    try {
+      resource = canonicalResourceIdentity(input.resource)
+    } catch {
+      return { status: 'invalid', code: 'invalid_resource' }
+    }
+    if (resourceIdentityKey(resource) !== resourceIdentityKey(input.resource)) {
+      return { status: 'invalid', code: 'invalid_resource' }
+    }
+    if (
+      input.requestedAccessPathId !== undefined &&
+      !validPathHandle(input.requestedAccessPathId)
+    ) {
+      return { status: 'invalid', code: 'invalid_operation_target' }
+    }
+    const work = (db: DbClient) =>
+      resolveInTransaction({
+        request: { ...input, resource },
+        capability: input.requiredCapability as AccessCapability,
+        operationTarget,
+        db,
+        gateway: options.gateway,
+        budget,
+        configureTransaction: options.configureTransaction !== false,
+      })
+    const factory = () =>
+      options.transaction
+        ? options.transaction(work)
+        : withAccessDatabaseTransaction(budget, work, { mode: 'caller_configured' })
+    return options.memo
+      ? await options.memo.getOrCreate(input, stableOperationTarget(operationTarget), factory)
+      : await factory()
+  } catch (error) {
+    return {
+      status: 'unavailable',
+      dependencyClass: dependencyForError(error),
+      retryable: true,
+      ...(options.correlationId ? { correlationId: options.correlationId } : {}),
+    }
+  } finally {
+    ownedBudget?.close()
+  }
+}
+
+/**
+ * Resolves one canonical PR 2 action without passing its exact target through
+ * the legacy capability-target table. The shared operation registry owns target
+ * shape and resource binding. The common live resolver continues to own current
+ * session, grant, selected-path, revision, and exact operational binding checks.
+ */
+export async function resolveLiveActionAuthorization(
+  input: LiveActionAuthorizationInput,
+  options: LiveAuthorizationOptions = {}
+): Promise<LiveAuthorizationResult> {
+  let operation
+  try {
+    operation = getActionOperationDefinition(input.operationId)
+  } catch {
+    return { status: 'invalid', code: 'invalid_operation_target' }
+  }
+  const requiredCapability = operation.requiredCapabilities[0]
+  if (!requiredCapability || operation.requiredCapabilities.length !== 1) {
+    return { status: 'denied', code: 'unknown_capability' }
+  }
+  let operationResource: CanonicalResourceIdentity
+  let authorizationResource: CanonicalResourceIdentity
+  let operationTarget: ReturnType<typeof validateActionOperationTarget>
+  try {
+    operationResource = canonicalResourceIdentity(input.resource)
+    if (
+      resourceIdentityKey(operationResource) !== resourceIdentityKey(input.resource) ||
+      operationResource.environmentId !== canonicalEnvironmentId()
+    ) {
+      return { status: 'invalid', code: 'invalid_resource' }
+    }
+    authorizationResource = canonicalResourceIdentity(input.authorizationResource ?? input.resource)
+    if (
+      resourceIdentityKey(authorizationResource) !==
+        resourceIdentityKey(input.authorizationResource ?? input.resource) ||
+      authorizationResource.environmentId !== operationResource.environmentId
+    ) {
+      return { status: 'invalid', code: 'invalid_resource' }
+    }
+    operationTarget = validateActionOperationTarget({
+      operationId: input.operationId,
+      resource: operationResource,
+      operationTarget: input.operationTarget,
+    })
+  } catch (error) {
+    if (error instanceof ActionOperationTargetError) {
+      return { status: 'invalid', code: 'invalid_operation_target' }
+    }
+    return { status: 'invalid', code: 'invalid_resource' }
+  }
+  if (resourceIdentityKey(authorizationResource) !== resourceIdentityKey(operationResource)) {
+    const hostRef = operationTarget && 'hostRef' in operationTarget ? operationTarget.hostRef : null
+    if (
+      authorizationResource.type !== 'host' ||
+      typeof hostRef !== 'string' ||
+      hostRef !== authorizationResource.logicalId
+    ) {
+      return { status: 'invalid', code: 'invalid_resource' }
+    }
+  }
+  const request: LiveAuthorizationInput = {
+    session: input.session,
+    requiredCapability,
+    resource: authorizationResource,
+    operationId: input.operationId,
+    operationTarget,
+    ...(input.requestedAccessPathId ? { requestedAccessPathId: input.requestedAccessPathId } : {}),
+  }
+  return resolveLiveAuthorizationUsing(request, options, operationTarget)
+}

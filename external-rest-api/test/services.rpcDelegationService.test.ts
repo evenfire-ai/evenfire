@@ -58,7 +58,6 @@ describe('rpc delegation v2 forwarding', () => {
     await issueRpcDelegationV2({
       sessionToken: 'session-v2',
       requestBody: body,
-      clientIp: '192.0.2.1',
       clientVersion: '2.1.0',
       accessPathId: `ap1_${'a'.repeat(43)}`,
       authorizationRevision: `ar1_${'b'.repeat(43)}`,
@@ -68,7 +67,6 @@ describe('rpc delegation v2 forwarding', () => {
       userSessionToken: 'session-v2',
       body,
       extraHeaders: {
-        'x-evenfire-client-ip': '192.0.2.1',
         'x-evenfire-client-version': '2.1.0',
         'x-evenfire-access-path-id': `ap1_${'a'.repeat(43)}`,
         'x-evenfire-authorization-revision': `ar1_${'b'.repeat(43)}`,

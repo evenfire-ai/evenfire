@@ -403,7 +403,7 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
       const target = `${upstream}${subPath}`
 
       let actionAuthority
-      if (req.externalSessionAuthority?.contract === 'v2') {
+      if (req.externalSessionAuthentication?.authorityContext.contract === 'v2') {
         const canonicalRelativePath =
           new URL(rawSubPath, 'http://wfc.local').searchParams.get('path') || '.'
         try {
@@ -412,7 +412,7 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
             caller: {
               kind: 'user-session',
               claims,
-              session: req.externalSessionAuthority,
+              session: req.externalSessionAuthentication?.authorityContext,
             },
             operationId: 'shared_filesystem.read',
             resourceType: 'shared_filesystem',

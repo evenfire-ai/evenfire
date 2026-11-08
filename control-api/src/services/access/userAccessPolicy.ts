@@ -14,6 +14,8 @@ export type ConfiguredUserAccessIntent = Readonly<{
   legacyLifecycle: LegacyLifecycle
   sessionV2Acceptance: boolean
   sessionV2Issuance: boolean
+  actionContextV2: boolean
+  rpcDelegationV2: boolean
   legacySwitchEndpoint: boolean
   minimumClientVersion: string | null
   minimumClientEnforcement: boolean
@@ -27,6 +29,10 @@ export type DeploymentReadiness = Readonly<{
   legacyDrainAccepted: boolean
   sessionV2Acceptance: Readiness
   sessionV2Issuance: Readiness
+  accessBudget: Readiness
+  actionContext: Readiness
+  rpcDelegationAllHops: Readiness
+  pr2RuntimeHops: Pr2RuntimeHopReadiness
   minimumClientEnforcement: Readiness
 }>
 
@@ -39,6 +45,8 @@ export type EffectiveUserAccessPolicy = Readonly<{
   issueV2: boolean
   renewV2: boolean
   switchCompatibility: boolean
+  actionContextV2: boolean
+  rpcDelegationV2: boolean
   minimumClientVersion: string | null
   enforceMinimumClient: boolean
 }>
@@ -113,6 +121,20 @@ export function compileUserAccessPolicy(
     )
   }
 
+  if (intent.actionContextV2) {
+    requireCondition(acceptV2, 'action_context_requires_v2_acceptance')
+    requireCondition(readiness.accessBudget === 'ready', 'action_context_budget_unavailable')
+    requireCondition(readiness.actionContext === 'ready', 'action_context_unavailable')
+    requireCondition(
+      allPr2RuntimeHopsReady(readiness.pr2RuntimeHops),
+      'action_context_pr2_hops_unavailable'
+    )
+  }
+  if (intent.rpcDelegationV2) {
+    requireCondition(intent.actionContextV2, 'rpc_v2_requires_action_context')
+    requireCondition(readiness.rpcDelegationAllHops === 'ready', 'rpc_v2_all_hops_unavailable')
+  }
+
   const minimumVersion = intent.minimumClientVersion?.trim() || null
   if (minimumVersion !== null) {
     requireCondition(
@@ -136,6 +158,8 @@ export function compileUserAccessPolicy(
     issueV2,
     renewV2: acceptV2 && issueV2,
     switchCompatibility: intent.legacySwitchEndpoint,
+    actionContextV2: intent.actionContextV2,
+    rpcDelegationV2: intent.rpcDelegationV2,
     minimumClientVersion: intent.minimumClientEnforcement ? minimumVersion : null,
     enforceMinimumClient: intent.minimumClientEnforcement,
   })
@@ -186,6 +210,8 @@ export function loadConfiguredUserAccessIntent(env: NodeJS.ProcessEnv): Configur
     ),
     sessionV2Acceptance: parseBoolean(env, 'CONTROL_API_USER_ACCESS_SESSION_V2_ACCEPTANCE', true),
     sessionV2Issuance: parseBoolean(env, 'CONTROL_API_USER_ACCESS_SESSION_V2_ISSUANCE', false),
+    actionContextV2: parseBoolean(env, 'CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2', false),
+    rpcDelegationV2: parseBoolean(env, 'CONTROL_API_USER_ACCESS_RPC_DELEGATION_V2', false),
     legacySwitchEndpoint: parseBoolean(env, 'CONTROL_API_USER_ACCESS_LEGACY_SWITCH_ENDPOINT', true),
     minimumClientVersion: parseVersion(env, 'CONTROL_API_USER_ACCESS_MINIMUM_CLIENT_VERSION'),
     minimumClientEnforcement: parseBoolean(
@@ -204,10 +230,50 @@ export const reconstructionReadiness: DeploymentReadiness = Object.freeze({
   legacyDrainAccepted: false,
   sessionV2Acceptance: 'ready',
   sessionV2Issuance: 'unavailable',
+  accessBudget: 'ready',
+  // The resolver exists for foundation validation, but its public rollout is
+  // owned by the later runtime unit and remains unavailable in PR 1.
+  actionContext: 'unavailable',
+  // PR 2 owns the rpc-proxy and mcp-host hops. This stays unavailable in PR 1.
+  rpcDelegationAllHops: 'unavailable',
+  // This is deliberately independent of configured intent and coarse release
+  // readiness. Every PR 2 producer, consumer, and continuation hop must supply
+  // executable evidence before either v2 runtime contract can be advertised.
+  pr2RuntimeHops: unavailablePr2RuntimeHops,
   minimumClientEnforcement: 'unavailable',
 })
 
 export const configuredUserAccessIntent = loadConfiguredUserAccessIntent(process.env)
+
+export function userAccessCapabilityManifest(policy: EffectiveUserAccessPolicy): Readonly<{
+  policyVersion: string
+  policyRevision: string
+  v1Accepted: boolean
+  v1Issued: boolean
+  v2Accepted: boolean
+  v2Issued: boolean
+  v2Renewal: boolean
+  legacySwitch: boolean
+  actionContextV2: boolean
+  rpcDelegationV2: boolean
+  minimumClientVersion: string | null
+  minimumClientEnforced: boolean
+}> {
+  return Object.freeze({
+    policyVersion: policy.policyVersion,
+    policyRevision: policy.policyRevision,
+    v1Accepted: policy.acceptV1,
+    v1Issued: policy.issueV1,
+    v2Accepted: policy.acceptV2,
+    v2Issued: policy.issueV2,
+    v2Renewal: policy.renewV2,
+    legacySwitch: policy.switchCompatibility,
+    actionContextV2: policy.actionContextV2,
+    rpcDelegationV2: policy.rpcDelegationV2,
+    minimumClientVersion: policy.minimumClientVersion,
+    minimumClientEnforced: policy.enforceMinimumClient,
+  })
+}
 
 export function compareSemanticVersions(left: string, right: string): number | null {
   const leftMatch = SEMANTIC_VERSION_PATTERN.exec(left)

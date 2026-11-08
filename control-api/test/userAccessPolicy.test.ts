@@ -16,6 +16,8 @@ function intent(overrides: Partial<ConfiguredUserAccessIntent> = {}): Configured
     legacyLifecycle: 'issue_and_accept',
     sessionV2Acceptance: true,
     sessionV2Issuance: false,
+    actionContextV2: false,
+    rpcDelegationV2: false,
     legacySwitchEndpoint: true,
     minimumClientVersion: null,
     minimumClientEnforcement: false,
