@@ -105,8 +105,10 @@ spec:
         # Boot waits up to 90s for Postgres (waitForDbConnection) before the
         # listener starts. Budget: ~5s process start + 90s wait + one 2s probe
         # interval + one 2s connection timeout + ~1.5s from database ready to
-        # running ≈ 101s,
-        # inside 40 x 3s = 120s. Liveness and readiness start after this passes.
+        # running ≈ 101s. The first probe can run at container start and the
+        # kubelet restarts the container at the 40th consecutive failure, so the
+        # earliest restart is 39 x 3s = 117s after start. Liveness and readiness
+        # start after this passes.
         startupProbe:
           httpGet:
             path: /health

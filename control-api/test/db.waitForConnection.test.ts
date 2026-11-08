@@ -191,11 +191,15 @@ describe('control-api startupProbe budget', () => {
     const container = deployment.spec.template.spec.containers.find(
       (c: { name: string }) => c.name === 'control-api'
     )
-    const { periodSeconds, failureThreshold } = container.startupProbe
+    const { initialDelaySeconds = 0, periodSeconds, failureThreshold } = container.startupProbe
+    // The first probe can run as soon as initialDelaySeconds have passed, and
+    // the kubelet restarts the container at the failureThreshold-th consecutive
+    // failure, so the earliest restart is (failureThreshold - 1) periods later.
+    const earliestRestartMs = (initialDelaySeconds + (failureThreshold - 1) * periodSeconds) * 1000
     // The manifest comment's own figures: ~5 s process start before the wait,
     // ~1.5 s from database ready to running after it.
     const bootWorkMs = 6_500
-    expect(periodSeconds * failureThreshold * 1000).toBeGreaterThan(
+    expect(earliestRestartMs).toBeGreaterThan(
       DB_WAIT_DEADLINE_MS +
         DB_WAIT_INTERVAL_MS +
         corePoolBudget().connectionTimeoutMillis +

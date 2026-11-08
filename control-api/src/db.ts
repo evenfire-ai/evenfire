@@ -6986,7 +6986,11 @@ const DB_WAIT_RETRY_MESSAGES = new Map([
 
 /** Default bound of the boot wait. The control-api startupProbe budget must cover it. */
 export const DB_WAIT_DEADLINE_MS = 90_000
-/** Pause between boot-wait probes; the last probe can start one interval before the deadline. */
+/**
+ * Pause between boot-wait probes. A probe that fails before the deadline is
+ * followed by one more after this pause, so the last probe can start up to one
+ * interval after the deadline.
+ */
 export const DB_WAIT_INTERVAL_MS = 2_000
 
 export type WaitForDbConnectionOptions = {
