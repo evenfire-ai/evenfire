@@ -6851,6 +6851,33 @@ export class AppService {
     return result
   }
 
+  /**
+   * Copy the exact canonical resource URI only while the observed local session
+   * still owns the serialized native-effect slot. This keeps the sidebar's
+   * direct Copy ID action from writing to the renderer clipboard after logout.
+   */
+  async copyGfsResourceId(
+    uri: string,
+    writeClipboard: (resourceId: string) => void | Promise<void>,
+    expectedSessionGeneration: number
+  ): Promise<{ resourceId: string }> {
+    const parsed = parseGfsUri(uri)
+    if (!parsed || parsed.byPath !== null || uri !== `gfs://${parsed.drive}/${parsed.rid}`) {
+      throw new Error('Cannot copy an invalid GFS resource ID')
+    }
+    if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+      throw new Error('invalid_session_generation')
+    }
+    await this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(expectedSessionGeneration)
+      if (this.gfsDispatchBlocked || !this.sessionToken || !this.me?.id) {
+        throw new Error('An authenticated Desktop session is required to copy a GFS resource ID')
+      }
+      await writeClipboard(uri)
+    })
+    return { resourceId: uri }
+  }
+
   async getGfsResourceProfileOrigin(): Promise<{
     origin: string
     sessionGeneration: number

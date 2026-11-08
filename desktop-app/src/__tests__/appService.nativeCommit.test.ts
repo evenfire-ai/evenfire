@@ -12,6 +12,64 @@ import { saveGfsReceiptToPath } from '../gfs/saveOwner.js'
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService native auth and environment commit ordering', () => {
+  it('keeps Copy ID inside the local authority queue and rejects stale generations', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const me = { id: 'user-a', email: 'user-a@example.test', teamId: 'team-a' }
+    service.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me }),
+    } as never
+    await service.googleLogin('synthetic-google-token')
+
+    const app = service as unknown as {
+      tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
+      getSessionGeneration(): number
+    }
+    const originalClear = app.tokenStore.clearSessionToken
+    const order: string[] = []
+    app.tokenStore.clearSessionToken = vi.fn(async (...args: unknown[]) => {
+      order.push('logout-commit')
+      await originalClear(...args)
+    })
+    let releaseClipboard!: () => void
+    let clipboardStarted!: () => void
+    const started = new Promise<void>(resolve => {
+      clipboardStarted = resolve
+    })
+    const clipboardGate = new Promise<void>(resolve => {
+      releaseClipboard = resolve
+    })
+    const writeClipboard = vi.fn(async (value: string) => {
+      expect(value).toBe('gfs://main/0123456789abcdef0123456789abcdef')
+      order.push('clipboard-start')
+      clipboardStarted()
+      await clipboardGate
+      order.push('clipboard-settled')
+    })
+    const generation = app.getSessionGeneration()
+    const copying = service.copyGfsResourceId(
+      'gfs://main/0123456789abcdef0123456789abcdef',
+      writeClipboard,
+      generation
+    )
+    await started
+    const loggingOut = service.logout()
+    releaseClipboard()
+
+    await expect(copying).resolves.toEqual({
+      resourceId: 'gfs://main/0123456789abcdef0123456789abcdef',
+    })
+    await loggingOut
+    expect(order).toEqual(['clipboard-start', 'clipboard-settled', 'logout-commit'])
+    await expect(
+      service.copyGfsResourceId(
+        'gfs://main/0123456789abcdef0123456789abcdef',
+        writeClipboard,
+        generation
+      )
+    ).rejects.toThrow()
+    expect(writeClipboard).toHaveBeenCalledOnce()
+  })
+
   it.each(['S144', 'S145'] as const)(
     '%s freezes the real save receipt before queued logout commits',
     async outcome => {

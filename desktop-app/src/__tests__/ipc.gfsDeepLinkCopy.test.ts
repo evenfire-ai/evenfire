@@ -39,12 +39,28 @@ const service = {
       return { url: sharedUrl }
     }
   ),
+  copyGfsResourceId: vi.fn(
+    async (
+      resourceId: string,
+      writeClipboard: (value: string) => void,
+      _expectedSessionGeneration: number
+    ) => {
+      await writeClipboard(resourceId)
+      return { resourceId }
+    }
+  ),
 }
 const trusted = { senderFrame: { url: 'file:///app/index.html' } }
 
 function copyHandler(): Handler {
   const handler = electron.handlers.get('gfs:copyDeepLink')
   if (!handler) throw new Error('gfs:copyDeepLink handler was not registered')
+  return handler
+}
+
+function copyResourceIdHandler(): Handler {
+  const handler = electron.handlers.get('gfs:copyResourceId')
+  if (!handler) throw new Error('gfs:copyResourceId handler was not registered')
   return handler
 }
 
@@ -55,7 +71,38 @@ beforeAll(async () => {
 
 afterEach(() => {
   service.copyGfsResourceDeepLink.mockClear()
+  service.copyGfsResourceId.mockClear()
   electron.writeText.mockClear()
+})
+
+describe('gfs:copyResourceId trusted clipboard handoff', () => {
+  it('copies the exact URI through the main-process session owner', async () => {
+    await expect(
+      copyResourceIdHandler()(trusted, { uri: ` ${uri} `, expectedSessionGeneration: 1 })
+    ).resolves.toEqual({ resourceId: uri })
+
+    expect(service.copyGfsResourceId).toHaveBeenCalledOnce()
+    expect(service.copyGfsResourceId.mock.calls[0]?.[0]).toBe(uri)
+    expect(service.copyGfsResourceId.mock.calls[0]?.[1]).toBeTypeOf('function')
+    expect(service.copyGfsResourceId.mock.calls[0]?.[2]).toBe(1)
+    expect(electron.writeText).toHaveBeenCalledOnce()
+    expect(electron.writeText).toHaveBeenCalledWith(uri)
+  })
+
+  it('rejects untrusted senders and invalid generations before clipboard access', async () => {
+    await expect(
+      copyResourceIdHandler()(
+        { senderFrame: { url: 'https://untrusted.example' } },
+        { uri, expectedSessionGeneration: 1 }
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    await expect(copyResourceIdHandler()(trusted, { uri })).rejects.toThrow(
+      'invalid_session_generation'
+    )
+
+    expect(service.copyGfsResourceId).not.toHaveBeenCalled()
+    expect(electron.writeText).not.toHaveBeenCalled()
+  })
 })
 
 describe('gfs:copyDeepLink trusted clipboard handoff', () => {

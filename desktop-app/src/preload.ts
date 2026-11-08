@@ -292,6 +292,8 @@ const clerum = Object.freeze({
     },
     copyDeepLink: (uri: string, expectedSessionGeneration: number) =>
       invokeGfs('gfs:copyDeepLink', { uri, expectedSessionGeneration }),
+    copyResourceId: (uri: string, expectedSessionGeneration: number) =>
+      invokeGfs('gfs:copyResourceId', { uri, expectedSessionGeneration }),
     getResourceProfileOrigin: () => invokeGfs('gfs:getResourceProfileOrigin'),
     resolve: (uri: string) => invokeGfs('gfs:resolve', { uri }),
     saveToDisk: (

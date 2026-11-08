@@ -673,6 +673,7 @@ function installClerum(
     moveResource,
     dispatchFileExplorerMutation,
     copyDeepLink: vi.fn(async () => ({ url: 'https://profile.fixture.test/link' })),
+    copyResourceId: vi.fn(async (resourceId: string) => ({ resourceId })),
     saveToDisk: vi.fn(async (uri: string) => ({
       status: 'saved_access_verified' as const,
       uri,
@@ -2698,7 +2699,8 @@ describe('App → Files action lifecycle integration', () => {
     expect(chatTab?.kind).toBe('chat')
     await chooseRowAction('target-a.txt', 'Copy file ID')
 
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(targetA.gfsUri))
+    await waitFor(() => expect(gfs.copyResourceId).toHaveBeenCalledWith(targetA.gfsUri, 1))
+    expect(writeText).not.toHaveBeenCalled()
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(chatTab?.id)
     expect(gfs.resolve).not.toHaveBeenCalledWith(targetA.gfsUri)
   })

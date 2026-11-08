@@ -476,6 +476,43 @@ static napi_value CleanupStage(napi_env env, napi_callback_info info) {
 #endif
 }
 
+static napi_value RemovePublishedStageAlias(napi_env env, napi_callback_info info) {
+#if !EVENFIRE_POSIX
+  napi_throw_error(env, "ERR_GFS_NATIVE_UNSUPPORTED", "retained POSIX save bridge unavailable");
+  return nullptr;
+#else
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  SaveSession* session = argc == 1 ? GetSession(env, argv[0]) : nullptr;
+  if (!session) return nullptr;
+  if (!session->published || !session->writer_settled) {
+    napi_throw_error(env, "ERR_GFS_STAGE_ALIAS_STATE",
+                     "published stage alias cleanup requires settled publication");
+    return nullptr;
+  }
+  struct stat handle_info, stage_info;
+  if (fstat(session->file_fd, &handle_info) != 0)
+    return ThrowErrno(env, "identify published GFS file before stage alias cleanup");
+  if (fstatat(session->stage_directory_fd, session->stage_file_name.c_str(), &stage_info,
+              AT_SYMLINK_NOFOLLOW) == 0) {
+    if (!S_ISREG(stage_info.st_mode) || stage_info.st_dev != handle_info.st_dev ||
+        stage_info.st_ino != handle_info.st_ino || handle_info.st_dev != session->device ||
+        handle_info.st_ino != session->inode) {
+      errno = ESTALE;
+      return ThrowErrno(env, "refuse cleanup of replaced published GFS stage alias");
+    }
+    if (unlinkat(session->stage_directory_fd, session->stage_file_name.c_str(), 0) != 0)
+      return ThrowErrno(env, "remove exact published GFS stage alias");
+  } else if (errno != ENOENT) {
+    return ThrowErrno(env, "inspect published GFS stage alias");
+  }
+  napi_value result;
+  napi_get_undefined(env, &result);
+  return result;
+#endif
+}
+
 static napi_value CloseNativeSession(napi_env env, napi_callback_info info) {
   size_t argc = 1; napi_value argv[1];
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
@@ -504,6 +541,7 @@ static napi_value Init(napi_env env, napi_value exports) {
     {"applyFinalMode", nullptr, ApplyFinalMode, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectFinalMode", nullptr, InspectFinalMode, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"cleanupStage", nullptr, CleanupStage, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"removePublishedStageAlias", nullptr, RemovePublishedStageAlias, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"closeSession", nullptr, CloseNativeSession, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);

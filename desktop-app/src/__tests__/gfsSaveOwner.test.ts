@@ -113,6 +113,33 @@ describe('trusted GFS save owner', () => {
     expect(statSync(filePath).mode & 0o777).toBe(0o666 & ~process.umask())
   })
 
+  it('removes the private stage alias before widening the published POSIX inode', async () => {
+    if (process.platform === 'win32') return
+    const directory = makeDirectory()
+    const filePath = path.join(directory, 'alias-order.txt')
+    let observed = false
+    const receipt = await saveGfsReceiptToPath({
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      version: 10,
+      filePath,
+      bytes: new TextEncoder().encode('alias order').buffer,
+      publishFence: async publish => await publish(),
+      onStageWriteChunk: (_written, stagePath) => {
+        if (!stagePath) throw new Error('stage path missing from producer test seam')
+      },
+      onPosixStageAliasRemoved: (stagePath, finalMode) => {
+        observed = true
+        expect(existsSync(stagePath)).toBe(false)
+        expect(finalMode).toBe(0o600)
+        expect(statSync(filePath).mode & 0o777).toBe(0o600)
+      },
+    })
+    expect(observed).toBe(true)
+    expect(receipt.status).toBe('saved_access_verified')
+    expect(readFileSync(filePath, 'utf8')).toBe('alias order')
+    expect(statSync(filePath).mode & 0o777).toBe(0o666 & ~process.umask())
+  })
+
   it('settles cancellation before the final effect and cleans the stage', async () => {
     const directory = makeDirectory()
     const filePath = path.join(directory, 'cancelled.txt')
@@ -383,13 +410,15 @@ describe('trusted GFS save owner', () => {
     )
     expect(restrictedObservation?.identity).toMatch(/^[0-9A-F]{16}:[0-9A-F]{32}$/i)
 
-    const host = path.win32.join(
-      process.env.SystemRoot ?? 'C:\\Windows',
-      'System32',
-      'WindowsPowerShell',
-      'v1.0',
-      'powershell.exe'
-    )
+    const host =
+      process.env.EVENFIRE_GFS_POWERSHELL_PATH ??
+      path.win32.join(
+        process.env.SystemRoot ?? 'C:\\Windows',
+        'System32',
+        'WindowsPowerShell',
+        'v1.0',
+        'powershell.exe'
+      )
     const script = String.raw`
 $paths = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $result = @()
@@ -424,13 +453,15 @@ $result | ConvertTo-Json -Compress
     const directory = makeDirectory()
     const controlPath = path.join(directory, 'q-readable-control.bin')
     writeFileSync(controlPath, 'Q token control')
-    const powershell = path.join(
-      process.env.SystemRoot ?? 'C:\\Windows',
-      'System32',
-      'WindowsPowerShell',
-      'v1.0',
-      'powershell.exe'
-    )
+    const powershell =
+      process.env.EVENFIRE_GFS_POWERSHELL_PATH ??
+      path.join(
+        process.env.SystemRoot ?? 'C:\\Windows',
+        'System32',
+        'WindowsPowerShell',
+        'v1.0',
+        'powershell.exe'
+      )
     const qProbe = path.join(__dirname, '../../native/test-q-token-access.ps1')
     const probeQ = (filePath: string, grantRead = false) => {
       const args = [

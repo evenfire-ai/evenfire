@@ -815,6 +815,24 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
+  handleGfs(
+    'gfs:copyResourceId',
+    async (event, payload: { uri?: unknown; expectedSessionGeneration?: unknown }) => {
+      assertTrustedSender(event)
+      if (
+        typeof payload?.expectedSessionGeneration !== 'number' ||
+        !Number.isSafeInteger(payload.expectedSessionGeneration) ||
+        payload.expectedSessionGeneration < 0
+      ) {
+        throw new Error('invalid_session_generation')
+      }
+      return service.copyGfsResourceId(
+        sanitizeString(payload?.uri),
+        resourceId => clipboard.writeText(resourceId),
+        payload.expectedSessionGeneration
+      )
+    }
+  )
   handleGfs('gfs:getResourceProfileOrigin', async event => {
     assertTrustedSender(event)
     return service.getGfsResourceProfileOrigin()

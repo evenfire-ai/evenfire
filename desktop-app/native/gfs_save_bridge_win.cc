@@ -201,12 +201,18 @@ bool CreatePrivateDescriptor(PSECURITY_DESCRIPTOR* descriptor, std::wstring* own
   return result == TRUE;
 }
 
-bool CreateIntendedDescriptor(HANDLE directory, PSECURITY_DESCRIPTOR* descriptor) {
+bool CreateIntendedDescriptor(HANDLE directory, PSECURITY_DESCRIPTOR* descriptor,
+                             DWORD* failure_status) {
   HANDLE token = nullptr;
   PSECURITY_DESCRIPTOR parent = nullptr;
   bool ok = false;
-  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
-  const DWORD status = GetSecurityInfo(directory, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+    *failure_status = GetLastError();
+    return false;
+  }
+  const DWORD status = GetSecurityInfo(directory, SE_FILE_OBJECT,
+                                       OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                           DACL_SECURITY_INFORMATION,
                                        nullptr, nullptr, nullptr, nullptr, &parent);
   if (status == ERROR_SUCCESS) {
     GENERIC_MAPPING mapping{};
@@ -216,6 +222,9 @@ bool CreateIntendedDescriptor(HANDLE directory, PSECURITY_DESCRIPTOR* descriptor
     mapping.GenericAll = FILE_ALL_ACCESS;
     ok = CreatePrivateObjectSecurityEx(parent, nullptr, descriptor, nullptr, FALSE,
           SEF_DACL_AUTO_INHERIT | SEF_DEFAULT_GROUP_FROM_PARENT, token, &mapping) == TRUE;
+    if (!ok) *failure_status = GetLastError();
+  } else {
+    *failure_status = status;
   }
   if (parent) LocalFree(parent);
   CloseHandle(token);
@@ -303,11 +312,17 @@ napi_value OpenDestination(napi_env env, napi_callback_info info) {
     return ThrowWin(env, "open accepted destination directory", error);
   }
   std::string filesystem;
-  if (!ParentIsSupported(session->directory, &filesystem) ||
-      !CreateIntendedDescriptor(session->directory, &session->intended_sd)) {
+  if (!ParentIsSupported(session->directory, &filesystem)) {
     CloseSession(session, false); delete session;
     return ThrowState(env, "ERR_GFS_NATIVE_UNSUPPORTED",
-                      "destination must be a validated NTFS or ReFS directory with readable ACLs");
+                      "destination must be a validated NTFS or ReFS directory");
+  }
+  DWORD descriptor_error = ERROR_SUCCESS;
+  if (!CreateIntendedDescriptor(session->directory, &session->intended_sd,
+                                &descriptor_error)) {
+    CloseSession(session, false); delete session;
+    return ThrowWin(env, "capture destination owner, group, and ACL for the published file",
+                    descriptor_error);
   }
   session->intended_sddl = DescriptorSddl(session->intended_sd);
   if (session->intended_sddl.empty()) {

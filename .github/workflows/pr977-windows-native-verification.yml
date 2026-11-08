@@ -129,6 +129,7 @@ jobs:
         working-directory: desktop-app
         run: |
           $ErrorActionPreference = 'Stop'
+          $env:EVENFIRE_GFS_POWERSHELL_PATH = Join-Path $PSHOME 'pwsh.exe'
           if ((Get-Volume -DriveLetter C).FileSystem -ne 'NTFS') { throw 'NTFS precondition failed' }
           $env:EVENFIRE_GFS_SAVE_TEST_ROOT = 'C:\gfs-r26-ntfs'
           node --test native/gfs_save_bridge.test.cjs
@@ -140,6 +141,7 @@ jobs:
         working-directory: desktop-app
         run: |
           $ErrorActionPreference = 'Stop'
+          $env:EVENFIRE_GFS_POWERSHELL_PATH = Join-Path $PSHOME 'pwsh.exe'
           if ((Get-Volume -DriveLetter R).FileSystem -ne 'ReFS') { throw 'ReFS precondition failed' }
           $env:EVENFIRE_GFS_SAVE_TEST_ROOT = 'R:\gfs-r26-refs'
           node --test native/gfs_save_bridge.test.cjs

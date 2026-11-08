@@ -1174,10 +1174,26 @@ export function App() {
       observedSessionGeneration?: number | null
     ) => {
       if (actionId === 'copy-route') {
-        void navigator.clipboard
-          .writeText(resource.gfsUri)
+        if (!Number.isSafeInteger(observedSessionGeneration) || observedSessionGeneration! < 0) {
+          vm.pushToast(
+            'This file action is no longer current. Refresh the file list and try again.',
+            'error'
+          )
+          return
+        }
+        const copyResourceId = window.clerum.gfs.copyResourceId
+        if (typeof copyResourceId !== 'function') {
+          vm.pushToast('Copy resource ID is unavailable in this version.', 'error')
+          return
+        }
+        void copyResourceId(resource.gfsUri, observedSessionGeneration!)
           .then(() => vm.pushToast('Resource ID copied.', 'success'))
-          .catch(() => vm.pushToast('Could not copy the resource ID.', 'error'))
+          .catch(error =>
+            vm.pushToast(
+              error instanceof Error ? error.message : 'Could not copy the resource ID.',
+              'error'
+            )
+          )
         return
       }
       if (actionId === 'copy-link') {

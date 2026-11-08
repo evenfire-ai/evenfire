@@ -17,6 +17,7 @@ interface PosixGfsSaveNativeBridge {
   inspectFinal(session: unknown): string
   applyFinalMode(session: unknown, mode: number): number
   inspectFinalMode(session: unknown): number
+  removePublishedStageAlias(session: unknown): void
   cleanupStage(session: unknown): void
   closeSession(session: unknown): void
 }
@@ -801,6 +802,26 @@ export function cleanupGfsStage(stage: GfsSaveStage): void {
   }
 }
 
+function removePublishedPosixStageAlias(stage: GfsSaveStage): void {
+  if (process.platform === 'win32') return
+  if (stage.nativeSession) {
+    if (!posixGfsSaveNative) throw new Error('POSIX GFS save bridge is unavailable')
+    posixGfsSaveNative.removePublishedStageAlias(stage.nativeSession)
+    return
+  }
+  let current: fs.Stats | undefined
+  try {
+    current = fs.lstatSync(stage.stagePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  if (!current) return
+  if (current.isSymbolicLink() || fileIdentity(current) !== stage.fileIdentity) {
+    throw new Error('refusing cleanup of a different published GFS stage object')
+  }
+  fs.unlinkSync(stage.stagePath)
+}
+
 function closeGfsSaveStage(stage: GfsSaveStage): void {
   if (process.platform === 'win32') windowsGfsSaveNative?.closeSession(stage.nativeSession)
   else if (stage.nativeSession) posixGfsSaveNative?.closeSession(stage.nativeSession)
@@ -827,10 +848,11 @@ export async function saveGfsReceiptToPath(options: {
     attempt: 'primary' | 'reconciliation'
   ) => string | null | undefined | Promise<string | null | undefined>
   /** Internal native-acceptance seam; never supplied by renderer or IPC callers. */
-  readWindowsFinalAccess?: (attempt: WindowsFinalAccessReadAttempt) =>
-    | 'intended'
-    | 'private'
-    | 'unknown'
+  readWindowsFinalAccess?: (
+    attempt: WindowsFinalAccessReadAttempt
+  ) => 'intended' | 'private' | 'unknown'
+  /** Internal producer-test observer for the private-alias/mode ordering. */
+  onPosixStageAliasRemoved?: (stagePath: string, finalMode: number) => void
 }): Promise<GfsSaveTerminalReceipt> {
   if (options.signal?.aborted) {
     return { status: 'cancelled_no_publication', uri: options.uri, filePath: null }
@@ -983,6 +1005,58 @@ export async function saveGfsReceiptToPath(options: {
         return receipt
       }
 
+      if (process.platform !== 'win32') {
+        try {
+          // The final and stage names share one inode. Remove the private stage
+          // alias before widening the final mode, so a failed cleanup cannot
+          // leave a broader-readable stage name behind.
+          removePublishedPosixStageAlias(stage)
+          options.onPosixStageAliasRemoved?.(
+            stage.stagePath,
+            stage.nativeSession && posixGfsSaveNative
+              ? posixGfsSaveNative.inspectFinalMode(stage.nativeSession)
+              : fs.statSync(stage.filePath).mode & 0o777
+          )
+        } catch {
+          let finalMode: number | undefined
+          try {
+            if (stage.nativeSession && posixGfsSaveNative) {
+              finalMode = posixGfsSaveNative.inspectFinalMode(stage.nativeSession)
+            } else {
+              finalMode = fs.statSync(stage.filePath).mode & 0o777
+            }
+          } catch {
+            finalMode = undefined
+          }
+          closeGfsSaveStage(stage)
+          return finalMode === 0o600
+            ? {
+                status: 'published_private_warning',
+                uri: options.uri,
+                version: options.version,
+                filePath: options.filePath,
+                publication: 'confirmed_by_native_return',
+                identity: 'verified',
+                access: 'verified_private',
+                stageCleanup: 'failed',
+                residualStagePath: stage.stagePath,
+                residualStageIdentity: stage.fileIdentity,
+              }
+            : {
+                status: 'published_access_unverified',
+                uri: options.uri,
+                version: options.version,
+                filePath: options.filePath,
+                publication: 'confirmed_by_native_return',
+                identity: 'verified',
+                access: 'unverified',
+                stageCleanup: 'failed',
+                residualStagePath: stage.stagePath,
+                residualStageIdentity: stage.fileIdentity,
+              }
+        }
+      }
+
       if (stage.nativeSession && posixGfsSaveNative) {
         let finalMode: number | undefined
         try {
@@ -996,6 +1070,19 @@ export async function saveGfsReceiptToPath(options: {
           }
         }
         if (finalMode !== (stage.intendedMode ?? 0o600)) {
+          let stageCleanup: 'complete' | 'failed' = 'failed'
+          try {
+            cleanupGfsStage(stage)
+            stageCleanup = 'complete'
+          } catch {
+            closeGfsSaveStage(stage)
+          }
+          const residualStagePath =
+            stageCleanup === 'complete' ? undefined : (stage.stageDirectory ?? stage.stagePath)
+          const residualStageIdentity =
+            stageCleanup === 'complete'
+              ? undefined
+              : (stage.stageDirectoryIdentity ?? stage.fileIdentity)
           const receipt: GfsSaveTerminalReceipt =
             finalMode === 0o600
               ? ({
@@ -1006,9 +1093,8 @@ export async function saveGfsReceiptToPath(options: {
                   publication: 'confirmed_by_native_return',
                   identity: 'verified',
                   access: 'verified_private',
-                  stageCleanup: 'retained',
-                  residualStagePath: stage.stagePath,
-                  residualStageIdentity: stage.fileIdentity,
+                  stageCleanup,
+                  ...(residualStagePath ? { residualStagePath, residualStageIdentity } : {}),
                 } as const)
               : ({
                   status: 'published_access_unverified',
@@ -1018,11 +1104,9 @@ export async function saveGfsReceiptToPath(options: {
                   publication: 'confirmed_by_native_return',
                   identity: 'verified',
                   access: 'unverified',
-                  stageCleanup: 'retained',
-                  residualStagePath: stage.stagePath,
-                  residualStageIdentity: stage.fileIdentity,
+                  stageCleanup,
+                  ...(residualStagePath ? { residualStagePath, residualStageIdentity } : {}),
                 } as const)
-          closeGfsSaveStage(stage)
           return receipt
         }
       } else if (process.platform !== 'win32' && (stage.intendedMode ?? 0o600) !== 0o600) {

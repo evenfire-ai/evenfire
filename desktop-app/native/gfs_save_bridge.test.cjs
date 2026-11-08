@@ -43,13 +43,15 @@ function stage(destination, body) {
 }
 
 function qTokenReadExit(filePath, grantRead = false) {
-  const powershell = path.join(
-    process.env.SystemRoot ?? 'C:\\Windows',
-    'System32',
-    'WindowsPowerShell',
-    'v1.0',
-    'powershell.exe'
-  )
+  const powershell =
+    process.env.EVENFIRE_GFS_POWERSHELL_PATH ??
+    path.join(
+      process.env.SystemRoot ?? 'C:\\Windows',
+      'System32',
+      'WindowsPowerShell',
+      'v1.0',
+      'powershell.exe'
+    )
   const probe = path.join(__dirname, 'test-q-token-access.ps1')
   const args = [
     '-NoProfile',

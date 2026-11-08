@@ -9,15 +9,20 @@ if (-not $env:GFS_Q_USERNAME -or -not $env:GFS_Q_PASSWORD) {
 }
 
 $account = "$env:COMPUTERNAME\$env:GFS_Q_USERNAME"
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$qSid = ([System.Security.Principal.NTAccount]::new($account)).Translate(
+  [System.Security.Principal.SecurityIdentifier]
+).Value
+if ($currentSid -eq $qSid) {
+  throw 'The secondary Q principal must have a distinct Windows SID.'
+}
 if ($GrantRead) {
-  $acl = Get-Acl -LiteralPath $Path
-  $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-    $account,
-    [System.Security.AccessControl.FileSystemRights]::Read,
-    [System.Security.AccessControl.AccessControlType]::Allow
-  )
-  [void]$acl.AddAccessRule($rule)
-  Set-Acl -LiteralPath $Path -AclObject $acl
+  $icacls = Join-Path $env:SystemRoot 'System32\\icacls.exe'
+  $grant = "${account}:(R)"
+  $output = & $icacls $Path /grant $grant 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "icacls could not establish the Q-token positive control: $output"
+  }
 }
 
 $pathBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Path))
@@ -38,6 +43,11 @@ $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($pro
 $securePassword = ConvertTo-SecureString $env:GFS_Q_PASSWORD -AsPlainText -Force
 $credential = [System.Management.Automation.PSCredential]::new($account, $securePassword)
 $arguments = "-NoProfile -NonInteractive -EncodedCommand $encodedProbe"
-$process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') `
+$powerShellHost = if ($env:EVENFIRE_GFS_POWERSHELL_PATH) {
+  $env:EVENFIRE_GFS_POWERSHELL_PATH
+} else {
+  Join-Path $PSHOME 'pwsh.exe'
+}
+$process = Start-Process -FilePath $powerShellHost `
   -Credential $credential -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
 Write-Output "Q_EXIT=$($process.ExitCode)"

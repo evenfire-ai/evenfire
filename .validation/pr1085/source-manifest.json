@@ -7,19 +7,19 @@
     },
     {
       "path": "desktop-app\\native\\gfs_save_bridge.cc",
-      "sha256": "42e436df21b90667b35dded3c29f9cb42a8a709e96e060983a28e7e603ef8ad5"
+      "sha256": "7a5d3fbee0efc959893819fad7ffb6f3ce2bc630ea32ecc7b1b7dc3ceaf60109"
     },
     {
       "path": "desktop-app\\native\\gfs_save_bridge.test.cjs",
-      "sha256": "8591fe9ca9c1c2670254f7c7fd62007d365d80595c82b9bd49588d95b5bc31fa"
+      "sha256": "2f1a081041987e5bd2dce543835e9470f34479a830973418281b6860632262a5"
     },
     {
       "path": "desktop-app\\native\\gfs_save_bridge_win.cc",
-      "sha256": "4798754c09b1a79ca199dcc3bcf17154f0d2c6605e08a9c67d665f5fc3db26e6"
+      "sha256": "25cfc8c23eb74a9689b94813bd6c7c833d8fa94e722665403da2fb3a791c61ba"
     },
     {
       "path": "desktop-app\\native\\test-q-token-access.ps1",
-      "sha256": "3e9d8ddb68c4ca387ad095704d88ff812591fba2ac197af9c186aa286e58d569"
+      "sha256": "c3efab3cd2eb90587caf348fe911be27be5ab869c740c816de0a1fefd56b9b09"
     },
     {
       "path": "desktop-app\\package-lock.json",
@@ -51,7 +51,7 @@
     },
     {
       "path": "desktop-app\\src\\__tests__\\appService.nativeCommit.test.ts",
-      "sha256": "0961ffd2b4f4c45133cddd8c2cff4c952c1c8fa75ac9e990419b16c7fcc52024"
+      "sha256": "b5c599099c746b45091c2cabd87ada8a24d7bac57bba321c9be2e1db6ef142bc"
     },
     {
       "path": "desktop-app\\src\\__tests__\\appService.sandboxUiApps.test.ts",
@@ -75,7 +75,7 @@
     },
     {
       "path": "desktop-app\\src\\__tests__\\gfsSaveOwner.test.ts",
-      "sha256": "6783d9705886cff9a0c56236624e5cbf2240c70692cbaabbc37ad5ace50a5922"
+      "sha256": "2e1f099379ca320f106be7c906f51aceffdfe30d4ae39b50642d66fbc20f104c"
     },
     {
       "path": "desktop-app\\src\\__tests__\\gfsSaveS147.integration.test.ts",
@@ -83,7 +83,7 @@
     },
     {
       "path": "desktop-app\\src\\__tests__\\ipc.gfsDeepLinkCopy.test.ts",
-      "sha256": "701e3d90500ea79345a054bcd0e72c8499a730da62192cd5360b6482ba579957"
+      "sha256": "dd3b8a53a684e1cabd35566eb7f6dcc11b79e556a6bcc8389ef650d031f6eed3"
     },
     {
       "path": "desktop-app\\src\\__tests__\\ipc.gfsSaveToDisk.test.ts",
@@ -99,7 +99,7 @@
     },
     {
       "path": "desktop-app\\src\\appService.ts",
-      "sha256": "67bed6e285054a29e2fc413620e71a6f34905e9f3c80d1d7ed936e701d42ac1b"
+      "sha256": "fb14613cf847674ce183bae75ae4ac725ba9428b395d7c60755f099f00c50288"
     },
     {
       "path": "desktop-app\\src\\authClient.ts",
@@ -111,7 +111,7 @@
     },
     {
       "path": "desktop-app\\src\\gfs\\saveOwner.ts",
-      "sha256": "2b2d9adc6e01eed610013721521bf3f7fc4a13a74a2798a02ce57f63ee9d2c2d"
+      "sha256": "881d15566878f35bba4d0ebe32192ea0c3aa6f88586f375b5d38f85c96b628be"
     },
     {
       "path": "desktop-app\\src\\gfs\\uriHandler.ts",
@@ -119,7 +119,7 @@
     },
     {
       "path": "desktop-app\\src\\ipc.ts",
-      "sha256": "8d6ce366d013889a765c963ac07f8d3695f45d348f0d0043821db9a20ebf1f65"
+      "sha256": "e25cc94dd85f53c24003bf46b0fe3df02994f2575b8f2490ec53ca180eff1598"
     },
     {
       "path": "desktop-app\\src\\main.ts",
@@ -127,11 +127,11 @@
     },
     {
       "path": "desktop-app\\src\\preload.ts",
-      "sha256": "3c63ebb83303bd8e73642b0f73b6141fdf4fc8ac875765e2ec5559dd8f4c9d46"
+      "sha256": "e6620875cb19237137a8d04b3ab90593db1b7162e47fa4b274f751139ff05b12"
     },
     {
       "path": "desktop-app\\src\\renderer.d.ts",
-      "sha256": "0c0d18d660576db595e6600ddf1ec8aa3395abeb9a016841603b66aacad5c508"
+      "sha256": "976472e6f3094923899a9574142d4b30f6ba38108547b1bda102df34d6117a58"
     },
     {
       "path": "desktop-app\\test\\adminCreateTeamForUser.test.ts",
@@ -199,7 +199,7 @@
     },
     {
       "path": "desktop-app\\ui\\src\\App.tsx",
-      "sha256": "0f0fe65251a02d0291f3048eed547a4018368a3cf116fc446674627d7fd49471"
+      "sha256": "1623a82929b4db82cc64e5abb821c644aab2fdeca7828007ac2c29c5d7c5d3af"
     },
     {
       "path": "desktop-app\\ui\\src\\__tests__\\App.activationSeam.test.tsx",
@@ -223,7 +223,7 @@
     },
     {
       "path": "desktop-app\\ui\\src\\__tests__\\AppFilesActionLifecycle.integration.test.tsx",
-      "sha256": "97d45226fd6e074cd8afea505abb3473492aeb3bb0389dfe386b2866a398248a"
+      "sha256": "8a1f5c328431129c9e380c0ec93ebd70099453cd6547bd5e79b5d4e6dbf30802"
     },
     {
       "path": "desktop-app\\ui\\src\\__tests__\\RecoveredAppDeepLinks.test.tsx",
