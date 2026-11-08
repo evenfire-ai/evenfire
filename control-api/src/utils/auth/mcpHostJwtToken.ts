@@ -663,6 +663,7 @@ export function getMcpHostExpiredRefreshRateLimitKey(token: string): string | nu
 }
 
 export async function verifyMcpHostRefreshJwt(token: string): Promise<McpHostRefreshClaims | null> {
+  let claims: McpHostRefreshClaims | null
   try {
     const payload = jwt.verify(token, getWorkflowJwtPublicKey(), {
       algorithms: ['RS256'],
@@ -670,22 +671,22 @@ export async function verifyMcpHostRefreshJwt(token: string): Promise<McpHostRef
       audience: MCP_HOST_WORKFLOW_AUDIENCE,
     }) as jwt.JwtPayload
 
-    const claims = validateClaims(
-      payload,
-      'workflow:approval:refresh'
-    ) as McpHostRefreshClaims | null
-    if (!claims) {
-      return null
-    }
-
-    if (await isRefreshJtiRevoked(claims.jti)) {
-      return null
-    }
-
-    return claims
+    claims = validateClaims(payload, 'workflow:approval:refresh') as McpHostRefreshClaims | null
   } catch {
     return null
   }
+  if (!claims) {
+    return null
+  }
+
+  // Outside the try: a database failure here is not a bad credential. It must
+  // reach the route's error handler (5xx), so the Host retries instead of
+  // treating its refresh token as rejected.
+  if (await isRefreshJtiRevoked(claims.jti)) {
+    return null
+  }
+
+  return claims
 }
 
 /**
