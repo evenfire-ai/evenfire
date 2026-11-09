@@ -48,6 +48,21 @@ function runningAuthorityFailureReason(error: unknown): string {
   return terminalAuthorityFailureReason(error.failure) ?? AUTHORITY_FAILURE_REASON.unavailable
 }
 
+/**
+ * True when the row read under the lock carries the binding that was
+ * checkpointed outside the transaction. A null id on either side (V1 run)
+ * only matches another null.
+ */
+function sameAuthorityBinding(checked: DbRunRow, locked: DbRunRow): boolean {
+  return (checked.authority_binding_id ?? null) === (locked.authority_binding_id ?? null)
+}
+
+/** Boundary answer decided by the phase alone; null when the run is Running. */
+function boundaryPhaseOutcome(phase: WorkflowRunPhase): 'paused' | 'not_running' | null {
+  if (phase === 'Running') return null
+  return phase === 'AuthorizationPaused' ? 'paused' : 'not_running'
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────
 
 export type WorkflowRunPhase =
@@ -79,6 +94,8 @@ export interface DbRunRow {
   child_recipe_namespace: string | null
   failure_reason?: string | null
   authority_binding?: WorkflowRunAuthorityBinding | null
+  /** Id of the binding row behind `authority_binding` (null for V1 runs). */
+  authority_binding_id?: string | null
 }
 
 export interface WorkflowRunAuthorityBinding {
@@ -155,7 +172,12 @@ export interface DbRunProcessor {
 
 // ─── SQL literal helpers ───────────────────────────────────────────────
 
-const SELECT_RUN_FOR_UPDATE = `
+// The authority checkpoint is an HTTP call, so it never runs while this
+// processor holds a Postgres transaction: the run is read once without a
+// transaction (SELECT_RUN), checkpointed, then re-read under the row lock
+// (SELECT_RUN_FOR_UPDATE), where `authority_binding_id` proves the binding
+// that was checked is still the binding being acted on.
+const SELECT_RUN = `
   SELECT run.run_id, run.recipe_namespace, run.recipe_name, run.phase,
          run.team_id, run.usage_team_id, run.actor_type, run.actor_id,
          run.inputs, run.intermediate_parameters, run.output_overrides,
@@ -177,7 +199,8 @@ const SELECT_RUN_FOR_UPDATE = `
            'pathKind', binding.path_kind,
            'effectiveTeamId', binding.effective_team_id,
            'behaviorBindingHash', binding.behavior_binding_hash
-         ) END AS authority_binding
+         ) END AS authority_binding,
+         binding.id AS authority_binding_id
     FROM workflow_runs run
     LEFT JOIN workflow_authority_bindings initiating_binding
       ON initiating_binding.id = run.initiating_authority_binding_id
@@ -194,7 +217,9 @@ const SELECT_RUN_FOR_UPDATE = `
     ) continuation_binding ON TRUE
     LEFT JOIN workflow_authority_bindings binding
       ON binding.id = COALESCE(continuation_binding.id, initiating_binding.id)
-   WHERE run.run_id = $1
+   WHERE run.run_id = $1`
+
+const SELECT_RUN_FOR_UPDATE = `${SELECT_RUN}
    FOR UPDATE OF run`
 
 const CLAIM_PENDING = `
@@ -539,50 +564,95 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
   //
   // Invariant: only called when we hold the WRC leader lock. Per-run
   // concurrency is further bounded by `pg_advisory_xact_lock(hash(run_id))`
-  // so two replicas cannot process the same run concurrently, even during a
+  // so two replicas cannot claim the same run concurrently, even during a
   // brief leader handover.
+  //
+  // The authority checkpoint (an HTTP call) runs before the transaction:
+  //   1. read the run without a transaction, on a client released right
+  //      after the read; return unless it is Pending;
+  //   2. checkpoint its binding, if any, holding no pooled client,
+  //      transaction or lock;
+  //   3. acquire a client, BEGIN, advisory lock, row lock; return (ROLLBACK)
+  //      unless the run is still Pending with the binding that step 2
+  //      checked. A Pending run left behind is picked up again by the orphan
+  //      poll;
+  //   4. pause on a rejected checkpoint, otherwise create the child and claim.
+  // A duplicate checkpoint during a leader handover is harmless: the
+  // checkpoint path writes nothing.
   async function processPending(runId: string): Promise<void> {
+    try {
+      const observed = await readRunWithoutTransaction(runId)
+      // Absent, or someone else already transitioned it past Pending —
+      // `syncFromRecipeExecution` drives Running→terminal.
+      if (!observed || observed.phase !== 'Pending') return
+
+      let authorityRejection: { error: unknown } | null = null
+      if (observed.authority_binding) {
+        try {
+          if (!opts.checkpointAuthority) {
+            throw new WorkflowAuthorityCheckpointError('authority_unavailable', true)
+          }
+          await opts.checkpointAuthority(observed)
+        } catch (error) {
+          authorityRejection = { error }
+        }
+      }
+
+      await lockAndTransitionPending(runId, observed, authorityRejection)
+    } catch (err) {
+      log.error('processPending failed', {
+        run_id: runId,
+        err: err instanceof Error ? err.message : String(err),
+      })
+      throw err
+    }
+  }
+
+  async function lockAndTransitionPending(
+    runId: string,
+    observed: DbRunRow,
+    authorityRejection: { error: unknown } | null
+  ): Promise<void> {
     const client = await connect()
-    let committed = false
+    let inTransaction = false
     try {
       await client.query('BEGIN')
+      inTransaction = true
       // Per-run lock — released at COMMIT/ROLLBACK. hashtextextended(text,
       // bigint) returns bigint, which `pg_advisory_xact_lock(bigint)`
       // accepts. Fall back to hashtext when the extended form is unavailable.
       await client.query("SELECT pg_advisory_xact_lock(hashtext('wrc-run-' || $1::text))", [runId])
       const selectRes = await client.query<DbRunRow>(SELECT_RUN_FOR_UPDATE, [runId])
       const run = selectRes.rows[0]
-      if (!run) {
+      if (!run || run.phase !== 'Pending') {
         await client.query('ROLLBACK')
-        committed = true
+        inTransaction = false
         return
       }
-
-      if (run.phase !== 'Pending') {
-        // Someone else already transitioned us past Pending — nothing to do
-        // here. `syncFromRecipeExecution` drives Running→terminal.
+      if (!sameAuthorityBinding(observed, run)) {
         await client.query('ROLLBACK')
-        return
-      }
-
-      if (run.authority_binding) {
-        try {
-          if (!opts.checkpointAuthority) {
-            throw new WorkflowAuthorityCheckpointError('authority_unavailable', true)
-          }
-          await opts.checkpointAuthority(run)
-        } catch (error) {
-          const failureReason = runningAuthorityFailureReason(error)
-          await client.query(PAUSE_PENDING_FOR_AUTHORITY, [run.run_id, failureReason])
-          await client.query('COMMIT')
-          committed = true
-          log.warn('pending run paused after authority checkpoint rejection', {
+        inTransaction = false
+        log.warn(
+          'pending run authority binding changed after the checkpoint; left for the next poll',
+          {
             run_id: run.run_id,
-            authority_failure:
-              error instanceof WorkflowAuthorityCheckpointError ? error.failure : 'unavailable',
-          })
-          return
-        }
+          }
+        )
+        return
+      }
+
+      if (authorityRejection) {
+        const { error } = authorityRejection
+        const failureReason = runningAuthorityFailureReason(error)
+        await client.query(PAUSE_PENDING_FOR_AUTHORITY, [run.run_id, failureReason])
+        await client.query('COMMIT')
+        inTransaction = false
+        log.warn('pending run paused after authority checkpoint rejection', {
+          run_id: run.run_id,
+          authority_failure:
+            error instanceof WorkflowAuthorityCheckpointError ? error.failure : 'unavailable',
+        })
+        return
       }
       const child = await opts.createChildRecipe(run)
       const claimRes = await client.query(CLAIM_PENDING, [
@@ -598,11 +668,11 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         // child instead of materializing a duplicate execution.
         log.warn('pending claim lost race', { run_id: run.run_id })
         await client.query('ROLLBACK')
-        committed = true
+        inTransaction = false
         return
       }
       await client.query('COMMIT')
-      committed = true
+      inTransaction = false
       log.info('run transitioned to Running', {
         run_id: run.run_id,
         child_name: child.name,
@@ -611,18 +681,26 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       // Business state is durable before any best-effort tracing notification.
       notifyRunStarted(run.run_id)
     } catch (err) {
-      if (!committed) {
+      if (inTransaction) {
         try {
           await client.query('ROLLBACK')
         } catch {
           /* swallow */
         }
       }
-      log.error('processPending failed', {
-        run_id: runId,
-        err: err instanceof Error ? err.message : String(err),
-      })
       throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  // One autocommit read on a client that is released before the caller makes
+  // the authority checkpoint HTTP call, so no pooled client is held across it.
+  async function readRunWithoutTransaction(runId: string): Promise<DbRunRow | undefined> {
+    const client = await connect()
+    try {
+      const result = await client.query<DbRunRow>(SELECT_RUN, [runId])
+      return result.rows[0]
     } finally {
       client.release()
     }
@@ -740,59 +818,88 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     return failed
   }
 
+  // The authority checkpoint (an HTTP call) runs outside any transaction and
+  // while no pooled client is held:
+  //   1. read the run without a transaction (client released after the read)
+  //      and answer from its phase;
+  //   2. checkpoint its binding;
+  //   3. acquire a client and re-read the run under the row lock. A phase
+  //      change answers from the new phase; a binding change (only resume
+  //      writes one, under the same row lock) throws a retryable
+  //      `authority_unavailable` with no retry here; otherwise pause on a
+  //      rejected checkpoint or answer `allowed`.
   async function checkpointRunningBoundary(
     runId: string
   ): Promise<'allowed' | 'paused' | 'not_running'> {
+    const observed = await readRunWithoutTransaction(runId)
+    if (!observed) return 'not_running'
+    const observedPhaseOutcome = boundaryPhaseOutcome(observed.phase)
+    if (observedPhaseOutcome) return observedPhaseOutcome
+    // Legacy V1 runs have no initiating authority binding and retain their
+    // existing lifecycle without the V2 continuation checkpoint.
+    if (!observed.authority_binding) return 'allowed'
+
+    let failureReason: string | null = null
+    try {
+      if (!opts.checkpointAuthority) {
+        throw new WorkflowAuthorityCheckpointError('authority_unavailable', true)
+      }
+      await opts.checkpointAuthority(observed)
+    } catch (error) {
+      failureReason = runningAuthorityFailureReason(error)
+    }
+
+    return lockAndSettleBoundary(runId, observed, failureReason)
+  }
+
+  async function lockAndSettleBoundary(
+    runId: string,
+    observed: DbRunRow,
+    failureReason: string | null
+  ): Promise<'allowed' | 'paused' | 'not_running'> {
     const client = await connect()
-    let committed = false
+    let inTransaction = false
     try {
       await client.query('BEGIN')
+      inTransaction = true
       const selected = await client.query<DbRunRow>(SELECT_RUN_FOR_UPDATE, [runId])
       const run = selected.rows[0]
       if (!run) {
-        await client.query('COMMIT')
+        await client.query('ROLLBACK')
+        inTransaction = false
         return 'not_running'
       }
-      if (run.phase === 'AuthorizationPaused') {
-        await client.query('COMMIT')
-        return 'paused'
+      const lockedPhaseOutcome = boundaryPhaseOutcome(run.phase)
+      if (lockedPhaseOutcome) {
+        await client.query('ROLLBACK')
+        inTransaction = false
+        return lockedPhaseOutcome
       }
-      if (run.phase !== 'Running') {
-        await client.query('COMMIT')
-        return 'not_running'
-      }
-      // Legacy V1 runs have no initiating authority binding and retain their
-      // existing lifecycle without the V2 continuation checkpoint.
-      if (!run.authority_binding) {
-        await client.query('COMMIT')
-        return 'allowed'
-      }
-
-      let failureReason: string | null = null
-      try {
-        if (!opts.checkpointAuthority) {
-          throw new WorkflowAuthorityCheckpointError('authority_unavailable', true)
-        }
-        await opts.checkpointAuthority(run)
-      } catch (error) {
-        failureReason = runningAuthorityFailureReason(error)
+      if (!sameAuthorityBinding(observed, run)) {
+        await client.query('ROLLBACK')
+        inTransaction = false
+        log.warn('running workflow authority binding changed during the boundary checkpoint', {
+          run_id: runId,
+        })
+        throw new WorkflowAuthorityCheckpointError('authority_unavailable', true)
       }
 
       if (!failureReason) {
         await client.query('COMMIT')
+        inTransaction = false
         return 'allowed'
       }
 
-      await client.query(PAUSE_RUNNING_FOR_AUTHORITY, [run.run_id, failureReason])
+      await client.query(PAUSE_RUNNING_FOR_AUTHORITY, [runId, failureReason])
       await client.query('COMMIT')
-      committed = true
+      inTransaction = false
       log.warn('running workflow paused at a protected boundary', {
-        run_id: run.run_id,
+        run_id: runId,
         authority_failure: failureReason,
       })
       return 'paused'
     } catch (err) {
-      if (!committed) {
+      if (inTransaction) {
         try {
           await client.query('ROLLBACK')
         } catch {

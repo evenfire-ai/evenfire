@@ -5,6 +5,7 @@ import {
   type ChildRecipeCreator,
   type DbRunProcessor,
   type DbRunRow,
+  type WorkflowRunAuthorityBinding,
   createDbRunProcessor,
   hasCompletedAllDeclaredSteps,
   mapStepPhase,
@@ -109,6 +110,133 @@ function baseRun(overrides: Partial<DbRunRow> = {}): DbRunRow {
   }
 }
 
+/**
+ * The run is read twice: once without a transaction (before the authority
+ * checkpoint) and once under the row lock. RUN_READ_SQL matches both reads;
+ * LOCKED_RUN_READ_SQL matches only the locked one.
+ */
+const RUN_READ_SQL = /FROM workflow_runs run[\s\S]*WHERE run\.run_id = \$1/i
+const LOCKED_RUN_READ_SQL = /FROM workflow_runs run[\s\S]*FOR UPDATE OF run\s*$/i
+
+const V2_BINDING: WorkflowRunAuthorityBinding = {
+  version: 2,
+  userId: '11111111-1111-4111-8111-111111111111',
+  sid: '22222222-2222-4222-8222-222222222222',
+  sessionVersion: 1,
+  delegationJti: '33333333-3333-4333-8333-333333333333',
+  operationId: 'workflow.trigger',
+  resource: { type: 'workflow_recipe', logicalId: 'demo/echo' },
+  target: { recipeNamespace: 'demo', recipeName: 'echo' },
+  targetHash: 'ath2_test',
+  accessPathId: 'ap1_test',
+  authorizationRevision: 'ar1_test',
+  pathKind: 'direct',
+  effectiveTeamId: null,
+  behaviorBindingHash: 'bh2_test',
+}
+
+/** A run row as SELECT_RUN returns it; a null binding id is a V1 run. */
+function runWithBinding(bindingId: string | null, overrides: Partial<DbRunRow> = {}): DbRunRow {
+  return baseRun({
+    authority_binding: bindingId ? V2_BINDING : null,
+    authority_binding_id: bindingId,
+    ...overrides,
+  })
+}
+
+/**
+ * T-L8-style transaction tripwire for this suite's fake pool (plan r6 §10 L12).
+ *
+ * `pool()` hands out tracked clients: every `connect()` checks a client out
+ * and every `release()` checks it back in; `BEGIN` opens a transaction on the
+ * client, `COMMIT` / `ROLLBACK` close it, and a release while it is open is
+ * counted. `guard()` wraps a network fake (the authority checkpoint, or the
+ * checkpoint client's `fetch`): a call made while any tracked client is
+ * between `BEGIN` and `COMMIT`/`ROLLBACK`, or while any client of the pool is
+ * checked out, is recorded as a violation and throws. Tests assert
+ * `violations` is empty together with a liveness witness (`guardedCalls` > 0,
+ * or the guarded fake's own call count).
+ */
+function createTransactionTripwire() {
+  const open = new Set<FakeClient>()
+  const tracked = new Set<FakeClient>()
+  const violations: string[] = []
+  let guardedCalls = 0
+  let releasedInTransaction = 0
+  let checkedOut = 0
+  let checkouts = 0
+
+  function track(client: FakeClient): FakeClient {
+    if (tracked.has(client)) return client
+    tracked.add(client)
+    const handle = client.query.getMockImplementation()
+    if (!handle) throw new Error('tripwire: fake client has no query implementation')
+    client.query.mockImplementation(async (sql: unknown, params?: unknown[]) => {
+      const text = String(sql).trim()
+      if (/^BEGIN\b/i.test(text)) open.add(client)
+      try {
+        return await handle(sql, params)
+      } finally {
+        if (/^(COMMIT|ROLLBACK)\b/i.test(text)) open.delete(client)
+      }
+    })
+    client.release.mockImplementation(() => {
+      if (checkedOut === 0) throw new Error('tripwire: release without a matching connect')
+      checkedOut -= 1
+      if (open.has(client)) {
+        releasedInTransaction += 1
+        open.delete(client)
+      }
+    })
+    return client
+  }
+
+  return {
+    pool(client: FakeClient): Pool {
+      return {
+        connect: vi.fn(async () => {
+          track(client)
+          checkedOut += 1
+          checkouts += 1
+          return client as unknown as PoolClient
+        }),
+      } as unknown as Pool
+    },
+    guard<A extends unknown[], R>(fn: (...args: A) => Promise<R>, label: string) {
+      return async (...args: A): Promise<R> => {
+        guardedCalls += 1
+        if (open.size > 0) {
+          violations.push(`${label}: inside a transaction`)
+          throw new Error(`tripwire: ${label} called inside a Postgres transaction`)
+        }
+        if (checkedOut > 0) {
+          violations.push(`${label}: pooled client held`)
+          throw new Error(`tripwire: ${label} called while a pooled client is checked out`)
+        }
+        return fn(...args)
+      }
+    },
+    get violations(): readonly string[] {
+      return violations
+    },
+    get guardedCalls(): number {
+      return guardedCalls
+    },
+    get openTransactions(): number {
+      return open.size
+    },
+    get releasedInTransaction(): number {
+      return releasedInTransaction
+    },
+    get checkedOut(): number {
+      return checkedOut
+    },
+    get checkouts(): number {
+      return checkouts
+    },
+  }
+}
+
 function makeRecipeWithAnnotation(
   runId: string,
   executionPhase?: string,
@@ -167,7 +295,7 @@ describe('createDbRunProcessor', () => {
     const client = makeClient(async sql => {
       if (/^BEGIN$/i.test(sql)) return { rows: [], rowCount: 0 }
       if (/pg_advisory_xact_lock/.test(sql)) return { rows: [], rowCount: 0 }
-      if (/FROM workflow_runs[\s\S]*FOR UPDATE/i.test(sql)) {
+      if (RUN_READ_SQL.test(sql)) {
         return { rows: [run], rowCount: 1 }
       }
       if (/UPDATE workflow_runs[\s\S]*SET phase = 'Running'/i.test(sql)) {
@@ -194,11 +322,18 @@ describe('createDbRunProcessor', () => {
     await proc.processPending(run.run_id)
 
     expect(createChildRecipe).toHaveBeenCalledWith(run)
-    expect(client.release).toHaveBeenCalledTimes(1)
+    // Two acquisitions: the unlocked read's client is released before the
+    // transaction's client is acquired.
+    expect(pool.connect).toHaveBeenCalledTimes(2)
+    expect(client.release).toHaveBeenCalledTimes(2)
 
-    const sqlTrail = client.calls.map(c => c.sql.trim().slice(0, 40))
-    expect(sqlTrail[0]).toBe('BEGIN')
-    expect(sqlTrail.some(s => /pg_advisory_xact_lock/.test(s))).toBe(true)
+    // Unlocked read first, then BEGIN → advisory lock → locked read → claim → COMMIT.
+    const sqlTrail = client.calls.map(c => c.sql)
+    expect(RUN_READ_SQL.test(sqlTrail[0]!)).toBe(true)
+    expect(LOCKED_RUN_READ_SQL.test(sqlTrail[0]!)).toBe(false)
+    expect(sqlTrail[1]).toBe('BEGIN')
+    expect(sqlTrail[2]).toMatch(/pg_advisory_xact_lock/)
+    expect(LOCKED_RUN_READ_SQL.test(sqlTrail[3]!)).toBe(true)
     expect(sqlTrail[sqlTrail.length - 1]).toBe('COMMIT')
 
     const claim = client.calls.find(c => /SET phase = 'Running'/.test(c.sql))
@@ -224,20 +359,23 @@ describe('createDbRunProcessor', () => {
       },
     })
     const client = makeClient(async sql => {
-      if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
+      if (RUN_READ_SQL.test(sql)) {
         return { rows: [run], rowCount: 1 }
       }
       if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
       return { rows: [], rowCount: 0 }
     })
     const order: string[] = []
+    const tripwire = createTransactionTripwire()
     const proc = spawn({
       instanceId: 'wrc-1',
-      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      pool: tripwire.pool(client),
       runPollMs: 30_000,
-      checkpointAuthority: vi.fn(async () => {
-        order.push('checkpoint')
-      }),
+      checkpointAuthority: vi.fn(
+        tripwire.guard(async () => {
+          order.push('checkpoint')
+        }, 'checkpoint')
+      ),
       createChildRecipe: vi.fn(async () => {
         order.push('child')
         return { name: 'child', namespace: 'sandbox-recipes' }
@@ -248,6 +386,8 @@ describe('createDbRunProcessor', () => {
     await proc.processPending(run.run_id)
 
     expect(order).toEqual(['checkpoint', 'child'])
+    expect(tripwire.guardedCalls).toBe(1)
+    expect(tripwire.violations).toEqual([])
   })
 
   it('pauses a bound run when no authority checkpointer is mounted', async () => {
@@ -267,9 +407,7 @@ describe('createDbRunProcessor', () => {
       },
     })
     const client = makeClient(async sql =>
-      /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
-        ? { rows: [run], rowCount: 1 }
-        : { rows: [], rowCount: 0 }
+      RUN_READ_SQL.test(sql) ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
     )
     const createChildRecipe = vi.fn()
     const proc = spawn({
@@ -313,19 +451,22 @@ describe('createDbRunProcessor', () => {
       })
       let phase: 'Pending' | 'AuthorizationPaused' = 'Pending'
       const client = makeClient(async sql => {
-        if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
+        if (RUN_READ_SQL.test(sql)) {
           return phase === 'Pending' ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
         }
         if (/SET phase = 'AuthorizationPaused'/.test(sql)) phase = 'AuthorizationPaused'
         return { rows: [], rowCount: 0 }
       })
       const createChildRecipe = vi.fn()
-      const checkpointAuthority = vi.fn(async () => {
-        throw new WorkflowAuthorityCheckpointError(failure, false)
-      })
+      const tripwire = createTransactionTripwire()
+      const checkpointAuthority = vi.fn(
+        tripwire.guard(async () => {
+          throw new WorkflowAuthorityCheckpointError(failure, false)
+        }, 'checkpoint')
+      )
       const proc = spawn({
         instanceId: 'wrc-1',
-        pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+        pool: tripwire.pool(client),
         runPollMs: 30_000,
         checkpointAuthority,
         createChildRecipe,
@@ -341,6 +482,7 @@ describe('createDbRunProcessor', () => {
       await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
       expect(checkpointAuthority).toHaveBeenCalledOnce()
       expect(phase).toBe('AuthorizationPaused')
+      expect(tripwire.violations).toEqual([])
     }
   )
 
@@ -366,18 +508,19 @@ describe('createDbRunProcessor', () => {
         },
       })
       const client = makeClient(async sql =>
-        /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
-          ? { rows: [run], rowCount: 1 }
-          : { rows: [], rowCount: 0 }
+        RUN_READ_SQL.test(sql) ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
       )
       const createChildRecipe = vi.fn()
+      const tripwire = createTransactionTripwire()
       const proc = spawn({
         instanceId: 'wrc-1',
-        pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+        pool: tripwire.pool(client),
         runPollMs: 30_000,
-        checkpointAuthority: vi.fn(async () => {
-          throw new WorkflowAuthorityCheckpointError(failure, true)
-        }),
+        checkpointAuthority: vi.fn(
+          tripwire.guard(async () => {
+            throw new WorkflowAuthorityCheckpointError(failure, true)
+          }, 'checkpoint')
+        ),
         createChildRecipe,
         logger: silentLogger(),
       })
@@ -387,6 +530,8 @@ describe('createDbRunProcessor', () => {
       expect(pause?.params).toEqual([run.run_id, 'workflow_authority_unavailable'])
       expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
       expect(createChildRecipe).not.toHaveBeenCalled()
+      expect(tripwire.guardedCalls).toBe(1)
+      expect(tripwire.violations).toEqual([])
     }
   )
 
@@ -412,12 +557,11 @@ describe('createDbRunProcessor', () => {
       },
     })
     const client = makeClient(async sql =>
-      /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
-        ? { rows: [run], rowCount: 1 }
-        : { rows: [], rowCount: 0 }
+      RUN_READ_SQL.test(sql) ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
     )
-    const checkpointAuthority = createWorkflowRunAuthorityCheckpointer({
-      fetchImpl: vi.fn(
+    const tripwire = createTransactionTripwire()
+    const fetchImpl = vi.fn(
+      tripwire.guard(
         async () =>
           new Response(
             JSON.stringify({
@@ -427,13 +571,17 @@ describe('createDbRunProcessor', () => {
               retryable: true,
             }),
             { status: 503 }
-          )
-      ) as typeof fetch,
+          ),
+        'checkpoint fetch'
+      )
+    )
+    const checkpointAuthority = createWorkflowRunAuthorityCheckpointer({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
     })
     const createChildRecipe = vi.fn()
     const proc = spawn({
       instanceId: 'wrc-1',
-      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      pool: tripwire.pool(client),
       runPollMs: 30_000,
       checkpointAuthority,
       createChildRecipe,
@@ -444,6 +592,8 @@ describe('createDbRunProcessor', () => {
     expect(createChildRecipe).not.toHaveBeenCalled()
     expect(client.calls.some(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))).toBe(true)
     expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
+    expect(fetchImpl).toHaveBeenCalled()
+    expect(tripwire.violations).toEqual([])
   })
 
   it('pauses a persisted binding for another run actor before child creation', async () => {
@@ -469,9 +619,7 @@ describe('createDbRunProcessor', () => {
       },
     })
     const client = makeClient(async sql =>
-      /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
-        ? { rows: [run], rowCount: 1 }
-        : { rows: [], rowCount: 0 }
+      RUN_READ_SQL.test(sql) ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
     )
     const fetchImpl = vi.fn()
     const createChildRecipe = vi.fn()
@@ -510,7 +658,7 @@ describe('createDbRunProcessor', () => {
     })
     let phase: 'Pending' | 'AuthorizationPaused' = 'Pending'
     const client = makeClient(async sql => {
-      if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
+      if (RUN_READ_SQL.test(sql)) {
         return phase === 'Pending'
           ? { rows: [{ ...run, phase }], rowCount: 1 }
           : { rows: [], rowCount: 0 }
@@ -520,13 +668,17 @@ describe('createDbRunProcessor', () => {
       return { rows: [], rowCount: 0 }
     })
     const createChildRecipe = vi.fn(async () => ({ name: 'child', namespace: 'sandbox-recipes' }))
-    const checkpointAuthority = vi
+    const tripwire = createTransactionTripwire()
+    const checkpointOutcomes = vi
       .fn()
       .mockRejectedValueOnce(new Error('workflow_authority_unavailable'))
       .mockResolvedValueOnce(undefined)
+    const checkpointAuthority = vi.fn(
+      tripwire.guard(async (checkedRun: DbRunRow) => checkpointOutcomes(checkedRun), 'checkpoint')
+    )
     const proc = spawn({
       instanceId: 'wrc-1',
-      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      pool: tripwire.pool(client),
       runPollMs: 30_000,
       checkpointAuthority,
       createChildRecipe,
@@ -545,6 +697,7 @@ describe('createDbRunProcessor', () => {
 
     expect(checkpointAuthority).toHaveBeenCalledTimes(2)
     expect(createChildRecipe).toHaveBeenCalledTimes(1)
+    expect(tripwire.violations).toEqual([])
   })
 
   it('does not fail processPending when the post-commit run-start callback throws', async () => {
@@ -552,7 +705,7 @@ describe('createDbRunProcessor', () => {
     const client = makeClient(async sql => {
       if (/^BEGIN$/i.test(sql)) return { rows: [], rowCount: 0 }
       if (/pg_advisory_xact_lock/.test(sql)) return { rows: [], rowCount: 0 }
-      if (/FOR UPDATE/.test(sql)) return { rows: [run], rowCount: 1 }
+      if (RUN_READ_SQL.test(sql)) return { rows: [run], rowCount: 1 }
       if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
       if (/^COMMIT$/i.test(sql)) return { rows: [], rowCount: 0 }
       if (/^ROLLBACK$/i.test(sql)) return { rows: [], rowCount: 0 }
@@ -589,10 +742,7 @@ describe('createDbRunProcessor', () => {
   it('processPending is a no-op when the row is no longer Pending', async () => {
     const run = baseRun({ phase: 'Running', owner_instance_id: 'wrc-other' })
     const client = makeClient(async sql => {
-      if (/^BEGIN$/i.test(sql)) return { rows: [], rowCount: 0 }
-      if (/pg_advisory_xact_lock/.test(sql)) return { rows: [], rowCount: 0 }
-      if (/FOR UPDATE/.test(sql)) return { rows: [run], rowCount: 1 }
-      if (/^ROLLBACK$/i.test(sql)) return { rows: [], rowCount: 0 }
+      if (RUN_READ_SQL.test(sql)) return { rows: [run], rowCount: 1 }
       return { rows: [], rowCount: 0 }
     })
     const pool = { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool
@@ -608,16 +758,50 @@ describe('createDbRunProcessor', () => {
 
     await proc.processPending(run.run_id)
 
+    // Witness: the unlocked read ran and saw Running; nothing else followed.
+    expect(client.calls).toHaveLength(1)
+    expect(RUN_READ_SQL.test(client.calls[0]!.sql)).toBe(true)
     expect(createChildRecipe).not.toHaveBeenCalled()
-    const hasRollback = client.calls.some(c => /^ROLLBACK$/i.test(c.sql))
-    expect(hasRollback).toBe(true)
+    expect(client.calls.some(c => /^BEGIN$/i.test(c.sql))).toBe(false)
+    expect(client.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('processPending rolls back when the locked read no longer sees Pending', async () => {
+    const pending = baseRun()
+    const client = makeClient(async sql => {
+      if (LOCKED_RUN_READ_SQL.test(sql)) {
+        return {
+          rows: [{ ...pending, phase: 'Running', owner_instance_id: 'wrc-other' }],
+          rowCount: 1,
+        }
+      }
+      if (RUN_READ_SQL.test(sql)) return { rows: [pending], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    })
+    const createChildRecipe = vi.fn(async () => ({ name: 'x', namespace: 'y' }))
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      createChildRecipe,
+      logger: silentLogger(),
+    })
+
+    await proc.processPending(pending.run_id)
+
+    // Witness: the locked read ran inside the transaction.
+    expect(client.calls.some(c => LOCKED_RUN_READ_SQL.test(c.sql))).toBe(true)
+    expect(client.calls.some(c => /^ROLLBACK$/i.test(c.sql))).toBe(true)
+    expect(createChildRecipe).not.toHaveBeenCalled()
+    expect(client.calls.some(c => /SET phase = 'Running'/.test(c.sql))).toBe(false)
+    expect(client.calls.some(c => /^COMMIT$/i.test(c.sql))).toBe(false)
   })
 
   // ─── 3) child recipe name+namespace land on claim UPDATE params (labels source)
   it('stamps child name/namespace into workflow_runs and preserves owner_instance_id', async () => {
     const run = baseRun({ run_id: 'aaaaaaaa-0000-0000-0000-000000000001' })
     const client = makeClient(async sql => {
-      if (/FOR UPDATE/.test(sql)) return { rows: [run], rowCount: 1 }
+      if (RUN_READ_SQL.test(sql)) return { rows: [run], rowCount: 1 }
       if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
       return { rows: [], rowCount: 0 }
     })
@@ -1043,7 +1227,7 @@ describe('createDbRunProcessor', () => {
         return { rows: [], rowCount: 0 }
       }
       if (/pg_advisory_xact_lock/.test(sql)) return { rows: [], rowCount: 0 }
-      if (/FOR UPDATE/.test(sql) && !/SKIP LOCKED/.test(sql)) {
+      if (RUN_READ_SQL.test(sql)) {
         return { rows: [run], rowCount: 1 }
       }
       if (/SET phase = 'Running'/.test(sql)) {
@@ -1092,8 +1276,8 @@ describe('createDbRunProcessor', () => {
             return { rows: [], rowCount: 0 }
           }
           if (/pg_advisory_xact_lock/.test(sql)) return { rows: [], rowCount: 0 }
-          if (/FOR UPDATE(?: OF run)?\s*$/i.test(sql.trim())) {
-            // SELECT_RUN_FOR_UPDATE — gate by param so only the orphan matches.
+          if (RUN_READ_SQL.test(sql)) {
+            // SELECT_RUN and SELECT_RUN_FOR_UPDATE — gate by param so only the orphan matches.
             expect(params).toEqual(['run-orphan-1'])
             return { rows: [orphanRow], rowCount: 1 }
           }
@@ -1368,7 +1552,7 @@ describe('createDbRunProcessor', () => {
       },
     })
     const client = makeClient(async (sql, params) => {
-      if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
+      if (RUN_READ_SQL.test(sql)) {
         return { rows: [{ ...run, phase }], rowCount: 1 }
       }
       if (/SET phase = 'AuthorizationPaused'/.test(sql)) {
@@ -1400,9 +1584,7 @@ describe('createDbRunProcessor', () => {
   it('keeps a legacy Running run outside V2 checkpoints', async () => {
     const run = baseRun({ phase: 'Running', started_at: new Date() })
     const client = makeClient(async sql =>
-      /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
-        ? { rows: [run], rowCount: 1 }
-        : { rows: [], rowCount: 1 }
+      RUN_READ_SQL.test(sql) ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 1 }
     )
     const checkpointAuthority = vi.fn()
     const proc = spawn({
@@ -1420,6 +1602,181 @@ describe('createDbRunProcessor', () => {
       false
     )
   })
+
+  // ─── Authority checkpoint outside the run transaction (plan r6 §3.2, §5.3)
+
+  it('T-R1: checkpoints a bound Pending run outside any transaction, then claims it', async () => {
+    const run = runWithBinding('binding-1')
+    const client = makeClient(async sql => {
+      if (RUN_READ_SQL.test(sql)) return { rows: [run], rowCount: 1 }
+      if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    })
+    const tripwire = createTransactionTripwire()
+    const checkpointAuthority = vi.fn(tripwire.guard(async (_run: DbRunRow) => {}, 'checkpoint'))
+    const createChildRecipe = vi.fn(async () => ({
+      name: 'child-r1',
+      namespace: 'sandbox-recipes',
+    }))
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: tripwire.pool(client),
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe,
+      logger: silentLogger(),
+    })
+
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+
+    // Witness: the checkpoint ran once, on the row read without a transaction,
+    // with no pooled client checked out (read client released, transaction
+    // client not yet acquired: two checkouts in all).
+    expect(checkpointAuthority).toHaveBeenCalledOnce()
+    expect(checkpointAuthority).toHaveBeenCalledWith(run)
+    expect(tripwire.violations).toEqual([])
+    expect(tripwire.checkouts).toBe(2)
+    expect(tripwire.checkedOut).toBe(0)
+    // Then the claim committed under the advisory and row locks.
+    const claim = client.calls.find(call => /SET phase = 'Running'/.test(call.sql))
+    expect(claim?.params).toEqual(['wrc-1', 'child-r1', 'sandbox-recipes', run.run_id])
+    expect(client.calls.some(call => LOCKED_RUN_READ_SQL.test(call.sql))).toBe(true)
+    expect(client.calls[client.calls.length - 1]?.sql).toBe('COMMIT')
+    expect(createChildRecipe).toHaveBeenCalledOnce()
+    expect(tripwire.openTransactions).toBe(0)
+    expect(tripwire.releasedInTransaction).toBe(0)
+  })
+
+  it.each([
+    ['a different binding', 'binding-1', 'binding-2'],
+    ['a binding where none was checked', null, 'binding-2'],
+    ['no binding where one was checked', 'binding-1', null],
+  ] as const)(
+    'T-R2: rolls back without claiming when the locked read carries %s',
+    async (_label, checkedBindingId, lockedBindingId) => {
+      const observed = runWithBinding(checkedBindingId)
+      const locked = runWithBinding(lockedBindingId)
+      const client = makeClient(async sql => {
+        if (LOCKED_RUN_READ_SQL.test(sql)) return { rows: [locked], rowCount: 1 }
+        if (RUN_READ_SQL.test(sql)) return { rows: [observed], rowCount: 1 }
+        if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
+        return { rows: [], rowCount: 0 }
+      })
+      const tripwire = createTransactionTripwire()
+      const checkpointAuthority = vi.fn(tripwire.guard(async (_run: DbRunRow) => {}, 'checkpoint'))
+      const createChildRecipe = vi.fn(async () => ({
+        name: 'child-r2',
+        namespace: 'sandbox-recipes',
+      }))
+      const proc = spawn({
+        instanceId: 'wrc-1',
+        pool: tripwire.pool(client),
+        runPollMs: 30_000,
+        checkpointAuthority,
+        createChildRecipe,
+        logger: silentLogger(),
+      })
+
+      await expect(proc.processPending(observed.run_id)).resolves.toBeUndefined()
+
+      // Witness: the locked read ran, and the checkpoint ran when a binding was read.
+      expect(client.calls.some(call => LOCKED_RUN_READ_SQL.test(call.sql))).toBe(true)
+      expect(checkpointAuthority).toHaveBeenCalledTimes(checkedBindingId ? 1 : 0)
+      expect(tripwire.violations).toEqual([])
+      expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
+      expect(client.calls.some(call => /SET phase = 'Running'/.test(call.sql))).toBe(false)
+      expect(client.calls.some(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))).toBe(
+        false
+      )
+      expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(false)
+      expect(createChildRecipe).not.toHaveBeenCalled()
+      expect(tripwire.openTransactions).toBe(0)
+    }
+  )
+
+  it('T-R3: answers paused when the run is paused while the boundary checkpoint runs', async () => {
+    const observed = runWithBinding('binding-1', { phase: 'Running' })
+    const locked = runWithBinding('binding-1', { phase: 'AuthorizationPaused' })
+    const client = makeClient(async sql => {
+      if (LOCKED_RUN_READ_SQL.test(sql)) return { rows: [locked], rowCount: 1 }
+      if (RUN_READ_SQL.test(sql)) return { rows: [observed], rowCount: 1 }
+      return { rows: [], rowCount: 1 }
+    })
+    const tripwire = createTransactionTripwire()
+    const checkpointAuthority = vi.fn(tripwire.guard(async (_run: DbRunRow) => {}, 'checkpoint'))
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: tripwire.pool(client),
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe: vi.fn(),
+      logger: silentLogger(),
+    })
+
+    await expect(proc.checkpointRunningBoundary(observed.run_id)).resolves.toBe('paused')
+
+    // Witness: the checkpoint answered allowed, and the locked re-read ran.
+    expect(checkpointAuthority).toHaveBeenCalledOnce()
+    expect(client.calls.some(call => LOCKED_RUN_READ_SQL.test(call.sql))).toBe(true)
+    expect(tripwire.violations).toEqual([])
+    expect(tripwire.checkouts).toBe(2)
+    expect(tripwire.checkedOut).toBe(0)
+    expect(client.calls.some(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))).toBe(
+      false
+    )
+    expect(tripwire.openTransactions).toBe(0)
+  })
+
+  it.each([
+    ['allowed', async () => {}],
+    [
+      'rejected',
+      async () => {
+        throw new WorkflowAuthorityCheckpointError('denied', false)
+      },
+    ],
+  ] as const)(
+    'T-R3: throws a retryable authority_unavailable when the binding changes during a %s boundary checkpoint',
+    async (_label, outcome) => {
+      const observed = runWithBinding('binding-1', { phase: 'Running' })
+      const locked = runWithBinding('binding-2', { phase: 'Running' })
+      const client = makeClient(async sql => {
+        if (LOCKED_RUN_READ_SQL.test(sql)) return { rows: [locked], rowCount: 1 }
+        if (RUN_READ_SQL.test(sql)) return { rows: [observed], rowCount: 1 }
+        return { rows: [], rowCount: 1 }
+      })
+      const tripwire = createTransactionTripwire()
+      const checkpointAuthority = vi.fn(tripwire.guard(outcome, 'checkpoint'))
+      const proc = spawn({
+        instanceId: 'wrc-1',
+        pool: tripwire.pool(client),
+        runPollMs: 30_000,
+        checkpointAuthority,
+        createChildRecipe: vi.fn(),
+        logger: silentLogger(),
+      })
+
+      const failure = await proc.checkpointRunningBoundary(observed.run_id).then(
+        () => null,
+        (error: unknown) => error
+      )
+
+      expect(failure).toBeInstanceOf(WorkflowAuthorityCheckpointError)
+      expect(failure).toMatchObject({ failure: 'authority_unavailable', retryable: true })
+      // Witness: one checkpoint (no retry) and the locked re-read that saw the new binding.
+      expect(checkpointAuthority).toHaveBeenCalledOnce()
+      expect(client.calls.some(call => LOCKED_RUN_READ_SQL.test(call.sql))).toBe(true)
+      expect(tripwire.violations).toEqual([])
+      expect(tripwire.checkouts).toBe(2)
+      expect(tripwire.checkedOut).toBe(0)
+      expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
+      expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(false)
+      expect(client.calls.some(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))).toBe(
+        false
+      )
+      expect(tripwire.openTransactions).toBe(0)
+    }
+  )
 })
 
 // ─── Pure helper tests ─────────────────────────────────────────────────────
