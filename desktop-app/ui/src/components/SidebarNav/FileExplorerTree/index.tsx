@@ -21,7 +21,6 @@ import {
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
-import { parseHttpStatus } from '@lib/gfsGrantErrors'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
@@ -153,12 +152,6 @@ function FileExplorerNode({
   // available because its authority is parent-relative and enforced by server.
   const affordances =
     affordancesQuery.isFetching || affordancesQuery.error ? undefined : affordancesQuery.data
-  useEffect(() => {
-    if (!affordancesQuery.error) return
-    if (isGfsSessionGeneration(sessionGeneration)) {
-      onAuthorityFailure(affordancesQuery.error, scope, sessionGeneration)
-    }
-  }, [affordancesQuery.error, onAuthorityFailure, scope, sessionGeneration])
   const preview = useMemo(() => resolveGfsPreview(node), [node])
   const canPreview = Boolean(preview && !isUnreadable)
   const canCopyContent = Boolean(
@@ -190,7 +183,7 @@ function FileExplorerNode({
                 ? () => onResourceAction(node, 'download')
                 : undefined,
             replace:
-              node.kind === 'file' && hasBit(affordances, 'write')
+              node.kind === 'file' && !isUnreadable && hasBit(affordances, 'write')
                 ? (file, context) => {
                     if (file) onResourceAction(node, 'replace', file)
                     else context?.requestFileSelection?.()
@@ -207,7 +200,7 @@ function FileExplorerNode({
           canCopyContent,
           canPreview,
           canDownload: node.kind === 'file' && !isUnreadable,
-          canReplace: node.kind === 'file' && hasBit(affordances, 'write'),
+          canReplace: node.kind === 'file' && !isUnreadable && hasBit(affordances, 'write'),
           canOpenFolder: isDirectory && !isUnreadable,
           canDelete: hasBit(affordances, 'delete'),
         })
@@ -252,13 +245,9 @@ function FileExplorerNode({
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
   const childDenied = isGfsChildrenDenied(childQuery.error, childQuery.data)
-  const childErrorMessage = errorMessage(childQuery.error)
-  const childHttpStatus = childErrorMessage ? parseHttpStatus(childErrorMessage) : null
   const childError = childDenied
     ? 'This folder is no longer available.'
-    : childHttpStatus !== null
-      ? 'Unable to load folder contents.'
-      : childErrorMessage
+    : errorMessage(childQuery.error)
   const childItems = useMemo(
     () =>
       childDenied ? [] : sortTreeItems((childQuery.data?.pages ?? []).flatMap(page => page.items)),
@@ -268,7 +257,7 @@ function FileExplorerNode({
   useEffect(() => {
     if (!childQuery.error || !isGfsSessionGeneration(sessionGeneration)) return
     purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError) onAuthorityFailure(childQuery.error, scope, sessionGeneration)
+    if (childError) onAuthorityFailure(childError, scope, sessionGeneration)
   }, [
     childError,
     childQuery.error,
@@ -698,8 +687,8 @@ export function FileExplorerTree({
     resolve: (uri: string) => window.clerum.gfs.resolve(uri),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
-    handleAuthorityFailure: (error, scope, sessionGeneration) =>
-      ctrl.handleAuthorityFailure(error, 'operation', scope, sessionGeneration),
+    handleAuthorityFailure: (message, scope, sessionGeneration) =>
+      ctrl.handleAuthorityFailure(message, 'operation', scope, sessionGeneration),
   })
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -1203,7 +1192,7 @@ export function FileExplorerTree({
 
   const authorityFailure = ctrl.handleAuthorityFailure
   const handleAuthorityFailure = useCallback(
-    (message: unknown, scope: string, sessionGeneration: number) =>
+    (message: string, scope: string, sessionGeneration: number) =>
       authorityFailure(message, 'operation', scope, sessionGeneration),
     [authorityFailure]
   )
@@ -1240,7 +1229,7 @@ export function FileExplorerTree({
           pushToast(`Downloaded ${displayName(node.name)}`, 'success')
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          if (authorityFailure(error, 'operation')) return
+          if (authorityFailure(message, 'operation')) return
           pushToast(message, 'error')
         } finally {
           downloadsInFlight.current.delete(node.gfsUri)

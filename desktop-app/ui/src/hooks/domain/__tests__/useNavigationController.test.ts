@@ -395,45 +395,50 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
   })
 })
 
-describe('Chat intent receipt ownership', () => {
-  it('honors a caller-owned receipt while revealing the real blank Chat tab', () => {
+describe('Files and Preview navigation receipts', () => {
+  it('returns the owning Files tab and navigation intent for the requested folder', () => {
     const { result } = renderHook(() => useNavigationController())
-    const ownerTabId = result.current.workspaceTabs.activeTabId
-    act(() => result.current.beginUserNavigationIntent())
-    const started = result.current.navigationIntentSequence
-    act(() =>
-      result.current.handleNavSelect(DESKTOP_ROUTES.chat, { navigationIntentAlreadyStarted: true })
-    )
-    expect(result.current.navigationIntentSequence).toBe(started)
-    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
-    expect(result.current.workspaceTabs.activeTabId).toBe(ownerTabId)
-    expect(result.current.workspaceTabs.tabs.find(tab => tab.id === ownerTabId)?.kind).toBe('chat')
+    let receipt: ReturnType<typeof result.current.openFilesSectionWithReceipt> | null = null
+    act(() => {
+      receipt = result.current.openFilesSectionWithReceipt(
+        'gfs://main/0123456789abcdef0123456789abcdef'
+      )
+    })
+    expect(receipt).toEqual({
+      ownerTabId: result.current.workspaceTabs.activeTabId,
+      intentSequence: result.current.navigationIntentSequence,
+    })
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.files)
+    expect(result.current.activeTab).toMatchObject({
+      kind: 'files',
+      files: { path: 'gfs://main/0123456789abcdef0123456789abcdef' },
+    })
   })
 
-  it('advances once for each explicit blank Chat reselection and supersedes the earlier receipt', () => {
+  it('returns the owning Preview tab and preserves the selected resource version', () => {
     const { result } = renderHook(() => useNavigationController())
-    const ownerTabId = result.current.workspaceTabs.activeTabId
-    const before = result.current.navigationIntentSequence
-    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat))
-    expect(result.current.navigationIntentSequence).toBe(before + 1)
-    const earlier = result.current.navigationIntentSequence
-    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat))
-    expect(result.current.navigationIntentSequence).toBe(before + 2)
-    expect(result.current.isNavigationIntentCurrent(earlier)).toBe(false)
-    expect(result.current.workspaceTabs.activeTabId).toBe(ownerTabId)
-    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
-  })
-  it('does not mint user intent for bootstrap or let stale programmatic focus replace Files', () => {
-    const { result } = renderHook(() => useNavigationController())
-    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' }))
-    expect(result.current.navigationIntentSequence).toBe(0)
-    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
-    act(() => result.current.openFilesSection())
-    const selectedFiles = result.current.workspaceTabs.activeTabId
-    const explicitIntent = result.current.navigationIntentSequence
-    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' }))
-    expect(result.current.navigationIntentSequence).toBe(explicitIntent)
-    expect(result.current.workspaceTabs.activeTabId).toBe(selectedFiles)
-    expect(result.current.navItem).toBe(DESKTOP_ROUTES.files)
+    let receipt: ReturnType<typeof result.current.openPreviewSectionWithReceipt> | null = null
+    act(() => {
+      receipt = result.current.openPreviewSectionWithReceipt({
+        kind: 'image',
+        gfsUri: 'gfs://main/abcdefabcdefabcdefabcdefabcdefab',
+        name: 'receipt.png',
+        bytes: 128,
+        mimeType: 'image/png',
+        version: 9,
+      })
+    })
+    expect(receipt).toEqual({
+      ownerTabId: result.current.workspaceTabs.activeTabId,
+      intentSequence: result.current.navigationIntentSequence,
+    })
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.preview)
+    expect(result.current.activeTab).toMatchObject({
+      kind: 'preview',
+      preview: {
+        gfsUri: 'gfs://main/abcdefabcdefabcdefabcdefabcdefab',
+        resourceVersion: 9,
+      },
+    })
   })
 })

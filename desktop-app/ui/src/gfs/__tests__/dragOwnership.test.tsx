@@ -530,15 +530,14 @@ for (const surface of ['sidebar', 'files'] as const) {
       // must be revoked, not left active over a dead session.
       const h = await setup('file')
       const message = 'Error invoking remote method: Error: 401 Unauthorized httpStatus=401'
-      const error = new Error(message)
       h.affordances.mockImplementation(async () => {
-        throw error
+        throw new Error(message)
       })
       h.start()
       h.drop()
       await waitFor(() =>
         expect(h.ctrl.handleAuthorityFailure).toHaveBeenCalledWith(
-          expect.objectContaining({ message }),
+          message,
           'operation',
           h.ctrl.sessionScope,
           h.ctrl.sessionGeneration
@@ -594,11 +593,10 @@ for (const surface of ['sidebar', 'files'] as const) {
 describe('files surface drop admission (RP-002)', () => {
   it('never dispatches the move when the ancestor resolve reports a session failure', async () => {
     const message = 'Error invoking remote method: Error: 401 Unauthorized httpStatus=401'
-    const error = new Error(message)
     const bits = await affordancesResult(heldAffordances(['read', 'write', 'delete']))
     const affordances = vi.fn(async () => bits)
     const resolve = vi.fn(async () => {
-      throw error
+      throw new Error(message)
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -637,7 +635,7 @@ describe('files surface drop admission (RP-002)', () => {
     // dispatch, nothing announced.
     await waitFor(() =>
       expect(ctrl.handleAuthorityFailure).toHaveBeenCalledWith(
-        expect.objectContaining({ message }),
+        message,
         'operation',
         ctrl.sessionScope,
         ctrl.sessionGeneration

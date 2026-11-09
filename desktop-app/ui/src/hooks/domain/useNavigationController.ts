@@ -211,18 +211,24 @@ export function useNavigationController() {
   // drift from the focused one (D4).
   const focusChatSection = useCallback(
     (
-      source: 'explicit' | 'programmatic' = 'explicit',
-      navigationIntentAlreadyStarted = false
+      source: 'explicit' | 'programmatic' = 'explicit'
     ): { agentRef: string; chatId: string } | null => {
       if (source === 'explicit') {
-        if (!navigationIntentAlreadyStarted) beginUserNavigationIntent()
+        beginUserNavigationIntent()
       } else if (navigationIntentSequenceRef.current > 0) {
-        // Bootstrap must not replace a tab selected while authentication loads.
+        // A session/bootstrap continuation may select the default Chat route
+        // only while no explicit navigation has happened in this renderer.
+        // In particular, it must not replace a tab selected while auth loads.
         return null
       }
+      setAppsPickerActive(false)
       const current = workspaceTabsRef.current
       const active = activeWorkspaceTab(current)
-      setAppsPickerActive(false)
+      // Precedence (mini-spec 08 §1): the active chat wins (no re-homing); else
+      // RESUME the last active chat tab the user left — validated live against the
+      // store so a not-yet-reflected close cannot resurrect a stale id — rather than
+      // the last chat by array order; else the last chat by order (first boot, no
+      // last-active); else seed a blank.
       const lastActiveId = lastActiveChatTabIdRef.current
       const resumeTarget =
         lastActiveId !== null
@@ -295,7 +301,7 @@ export function useNavigationController() {
   // Open/focus a files tab at `path` (a gfsUri, or `null` for the virtual root).
   // Dedupes by path in the store: the sidebar "Files" entry (root) and a plugin
   // deep-link to a specific gfsUri both route here (mini-spec 06 §3).
-  const openFilesSection = useCallback(
+  const openFilesSectionWithReceipt = useCallback(
     (path: string | null = null) => {
       const intentSequence = beginUserNavigationIntent()
       setAppsPickerActive(false)
@@ -308,29 +314,42 @@ export function useNavigationController() {
     },
     [beginUserNavigationIntent, nextWorkspaceTabId, setWorkspaceTabs]
   )
+  const openFilesSection = useCallback(
+    (path: string | null = null) => {
+      openFilesSectionWithReceipt(path)
+    },
+    [openFilesSectionWithReceipt]
+  )
 
   // Open/focus a preview tab for a previewable file (spec 18 §3.B.1). Dedupes by
   // gfsUri in the store: opening the same file twice focuses its existing tab
   // instead of stacking duplicates. A direct clone of `openFilesSection`.
-  const openPreviewSection = useCallback(
-    (preview: GfsPreviewResource, sessionScope?: string) => {
-      beginUserNavigationIntent()
+  const openPreviewSectionWithReceipt = useCallback(
+    (preview: GfsPreviewResource) => {
+      const intentSequence = beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
-      setWorkspaceTabs(current =>
-        openPreviewTab(current, {
-          id,
-          title: preview.name,
-          gfsUri: preview.gfsUri,
-          ...(sessionScope !== undefined ? { sessionScope } : {}),
-          fileKind: preview.kind,
-          byteLength: preview.bytes,
-          ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
-          ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
-        })
-      )
+      const next = openPreviewTab(workspaceTabsRef.current, {
+        id,
+        title: preview.name,
+        gfsUri: preview.gfsUri,
+        fileKind: preview.kind,
+        byteLength: preview.bytes,
+        ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
+        ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+      })
+      const ownerTabId = next.activeTabId
+      if (!ownerTabId) return null
+      setWorkspaceTabs(next)
+      return { ownerTabId, intentSequence }
     },
-    [beginUserNavigationIntent, nextWorkspaceTabId]
+    [beginUserNavigationIntent, nextWorkspaceTabId, setWorkspaceTabs]
+  )
+  const openPreviewSection = useCallback(
+    (preview: GfsPreviewResource) => {
+      openPreviewSectionWithReceipt(preview)
+    },
+    [openPreviewSectionWithReceipt]
   )
 
   const beginGfsResourceNavigation = useCallback(
@@ -414,8 +433,7 @@ export function useNavigationController() {
       request: GfsResourceNavigationRequest,
       preview: GfsPreviewResource,
       principalGeneration: number,
-      returnLocation: { gfsUri: string | null; name: string | null },
-      sessionScope?: string
+      returnLocation: { gfsUri: string | null; name: string | null }
     ): boolean => {
       if (!isGfsResourceNavigationCurrent(request, principalGeneration)) return false
       const id = nextWorkspaceTabId()
@@ -429,7 +447,6 @@ export function useNavigationController() {
         id,
         title: preview.name,
         gfsUri: preview.gfsUri,
-        ...(sessionScope !== undefined ? { sessionScope } : {}),
         fileKind: preview.kind,
         byteLength: preview.bytes,
         ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
@@ -473,7 +490,7 @@ export function useNavigationController() {
       if (item === DESKTOP_ROUTES.chat) {
         setSelectedAgent(null)
         setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
-        return focusChatSection(source, options.navigationIntentAlreadyStarted)
+        return focusChatSection(source)
       }
       if (item === DESKTOP_ROUTES.apps) {
         showAppsPicker()
@@ -525,7 +542,9 @@ export function useNavigationController() {
     activateChatTab,
     lastActiveChatTabId,
     openFilesSection,
+    openFilesSectionWithReceipt,
     openPreviewSection,
+    openPreviewSectionWithReceipt,
     // Agent/chat selection state (stays here through this slice; §4).
     selectedAgent,
     selectedAgentRoute,

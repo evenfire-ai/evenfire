@@ -55,7 +55,7 @@ export interface FileExplorerNodeProps {
   onActivateFile: (node: GfsBrowserChild) => void
   onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
   /** Fail-closed hook: a listing authority error revokes the session. */
-  onAuthorityFailure: (message: unknown, scope: string, sessionGeneration: number) => void
+  onAuthorityFailure: (message: string, scope: string, sessionGeneration: number) => void
   onNodeDragStart: (
     node: GfsBrowserChild,
     event: ReactDragEvent<HTMLElement>,

@@ -7,7 +7,7 @@ import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
-import type { GfsResourceActionRequest } from '@lib/gfsResourceActions'
+import type { GfsResourceActionRequest, GfsResourceKind } from '@lib/gfsResourceActions'
 import {
   accessibleResource,
   affordancesResult,
@@ -523,7 +523,18 @@ describe('FilesPage', () => {
       undefined,
       target.gfsUri,
       undefined,
-      { id: 11, targetUri: target.gfsUri, actionId: 'refresh' },
+      {
+        id: 11,
+        targetUri: target.gfsUri,
+        actionId: 'refresh',
+        targetResource: {
+          resourceId: target.resourceId,
+          name: target.name,
+          kind: target.kind as GfsResourceKind,
+          version: target.version,
+          parentResourceId: target.parentResourceId,
+        },
+      },
       handled
     )
 
@@ -542,7 +553,18 @@ describe('FilesPage', () => {
       undefined,
       target.gfsUri,
       undefined,
-      { id: 12, targetUri: target.gfsUri, actionId: 'refresh' },
+      {
+        id: 12,
+        targetUri: target.gfsUri,
+        actionId: 'refresh',
+        targetResource: {
+          resourceId: target.resourceId,
+          name: target.name,
+          kind: target.kind as GfsResourceKind,
+          version: target.version,
+          parentResourceId: target.parentResourceId,
+        },
+      },
       handled
     )
 
@@ -590,7 +612,18 @@ describe('FilesPage', () => {
       onOpenPreview,
       file.gfsUri,
       undefined,
-      { id: 13, targetUri: file.gfsUri, actionId: 'download' },
+      {
+        id: 13,
+        targetUri: file.gfsUri,
+        actionId: 'download',
+        targetResource: {
+          resourceId: file.resourceId,
+          name: file.name,
+          kind: file.kind as GfsResourceKind,
+          version: file.version,
+          parentResourceId: file.parentResourceId,
+        },
+      },
       handled
     )
 
@@ -649,6 +682,13 @@ describe('FilesPage', () => {
       targetUri: file.gfsUri,
       actionId: 'replace' as const,
       file: replacement,
+      targetResource: {
+        resourceId: file.resourceId,
+        name: file.name,
+        kind: file.kind as GfsResourceKind,
+        version: file.version,
+        parentResourceId: file.parentResourceId,
+      },
     }
     const renderRoute = (uri: string | null) => (
       <QueryClientProvider client={queryClient}>
@@ -692,7 +732,17 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockImplementation(() => {
       const [loadingCurrentView, setLoading] = useState(true)
       finishLoading = setLoading
-      return { ...baseController(), accessibleResources: [resource], loadingCurrentView }
+      return {
+        ...baseController(),
+        accessibleResources: [resource],
+        moveSourceParentAffordancesById: {
+          [resource.parentResourceId!]: delegationAffordances(new Set(['write', 'delete']), false),
+        },
+        rowAffordancesByResourceId: {
+          [resource.parentResourceId!]: delegationAffordances(new Set(['write', 'delete']), false),
+        },
+        loadingCurrentView,
+      }
     })
     const handled = vi.fn()
     renderFilesPage(
@@ -752,6 +802,7 @@ describe('FilesPage', () => {
         current: parentCrumb,
         crumbs: [parentCrumb],
         items: [child],
+        affordances: delegationAffordances(new Set(['write', 'delete']), false),
         loadingCurrentView,
       }
     })
@@ -6574,18 +6625,14 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'diagram.PNG' }))
 
-    expect(onOpenPreview).toHaveBeenCalledWith(
-      {
-        gfsUri: 'gfs://main/image-1',
-        kind: 'image',
-        mimeType: 'image/png',
-        name: 'diagram.PNG',
-        bytes: 3,
-        version: 1,
-      },
-      'env-1:user-1:team-1',
-      0
-    )
+    expect(onOpenPreview).toHaveBeenCalledWith({
+      gfsUri: 'gfs://main/image-1',
+      kind: 'image',
+      mimeType: 'image/png',
+      name: 'diagram.PNG',
+      bytes: 3,
+      version: 1,
+    })
     // No modal, and FilesPage itself never fetches the bytes.
     expect(screen.queryByRole('dialog', { name: 'diagram.PNG' })).toBeNull()
     expect(download).not.toHaveBeenCalled()
@@ -6644,17 +6691,13 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'README.md' }))
 
-    expect(onOpenPreview).toHaveBeenCalledWith(
-      {
-        gfsUri: 'gfs://main/markdown-1',
-        kind: 'markdown',
-        name: 'README.md',
-        bytes: 12,
-        version: 1,
-      },
-      'env-1:user-1:team-1',
-      0
-    )
+    expect(onOpenPreview).toHaveBeenCalledWith({
+      gfsUri: 'gfs://main/markdown-1',
+      kind: 'markdown',
+      name: 'README.md',
+      bytes: 12,
+      version: 1,
+    })
   })
 
   it('opens a preview tab for a video file with its detected mimeType', () => {
@@ -6667,18 +6710,14 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'demo.mp4' }))
 
-    expect(onOpenPreview).toHaveBeenCalledWith(
-      {
-        gfsUri: 'gfs://main/video-1',
-        kind: 'video',
-        mimeType: 'video/mp4',
-        name: 'demo.mp4',
-        bytes: 3,
-        version: 1,
-      },
-      'env-1:user-1:team-1',
-      0
-    )
+    expect(onOpenPreview).toHaveBeenCalledWith({
+      gfsUri: 'gfs://main/video-1',
+      kind: 'video',
+      mimeType: 'video/mp4',
+      name: 'demo.mp4',
+      bytes: 3,
+      version: 1,
+    })
   })
 
   it('downloads a previewable file when no preview surface is wired (fail-open to download)', async () => {
@@ -6754,18 +6793,14 @@ describe('FilesPage', () => {
     fireEvent.click(within(linkDialog).getByRole('button', { name: 'Open' }))
 
     await waitFor(() =>
-      expect(onOpenPreview).toHaveBeenCalledWith(
-        {
-          gfsUri: 'gfs://main/svg-1',
-          kind: 'image',
-          mimeType: 'image/svg+xml',
-          name: 'architecture.svg',
-          bytes: 4,
-          version: 1,
-        },
-        'env-1:user-1:team-1',
-        0
-      )
+      expect(onOpenPreview).toHaveBeenCalledWith({
+        gfsUri: 'gfs://main/svg-1',
+        kind: 'image',
+        mimeType: 'image/svg+xml',
+        name: 'architecture.svg',
+        bytes: 4,
+        version: 1,
+      })
     )
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from link' })).toBeNull())
     expect(within(titlebarLeadingRoot).getByRole('button', { name: 'Open link' })).toBeTruthy()

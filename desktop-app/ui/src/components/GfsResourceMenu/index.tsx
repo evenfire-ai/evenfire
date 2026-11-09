@@ -352,7 +352,9 @@ export function GfsResourceMenu({
 
   const runAction = (action: () => void, keyboardActivated: boolean, actionKey: string) => {
     restoreTriggerAfterActionRef.current =
-      keyboardActivated && !ACTIONS_WITH_FOCUS_DESTINATION.has(actionKey)
+      triggerMode === 'context' &&
+      keyboardActivated &&
+      !ACTIONS_WITH_FOCUS_DESTINATION.has(actionKey)
     closeMenu()
     action()
   }

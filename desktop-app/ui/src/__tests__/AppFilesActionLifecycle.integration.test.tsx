@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useLayoutEffect, useReducer } from 'react'
+import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClientProvider } from '@tanstack/react-query'
@@ -13,12 +13,9 @@ import {
   waitFor,
   within,
 } from '@testing-library/react'
+import fc, { type AsyncCommand, type Scheduler } from 'fast-check'
 import { DESKTOP_ROUTES } from '@constants/navigation'
-import { NOTIFICATION_SETTINGS_STORAGE_KEY } from '@constants/notificationSettings'
-import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
-import { ipcHostAccessRevoked } from '@hooks/domain/__tests__/__fixtures__/ipcErrors'
 import { installMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
-import { buildGfsSessionScope } from '@hooks/domain/useGfsBrowserController'
 import { useNotificationsController } from '@hooks/domain/useNotificationsController'
 import { useAppController } from '@hooks/useAppController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
@@ -63,8 +60,6 @@ const appHarness = vi.hoisted(() => ({
   filesPageRenderCount: 0,
   filesPageLastLocation: null as { gfsUri: string | null; name: string | null } | null,
   previewPagePendingActions: [] as unknown[],
-  beforeNativeAgentConversationNotification: null as null | (() => void),
-  nativeNotificationContinuation: null as null | Promise<void>,
   sandboxUiShortcutAppRef: null as string | null,
   latestConversationNotification: null as unknown as {
     kind: string
@@ -78,13 +73,9 @@ const grantDesktopNotification = async () => 'granted' as const
 const noopAsync = async () => {}
 const noop = () => {}
 
-function useReactiveController(options?: {
-  onBeforeNativeAgentConversationNotification?: () => void
-}): AppController {
+function useReactiveController(): AppController {
   const [, force] = useReducer((count: number) => count + 1, 0)
   appHarness.forceRender = force
-  appHarness.beforeNativeAgentConversationNotification =
-    options?.onBeforeNativeAgentConversationNotification ?? null
   const controller = appHarness.controller
   const activeTab = activeWorkspaceTab(controller.workspaceTabs)
   ;(controller as { activeWorkspaceTab: unknown }).activeWorkspaceTab = activeTab
@@ -353,38 +344,34 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
         })
       }
     ),
-    openAgentConversationFromNotification: vi.fn(
-      async (target: { agentName: string; chatId?: string }) => {
-        appHarness.beforeNativeAgentConversationNotification?.()
-        await appHarness.nativeNotificationContinuation
-        controller.handleSelectChatAgent(target.agentName, {
-          ...(target.chatId ? { chatId: target.chatId } : {}),
-          selectLatest: false,
-        })
-      }
-    ),
     handleNavSelect,
-    openFilesSection: vi.fn((path: string | null = null) => {
+    openFilesSectionWithReceipt: vi.fn((path: string | null = null) => {
       const intentSequence = beginUserNavigationIntent()
       clearAppsPicker()
       const next = openFilesTab(controller.workspaceTabs, { id: nextWorkspaceTabId(), path })
       setWorkspaceTabs(next)
       return next.activeTabId ? { ownerTabId: next.activeTabId, intentSequence } : null
     }),
-    openPreviewSection: vi.fn((preview, sessionScope?: string) => {
+    openFilesSection: vi.fn((path: string | null = null) => {
+      controller.openFilesSectionWithReceipt(path)
+    }),
+    openPreviewSectionWithReceipt: vi.fn(preview => {
+      const intentSequence = beginUserNavigationIntent()
       clearAppsPicker()
-      setWorkspaceTabs(state =>
-        openPreviewTab(state, {
-          id: nextWorkspaceTabId(),
-          title: preview.name,
-          gfsUri: preview.gfsUri,
-          ...(sessionScope !== undefined ? { sessionScope } : {}),
-          fileKind: preview.kind,
-          byteLength: preview.bytes,
-          ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
-          ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
-        })
-      )
+      const next = openPreviewTab(controller.workspaceTabs, {
+        id: nextWorkspaceTabId(),
+        title: preview.name,
+        gfsUri: preview.gfsUri,
+        fileKind: preview.kind,
+        byteLength: preview.bytes,
+        ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
+        ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+      })
+      setWorkspaceTabs(next)
+      return next.activeTabId ? { ownerTabId: next.activeTabId, intentSequence } : null
+    }),
+    openPreviewSection: vi.fn(preview => {
+      controller.openPreviewSectionWithReceipt(preview)
     }),
     handleLogout: noop,
     pushToast: vi.fn(),
@@ -428,6 +415,7 @@ function resourceByteLength(resource: HarnessResource): number {
 }
 
 let originalClipboardDescriptor: PropertyDescriptor | undefined
+let originalCreateObjectUrlDescriptor: PropertyDescriptor | undefined
 
 function installClerum(
   resources: HarnessResource[],
@@ -460,6 +448,7 @@ function installClerum(
   const deleteResource = vi.fn(async () => ({}))
   const createFolder = vi.fn(async () => ({}))
   const createFileFromPath = vi.fn(async () => ({}))
+  const replaceFileFromPath = vi.fn(async () => ({}))
   const moveResource = vi.fn(async () => ({}))
   const gfs = {
     listAccessible: vi.fn(async () => rootPage),
@@ -473,6 +462,7 @@ function installClerum(
     deleteResource,
     createFolder,
     createFileFromPath,
+    replaceFileFromPath,
     moveResource,
     copyDeepLink: vi.fn(async () => ({ url: 'https://profile.fixture.test/link' })),
     download: vi.fn(),
@@ -527,7 +517,14 @@ function installClerum(
       gfs,
     } as unknown as Window['clerum'],
   })
-  return { gfs, deleteResource, createFolder, createFileFromPath, moveResource }
+  return {
+    gfs,
+    deleteResource,
+    createFolder,
+    createFileFromPath,
+    replaceFileFromPath,
+    moveResource,
+  }
 }
 
 function renderApp() {
@@ -536,45 +533,6 @@ function renderApp() {
       <App />
     </QueryClientProvider>
   )
-}
-
-async function renderAppWithRealController(options?: { onTeamBLayoutCommit?: () => void }) {
-  const gfsRuntimeBridge = window.clerum as unknown as Record<string, any>
-  const { handle } = installAppControllerClerum({ agentNames: ['agent-a'] })
-  const controllerBridge = window.clerum as unknown as Record<string, any>
-  Object.assign(controllerBridge, {
-    app: gfsRuntimeBridge.app,
-    shortcuts: gfsRuntimeBridge.shortcuts,
-    sandboxUi: gfsRuntimeBridge.sandboxUi,
-    gfs: gfsRuntimeBridge.gfs,
-  })
-  Object.assign(controllerBridge.auth as object, gfsRuntimeBridge.auth)
-
-  const actualControllerModule =
-    await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
-  let liveController: AppController | null = null
-  vi.mocked(useAppController).mockImplementation(controllerOptions => {
-    liveController = actualControllerModule.useAppController(controllerOptions)
-    useLayoutEffect(() => {
-      if (liveController?.currentTeamId === 'team-2') options?.onTeamBLayoutCommit?.()
-    }, [liveController?.currentTeamId])
-    return liveController
-  })
-  render(
-    <QueryClientProvider client={desktopQueryClient}>
-      <AgentTaskTrackerProvider>
-        <App />
-      </AgentTaskTrackerProvider>
-    </QueryClientProvider>
-  )
-
-  const currentController = () => {
-    if (!liveController) throw new Error('The real App controller did not mount')
-    return liveController
-  }
-  await waitFor(() => expect(currentController().isAuthenticated).toBe(true))
-  await waitFor(() => expect(currentController().initialExperienceLoading).toBe(false))
-  return { currentController, handle }
 }
 
 async function produceLatestSidebarSession() {
@@ -657,10 +615,49 @@ async function openRowActions(resourceName: string) {
 
 async function chooseRowAction(resourceName: string, actionName: string) {
   await openRowActions(resourceName)
+  if (actionName === 'Share') {
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${resourceName}` })
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+    return
+  }
   if (['Copy link', 'Copy file ID', 'Copy folder ID'].includes(actionName)) {
     fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Share' }))
   }
   fireEvent.click(await screen.findByRole('menuitem', { name: actionName }))
+}
+
+async function chooseFilesAction(resourceName: string, actionName: string) {
+  const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+  fireEvent.click(within(browser).getByRole('button', { name: `Options for ${resourceName}` }))
+  const menu = await screen.findByRole('menu', { name: `Actions for ${resourceName}` })
+  if (['Copy link', 'Copy file ID', 'Copy folder ID'].includes(actionName)) {
+    fireEvent.mouseEnter(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${resourceName}` })
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: actionName }))
+    return
+  }
+  if (actionName === 'Share') {
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${resourceName}` })
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+    return
+  }
+  fireEvent.click(within(menu).getByRole('menuitem', { name: actionName }))
+}
+
+async function chooseCurrentFilesAction(resourceName: string, actionName: string) {
+  fireEvent.click(await screen.findByRole('button', { name: `Options for ${resourceName}` }))
+  const menu = await screen.findByRole('menu', { name: `Actions for ${resourceName}` })
+  fireEvent.click(await within(menu).findByRole('menuitem', { name: actionName }))
+}
+
+async function choosePreviewAction(resourceName: string, actionName: string) {
+  const preview = document.querySelector<HTMLElement>('.da-gfs-preview-page')
+  if (!preview) throw new Error('The current Preview page is not mounted')
+  fireEvent.click(within(preview).getByRole('button', { name: `Options for ${resourceName}` }))
+  const menu = await screen.findByRole('menu', { name: `Actions for ${resourceName}` })
+  fireEvent.click(within(menu).getByRole('menuitem', { name: actionName }))
 }
 
 async function expectActionAtConsumer(
@@ -746,6 +743,7 @@ const targetB = await resolveResource(
 
 beforeEach(() => {
   originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  originalCreateObjectUrlDescriptor = Object.getOwnPropertyDescriptor(URL, 'createObjectURL')
   desktopQueryClient.clear()
   appHarness.forceRender = () => {}
   appHarness.shortcutCommand = () => {}
@@ -756,8 +754,6 @@ beforeEach(() => {
   appHarness.filesPageRenderCount = 0
   appHarness.filesPageLastLocation = null
   appHarness.previewPagePendingActions = []
-  appHarness.beforeNativeAgentConversationNotification = null
-  appHarness.nativeNotificationContinuation = null
   appHarness.sandboxUiShortcutAppRef = null
   appHarness.latestConversationNotification = null
   appHarness.controller = makeController()
@@ -776,259 +772,16 @@ afterEach(() => {
   } else {
     Reflect.deleteProperty(navigator, 'clipboard')
   }
+  if (originalCreateObjectUrlDescriptor) {
+    Object.defineProperty(URL, 'createObjectURL', originalCreateObjectUrlDescriptor)
+  } else {
+    Reflect.deleteProperty(URL, 'createObjectURL')
+  }
   delete (window as { clerum?: unknown }).clerum
   vi.restoreAllMocks()
 })
 
 describe('App → Files action lifecycle integration', () => {
-  it('closes a loaded workspace Preview when the same principal switches teams', async () => {
-    const markdown = '# Team A private content'
-    const markdownBytes = new TextEncoder().encode(markdown)
-    const resource = await resolveResource(
-      resolvedFile('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'team-a-private.md', {
-        bytes: markdownBytes.byteLength,
-      })
-    )
-    const { gfs } = installClerum([resource])
-    const downloadPreview = vi.fn((_uri: string, maxBytes: number) =>
-      previewDownloadResult(resource, markdownBytes.buffer, maxBytes)
-    )
-    Object.assign(gfs, { downloadPreview })
-    const { currentController, handle } = await renderAppWithRealController()
-    const principalIdentity = currentController().authenticatedPrincipalIdentity
-    const teamAScope = buildGfsSessionScope(
-      currentController().runtimeConfigState?.envKey,
-      currentController().isAuthenticated,
-      currentController().me
-    )
-    if (!teamAScope) throw new Error('The authenticated team scope was not available')
-    act(() =>
-      currentController().openPreviewSection(
-        {
-          gfsUri: resource.gfsUri,
-          kind: 'markdown',
-          name: resource.name,
-          bytes: resourceByteLength(resource),
-          version: resource.version,
-        },
-        teamAScope
-      )
-    )
-
-    expect(await screen.findByText('Team A private content')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Options for team-a-private.md' }))
-    expect(screen.getByRole('menuitem', { name: 'Copy content' })).toBeTruthy()
-    expect(downloadPreview).toHaveBeenCalledTimes(1)
-
-    await act(async () => {
-      await currentController().handleEnsureTeamContext({ teamId: 'team-2' })
-    })
-
-    expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
-    expect(currentController().authenticatedPrincipalIdentity).toBe(principalIdentity)
-    expect(currentController().me?.teamId).toBe('team-2')
-    expect(
-      buildGfsSessionScope(
-        currentController().runtimeConfigState?.envKey,
-        currentController().isAuthenticated,
-        currentController().me
-      )
-    ).not.toBe(teamAScope)
-    await waitFor(() =>
-      expect(
-        currentController().workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
-      ).toHaveLength(0)
-    )
-    expect(screen.queryByText('Team A private content')).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Copy content' })).toBeNull()
-    expect(downloadPreview).toHaveBeenCalledTimes(1)
-  })
-
-  it('drops a Files seed resolved during a real same-principal team switch', async () => {
-    const markdownBytes = new TextEncoder().encode('# Team A pending resource')
-    const resource = await resolveResource(
-      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'pending-team-a.md', {
-        bytes: markdownBytes.byteLength,
-      })
-    )
-    const pendingResolve = deferred<HarnessResource>()
-    const { gfs } = installClerum([resource], new Map([[resource.gfsUri, pendingResolve]]))
-    const downloadPreview = vi.fn((_uri: string, maxBytes: number) =>
-      previewDownloadResult(resource, markdownBytes.buffer, maxBytes)
-    )
-    Object.assign(gfs, { downloadPreview })
-    const { currentController, handle } = await renderAppWithRealController({
-      onTeamBLayoutCommit: () => pendingResolve.resolve(resource),
-    })
-    const principalIdentity = currentController().authenticatedPrincipalIdentity
-
-    act(() => currentController().openFilesSection(resource.gfsUri))
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(resource.gfsUri))
-
-    await act(async () => {
-      await currentController().handleEnsureTeamContext({ teamId: 'team-2' })
-      await pendingResolve.promise
-    })
-
-    expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
-    expect(currentController().currentTeamId).toBe('team-2')
-    expect(currentController().authenticatedPrincipalIdentity).toBe(principalIdentity)
-    expect(currentController().workspaceTabs.tabs.some(tab => tab.kind === 'preview')).toBe(false)
-    expect(downloadPreview).not.toHaveBeenCalled()
-  })
-
-  it('drops a pending Preview download, closes inactive previews, and does not replay on switch-back', async () => {
-    const resourceA = await resolveResource(
-      resolvedFile('dddddddddddddddddddddddddddddddd', 'loaded-team-a.md')
-    )
-    const resourceB = await resolveResource(
-      resolvedFile('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'pending-team-a.md')
-    )
-    const bytesA = new TextEncoder().encode('# Loaded Team A content')
-    const bytesB = new TextEncoder().encode('# Pending Team A content')
-    const resultA = await previewDownloadResult(resourceA, bytesA.buffer)
-    const resultB = await previewDownloadResult(resourceB, bytesB.buffer)
-    const pendingA = deferred<PreviewDownload>()
-    const pendingB = deferred<PreviewDownload>()
-    const { gfs } = installClerum([resourceA, resourceB])
-    const downloadPreview = vi.fn((uri: string) =>
-      uri === resourceA.gfsUri ? pendingA.promise : pendingB.promise
-    )
-    Object.assign(gfs, { downloadPreview })
-    const { currentController } = await renderAppWithRealController({
-      onTeamBLayoutCommit: () => pendingB.resolve(resultB),
-    })
-    const teamAScope = buildGfsSessionScope(
-      currentController().runtimeConfigState?.envKey,
-      currentController().isAuthenticated,
-      currentController().me
-    )
-    if (!teamAScope) throw new Error('Team A scope was not available')
-
-    act(() =>
-      currentController().openPreviewSection(
-        {
-          gfsUri: resourceA.gfsUri,
-          kind: 'markdown',
-          name: resourceA.name,
-          bytes: resourceByteLength(resourceA),
-          version: resourceA.version,
-        },
-        teamAScope
-      )
-    )
-    await waitFor(() =>
-      expect(downloadPreview).toHaveBeenCalledWith(resourceA.gfsUri, expect.any(Number))
-    )
-    await act(async () => {
-      pendingA.resolve(resultA)
-      await pendingA.promise
-    })
-    expect(await screen.findByText('Loaded Team A content')).toBeTruthy()
-
-    act(() =>
-      currentController().openPreviewSection(
-        {
-          gfsUri: resourceB.gfsUri,
-          kind: 'markdown',
-          name: resourceB.name,
-          bytes: resourceByteLength(resourceB),
-          version: resourceB.version,
-        },
-        teamAScope
-      )
-    )
-    await waitFor(() =>
-      expect(downloadPreview).toHaveBeenCalledWith(resourceB.gfsUri, expect.any(Number))
-    )
-    expect(
-      currentController().workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
-    ).toHaveLength(2)
-
-    await act(async () => {
-      await currentController().handleEnsureTeamContext({ teamId: 'team-2' })
-      await pendingB.promise
-    })
-    expect(
-      currentController().workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
-    ).toHaveLength(0)
-    expect(screen.queryByText('Pending Team A content')).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Copy content' })).toBeNull()
-
-    await act(async () => {
-      await currentController().handleEnsureTeamContext({ teamId: 'team-1' })
-    })
-    expect(
-      currentController().workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
-    ).toHaveLength(0)
-    expect(downloadPreview).toHaveBeenCalledTimes(2)
-  })
-
-  it('keeps a newer explicit Chat selection when Preview scope cleanup runs', async () => {
-    const resource = await resolveResource(
-      resolvedFile('ffffffffffffffffffffffffffffffff', 'latest-selection.md')
-    )
-    installClerum([resource])
-    Object.assign(window.clerum.sandboxUi, {
-      listApps: vi.fn(async () => ({
-        apps: [
-          {
-            appRef: 'ns/selection-app',
-            title: 'Selection app',
-            defaultPath: '/',
-            ready: true,
-            phase: 'active',
-          },
-        ],
-      })),
-    })
-    const controller = makeController()
-    const teamAScope = buildGfsSessionScope('', true, controller.me)
-    if (!teamAScope) throw new Error('Team A scope was not available')
-    const appTab = openAppTab(controller.workspaceTabs, {
-      id: 'selection-app-tab',
-      appRef: 'ns/selection-app',
-      title: 'Selection app',
-    })
-    const workspaceTabs = openPreviewTab(appTab, {
-      id: 'selection-preview-tab',
-      title: resource.name,
-      gfsUri: resource.gfsUri,
-      fileKind: 'markdown',
-      byteLength: resourceByteLength(resource),
-      sessionScope: teamAScope,
-    })
-    controller.workspaceTabs = workspaceTabs
-    appHarness.controller = controller
-    let injectExplicitChatSelection = false
-    const setWorkspaceTabs = controller.setWorkspaceTabs
-    controller.setWorkspaceTabs = vi.fn(updater => {
-      if (injectExplicitChatSelection) {
-        injectExplicitChatSelection = false
-        controller.selectWorkspaceTabById('chat-tab-1')
-      }
-      setWorkspaceTabs(updater)
-    })
-    renderApp()
-    await screen.findByRole('heading', { name: /fixture preview/i })
-
-    act(() => {
-      controller.me = { ...controller.me!, teamId: 'team-b' }
-      controller.currentTeamId = 'team-b'
-      injectExplicitChatSelection = true
-      appHarness.forceRender()
-    })
-
-    await waitFor(() =>
-      expect(controller.workspaceTabs.tabs.some(tab => tab.kind === 'preview')).toBe(false)
-    )
-    expect(activeWorkspaceTab(controller.workspaceTabs)).toMatchObject({
-      id: 'chat-tab-1',
-      kind: 'chat',
-    })
-    expect(appHarness.sandboxUiShortcutAppRef).toBeNull()
-  })
-
   it('keeps sidebar folder and file menus aligned with the shared action producer', async () => {
     const folder = await resolveResource(
       resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Parity folder')
@@ -1103,6 +856,447 @@ describe('App → Files action lifecycle integration', () => {
     }
   })
 
+  it('matches Files copy-link and copy-ID producers for the exact clicked URI', async () => {
+    const file = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'copy-target.txt')
+    )
+    const { gfs } = installClerum([file])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(file.name)
+    await chooseFilesAction(file.name, 'Copy link')
+    await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledWith(file.gfsUri))
+    await chooseFilesAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    const filesOutcome = {
+      linkInputs: gfs.copyDeepLink.mock.calls,
+      copiedIds: writeText.mock.calls,
+    }
+
+    gfs.copyDeepLink.mockClear()
+    writeText.mockClear()
+    await chooseRowAction(file.name, 'Copy link')
+    await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledWith(file.gfsUri))
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect({ linkInputs: gfs.copyDeepLink.mock.calls, copiedIds: writeText.mock.calls }).toEqual(
+      filesOutcome
+    )
+  })
+
+  it('opens the same Files-owned Share dialog from a sidebar action', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Share parent')
+    )
+    const file = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'share-target.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    installClerum([parent, file], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([
+        [
+          parent.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: parent.resourceId,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+      affordanceBits: ['read', 'manage_acl'],
+    })
+    Object.assign(window.clerum.team, {
+      directory: vi.fn(async () => ({ items: [] })),
+    })
+    Object.assign(window.clerum.agents, {
+      listMine: vi.fn(async () => []),
+    })
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'files-parent',
+        path: parent.gfsUri,
+      })
+    )
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const sidebarParent = await screen.findByRole('treeitem', { name: /Share parent/ })
+    fireEvent.click(within(sidebarParent).getByRole('button', { name: 'Expand Share parent' }))
+    await findResourceTreeRow(file.name)
+    await chooseFilesAction(file.name, 'Share')
+    const filesDialog = await screen.findByRole('dialog', { name: `Share file ${file.name}` })
+    const filesDialogName = filesDialog.getAttribute('aria-label')
+    fireEvent.click(within(filesDialog).getByRole('button', { name: 'Close share dialog' }))
+
+    await chooseRowAction(file.name, 'Share')
+    const sidebarDialog = await screen.findByRole('dialog', { name: `Share file ${file.name}` })
+    expect(sidebarDialog.getAttribute('aria-label')).toBe(filesDialogName)
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: file.gfsUri },
+    })
+  })
+
+  it('opens the clicked folder through the same Files route as the row action', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'Open target folder')
+    )
+    installClerum([folder])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(folder.name)
+    await chooseFilesAction(folder.name, 'Open folder')
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: folder.gfsUri },
+      })
+    )
+    const filesOutcome = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.files?.path
+
+    await chooseRowAction(folder.name, 'Open folder')
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.files?.path).toBe(
+        folder.gfsUri
+      )
+    )
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.files?.path).toBe(filesOutcome)
+  })
+
+  it('opens Preview with the same resource version as the Files action', async () => {
+    const file = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'preview-target.md', { version: 7 })
+    )
+    installClerum([file])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(file.name)
+    await chooseFilesAction(file.name, 'Preview')
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'preview',
+        preview: { gfsUri: file.gfsUri, resourceVersion: file.version },
+      })
+    )
+    const filesPreview = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.preview
+
+    await chooseRowAction(file.name, 'Preview')
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'preview',
+        preview: { gfsUri: file.gfsUri, resourceVersion: file.version },
+      })
+    )
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.preview).toEqual(filesPreview)
+  })
+
+  it('routes unreadable authorized sidebar actions through the exact Files parent row', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Vault')
+    )
+    const child = childView('44444444444444444444444444444444', 'secret.pdf', 'file', {
+      parentResourceId: parent.resourceId,
+      readable: false,
+      version: 7,
+    })
+    const renameResource = vi.fn(async () => ({}))
+    const { gfs } = installClerum([parent], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[parent.resourceId, [child]]]),
+      affordanceBits: ['write', 'delete'],
+    })
+    const resolve = gfs.resolve
+    Object.assign(gfs, {
+      renameResource,
+      resolve: vi.fn(async (uri: string) => {
+        if (uri === child.gfsUri) throw new Error('403 Forbidden: unreadable resource')
+        return resolve(uri)
+      }),
+    })
+
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'files-parent',
+        path: parent.gfsUri,
+      })
+    )
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const sidebarParent = await screen.findByRole('treeitem', { name: /Vault/ })
+    fireEvent.click(within(sidebarParent).getByRole('button', { name: 'Expand Vault' }))
+    await findResourceTreeRow('secret.pdf')
+    const unreadableSidebarMenu = await openRowActions('secret.pdf')
+    expect(
+      await within(unreadableSidebarMenu).findByRole('menuitem', { name: 'Rename' })
+    ).toBeTruthy()
+    expect(
+      within(unreadableSidebarMenu).queryByRole('menuitem', { name: 'Replace file' })
+    ).toBeNull()
+    fireEvent.keyDown(unreadableSidebarMenu, { key: 'Escape' })
+
+    const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    fireEvent.click(within(filesBrowser).getByRole('button', { name: 'Options for secret.pdf' }))
+    const filesMenu = await screen.findByRole('menu', { name: 'Actions for secret.pdf' })
+    expect(within(filesMenu).queryByRole('menuitem', { name: 'Replace file' })).toBeNull()
+    fireEvent.click(within(filesMenu).getByRole('menuitem', { name: 'Rename' }))
+    const filesRenameForm = await screen.findByRole('form', { name: 'Rename resource' })
+    fireEvent.change(within(filesRenameForm).getByLabelText('New name'), {
+      target: { value: 'renamed-secret.pdf' },
+    })
+    fireEvent.click(within(filesRenameForm).getByRole('button', { name: 'Save name' }))
+    await waitFor(() =>
+      expect(renameResource).toHaveBeenCalledWith(child.resourceId, 'renamed-secret.pdf', 'main', 7)
+    )
+
+    renameResource.mockClear()
+    await chooseRowAction('secret.pdf', 'Rename')
+    const sidebarRenameForm = await screen.findByRole('form', { name: 'Rename resource' })
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: 'files-parent',
+      kind: 'files',
+      files: { path: parent.gfsUri },
+    })
+    fireEvent.change(within(sidebarRenameForm).getByLabelText('New name'), {
+      target: { value: 'sidebar-renamed-secret.pdf' },
+    })
+    fireEvent.click(within(sidebarRenameForm).getByRole('button', { name: 'Save name' }))
+    await waitFor(() =>
+      expect(renameResource).toHaveBeenCalledWith(
+        child.resourceId,
+        'sidebar-renamed-secret.pdf',
+        'main',
+        7
+      )
+    )
+    expect(renameResource).toHaveBeenCalledTimes(1)
+    expect(gfs.resolve).not.toHaveBeenCalledWith(child.gfsUri)
+  })
+
+  it('does not rename a newer resource version after the sidebar route resolves', async () => {
+    const parentResourceId = '11111111111111111111111111111111'
+    const resourceId = '44444444444444444444444444444444'
+    const parent = await resolveResource(resolvedDirectory(parentResourceId, 'Vault'))
+    const resolvedVersion = await resolveResource(
+      resolvedFile(resourceId, 'report.txt', { parentResourceId, version: 8 })
+    )
+    const clickedRow = childView(resourceId, 'report.txt', 'file', {
+      parentResourceId,
+      readable: true,
+      version: 7,
+    })
+    const renameResource = vi.fn(async () => ({}))
+    const { gfs } = installClerum([parent, resolvedVersion], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[parentResourceId, [clickedRow]]]),
+      affordanceBits: ['write'],
+    })
+    Object.assign(gfs, { renameResource })
+
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const sidebarParent = await screen.findByRole('treeitem', { name: /Vault/ })
+    fireEvent.click(within(sidebarParent).getByRole('button', { name: 'Expand Vault' }))
+    await findResourceTreeRow('report.txt')
+    await chooseRowAction('report.txt', 'Rename')
+
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(clickedRow.gfsUri))
+    await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+    expect(screen.queryAllByRole('form', { name: 'Rename resource' })).toHaveLength(0)
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(appHarness.controller.pushToast).not.toHaveBeenCalledWith(
+      'Renamed to report.txt',
+      'success'
+    )
+  })
+
+  it('cancels a pending Files action when the session generation changes', async () => {
+    const target = await resolveResource(
+      resolvedFile('44444444444444444444444444444444', 'session-target.txt', { version: 3 })
+    )
+    const delayedTarget = deferred<unknown>()
+    const { deleteResource, gfs } = installClerum(
+      [target],
+      new Map([[target.gfsUri, delayedTarget]])
+    )
+    appHarness.controller = makeController()
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(target.name)
+    await chooseDeleteAction(target.name)
+    await expectActionAtConsumer(appHarness.filesPagePendingActions, target.gfsUri, 'delete')
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(target.gfsUri))
+
+    act(() => {
+      appHarness.controller.sessionGeneration = 2
+      appHarness.forceRender()
+    })
+    await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+    await act(async () => {
+      delayedTarget.resolve(target)
+      await delayedTarget.promise
+    })
+    expect(deleteResource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog', { name: `Delete ${target.name}?` })).toBeNull()
+  })
+
+  it('matches Files cancellation when a delayed sidebar action is superseded', async () => {
+    type Model = { done: boolean }
+    type Real = {
+      scheduler: Scheduler
+      cancelSidebarDelete: (scheduler: Scheduler) => Promise<void>
+    }
+    class CompareCancelledDelete implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return !model.done
+      }
+
+      async run(model: Model, real: Real) {
+        await real.cancelSidebarDelete(real.scheduler)
+        model.done = true
+      }
+
+      toString() {
+        return 'compare direct Files and sidebar Delete cancellation'
+      }
+    }
+
+    const parentResourceId = '11111111111111111111111111111111'
+    const resourceId = '44444444444444444444444444444444'
+    const parent = await resolveResource(resolvedDirectory(parentResourceId, 'Vault'))
+    const target = await resolveResource(
+      resolvedFile(resourceId, 'report.txt', { parentResourceId, version: 3 })
+    )
+    const child = childView(resourceId, target.name, 'file', {
+      parentResourceId,
+      readable: true,
+      version: target.version,
+    })
+    const { gfs, deleteResource } = installClerum([parent, target], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[parentResourceId, [child]]]),
+      affordanceBits: ['delete'],
+    })
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'files-parent',
+        path: parent.gfsUri,
+      })
+    )
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const sidebarParent = await screen.findByRole('treeitem', { name: /Vault/ })
+    fireEvent.click(within(sidebarParent).getByRole('button', { name: 'Expand Vault' }))
+    await findResourceTreeRow('report.txt')
+
+    const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    fireEvent.click(within(filesBrowser).getByRole('button', { name: 'Options for report.txt' }))
+    const filesMenu = await screen.findByRole('menu', { name: 'Actions for report.txt' })
+    fireEvent.click(within(filesMenu).getByRole('menuitem', { name: 'Delete' }))
+    expect(await screen.findByRole('dialog', { name: 'Delete report.txt?' })).toBeTruthy()
+    fireEvent.click(screen.getByTestId('nav-chat'))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+    )
+    expect(screen.queryByRole('dialog', { name: 'Delete report.txt?' })).toBeNull()
+    expect(deleteResource).not.toHaveBeenCalled()
+    const filesOutcome = {
+      deleteCalls: deleteResource.mock.calls,
+      dialogs: screen.queryAllByRole('dialog').map(dialog => dialog.textContent),
+      toasts: vi.mocked(appHarness.controller.pushToast).mock.calls,
+      activeKind: activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind,
+    }
+
+    vi.mocked(appHarness.controller.pushToast).mockClear()
+    const originalResolve = gfs.resolve
+    const command = new CompareCancelledDelete()
+    const schedulerArbitrary = fc.scheduler()
+    await fc.assert(
+      fc.asyncProperty(
+        schedulerArbitrary,
+        fc.commands([fc.constant(command)], { maxCommands: 1, size: '+1' }),
+        async (scheduler, commands) => {
+          Object.assign(gfs, {
+            resolve: vi.fn(async (uri: string) => {
+              const result = originalResolve(uri)
+              return uri === target.gfsUri
+                ? scheduler.schedule(result, 'Files target resolution')
+                : result
+            }),
+          })
+          const model: Model = { done: false }
+          const real: Real = {
+            scheduler,
+            cancelSidebarDelete: async activeScheduler => {
+              await chooseDeleteAction('report.txt')
+              await waitFor(() =>
+                expect(appHarness.filesPageLatestPendingAction).toMatchObject({
+                  actionId: 'delete',
+                  targetUri: target.gfsUri,
+                })
+              )
+              fireEvent.click(screen.getByTestId('nav-chat'))
+              await waitFor(() =>
+                expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+              )
+              await activeScheduler.waitAll()
+            },
+          }
+          const generatedCommands = [...commands]
+          if (generatedCommands.length === 0) generatedCommands.push(command)
+          await fc.asyncModelRun(() => ({ model, real }), generatedCommands)
+          expect(model.done).toBe(true)
+          expect(deleteResource).not.toHaveBeenCalled()
+          expect(screen.queryByRole('dialog', { name: 'Delete report.txt?' })).toBeNull()
+          const sidebarOutcome = {
+            deleteCalls: deleteResource.mock.calls,
+            dialogs: screen.queryAllByRole('dialog').map(dialog => dialog.textContent),
+            toasts: vi.mocked(appHarness.controller.pushToast).mock.calls,
+            activeKind: activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind,
+          }
+          expect(sidebarOutcome).toEqual(filesOutcome)
+        }
+      ),
+      { numRuns: 1, seed: 281109 }
+    )
+  })
+
   it('executes an action on the live same-tab Files route after S → T navigation', async () => {
     const { targetFolder } = await openLiveTargetInSameFilesTab()
 
@@ -1166,29 +1360,47 @@ describe('App → Files action lifecycle integration', () => {
     )
   })
 
-  it('opens and submits New folder against the exact live same-tab destination', async () => {
-    const { targetFolder, createFolder } = await openLiveTargetInSameFilesTab()
+  it('matches the Files New folder handler for the exact clicked folder', async () => {
+    const { sourceFolder, targetFolder, createFolder } = await openLiveTargetInSameFilesTab()
+    fireEvent.click(
+      within(screen.getByRole('region', { name: 'EvenDrive browser' })).getByRole('button', {
+        name: sourceFolder.name,
+      })
+    )
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: sourceFolder.gfsUri },
+      })
+    )
 
-    await chooseRowAction(targetFolder.name, 'New folder')
-    const dialog = await screen.findByRole('dialog', { name: 'New folder' })
-    expect(dialog.textContent).toContain(`Create a new folder in ${targetFolder.name}.`)
-    expect(dialog.contains(document.activeElement), document.activeElement?.outerHTML).toBe(true)
-
-    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Folder name' }), {
+    await chooseFilesAction(targetFolder.name, 'New folder')
+    const filesDialog = await screen.findByRole('dialog', { name: 'New folder' })
+    expect(filesDialog.textContent).toContain(`Create a new folder in ${targetFolder.name}.`)
+    fireEvent.change(within(filesDialog).getByRole('textbox', { name: 'Folder name' }), {
       target: { value: 'Created from sidebar' },
     })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Create folder' }))
+    fireEvent.click(within(filesDialog).getByRole('button', { name: 'Create folder' }))
+    await waitFor(() => expect(createFolder).toHaveBeenCalledTimes(1))
+    const filesCalls = createFolder.mock.calls.map(call => [...call])
+    createFolder.mockClear()
 
-    await waitFor(() =>
-      expect(createFolder).toHaveBeenCalledWith(
-        targetFolder.resourceId,
-        'Created from sidebar',
-        'main'
-      )
+    await chooseRowAction(targetFolder.name, 'New folder')
+    const sidebarDialog = await screen.findByRole('dialog', { name: 'New folder' })
+    expect(sidebarDialog.textContent).toContain(`Create a new folder in ${targetFolder.name}.`)
+    expect(sidebarDialog.contains(document.activeElement), document.activeElement?.outerHTML).toBe(
+      true
     )
+    fireEvent.change(within(sidebarDialog).getByRole('textbox', { name: 'Folder name' }), {
+      target: { value: 'Created from sidebar' },
+    })
+    fireEvent.click(within(sidebarDialog).getByRole('button', { name: 'Create folder' }))
+
+    await waitFor(() => expect(createFolder).toHaveBeenCalledTimes(1))
+    expect(createFolder.mock.calls.map(call => [...call])).toEqual(filesCalls)
   })
 
-  it('opens the file chooser and uploads into the exact live same-tab destination', async () => {
+  it('matches the Files upload handler and destination for the clicked folder', async () => {
     const { targetFolder, createFileFromPath } = await openLiveTargetInSameFilesTab()
     const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const uploadInput = within(filesBrowser).getByLabelText('Upload file', {
@@ -1196,19 +1408,113 @@ describe('App → Files action lifecycle integration', () => {
     }) as HTMLInputElement
     const clickChooser = vi.spyOn(uploadInput, 'click').mockImplementation(() => undefined)
 
-    await chooseRowAction(targetFolder.name, 'Upload file')
+    await chooseCurrentFilesAction(targetFolder.name, 'Upload file')
     await waitFor(() => expect(clickChooser).toHaveBeenCalledTimes(1))
     const upload = new File(['test upload'], 'sidebar-upload.md', { type: 'text/markdown' })
     fireEvent.change(uploadInput, { target: { files: [upload] } })
+    await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(1))
+    const filesCalls = createFileFromPath.mock.calls.map(call => [...call])
+    createFileFromPath.mockClear()
+    clickChooser.mockClear()
 
-    await waitFor(() =>
-      expect(createFileFromPath).toHaveBeenCalledWith(
-        targetFolder.resourceId,
-        'sidebar-upload.md',
-        'sidebar-upload.md',
-        'main'
-      )
+    await chooseRowAction(targetFolder.name, 'Upload file')
+    await waitFor(() => expect(clickChooser).toHaveBeenCalledTimes(1))
+    const sidebarUpload = new File(['test upload'], 'sidebar-upload.md', { type: 'text/markdown' })
+    fireEvent.change(uploadInput, { target: { files: [sidebarUpload] } })
+    await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(1))
+    expect(createFileFromPath.mock.calls.map(call => [...call])).toEqual(filesCalls)
+    expect(filesCalls[0]).toEqual([
+      targetFolder.resourceId,
+      'sidebar-upload.md',
+      'sidebar-upload.md',
+      'main',
+    ])
+  })
+
+  it('uses the Files save-to-disk handler for Download from the sidebar', async () => {
+    const file = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'download-target.txt')
     )
+    const { gfs } = installClerum([file])
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    Object.assign(gfs, { download })
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    const anchorDownloads: Array<{ filename: string; href: string }> = []
+    const createObjectUrl = vi.fn(() => 'blob:sidebar-parity')
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectUrl,
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      anchorDownloads.push({ filename: this.download, href: this.href })
+    })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(file.name)
+    await chooseFilesAction(file.name, 'Download')
+    await waitFor(() => expect(download).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(anchorDownloads).toHaveLength(1))
+    const filesOutcome = {
+      downloadInputs: download.mock.calls,
+      filenames: anchorDownloads.map(anchor => anchor.filename),
+    }
+
+    download.mockClear()
+    anchorDownloads.length = 0
+    createObjectUrl.mockClear()
+    vi.mocked(appHarness.controller.pushToast).mockClear()
+    await chooseRowAction(file.name, 'Download')
+    await waitFor(() => expect(download).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(anchorDownloads).toHaveLength(1))
+    expect({
+      downloadInputs: download.mock.calls,
+      filenames: anchorDownloads.map(anchor => anchor.filename),
+    }).toEqual(filesOutcome)
+    expect(download.mock.calls[0]).toEqual([file.gfsUri])
+    expect(anchorDownloads[0]?.filename).toBe(file.name)
+    expect(appHarness.controller.pushToast).toHaveBeenCalledWith(
+      `Downloaded ${file.name}`,
+      'success'
+    )
+  })
+
+  it('completes Replace through the Files handler with the selected file and clicked version', async () => {
+    const file = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'replace-target.bin', { version: 7 })
+    )
+    const { gfs, replaceFileFromPath } = installClerum([file], new Map(), {
+      affordanceBits: ['read', 'write'],
+    })
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const row = await findResourceTreeRow(file.name)
+    const menu = await openRowActions(file.name)
+    await within(menu).findByRole('menuitem', { name: 'Replace file' })
+    const sidebarInput = within(row).getByLabelText(`Replace ${file.name}`) as HTMLInputElement
+    const openSidebarChooser = vi.spyOn(sidebarInput, 'click').mockImplementation(() => undefined)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Replace file' }))
+    await waitFor(() => expect(openSidebarChooser).toHaveBeenCalledTimes(1))
+    const replacement = new File(['replacement bytes'], 'replacement.txt', {
+      type: 'text/plain',
+    })
+    fireEvent.change(sidebarInput, { target: { files: [replacement] } })
+    await waitFor(() =>
+      expect(replaceFileFromPath).toHaveBeenCalledWith(file.resourceId, replacement.name, 'main', 7)
+    )
+    expect(gfs.getPathForFile).toHaveBeenCalledWith(replacement)
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: file.gfsUri },
+    })
   })
 
   it('reuses an inactive exact-destination Files tab and completes the pending action', async () => {
@@ -1323,7 +1629,7 @@ describe('App → Files action lifecycle integration', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     const folderRow = await screen.findByRole('treeitem', { name: /Folder A/ })
-    const openFilesSection = appHarness.controller.openFilesSection
+    const openFilesSection = appHarness.controller.openFilesSectionWithReceipt
     await chooseRowAction('Folder A', 'New folder')
     expect(openFilesSection).toHaveBeenCalledWith(folder.gfsUri)
     await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(folder.gfsUri))
@@ -1455,7 +1761,6 @@ describe('App → Files action lifecycle integration', () => {
 
     const ownerTabId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
     fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
-    const intentBeforeSelection = appHarness.controller.navigationIntentSequence
     fireEvent.click(screen.getByRole('button', { name: 'Open New Chat' }))
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(ownerTabId)
     expect(appHarness.controller.handleSelectChatAgent).toHaveBeenCalledWith(
@@ -1473,7 +1778,6 @@ describe('App → Files action lifecycle integration', () => {
     })
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
     expect(deleteResource).not.toHaveBeenCalled()
-    expect(appHarness.controller.navigationIntentSequence).toBeGreaterThan(intentBeforeSelection)
   })
 
   it('cancels a pending Files action when a notification selects a drawer chat', async () => {
@@ -1502,19 +1806,14 @@ describe('App → Files action lifecycle integration', () => {
     await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
 
     fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
-    const intentBeforeSelection = appHarness.controller.navigationIntentSequence
     fireEvent.click(screen.getByRole('button', { name: 'Open conversation notification' }))
     expect(appHarness.controller.handleOpenNotification).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'notification-chat' }),
-      {
-        keepNavItem: true,
-        navigationIntentSequence: intentBeforeSelection + 1,
-      }
+      { keepNavItem: true }
     )
     expect(appHarness.controller.selectedAgent).toBe('agent-a')
     expect(appHarness.controller.activeChatId).toBe('notification-chat')
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
-    expect(appHarness.controller.navigationIntentSequence).toBeGreaterThan(intentBeforeSelection)
 
     await act(async () => {
       deferredTarget.resolve(targetA)
@@ -1523,374 +1822,6 @@ describe('App → Files action lifecycle integration', () => {
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
     expect(deleteResource).not.toHaveBeenCalled()
     expect(gfs.download).not.toHaveBeenCalled()
-    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
-  })
-
-  it('cancels a pending Files action before a native desktop conversation notification', async () => {
-    const deferredTarget = deferred<unknown>()
-    const notificationResolution = deferred<void>()
-    appHarness.nativeNotificationContinuation = notificationResolution.promise
-    const { gfs, deleteResource } = installClerum(
-      [targetA],
-      new Map([[targetA.gfsUri, deferredTarget]])
-    )
-    appHarness.controller.desktopEnvironmentSetupComplete = false
-    renderApp()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
-    await screen.findByRole('treeitem', { name: /target-a\.txt/ })
-    await chooseDeleteAction('target-a.txt')
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
-    await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
-
-    let nativeNotificationOpen!: Promise<void>
-    act(() => {
-      const nativeNotificationController = appHarness.controller as AppController & {
-        openAgentConversationFromNotification: (target: {
-          agentName: string
-          chatId?: string
-          teamId?: string
-        }) => Promise<void>
-      }
-      nativeNotificationOpen = nativeNotificationController.openAgentConversationFromNotification({
-        agentName: 'agent-a',
-        chatId: 'notification-chat',
-        teamId: 'team-a',
-      })
-    })
-    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
-
-    await act(async () => {
-      deferredTarget.resolve(targetA)
-      await deferredTarget.promise
-    })
-
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    notificationResolution.resolve()
-    await act(async () => nativeNotificationOpen)
-
-    expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(appHarness.controller.activeChatId).toBe('notification-chat')
-    expect(deleteResource).not.toHaveBeenCalled()
-    expect(gfs.download).not.toHaveBeenCalled()
-  })
-
-  it('opens a produced cross-team reply through App and the real controller', async () => {
-    const { gfs } = installClerum([])
-    const gfsRuntimeBridge = window.clerum as unknown as Record<string, any>
-    const { clerum, handle } = installAppControllerClerum({ agentNames: ['agent-a'] })
-    const controllerBridge = window.clerum as unknown as Record<string, any>
-    Object.assign(controllerBridge, {
-      app: gfsRuntimeBridge.app,
-      shortcuts: gfsRuntimeBridge.shortcuts,
-      sandboxUi: gfsRuntimeBridge.sandboxUi,
-      gfs,
-    })
-    Object.assign(controllerBridge.auth as object, gfsRuntimeBridge.auth)
-    await clerum.chat.create('agent-a', 'produced-cross-team-chat')
-    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'produced-cross-team-task' })
-    clerum.rpc.getTaskResult.mockResolvedValue({ response: 'A team two reply' })
-    const previousNotificationSettings = window.localStorage.getItem(
-      NOTIFICATION_SETTINGS_STORAGE_KEY
-    )
-    window.localStorage.setItem(
-      NOTIFICATION_SETTINGS_STORAGE_KEY,
-      JSON.stringify({ inApp: 'always', desktop: 'never', soundVolume: 0 })
-    )
-
-    const actualControllerModule =
-      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
-    let liveController: AppController | null = null
-    vi.mocked(useAppController).mockImplementation(options => {
-      liveController = actualControllerModule.useAppController(options)
-      return liveController
-    })
-    render(
-      <QueryClientProvider client={desktopQueryClient}>
-        <AgentTaskTrackerProvider>
-          <App />
-        </AgentTaskTrackerProvider>
-      </QueryClientProvider>
-    )
-
-    try {
-      const currentController = () => {
-        if (!liveController) throw new Error('The real App controller did not mount')
-        return liveController
-      }
-      await waitFor(() => expect(currentController().isAuthenticated).toBe(true))
-      await waitFor(() => expect(currentController().initialExperienceLoading).toBe(false))
-
-      await act(async () => {
-        await currentController().handleEnsureTeamContext({ teamId: 'team-2' })
-      })
-      await waitFor(() => expect(currentController().currentTeamId).toBe('team-2'))
-      act(() =>
-        currentController().handleSelectChatAgent('agent-a', {
-          chatId: 'produced-cross-team-chat',
-          selectLatest: false,
-        })
-      )
-      await waitFor(() => expect(currentController().activeChatId).toBe('produced-cross-team-chat'))
-      await waitFor(() => expect(currentController().chatMessagesLoading).toBe(false))
-      act(() => currentController().handleNavSelect(DESKTOP_ROUTES.files))
-
-      const sendPromise = currentController().handleSendAgentMessage('Create a team reply')
-      await waitFor(() => expect(clerum.hasProgressHandler('produced-cross-team-task')).toBe(true))
-      await act(async () => {
-        clerum.emitTaskProgress('produced-cross-team-task', {
-          type: 'open',
-          taskId: 'produced-cross-team-task',
-          hostRef: 'agent-a',
-        })
-        clerum.emitTaskProgress('produced-cross-team-task', {
-          type: 'terminal',
-          data: { taskId: 'produced-cross-team-task', status: 'completed' },
-        })
-        await sendPromise
-      })
-      await waitFor(() => expect(appHarness.latestConversationNotification?.teamId).toBe('team-2'))
-      const producedNotification = appHarness.latestConversationNotification
-      expect(producedNotification).toMatchObject({ teamId: 'team-2' })
-      const notificationChatId = producedNotification?.chatId
-      expect(notificationChatId).toBeTruthy()
-      const notificationButton = await screen.findByRole('button', {
-        name: 'Open conversation notification',
-      })
-
-      await act(async () => {
-        await currentController().handleEnsureTeamContext({ teamId: 'team-1' })
-      })
-      await waitFor(() => expect(currentController().currentTeamId).toBe('team-1'))
-      fireEvent.click(notificationButton)
-
-      await waitFor(() => expect(currentController().currentTeamId).toBe('team-2'))
-      await waitFor(() => expect(currentController().activeChatId).toBe(notificationChatId))
-      expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat)
-      expect(currentController().selectedAgent).toBe('agent-a')
-      expect(activeWorkspaceTab(currentController().workspaceTabs)).toMatchObject({
-        kind: 'chat',
-        chat: { agentRef: 'agent-a', chatId: notificationChatId },
-      })
-      expect((handle.switchTeam.mock.calls as Array<[string]>).map(([teamId]) => teamId)).toEqual([
-        'team-2',
-        'team-1',
-        'team-2',
-      ])
-    } finally {
-      if (previousNotificationSettings === null) {
-        window.localStorage.removeItem(NOTIFICATION_SETTINGS_STORAGE_KEY)
-      } else {
-        window.localStorage.setItem(NOTIFICATION_SETTINGS_STORAGE_KEY, previousNotificationSettings)
-      }
-    }
-  })
-
-  it('cancels a pending Files action through a produced native notification while Host verification waits', async () => {
-    const deferredTarget = deferred<unknown>()
-    const { gfs, deleteResource } = installClerum(
-      [targetA],
-      new Map([[targetA.gfsUri, deferredTarget]])
-    )
-    const gfsRuntimeBridge = window.clerum as unknown as Record<string, any>
-    const { clerum } = installAppControllerClerum({ agentNames: ['agent-a'] })
-    const controllerBridge = window.clerum as unknown as Record<string, any>
-    Object.assign(controllerBridge, {
-      app: gfsRuntimeBridge.app,
-      shortcuts: gfsRuntimeBridge.shortcuts,
-      sandboxUi: gfsRuntimeBridge.sandboxUi,
-      gfs,
-    })
-    Object.assign(controllerBridge.auth as object, gfsRuntimeBridge.auth)
-    await clerum.chat.create('agent-a', 'native-notification-chat')
-    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'native-notification-task' })
-    clerum.rpc.getTaskResult.mockResolvedValue({ response: 'A desktop reply' })
-    const previousNotificationSettings = window.localStorage.getItem(
-      NOTIFICATION_SETTINGS_STORAGE_KEY
-    )
-    window.localStorage.setItem(
-      NOTIFICATION_SETTINGS_STORAGE_KEY,
-      JSON.stringify({ inApp: 'always', desktop: 'always', soundVolume: 0 })
-    )
-
-    const notificationBridge = controllerBridge.notifications as {
-      show: (payload: { id: string }) => Promise<{ supported: boolean; id: string }>
-      onClick: (callback: (event: { id: string }) => void) => () => void
-    }
-    let notificationId: string | null = null
-    let clickHandler: ((event: { id: string }) => void) | null = null
-    notificationBridge.show = vi.fn(async payload => {
-      notificationId = payload.id
-      return { supported: true, id: payload.id }
-    })
-    notificationBridge.onClick = vi.fn(callback => {
-      clickHandler = callback
-      return vi.fn()
-    })
-
-    const originalNotification = Object.getOwnPropertyDescriptor(window, 'Notification')
-    class GrantedNotification {
-      static permission = 'granted'
-      static requestPermission = async () => 'granted' as NotificationPermission
-      constructor(_title: string, _options?: NotificationOptions) {}
-      close() {}
-    }
-    Object.defineProperty(window, 'Notification', {
-      configurable: true,
-      value: GrantedNotification,
-    })
-
-    const actualControllerModule =
-      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
-    let liveController: AppController | null = null
-    vi.mocked(useAppController).mockImplementation(options => {
-      liveController = actualControllerModule.useAppController(options)
-      return liveController
-    })
-    const queryClient = desktopQueryClient
-    render(
-      <QueryClientProvider client={queryClient}>
-        <AgentTaskTrackerProvider>
-          <App />
-        </AgentTaskTrackerProvider>
-      </QueryClientProvider>
-    )
-
-    try {
-      const currentController = () => {
-        if (!liveController) throw new Error('The real App controller did not mount')
-        return liveController
-      }
-      await waitFor(() => expect(currentController().isAuthenticated).toBe(true))
-      await waitFor(() => expect(currentController().initialExperienceLoading).toBe(false))
-      act(() =>
-        currentController().handleSelectChatAgent('agent-a', {
-          chatId: 'native-notification-chat',
-          selectLatest: false,
-        })
-      )
-      await waitFor(() => expect(currentController().activeChatId).toBe('native-notification-chat'))
-      await waitFor(() => expect(currentController().chatMessagesLoading).toBe(false))
-      act(() => currentController().handleNavSelect(DESKTOP_ROUTES.files))
-      await waitFor(() => expect(currentController().navItem).toBe(DESKTOP_ROUTES.files))
-
-      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
-      await screen.findByRole('treeitem', { name: /target-a\.txt/ })
-      await chooseDeleteAction('target-a.txt')
-      await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
-      await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
-      await waitFor(() => expect(notificationBridge.onClick).toHaveBeenCalled())
-
-      const sendPromise = currentController().handleSendAgentMessage('Create a reply')
-      await waitFor(() => expect(clerum.hasProgressHandler('native-notification-task')).toBe(true))
-      await act(async () => {
-        clerum.emitTaskProgress('native-notification-task', {
-          type: 'open',
-          taskId: 'native-notification-task',
-          hostRef: 'agent-a',
-        })
-        clerum.emitTaskProgress('native-notification-task', {
-          type: 'terminal',
-          data: { taskId: 'native-notification-task', status: 'completed' },
-        })
-        await sendPromise
-      })
-      await waitFor(() => expect(notificationBridge.show).toHaveBeenCalledTimes(1))
-      expect(notificationId).toBeTruthy()
-      expect(clickHandler).toBeTypeOf('function')
-      const notificationChatId = currentController().activeChatId
-      expect(notificationChatId).toBeTruthy()
-
-      clerum.rpc.renameSession.mockRejectedValue(await ipcHostAccessRevoked('rpc:renameSession'))
-      await act(async () => {
-        await currentController().handleRenameChatForAgent(
-          'agent-a',
-          'native-notification-chat',
-          'Renamed'
-        )
-      })
-      expect(currentController().isHostAccessBlocked('agent-a')).toBe(true)
-      const previousStatus = currentController().statusText
-      const verification = deferred<{ items: unknown[] }>()
-      const verificationStarted = deferred<void>()
-      clerum.rpc.listSessions.mockImplementation(
-        async (_hostRef: string, _teamId: string | undefined, query?: { limit?: number }) => {
-          if (query?.limit === 1) {
-            verificationStarted.resolve()
-            return verification.promise
-          }
-          return { items: [] }
-        }
-      )
-
-      act(() => clickHandler?.({ id: notificationId! }))
-      await act(async () => verificationStarted.promise)
-      expect(currentController().navItem).toBe(DESKTOP_ROUTES.files)
-      await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
-      const liveLocationBeforeResolve = appHarness.filesPageLastLocation?.gfsUri ?? null
-      await act(async () => {
-        deferredTarget.resolve(targetA)
-        await deferredTarget.promise
-        await new Promise(resolve => setTimeout(resolve, 0))
-      })
-
-      // Give the producer-backed resolver and FilesPage effects a task turn.
-      // Cancellation leaves the live route where it was; without the App bridge,
-      // FilesPage reports the exact target and opens Delete.
-      expect(appHarness.filesPageLastLocation?.gfsUri ?? null).toBe(liveLocationBeforeResolve)
-      expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-      expect(deleteResource).not.toHaveBeenCalled()
-      expect(gfs.download).not.toHaveBeenCalled()
-      expect(currentController().statusText).toBe(previousStatus)
-
-      await act(async () => {
-        verification.resolve({ items: [] })
-        await verification.promise
-      })
-      await waitFor(() => expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat))
-      expect(currentController().activeChatId).toBe(notificationChatId)
-    } finally {
-      if (previousNotificationSettings === null) {
-        window.localStorage.removeItem(NOTIFICATION_SETTINGS_STORAGE_KEY)
-      } else {
-        window.localStorage.setItem(NOTIFICATION_SETTINGS_STORAGE_KEY, previousNotificationSettings)
-      }
-      if (originalNotification) {
-        Object.defineProperty(window, 'Notification', originalNotification)
-      } else {
-        Reflect.deleteProperty(window, 'Notification')
-      }
-    }
-  })
-
-  it('does not download a canceled non-previewable action seed after notification selection', async () => {
-    const binary = await resolveResource(
-      resolvedFile('66666666666666666666666666666666', 'target-a.bin')
-    )
-    const deferredTarget = deferred<unknown>()
-    const { gfs, deleteResource } = installClerum(
-      [binary],
-      new Map([[binary.gfsUri, deferredTarget]])
-    )
-    appHarness.controller.desktopEnvironmentSetupComplete = false
-    appHarness.controller.notifications = [produceConversationNotification()]
-    renderApp()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
-    await screen.findByRole('treeitem', { name: /target-a\.bin/ })
-    await chooseDeleteAction('target-a.bin')
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(binary.gfsUri))
-    await expectActionAtConsumer(appHarness.filesPagePendingActions, binary.gfsUri, 'delete')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Toggle chat drawer' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Open conversation notification' }))
-    await act(async () => {
-      deferredTarget.resolve(binary)
-      await deferredTarget.promise
-    })
-
-    expect(gfs.download).not.toHaveBeenCalled()
-    expect(deleteResource).not.toHaveBeenCalled()
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
   })
 
@@ -1974,7 +1905,15 @@ describe('App → Files action lifecycle integration', () => {
       path: null,
     })
     appHarness.controller = makeController(workspaceTabs)
-    const { deleteResource } = installClerum([targetA])
+    const { deleteResource } = installClerum([targetA], new Map(), {
+      accessibleRows: [
+        accessibleResource(targetA.resourceId, targetA.name, 'file', {
+          gfsUri: targetA.gfsUri,
+          version: targetA.version,
+          permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        }),
+      ],
+    })
     renderApp()
 
     const rootTab = getWorkspaceTabButtons('Files')[0]
@@ -1986,11 +1925,30 @@ describe('App → Files action lifecycle integration', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    vi.mocked(appHarness.controller.pushToast).mockClear()
+    await chooseFilesAction(targetA.name, 'Delete')
+    const filesDialog = await screen.findByText(`Delete ${targetA.name}?`)
+    await confirmDelete(targetA.name)
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1))
+    const filesOutcome = {
+      calls: deleteResource.mock.calls.map(call => [...call]),
+      feedback: vi.mocked(appHarness.controller.pushToast).mock.calls.map(call => [...call]),
+      title: filesDialog.textContent,
+    }
+    deleteResource.mockClear()
+    vi.mocked(appHarness.controller.pushToast).mockClear()
+
     await chooseDeleteAction('target-a.txt')
+    const sidebarDialog = await screen.findByText(`Delete ${targetA.name}?`)
     await confirmDelete('target-a.txt')
 
     await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1))
-    expect(deleteResource.mock.calls[0]).toEqual([targetA.resourceId, 'main', targetA.version])
+    expect({
+      calls: deleteResource.mock.calls.map(call => [...call]),
+      feedback: vi.mocked(appHarness.controller.pushToast).mock.calls.map(call => [...call]),
+      title: sidebarDialog.textContent,
+    }).toEqual(filesOutcome)
+    expect(filesOutcome.calls[0]).toEqual([targetA.resourceId, 'main', targetA.version])
   })
 
   it('cancels on a reachable root-tab switch before target arrival and never revives on return', async () => {
@@ -2112,7 +2070,7 @@ describe('App → Files action lifecycle integration', () => {
   })
 
   it.each([false, true])(
-    'moves a child through its exact parent (readable: %s)',
+    'matches the Files Move handler and exact parent context (readable: %s)',
     async readable => {
       const parent = await resolveResource(
         resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Shared parent')
@@ -2142,15 +2100,53 @@ describe('App → Files action lifecycle integration', () => {
         ],
         childRowsByParent: new Map([[parent.resourceId, [unreadableChild]]]),
       })
+      appHarness.controller = makeController(
+        openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+          id: 'files-parent',
+          path: parent.gfsUri,
+        })
+      )
       renderApp()
 
       fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
       const parentRow = await screen.findByRole('treeitem', { name: /Shared parent/ })
       fireEvent.click(within(parentRow).getByRole('button', { name: 'Expand Shared parent' }))
       await findResourceTreeRow('unreadable-child.txt')
+
+      await chooseFilesAction(target.name, 'Move to')
+      const filesDialog = await screen.findByRole('dialog', {
+        name: 'Move file unreadable-child.txt',
+      })
+      const filesDialogText = filesDialog.textContent
+      expect(
+        filesDialog.querySelector('.da-gfs-move-dialog__current-location')?.textContent
+      ).toContain('Shared parent')
+      fireEvent.click(await within(filesDialog).findByRole('button', { name: destination.name }))
+      fireEvent.click(
+        within(filesDialog).getByRole('button', { name: `Move here (${destination.name})` })
+      )
+      await waitFor(() =>
+        expect(moveResource).toHaveBeenCalledWith(
+          target.resourceId,
+          destination.resourceId,
+          'main',
+          target.version,
+          undefined,
+          1
+        )
+      )
+      const filesCalls = moveResource.mock.calls.map(call => [...call])
+      moveResource.mockClear()
+
       await chooseRowAction(target.name, 'Move to')
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: parent.gfsUri },
+      })
+      await waitFor(() => expect(appHarness.filesPageLastLocation?.gfsUri).toBe(parent.gfsUri))
 
       const dialog = await screen.findByRole('dialog', { name: 'Move file unreadable-child.txt' })
+      const sidebarDialogText = dialog.textContent
       expect(dialog.querySelector('.da-gfs-move-dialog__current-location')?.textContent).toContain(
         'Shared parent'
       )
@@ -2169,6 +2165,8 @@ describe('App → Files action lifecycle integration', () => {
           1
         )
       )
+      expect(moveResource.mock.calls.map(call => [...call])).toEqual(filesCalls)
+      expect(sidebarDialogText).toBe(filesDialogText)
     }
   )
 
@@ -2200,10 +2198,23 @@ describe('App → Files action lifecycle integration', () => {
       configurable: true,
       value: { writeText },
     })
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /preview-source\.md/ })
+
+    await chooseFilesAction(markdown.name, 'Preview')
+    await screen.findByRole('heading', { name: markdown.name, level: 2 })
+    await choosePreviewAction(markdown.name, 'Copy content')
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    const filesOutcome = writeText.mock.calls.map(call => [...call])
+    const previewDownloads = gfs.downloadPreview.mock.calls.map(call => [...call])
+    expect(previewDownloads[0]?.[0]).toBe(markdown.gfsUri)
+    writeText.mockClear()
+
     await chooseRowAction('preview-source.md', 'Copy content')
 
     await waitFor(() =>
@@ -2214,8 +2225,8 @@ describe('App → Files action lifecycle integration', () => {
     )
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
     expect(writeText.mock.calls[0]).toEqual(['# fixture preview\n'])
-    expect(gfs.downloadPreview).toHaveBeenCalled()
-    expect(gfs.downloadPreview.mock.calls[0]?.[0]).toBe(markdown.gfsUri)
+    expect(writeText.mock.calls.map(call => [...call])).toEqual(filesOutcome)
+    expect(gfs.downloadPreview.mock.calls.map(call => [...call])).toEqual(previewDownloads)
     expect(deleteResource).not.toHaveBeenCalled()
   })
 
@@ -2265,75 +2276,4 @@ describe('App → Files action lifecycle integration', () => {
     await screen.findByRole('heading', { name: 'Preview body' })
     expect(writeText).not.toHaveBeenCalled()
   })
-})
-
-describe('App explicit Chat intent handoff through the real controller', () => {
-  it.each([null, 'agent-a'])(
-    'closes Files into its Chat neighbor with exactly one intent (agent: %s)',
-    async agentRef => {
-      installClerum([])
-      const { currentController } = await renderAppWithRealController()
-      const workspace = openFilesTab(createWorkspaceTabsState('intent-chat-owner', agentRef), {
-        id: 'files-to-close',
-        path: null,
-      })
-      act(() => currentController().setWorkspaceTabs(workspace))
-      await waitFor(() =>
-        expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe('files-to-close')
-      )
-      const before = currentController().navigationIntentSequence
-      fireEvent.click(screen.getByRole('button', { name: 'Close Files' }))
-      await waitFor(() => {
-        expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat)
-        expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe('intent-chat-owner')
-        expect(
-          currentController().workspaceTabs.tabs.some(tab => tab.id === 'files-to-close')
-        ).toBe(false)
-      })
-      expect(currentController().navigationIntentSequence).toBe(before + 1)
-    }
-  )
-
-  it.each(['chat', 'files'] as const)(
-    'creates New chat once from %s and records later active-tab reselection once',
-    async surface => {
-      installClerum([])
-      const { currentController } = await renderAppWithRealController()
-      const chatWorkspace = createWorkspaceTabsState('prior-chat', 'agent-a')
-      act(() =>
-        currentController().setWorkspaceTabs(
-          surface === 'files'
-            ? openFilesTab(chatWorkspace, { id: 'files-before-new', path: null })
-            : chatWorkspace
-        )
-      )
-      const before = currentController().navigationIntentSequence
-      const newChatAction = screen
-        .getAllByRole('button', { name: 'New chat' })
-        .find(button => !button.hasAttribute('aria-pressed'))
-      if (!newChatAction) throw new Error('The explicit New chat action did not render')
-      fireEvent.click(newChatAction)
-      if (surface === 'files') {
-        // Files supports the existing drawer diversion; New chat must not replace it.
-        await screen.findByRole('button', { name: 'Open chats' })
-      } else {
-        await waitFor(() => expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat))
-      }
-      const selected = activeWorkspaceTab(currentController().workspaceTabs)
-      expect(selected?.kind).toBe(surface)
-      expect(currentController().navigationIntentSequence).toBe(before + 1)
-      const newChatIntent = currentController().navigationIntentSequence
-      const tab = getWorkspaceTabButtons(selected!.title).find(
-        button => button.getAttribute('aria-pressed') === 'true'
-      )
-      if (!tab) throw new Error('New chat did not select a rendered workspace tab')
-      fireEvent.click(tab)
-      expect(currentController().navigationIntentSequence).toBe(newChatIntent + 1)
-      expect(currentController().isNavigationIntentCurrent(newChatIntent)).toBe(false)
-      expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe(selected!.id)
-      expect(currentController().navItem).toBe(
-        surface === 'files' ? DESKTOP_ROUTES.files : DESKTOP_ROUTES.chat
-      )
-    }
-  )
 })
