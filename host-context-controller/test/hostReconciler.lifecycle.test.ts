@@ -23,6 +23,7 @@ import {
   MCP_HOST_RUNTIME_TOKEN_SECRET_REFRESH_KEY,
 } from '../src/secretFactory'
 import { HostCRD, HostCrdStatus } from '../src/types'
+import { allowlistConfigMap, liveGrokConnections } from './__fixtures__/llmAllowedModelsConfigMap'
 import {
   type MockAppsApi,
   type MockCustomApi,
@@ -570,13 +571,17 @@ describe('HostReconciler resource rollout bootstrap', () => {
       consumed?: boolean
       oauth?: boolean
       canonicalResources?: boolean
+      // SharedFileSystem mounts the context resolver returns for this Host.
+      mounts?: ResolvedSfsMount[]
+      // A Grok model whose allowlist entry derives llm:grok:execute.
+      grok?: boolean
     } = {}
   ) {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-07-03T00:00:00.000Z'))
     // A finite producer-derived renewal window exercises maintenance before expiry.
     config.mcpHostBootstrapRefreshBeforeSec = 90
-    const host = makeHost({
+    const baseHost = makeHost({
       generation: 1,
       ...(options.stateless
         ? makeStatelessHost({
@@ -590,10 +595,36 @@ describe('HostReconciler resource rollout bootstrap', () => {
         : {}),
       ...(options.desktop ? { spec: { ...makeHost().spec, desktop: { browser: true } } } : {}),
     })
+    const host: HostCRD = options.grok
+      ? {
+          ...baseHost,
+          spec: {
+            ...baseHost.spec,
+            model: { provider: 'grok-subscription', name: 'grok-4', connectionRef: 'team-grok' },
+          },
+        }
+      : baseHost
     let cacheSynced = true
-    const apis = createReconciler({ isCommunicationChannelCacheSynced: () => cacheSynced })
+    const apis = createReconciler({
+      isCommunicationChannelCacheSynced: () => cacheSynced,
+      resolveContextMounts: async () => options.mounts ?? [],
+    })
     const { reconciler, appsApi, coreApi, customApi } = apis
     fixtures.push(reconciler)
+    if (options.grok) {
+      // Grok enabled with a connected team-grok connection; every other
+      // ConfigMap keeps the default mock.
+      const allowlist = allowlistConfigMap({
+        grokEnabled: true,
+        grokConnections: liveGrokConnections,
+      })
+      const readConfigMap = coreApi.readNamespacedConfigMap.getMockImplementation()!
+      coreApi.readNamespacedConfigMap.mockImplementation(async request =>
+        request.name === 'clerum-llm-allowed-models'
+          ? structuredClone(allowlist)
+          : readConfigMap(request)
+      )
+    }
     reconciler.setHostFrontsOAuthServer(async () => options.oauth ?? false)
     const readHost = customApi.getNamespacedCustomObject.getMockImplementation()!
     customApi.getNamespacedCustomObject.mockImplementation(async request =>
@@ -1055,40 +1086,78 @@ describe('HostReconciler resource rollout bootstrap', () => {
       issue.mockReset()
     })
 
-    it('mints before writing a new image to a Ready runtime, then settles', async () => {
-      const fixture = await runtime()
-      const consumedRevision = fixture.secret().metadata!.annotations![SECRET_REVISION]
-      config.hostImage = NEW_IMAGE
-
-      await fixture.reconcile()
-
-      // The new pod reads fresh material: the Secret is replaced before the
-      // template that points at it.
-      expect(issue).toHaveBeenCalledOnce()
-      expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
-      const prepared = fixture.secret().metadata!.annotations![SECRET_REVISION]
-      expect(prepared).not.toBe(consumedRevision)
-      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
-      expect(image(fixture.deployment())).toBe(NEW_IMAGE)
-      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
-        prepared
-      )
-
-      // Later passes see an equal template and do not mint again.
-      for (let pass = 0; pass < 3; pass++) {
-        fixture.advance()
-        const reads = deploymentReads(fixture)
-        await fixture.reconcile()
-        expect(deploymentReads(fixture)).toBeGreaterThan(reads)
+    // The predicate rebuilds the desired Deployment from the context mounts and
+    // the Grok execution flag; the write derives both again. Each shape below
+    // changes the pod template, so a predicate input that drifts from the
+    // write's reports a change (and mints) on every pass for that shape.
+    const GROK_FLAG_ENV = 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED'
+    const SFS_A: ResolvedSfsMount = {
+      name: 'sfs-a',
+      namespace: 'mcp-host',
+      pvcName: 'sfs-a-pvc',
+      mountPath: '/mnt/sfs-a',
+    }
+    type HostShape = { mounts?: ResolvedSfsMount[]; grok?: boolean }
+    const HOST_SHAPES: Array<[string, HostShape]> = [
+      ['a bare Host', {}],
+      ['a Host with a context mount', { mounts: [SFS_A] }],
+      ['a Host with Grok execution', { grok: true }],
+    ]
+    // Shape witness: the stored Deployment really carries the shape under
+    // test. A fixture that fails closed (for example a mis-wired allowlist,
+    // which derives no Grok scope) would otherwise make a case bare.
+    const expectHostShape = (deployment: k8s.V1Deployment, shape: HostShape) => {
+      const container = deployment.spec!.template.spec!.containers.find(c => c.name === 'mcp-host')!
+      const mountPaths = (container.volumeMounts ?? []).map(mount => mount.mountPath)
+      if (shape.mounts) {
+        for (const mount of shape.mounts) expect(mountPaths).toContain(mount.mountPath)
+      } else {
+        expect(mountPaths).not.toContain(SFS_A.mountPath)
       }
-      expect(issue).toHaveBeenCalledOnce()
-      expect(fixture.templateChanges()).toBe(1)
-      // Witness: the new pod consumed the prepared material.
-      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
-    })
+      expect((container.env ?? []).filter(env => env.name === GROK_FLAG_ENV)).toEqual(
+        shape.grok ? [{ name: GROK_FLAG_ENV, value: 'true' }] : []
+      )
+    }
 
-    it('does not mint for an equal template', async () => {
-      const fixture = await runtime()
+    it.each(HOST_SHAPES)(
+      'mints before writing a new image to a Ready runtime, then settles (%s)',
+      async (_label, shape) => {
+        const fixture = await runtime(shape)
+        expectHostShape(fixture.deployment(), shape)
+        const consumedRevision = fixture.secret().metadata!.annotations![SECRET_REVISION]
+        config.hostImage = NEW_IMAGE
+
+        await fixture.reconcile()
+
+        // The new pod reads fresh material: the Secret is replaced before the
+        // template that points at it.
+        expect(issue).toHaveBeenCalledOnce()
+        expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+        const prepared = fixture.secret().metadata!.annotations![SECRET_REVISION]
+        expect(prepared).not.toBe(consumedRevision)
+        expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+        expect(image(fixture.deployment())).toBe(NEW_IMAGE)
+        expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+          prepared
+        )
+
+        // Later passes see an equal template and do not mint again.
+        for (let pass = 0; pass < 3; pass++) {
+          fixture.advance()
+          const reads = deploymentReads(fixture)
+          await fixture.reconcile()
+          expect(deploymentReads(fixture)).toBeGreaterThan(reads)
+        }
+        expect(issue).toHaveBeenCalledOnce()
+        expect(fixture.templateChanges()).toBe(1)
+        // Witness: the new pod consumed the prepared material.
+        expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+      }
+    )
+
+    it.each(HOST_SHAPES)('does not mint for an equal template (%s)', async (_label, shape) => {
+      const fixture = await runtime(shape)
+      expectHostShape(fixture.deployment(), shape)
       const reads = deploymentReads(fixture)
       await fixture.reconcile()
       await fixture.reconcile()
@@ -1117,7 +1186,12 @@ describe('HostReconciler resource rollout bootstrap', () => {
         .mockRejectedValueOnce(unavailable)
         .mockRejectedValueOnce(unavailable)
 
-      await fixture.reconcile().catch(() => undefined)
+      await expect(fixture.reconcile()).rejects.toThrow(
+        `Failed to ensure mcp-host-runtime-token Secret for host "${fixture.host.name}" after 3 attempts: Error: synthetic control-api unavailable`
+      )
+      expect(fixture.reconciler.getStatus(fixture.host.name)).toMatchObject({
+        message: 'mcpHost runtime token provisioning failed',
+      })
 
       // Witness: three mint attempts. No Secret or Deployment write followed.
       expect(issue).toHaveBeenCalledTimes(3)
@@ -1194,6 +1268,38 @@ describe('HostReconciler resource rollout bootstrap', () => {
       expect(fixture.deployment().spec!.paused).not.toBe(true)
       expect(issue).not.toHaveBeenCalled()
       expect(fixture.templateChanges()).toBe(0)
+    })
+
+    it('does not mint for a pod-template annotation only the live object carries (kubectl rollout restart)', async () => {
+      const RESTARTED_AT = 'kubectl.kubernetes.io/restartedAt'
+      const restartedAt = '2026-07-03T00:00:00Z'
+      const fixture = await runtime()
+      const revision = fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]
+      // What `kubectl rollout restart` patches: a template annotation, which
+      // bumps the Deployment generation on the API server.
+      const live = fixture.deployment()
+      live.spec!.template.metadata!.annotations = {
+        ...live.spec!.template.metadata!.annotations,
+        [RESTARTED_AT]: restartedAt,
+      }
+      live.metadata!.generation = live.metadata!.generation! + 1
+      fixture.advance()
+
+      for (let pass = 0; pass < 3; pass++) {
+        fixture.advance()
+        const reads = deploymentReads(fixture)
+        await fixture.reconcile()
+        expect(deploymentReads(fixture)).toBeGreaterThan(reads)
+      }
+      expect(issue).not.toHaveBeenCalled()
+      expect(fixture.templateChanges()).toBe(0)
+      // HCC kept the live annotation and the applied runtime-token revision.
+      expect(fixture.deployment().spec!.template.metadata!.annotations![RESTARTED_AT]).toBe(
+        restartedAt
+      )
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        revision
+      )
     })
 
     it('refuses an image change without prepared material, then delivers it once prepared', async () => {
