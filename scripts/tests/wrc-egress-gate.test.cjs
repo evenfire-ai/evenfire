@@ -26,6 +26,7 @@ const {
   RUN_LABEL,
 } = require('../e2e/_lib/wrc-egress-lifecycle.cjs')
 const { readConfig } = require('../../tests/e2e/fixtures/wrc-egress-dns-proxy/server.cjs')
+const { reconcileEgressState } = require('../../packages/network-policy-core/index.cjs')
 
 const source = fs.realpathSync(path.resolve(__dirname, '../..'))
 const key = identity => `${identity.kind}/${identity.namespace}/${identity.name}`
@@ -286,8 +287,27 @@ test('the supported overlap is the largest one the gate does not refuse', () => 
   // deploy/overlays/minikube/patches/wrc-external-egress-overlap.yaml names this bound.
   assert.equal(max, 505)
   const now = 1_000_000
-  // The window WRC stores: now + TTL + overlap (packages/network-policy-core/index.cjs).
-  const expiryFor = overlap => now + (overlap + DNS_FIXTURE_TTL_SECONDS) * 1000
+  // The window WRC stores, from the core it calls with the overlap in milliseconds
+  // (workflowRecipeReconciler.ts) and the fixture's DNS answer.
+  const expiryFor = overlap => {
+    const { entries } = reconcileEgressState(
+      { entries: [] },
+      [
+        {
+          kind: 'ok',
+          fqdn: 'bound.example.test',
+          port: 443,
+          protocol: 'TCP',
+          ips: ['192.0.2.10'],
+          ttlMs: DNS_FIXTURE_TTL_SECONDS * 1000,
+        },
+      ],
+      now,
+      { overlapMs: overlap * 1000, maxEntries: 8 }
+    )
+    assert.equal(entries.length, 1)
+    return entries[0].expiresAt
+  }
   assert.doesNotThrow(() => assertRecoveryBudgetFitsCap(expiryFor(max), now))
   assert.throws(
     () => assertRecoveryBudgetFitsCap(expiryFor(max + 1), now),
