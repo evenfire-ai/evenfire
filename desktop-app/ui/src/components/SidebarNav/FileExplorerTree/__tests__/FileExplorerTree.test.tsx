@@ -3144,4 +3144,57 @@ describe('FileExplorerTree — resource action menus', () => {
     await waitFor(() => expect(within(menu).queryByRole('menuitem', { name: 'Rename' })).toBeNull())
     expect(affordances).toHaveBeenCalledTimes(2)
   })
+
+  it('revokes shared tree access when the per-row affordance refresh returns 401', async () => {
+    function AccessStateProbe() {
+      const ctrl = useGfsBrowserController()
+      return <div data-testid="probe-access">{ctrl.accessState}</div>
+    }
+
+    const affordances = vi
+      .fn()
+      .mockResolvedValueOnce(resourceAffordances(['read', 'write']))
+      .mockRejectedValueOnce(new Error('401 Unauthorized'))
+    const resource = accessibleResource('folder', 'Reports', 'directory')
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+      affordances,
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FileExplorerTree
+          onOpenFolder={vi.fn()}
+          onOpenPreview={vi.fn()}
+          onResourceAction={vi.fn()}
+          pushToast={vi.fn()}
+        />
+        <AccessStateProbe />
+      </QueryClientProvider>
+    )
+    const row = (await screen.findByRole('button', { name: 'Reports' })).closest(
+      '[role="treeitem"]'
+    ) as HTMLElement
+    openContextMenuFor(row)
+    const menu = await screen.findByRole('menu', { name: 'Actions for Reports' })
+    expect(await within(menu).findByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.gfsAffordances(
+          'test:user-1:team-1',
+          'folder',
+          'main',
+          mockAuthContext.sessionGeneration
+        ),
+        exact: true,
+      })
+    })
+
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    await waitFor(() => expect(screen.getByTestId('probe-access').textContent).toBe('revoked'))
+    expect(within(menu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
+    expect(affordances).toHaveBeenCalledTimes(2)
+  })
 })

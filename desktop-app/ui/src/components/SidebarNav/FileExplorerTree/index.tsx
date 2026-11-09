@@ -152,6 +152,13 @@ function FileExplorerNode({
   // available because its authority is parent-relative and enforced by server.
   const affordances =
     affordancesQuery.isFetching || affordancesQuery.error ? undefined : affordancesQuery.data
+  useEffect(() => {
+    if (!affordancesQuery.error) return
+    if (isGfsSessionGeneration(sessionGeneration)) {
+      const message = errorMessage(affordancesQuery.error)
+      if (message) onAuthorityFailure(message, scope, sessionGeneration)
+    }
+  }, [affordancesQuery.error, onAuthorityFailure, scope, sessionGeneration])
   const preview = useMemo(() => resolveGfsPreview(node), [node])
   const canPreview = Boolean(preview && !isUnreadable)
   const canCopyContent = Boolean(
