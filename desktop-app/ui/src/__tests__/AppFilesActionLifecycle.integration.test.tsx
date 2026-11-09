@@ -405,13 +405,6 @@ type HarnessGfsOptions = {
   affordanceBits?: string[]
 }
 
-function resourceByteLength(resource: HarnessResource): number {
-  if (typeof resource.bytes !== 'number') {
-    throw new Error(`Expected fixture resource ${resource.gfsUri} to include a byte length`)
-  }
-  return resource.bytes
-}
-
 let originalClipboardDescriptor: PropertyDescriptor | undefined
 let originalCreateObjectUrlDescriptor: PropertyDescriptor | undefined
 
