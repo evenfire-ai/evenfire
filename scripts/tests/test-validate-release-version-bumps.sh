@@ -493,7 +493,8 @@ for root in $default_services; do
   for path in $CROSS_MODE_KINDS; do cross_files="$cross_files $root/$path"; done
   cross_files="$cross_files $root/package.json"
 done
-cross_files="$cross_files packages/jwt-key-policy/index.cjs external-rest-api/src/releaseManifest.ts"
+# A test file under packages/jwt-key-policy/ counts in neither mode; index.cjs counts in both.
+cross_files="$cross_files packages/jwt-key-policy/index.cjs packages/jwt-key-policy/test/crypto-identity.test.cjs external-rest-api/src/releaseManifest.ts"
 agreed_red=0
 agreed_green=0
 probe=0
@@ -548,8 +549,8 @@ if depth="$(RUBYOPT=--disable=gems ruby -ryaml -e '
   # The ruleset requires this job by this exact name.
   abort("job name changed: #{job["name"]}") unless job["name"] == "Repo hygiene (no internal working artifacts)"
   # Exactly these keys: if, needs, continue-on-error or strategy could skip or soften the job.
-  # permissions and timeout-minutes may be added: they can take rights away or end the job red,
-  # never turn it green.
+  # permissions and timeout-minutes may be added: they change the token rights or end the job
+  # red, but neither can skip these steps or turn their failure green.
   hardening = %w[permissions timeout-minutes]
   abort("the job has other keys: #{job.keys}") unless (job.keys - hardening).sort == %w[name runs-on steps]
   steps = job.fetch("steps")
@@ -581,5 +582,5 @@ else
 fi
 
 printf 'validate-release-version-bumps: %d checks, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
-[ "$TESTS_RUN" -eq 319 ] || { echo "FAIL: expected 319 checks, ran $TESTS_RUN" >&2; exit 1; }
+[ "$TESTS_RUN" -eq 320 ] || { echo "FAIL: expected 320 checks, ran $TESTS_RUN" >&2; exit 1; }
 [ "$TESTS_FAILED" -eq 0 ]
