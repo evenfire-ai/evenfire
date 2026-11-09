@@ -97,12 +97,34 @@ function answerPool(): void {
       agents: { [USER]: [HOST] },
     })
     if (membership) return Promise.resolve(membership)
+    // Team-scoped routes check the caller's live membership (liveTeamAuthorization.ts).
+    if (text.includes('FROM team_members tm')) {
+      const [userId, teamId] = Array.isArray(values) ? values : []
+      return Promise.resolve(
+        userId === USER && teamId === TEAM
+          ? { rows: [{ team_id: TEAM, role: 'member' }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
+      )
+    }
     if (text.includes('FROM team_agents')) {
       return Promise.resolve({ rows: [{ agent_name: HOST }], rowCount: 1 })
     }
+    // V1 session validation reads the database clock, then the user's lifecycle,
+    // security epoch and logout revocation (userSessionService.ts validateLegacyUserSession).
+    if (text.includes('clock_timestamp()')) {
+      return Promise.resolve({ rows: [{ db_now: new Date() }], rowCount: 1 })
+    }
     if (text.includes('lifecycle_version')) {
       return Promise.resolve({
-        rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }],
+        rows: [
+          {
+            id: USER,
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+            valid_after: null,
+            token_revoked: false,
+          },
+        ],
         rowCount: 1,
       })
     }

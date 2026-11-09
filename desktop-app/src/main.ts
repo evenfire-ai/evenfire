@@ -92,6 +92,11 @@ const appService = new AppService({
       })
     }
   },
+  onSessionCleared: () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('auth:sessionCleared')
+    }
+  },
 })
 const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
 const gfsUserNavigationGeneration = new GfsUserNavigationGeneration()

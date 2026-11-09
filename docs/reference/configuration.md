@@ -82,8 +82,9 @@ Every replica syncs once at start: as the cron's first tick, or, with the cron
 off, on its own unless `LLM_CATALOG_BOOT_SYNC_ENABLED=false` (code default
 `true`; only `true` or `false`). A boot sync that got no live, plausible catalog,
 or failed, probes models.dev again with backoff (30 s doubling up to 1 h) and
-reconciles once it does. `MODELS_DEV_API_URL` must be `https://` and must not
-point at an internal host; control-api refuses to start otherwise.
+reconciles once it does. `MODELS_DEV_API_URL` must be `https://`, must not point
+at an internal host and must not contain credentials; control-api refuses to
+start otherwise.
 
 ## Where every variable is documented
 

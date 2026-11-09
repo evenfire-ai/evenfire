@@ -1129,7 +1129,6 @@ describe('FilePreviewPage', () => {
           refreshResolvers.push(resolve)
         })
     )
-    let resolveCount = 0
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {

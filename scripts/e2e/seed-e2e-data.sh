@@ -624,9 +624,14 @@ ensure_seed_user_and_team() {
 
   if [ -z "$ENSURE_TEAM_ID" ]; then
     admin_post "$CAPI_BASE/admin/teams" \
-      "$(jq -cn --arg u "$ENSURE_USER_ID" --arg n "$team_name" '{userId: $u, name: $n}')" \
+      "$(jq -cn --arg n "$team_name" '{name: $n}')" \
       "POST /admin/teams"
     ENSURE_TEAM_ID="$(echo "$ADMIN_POST_BODY" | jq -r '.id // empty')"
+    [ -n "$ENSURE_TEAM_ID" ] || die "Could not create team for $email"
+    # POST /admin/teams creates the team only; membership is a separate call.
+    admin_post "$CAPI_BASE/admin/teams/$ENSURE_TEAM_ID/members" \
+      "$(jq -cn --arg u "$ENSURE_USER_ID" '{userId: $u, role: "admin"}')" \
+      "POST /admin/teams/:teamId/members"
   fi
   [ -n "$ENSURE_TEAM_ID" ] || die "Could not create or find team for $email"
   ok "Team  id=${ENSURE_TEAM_ID:0:8}…"

@@ -127,14 +127,12 @@ export function resolveCaller(req: Request): GfsCaller {
       actorOnBehalfOf: authority.controlAdminId,
     }
   }
-  const external = (req as { externalAuth?: { userId?: string; teamId?: string | null } })
-    .externalAuth
+  const external = (req as { externalAuth?: { userId?: string } }).externalAuth
   if (external?.userId) {
     const key = `user:${external.userId}`
     const preResolved = (req as RequestWithResolvedGfsSubjects).gfsSubjectKeys
     const subjects = new Set(preResolved && preResolved.length > 0 ? preResolved : [key])
     subjects.add(key)
-    if (external.teamId) subjects.add(`team:${external.teamId}`)
     return {
       isOperator: false,
       subjects,
@@ -839,6 +837,7 @@ export async function writeGfsGrantBatchInTransaction(
          (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
        SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7
          FROM unnest($3::text[], $4::text[]) AS input(subject_type, subject_id)
+        ORDER BY input.subject_type, input.subject_id
        ON CONFLICT (drive, resource_id, subject_type, subject_id)
        DO UPDATE SET permissions = EXCLUDED.permissions, inherit = EXCLUDED.inherit,
                      granted_by = EXCLUDED.granted_by, updated_at = now()`,

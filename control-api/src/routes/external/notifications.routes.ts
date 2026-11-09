@@ -4,6 +4,7 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
+  handleExternalSessionBackendFailure,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { mcpHostHttpMetrics } from '../../middleware/mcpHostHttpMetrics.js'
@@ -16,6 +17,7 @@ import {
   notificationStreamEventsSentTotal,
   notificationStreamSnapshotSize,
 } from '../../observability/metrics.js'
+import { observeExternalSessionCurrentness } from '../../services/auth/externalSessionCurrentnessObserver.js'
 import { acknowledgeDesktopNotificationDelivery } from '../../services/notificationAckService.js'
 import {
   listActiveApprovalNotificationsForUser,
@@ -113,12 +115,23 @@ export function createExternalNotificationsRouter(): Router {
       },
       onBackendUnavailable: 'process-memory',
     }),
-    (req: Request, res: Response) => {
+    (req: Request, res: Response, next) => {
       void (async () => {
         const extReq = req as ExternalAuthedRequest
         const claims = extReq.externalAuth
-        if (!claims) {
+        const authentication = extReq.externalSessionAuthentication
+        if (!claims || !authentication) {
           res.status(401).json({ error: 'Unauthorized' })
+          return
+        }
+
+        const initialAuthority = await observeExternalSessionCurrentness(authentication)
+        if (initialAuthority.status === 'denied') {
+          res.status(401).json({ error: 'Unauthorized' })
+          return
+        }
+        if (initialAuthority.status === 'unavailable') {
+          handleExternalSessionBackendFailure(initialAuthority.error, req, res, next)
           return
         }
 
@@ -131,6 +144,15 @@ export function createExternalNotificationsRouter(): Router {
 
         let closed = false
         let flushInFlight = false
+        // A wake-up that arrives while a flush is reading, observing authority
+        // or writing is recorded here; the flush runs once more when it ends,
+        // so a notification committed after its read is not left for the next
+        // heartbeat.
+        let flushRequested = false
+        // Delivery opens only once the snapshot frame is written. Listener
+        // notifications that arrive during startup read and write nothing; the
+        // first flush after the snapshot catches up from lastCursor.
+        let deliveryOpen = false
         let lastCursor: string | null = rawCursor || null
         let listener: Awaited<ReturnType<typeof openNotificationQueueListener>> | null = null
         let heartbeatTimer: NodeJS.Timeout | null = null
@@ -159,6 +181,46 @@ export function createExternalNotificationsRouter(): Router {
           )
         }
 
+        const closeForAuthority = async (): Promise<boolean> => {
+          if (closed) return false
+          let authority
+          try {
+            authority = await observeExternalSessionCurrentness(authentication)
+          } catch {
+            // Unexpected observer failures are fail-closed after the stream
+            // starts, and must release its listener and connection accounting.
+            disconnectReason = 'stream_error'
+            logger.error(
+              {
+                event: 'notification_stream_currentness_failed',
+                userId: claims.userId,
+                correlationId: req.correlationId ?? null,
+              },
+              'notification stream currentness check failed'
+            )
+            res.end()
+            cleanup()
+            return false
+          }
+          if (closed) return false
+          if (authority.status === 'current') return true
+          if (authority.status === 'denied') {
+            disconnectReason = 'session_expired'
+            writeStreamMessage(res, {
+              type: 'stream.closing',
+              reason: 'session_expired',
+              observedAt: new Date().toISOString(),
+            })
+          } else {
+            // The client already has bounded reconnect/backoff behavior for an
+            // ended notification transport. Emit no data or cursor on outage.
+            disconnectReason = 'stream_error'
+          }
+          res.end()
+          cleanup()
+          return false
+        }
+
         req.on('close', cleanup)
         req.on('aborted', () => {
           disconnectReason = 'client_aborted'
@@ -180,8 +242,13 @@ export function createExternalNotificationsRouter(): Router {
         )
 
         const flushNewEvents = async () => {
-          if (closed || flushInFlight) return
+          if (closed || !deliveryOpen) return
+          if (flushInFlight) {
+            flushRequested = true
+            return
+          }
           flushInFlight = true
+          flushRequested = false
           try {
             const events = await listNotificationStreamEventsForUser(claims.userId, {
               limit: config.notificationStreamSnapshotLimit,
@@ -191,6 +258,12 @@ export function createExternalNotificationsRouter(): Router {
               notificationStreamEventsFilteredTotal.inc({ reason: 'no_new_active_events' }, 1)
               return
             }
+            // One authority observation per non-empty batch, after the read and
+            // before the write. The writes below are synchronous, so this
+            // observation covers the whole batch. On a refusal the stream ends
+            // (with session_expired when denied) and lastCursor does not
+            // advance, so a reconnect re-reads the withheld events.
+            if (!(await closeForAuthority())) return
             for (const event of events) {
               if (closed) break
               if (event.eventType === 'approval.requested') {
@@ -245,6 +318,12 @@ export function createExternalNotificationsRouter(): Router {
             cleanup()
           } finally {
             flushInFlight = false
+            // One more flush per recorded wake-up. An error path above has
+            // already called cleanup(), so `closed` stops it from running.
+            if (flushRequested && !closed) {
+              flushRequested = false
+              void flushNewEvents()
+            }
           }
         }
 
@@ -278,10 +357,12 @@ export function createExternalNotificationsRouter(): Router {
           )
         }
 
+        if (!(await closeForAuthority())) return
         const snapshot = await listActiveApprovalNotificationsForUser(claims.userId, {
           limit: config.notificationStreamSnapshotLimit,
           after: parsedCursor,
         })
+        if (!(await closeForAuthority())) return
         const snapshotCursor = newestNotificationCursor(snapshot, lastCursor)
         notificationStreamSnapshotSize.observe(snapshot.length)
         writeStreamMessage(res, {
@@ -291,16 +372,19 @@ export function createExternalNotificationsRouter(): Router {
           observedAt: new Date().toISOString(),
         })
         notificationStreamEventsSentTotal.inc({ event_type: 'notification.snapshot' }, 1)
+        deliveryOpen = true
         void flushNewEvents()
 
         heartbeatTimer = setInterval(() => {
-          void flushNewEvents()
-          if (closed) return
-          writeStreamMessage(res, {
-            type: 'heartbeat',
-            observedAt: new Date().toISOString(),
-          })
-          notificationStreamEventsSentTotal.inc({ event_type: 'heartbeat' }, 1)
+          void (async () => {
+            if (closed || !(await closeForAuthority())) return
+            writeStreamMessage(res, {
+              type: 'heartbeat',
+              observedAt: new Date().toISOString(),
+            })
+            notificationStreamEventsSentTotal.inc({ event_type: 'heartbeat' }, 1)
+            void flushNewEvents()
+          })()
         }, config.notificationStreamHeartbeatMs)
 
         lifetimeTimer = setTimeout(() => {
@@ -371,6 +455,7 @@ export function createExternalNotificationsRouter(): Router {
     ...externalNotificationsEdgeRateLimits,
     mcpHostHttpMetrics('external_notification_preferences_get'),
     requireValidExternalSessionToken,
+
     asyncHandler(async (req: Request, res: Response) => {
       const extReq = req as ExternalAuthedRequest
       const claims = extReq.externalAuth
@@ -387,6 +472,7 @@ export function createExternalNotificationsRouter(): Router {
     ...externalNotificationsEdgeRateLimits,
     mcpHostHttpMetrics('external_notification_preferences_put'),
     requireValidExternalSessionToken,
+
     asyncHandler(async (req: Request, res: Response) => {
       const extReq = req as ExternalAuthedRequest
       const claims = extReq.externalAuth

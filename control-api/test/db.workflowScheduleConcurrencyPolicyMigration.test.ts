@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { onlineIndexAwareQuery } from './helpers/onlineIndexCatalogMock.js'
 import { passwordAdmissionMigrationFixtureResult } from './helpers/passwordAdmissionMigrationFixture.js'
 
 // Mock pg exactly like the other db.*.test.ts specs so importing ../src/db.js
@@ -89,7 +90,9 @@ describe('0129_workflow_schedules_concurrency_policy migration', () => {
     const query = recordingQuery(earlier)
     const release = vi.fn()
 
-    await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+    await initDb({
+      connect: vi.fn().mockResolvedValue({ query: onlineIndexAwareQuery(query), release }),
+    } as never)
 
     const sqls = query.mock.calls.map(([sql]) => String(sql))
     expect(sqls.filter(sql => sql.includes('concurrency_policy'))).toHaveLength(1)

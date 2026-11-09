@@ -37,6 +37,26 @@ describe('MODELS_DEV_API_URL at boot', () => {
     await expect(bootWith(url)).rejects.toThrow(message)
   })
 
+  it.each([
+    'https://user:s3cret@stub.example.com/api.json',
+    'https://s3cret@stub.example.com/api.json',
+    'https://:s3cret@stub.example.com/api.json',
+  ])('refuses credentials in the URL without echoing them (%s)', async url => {
+    const boot = bootWith(url)
+    await expect(boot).rejects.toThrow('models.dev catalog URL must not contain credentials')
+    await expect(boot).rejects.not.toThrow('s3cret')
+  })
+
+  it('refuses a malformed URL without echoing the secret it carries', async () => {
+    const boot = bootWith('https://user:s3cret@ bad host/api.json')
+    await expect(boot).rejects.toThrow('models.dev catalog URL is not a valid URL')
+    await expect(boot).rejects.not.toThrow('s3cret')
+  })
+
+  it('boots with a public URL that has no credentials', async () => {
+    await expect(bootWith('https://stub.example.com/api.json')).resolves.toBeDefined()
+  })
+
   it('boots with the emergency brake, and the loader then falls back to the vendored snapshot', async () => {
     await expect(bootWith(BRAKE)).resolves.toBeDefined()
     const { loadModelsDevCatalog } = await import('../src/services/modelsDevClient.js')
