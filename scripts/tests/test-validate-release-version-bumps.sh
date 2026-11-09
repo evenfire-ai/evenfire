@@ -424,6 +424,86 @@ else
   fail "packages/jwt-key-policy: the check names [$jwt_named], the services declaring it are [$jwt_consumers]"
 fi
 
+# One rule per service in both modes. The default mode checks fewer services, never other files,
+# so for each service it checks, every change gets the same verdict from both modes. The services
+# come from the default mode itself: a service added to it is probed here with no edit.
+run_mode() { # <args...>: MODE_NAMED, the services the check names; a run it cannot read fails
+  local exit_code=0 output errors named
+  output="$(node scripts/release/validate-release-version-bumps.mjs --previous HEAD^ "$@" 2>&1)" || exit_code=$?
+  MODE_NAMED="$(printf '%s\n' "$output" | sed -n 's/^::error::\(.*\) code changed but .*/\1/p' | LC_ALL=C sort | tr '\n' ' ')"
+  errors="$(printf '%s\n' "$output" | grep -c '^::error::' || true)"
+  named="$(printf '%s' "$MODE_NAMED" | wc -w)"
+  if [ "$exit_code" -eq 0 ] && [ -z "$MODE_NAMED" ] && printf '%s' "$output" | grep -qF 'are valid'; then
+    return 0
+  elif [ "$exit_code" -eq 1 ] && [ -n "$MODE_NAMED" ] && [ "$errors" -eq $((named)) ]; then
+    return 0
+  fi
+  MODE_NAMED="unreadable run (exit $exit_code): $output"
+  return 1
+}
+while read -r root _; do
+  mkdir -p "$root/src"
+  echo derive >"$root/src/cross-mode-derive.ts"
+done <<<"$SERVICES"
+commit_all 'a file in every service'
+default_services=''
+if run_mode; then default_services="$MODE_NAMED"; fi
+if [ "$default_services" = 'external-rest-api rpc-proxy ' ]; then
+  pass
+else
+  fail "the default mode checks [$default_services], want the services releaseManifest.ts publishes"
+fi
+in_default() { # <services...>: those the default mode checks, in order
+  local service
+  for service in "$@"; do
+    case " $default_services" in *" $service "*) printf '%s ' "$service" ;; esac
+  done
+}
+# Kinds beyond the table's paths and COMMON_SHIPPED: the files each mode used to treat apart.
+CROSS_MODE_KINDS='src/cross.ts src/test/helper.ts Dockerfile.dockerignore
+tsconfig.jwt-contract-tests.json scripts/tool.mjs test/t.ts tests/t.ts e2e/t.ts
+src/x.test.ts src/x.spec.tsx src/__tests__/x.ts src/x.testFixtures.ts README.md src/notes.md
+Makefile makefile vitest.config.ts .env.example'
+cross_files=''
+for root in $default_services; do
+  table_paths="$(printf '%s\n' "$SERVICES" | awk -v root="$root" '$1 == root { $1 = ""; print }')"
+  for path in $table_paths $COMMON_SHIPPED; do cross_files="$cross_files $(shipped_file "$root" "$path")"; done
+  for path in $CROSS_MODE_KINDS; do cross_files="$cross_files $root/$path"; done
+  cross_files="$cross_files $root/package.json"
+done
+cross_files="$cross_files packages/jwt-key-policy/index.cjs external-rest-api/src/releaseManifest.ts"
+agreed_red=0
+agreed_green=0
+probe=0
+for file in $cross_files; do
+  probe=$((probe + 1))
+  mkdir -p "$(dirname "$file")"
+  case "$file" in
+    */package.json) # A dependency edit at the same version.
+      printf '{ "name": "%s", "version": "0.1.1", "dependencies": { "probe": "%s" } }\n' \
+        "$(basename "$(dirname "$file")")" "$probe" >"$file" ;;
+    *) echo "cross $probe" >"$file" ;;
+  esac
+  commit_all "cross-mode $file"
+  if ! run_mode; then fail "$file, default mode: $MODE_NAMED"; continue; fi
+  default_named="$MODE_NAMED"
+  if ! run_mode --all-services; then fail "$file, --all-services: $MODE_NAMED"; continue; fi
+  # shellcheck disable=SC2086 # One word per service.
+  all_named="$(in_default $MODE_NAMED)"
+  if [ "$default_named" != "$all_named" ]; then
+    fail "$file: the default mode names [$default_named], --all-services names [$all_named] of the services both check"
+  else
+    pass
+    if [ -n "$default_named" ]; then agreed_red=$((agreed_red + 1)); else agreed_green=$((agreed_green + 1)); fi
+  fi
+done
+# Witness: both verdicts occurred, so the agreement above is not two runs that read nothing.
+if [ "$agreed_red" -gt 0 ] && [ "$agreed_green" -gt 0 ]; then
+  pass
+else
+  fail "cross-mode probes: $agreed_red agreed on a missing bump, $agreed_green on none; want both"
+fi
+
 # The CI steps: in the job the dev ruleset requires, with no filter that could skip them, exactly
 # these commands with no key that softens them, on the merge result, and with history enough to
 # read HEAD^1. Depth comes from the workflow, so the clone below proves it. The job's other steps
@@ -476,5 +556,5 @@ else
 fi
 
 printf 'validate-release-version-bumps: %d checks, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
-[ "$TESTS_RUN" -eq 265 ] || { echo "FAIL: expected 265 checks, ran $TESTS_RUN" >&2; exit 1; }
+[ "$TESTS_RUN" -eq 315 ] || { echo "FAIL: expected 315 checks, ran $TESTS_RUN" >&2; exit 1; }
 [ "$TESTS_FAILED" -eq 0 ]

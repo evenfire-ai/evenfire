@@ -8,22 +8,6 @@ const allServices = process.argv.includes('--all-services')
 const JWT_KEY_POLICY = 'packages/jwt-key-policy/'
 const RELEASE_MANIFEST = 'external-rest-api/src/releaseManifest.ts'
 
-const PROJECTS = [
-  {
-    name: 'external-rest-api',
-    packagePath: 'external-rest-api/package.json',
-    codePrefixes: ['external-rest-api/src/', 'external-rest-api/test/', JWT_KEY_POLICY],
-    codeFiles: ['external-rest-api/tsconfig.json'],
-    ignoredFiles: [RELEASE_MANIFEST],
-  },
-  {
-    name: 'rpc-proxy',
-    packagePath: 'rpc-proxy/package.json',
-    codePrefixes: ['rpc-proxy/src/', 'rpc-proxy/test/', JWT_KEY_POLICY],
-    codeFiles: ['rpc-proxy/tsconfig.json'],
-  },
-]
-
 // Test code and Markdown under a service. A running service loads neither, so a change to them
 // alone leaves what the service does as it was. channel-reader and external-rest-api compile
 // the test files under src/ into dist/, so their images hold them; no production module imports
@@ -36,33 +20,35 @@ const TEST_DIRECTORIES = ['test/', 'tests/', 'e2e/']
 // next.config.js and public/ all reach the image.
 const DEV_ONLY_ROOT_FILE = /^(Makefile|makefile|vitest\.config\.[^/]+|\.env\.example)$/
 
-// The services --all-services checks. Two branches from one base can reach the same next
-// version, and that line then merges cleanly: a clean merge runs no pre-commit hook, so nothing
-// else notices that one version now names two different trees. Comparing a pull request's merge
-// result with its base catches it. The push leg cannot use this: after such a merge it would
-// fail with no branch to fix.
+// Every service this check covers, with the one rule above for each, whatever the mode. The
+// default mode, which the push leg runs too, checks the services whose versions RELEASE_MANIFEST
+// publishes. --all-services checks all of them: two branches from one base can reach the same
+// next version, and that line then merges cleanly. A clean merge runs no pre-commit hook, so
+// nothing else notices that one version now names two different trees. Comparing a pull
+// request's merge result with its base catches it. The push leg cannot use this: after such a
+// merge it would fail with no branch to fix.
 // scripts/tests/test-validate-release-version-bumps.sh pins this list against the roots the
-// pre-commit hook bumps. Keep this file free of local imports: that test and
-// test-jwt-policy-version-consumers.sh run a copy of it in a fixture.
+// pre-commit hook bumps, and both modes against each other. Keep this file free of local
+// imports: that test and test-jwt-policy-version-consumers.sh run a copy of it in a fixture.
 const SERVICES = [
   { root: 'channel-reader' },
   { root: 'control-api', sharedPrefixes: [JWT_KEY_POLICY], devDirectories: ['scripts/'] },
   { root: 'control-ui' },
-  { root: 'external-rest-api', sharedPrefixes: [JWT_KEY_POLICY] },
+  { root: 'external-rest-api', sharedPrefixes: [JWT_KEY_POLICY], inReleaseManifest: true },
   { root: 'host-context-controller' },
   { root: 'mcp-host', devDirectories: ['scripts/'] },
   { root: 'mcp-proxy' },
   { root: 'mcp-servers/doc-generator' },
   { root: 'mcp-servers/web-search' },
   { root: 'profile-ui' },
-  { root: 'rpc-proxy', sharedPrefixes: [JWT_KEY_POLICY] },
+  { root: 'rpc-proxy', sharedPrefixes: [JWT_KEY_POLICY], inReleaseManifest: true },
   { root: 'stdio-bridge' },
   { root: 'workflow-recipes', devDirectories: ['scripts/'] },
-].map(({ root, sharedPrefixes = [], devDirectories = [] }) => ({
+].map(({ root, sharedPrefixes = [], devDirectories = [], inReleaseManifest = false }) => ({
   name: root,
+  inReleaseManifest,
   packagePath: `${root}/package.json`,
   codePrefixes: [`${root}/`, ...sharedPrefixes],
-  codeFiles: [],
   ignoredFiles: [RELEASE_MANIFEST],
   ignoredPrefixes: [...TEST_DIRECTORIES, ...devDirectories].map(
     directory => `${root}/${directory}`
@@ -104,19 +90,16 @@ function changedFiles() {
 
 function codeChanged(project, files) {
   return files.some(filePath => {
-    if (project.ignoredFiles?.includes(filePath)) return false
-    if (project.ignoredPrefixes?.some(prefix => filePath.startsWith(prefix))) return false
-    if (project.ignoredPattern?.test(filePath)) return false
+    if (project.ignoredFiles.includes(filePath)) return false
+    if (project.ignoredPrefixes.some(prefix => filePath.startsWith(prefix))) return false
+    if (project.ignoredPattern.test(filePath)) return false
     if (
       filePath.startsWith(`${project.name}/`) &&
-      project.ignoredRootFile?.test(filePath.slice(project.name.length + 1))
+      project.ignoredRootFile.test(filePath.slice(project.name.length + 1))
     ) {
       return false
     }
-    return (
-      project.codePrefixes.some(prefix => filePath.startsWith(prefix)) ||
-      project.codeFiles.includes(filePath)
-    )
+    return project.codePrefixes.some(prefix => filePath.startsWith(prefix))
   })
 }
 
@@ -134,7 +117,7 @@ if (!previousRef || /^0+$/.test(previousRef)) {
 const files = changedFiles()
 const failures = []
 
-for (const project of allServices ? SERVICES : PROJECTS) {
+for (const project of allServices ? SERVICES : SERVICES.filter(s => s.inReleaseManifest)) {
   if (!codeChanged(project, files)) continue
 
   if (!existsAt(currentRef, project.packagePath)) {

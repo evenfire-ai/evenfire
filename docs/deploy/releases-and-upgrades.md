@@ -33,10 +33,10 @@ every pull request:
 
 - `update-desktop-release-manifest.mjs --validate-only` fails if the manifest
   disagrees with the package versions.
-- `validate-release-version-bumps.mjs` fails if `src/`, `test/` or `tsconfig.json`
-  under `external-rest-api/` or `rpc-proxy/`, or the `packages/jwt-key-policy/` they
-  both ship, changed but that package's version did not. Bump that package's version
-  to fix it.
+- `validate-release-version-bumps.mjs` fails if a file under `external-rest-api/` or
+  `rpc-proxy/`, or the `packages/jwt-key-policy/` they both ship, changed but that
+  package's version did not. It counts the same files for those two services as the
+  required check below does. Bump that package's version to fix it.
 
 On pull requests into `dev`, the required check `Repo hygiene (no internal working
 artifacts)` runs the same script with `--all-services` against the merge result.
