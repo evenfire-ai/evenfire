@@ -32,7 +32,6 @@ vi.mock('electron', () => ({
 vi.mock('../appService.js', () => ({ AppService: class {} }))
 
 const service = {
-  getSessionGeneration: () => 1,
   downloadGfsUri: vi.fn(async () => new ArrayBuffer(0)),
 }
 const trusted = { senderFrame: { url: 'file:///app/index.html' } }

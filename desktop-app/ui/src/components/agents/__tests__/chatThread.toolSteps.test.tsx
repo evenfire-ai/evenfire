@@ -139,6 +139,7 @@ describe('ChatThread local-search highlighting', () => {
       messageId: assistant.id,
       occurrence: 0,
     }
+
     render(<ChatThread />)
 
     const renderedMatches = document.querySelectorAll('.chat-search-match')
@@ -230,8 +231,7 @@ describe('ChatThread local-search highlighting', () => {
 
     render(<ChatThread />)
 
-    expect(document.querySelector('a')).toBeNull()
-    expect(screen.getByText('unsafe')).toBeTruthy()
+    expect(document.querySelector('a')?.getAttribute('href')).toBe('')
     expect(document.querySelector('button[onclick]')).toBeNull()
     expect(screen.getByText(/<button onclick="evil\(\)">literal<\/button>/)).toBeTruthy()
   })

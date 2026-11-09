@@ -12,62 +12,6 @@ import type {
   SandboxUiReleasedEvent,
 } from './types.js'
 
-const STALE_GFS_AUTHORITY_MARKER = '__CLERUM_GFS_STALE_AUTHORITY_V1__:'
-const STALE_GFS_AUTHORITY_STALE_TAG = 'stale:'
-const STALE_GFS_AUTHORITY_MESSAGE_TAG = 'message:'
-
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error
-    ? error.message
-    : error && typeof error === 'object' && 'message' in error
-      ? String((error as { message?: unknown }).message ?? '')
-      : String(error ?? '')
-}
-
-function decodeGfsIpcErrorMessage(encoded: string): string | undefined {
-  try {
-    const decoded = JSON.parse(decodeURIComponent(encoded)) as unknown
-    return typeof decoded === 'string' ? decoded : undefined
-  } catch {
-    return undefined
-  }
-}
-
-async function invokeGfs<T = unknown>(channel: string, payload?: unknown): Promise<T> {
-  try {
-    return (
-      payload === undefined
-        ? await ipcRenderer.invoke(channel)
-        : await ipcRenderer.invoke(channel, payload)
-    ) as T
-  } catch (error) {
-    const message = getErrorMessage(error)
-    // Electron 41's ipcRenderer.invoke wraps a rejected main error as:
-    // "Error invoking remote method '<channel>': Error: <message>".
-    // Normalize only this exact GFS bridge envelope and its main-owned tag.
-    const prefix = `Error invoking remote method '${channel}': Error: ${STALE_GFS_AUTHORITY_MARKER}`
-    if (!message.startsWith(prefix)) throw error
-
-    const payload = message.slice(prefix.length)
-    const staleMessage = payload.startsWith(STALE_GFS_AUTHORITY_STALE_TAG)
-      ? decodeGfsIpcErrorMessage(payload.slice(STALE_GFS_AUTHORITY_STALE_TAG.length))
-      : undefined
-    if (staleMessage !== undefined) {
-      const staleError = new Error(staleMessage)
-      staleError.name = 'GfsStaleSessionAuthorityError'
-      Object.assign(staleError, { code: 'GFS_STALE_SESSION_AUTHORITY' })
-      throw staleError
-    }
-
-    const ordinaryMessage = payload.startsWith(STALE_GFS_AUTHORITY_MESSAGE_TAG)
-      ? decodeGfsIpcErrorMessage(payload.slice(STALE_GFS_AUTHORITY_MESSAGE_TAG.length))
-      : undefined
-    if (ordinaryMessage !== undefined) throw new Error(ordinaryMessage)
-
-    throw error
-  }
-}
-
 type SandboxUiQueuedDeepLinkEnvelope = SandboxUiDeepLinkEnvelope & {
   userNavigationGenerationAtActivation: number
 }
@@ -146,16 +90,16 @@ function cancellableGfsInvoke<T>(
   payload: Record<string, unknown>,
   signal?: AbortSignal
 ): Promise<T> {
-  if (!signal) return invokeGfs<T>(channel, payload)
+  if (!signal) return ipcRenderer.invoke(channel, payload) as Promise<T>
   if (signal.aborted) {
     return Promise.reject(new DOMException('Request was stopped before it started.', 'AbortError'))
   }
   const requestId = crypto.randomUUID()
   const onAbort = () => ipcRenderer.send('gfs:abort', { requestId })
   signal.addEventListener('abort', onAbort, { once: true })
-  return invokeGfs<T>(channel, { ...payload, requestId }).finally(() =>
-    signal.removeEventListener('abort', onAbort)
-  ) as Promise<T>
+  return ipcRenderer
+    .invoke(channel, { ...payload, requestId })
+    .finally(() => signal.removeEventListener('abort', onAbort)) as Promise<T>
 }
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
@@ -272,10 +216,10 @@ const clerum = Object.freeze({
       ipcRenderer.sendSync('gfs:getUserNavigationGeneration'),
     advanceUserNavigationGeneration: (): number | null =>
       ipcRenderer.sendSync('gfs:advanceUserNavigationGeneration'),
-    listPendingDeepLinks: () => invokeGfs('gfs:listPendingDeepLinks'),
-    clearPendingDeepLinks: () => invokeGfs('gfs:clearPendingDeepLinks'),
+    listPendingDeepLinks: () => ipcRenderer.invoke('gfs:listPendingDeepLinks'),
+    clearPendingDeepLinks: () => ipcRenderer.invoke('gfs:clearPendingDeepLinks'),
     acknowledgeDeepLink: (id: number, authority?: DeepLinkAcknowledgmentAuthority) =>
-      invokeGfs('gfs:acknowledgeDeepLink', {
+      ipcRenderer.invoke('gfs:acknowledgeDeepLink', {
         id,
         ...(authority !== undefined ? { authority } : {}),
       }),
@@ -284,15 +228,14 @@ const clerum = Object.freeze({
       ipcRenderer.on('gfs:deepLink', listener)
       return () => ipcRenderer.off('gfs:deepLink', listener)
     },
-    copyDeepLink: (uri: string) => invokeGfs('gfs:copyDeepLink', { uri }),
-    getResourceProfileOrigin: () => invokeGfs('gfs:getResourceProfileOrigin'),
-    resolve: (uri: string) => invokeGfs('gfs:resolve', { uri }),
+    copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
+    resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
     download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
       cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
     downloadPreview: (uri: string, maxBytes: number) =>
-      invokeGfs('gfs:downloadPreview', { uri, maxBytes }),
+      ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
     listAccessible: (drive?: string, cursor?: string) =>
-      invokeGfs('gfs:listAccessible', { drive, cursor }),
+      ipcRenderer.invoke('gfs:listAccessible', { drive, cursor }),
     listChildren: (
       resourceId: string,
       drive?: string,
@@ -300,11 +243,11 @@ const clerum = Object.freeze({
       options?: { signal?: AbortSignal }
     ) => cancellableGfsInvoke('gfs:listChildren', { resourceId, drive, cursor }, options?.signal),
     affordances: (resourceId: string, drive?: string) =>
-      invokeGfs('gfs:affordances', { resourceId, drive }),
+      ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
     zipStream: {
-      start: () => invokeGfs('gfs:zipStream:start'),
+      start: () => ipcRenderer.invoke('gfs:zipStream:start'),
       append: (jobId: string, name: string, bytes: ArrayBuffer) =>
-        invokeGfs('gfs:zipStream:append', { jobId, name, bytes }),
+        ipcRenderer.invoke('gfs:zipStream:append', { jobId, name, bytes }),
       // The folder-zip transfer (R1-H2): the MAIN process fetches the
       // resource and writes it into the archive chunk by chunk, so the payload
       // never crosses this boundary. The walk's stop signal rides along as a
@@ -321,19 +264,19 @@ const clerum = Object.freeze({
           options?.signal
         ),
       finish: (jobId: string, suggestedName: string) =>
-        invokeGfs('gfs:zipStream:finish', { jobId, suggestedName }),
-      abort: (jobId: string) => invokeGfs('gfs:zipStream:abort', { jobId }),
+        ipcRenderer.invoke('gfs:zipStream:finish', { jobId, suggestedName }),
+      abort: (jobId: string) => ipcRenderer.invoke('gfs:zipStream:abort', { jobId }),
     },
     createFolder: (parentResourceId: string, name: string, drive?: string) =>
-      invokeGfs('gfs:createFolder', { parentResourceId, name, drive }),
+      ipcRenderer.invoke('gfs:createFolder', { parentResourceId, name, drive }),
     createFile: (parentResourceId: string, name: string, encodedData: string, drive?: string) =>
-      invokeGfs('gfs:createFile', { parentResourceId, name, encodedData, drive }),
+      ipcRenderer.invoke('gfs:createFile', { parentResourceId, name, encodedData, drive }),
     createFileFromPath: (
       parentResourceId: string,
       name: string,
       filePath: string,
       drive?: string
-    ) => invokeGfs('gfs:createFileFromPath', { parentResourceId, name, filePath, drive }),
+    ) => ipcRenderer.invoke('gfs:createFileFromPath', { parentResourceId, name, filePath, drive }),
     startFileUpload: (
       parentResourceId: string,
       name: string,
@@ -341,7 +284,7 @@ const clerum = Object.freeze({
       drive?: string,
       resumeUploadId?: string
     ) =>
-      invokeGfs('gfs:startFileUpload', {
+      ipcRenderer.invoke('gfs:startFileUpload', {
         parentResourceId,
         name,
         filePath,
@@ -355,7 +298,7 @@ const clerum = Object.freeze({
       ifMatch?: number,
       resumeUploadId?: string
     ) =>
-      invokeGfs('gfs:startFileReplace', {
+      ipcRenderer.invoke('gfs:startFileReplace', {
         resourceId,
         filePath,
         drive,
@@ -363,21 +306,21 @@ const clerum = Object.freeze({
         resumeUploadId,
       }),
     getUploadSnapshot: (uploadId: string, drive = 'main') =>
-      invokeGfs('gfs:getUploadSnapshot', { uploadId, drive }),
-    listUploadSessions: (drive = 'main') => invokeGfs('gfs:listUploadSessions', { drive }),
+      ipcRenderer.invoke('gfs:getUploadSnapshot', { uploadId, drive }),
+    listUploadSessions: (drive = 'main') => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
     pauseUpload: (uploadId: string, drive = 'main') =>
-      invokeGfs('gfs:pauseUpload', { uploadId, drive }),
+      ipcRenderer.invoke('gfs:pauseUpload', { uploadId, drive }),
     resumeUpload: (uploadId: string, drive = 'main') =>
-      invokeGfs('gfs:resumeUpload', { uploadId, drive }),
+      ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
     cancelUpload: (uploadId: string, drive = 'main') =>
-      invokeGfs('gfs:cancelUpload', { uploadId, drive }),
+      ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
     replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
-      invokeGfs('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
+      ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
     replaceFileFromPath: (resourceId: string, filePath: string, drive?: string, ifMatch?: number) =>
-      invokeGfs('gfs:replaceFileFromPath', { resourceId, filePath, drive, ifMatch }),
+      ipcRenderer.invoke('gfs:replaceFileFromPath', { resourceId, filePath, drive, ifMatch }),
     getPathForFile: (file: File) => webUtils.getPathForFile(file),
     renameResource: (resourceId: string, newName: string, drive?: string, ifMatch?: number) =>
-      invokeGfs('gfs:renameResource', { resourceId, newName, drive, ifMatch }),
+      ipcRenderer.invoke('gfs:renameResource', { resourceId, newName, drive, ifMatch }),
     moveResource: (
       resourceId: string,
       destinationId: string,
@@ -386,7 +329,7 @@ const clerum = Object.freeze({
       newName: string | undefined,
       expectedSessionGeneration: number
     ) =>
-      invokeGfs('gfs:moveResource', {
+      ipcRenderer.invoke('gfs:moveResource', {
         resourceId,
         destinationId,
         expectedSessionGeneration,
@@ -395,25 +338,25 @@ const clerum = Object.freeze({
         newName,
       }),
     deleteResource: (resourceId: string, drive?: string, ifMatch?: number) =>
-      invokeGfs('gfs:deleteResource', { resourceId, drive, ifMatch }),
+      ipcRenderer.invoke('gfs:deleteResource', { resourceId, drive, ifMatch }),
     grant: (
       resourceId: string,
       subjectKeys: string[],
       bits: string[],
       drive?: string,
       inherit?: boolean
-    ) => invokeGfs('gfs:grant', { resourceId, subjectKeys, bits, drive, inherit }),
+    ) => ipcRenderer.invoke('gfs:grant', { resourceId, subjectKeys, bits, drive, inherit }),
     listGrants: (resourceId: string, drive?: string) =>
-      invokeGfs('gfs:listGrants', { resourceId, drive }),
-    revokeGrant: (grantId: string) => invokeGfs('gfs:revokeGrant', { grantId }),
+      ipcRenderer.invoke('gfs:listGrants', { resourceId, drive }),
+    revokeGrant: (grantId: string) => ipcRenderer.invoke('gfs:revokeGrant', { grantId }),
     listShares: (resourceId: string, drive?: string) =>
-      invokeGfs('gfs:listShares', { resourceId, drive }),
-    revokeShare: (shareId: string) => invokeGfs('gfs:revokeShare', { shareId }),
+      ipcRenderer.invoke('gfs:listShares', { resourceId, drive }),
+    revokeShare: (shareId: string) => ipcRenderer.invoke('gfs:revokeShare', { shareId }),
     // A desktop share grants READ access only (the minimal shared capability) —
     // unlike `grant`, it takes no permission bits by design. The server still
     // enforces the caller holds read + share (no-escalation).
     createShare: (resourceId: string, subjectKeys: string[], drive?: string) =>
-      invokeGfs('gfs:createShare', { resourceId, subjectKeys, drive }),
+      ipcRenderer.invoke('gfs:createShare', { resourceId, subjectKeys, drive }),
   },
   agents: {
     listMine: () => ipcRenderer.invoke('agents:listMine'),

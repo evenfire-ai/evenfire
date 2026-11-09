@@ -1056,7 +1056,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                         onClick={openGlobalFilesModal}
                         role="menuitem"
                       >
-                        Attach EvenDrive files
+                        EvenDrive
                       </MenuItem>
                     ) : null}
                     <MenuItem

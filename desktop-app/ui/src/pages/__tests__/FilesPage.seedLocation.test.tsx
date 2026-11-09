@@ -130,8 +130,7 @@ function FilesTabHarness({
   onOpenPendingGfsPreview?: (
     id: number,
     preview: GfsPreviewResource,
-    returnLocation: { gfsUri: string | null; name: string | null },
-    originatingSessionScope?: string | null
+    returnLocation: { gfsUri: string | null; name: string | null }
   ) => boolean
   includeInactiveTab?: boolean
 }) {
@@ -213,8 +212,7 @@ function renderHarness(
     onOpenPendingGfsPreview?: (
       id: number,
       preview: GfsPreviewResource,
-      returnLocation: { gfsUri: string | null; name: string | null },
-      originatingSessionScope?: string | null
+      returnLocation: { gfsUri: string | null; name: string | null }
     ) => boolean
   } = {}
 ) {
@@ -1163,9 +1161,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(onOpenPendingGfsPreview).toHaveBeenCalledWith(
       1084,
       expect.objectContaining({ kind: 'markdown', gfsUri: DEEP_LINK_URI }),
-      { gfsUri: SEED_URI, name: 'Reports' },
-      ':user-1:team-1',
-      0
+      { gfsUri: SEED_URI, name: 'Reports' }
     )
     expect(outcomeOrder).toEqual([`preview:${DEEP_LINK_URI}`, 'opened'])
   })

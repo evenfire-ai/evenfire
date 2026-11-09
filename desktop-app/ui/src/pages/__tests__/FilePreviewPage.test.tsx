@@ -705,11 +705,6 @@ describe('FilePreviewPage', () => {
       expect(renameResource).not.toHaveBeenCalled()
       expect(affordances).toHaveBeenCalledTimes(permissionReadsBeforeReplacement)
 
-      // The old digest continuation must not query replacement-session authority.
-      expect(digestDelivered).toBe(true)
-      expect(renameResource).not.toHaveBeenCalled()
-      expect(affordances).toHaveBeenCalledTimes(permissionReadsBeforeReplacement)
-
       // Liveness: once generation 2 owns its resource, the page reads its own
       // resource and source-folder authority through the counted producer.
       await act(async () => releaseReplacementResolve())

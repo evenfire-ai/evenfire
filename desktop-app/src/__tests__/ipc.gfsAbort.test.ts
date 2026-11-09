@@ -67,7 +67,6 @@ async function flushMicrotasks() {
 
 describe('gfs producer-side abort (R1-M1)', () => {
   const service = {
-    getSessionGeneration: () => 1,
     listGfsChildren: hangingRead(),
     downloadGfsUri: vi.fn(async () => new ArrayBuffer(0)),
   }

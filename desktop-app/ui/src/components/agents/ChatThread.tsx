@@ -880,13 +880,13 @@ export function ChatThread({
                                   ) : null}
                                 </div>
                               ) : displayContent ? (
-                                <div className="message-block">
+                                <p className="message-block">
                                   <ChatMarkdownContent
                                     model={semanticModel}
                                     query={localSearchQuery}
                                     activeOccurrence={activeSearchOccurrence}
                                   />
-                                </div>
+                                </p>
                               ) : null}
                             </>
                           )}

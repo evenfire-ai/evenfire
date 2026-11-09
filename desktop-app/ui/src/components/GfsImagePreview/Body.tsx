@@ -7,8 +7,6 @@ import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import { copyImageBlobToClipboard } from '@lib/imageClipboard'
 import type { GfsImagePreviewBodyProps } from './types'
 
-const ALWAYS_IN_SCOPE = () => true
-
 /**
  * De-modalized image preview body (spec 18 §3.B.2). Owns the byte fetch (by
  * `gfsUri`), the size-guard, the copy-to-clipboard, and the rendered `<img>` +
@@ -24,7 +22,6 @@ export function GfsImagePreviewBody({
   mimeType,
   onDownloadError,
   onCopyContentReady,
-  isScopeCurrent = ALWAYS_IN_SCOPE,
   titleId,
   titleActions,
   headerActions,
@@ -77,13 +74,13 @@ export function GfsImagePreviewBody({
           bytes = downloaded.bytes
           assertGfsImagePreviewSize(bytes.byteLength)
         }
-        if (!active || !isScopeCurrent()) return
+        if (!active) return
         const blob = new Blob([bytes], { type: mimeType })
         setSourceBlob(blob)
         objectUrl = URL.createObjectURL(blob)
         setPreviewUrl(objectUrl)
       } catch (error) {
-        if (!active || !isScopeCurrent()) return
+        if (!active) return
         onDownloadErrorRef.current?.(error)
         // Through the shared read-plane presenter, not raw. `downloadPreview`
         // crosses Electron IPC, so a rejection arrives as
@@ -106,7 +103,7 @@ export function GfsImagePreviewBody({
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [byteLength, dataBase64, gfsUri, isScopeCurrent, mimeType])
+  }, [byteLength, gfsUri, dataBase64, mimeType])
 
   useEffect(() => {
     mountedRef.current = true
@@ -116,24 +113,19 @@ export function GfsImagePreviewBody({
   }, [])
 
   const copyImageToClipboard = useCallback(async (): Promise<boolean> => {
-    if (!sourceBlob || !mountedRef.current || !isScopeCurrent() || previewError) return false
+    if (!sourceBlob || !mountedRef.current || previewError) return false
     try {
-      const copied = await copyImageBlobToClipboard(
-        sourceBlob,
-        () => mountedRef.current && isScopeCurrent()
-      )
-      return copied && mountedRef.current && isScopeCurrent()
+      const copied = await copyImageBlobToClipboard(sourceBlob, () => mountedRef.current)
+      return copied && mountedRef.current
     } catch {
       return false
     }
-  }, [isScopeCurrent, previewError, sourceBlob])
+  }, [previewError, sourceBlob])
 
   useEffect(() => {
-    onCopyContentReady?.(
-      sourceBlob && !previewError && isScopeCurrent() ? copyImageToClipboard : null
-    )
+    onCopyContentReady?.(sourceBlob && !previewError ? copyImageToClipboard : null)
     return () => onCopyContentReady?.(null)
-  }, [copyImageToClipboard, isScopeCurrent, onCopyContentReady, previewError, sourceBlob])
+  }, [copyImageToClipboard, onCopyContentReady, previewError, sourceBlob])
 
   return (
     <>
@@ -148,12 +140,12 @@ export function GfsImagePreviewBody({
       </header>
       <div className="da-gfs-image-preview-dialog__body">
         {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
-        {!previewError && isScopeCurrent() && !previewUrl ? (
+        {!previewError && !previewUrl ? (
           <div className="da-gfs-image-preview-dialog__loading" role="status">
             Loading image preview…
           </div>
         ) : null}
-        {previewUrl && !previewError && isScopeCurrent() ? (
+        {previewUrl && !previewError ? (
           <img
             alt={`Preview of ${fileName}`}
             className="da-gfs-image-preview-dialog__image"

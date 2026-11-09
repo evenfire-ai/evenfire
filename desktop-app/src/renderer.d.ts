@@ -128,11 +128,6 @@ declare global {
         getUserNavigationGeneration?: () => number | null
         advanceUserNavigationGeneration?: () => number | null
         copyDeepLink?: (uri: string) => Promise<{ url: string }>
-        getResourceProfileOrigin?: () => Promise<{
-          origin: string
-          sessionGeneration: number
-          envKey: string
-        }>
         listPendingDeepLinks?: () => Promise<{
           links: Array<{
             id: number

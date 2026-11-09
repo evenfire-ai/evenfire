@@ -12,7 +12,6 @@ import {
   isGfsSessionAuthorityCurrent,
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
-import { isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
 import { httpErrorStatus } from '@lib/format'
 import {
   GFS_AUTHORITY_STALE_TIME_MS,
@@ -20,7 +19,11 @@ import {
   gfsAuthorityQueryPolicy,
 } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
-import { describeGfsGrantError, describeGfsReadError } from '@lib/gfsGrantErrors'
+import {
+  describeGfsGrantError,
+  describeGfsReadError,
+  isGfsSessionAuthorityFailure,
+} from '@lib/gfsGrantErrors'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
@@ -45,7 +48,11 @@ type FilePreviewResourceActionsProps = {
   sessionGeneration: number | null
   principalScope: string | null
   canResolve: boolean
-  onAuthorityFailure: (error: unknown, scope?: string | null, generation?: number | null) => boolean
+  onAuthorityFailure: (
+    message: string,
+    scope?: string | null,
+    generation?: number | null
+  ) => boolean
   onDeleted: () => void
   onRenameCommitted?: (gfsUri: string) => void
   pushToast?: MoveToast
@@ -459,7 +466,7 @@ export function useFilePreviewResourceActions({
         moveContextRef.current.sessionGeneration
       )
     )
-      onAuthorityFailure(resourceQuery.error, sessionScope, sessionGeneration)
+      onAuthorityFailure(errorMessage(resourceQuery.error), sessionScope, sessionGeneration)
   }, [onAuthorityFailure, resourceQuery.error, sessionGeneration, sessionScope])
   useEffect(() => {
     if (
@@ -471,7 +478,7 @@ export function useFilePreviewResourceActions({
         moveContextRef.current.sessionGeneration
       )
     )
-      onAuthorityFailure(affordancesQuery.error, sessionScope, sessionGeneration)
+      onAuthorityFailure(errorMessage(affordancesQuery.error), sessionScope, sessionGeneration)
   }, [affordancesQuery.error, onAuthorityFailure, sessionGeneration, sessionScope])
   useEffect(() => {
     if (
@@ -483,7 +490,11 @@ export function useFilePreviewResourceActions({
         moveContextRef.current.sessionGeneration
       )
     )
-      onAuthorityFailure(sourceParentAffordancesQuery.error, sessionScope, sessionGeneration)
+      onAuthorityFailure(
+        errorMessage(sourceParentAffordancesQuery.error),
+        sessionScope,
+        sessionGeneration
+      )
   }, [onAuthorityFailure, sessionGeneration, sessionScope, sourceParentAffordancesQuery.error])
   useEffect(() => {
     if (
@@ -496,7 +507,7 @@ export function useFilePreviewResourceActions({
     )
       return
     for (const error of [grantsQuery.error, sharesQuery.error, inheritedQuery.error]) {
-      if (error) onAuthorityFailure(error, sessionScope, sessionGeneration)
+      if (error) onAuthorityFailure(errorMessage(error), sessionScope, sessionGeneration)
     }
   }, [
     grantsQuery.error,
@@ -603,7 +614,13 @@ export function useFilePreviewResourceActions({
           )
         )
           return false
-        if (!onAuthorityFailure(error, captured.sessionScope, captured.sessionGeneration)) {
+        if (
+          !onAuthorityFailure(
+            errorMessage(error),
+            captured.sessionScope,
+            captured.sessionGeneration
+          )
+        ) {
           pushToast?.(`${failurePrefix}: ${describeGfsReadError(error).message}`, 'error')
         }
         return false
@@ -669,7 +686,7 @@ export function useFilePreviewResourceActions({
         return false
       if (
         !onAuthorityFailure(
-          error,
+          errorMessage(error),
           requestedContext.sessionScope,
           requestedContext.sessionGeneration ?? null
         )
@@ -806,7 +823,13 @@ export function useFilePreviewResourceActions({
               )
             )
               return
-            if (!onAuthorityFailure(error, captured.sessionScope, captured.sessionGeneration)) {
+            if (
+              !onAuthorityFailure(
+                errorMessage(error),
+                captured.sessionScope,
+                captured.sessionGeneration
+              )
+            ) {
               pushToast?.(
                 `Could not download the file: ${describeGfsReadError(error).message}`,
                 'error'
@@ -893,7 +916,7 @@ export function useFilePreviewResourceActions({
         return
       if (
         !onAuthorityFailure(
-          error,
+          errorMessage(error),
           operationContext.sessionScope,
           operationContext.sessionGeneration
         )
@@ -1093,10 +1116,11 @@ export function useFilePreviewResourceActions({
             )
           },
           isSessionAuthorityFailure: error => {
+            const message = errorMessage(error)
             if (moveContextRef.current.sessionScope !== moveContext.sessionScope) {
-              return isGfsSessionAuthorityFailure(error, 'operation')
+              return isGfsSessionAuthorityFailure(message, 'operation')
             }
-            return onAuthorityFailure(error, moveContext.sessionScope, capturedSessionGeneration)
+            return onAuthorityFailure(message, moveContext.sessionScope, capturedSessionGeneration)
           },
           isSessionGenerationCurrent: isCurrentSessionGeneration,
           isCurrent: () =>
@@ -1186,7 +1210,13 @@ export function useFilePreviewResourceActions({
           setMovePermissionStatus(null)
           return
         }
-        if (onAuthorityFailure(error, moveContext.sessionScope, capturedSessionGeneration)) {
+        if (
+          onAuthorityFailure(
+            errorMessage(error),
+            moveContext.sessionScope,
+            capturedSessionGeneration
+          )
+        ) {
           setMoveOpen(false)
           setMovePermissionStatus(null)
         } else {
@@ -1196,7 +1226,9 @@ export function useFilePreviewResourceActions({
         return
       }
       if (!previewMountedRef.current || !hasCurrentMovePresentationContext()) return
-      if (onAuthorityFailure(error, moveContext.sessionScope, capturedSessionGeneration)) {
+      if (
+        onAuthorityFailure(errorMessage(error), moveContext.sessionScope, capturedSessionGeneration)
+      ) {
         if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) {
           setMoveOpen(false)
           setMovePermissionStatus(null)
@@ -1321,7 +1353,7 @@ export function useFilePreviewResourceActions({
         return
       if (
         !onAuthorityFailure(
-          error,
+          errorMessage(error),
           operationContext.sessionScope,
           operationContext.sessionGeneration
         )
@@ -1370,7 +1402,7 @@ export function useFilePreviewResourceActions({
         return
       if (
         !onAuthorityFailure(
-          error,
+          errorMessage(error),
           operationContext.sessionScope,
           operationContext.sessionGeneration
         )
@@ -1428,7 +1460,7 @@ export function useFilePreviewResourceActions({
         return
       if (
         !onAuthorityFailure(
-          error,
+          errorMessage(error),
           operationContext.sessionScope,
           operationContext.sessionGeneration
         )
@@ -1510,7 +1542,7 @@ export function useFilePreviewResourceActions({
         return
       if (
         !onAuthorityFailure(
-          error,
+          errorMessage(error),
           operationContext.sessionScope,
           operationContext.sessionGeneration
         )

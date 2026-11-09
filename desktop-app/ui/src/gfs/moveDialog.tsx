@@ -45,7 +45,7 @@ type GfsMoveTreeFolderProps = {
   selectedDestination: SelectedDestination | null
   onToggle: (resourceId: string) => void
   onSelect: (folder: GfsBrowserChild) => void
-  onAuthorityFailure?: (error: unknown, scope: string, sessionGeneration: number) => boolean
+  onAuthorityFailure?: (message: string, scope: string, sessionGeneration: number) => boolean
 }
 
 function GfsMoveTreeFolder({
@@ -107,7 +107,7 @@ function GfsMoveTreeFolder({
     if (!isAuthorityCurrent()) return
     if (childQuery.error) purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
     if (childError && isGfsSessionGeneration(sessionGeneration)) {
-      onAuthorityFailure?.(childQuery.error, scope, sessionGeneration)
+      onAuthorityFailure?.(childError, scope, sessionGeneration)
     }
   }, [
     childError,
@@ -396,7 +396,7 @@ export function GfsMoveDialog({
       isGfsSessionGeneration(sessionGeneration) &&
       sessionScope
     ) {
-      onAuthorityFailure?.(accessibleQuery.error, sessionScope, sessionGeneration)
+      onAuthorityFailure?.(listError, sessionScope, sessionGeneration)
     }
   }, [listError, onAuthorityFailure, sessionGeneration, sessionScope])
 

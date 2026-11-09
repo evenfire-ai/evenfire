@@ -343,12 +343,11 @@ export class PluginSdkRuntime {
 
     let resource
     try {
-      resource = await this.deps.service.resolveGfsUriInCurrentAuthScope(link)
+      resource = await this.deps.service.resolveGfsUri(link)
     } catch (err) {
       console.warn('[PluginSDK] gfs.open resolve failed:', err)
       return { opened: false, reason: 'not_found' }
     }
-    if (!resource) return { opened: false, reason: 'scope_changed' }
 
     this.sendToRenderer('pluginSdk:openGfsResource', {
       gfsUri: resource.gfsUri ?? link,

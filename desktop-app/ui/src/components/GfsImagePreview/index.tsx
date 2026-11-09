@@ -22,7 +22,6 @@ export function GfsImagePreview({
   reloadVersion,
   unavailable = false,
   onDownloadError,
-  isScopeCurrent,
 }: GfsImagePreviewProps) {
   const titleId = useId()
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -148,7 +147,6 @@ export function GfsImagePreview({
             mimeType={mimeType}
             onDownloadError={onDownloadError}
             onCopyContentReady={handleCopyContentReady}
-            isScopeCurrent={isScopeCurrent}
             titleId={titleId}
             headerActions={
               <>

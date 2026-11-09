@@ -251,34 +251,26 @@ function makeController(): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
-  const beginUserNavigationIntent = vi.fn(() => {
-    navigationIntentSequence += 1
-    controller.navigationIntentSequence = navigationIntentSequence
-    forceControllerRender()
-    return navigationIntentSequence
-  })
-  const openFilesSection = vi.fn((path: string | null = null) => {
-    beginUserNavigationIntent()
-    clearAppsPicker()
-    setWorkspaceTabs((state: WorkspaceState) =>
-      openFilesTab(state, { id: nextWorkspaceTabId(), path })
-    )
-    forceControllerRender()
-  })
-  const openPreviewSection = vi.fn((preview: GfsPreviewResource, sessionScope?: string) => {
-    beginUserNavigationIntent()
+  const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
+    controller.beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openPreviewTab(state, {
         id: nextWorkspaceTabId(),
         title: preview.name,
         gfsUri: preview.gfsUri,
-        ...(sessionScope !== undefined ? { sessionScope } : {}),
         fileKind: preview.kind,
         byteLength: preview.bytes,
         ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
         ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
       })
+    )
+  })
+  const openFilesSection = vi.fn((path: string | null = null) => {
+    controller.beginUserNavigationIntent()
+    clearAppsPicker()
+    setWorkspaceTabs((state: WorkspaceState) =>
+      openFilesTab(state, { id: nextWorkspaceTabId(), path })
     )
   })
   const showAppsPicker = vi.fn(() => {
@@ -295,7 +287,6 @@ function makeController(): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
-    sessionGeneration: 1,
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',
