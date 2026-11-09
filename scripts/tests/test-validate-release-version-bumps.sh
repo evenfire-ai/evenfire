@@ -203,6 +203,15 @@ commit_all 'a source file leaves the service'
 expect_run 'a file moved out of a service needs a bump' 1 \
   'control-api code changed but control-api/package.json stayed at 0.1.9' --previous "$checkpoint" --all-services
 
+# git quotes a path with a non-ASCII character or a double quote; the check reads it as it is.
+new_fixture quoted-paths control-api
+for name in 'café.ts' 'a"b.ts'; do
+  echo one >"control-api/src/$name"
+  commit_all "add control-api/src/$name"
+  expect_run "control-api/src/$name needs a bump" 1 \
+    'control-api code changed but control-api/package.json stayed at 0.1.9' --previous HEAD^ --all-services
+done
+
 # Test files beside the code need no bump; the code beside them does.
 new_fixture tests-beside control-api control-ui workflow-recipes
 mkdir -p control-ui/components/__tests__/fixtures
@@ -556,5 +565,5 @@ else
 fi
 
 printf 'validate-release-version-bumps: %d checks, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
-[ "$TESTS_RUN" -eq 315 ] || { echo "FAIL: expected 315 checks, ran $TESTS_RUN" >&2; exit 1; }
+[ "$TESTS_RUN" -eq 317 ] || { echo "FAIL: expected 317 checks, ran $TESTS_RUN" >&2; exit 1; }
 [ "$TESTS_FAILED" -eq 0 ]

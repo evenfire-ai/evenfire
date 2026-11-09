@@ -81,10 +81,10 @@ function packageVersionAt(ref, filePath) {
 function changedFiles() {
   if (!previousRef || /^0+$/.test(previousRef)) return []
   // --no-renames lists both sides, so a file renamed to a test name or moved out of a service
-  // still counts as that service's file going away.
-  return git(['diff', '--no-renames', '--name-only', `${previousRef}..${currentRef}`])
-    .split('\n')
-    .map(filePath => filePath.trim())
+  // still counts as that service's file going away. -z prints each path as it is: without it, git
+  // quotes a path with a non-ASCII character or a double quote, and the quote hides its service.
+  return git(['diff', '-z', '--no-renames', '--name-only', `${previousRef}..${currentRef}`])
+    .split('\0')
     .filter(Boolean)
 }
 

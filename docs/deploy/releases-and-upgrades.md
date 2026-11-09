@@ -55,7 +55,8 @@ and at `packages/jwt-key-policy/` for the three services that declare it (`contr
 `external-rest-api/src/releaseManifest.ts`, which the release script writes. Unlike the
 hook, it counts both sides of a rename, so a file moved out of a service with nothing
 else changed there fails the check with no hook bump: set that service's version by
-hand. It also leaves out what a running service does not load: test code (`test/`,
+hand. The same holds for a file whose path has a non-ASCII character or a double quote,
+which the hook does not match to its service. It also leaves out what a running service does not load: test code (`test/`,
 `tests/` and `e2e/` at the service's root, `__tests__/`, JavaScript and TypeScript files
 named `*.test.*` or `*.spec.*`, `*.testFixtures.ts`), Markdown, the dev-only files
 `Makefile`, `makefile`, `vitest.config.*` and `.env.example` at the service's root, and
