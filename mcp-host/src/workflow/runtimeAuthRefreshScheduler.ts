@@ -98,7 +98,6 @@ export function computeNextRefreshDelayMs(
 }
 
 type SchedulerDeps = {
-  refresh?: (auth: McpHostRuntimeAuth) => Promise<void>
   now?: () => number
   config?: ProactiveRefreshConfig
 }
@@ -119,12 +118,10 @@ export function startRuntimeAuthProactiveRefresh(
   if (!cfg.enabled || running) return
   running = true
 
-  const refresh =
-    deps.refresh ??
-    (cfg.accessHalfLife
-      ? (a: McpHostRuntimeAuth) =>
-          refreshWithRecovery(a, { deferUnavailableWhileAccessValidMs: cfg.minIntervalSec * 1000 })
-      : refreshWithRecovery)
+  const refresh = cfg.accessHalfLife
+    ? (a: McpHostRuntimeAuth) =>
+        refreshWithRecovery(a, { deferUnavailableWhileAccessValidMs: cfg.minIntervalSec * 1000 })
+    : refreshWithRecovery
   const now = deps.now ?? (() => Date.now())
 
   const arm = (delayMs: number): void => {

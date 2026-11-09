@@ -15,10 +15,11 @@ import {
 } from '../../workflow/runtimeAuthRefreshScheduler'
 import { type McpHostRuntimeAuth, refreshWithRecovery } from '../../workflow/userApprovalRequester'
 
-// Process-level continuity for a Host pod: the real HCC client, the real
+// Multi-module continuity for a Host pod: the real HCC client, the real
 // refresh path and the real scheduler, on a fake clock, against scripted HCC
 // and control-api answers. HCC rejects a bearer whose `exp` has passed; the
-// refresh route answers 504 while control-api is down.
+// refresh route answers 504 while control-api is down. The scheduler is armed
+// here with an explicit config (`HALF_LIFE`), not through main.ts.
 //
 // Readiness is modelled, not served: a probe every 10 s that fails while
 // runtimeAuthHealthSnapshot() is degraded (the state /v1/runtime/health

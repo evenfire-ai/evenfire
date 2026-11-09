@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   resetRuntimeAuthHealthForTests,
   runtimeAuthHealthSnapshot,
@@ -41,10 +44,6 @@ const CFG: ProactiveRefreshConfig = {
   marginSec: 600,
   minIntervalSec: 60,
   fallbackSec: 1800,
-}
-
-function authWithToken(token: string): McpHostRuntimeAuth {
-  return { refreshToken: token } as unknown as McpHostRuntimeAuth
 }
 
 describe('computeNextRefreshDelayMs', () => {
@@ -153,139 +152,218 @@ describe('proactiveRefreshConfig: half-life by runtime kind', () => {
   })
 })
 
+const GATEWAY = 'http://gateway.test'
+const claims = { hostRefs: ['host-a'], recipeNamespace: 'mcp-host', recipeName: 'standalone' }
+const signed = (payload: Record<string, unknown>) =>
+  `${b64url({ alg: 'none', typ: 'JWT' })}.${b64url({ ...claims, ...payload })}.sig`
+const nowSec = () => Math.floor(Date.now() / 1000)
+
+/** No outage: the gateway rotates tokens on every call. */
+const ALWAYS_UP = { from: 0, to: 0 }
+/** control-api unavailable from 0 s on. */
+const DOWN_FROM_START = { from: 0, to: Number.POSITIVE_INFINITY }
+
+/** Gateway that answers 502 inside [from, to) and rotates tokens outside it. */
+function gateway(outage: { from: number; to: number }, accessTtlSec: number, refreshTtlSec = 3600) {
+  const calls = {
+    inOutage: 0,
+    ok: 0,
+    /** Authorization header of every refresh-route call, in order. */
+    bearers: [] as (string | null)[],
+    /** Refresh token returned by every successful call, in order. */
+    issuedRefreshTokens: [] as string[],
+  }
+  const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    if (String(input) !== `${GATEWAY}/api/v1/workflow-auth/refresh`) {
+      throw new Error(`unexpected fetch ${String(input)}`)
+    }
+    calls.bearers.push(new Headers(init?.headers).get('Authorization'))
+    if (nowSec() >= outage.from && nowSec() < outage.to) {
+      calls.inOutage += 1
+      return new Response('bad gateway', { status: 502 })
+    }
+    calls.ok += 1
+    const t = nowSec()
+    const refreshToken = signed({ iat: t, exp: t + refreshTtlSec })
+    calls.issuedRefreshTokens.push(refreshToken)
+    // Same token fields as the control-api refresh route answers with.
+    return new Response(
+      JSON.stringify({
+        accessToken: signed({ iat: t, exp: t + accessTtlSec }),
+        refreshToken,
+        mcpHostControlToken: signed({ iat: t, exp: t + accessTtlSec }),
+      }),
+      { status: 200 }
+    )
+  })
+  return { fetchMock, calls }
+}
+
+/** Host runtime auth whose tokens were issued at 0 s. */
+function hostAuth(accessTtlSec: number, refreshTtlSec: number): McpHostRuntimeAuth {
+  return {
+    accessToken: signed({ iat: 0, exp: accessTtlSec }),
+    refreshToken: signed({ iat: 0, exp: refreshTtlSec }),
+    baseUrl: GATEWAY,
+    hostRef: 'host-a',
+    recipeNamespace: 'mcp-host',
+    recipeName: 'standalone',
+  }
+}
+
+/** Advance the fake clock to an absolute second. */
+async function advanceTo(sec: number): Promise<void> {
+  await vi.advanceTimersByTimeAsync(sec * 1000 - Date.now())
+}
+
 describe('startRuntimeAuthProactiveRefresh loop', () => {
+  let stateDir: string
+
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(0)
+    // Empty state dir, so a persisted token pair cannot stand in for a refresh.
+    stateDir = mkdtempSync(join(tmpdir(), 'mcp-host-refresh-scheduler-'))
+    vi.stubEnv('MCP_HOST_RUNTIME_AUTH_STATE_DIR', stateDir)
+    resetRuntimeAuthHealthForTests()
+    runtimeAuthRecoveryFailuresCounter.reset()
   })
 
   afterEach(() => {
     stopRuntimeAuthProactiveRefresh()
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
     vi.useRealTimers()
+    rmSync(stateDir, { recursive: true, force: true })
   })
 
-  it('does not arm when disabled', () => {
-    const refresh = vi.fn().mockResolvedValue(undefined)
-    startRuntimeAuthProactiveRefresh(authWithToken(jwtWithExp(3600)), {
-      refresh,
-      config: { ...CFG, enabled: false },
-    })
+  it('does not arm when disabled', async () => {
+    const { fetchMock, calls } = gateway(ALWAYS_UP, 3600)
+    vi.stubGlobal('fetch', fetchMock)
+    const auth = hostAuth(3600, 3600)
+
+    startRuntimeAuthProactiveRefresh(auth, { config: { ...CFG, enabled: false } })
     expect(isRuntimeAuthProactiveRefreshRunning()).toBe(false)
+    await advanceTo(3600)
+    expect(calls.bearers).toHaveLength(0)
+
+    // Witness for the 0: the same auth, gateway and clock with the loop
+    // enabled call the refresh route at 3000 s.
+    vi.setSystemTime(0)
+    startRuntimeAuthProactiveRefresh(auth, { config: CFG })
+    expect(isRuntimeAuthProactiveRefreshRunning()).toBe(true)
+    await advanceTo(3000)
+    expect(calls.bearers).toHaveLength(1)
   })
 
   it('refreshes proactively before expiry and reschedules from the rotated token', async () => {
-    // First token expires in 1h → first fire at 3000s. After a successful
-    // refresh the auth carries a new token whose exp drives the next fire.
-    const auth = authWithToken(jwtWithExp(3600))
-    const refresh = vi.fn().mockImplementation(async (a: McpHostRuntimeAuth) => {
-      a.refreshToken = jwtWithExp(7200) // rotated: now expires in 2h from t0
-    })
+    const { fetchMock, calls } = gateway(ALWAYS_UP, 3600)
+    vi.stubGlobal('fetch', fetchMock)
+    const auth = hostAuth(3600, 3600)
+    const firstRefreshToken = auth.refreshToken
 
-    startRuntimeAuthProactiveRefresh(auth, { refresh, config: CFG, now: () => Date.now() })
+    startRuntimeAuthProactiveRefresh(auth, { config: CFG })
     expect(isRuntimeAuthProactiveRefreshRunning()).toBe(true)
 
-    await vi.advanceTimersByTimeAsync(3000 * 1000)
-    expect(refresh).toHaveBeenCalledTimes(1)
+    // The first token expires at 3600 s: the refresh fires 600 s before.
+    await advanceTo(2999)
+    expect(calls.bearers).toHaveLength(0)
+    await advanceTo(3000)
+    expect(calls.bearers).toEqual([`Bearer ${firstRefreshToken}`])
+    // The real refresh path rotated the pair: the new refresh token expires at 6600 s.
+    expect(auth.refreshToken).toBe(calls.issuedRefreshTokens[0])
+    expect(expOf(auth.refreshToken)).toBe(6600)
 
-    // New token exp=7200s, fired at t=3000s → next at 7200-600-3000 = 3600s later.
-    await vi.advanceTimersByTimeAsync(3600 * 1000)
-    expect(refresh).toHaveBeenCalledTimes(2)
+    // The next fire comes from the rotated token: 6600 - 600 = 6000 s.
+    await advanceTo(5999)
+    expect(calls.bearers).toHaveLength(1)
+    await advanceTo(6000)
+    expect(calls.bearers).toHaveLength(2)
+    expect(calls.bearers[1]).toBe(`Bearer ${calls.issuedRefreshTokens[0]}`)
   })
 
   it('retries at minIntervalSec after a failed refresh so failures accumulate', async () => {
-    const auth = authWithToken(jwtWithExp(3600))
-    const refresh = vi.fn().mockRejectedValue(new Error('reIssueTokens: unauthorized (401)'))
+    // No half-life (recipe config), so every failed tick counts.
+    const { fetchMock, calls } = gateway(DOWN_FROM_START, 3600)
+    vi.stubGlobal('fetch', fetchMock)
+    const auth = hostAuth(3600, 3600)
 
-    startRuntimeAuthProactiveRefresh(auth, { refresh, config: CFG, now: () => Date.now() })
+    startRuntimeAuthProactiveRefresh(auth, { config: CFG })
 
-    await vi.advanceTimersByTimeAsync(3000 * 1000) // first fire
-    expect(refresh).toHaveBeenCalledTimes(1)
+    // First tick at 3000 s: three attempts (backoff 1 s + 2 s), ends at 3003 s.
+    await advanceTo(2999)
+    expect(calls.bearers).toHaveLength(0)
+    await advanceTo(3003)
+    expect(calls.bearers).toHaveLength(3)
+    expect(runtimeAuthHealthSnapshot().consecutiveFailures).toBe(1)
 
-    // Failure → retry after minIntervalSec (60s), not the full margin window.
-    await vi.advanceTimersByTimeAsync(60 * 1000)
-    expect(refresh).toHaveBeenCalledTimes(2)
-    await vi.advanceTimersByTimeAsync(60 * 1000)
-    expect(refresh).toHaveBeenCalledTimes(3)
+    // Failure → retry 60 s after the failed tick ended (3063 s), not the
+    // refresh-token schedule.
+    await advanceTo(3062)
+    expect(calls.bearers).toHaveLength(3)
+    await advanceTo(3066)
+    expect(calls.bearers).toHaveLength(6)
+    expect(runtimeAuthHealthSnapshot().consecutiveFailures).toBe(2)
+    await advanceTo(3129)
+    expect(calls.bearers).toHaveLength(9)
+    expect(runtimeAuthHealthSnapshot().consecutiveFailures).toBe(3)
+    expect(calls.ok).toBe(0)
   })
 
   it('is idempotent — a second start while running does not double-arm', async () => {
-    const auth = authWithToken(jwtWithExp(3600))
-    const refresh = vi.fn().mockResolvedValue(undefined)
-    startRuntimeAuthProactiveRefresh(auth, { refresh, config: CFG, now: () => Date.now() })
-    startRuntimeAuthProactiveRefresh(auth, { refresh, config: CFG, now: () => Date.now() })
+    const { fetchMock, calls } = gateway(ALWAYS_UP, 3600)
+    vi.stubGlobal('fetch', fetchMock)
+    const auth = hostAuth(3600, 3600)
 
-    await vi.advanceTimersByTimeAsync(3000 * 1000)
-    expect(refresh).toHaveBeenCalledTimes(1)
+    startRuntimeAuthProactiveRefresh(auth, { config: CFG })
+    startRuntimeAuthProactiveRefresh(auth, { config: CFG })
+
+    await advanceTo(3000)
+    expect(calls.bearers).toHaveLength(1)
+    // Witness: the single tick rotated the pair once.
+    expect(calls.issuedRefreshTokens).toHaveLength(1)
+    expect(auth.refreshToken).toBe(calls.issuedRefreshTokens[0])
   })
 
   it('renews a Host token at its midpoint, then at the new token’s midpoint', async () => {
-    const auth = {
-      refreshToken: jwtWithExp(3600),
-      accessToken: accessJwt(0, 600),
-    } as unknown as McpHostRuntimeAuth
-    const refresh = vi.fn().mockImplementation(async (a: McpHostRuntimeAuth) => {
-      const t = Math.floor(Date.now() / 1000)
-      a.accessToken = accessJwt(t, t + 600)
-      a.refreshToken = jwtWithExp(t + 3600)
-    })
-    startRuntimeAuthProactiveRefresh(auth, {
-      refresh,
-      config: { ...CFG, accessHalfLife: true },
-      now: () => Date.now(),
-    })
+    const { fetchMock, calls } = gateway(ALWAYS_UP, 600)
+    vi.stubGlobal('fetch', fetchMock)
+    const auth = hostAuth(600, 3600)
 
-    await vi.advanceTimersByTimeAsync(299 * 1000)
-    expect(refresh).toHaveBeenCalledTimes(0)
+    startRuntimeAuthProactiveRefresh(auth, { config: { ...CFG, accessHalfLife: true } })
+
+    await advanceTo(299)
+    expect(calls.bearers).toHaveLength(0)
     // Witness for the line above: the renewal does come, at 300 s.
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(refresh).toHaveBeenCalledTimes(1)
-    // The rotated token was issued at 300 s, so the next renewal is at 600 s.
-    await vi.advanceTimersByTimeAsync(299 * 1000)
-    expect(refresh).toHaveBeenCalledTimes(1)
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(refresh).toHaveBeenCalledTimes(2)
+    await advanceTo(300)
+    expect(calls.bearers).toHaveLength(1)
+    // The rotated access token was issued at 300 s, so the next renewal is at 600 s.
+    await advanceTo(599)
+    expect(calls.bearers).toHaveLength(1)
+    expect(expOf(auth.accessToken)).toBe(900)
+    await advanceTo(600)
+    expect(calls.bearers).toHaveLength(2)
   })
 
-  it('stops cleanly', () => {
-    const refresh = vi.fn().mockResolvedValue(undefined)
-    startRuntimeAuthProactiveRefresh(authWithToken(jwtWithExp(3600)), { refresh, config: CFG })
+  it('stops cleanly', async () => {
+    const { fetchMock, calls } = gateway(ALWAYS_UP, 3600)
+    vi.stubGlobal('fetch', fetchMock)
+    const auth = hostAuth(3600, 3600)
+
+    startRuntimeAuthProactiveRefresh(auth, { config: CFG })
     expect(isRuntimeAuthProactiveRefreshRunning()).toBe(true)
+    // Witness: the loop fired and re-armed (next fire at 6000 s).
+    await advanceTo(3000)
+    expect(calls.bearers).toHaveLength(1)
+
     stopRuntimeAuthProactiveRefresh()
     expect(isRuntimeAuthProactiveRefreshRunning()).toBe(false)
+    await advanceTo(6600)
+    expect(calls.bearers).toHaveLength(1)
   })
 })
 
 describe('startRuntimeAuthProactiveRefresh: control-api outage, real refresh path', () => {
-  const GATEWAY = 'http://gateway.test'
-  const claims = { hostRefs: ['host-a'], recipeNamespace: 'mcp-host', recipeName: 'standalone' }
-  const signed = (payload: Record<string, unknown>) =>
-    `${b64url({ alg: 'none', typ: 'JWT' })}.${b64url({ ...claims, ...payload })}.sig`
-  const nowSec = () => Math.floor(Date.now() / 1000)
-
-  /** Gateway that answers 502 inside [from, to) and rotates tokens outside it. */
-  function gateway(outage: { from: number; to: number }, accessTtlSec: number) {
-    const calls = { inOutage: 0, ok: 0 }
-    const fetchMock = vi.fn(async (input: string | URL) => {
-      if (String(input) !== `${GATEWAY}/api/v1/workflow-auth/refresh`) {
-        throw new Error(`unexpected fetch ${String(input)}`)
-      }
-      if (nowSec() >= outage.from && nowSec() < outage.to) {
-        calls.inOutage += 1
-        return new Response('bad gateway', { status: 502 })
-      }
-      calls.ok += 1
-      const t = nowSec()
-      return new Response(
-        JSON.stringify({
-          accessToken: signed({ iat: t, exp: t + accessTtlSec }),
-          refreshToken: signed({ iat: t, exp: t + 3600 }),
-        }),
-        { status: 200 }
-      )
-    })
-    return { fetchMock, calls }
-  }
-
   /** Advance one second at a time and keep the worst health seen. */
   async function runUntil(untilSec: number) {
     let maxConsecutive = 0
