@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClientProvider } from '@tanstack/react-query'
 import {
   act,
