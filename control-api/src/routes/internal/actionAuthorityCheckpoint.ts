@@ -3,6 +3,7 @@ import { ACTION_CONTEXT_VERSION } from '@clerum/action-context-contracts'
 import { pool } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import { requireActionCheckpointCaller } from '../../middleware/actionCheckpointCaller.js'
+import { requireActionContextEnabled } from '../../middleware/actionContextEnabled.js'
 import { AccessExecutionBudget } from '../../services/access/accessExecutionBudget.js'
 import {
   checkpointActionAuthority,
@@ -37,6 +38,7 @@ export function createInternalActionAuthorityCheckpointRouter(gateway: K8sGatewa
   router.post(
     '/internal/action-authority/checkpoint',
     requireActionCheckpointCaller,
+    requireActionContextEnabled,
     async (req, res) => {
       const caller = req.actionCheckpointCaller!
       let parsed

@@ -8,8 +8,10 @@ const checkpoint = vi.hoisted(() => ({
   checkpointActionAuthority: vi.fn(),
 }))
 const wake = vi.hoisted(() => ({ executeHostWake: vi.fn() }))
+const accessPolicy = vi.hoisted(() => ({ resolveEffectiveUserAccessPolicy: vi.fn() }))
 
 vi.mock('../src/services/access/actionAuthorityCheckpoint.js', () => checkpoint)
+vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => accessPolicy)
 vi.mock('../src/services/hostWakeAction.js', () => wake)
 vi.mock('../src/middleware/actionCheckpointCaller.js', () => ({
   requireActionCheckpointCaller: (
@@ -79,6 +81,47 @@ function app() {
 describe('v2 host wake adapter', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    accessPolicy.resolveEffectiveUserAccessPolicy.mockResolvedValue({ actionContextV2: true })
+  })
+
+  it('X3: answers 409 action_context_disabled with the action context off, before any delegation work', async () => {
+    checkpoint.parseActionAuthorityCheckpointRequest.mockReturnValue(parsed('host.wake'))
+    checkpoint.checkpointActionAuthority.mockResolvedValue({
+      version: 2,
+      status: 'allowed',
+      destination: {
+        kind: 'host',
+        ref: 'mcp-host/chatllm',
+        url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+      },
+    })
+    wake.executeHostWake.mockResolvedValue({ kind: 'wake-requested', wakeGeneration: 11 })
+
+    accessPolicy.resolveEffectiveUserAccessPolicy.mockResolvedValueOnce({ actionContextV2: false })
+    const disabled = await request(app())
+      .post('/internal/action-authority/hosts/chatllm/wake')
+      .send({ binding: {}, wakeReason: 'explicit' })
+      .expect(409)
+
+    expect(disabled.body).toEqual({
+      version: 2,
+      status: 'conflict',
+      code: 'action_context_disabled',
+    })
+    expect(accessPolicy.resolveEffectiveUserAccessPolicy).toHaveBeenCalledTimes(1)
+    expect(checkpoint.parseActionAuthorityCheckpointRequest).not.toHaveBeenCalled()
+    expect(checkpoint.checkpointActionAuthority).not.toHaveBeenCalled()
+    expect(wake.executeHostWake).not.toHaveBeenCalled()
+
+    // Witness: the same request with the action context on reaches the checkpoint.
+    await request(app())
+      .post('/internal/action-authority/hosts/chatllm/wake')
+      .send({ binding: {}, wakeReason: 'explicit' })
+      .expect(202)
+
+    expect(accessPolicy.resolveEffectiveUserAccessPolicy).toHaveBeenCalledTimes(2)
+    expect(checkpoint.checkpointActionAuthority).toHaveBeenCalledTimes(1)
+    expect(wake.executeHostWake).toHaveBeenCalledOnce()
   })
 
   it('rejects a chat delegation without widening it into host.wake authority', async () => {

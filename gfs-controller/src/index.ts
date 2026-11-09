@@ -294,7 +294,6 @@ async function main(): Promise<void> {
                 permissions,
                 writeService,
                 audit,
-                checkpointAuthority,
               }),
             })),
           }

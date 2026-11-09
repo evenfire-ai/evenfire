@@ -1,11 +1,9 @@
 import { type Request, type Response, Router } from 'express'
-import { pool } from '../../../db.js'
 import { asyncHandler } from '../../../http/asyncHandler.js'
 import type { K8sGateway } from '../../../k8s.js'
 import { K8sNotFoundError } from '../../../services/resourceService.js'
 import {
   WorkflowAuthorityError,
-  persistWorkflowAuthorityBinding,
   requireWorkflowActionAuthority,
 } from '../../../services/workflows/workflowAuthorityBindingService.js'
 import {
@@ -21,6 +19,7 @@ import { listCanonicalRuns } from '../../../services/workflows/workflowRunReadSe
 import { requireBoundExternalWorkflowCaller } from '../../workflows/shared/auth.js'
 import { parseLimit } from '../../workflows/shared/validation.js'
 import { externalWorkflowReadAdmission } from './admission.js'
+import { auditAuthorizedWorkflowRead } from './readAudit.js'
 
 const BASE = '/external/workflows'
 
@@ -92,9 +91,7 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
       const limit = parseLimit(req.query?.limit)
       const items = await listCanonicalRuns(ns, name, limit, caller)
       if (authority) {
-        await persistWorkflowAuthorityBinding(pool, {
-          authority,
-          kind: 'workflow_read',
+        auditAuthorizedWorkflowRead(authority, {
           entityType: 'workflow_recipe',
           entityId: `${ns}/${name}`,
         })
@@ -130,9 +127,7 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
           runId: req.params.runId,
         })
         if (authority) {
-          await persistWorkflowAuthorityBinding(pool, {
-            authority,
-            kind: 'artifact_list',
+          auditAuthorizedWorkflowRead(authority, {
             entityType: 'workflow_run',
             entityId: req.params.runId,
           })
@@ -173,9 +168,7 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
           artifactName: req.params.artifactName,
         })
         if (authority) {
-          await persistWorkflowAuthorityBinding(pool, {
-            authority,
-            kind: 'artifact_read',
+          auditAuthorizedWorkflowRead(authority, {
             entityType: 'workflow_artifact',
             entityId: `${req.params.runId}/${req.params.artifactName}`,
           })

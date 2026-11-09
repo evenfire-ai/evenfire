@@ -6,6 +6,7 @@ import {
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
 import { requireActionCheckpointCaller } from '../../middleware/actionCheckpointCaller.js'
+import { requireActionContextEnabled } from '../../middleware/actionContextEnabled.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { AccessExecutionBudget } from '../../services/access/accessExecutionBudget.js'
 import {
@@ -34,6 +35,7 @@ export function createInternalActionAuthorityHostWakeRouter(gateway: K8sGateway)
   router.post(
     '/internal/action-authority/hosts/:hostRef/wake',
     requireActionCheckpointCaller,
+    requireActionContextEnabled,
     rateLimitMiddleware({
       bucketType: 'host_wake',
       maxPerMinute: config.hostWakeRlPerMin,

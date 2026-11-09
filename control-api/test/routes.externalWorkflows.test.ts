@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { hashActionTarget } from '@clerum/action-context-contracts'
 import { createExternalWorkflowsRouter } from '../src/routes/external/workflows/index.js'
+import { workflowReadAuditLogger } from '../src/routes/external/workflows/readAudit.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
@@ -152,6 +153,53 @@ function makeApp(gateway: MockGateway) {
   app.use(express.json())
   app.use(createExternalWorkflowsRouter(gateway as never))
   return app
+}
+
+const RECIPE_READ_TARGET = Object.freeze({ recipeNamespace: RECIPE_NS, recipeName: 'test-recipe' })
+
+function mockRecipeReadDelegation(): void {
+  mockVerifyUserDelegationV2.mockReturnValue({
+    sub: '11111111-1111-4111-8111-111111111111',
+    sid: '22222222-2222-4222-8222-222222222222',
+    sv: 2,
+    jti: '33333333-3333-4333-8333-333333333333',
+    iat: 1_700_000_000,
+    exp: 1_700_000_300,
+    operationIds: ['workflow.read'],
+    resource: canonicalResourceIdentity({
+      environmentId: canonicalEnvironmentId(),
+      type: 'workflow_recipe',
+      logicalId: `${RECIPE_NS}/test-recipe`,
+    }),
+    targets: { 'workflow.read': RECIPE_READ_TARGET },
+    targetHashes: { 'workflow.read': hashActionTarget(RECIPE_READ_TARGET) },
+    accessPathId: `ap1_${'a'.repeat(43)}`,
+    authorizationRevision: `ar1_${'b'.repeat(43)}`,
+    behaviorBindingHash: 'bh2_workflow',
+    pathKind: 'direct',
+    effectiveTeamId: null,
+  })
+}
+
+function authorityBindingInserts(): number {
+  return mockPoolQuery.mock.calls.filter(([sql]) =>
+    String(sql).includes('INSERT INTO workflow_authority_bindings')
+  ).length
+}
+
+const EXPECTED_RECIPE_READ_AUDIT = {
+  event: 'workflow_authorized_read',
+  operationId: 'workflow.read',
+  entityType: 'workflow_recipe',
+  entityId: `${RECIPE_NS}/test-recipe`,
+  userId: '11111111-1111-4111-8111-111111111111',
+  sid: '22222222-2222-4222-8222-222222222222',
+  sessionVersion: 2,
+  delegationJti: '33333333-3333-4333-8333-333333333333',
+  accessPathId: `ap1_${'a'.repeat(43)}`,
+  authorizationRevision: `ar1_${'b'.repeat(43)}`,
+  pathKind: 'direct',
+  effectiveTeamId: null,
 }
 
 describe('routes/external/workflows', () => {
@@ -450,6 +498,33 @@ describe('routes/external/workflows', () => {
         .expect(200)
 
       expect(res.body.metadata.name).toBe('test-recipe')
+    })
+
+    it('WF-14: records an audit line instead of a binding for a v2 recipe read', async () => {
+      await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
+      mockRecipeReadDelegation()
+      mockPoolQuery.mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+      const auditInfo = vi.spyOn(workflowReadAuditLogger, 'info')
+
+      let res
+      try {
+        res = await request(makeApp(gateway))
+          .get(`/external/workflows/${RECIPE_NS}/test-recipe`)
+          .set('x-user-session-token', 'user-session-token-v2')
+          .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
+        expect(auditInfo).toHaveBeenCalledTimes(1)
+        expect(auditInfo).toHaveBeenCalledWith(
+          expect.objectContaining(EXPECTED_RECIPE_READ_AUDIT),
+          'Workflow delegated read authorized'
+        )
+      } finally {
+        auditInfo.mockRestore()
+      }
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(res.body.metadata.name).toBe('test-recipe')
+      expect(mockCheckpointActionAuthority).toHaveBeenCalledTimes(1)
+      expect(authorityBindingInserts()).toBe(0)
     })
   })
 
@@ -1105,45 +1180,70 @@ describe('routes/external/workflows', () => {
   })
 
   describe('GET /external/workflows/:ns/:name/runs', () => {
-    it('does not persist v2 read provenance when run retrieval fails', async () => {
-      const target = Object.freeze({ recipeNamespace: RECIPE_NS, recipeName: 'test-recipe' })
-      const resource = canonicalResourceIdentity({
-        environmentId: canonicalEnvironmentId(),
-        type: 'workflow_recipe',
-        logicalId: `${RECIPE_NS}/test-recipe`,
-      })
-      mockVerifyUserDelegationV2.mockReturnValue({
-        sub: '11111111-1111-4111-8111-111111111111',
-        sid: '22222222-2222-4222-8222-222222222222',
-        sv: 2,
-        jti: '33333333-3333-4333-8333-333333333333',
-        iat: 1_700_000_000,
-        exp: 1_700_000_300,
-        operationIds: ['workflow.read'],
-        resource,
-        targets: { 'workflow.read': target },
-        targetHashes: { 'workflow.read': hashActionTarget(target) },
-        accessPathId: `ap1_${'a'.repeat(43)}`,
-        authorizationRevision: `ar1_${'b'.repeat(43)}`,
-        behaviorBindingHash: 'bh2_workflow',
-        pathKind: 'direct',
-        effectiveTeamId: null,
-      })
+    it('leaves no read audit line and no binding when run retrieval fails', async () => {
+      mockRecipeReadDelegation()
       mockPoolQuery
         .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
         .mockRejectedValueOnce(new Error('run read failed'))
+      const auditInfo = vi.spyOn(workflowReadAuditLogger, 'info')
 
-      const response = await request(makeApp(gateway))
-        .get(`/external/workflows/${RECIPE_NS}/test-recipe/runs?limit=10`)
-        .set('x-user-session-token', 'user-session-token-v2')
-        .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
+      let response
+      try {
+        response = await request(makeApp(gateway))
+          .get(`/external/workflows/${RECIPE_NS}/test-recipe/runs?limit=10`)
+          .set('x-user-session-token', 'user-session-token-v2')
+          .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
+        expect(auditInfo).not.toHaveBeenCalled()
+      } finally {
+        auditInfo.mockRestore()
+      }
 
       expect(response.status).toBe(500)
-      expect(
-        mockPoolQuery.mock.calls.some(([sql]) =>
-          String(sql).includes('INSERT INTO workflow_authority_bindings')
+      // Liveness witness: the V2 read was authorized and the run read was attempted.
+      expect(mockCheckpointActionAuthority).toHaveBeenCalledTimes(1)
+      expect(mockPoolQuery).toHaveBeenCalledTimes(2)
+      expect(authorityBindingInserts()).toBe(0)
+    })
+
+    it('WF-14: records an audit line instead of a binding for a successful v2 run list', async () => {
+      mockRecipeReadDelegation()
+      mockPoolQuery
+        // 1. ensureRecipeAuthorized → granted
+        .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+        // 2. live runs → empty
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        // 3. workflow_runs_audit → empty
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      const auditInfo = vi.spyOn(workflowReadAuditLogger, 'info')
+
+      let response
+      try {
+        response = await request(makeApp(gateway))
+          .get(`/external/workflows/${RECIPE_NS}/test-recipe/runs?limit=10`)
+          .set('x-user-session-token', 'user-session-token-v2')
+          .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
+        // Witness: the one structured audit line through the service logger.
+        expect(auditInfo).toHaveBeenCalledTimes(1)
+        expect(auditInfo).toHaveBeenCalledWith(
+          expect.objectContaining(EXPECTED_RECIPE_READ_AUDIT),
+          'Workflow delegated read authorized'
         )
-      ).toBe(false)
+      } finally {
+        auditInfo.mockRestore()
+      }
+
+      expect(response.status, JSON.stringify(response.body)).toBe(200)
+      expect(response.body).toEqual({ items: [], count: 0 })
+      expect(mockCheckpointActionAuthority).toHaveBeenCalledTimes(1)
+      expect(mockCheckpointActionAuthority).toHaveBeenCalledWith(
+        expect.objectContaining({
+          request: expect.objectContaining({
+            operationId: 'workflow.read',
+            target: RECIPE_READ_TARGET,
+          }),
+        })
+      )
+      expect(authorityBindingInserts()).toBe(0)
     })
 
     it('returns empty list when user has grant but no runs exist', async () => {

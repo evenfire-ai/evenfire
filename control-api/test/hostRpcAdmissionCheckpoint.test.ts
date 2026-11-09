@@ -15,7 +15,9 @@ import {
 
 const admission = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 const checkpoint = vi.hoisted(() => ({ checkpointActionAuthority: vi.fn() }))
+const accessPolicy = vi.hoisted(() => ({ resolveEffectiveUserAccessPolicy: vi.fn() }))
 
+vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => accessPolicy)
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: admission.checkAndIncrement,
   checkAndIncrementStrict: admission.checkAndIncrement,
@@ -239,6 +241,42 @@ describe('Spec 65 v2 Host-RPC admission checkpoint', () => {
       backendAvailable: true,
     }))
     checkpoint.checkpointActionAuthority.mockResolvedValue({ status: 'allowed' })
+    accessPolicy.resolveEffectiveUserAccessPolicy.mockResolvedValue({ actionContextV2: true })
+  })
+
+  it('M-39: answers 409 action_context_disabled with the action context off, before admission or checkpoint', async () => {
+    const server = app()
+    const route = IN_SCOPE_ROUTES.find(entry => entry.operationId === 'host.wake')!
+
+    accessPolicy.resolveEffectiveUserAccessPolicy.mockResolvedValueOnce({ actionContextV2: false })
+    const disabled = await request(server)
+      .post('/internal/action-authority/checkpoint')
+      .send(checkpointFor(route))
+      .expect(409)
+
+    expect(disabled.body).toEqual({
+      version: 2,
+      status: 'conflict',
+      code: 'action_context_disabled',
+    })
+    expect(accessPolicy.resolveEffectiveUserAccessPolicy).toHaveBeenCalledTimes(1)
+    expect(admission.checkAndIncrement).not.toHaveBeenCalled()
+    expect(checkpoint.checkpointActionAuthority).not.toHaveBeenCalled()
+
+    // Witness: the same request with the action context on reaches the checkpoint.
+    await request(server)
+      .post('/internal/action-authority/checkpoint')
+      .send(checkpointFor(route))
+      .expect(200)
+
+    expect(accessPolicy.resolveEffectiveUserAccessPolicy).toHaveBeenCalledTimes(2)
+    expect(admission.checkAndIncrement).toHaveBeenCalledTimes(1)
+    expect(checkpoint.checkpointActionAuthority).toHaveBeenCalledTimes(1)
+    expect(checkpoint.checkpointActionAuthority).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({ operationId: 'host.wake' }),
+      })
+    )
   })
 
   it('charges every approved non-message operation through one subject bucket', async () => {

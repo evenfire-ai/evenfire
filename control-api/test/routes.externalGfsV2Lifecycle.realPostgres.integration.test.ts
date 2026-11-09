@@ -16,6 +16,20 @@ import { GfsServer } from '../../gfs-controller/src/server.js'
 import type { DbClient } from '../src/db.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
+// M-39: the internal checkpoint route answers 409 while the action context is
+// off. This V2 lifecycle runs with it on; only the actionContextV2 flag is
+// overridden, everything else is the real resolved policy.
+vi.mock('../src/services/access/userAccessRuntimePolicy.js', async importOriginal => {
+  const actual =
+    await importOriginal<typeof import('../src/services/access/userAccessRuntimePolicy.js')>()
+  return {
+    ...actual,
+    resolveEffectiveUserAccessPolicy: async (
+      ...args: Parameters<typeof actual.resolveEffectiveUserAccessPolicy>
+    ) => ({ ...(await actual.resolveEffectiveUserAccessPolicy(...args)), actionContextV2: true }),
+  }
+})
+
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 

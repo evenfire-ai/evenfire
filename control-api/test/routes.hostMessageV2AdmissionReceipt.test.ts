@@ -22,6 +22,11 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrementStrict: admission.checkAndIncrement,
 }))
 vi.mock('../src/services/directory/index.js', () => directory)
+// M-39: the checkpoint route reads the policy per request; these cases run
+// with the action context on.
+vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => ({
+  resolveEffectiveUserAccessPolicy: async () => ({ actionContextV2: true }),
+}))
 vi.mock('../src/services/access/actionAuthorityCheckpoint.js', async importOriginal => ({
   ...(await importOriginal<object>()),
   checkpointActionAuthority: checkpoint.checkpointActionAuthority,

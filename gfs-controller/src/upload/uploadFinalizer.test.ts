@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { GfsError } from '../api/errors'
 import type { FilesystemActionAuthorityV2 } from '../auth/actionAuthority'
 import type { DbAuditSink, PermissionClient } from '../authz/permissionClient'
 import { createGfsUploadFinalizer } from './uploadFinalizer'
@@ -92,8 +91,7 @@ function part(root: string): UploadPartRow {
 
 function finalizerHarness(
   root: string,
-  permissionEpoch: () => { generation: number; bypassed: boolean },
-  checkpointAuthority = vi.fn(async () => undefined)
+  permissionEpoch: () => { generation: number; bypassed: boolean }
 ) {
   const permissions = {
     permissionEpoch,
@@ -134,9 +132,8 @@ function finalizerHarness(
     permissions,
     writeService: writeService as never,
     audit: {} as DbAuditSink,
-    checkpointAuthority,
   })
-  return { finalizer, permissions, client, writeService, checkpointAuthority }
+  return { finalizer, permissions, client, writeService }
 }
 
 describe('production GFS upload finalizer seam', () => {
@@ -205,32 +202,36 @@ describe('production GFS upload finalizer seam', () => {
     }
   })
 
-  it('rechecks live v2 authority before publishing a durable upload', async () => {
+  it('publishes a v2 upload with only the local permission recheck inside the transaction', async () => {
+    // GFS-09: the finalize request's route checkpoint is the live V2 check
+    // (serve.test.ts); the publication transaction repeats only the local
+    // permission decision for the v2 principal.
     const root = await mkdtemp(join(tmpdir(), 'gfs-upload-finalizer-authority-'))
     try {
       const partPath = join(root, '.uploads', UPLOAD_ID, 'parts', '0.part')
       await mkdir(join(root, '.uploads', UPLOAD_ID, 'parts'), { recursive: true })
       await writeFile(partPath, BODY)
-      const checkpointAuthority = vi.fn(async () => {
-        throw new GfsError('forbidden', 'authority revoked')
-      })
-      const harness = finalizerHarness(
-        root,
-        () => ({ generation: 1, bypassed: false }),
-        checkpointAuthority
-      )
+      const harness = finalizerHarness(root, () => ({ generation: 1, bypassed: false }))
       const current = actionAuthority()
 
       await expect(
         harness.finalizer(session(), [part(root)], undefined, undefined, {
           drive: 'main',
-          ownerSubject: current.binding.userId,
-          primarySubject: `user:${current.binding.userId}`,
+          ownerSubject: FINALIZER_SUBJECT,
+          primarySubject: FINALIZER_SUBJECT,
           actionAuthority: current,
         })
-      ).rejects.toMatchObject({ code: 'forbidden' })
-      expect(checkpointAuthority).toHaveBeenCalledWith(current)
-      expect(harness.client.query).not.toHaveBeenCalled()
+      ).resolves.toEqual({ resourceId: UPLOAD_ID, version: 0, sha256: SHA256 })
+      expect(harness.permissions.authorize).toHaveBeenCalledTimes(1)
+      expect(harness.permissions.authorize).toHaveBeenCalledWith(
+        expect.anything(),
+        PARENT_ID,
+        'write'
+      )
+      expect(harness.client.query).toHaveBeenCalledWith(
+        expect.stringContaining("SET state = 'completed'"),
+        expect.arrayContaining([UPLOAD_ID])
+      )
     } finally {
       await rm(root, { recursive: true, force: true })
     }

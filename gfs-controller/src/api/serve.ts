@@ -307,6 +307,7 @@ export class GfsServingHandler {
     }
     const target = authority.binding.target
     let operationId: FilesystemActionAuthorityV2['binding']['operationId']
+    let uploadPart = false
     const routeRid = resourceMatch?.[1] ? requireRid(resourceMatch[1]) : undefined
     const targetRid = target.resourceId
     if (
@@ -345,8 +346,9 @@ export class GfsServingHandler {
     } else if (uploadItemMatch) {
       operationId = 'gfs.write'
       const action = uploadItemMatch[2]
+      uploadPart = action?.startsWith('parts/') === true
       const expectedAction =
-        action === 'complete' ? 'finalize' : action?.startsWith('parts/') ? 'upload_part' : 'upload'
+        action === 'complete' ? 'finalize' : uploadPart ? 'upload_part' : 'upload'
       if (target.action !== expectedAction || target.uploadId !== uploadItemMatch[1]) {
         throw new GfsError('forbidden', 'v2 upload continuation mismatch')
       }
@@ -354,6 +356,10 @@ export class GfsServingHandler {
       throw new GfsError('forbidden', 'v2 filesystem operation is unsupported on this route')
     }
     const exact = requireExactGfsAuthority(authority, { operationId, target })
+    // GFS-09: an upload is checkpointed when its session is created and when it
+    // is finalized, not per part. The session origin is already fixed (GFS-10),
+    // and the part token still has to match the exact upload_part target above.
+    if (uploadPart) return
     await this.deps.checkpointAuthority(exact!)
   }
 

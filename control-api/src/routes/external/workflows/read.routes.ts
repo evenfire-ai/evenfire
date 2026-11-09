@@ -1,11 +1,9 @@
 import { type Request, type Response, Router } from 'express'
-import { pool } from '../../../db.js'
 import { asyncHandler } from '../../../http/asyncHandler.js'
 import type { K8sGateway } from '../../../k8s.js'
 import { K8sNotFoundError } from '../../../services/resourceService.js'
 import {
   WorkflowAuthorityError,
-  persistWorkflowAuthorityBinding,
   requireWorkflowActionAuthority,
 } from '../../../services/workflows/workflowAuthorityBindingService.js'
 import {
@@ -18,6 +16,7 @@ import {
 import { getWorkflowHealth } from '../../../services/workflows/workflowRunReadService.js'
 import { requireBoundExternalWorkflowCaller } from '../../workflows/shared/auth.js'
 import { externalWorkflowReadAdmission } from './admission.js'
+import { auditAuthorizedWorkflowRead } from './readAudit.js'
 
 const BASE = '/external/workflows'
 
@@ -37,20 +36,6 @@ async function authorizeRecipeRead(
     resourceLogicalId: `${recipeNamespace}/${recipeName}`,
     target: Object.freeze({ recipeNamespace, recipeName }),
     gateway,
-  })
-}
-
-async function persistSuccessfulRecipeRead(
-  authority: Exclude<Awaited<ReturnType<typeof requireWorkflowActionAuthority>>, null>,
-  recipeNamespace: string,
-  recipeName: string,
-  entityType: string
-): Promise<void> {
-  await persistWorkflowAuthorityBinding(pool, {
-    authority,
-    kind: 'workflow_read',
-    entityType,
-    entityId: `${recipeNamespace}/${recipeName}`,
   })
 }
 
@@ -97,7 +82,10 @@ export function createExternalWorkflowReadRoutes(gateway: K8sGateway): Router {
         )
         const resource = await gateway.getResource(WORKFLOW_RECIPE_PLURAL, name, ns)
         if (authority) {
-          await persistSuccessfulRecipeRead(authority, ns, name, 'workflow_recipe')
+          auditAuthorizedWorkflowRead(authority, {
+            entityType: 'workflow_recipe',
+            entityId: `${ns}/${name}`,
+          })
         }
         res.json(resource)
       } catch (err) {
@@ -147,7 +135,10 @@ export function createExternalWorkflowReadRoutes(gateway: K8sGateway): Router {
         const status = asRecord(resource.status) ?? {}
         const { activeRuns, lastRun } = await getWorkflowHealth(ns, name, caller)
         if (authority) {
-          await persistSuccessfulRecipeRead(authority, ns, name, 'workflow_recipe')
+          auditAuthorizedWorkflowRead(authority, {
+            entityType: 'workflow_recipe',
+            entityId: `${ns}/${name}`,
+          })
         }
         res.json({
           recipe: `${ns}/${name}`,

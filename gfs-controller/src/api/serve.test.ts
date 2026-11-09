@@ -531,6 +531,109 @@ describe('GFS Upload v2 route contract', () => {
       error: { code: 'quota_exceeded', retryAfterSeconds: 1, limit: 'active_part_streams_global' },
     })
   })
+
+  it('GFS-09: checkpoints a v2 upload once at session create and once at finalize, not per part', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const uploadClaims = (target: Record<string, string>): GfsVerifiedClaims => ({
+      ...USER_WRITE_CLAIMS,
+      sub: '11111111-1111-4111-8111-111111111111',
+      iat: now,
+      exp: now + 300,
+      actionAuthority: {
+        binding: {
+          version: 2,
+          userId: '11111111-1111-4111-8111-111111111111',
+          sid: '22222222-2222-4222-8222-222222222222',
+          sessionVersion: 1,
+          delegationJti: '33333333-3333-4333-8333-333333333333',
+          operationId: 'gfs.write',
+          resource: { type: 'gfs_resource', logicalId: RID },
+          target: { drive: 'main', ...target },
+          targetHash: 'ath1_upload_target',
+          accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          pathKind: 'direct',
+          effectiveTeamId: null,
+          behaviorBindingHash: 'abh1_upload_behavior',
+        },
+        sourceIssuedAt: now,
+        sourceExpiresAt: now + 300,
+      },
+    })
+    let current = uploadClaims({ action: 'upload', resourceId: RID })
+    const checkpointedActions: string[] = []
+    let partWrites = 0
+    let completions = 0
+    const service = {
+      ...uploadDeps().uploadService,
+      putPart: async () => {
+        partWrites += 1
+        return { part: UPLOAD_PART, session: UPLOAD_SESSION }
+      },
+      complete: async () => {
+        completions += 1
+        return { ...UPLOAD_SESSION, state: 'completed' }
+      },
+    } as ServingDeps['uploadService']
+    const d = uploadDeps({
+      verifyToken: () => current,
+      checkpointAuthority: async authority => {
+        checkpointedActions.push(String(authority.binding.target.action))
+      },
+      uploadService: service,
+    })
+    const partHeaders = (partNumber: number) => ({
+      'upload-part-number': String(partNumber),
+      'upload-offset': '0',
+      'upload-chunk-length': '4',
+      'upload-checksum': 'sha256 n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=',
+      'content-type': 'application/offset+octet-stream',
+      'content-length': '4',
+    })
+
+    const created = new FakeRes()
+    await run(
+      d,
+      reqBody('/v1/uploads', {
+        method: 'POST',
+        auth: 'Bearer t',
+        body: {
+          operation: 'create',
+          parentRid: RID,
+          name: 'payload.bin',
+          sizeBytes: 4,
+          idempotencyKey: UPLOAD_ID,
+        },
+      }),
+      created
+    )
+    expect(created.statusCode, created.body).toBe(201)
+
+    current = uploadClaims({ action: 'upload_part', uploadId: UPLOAD_ID })
+    for (const partNumber of [0, 1]) {
+      const partRes = new FakeRes()
+      await run(
+        d,
+        reqPart(`/v1/uploads/${UPLOAD_ID}/parts/${partNumber}`, partHeaders(partNumber)),
+        partRes
+      )
+      expect(partRes.statusCode, partRes.body).toBe(204)
+    }
+
+    current = uploadClaims({ action: 'finalize', uploadId: UPLOAD_ID })
+    const completed = new FakeRes()
+    await run(
+      d,
+      reqBody(`/v1/uploads/${UPLOAD_ID}/complete`, { method: 'POST', auth: 'Bearer t' }),
+      completed
+    )
+    expect(completed.statusCode, completed.body).toBe(201)
+
+    // Witness: both parts reached the upload service and the upload finalized.
+    expect(partWrites).toBe(2)
+    expect(completions).toBe(1)
+    expect(checkpointedActions).toEqual(['upload', 'finalize'])
+  })
 })
 
 describe('GfsReadServer.tryHandle — auth chain (fail-closed)', () => {
