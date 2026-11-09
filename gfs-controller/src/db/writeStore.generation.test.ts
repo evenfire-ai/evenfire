@@ -334,6 +334,9 @@ describe("PgTransactor", () => {
           if (text === "COMMIT") throw new Error("connection lost after commit send");
           return { rows: [] };
         },
+        // The checkout error-event surface; this fake never emits.
+        on: () => undefined,
+        removeListener: () => undefined,
         release: () => undefined,
       };
     }

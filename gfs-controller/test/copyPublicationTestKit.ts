@@ -64,6 +64,9 @@ export class CopyDb implements TxClient {
         }
         return this.query(sql, values);
       },
+      // The checkout error-event surface; this fake never emits.
+      on: () => undefined,
+      removeListener: () => undefined,
       release: () => undefined,
     };
   }

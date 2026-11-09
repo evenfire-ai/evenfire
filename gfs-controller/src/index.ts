@@ -17,6 +17,7 @@ import { resolveAuthzContext } from './authz/subjectResolver'
 import { createWriterCleanupRunner } from './cleanup'
 import { loadConfig } from './config'
 import { PgBlobStagingStore, reconcileExpiredBlobs } from './db/blobStaging'
+import { createGfsPool } from './db/pool'
 import { PgResourceStore } from './db/resourceStore'
 import { GfsWriteService, PgTransactor } from './db/writeStore'
 import { GfsMetrics } from './metrics'
@@ -142,7 +143,9 @@ function startInvalidation(
 async function main(): Promise<void> {
   const config = loadConfig()
 
-  const pool = new Pool({ connectionString: config.pgConnectionString })
+  // The pool logs and survives an idle client's connection error (a Postgres
+  // restart); without the listener that error crashes the process (#700).
+  const pool = createGfsPool(config.pgConnectionString, message => console.error(message))
   if (config.uploadV2.enabled) {
     await assertUploadV2Ready(pool, config.storageMountPath, config.storageRole)
   }
