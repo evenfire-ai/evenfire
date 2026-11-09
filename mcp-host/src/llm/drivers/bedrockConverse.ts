@@ -25,6 +25,7 @@ import {
 } from '../../core/types'
 import type { ProviderCredentials } from '../../types'
 import { classifyByHttpStatus, classifyUnknown } from '../errorClassification'
+import { BEDROCK_TOOL_NAME_RULE, ToolNameAliaser } from '../toolNameAlias'
 import { type ProviderEnvLookup, processEnvLookup } from '../providerEnv'
 import type { LlmProvider } from '../registryCore'
 import type { ClassifiedError, SingleTurnProvider } from '../types'
@@ -128,13 +129,14 @@ export class BedrockConverseDriver implements SingleTurnProvider {
     }
   ): Promise<ToolCompletionResponse> {
     const { system, converseMessages } = this.toBedrockMessages(messages)
+    const aliaser = new ToolNameAliaser(BEDROCK_TOOL_NAME_RULE)
     const toolConfig =
       tools.length > 0
         ? {
             tools: tools.map(t => ({
               toolSpec: {
-                name: t.name,
-                description: t.description,
+                name: aliaser.alias(t.name),
+                description: aliaser.describe(t.name, t.description),
                 inputSchema: { json: t.parameters },
               },
             })),
@@ -157,7 +159,7 @@ export class BedrockConverseDriver implements SingleTurnProvider {
       .filter(b => b.toolUse)
       .map(b => ({
         id: b.toolUse!.toolUseId,
-        name: b.toolUse!.name,
+        name: aliaser.resolve(b.toolUse!.name),
         arguments: (b.toolUse!.input ?? {}) as Record<string, unknown>,
       }))
 

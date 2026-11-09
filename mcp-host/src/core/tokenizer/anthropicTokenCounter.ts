@@ -14,6 +14,7 @@ import type Anthropic from '@anthropic-ai/sdk'
 import type { MessageCountTokensParams } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import { convertToClaudeMessages, separateSystemMessage } from '../../llm/claude/messageTranslate'
 import type { ChatMessage, ToolDefinition } from '../types'
+import { ANTHROPIC_TOOL_NAME_RULE, ToolNameAliaser } from '../../llm/toolNameAlias'
 import { heuristicCount, heuristicCountTools } from './heuristic'
 import {
   type TokenizerFallbackReason,
@@ -62,11 +63,14 @@ export class AnthropicTokenCounter implements TokenCounter {
       const anthropicMessages = convertToClaudeMessages(claudeMessages)
       const translatedTools =
         tools.length > 0
-          ? tools.map(t => ({
-              name: t.name,
-              description: t.description,
-              input_schema: t.parameters as Anthropic.Tool['input_schema'],
-            }))
+          ? (() => {
+              const aliaser = new ToolNameAliaser(ANTHROPIC_TOOL_NAME_RULE)
+              return tools.map(t => ({
+                name: aliaser.alias(t.name),
+                description: aliaser.describe(t.name, t.description),
+                input_schema: t.parameters as Anthropic.Tool['input_schema'],
+              }))
+            })()
           : undefined
       // SDK 0.32.x exposes countTokens only under the beta namespace. The
       // request shape is wire-compatible with the GA `messages.create` shape,
