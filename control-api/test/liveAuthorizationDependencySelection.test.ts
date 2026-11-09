@@ -84,7 +84,8 @@ function threeMcpGraph(siblings: readonly string[]): CurrentGraph {
     resource: resources[0]!,
     resources,
     relationships,
-    sourceStateRevision: 'source-state',
+    contextReferenceNames: new Map(),
+    dependencyRevision: 'unselected',
     relationshipsRevision: 'unselected',
   } as unknown as CurrentGraph
 }
@@ -127,7 +128,8 @@ function mcpRootGraph(siblings: readonly string[]): CurrentGraph {
     resource: resources[0]!,
     resources,
     relationships,
-    sourceStateRevision: 'source-state',
+    contextReferenceNames: new Map(),
+    dependencyRevision: 'unselected',
     relationshipsRevision: 'unselected',
   } as unknown as CurrentGraph
 }
@@ -179,6 +181,8 @@ describe('selected-action operational dependency closure', () => {
           ])
           expect(selected.resources).toEqual(selectedAgain.resources)
           expect(selected.relationshipsRevision).toBe(selectedAgain.relationshipsRevision)
+          expect(selected.dependencyRevision).not.toBe('unselected')
+          expect(selected.dependencyRevision).toBe(selectedAgain.dependencyRevision)
         }
       ),
       { numRuns: 10_000 }

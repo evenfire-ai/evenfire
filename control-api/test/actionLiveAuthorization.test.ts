@@ -1,6 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { config } from '../src/config.js'
-import type { DbClient } from '../src/db.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { checkpointActionAuthority } from '../src/services/access/actionAuthorityCheckpoint.js'
 import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
@@ -10,11 +9,19 @@ import {
   type LiveActionAuthorizationInput,
   resolveLiveActionAuthorization,
 } from '../src/services/access/liveAuthorizationResolver.js'
-import {
-  canonicalEnvironmentId,
-  projectOperationalObject,
-} from '../src/services/access/operationalAccessProjection.js'
+import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
+import {
+  type AccessTransactionTripwire,
+  type TripwireQueryResult,
+  installAccessTransactionTripwire,
+} from './helpers/accessTransactionTripwire.js'
+import {
+  contextObject,
+  createFakeOperationalGateway,
+  hostObject,
+  mcpServerObject,
+} from './helpers/fakeOperationalGateway.js'
 
 const environmentId = canonicalEnvironmentId()
 const userId = '10000000-0000-4000-8000-000000000001'
@@ -29,255 +36,65 @@ const session = Object.freeze({
   sessionVersion: 1,
 })
 
-const hostObject = Object.freeze({
-  metadata: {
-    name: 'host-a',
-    namespace: config.hostsNamespace,
-    uid: 'uid-host-a',
-    resourceVersion: '91',
-    generation: 1,
-  },
-  spec: { enabled: true },
-})
-const contextObject = Object.freeze({
-  metadata: {
-    name: 'ctx-a',
-    namespace: config.contextsNamespace,
-    uid: 'uid-context-a',
-    resourceVersion: '17',
-    generation: 1,
-  },
-  spec: { contextId: 'ctx-a', mcpServers: ['weather'], sharedFileSystems: [] },
-})
-const mcpObject = Object.freeze({
-  metadata: {
-    name: 'weather',
-    namespace: config.mcpServersNamespace,
-    uid: 'uid-mcp-weather',
-    resourceVersion: '23',
-    generation: 1,
-  },
-  spec: {
-    enabled: true,
-    auth: { type: 'none' },
-    transport: { type: 'streamable-http', url: 'http://weather.mcp-server:3000/mcp' },
-  },
-})
+const hostA = hostObject('host-a', {}, { uid: 'uid-host-a', resourceVersion: '91' })
+const contextA = contextObject(
+  'ctx-a',
+  { contextId: 'ctx-a', mcpServers: ['weather'] },
+  { uid: 'uid-context-a', resourceVersion: '17' }
+)
+const weather = mcpServerObject(
+  'weather',
+  { url: 'http://weather.mcp-server:3000/mcp' },
+  { uid: 'uid-mcp-weather', resourceVersion: '23' }
+)
 
-const relationshipNamespaces = {
-  context: config.contextsNamespace,
-  mcpServer: config.mcpServersNamespace,
-  sharedFilesystem: config.sharedFilesystemsNamespace,
+function rows(values: Record<string, unknown>[]): TripwireQueryResult {
+  return { rows: values, rowCount: values.length }
 }
 
-function projection(plural: 'hosts' | 'contexts' | 'mcpservers', object: unknown) {
-  return projectOperationalObject({
-    environmentId,
-    plural,
-    namespace:
-      plural === 'hosts'
-        ? config.hostsNamespace
-        : plural === 'contexts'
-          ? config.contextsNamespace
-          : config.mcpServersNamespace,
-    object,
-    behaviorFingerprintKey: config.sessionJwtPrivateKey,
-    relationshipNamespaces,
-  })
-}
-
-const hostProjection = projection('hosts', hostObject)
-const contextProjection = projection('contexts', contextObject)
-const mcpProjection = projection('mcpservers', mcpObject)
-
-function resourceRow(resource: (typeof hostProjection.resources)[number]) {
-  return {
-    environment_id: resource.environmentId,
-    resource_type: resource.resourceType,
-    logical_id: resource.logicalId,
-    source_family: resource.sourceFamily,
-    provider_uid: resource.providerUid,
-    provider_resource_version: resource.providerResourceVersion,
-    display_name: resource.displayName,
-    enabled: resource.enabled,
-    deleted_at: resource.deletedAt,
-    observed_generation: resource.observedGeneration,
-    content_bytes: resource.contentBytes,
-    behavior_sources: resource.behaviorSources,
-  }
-}
-
-function relationshipRow(relationship: (typeof contextProjection.relationships)[number]) {
-  return {
-    environment_id: relationship.environmentId,
-    source_type: relationship.sourceType,
-    source_id: relationship.sourceId,
-    relationship_type: relationship.relationshipType,
-    target_type: relationship.targetType,
-    target_id: relationship.targetId,
-    relationship_instance_id: relationship.relationshipInstanceId,
-    behavior_attributes: relationship.behaviorAttributes,
-    source_family: relationship.sourceFamily,
-    source_provider_uid: relationship.sourceProviderUid,
-    source_resource_version: relationship.sourceResourceVersion,
-    observed_generation: relationship.observedGeneration,
-    content_bytes: relationship.contentBytes,
-  }
-}
-
-function fakeTransaction(
-  kind: 'host' | 'mcp_server',
-  options: { behaviorSources?: boolean; unresolvedHostContext?: boolean } = {}
-) {
-  const query = vi.fn(async (text: string, values: unknown[] = []) => {
-    // A Host graph first checks that every configured Context reference
-    // resolves to one canonical Context (operationalAccessReader fail-closed).
-    if (text.includes('AS unresolved_host_context')) {
-      return options.unresolvedHostContext
-        ? { rows: [{ unresolved_host_context: 1 }], rowCount: 1 }
-        : { rows: [], rowCount: 0 }
-    }
+/** The Postgres side of one resolution: phase P's statements, nothing else. */
+function statements(kind: 'host' | 'mcp_server') {
+  return (text: string): TripwireQueryResult => {
     if (text.startsWith('SET TRANSACTION') || text.includes("set_config('statement_timeout'")) {
-      return { rows: [], rowCount: 0 }
+      return rows([])
     }
     if (text.includes('AS session_live')) {
-      return {
-        rows: [
-          {
-            user_id: userId,
-            user_revision: '1',
-            resource_revision: '1',
-            session_live: true,
-            session_revision: '1:current',
-            memberships: [],
-          },
-        ],
-        rowCount: 1,
-      }
+      return rows([
+        {
+          user_id: userId,
+          session_live: true,
+          session_revision: '1:current',
+          memberships: [],
+        },
+      ])
     }
-    if (text.includes('FROM operational_catalog_source_state')) {
-      const fallbackFamilies =
-        kind === 'host'
-          ? ['host', 'context', 'mcp_server', 'shared_filesystem']
-          : ['mcp_server', 'context', 'host', 'shared_filesystem']
-      const families = Array.isArray(values[1]) ? (values[1] as string[]) : fallbackFamilies
-      return {
-        rows: families.map(source_family => ({
-          source_family,
-          generation: '7',
-          resource_version: '91',
-          status: 'current',
-          safe_error_code: null,
-        })),
-        rowCount: families.length,
-      }
+    if (text.includes('FROM token_budgets')) return rows([])
+    if (text.includes('FROM llm_allowed_models')) return rows([])
+    if (text.includes('SELECT DISTINCT ON (context_id)')) return rows([])
+    if (kind === 'mcp_server' && text.includes('WITH context_references AS')) {
+      return rows([
+        {
+          kind: 'direct',
+          grant_id: `user_contexts:${userId}:ctx-a`,
+          team_id: null,
+          current_role: null,
+          source_type: 'context',
+          source_name: `${config.contextsNamespace}/ctx-a`,
+        },
+      ])
     }
-    if (
-      text.includes('FROM operational_resource_index') &&
-      !text.includes('FROM operational_resource_relationships') &&
-      !text.includes('WITH context_names AS') &&
-      !text.includes('WITH requested_context_references AS')
-    ) {
-      const resources =
-        kind === 'host'
-          ? [hostProjection.resources[0]!]
-          : text.includes('(resource_type, logical_id) IN')
-            ? [mcpProjection.resources[0]!, contextProjection.resources[0]!]
-            : [mcpProjection.resources[0]!]
-      const rows = resources.map(resourceRow)
-      if (options.behaviorSources === false) {
-        for (const row of rows) delete row.behavior_sources
-      }
-      return { rows, rowCount: rows.length }
-    }
-    if (
-      text.includes('SELECT relationship.environment_id') &&
-      text.includes('FROM operational_resource_relationships')
-    ) {
-      const rows =
-        kind === 'mcp_server'
-          ? contextProjection.relationships
-              .filter(value => value.targetId === `${config.mcpServersNamespace}/weather`)
-              .map(relationshipRow)
-          : []
-      return { rows, rowCount: rows.length }
-    }
-    if (text.includes('FROM token_budgets')) return { rows: [], rowCount: 0 }
-    if (text.includes('FROM llm_allowed_models')) return { rows: [], rowCount: 0 }
-    if (text.includes('SELECT DISTINCT ON (context_id)')) {
-      return { rows: [], rowCount: 0 }
-    }
-    if (text.includes('WITH requested_context_references AS')) {
-      return {
-        rows: [
-          {
-            kind: 'direct',
-            grant_id: `user_agents:${userId}:host-a`,
-            team_id: null,
-            current_role: null,
-          },
-        ],
-        rowCount: 1,
-      }
-    }
-    if (text.includes('WITH context_names AS')) {
-      // The production CTE also carries host candidates; return the grant for
-      // the resource under test instead of matching only its context branch.
-      return {
-        rows:
-          kind === 'mcp_server'
-            ? [
-                {
-                  kind: 'direct',
-                  grant_id: `user_contexts:${userId}:ctx-a`,
-                  team_id: null,
-                  current_role: null,
-                  source_type: 'context',
-                  source_name: `${config.contextsNamespace}/ctx-a`,
-                },
-              ]
-            : [
-                {
-                  kind: 'direct',
-                  grant_id: `user_agents:${userId}:host-a`,
-                  team_id: null,
-                  current_role: null,
-                  source_type: 'host',
-                  source_name: 'host-a',
-                },
-              ],
-        rowCount: 1,
-      }
-    }
-    if (text.includes('WITH candidates AS')) {
-      return {
-        rows: [
-          {
-            kind: 'direct',
-            grant_id: `user_agents:${userId}:host-a`,
-            team_id: null,
-            current_role: null,
-          },
-        ],
-        rowCount: 1,
-      }
+    if (kind === 'host' && text.includes('WITH candidates AS')) {
+      return rows([
+        {
+          kind: 'direct',
+          grant_id: `user_agents:${userId}:host-a`,
+          team_id: null,
+          current_role: null,
+        },
+      ])
     }
     throw new Error(`Unexpected query: ${text.slice(0, 100)}`)
-  })
-  return {
-    query,
-    transaction: async <T>(work: (db: DbClient) => Promise<T>) =>
-      work({ query } as unknown as DbClient),
   }
-}
-
-const gateway = {
-  getResourceExact: vi.fn(async (plural: string, name: string) => {
-    if (plural === 'hosts' && name === 'host-a') return hostObject
-    if (plural === 'contexts' && name === 'ctx-a') return contextObject
-    if (plural === 'mcpservers' && name === 'weather') return mcpObject
-    throw Object.assign(new Error('not found'), { statusCode: 404 })
-  }),
 }
 
 const hostResource = canonicalResourceIdentity({
@@ -291,19 +108,35 @@ const mcpResource = canonicalResourceIdentity({
   logicalId: `${config.mcpServersNamespace}/weather`,
 })
 
-async function resolve(
-  input: Omit<LiveActionAuthorizationInput, 'session'>,
-  db = fakeTransaction(input.resource.type === 'mcp_server' ? 'mcp_server' : 'host')
-) {
-  return resolveLiveActionAuthorization(
-    { session, ...input },
-    { transaction: db.transaction, gateway }
-  )
+let tripwire: AccessTransactionTripwire
+let fake: ReturnType<typeof createFakeOperationalGateway>
+
+function install(kind: 'host' | 'mcp_server', objects: { hosts?: unknown[] } = {}) {
+  tripwire = installAccessTransactionTripwire(statements(kind))
+  fake = createFakeOperationalGateway({
+    objects: {
+      hosts: objects.hosts ?? [hostA],
+      contexts: [contextA],
+      mcpservers: [weather],
+    },
+    tripwire,
+  })
 }
 
-function unresolvedHostContextChecks(db: ReturnType<typeof fakeTransaction>): number {
-  return db.query.mock.calls.filter(([text]) => String(text).includes('AS unresolved_host_context'))
-    .length
+beforeEach(() => install('host'))
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+async function resolve(input: Omit<LiveActionAuthorizationInput, 'session'>) {
+  return resolveLiveActionAuthorization({ session, ...input }, { gateway: fake.gateway })
+}
+
+function expectTransactionsClosed(): void {
+  // T-L8 witness: the fakes were called, and every transaction ended.
+  expect(tripwire.externalCalls.length).toBeGreaterThan(0)
+  expect(tripwire.events).toContain('BEGIN')
+  expect(tripwire.openTransactions()).toBe(0)
 }
 
 describe('canonical action live authorization', () => {
@@ -326,26 +159,28 @@ describe('canonical action live authorization', () => {
       capability: 'chat.message.invoke',
     },
   ])('resolves $operationId through the real selected-path resolver', async input => {
-    const db = fakeTransaction('host')
-    const result = await resolve(input, db)
+    const result = await resolve(input)
     expect(result.status, JSON.stringify(result)).toBe('allowed')
-    // Liveness witness: the Host graph ran its unresolved-Context check.
-    expect(unresolvedHostContextChecks(db)).toBeGreaterThan(0)
+    // Liveness witness: the Host graph was read live from Kubernetes.
+    expect(fake.calls.map(call => `${call.method}:${call.plural}`)).toContain(
+      'listResourcePage:contexts'
+    )
+    expectTransactionsClosed()
     if (result.status !== 'allowed') return
     expect(result.selectedPath.behavior.capabilities).toContain(input.capability)
   })
 
   it('fails a Host closed when its configured Context does not resolve', async () => {
-    const db = fakeTransaction('host', { unresolvedHostContext: true })
-    const result = await resolve(
-      {
-        operationId: 'host.status.read',
-        resource: hostResource,
-        operationTarget: { hostRef: `${config.hostsNamespace}/host-a` },
-      },
-      db
+    vi.restoreAllMocks()
+    install('host', { hosts: [hostObject('host-a', { contextRef: 'missing' })] })
+    const result = await resolve({
+      operationId: 'host.status.read',
+      resource: hostResource,
+      operationTarget: { hostRef: `${config.hostsNamespace}/host-a` },
+    })
+    expect(fake.calls.map(call => `${call.method}:${call.plural}`)).toContain(
+      'listResourcePage:contexts'
     )
-    expect(unresolvedHostContextChecks(db)).toBeGreaterThan(0)
     expect(result).toEqual({
       status: 'unavailable',
       dependencyClass: 'operational_resource_store',
@@ -354,25 +189,24 @@ describe('canonical action live authorization', () => {
   })
 
   it('resolves an exact MCP tool target through a current context grant', async () => {
-    const db = fakeTransaction('mcp_server')
+    vi.restoreAllMocks()
+    install('mcp_server')
     const target = {
       serverNamespace: config.mcpServersNamespace,
       serverName: 'weather',
       toolName: 'forecast',
     }
-    const authorized = await authorizeActionV2(
-      {
-        session,
-        requested: { version: 2 },
-        operationId: 'mcp.invoke',
-        resource: mcpResource,
-        operationTarget: target,
-        allocateChatMessageId: false,
-        gateway,
-      },
-      { authorizationOptions: { transaction: db.transaction } }
-    )
+    const authorized = await authorizeActionV2({
+      session,
+      requested: { version: 2 },
+      operationId: 'mcp.invoke',
+      resource: mcpResource,
+      operationTarget: target,
+      allocateChatMessageId: false,
+      gateway: fake.gateway,
+    })
     expect(authorized.status, JSON.stringify(authorized)).toBe('allowed')
+    expectTransactionsClosed()
     if (authorized.status !== 'allowed') return
     expect(authorized.context.selectedPathCapabilities).toContain('mcp_server.use')
     expect(authorized.mcpServerBinding).toEqual({
@@ -386,7 +220,7 @@ describe('canonical action live authorization', () => {
         resource: authorized.context.resource,
         target: authorized.context.target,
         mcpServerBinding: authorized.mcpServerBinding,
-        gateway,
+        gateway: fake.gateway,
         budget,
       })
       expect(destination).toEqual({
@@ -414,33 +248,24 @@ describe('canonical action live authorization', () => {
       resourceVersion: '24',
     },
   ])('rejects an MCP destination replaced after authorization: $description', async replacement => {
-    const db = fakeTransaction('mcp_server')
-    let currentMcpServer: unknown = mcpObject
-    const replacementGateway = {
-      getResourceExact: vi.fn(async (plural: string, name: string) => {
-        if (plural === 'mcpservers' && name === 'weather') return currentMcpServer
-        return gateway.getResourceExact(plural, name)
-      }),
-    }
+    vi.restoreAllMocks()
+    install('mcp_server')
     const budget = AccessExecutionBudget.create('action')
     try {
-      const authorized = await authorizeActionV2(
-        {
-          session,
-          requested: { version: 2 },
-          operationId: 'mcp.invoke',
-          resource: mcpResource,
-          operationTarget: {
-            serverNamespace: config.mcpServersNamespace,
-            serverName: 'weather',
-            toolName: 'forecast',
-          },
-          allocateChatMessageId: false,
-          gateway: replacementGateway,
-          budget,
+      const authorized = await authorizeActionV2({
+        session,
+        requested: { version: 2 },
+        operationId: 'mcp.invoke',
+        resource: mcpResource,
+        operationTarget: {
+          serverNamespace: config.mcpServersNamespace,
+          serverName: 'weather',
+          toolName: 'forecast',
         },
-        { authorizationOptions: { transaction: db.transaction } }
-      )
+        allocateChatMessageId: false,
+        gateway: fake.gateway,
+        budget,
+      })
       expect(authorized.status, JSON.stringify(authorized)).toBe('allowed')
       if (authorized.status !== 'allowed') return
       expect(authorized.mcpServerBinding).toEqual({
@@ -448,27 +273,17 @@ describe('canonical action live authorization', () => {
         providerResourceVersion: '23',
       })
 
-      currentMcpServer = Object.freeze({
-        ...mcpObject,
-        metadata: Object.freeze({
-          ...mcpObject.metadata,
-          uid: replacement.uid,
-          resourceVersion: replacement.resourceVersion,
-        }),
-        spec: Object.freeze({
-          ...mcpObject.spec,
-          transport: Object.freeze({
-            type: 'streamable-http',
-            url: 'http://replacement.mcp-server:3000/mcp',
-          }),
-        }),
-      })
+      fake.objects.mcpservers[0] = mcpServerObject(
+        'weather',
+        { url: 'http://replacement.mcp-server:3000/mcp' },
+        { uid: replacement.uid, resourceVersion: replacement.resourceVersion }
+      )
 
       const destination = await resolveActionDestination({
         resource: authorized.context.resource,
         target: authorized.context.target,
         mcpServerBinding: authorized.mcpServerBinding,
-        gateway: replacementGateway,
+        gateway: fake.gateway,
         budget,
       })
       expect(destination).toEqual({ status: 'stale' })
@@ -478,70 +293,60 @@ describe('canonical action live authorization', () => {
   })
 
   it('issues and checkpoints a read action using the real resolver path', async () => {
-    const firstDb = fakeTransaction('host')
-    const issued = await authorizeActionV2(
-      {
-        session,
-        requested: { version: 2 },
-        operationId: 'host.status.read',
-        resource: hostResource,
-        operationTarget: { hostRef: `${config.hostsNamespace}/host-a` },
-        allocateChatMessageId: false,
-        gateway,
-      },
-      { authorizationOptions: { transaction: firstDb.transaction } }
-    )
+    const issued = await authorizeActionV2({
+      session,
+      requested: { version: 2 },
+      operationId: 'host.status.read',
+      resource: hostResource,
+      operationTarget: { hostRef: `${config.hostsNamespace}/host-a` },
+      allocateChatMessageId: false,
+      gateway: fake.gateway,
+    })
     expect(issued.status, JSON.stringify(issued)).toBe('allowed')
     if (issued.status !== 'allowed') return
 
     const budget = AccessExecutionBudget.create('action')
     try {
-      const checkpointDb = fakeTransaction('host')
-      const checked = await checkpointActionAuthority(
-        {
-          request: {
-            version: 2,
-            principal: {
-              sub: userId,
-              sid,
-              sessionVersion: 1,
-            },
-            delegationJti: jti,
-            resource: hostResource,
-            operationId: 'host.status.read',
-            target: issued.context.target,
-            targetHash: issued.context.targetHash,
-            accessPathId: issued.context.accessPathId,
-            authorizationRevision: issued.context.authorizationRevision,
-            behaviorBindingHash: issued.context.behaviorBindingHash,
-            domain: {
-              service: 'rpc-proxy',
-              resource: hostResource,
-              targetHash: issued.context.targetHash,
-            },
+      const checked = await checkpointActionAuthority({
+        request: {
+          version: 2,
+          principal: {
+            sub: userId,
+            sid,
+            sessionVersion: 1,
           },
-          gateway,
-          budget,
+          delegationJti: jti,
+          resource: hostResource,
+          operationId: 'host.status.read',
+          target: issued.context.target,
+          targetHash: issued.context.targetHash,
+          accessPathId: issued.context.accessPathId,
+          authorizationRevision: issued.context.authorizationRevision,
+          behaviorBindingHash: issued.context.behaviorBindingHash,
+          domain: {
+            service: 'rpc-proxy',
+            resource: hostResource,
+            targetHash: issued.context.targetHash,
+          },
         },
-        {
-          authorize: input =>
-            authorizeActionV2(input, {
-              authorizationOptions: { transaction: checkpointDb.transaction },
-            }),
-        }
-      )
+        gateway: fake.gateway,
+        budget,
+      })
       expect(checked).toMatchObject({
         version: 2,
         status: 'allowed',
         authorizationRevision: issued.context.authorizationRevision,
         behaviorBindingHash: issued.context.behaviorBindingHash,
       })
+      expectTransactionsClosed()
     } finally {
       budget.close()
     }
   })
 
   it('rejects a replaced MCP destination in the action checkpoint consumer', async () => {
+    vi.restoreAllMocks()
+    install('mcp_server')
     const mcpTarget = {
       serverNamespace: config.mcpServersNamespace,
       serverName: 'weather',
@@ -555,45 +360,23 @@ describe('canonical action live authorization', () => {
         throw new Error('MCP invocation must not allocate a chat message ID')
       },
     })
-    const initialDb = fakeTransaction('mcp_server')
-    const authorized = await authorizeActionV2(
-      {
-        session,
-        requested: { version: 2 },
-        operationId: 'mcp.invoke',
-        resource: mcpResource,
-        operationTarget: mcpTarget,
-        allocateChatMessageId: false,
-        gateway,
-      },
-      { authorizationOptions: { transaction: initialDb.transaction } }
-    )
+    const authorized = await authorizeActionV2({
+      session,
+      requested: { version: 2 },
+      operationId: 'mcp.invoke',
+      resource: mcpResource,
+      operationTarget: mcpTarget,
+      allocateChatMessageId: false,
+      gateway: fake.gateway,
+    })
     expect(authorized.status, JSON.stringify(authorized)).toBe('allowed')
     if (authorized.status !== 'allowed') return
 
-    const checkpointDb = fakeTransaction('mcp_server')
-    let currentMcpServer: unknown = mcpObject
-    const checkpointGateway = {
-      getResourceExact: vi.fn(async (plural: string, name: string) => {
-        if (plural === 'mcpservers' && name === 'weather') return currentMcpServer
-        return gateway.getResourceExact(plural, name)
-      }),
-    }
-    const replacement = Object.freeze({
-      ...mcpObject,
-      metadata: Object.freeze({
-        ...mcpObject.metadata,
-        uid: 'uid-mcp-weather-replacement',
-        resourceVersion: '24',
-      }),
-      spec: Object.freeze({
-        ...mcpObject.spec,
-        transport: Object.freeze({
-          type: 'streamable-http',
-          url: 'http://replacement.mcp-server:3000/mcp',
-        }),
-      }),
-    })
+    const replacement = mcpServerObject(
+      'weather',
+      { url: 'http://replacement.mcp-server:3000/mcp' },
+      { uid: 'uid-mcp-weather-replacement', resourceVersion: '24' }
+    )
     const budget = AccessExecutionBudget.create('action')
     try {
       const checked = await checkpointActionAuthority(
@@ -615,15 +398,13 @@ describe('canonical action live authorization', () => {
               targetHash: preparedMcpTarget.targetHash,
             },
           },
-          gateway: checkpointGateway,
+          gateway: fake.gateway,
           budget,
         },
         {
           authorize: async input => {
-            const current = await authorizeActionV2(input, {
-              authorizationOptions: { transaction: checkpointDb.transaction },
-            })
-            currentMcpServer = replacement
+            const current = await authorizeActionV2(input)
+            fake.objects.mcpservers[0] = replacement
             return current
           },
         }
@@ -634,19 +415,29 @@ describe('canonical action live authorization', () => {
         status: 'access_path_stale',
         code: 'access_path_stale',
       })
-      expect(checkpointGateway.getResourceExact).toHaveBeenLastCalledWith(
-        'mcpservers',
-        'weather',
-        config.mcpServersNamespace,
-        expect.objectContaining({ signal: expect.any(AbortSignal) })
-      )
+      const lastGet = fake.calls.filter(call => call.method === 'getResourceExact').at(-1)
+      expect(lastGet).toMatchObject({
+        plural: 'mcpservers',
+        name: 'weather',
+        namespace: config.mcpServersNamespace,
+      })
     } finally {
       budget.close()
     }
   })
 
   it('fails closed when the selected chat path lacks required behavior facts', async () => {
-    const db = fakeTransaction('host', { behaviorSources: false })
+    vi.restoreAllMocks()
+    // A non-string model connection reference leaves the Host credential
+    // policy unknown in its projection.
+    const unknownCredentialHost = {
+      ...hostA,
+      spec: {
+        enabled: true,
+        model: { provider: 'codex-subscription', name: 'gpt-5', connectionRef: 7 },
+      },
+    }
+    install('host', { hosts: [unknownCredentialHost] })
     await expect(
       authorizeActionV2(
         {
@@ -660,17 +451,20 @@ describe('canonical action live authorization', () => {
             channelId: 'host-a',
           },
           allocateChatMessageId: true,
-          gateway,
+          gateway: fake.gateway,
         },
-        {
-          messageId: () => messageId,
-          authorizationOptions: { transaction: db.transaction },
-        }
+        { messageId: () => messageId }
       )
     ).resolves.toEqual({
       status: 'authority_unavailable',
       code: 'authority_unavailable',
       retryable: true,
     })
+    // Witness: the resolver reached its selected path: the root GET of phase K1
+    // and the exact Host GET of phase K2 both ran.
+    expect(
+      fake.calls.filter(call => call.method === 'getResourceExact' && call.name === 'host-a')
+    ).toHaveLength(2)
+    expectTransactionsClosed()
   })
 })

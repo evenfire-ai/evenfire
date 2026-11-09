@@ -369,7 +369,9 @@ async function assertHostTargetsWithinCallerAgents(
  * This mirrors `routes/external/sharedFilesystems.ts` (user-session-gated proxy)
  * and `routes/external/auth.ts` `/external/rpc/token` (session → downstream token).
  */
-export function createExternalGfsRouter(gateway?: Pick<K8sGateway, 'getResourceExact'>): Router {
+export function createExternalGfsRouter(
+  gateway?: Pick<K8sGateway, 'getResourceExact' | 'listResourcePage'>
+): Router {
   const router = Router()
 
   // The durable externalGfs* guards below are the authoritative distributed

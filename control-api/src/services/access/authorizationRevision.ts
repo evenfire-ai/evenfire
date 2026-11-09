@@ -8,7 +8,6 @@ export type AuthorizationMembershipRevision = Readonly<{
   teamId: string
   role: TeamRole
   membershipUpdatedAt: string
-  teamRevision: string
 }>
 
 export type AuthorizationRelationship = Readonly<{
@@ -21,11 +20,10 @@ export type AuthorizationRevisionInput = Readonly<{
   principalUserId: string
   sessionContract: 'v1' | 'v2'
   sessionRevision: string
-  userRevision: string
   memberships: readonly AuthorizationMembershipRevision[]
   resource: CanonicalResourceIdentity
   resourceRevision: string
-  sourceStateRevision: string
+  dependencyRevision: string
   relationshipsRevision: string
   candidates: readonly AccessPathSeed[]
 }>
@@ -62,17 +60,20 @@ export function authorizationRevision(input: AuthorizationRevisionInput): string
   return `ar1_${createHash('sha256')
     .update(
       JSON.stringify({
-        policy: 'user-access-authority-v1',
+        policy: 'user-access-authority-v2',
         principalUserId: input.principalUserId,
         sessionContract: input.sessionContract,
         sessionRevision: input.sessionRevision,
-        userRevision: input.userRevision,
-        memberships: [...input.memberships].sort((left, right) =>
-          compareCanonicalUtf8Text(left.teamId, right.teamId)
-        ),
+        memberships: [...input.memberships]
+          .sort((left, right) => compareCanonicalUtf8Text(left.teamId, right.teamId))
+          .map(membership => ({
+            teamId: membership.teamId,
+            role: membership.role,
+            membershipUpdatedAt: membership.membershipUpdatedAt,
+          })),
         resource: resourceIdentityKey(input.resource),
         resourceRevision: input.resourceRevision,
-        sourceStateRevision: input.sourceStateRevision,
+        dependencyRevision: input.dependencyRevision,
         relationshipsRevision: input.relationshipsRevision,
         candidates: canonicalCandidates(input.candidates),
       })

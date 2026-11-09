@@ -49,8 +49,6 @@ describe('workflow artifact authority producer', () => {
           sessionContract: 'v2',
           sessionLive: true,
           sessionRevision: 'session-revision',
-          userRevision: 'user-revision',
-          resourceRevision: 'resource-revision',
           memberships: [],
         },
         resource,
@@ -60,6 +58,7 @@ describe('workflow artifact authority producer', () => {
           operationTarget: { runId, artifactName },
         } as never),
         operationalGraph: null,
+        workflowRunRecipeGraph: null,
       })
 
       expect(result.exists).toBe(true)
@@ -71,6 +70,9 @@ describe('workflow artifact authority producer', () => {
       expect(result.relationships).toEqual([
         { type: 'recipe', targetResourceId: 'workflow_recipe:sandbox-recipes/demo' },
       ])
+      // Postgres-only resources revise on the candidate rows they read (v2 §2.7).
+      expect(result.candidateRowsRevision).toMatch(/^[A-Za-z0-9_-]{43}$/)
+      expect(query).toHaveBeenCalledTimes(1)
     } finally {
       budget.close()
     }

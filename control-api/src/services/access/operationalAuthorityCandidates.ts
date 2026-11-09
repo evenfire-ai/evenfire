@@ -8,7 +8,6 @@ import {
 } from './authorityCandidates.js'
 import { compareCanonicalUtf8Text } from './canonicalText.js'
 import type { AccessCapability } from './capabilityRegistry.js'
-import { canonicalContextLogicalIdSql } from './contextIdentitySql.js'
 import {
   type OperationalResourceGraphResult,
   selectOperationalPathGraph,
@@ -72,28 +71,16 @@ export async function loadSimpleOperationalGrantCandidates(input: {
   const isContext = input.resource.type === 'context'
   const isRecipe = ['workflow_recipe', 'sandbox_app'].includes(input.resource.type)
   if (!isHost && !isContext && !isRecipe) return []
+  const contextReferenceNames = isContext
+    ? input.graph.contextReferenceNames.get(input.resource.logicalId)
+    : []
+  if (!contextReferenceNames) throw new Error('operational_context_reference_names_missing')
   const directWorkflowTriggerGrantId = workflowTriggerGrantIdentitySql('direct', 'uwt')
   const teamWorkflowTriggerGrantId = workflowTriggerGrantIdentitySql('team', 'twt')
   const result = await query(
     input.db,
     input.budget,
-    `WITH requested_context_references AS (
-       SELECT $5::text AS logical_id, split_part($5::text, '/', 2) AS reference_name
-       UNION
-       SELECT alias_relationship.source_id,
-              split_part(alias_relationship.target_id, '/', 2)
-         FROM operational_resource_relationships alias_relationship
-         JOIN operational_resource_index alias_source
-           ON alias_source.environment_id = alias_relationship.environment_id
-          AND alias_source.resource_type = 'context'
-          AND alias_source.logical_id = alias_relationship.source_id
-          AND alias_source.provider_uid = alias_relationship.source_provider_uid
-        WHERE alias_relationship.environment_id = $6
-          AND alias_relationship.source_type = 'context'
-          AND alias_relationship.source_id = $5
-          AND alias_relationship.relationship_type = 'context_identity_alias'
-          AND alias_relationship.target_type = 'context'
-     ), candidates AS (
+    `WITH candidates AS (
        SELECT 'direct'::text AS kind,
               'user_agents:' || ua.user_id || ':' || ua.agent_name AS grant_id,
               NULL::uuid AS team_id, NULL::text AS current_role
@@ -110,19 +97,15 @@ export async function loadSimpleOperationalGrantCandidates(input: {
        SELECT 'direct', 'user_contexts:' || uc.user_id || ':' || uc.context_id,
               NULL, NULL
          FROM user_contexts uc
-         JOIN requested_context_references requested
-           ON requested.reference_name = uc.context_id
         WHERE $2::text = 'context' AND uc.user_id = $1
-          AND ${canonicalContextLogicalIdSql('$6', "split_part(requested.logical_id, '/', 1) || '/' || uc.context_id")} = requested.logical_id
+          AND uc.context_id = ANY($5::text[])
        UNION ALL
        SELECT 'team', 'team_contexts:' || tc.team_id || ':' || tc.context_id,
               tc.team_id, tm.role
          FROM team_contexts tc
-         JOIN requested_context_references requested
-           ON requested.reference_name = tc.context_id
          JOIN team_members tm ON tm.team_id = tc.team_id
         WHERE $2::text = 'context' AND tm.user_id = $1 AND tm.status = 'active'
-          AND ${canonicalContextLogicalIdSql('$6', "split_part(requested.logical_id, '/', 1) || '/' || tc.context_id")} = requested.logical_id
+          AND tc.context_id = ANY($5::text[])
        UNION ALL
        SELECT 'direct', ${directWorkflowTriggerGrantId},
               NULL, NULL
@@ -140,14 +123,13 @@ export async function loadSimpleOperationalGrantCandidates(input: {
      )
      SELECT * FROM candidates
      ORDER BY kind, team_id NULLS FIRST, grant_id
-     LIMIT $7`,
+     LIMIT $6`,
     [
       input.userId,
       input.resource.type,
       identity.namespace,
       identity.name,
-      input.resource.logicalId,
-      input.graph.resource.environmentId,
+      contextReferenceNames,
       input.budget.limits.accessPaths + 1,
     ]
   )
@@ -236,55 +218,39 @@ export async function loadDerivedOperationalCandidates(input: {
   const hostIds = [...new Set(hostEdges.map(edge => edge.sourceId))]
   const hostNames = hostIds.map(value => scopedName(value)?.name ?? '').filter(Boolean)
   if (contextIds.length === 0 && hostNames.length === 0) return []
+  const contextReferenceIds: string[] = []
+  const contextReferenceNames: string[] = []
+  for (const contextId of contextIds) {
+    const names = input.graph.contextReferenceNames.get(contextId)
+    if (!names) throw new Error('operational_context_reference_names_missing')
+    for (const name of names) {
+      contextReferenceIds.push(contextId)
+      contextReferenceNames.push(name)
+    }
+  }
   const result = await query(
     input.db,
     input.budget,
-    `WITH context_names AS (SELECT UNNEST($2::text[]) AS logical_id),
-          context_references AS MATERIALIZED (
-       SELECT requested.logical_id,
-              split_part(requested.logical_id, '/', 2) AS reference_name
-         FROM context_names requested
-       UNION
-       SELECT requested.logical_id,
-              split_part(alias_relationship.target_id, '/', 2)
-         FROM context_names requested
-         JOIN operational_resource_relationships alias_relationship
-           ON alias_relationship.environment_id = $4
-          AND alias_relationship.source_type = 'context'
-          AND alias_relationship.source_id = requested.logical_id
-          AND alias_relationship.relationship_type = 'context_identity_alias'
-          AND alias_relationship.target_type = 'context'
-         JOIN operational_resource_index alias_source
-           ON alias_source.environment_id = alias_relationship.environment_id
-          AND alias_source.resource_type = 'context'
-          AND alias_source.logical_id = alias_relationship.source_id
-          AND alias_source.provider_uid = alias_relationship.source_provider_uid
+    `WITH context_references AS (
+       SELECT requested.logical_id, requested.reference_name
+         FROM UNNEST($2::text[], $3::text[]) AS requested(logical_id, reference_name)
      ),
-          host_names AS (SELECT UNNEST($3::text[]) AS name),
+          host_names AS (SELECT UNNEST($4::text[]) AS name),
           candidates AS (
        SELECT 'direct'::text AS kind,
               'user_contexts:' || uc.user_id || ':' || uc.context_id AS grant_id,
               NULL::uuid AS team_id, NULL::text AS current_role,
-              'context'::text AS source_type, context_identity.canonical_id AS source_name
+              'context'::text AS source_type, requested.logical_id AS source_name
         FROM user_contexts uc
         JOIN context_references requested ON requested.reference_name = uc.context_id
-        CROSS JOIN LATERAL (
-          SELECT ${canonicalContextLogicalIdSql('$4', "split_part(requested.logical_id, '/', 1) || '/' || uc.context_id")}
-                   AS canonical_id
-        ) context_identity
-        WHERE uc.user_id = $1 AND context_identity.canonical_id = requested.logical_id
+        WHERE uc.user_id = $1
        UNION ALL
        SELECT 'team', 'team_contexts:' || tc.team_id || ':' || tc.context_id,
-              tc.team_id, tm.role, 'context', context_identity.canonical_id
+              tc.team_id, tm.role, 'context', requested.logical_id
          FROM team_contexts tc
          JOIN context_references requested ON requested.reference_name = tc.context_id
-         CROSS JOIN LATERAL (
-           SELECT ${canonicalContextLogicalIdSql('$4', "split_part(requested.logical_id, '/', 1) || '/' || tc.context_id")}
-                    AS canonical_id
-         ) context_identity
          JOIN team_members tm ON tm.team_id = tc.team_id
         WHERE tm.user_id = $1 AND tm.status = 'active'
-          AND context_identity.canonical_id = requested.logical_id
        UNION ALL
        SELECT 'direct', 'user_agents:' || ua.user_id || ':' || ua.agent_name,
               NULL, NULL, 'host', ua.agent_name
@@ -302,9 +268,9 @@ export async function loadDerivedOperationalCandidates(input: {
      LIMIT $5`,
     [
       input.userId,
-      contextIds,
+      contextReferenceIds,
+      contextReferenceNames,
       hostNames,
-      input.graph.resource.environmentId,
       input.budget.limits.accessPaths + 1,
     ]
   )

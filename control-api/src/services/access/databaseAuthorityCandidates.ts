@@ -6,12 +6,12 @@ import {
   type OperationalPathBinding,
   authorityCandidateFromGrantRow,
 } from './authorityCandidates.js'
+import { revisionOfValues } from './authorizationRevision.js'
 import { compareCanonicalUtf8Text } from './canonicalText.js'
 import { type AccessCapability, gfsPermissionsToCapabilities } from './capabilityRegistry.js'
 import type { ValidatedOperationTarget } from './operationTarget.js'
 import {
   type OperationalResourceGraphResult,
-  loadOperationalResourceGraph,
   selectOperationalPathGraph,
 } from './operationalAccessReader.js'
 import { operationalBindingsForGraph } from './operationalAuthorityCandidates.js'
@@ -32,7 +32,40 @@ export type ResourceAuthorityResult = Readonly<{
     instanceId?: string
   }>[]
   validUntil: Date | null
+  /**
+   * Postgres-only resources: the revision of every column of every candidate
+   * row read. Null for operational resources, whose revision is their
+   * Kubernetes UID and resourceVersion.
+   */
+  candidateRowsRevision: string | null
 }>
+
+const CANDIDATE_ROW_COLUMNS = [
+  'kind',
+  'grant_id',
+  'team_id',
+  'current_role',
+  'permissions',
+  'recipe_namespace',
+  'recipe_name',
+  'valid_until',
+  'related_team',
+  'usage_team',
+  'drive',
+  'parent_resource',
+] as const
+
+function candidateRowsRevision(rows: readonly Record<string, unknown>[]): string {
+  return revisionOfValues(
+    rows.map(row =>
+      CANDIDATE_ROW_COLUMNS.map(column => {
+        const value = row[column]
+        if (value instanceof Date) return value.toISOString()
+        return value === undefined ? null : value
+      })
+    )
+  )
+}
 
 function workflowRunResumeBindings(
   graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
@@ -61,6 +94,8 @@ export async function loadDatabaseCandidates(input: {
   snapshot: PrincipalAuthoritySnapshot
   resource: CanonicalResourceIdentity
   operationTarget?: ValidatedOperationTarget
+  /** The run's recipe graph, loaded before the transaction for a V2 resume. */
+  workflowRunRecipeGraph?: OperationalResourceGraphResult | null
 }): Promise<ResourceAuthorityResult> {
   const { resource, snapshot } = input
   const result = await query(
@@ -228,14 +263,16 @@ export async function loadDatabaseCandidates(input: {
   ) {
     const firstRun = rows[0]
     if (firstRun) {
-      const recipeGraph = await loadOperationalResourceGraph({
-        db: input.db,
-        budget: input.budget,
-        environmentId: resource.environmentId,
-        resourceType: 'workflow_recipe',
-        logicalId: `${String(firstRun.recipe_namespace)}/${String(firstRun.recipe_name)}`,
-      })
-      if (recipeGraph.status !== 'current') {
+      // The graph was loaded from Kubernetes before this transaction began; it
+      // must be the graph of the run's recipe as this snapshot reads it.
+      const recipeGraph = input.workflowRunRecipeGraph
+      if (
+        !recipeGraph ||
+        recipeGraph.status !== 'current' ||
+        recipeGraph.resource.resourceType !== 'workflow_recipe' ||
+        recipeGraph.resource.logicalId !==
+          `${String(firstRun.recipe_namespace)}/${String(firstRun.recipe_name)}`
+      ) {
         throw new Error('workflow_resume_operational_graph_unavailable')
       }
       const selectedGraph = selectOperationalPathGraph({ graph: recipeGraph })
@@ -344,5 +381,6 @@ export async function loadDatabaseCandidates(input: {
       validTimes.length > 0
         ? new Date(Math.min(...validTimes.map(value => value.getTime())))
         : null,
+    candidateRowsRevision: candidateRowsRevision(rows),
   })
 }

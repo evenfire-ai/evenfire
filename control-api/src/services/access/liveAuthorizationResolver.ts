@@ -1,6 +1,4 @@
-import type { DbClient } from '../../db.js'
-import type { K8sGateway } from '../../k8s.js'
-import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
+import { type DbClient, pool } from '../../db.js'
 import { loadResourceAuthority } from './accessAuthorityStore.js'
 import { configureAccessAuthorityTransaction } from './accessAuthorityTransaction.js'
 import { runAccessDatabaseQuery, withAccessDatabaseTransaction } from './accessDatabaseQuery.js'
@@ -31,12 +29,15 @@ import {
 import { compareCanonicalUtf8Text } from './canonicalText.js'
 import { type AccessCapability, isAccessCapability } from './capabilityRegistry.js'
 import { validateExactOperationalBindings } from './exactOperationalAuthorization.js'
-import { type ValidatedOperationTarget, stableOperationTarget } from './operationTarget.js'
+import type { ValidatedOperationTarget } from './operationTarget.js'
 import { canonicalEnvironmentId } from './operationalAccessProjection.js'
 import {
+  type OperationalGraphClass,
+  type OperationalGraphGateway,
   type OperationalResourceGraphResult,
   isOperationalAccessResourceType,
-  loadOperationalResourceGraph,
+  loadLiveOperationalResourceGraph,
+  operationalDependencyRevision,
 } from './operationalAccessReader.js'
 import {
   type AccessAuthoritySession,
@@ -122,10 +123,16 @@ const HOST_GRAPH_ACTIONS = new Set<ActionOperationId>([
   'remote_desktop.reconnect',
 ])
 
+export type LiveAuthorizationGateway = OperationalGraphGateway
+
 export type LiveAuthorizationOptions = Readonly<{
-  gateway?: Pick<K8sGateway, 'getResourceExact'>
+  gateway?: LiveAuthorizationGateway
   budget?: AccessExecutionBudget
-  memo?: AuthorizationRequestMemo
+  /**
+   * A caller-owned transaction. Only Postgres-only resources may be resolved
+   * in it: the resolver never makes a Kubernetes call while a caller holds a
+   * Postgres transaction.
+   */
   transaction?: ResolverTransaction
   configureTransaction?: boolean
   correlationId?: string
@@ -157,35 +164,6 @@ function candidateForPath(
       candidate.grantId === path.grantId &&
       candidate.teamId === path.teamId
   )
-}
-
-export class AuthorizationRequestMemo {
-  private readonly values = new Map<string, Promise<LiveAuthorizationResult>>()
-
-  constructor(private readonly budget: AccessExecutionBudget) {}
-
-  getOrCreate(
-    input: LiveAuthorizationInput,
-    targetKey: string,
-    factory: () => Promise<LiveAuthorizationResult>
-  ): Promise<LiveAuthorizationResult> {
-    const key = JSON.stringify([
-      input.session,
-      input.requiredCapability,
-      resourceIdentityKey(input.resource),
-      input.operationId ?? null,
-      targetKey,
-      input.requestedAccessPathId ?? null,
-    ])
-    const existing = this.values.get(key)
-    if (existing) return existing
-    this.budget.charge({ kind: 'memoEntries' })
-    this.budget.charge({ kind: 'memoBytes', amount: Buffer.byteLength(key, 'utf8') })
-    const created = factory()
-    this.values.set(key, created)
-    void created.catch(() => this.values.delete(key))
-    return created
-  }
 }
 
 export function selectActionOperationalDependencies(
@@ -291,96 +269,71 @@ export function selectActionOperationalDependencies(
     ...graph,
     resources: Object.freeze(resources),
     relationships: Object.freeze(orderedRelationships),
+    dependencyRevision: operationalDependencyRevision({ resource: root, resources }),
     relationshipsRevision,
   })
 }
 
-async function requireSelectedSourceFamiliesCurrent(input: {
-  graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
-  db: DbClient
-  budget: AccessExecutionBudget
-}): Promise<OperationalResourceGraphResult> {
-  const families = [...new Set(input.graph.resources.map(resource => resource.sourceFamily))].sort(
-    compareCanonicalUtf8Text
-  )
-  const states = await runAccessDatabaseQuery(
-    input.db,
-    input.budget,
-    `SELECT source_family, generation, status
-       FROM operational_catalog_source_state
-      WHERE environment_id = $1
-        AND source_family = ANY($2::text[])
-      ORDER BY source_family`,
-    [input.graph.resource.environmentId, families]
-  )
-  const rows = states.rows as Array<Record<string, unknown>>
-  if (
-    rows.length !== families.length ||
-    rows.some((row, index) => row.source_family !== families[index] || row.status !== 'current')
-  ) {
-    return { status: 'unavailable', safeCode: 'operational_source_not_current' }
-  }
-  return Object.freeze({
-    ...input.graph,
-    sourceStateRevision: revisionOfValues(
-      rows.map(row => [row.source_family, row.generation, row.status])
-    ),
-  })
+function operationalGraphClass(
+  request: LiveAuthorizationInput,
+  operationTarget: ValidatedOperationTarget
+): OperationalGraphClass {
+  return request.resource.type === 'host' &&
+    request.operationId !== undefined &&
+    HOST_GRAPH_ACTIONS.has(request.operationId) &&
+    operationTarget?.hostRef === request.resource.logicalId
+    ? 'host_graph'
+    : 'full'
 }
 
-async function resolveInTransaction(input: {
-  request: LiveAuthorizationInput
-  capability: AccessCapability
+function isWorkflowRunResume(
+  request: LiveAuthorizationInput,
   operationTarget: ValidatedOperationTarget
-  db: DbClient
-  gateway?: Pick<K8sGateway, 'getResourceExact'>
-  budget: AccessExecutionBudget
-  configureTransaction: boolean
-}): Promise<LiveAuthorizationResult> {
-  if (input.configureTransaction) {
-    await configureAccessAuthorityTransaction(input.db, input.budget)
-  }
-  const snapshot = await loadPrincipalAuthoritySnapshot({
-    db: input.db,
-    budget: input.budget,
-    session: input.request.session,
-    resource: input.request.resource,
-  })
-  if (!snapshot) return { status: 'not_found', code: 'not_found' }
-  if (!snapshot.sessionLive) return { status: 'denied', code: 'session_not_live' }
+): boolean {
+  return (
+    request.resource.type === 'workflow_run' &&
+    request.session.contract === 'v2' &&
+    operationTarget?.runId === request.resource.logicalId &&
+    operationTarget.action === 'resume'
+  )
+}
 
-  let graph: OperationalResourceGraphResult | null = null
+type KubernetesPhase = Readonly<{
+  graph: OperationalResourceGraphResult | null
+  workflowRunRecipeGraph: OperationalResourceGraphResult | null
+}>
+
+/**
+ * Phase K1, outside any Postgres transaction: the live operational graph of
+ * the resource, or, for a V2 workflow run resume, of the run's recipe.
+ */
+async function loadKubernetesPhase(input: {
+  request: LiveAuthorizationInput
+  operationTarget: ValidatedOperationTarget
+  gateway?: LiveAuthorizationGateway
+  budget: AccessExecutionBudget
+}): Promise<KubernetesPhase> {
   if (isOperationalAccessResourceType(input.request.resource.type)) {
+    if (!input.gateway) {
+      return {
+        graph: { status: 'unavailable', safeCode: 'operational_gateway_unavailable' },
+        workflowRunRecipeGraph: null,
+      }
+    }
     try {
-      const hostAction =
-        input.request.resource.type === 'host' &&
-        input.request.operationId !== undefined &&
-        HOST_GRAPH_ACTIONS.has(input.request.operationId) &&
-        input.operationTarget?.hostRef === input.request.resource.logicalId
-      graph = await loadOperationalResourceGraph({
-        db: input.db,
+      const graph = await loadLiveOperationalResourceGraph({
+        gateway: input.gateway,
         budget: input.budget,
-        environmentId: input.request.resource.environmentId,
-        resourceType: input.request.resource.type,
-        logicalId: input.request.resource.logicalId,
-        ...(hostAction
-          ? {
-              requiredSourceFamilies: ['host'],
-              allowIncompleteRelatedResources: true,
-            }
-          : {}),
+        resource: input.request.resource,
+        operationClass: operationalGraphClass(input.request, input.operationTarget),
       })
-      graph = selectActionOperationalDependencies(
-        graph,
-        input.request.operationId,
-        input.operationTarget
-      )
-      if (hostAction && graph.status === 'current') {
-        graph = await requireSelectedSourceFamiliesCurrent({
+      return {
+        graph: selectActionOperationalDependencies(
           graph,
-          db: input.db,
-          budget: input.budget,
-        })
+          input.request.operationId,
+          input.operationTarget
+        ),
+        workflowRunRecipeGraph: null,
       }
     } catch (error) {
       if (
@@ -390,20 +343,99 @@ async function resolveInTransaction(input: {
         throw error
       }
       return {
-        status: 'unavailable',
-        dependencyClass: 'operational_resource_store',
-        retryable: true,
+        graph: { status: 'unavailable', safeCode: 'operational_source_unavailable' },
+        workflowRunRecipeGraph: null,
       }
     }
-    if (graph.status === 'unavailable') {
-      return {
-        status: 'unavailable',
-        dependencyClass: 'operational_resource_store',
-        retryable: true,
-      }
-    }
-    if (graph.status === 'not_found') return { status: 'not_found', code: 'not_found' }
   }
+  if (!isWorkflowRunResume(input.request, input.operationTarget)) {
+    return { graph: null, workflowRunRecipeGraph: null }
+  }
+  // One autocommit statement names the run's recipe; phase P re-reads the run in
+  // its snapshot and requires the same recipe.
+  const run = await runAccessDatabaseQuery(
+    pool,
+    input.budget,
+    `SELECT recipe_namespace, recipe_name
+       FROM workflow_runs
+      WHERE run_id::text = $1`,
+    [input.request.resource.logicalId]
+  )
+  const row = run.rows[0] as Record<string, unknown> | undefined
+  if (!row) return { graph: null, workflowRunRecipeGraph: null }
+  if (!input.gateway) {
+    return {
+      graph: null,
+      workflowRunRecipeGraph: {
+        status: 'unavailable',
+        safeCode: 'operational_gateway_unavailable',
+      },
+    }
+  }
+  const recipe = canonicalResourceIdentity({
+    environmentId: input.request.resource.environmentId,
+    type: 'workflow_recipe',
+    logicalId: `${String(row.recipe_namespace)}/${String(row.recipe_name)}`,
+  })
+  return {
+    graph: null,
+    workflowRunRecipeGraph: await loadLiveOperationalResourceGraph({
+      gateway: input.gateway,
+      budget: input.budget,
+      resource: recipe,
+      operationClass: 'full',
+    }),
+  }
+}
+
+type PostgresPhase =
+  | Readonly<{ status: 'resolved'; result: LiveAuthorizationResult }>
+  | Readonly<{
+      status: 'selected'
+      revision: string
+      paths: readonly AccessPath[]
+      selectedPath: AccessPath
+      selectedCandidate: AuthorityCandidate
+      validUntil: Date | null
+    }>
+
+/**
+ * Phase P, one short read-only transaction: principal snapshot, candidates,
+ * policy snapshot, `ar1_` and path selection. It makes no Kubernetes call.
+ */
+async function resolvePostgresPhase(input: {
+  request: LiveAuthorizationInput
+  capability: AccessCapability
+  operationTarget: ValidatedOperationTarget
+  kubernetes: KubernetesPhase
+  db: DbClient
+  budget: AccessExecutionBudget
+  configureTransaction: boolean
+}): Promise<PostgresPhase> {
+  const resolved = (result: LiveAuthorizationResult): PostgresPhase => ({
+    status: 'resolved',
+    result,
+  })
+  if (input.configureTransaction) {
+    await configureAccessAuthorityTransaction(input.db, input.budget)
+  }
+  const snapshot = await loadPrincipalAuthoritySnapshot({
+    db: input.db,
+    budget: input.budget,
+    session: input.request.session,
+  })
+  if (!snapshot) return resolved({ status: 'not_found', code: 'not_found' })
+  if (!snapshot.sessionLive) return resolved({ status: 'denied', code: 'session_not_live' })
+
+  const graph = input.kubernetes.graph
+  if (graph?.status === 'unavailable') {
+    return resolved({
+      status: 'unavailable',
+      dependencyClass: 'operational_resource_store',
+      retryable: true,
+    })
+  }
+  if (graph?.status === 'not_found') return resolved({ status: 'not_found', code: 'not_found' })
 
   const authority = await loadResourceAuthority({
     db: input.db,
@@ -412,29 +444,38 @@ async function resolveInTransaction(input: {
     resource: input.request.resource,
     operationTarget: input.operationTarget,
     operationalGraph: graph,
+    workflowRunRecipeGraph: input.kubernetes.workflowRunRecipeGraph,
   })
-  if (!authority.exists) return { status: 'not_found', code: 'not_found' }
+  if (!authority.exists) return resolved({ status: 'not_found', code: 'not_found' })
   const identitySeeds = canonicalAccessPathSeeds(authority.candidates)
-  if (identitySeeds.length === 0) return { status: 'denied', code: 'forbidden' }
+  if (identitySeeds.length === 0) return resolved({ status: 'denied', code: 'forbidden' })
   input.budget.charge({ kind: 'accessPaths', amount: identitySeeds.length })
   const capable = Object.freeze(
     identitySeeds.filter(candidate => candidate.behavior.capabilities.includes(input.capability))
   )
-  if (capable.length === 0) return { status: 'denied', code: 'forbidden' }
+  if (capable.length === 0) return resolved({ status: 'denied', code: 'forbidden' })
 
+  let resourceRevision: string
+  if (graph?.status === 'current') {
+    resourceRevision = revisionOfValues([
+      graph.resource.providerUid,
+      graph.resource.providerResourceVersion,
+    ])
+  } else {
+    if (authority.candidateRowsRevision === null) {
+      throw new Error('authorization_resource_revision_unavailable')
+    }
+    resourceRevision = authority.candidateRowsRevision
+  }
   const revision = authorizationRevision({
     principalUserId: snapshot.userId,
     sessionContract: snapshot.sessionContract,
     sessionRevision: snapshot.sessionRevision,
-    userRevision: snapshot.userRevision,
     memberships: snapshot.memberships,
     resource: input.request.resource,
-    resourceRevision:
-      graph?.status === 'current'
-        ? revisionOfValues([graph.resource.providerUid, graph.resource.providerResourceVersion])
-        : snapshot.resourceRevision,
-    sourceStateRevision:
-      graph?.status === 'current' ? graph.sourceStateRevision : 'database-resource',
+    resourceRevision,
+    dependencyRevision:
+      graph?.status === 'current' ? graph.dependencyRevision : 'database-resource',
     relationshipsRevision:
       graph?.status === 'current'
         ? graph.relationshipsRevision
@@ -458,16 +499,16 @@ async function resolveInTransaction(input: {
       accessPathHandleEquals(path.id, input.request.requestedAccessPathId!)
     )
     if (!selectedPath) {
-      return {
+      return resolved({
         status: 'access_path_stale',
         code: 'access_path_stale',
         currentAuthorizationRevision: revision,
-      }
+      })
     }
   } else {
     selectedPath = selectEquivalentAccessPath(paths) ?? undefined
     if (!selectedPath) {
-      return {
+      return resolved({
         status: 'access_path_required',
         code: 'access_path_required',
         authorizationRevision: revision,
@@ -480,53 +521,26 @@ async function resolveInTransaction(input: {
             })
           )
         ),
-      }
+      })
     }
   }
 
   const selectedCandidate = candidateForPath(selectedPath, capable)
   if (!selectedCandidate) {
-    return {
+    return resolved({
       status: 'access_path_stale',
       code: 'access_path_stale',
       currentAuthorizationRevision: revision,
-    }
+    })
   }
-  const exact = await validateExactOperationalBindings({
-    gateway: input.gateway,
-    budget: input.budget,
-    bindings: selectedCandidate.operationalBindings,
-  })
-  if (exact.status === 'not_found') return { status: 'not_found', code: 'not_found' }
-  if (exact.status === 'stale') {
-    return input.request.requestedAccessPathId
-      ? {
-          status: 'access_path_stale',
-          code: 'access_path_stale',
-          currentAuthorizationRevision: revision,
-        }
-      : {
-          status: 'unavailable',
-          dependencyClass: 'operational_resource_store',
-          retryable: true,
-        }
-  }
-  if (exact.status === 'unavailable') {
-    return {
-      status: 'unavailable',
-      dependencyClass: 'operational_resource_store',
-      retryable: true,
-    }
-  }
-  return Object.freeze({
-    status: 'allowed',
-    effectiveCapabilities: Object.freeze([...selectedPath.behavior.capabilities]),
+  return {
+    status: 'selected',
+    revision,
     paths,
     selectedPath,
-    operationalBindings: Object.freeze([...selectedCandidate.operationalBindings]),
-    authorizationRevision: revision,
-    validUntil: authority.validUntil?.toISOString() ?? null,
-  })
+    selectedCandidate,
+    validUntil: authority.validUntil,
+  }
 }
 
 async function resolveLiveAuthorizationUsing(
@@ -562,23 +576,79 @@ async function resolveLiveAuthorizationUsing(
     ) {
       return { status: 'invalid', code: 'invalid_operation_target' }
     }
+    const request: LiveAuthorizationInput = { ...input, resource }
+    if (
+      options.transaction &&
+      (isOperationalAccessResourceType(resource.type) ||
+        isWorkflowRunResume(request, operationTarget))
+    ) {
+      // A caller-held transaction may not span the Kubernetes reads of phase K1.
+      return {
+        status: 'unavailable',
+        dependencyClass: 'operational_resource_store',
+        retryable: true,
+        ...(options.correlationId ? { correlationId: options.correlationId } : {}),
+      }
+    }
+
+    const kubernetes = await loadKubernetesPhase({
+      request,
+      operationTarget,
+      gateway: options.gateway,
+      budget,
+    })
     const work = (db: DbClient) =>
-      resolveInTransaction({
-        request: { ...input, resource },
+      resolvePostgresPhase({
+        request,
         capability: input.requiredCapability as AccessCapability,
         operationTarget,
+        kubernetes,
         db,
-        gateway: options.gateway,
         budget,
         configureTransaction: options.configureTransaction !== false,
       })
-    const factory = () =>
-      options.transaction
-        ? options.transaction(work)
-        : withAccessDatabaseTransaction(budget, work, { mode: 'caller_configured' })
-    return options.memo
-      ? await options.memo.getOrCreate(input, stableOperationTarget(operationTarget), factory)
-      : await factory()
+    const phase = options.transaction
+      ? await options.transaction(work)
+      : await withAccessDatabaseTransaction(budget, work, { mode: 'caller_configured' })
+    if (phase.status === 'resolved') return phase.result
+
+    // Phase K2, outside any Postgres transaction: re-read every binding of the
+    // selected path and compare it with what phases K1 and P decided on.
+    const exact = await validateExactOperationalBindings({
+      gateway: options.gateway,
+      budget,
+      bindings: phase.selectedCandidate.operationalBindings,
+    })
+    if (exact.status === 'not_found') return { status: 'not_found', code: 'not_found' }
+    if (exact.status === 'stale') {
+      return input.requestedAccessPathId
+        ? {
+            status: 'access_path_stale',
+            code: 'access_path_stale',
+            currentAuthorizationRevision: phase.revision,
+          }
+        : {
+            status: 'unavailable',
+            dependencyClass: 'operational_resource_store',
+            retryable: true,
+          }
+    }
+    if (exact.status === 'unavailable') {
+      return {
+        status: 'unavailable',
+        dependencyClass: 'operational_resource_store',
+        retryable: true,
+      }
+    }
+    return Object.freeze({
+      status: 'allowed',
+      effectiveCapabilities: Object.freeze([...phase.selectedPath.behavior.capabilities]),
+      paths: phase.paths,
+      selectedPath: phase.selectedPath,
+      operationalBindings: Object.freeze([...phase.selectedCandidate.operationalBindings]),
+      authorizationRevision: phase.revision,
+      validUntil: phase.validUntil?.toISOString() ?? null,
+    })
   } catch (error) {
     return {
       status: 'unavailable',

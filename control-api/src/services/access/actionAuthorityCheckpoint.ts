@@ -167,7 +167,7 @@ export function parseActionAuthorityCheckpointRequest(
 export async function checkpointActionAuthority(
   input: {
     request: ActionAuthorityCheckpointRequestV2
-    gateway: Pick<K8sGateway, 'getResourceExact'>
+    gateway: Pick<K8sGateway, 'getResourceExact' | 'listResourcePage'>
     budget: AccessExecutionBudget
     correlationId?: string
     now?: Date

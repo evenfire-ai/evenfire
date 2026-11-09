@@ -36,6 +36,7 @@ export async function loadResourceAuthority(input: {
   resource: CanonicalResourceIdentity
   operationTarget: ValidatedOperationTarget
   operationalGraph: OperationalResourceGraphResult | null
+  workflowRunRecipeGraph: OperationalResourceGraphResult | null
 }): Promise<ResourceAuthorityResult> {
   if (input.operationalGraph?.status === 'current') {
     const policySnapshot = await loadRuntimeBehaviorPolicySnapshot({
@@ -73,6 +74,7 @@ export async function loadResourceAuthority(input: {
       candidates: Object.freeze(candidates),
       relationships: Object.freeze(publicRelationships(input.operationalGraph)),
       validUntil: null,
+      candidateRowsRevision: null,
     })
   }
   return loadDatabaseCandidates(input)

@@ -110,7 +110,7 @@ export async function authorizeActionV2(
     operationTarget?: unknown
     allocateChatMessageId: boolean
     budget?: AccessExecutionBudget
-    gateway?: Pick<K8sGateway, 'getResourceExact'>
+    gateway?: Pick<K8sGateway, 'getResourceExact' | 'listResourcePage'>
     correlationId?: string
   }>,
   dependencies: Readonly<{

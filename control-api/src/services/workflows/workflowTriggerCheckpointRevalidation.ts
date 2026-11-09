@@ -68,7 +68,7 @@ function sameStoredPath(
 export async function revalidateWorkflowTriggerCheckpoint(input: {
   request: ActionAuthorityCheckpointRequestV2
   caller: ActionCheckpointCallerIdentity
-  gateway: Pick<K8sGateway, 'getResourceExact'>
+  gateway: Pick<K8sGateway, 'getResourceExact' | 'listResourcePage'>
   budget: AccessExecutionBudget
   db: Pick<DbClient, 'query'>
   correlationId?: string

@@ -58,6 +58,12 @@ export class K8sConflictError extends Error {
   }
 }
 
+export type ResourceListPage = Readonly<{
+  items: readonly unknown[]
+  continueToken: string | null
+  resourceVersion: string
+}>
+
 type BoundedKubernetesRequest = Readonly<{
   signal: AbortSignal
   timeoutSeconds: number
@@ -268,6 +274,52 @@ export class ResourceService {
     )) as unknown as ResourceListResponse
     signal?.throwIfAborted()
     return res.items || []
+  }
+
+  /**
+   * One bounded, cancellable page of a namespaced LIST. No resourceVersion is
+   * sent, so every page is a quorum read. Errors propagate unchanged.
+   */
+  async listResourcePage(
+    plural: ClerumResourceType,
+    namespace: string,
+    options: BoundedKubernetesRequest & {
+      limit: number
+      continueToken?: string
+    }
+  ): Promise<ResourceListPage> {
+    if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 100) {
+      throw new Error('Kubernetes list limit must be between 1 and 100')
+    }
+    if (
+      !Number.isSafeInteger(options.timeoutSeconds) ||
+      options.timeoutSeconds < 1 ||
+      options.timeoutSeconds > 60
+    ) {
+      throw new Error('Kubernetes request timeout must be between 1 and 60 seconds')
+    }
+    const resolvedNamespace = this.resolveNamespace(plural, namespace)
+    const response = (await runKubernetesTransportCall(options.signal, callOptions =>
+      this.customApi.listNamespacedCustomObject(
+        {
+          group: CLERUM_GROUP,
+          version: CLERUM_VERSION,
+          namespace: resolvedNamespace,
+          plural,
+          limit: options.limit,
+          _continue: options.continueToken,
+          timeoutSeconds: options.timeoutSeconds,
+        },
+        callOptions
+      )
+    )) as ResourceListResponse
+    const resourceVersion = String(response.metadata?.resourceVersion || '').trim()
+    if (!resourceVersion) throw new Error('Kubernetes list response omitted resourceVersion')
+    return Object.freeze({
+      items: Object.freeze([...(response.items ?? [])]),
+      continueToken: String(response.metadata?.continue || '').trim() || null,
+      resourceVersion,
+    })
   }
 
   async getResourceExact(

@@ -4,15 +4,12 @@ import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAut
 import { query } from './accessAuthorityQuery.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import type { AuthorizationMembershipRevision } from './authorizationRevision.js'
-import type { CanonicalResourceIdentity } from './resourceIdentity.js'
 
 export type PrincipalAuthoritySnapshot = Readonly<{
   userId: string
   sessionContract: 'v1' | 'v2'
   sessionLive: boolean
   sessionRevision: string
-  userRevision: string
-  resourceRevision: string
   memberships: readonly AuthorizationMembershipRevision[]
 }>
 
@@ -41,7 +38,6 @@ export function parseAuthorizationMemberships(value: unknown): AuthorizationMemb
         teamId,
         role,
         membershipUpdatedAt: new Date(String(row.membershipUpdatedAt)).toISOString(),
-        teamRevision: String(row.teamRevision ?? '1'),
       }),
     ]
   })
@@ -51,22 +47,17 @@ export async function loadPrincipalAuthoritySnapshot(input: {
   db: Pick<DbClient, 'query'>
   budget: AccessExecutionBudget
   session: AccessAuthoritySession
-  resource: CanonicalResourceIdentity
 }): Promise<PrincipalAuthoritySnapshot | null> {
   const result = await query(
     input.db,
     input.budget,
     `WITH active_memberships AS (
-       SELECT tm.team_id, tm.role, tm.updated_at,
-              COALESCE(atr.revision, 1) AS team_revision
+       SELECT tm.team_id, tm.role, tm.updated_at
          FROM team_members tm
-    LEFT JOIN authorization_team_revisions atr ON atr.team_id = tm.team_id
         WHERE tm.user_id = $1
           AND tm.status = 'active'
      )
      SELECT u.id AS user_id,
-            COALESCE(aur.revision, 1) AS user_revision,
-            COALESCE(arr.revision, 1) AS resource_revision,
             CASE
               WHEN u.lifecycle_state <> 'active' THEN FALSE
               WHEN $2::text = 'v2' THEN EXISTS (
@@ -79,7 +70,7 @@ export async function loadPrincipalAuthoritySnapshot(input: {
                    AND s.idle_expires_at > NOW()
                    AND s.absolute_expires_at > NOW()
                    AND (
-                     $9::boolean
+                     $6::boolean
                      OR s.current_jti::text = $4
                      OR (
                        s.prior_jti::text = $4
@@ -103,21 +94,15 @@ export async function loadPrincipalAuthoritySnapshot(input: {
                 jsonb_build_object(
                   'teamId', am.team_id,
                   'role', am.role,
-                  'membershipUpdatedAt', am.updated_at,
-                  'teamRevision', am.team_revision
+                  'membershipUpdatedAt', am.updated_at
                 ) ORDER BY am.team_id
               ) FILTER (WHERE am.team_id IS NOT NULL),
               '[]'::jsonb
             ) AS memberships
        FROM users u
-  LEFT JOIN authorization_user_revisions aur ON aur.user_id = u.id
-  LEFT JOIN authorization_resource_revisions arr
-         ON arr.environment_id = $6
-        AND arr.resource_type = $7
-        AND arr.resource_id = $8
   LEFT JOIN active_memberships am ON TRUE
       WHERE u.id = $1
-   GROUP BY u.id, aur.revision, arr.revision`,
+   GROUP BY u.id`,
     [
       input.session.userId,
       input.session.contract,
@@ -126,9 +111,6 @@ export async function loadPrincipalAuthoritySnapshot(input: {
         ? input.session.jti
         : null,
       input.session.contract === 'v2' ? input.session.sessionVersion : null,
-      input.resource.environmentId,
-      input.resource.type,
-      input.resource.logicalId,
       'authorityMode' in input.session &&
         input.session.authorityMode === 'logical_session_checkpoint',
     ]
@@ -140,8 +122,6 @@ export async function loadPrincipalAuthoritySnapshot(input: {
     sessionContract: input.session.contract,
     sessionLive: row.session_live === true,
     sessionRevision: String(row.session_revision),
-    userRevision: String(row.user_revision ?? '1'),
-    resourceRevision: String(row.resource_revision ?? '1'),
     memberships: Object.freeze(parseAuthorizationMemberships(row.memberships)),
   })
 }

@@ -125,7 +125,7 @@ export async function requireWorkflowActionAuthority(input: {
   resourceType: CanonicalResourceIdentity['type']
   resourceLogicalId: string
   target: CanonicalActionTarget
-  gateway: Pick<K8sGateway, 'getResourceExact'>
+  gateway: Pick<K8sGateway, 'getResourceExact' | 'listResourcePage'>
 }): Promise<WorkflowAuthorityBinding | null> {
   const values = rawHeaderValues(input.req)
   if (input.caller.session.contract !== 'v2') {

@@ -60,7 +60,6 @@ export type ActionContextV2Outcome =
       retryable: true
       dependencyClass: 'authorization_store' | 'operational_resource_store' | 'capacity'
     }>
-  | Readonly<{ status: 'operational_partial'; complete: false }>
 
 export class ActionContextV2Error extends Error {
   constructor(

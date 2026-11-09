@@ -1,36 +1,20 @@
 export const ACCESS_EXECUTION_LIMIT_CLAMPS = Object.freeze({
-  publicPageSize: 100,
-  catalogDeadlineMs: 5_000,
   actionDeadlineMs: 2_000,
   statementTimeoutMs: 2_500,
-  producerCalls: 42,
-  databaseStatements: 1_493,
+  producerCalls: 32,
+  databaseStatements: 128,
   producerConcurrency: 4,
-  keyCandidatesPerCall: 101,
   objects: 1_000,
   decodedBytes: 8 * 1024 * 1024,
   objectBytes: 512 * 1024,
   accessPaths: 2_048,
   relationships: 4_096,
-  relationshipDepth: 1,
   dbRowsReturned: 4_096,
   kubernetesPageSize: 100,
   exactKubernetesGets: 4,
-  memoEntries: 512,
-  memoBytes: 4 * 1024 * 1024,
-  cursorBytes: 16 * 1024,
-  responseBytes: 4 * 1024 * 1024,
 })
 
-export type AccessExecutionKind = 'catalog' | 'action' | 'indexer'
-
-const ACCESS_EXECUTION_CLASS_LIMITS: Readonly<
-  Record<AccessExecutionKind, Readonly<{ producerCalls: number; databaseStatements: number }>>
-> = Object.freeze({
-  catalog: Object.freeze({ producerCalls: 42, databaseStatements: 1_493 }),
-  action: Object.freeze({ producerCalls: 32, databaseStatements: 128 }),
-  indexer: Object.freeze({ producerCalls: 41, databaseStatements: 55 }),
-})
+export type AccessExecutionKind = 'action'
 
 export type AccessExecutionLimitName = keyof typeof ACCESS_EXECUTION_LIMIT_CLAMPS
 export type AccessExecutionLimits = Readonly<Record<AccessExecutionLimitName, number>>
@@ -44,17 +28,12 @@ export type AccessBudgetCounterKind =
   | 'relationships'
   | 'dbRowsReturned'
   | 'exactKubernetesGets'
-  | 'memoEntries'
-  | 'memoBytes'
-  | 'responseBytes'
 
 export type AccessBudgetCharge = Readonly<{
   kind: AccessBudgetCounterKind
   amount?: number
   authorityRequired?: boolean
 }>
-
-export type AccessBudgetReservation = Partial<Readonly<Record<AccessBudgetCounterKind, number>>>
 
 export class AccessBudgetConfigurationError extends Error {
   constructor(
@@ -68,12 +47,7 @@ export class AccessBudgetConfigurationError extends Error {
 
 export class AccessBudgetExceededError extends Error {
   constructor(
-    readonly limit:
-      | AccessBudgetCounterKind
-      | 'deadline'
-      | 'objectBytes'
-      | 'relationshipDepth'
-      | 'teamGfsMembershipAdmission',
+    readonly limit: AccessBudgetCounterKind | 'deadline' | 'objectBytes',
     readonly authorityRequired: boolean
   ) {
     super(`Access execution budget exhausted: ${limit}`)
@@ -102,10 +76,6 @@ class BudgetCounter {
     if (amount > this.available) return false
     this.available -= amount
     return true
-  }
-
-  giveBack(amount: number): void {
-    this.available = Math.min(this.capacity, this.available + amount)
   }
 }
 
@@ -169,9 +139,6 @@ const COUNTER_KINDS: readonly AccessBudgetCounterKind[] = [
   'relationships',
   'dbRowsReturned',
   'exactKubernetesGets',
-  'memoEntries',
-  'memoBytes',
-  'responseBytes',
 ]
 
 function positiveSafeInteger(value: unknown): value is number {
@@ -179,15 +146,10 @@ function positiveSafeInteger(value: unknown): value is number {
 }
 
 export function resolveAccessExecutionLimits(
-  requested: Partial<AccessExecutionLimits> = {},
-  kind: AccessExecutionKind = 'action'
+  requested: Partial<AccessExecutionLimits> = {}
 ): AccessExecutionLimits {
-  const classLimits = ACCESS_EXECUTION_CLASS_LIMITS[kind]
-  const values: Record<AccessExecutionLimitName, number> = {
-    ...ACCESS_EXECUTION_LIMIT_CLAMPS,
-    ...classLimits,
-  }
-  const maximums = { ...ACCESS_EXECUTION_LIMIT_CLAMPS, ...classLimits }
+  const values: Record<AccessExecutionLimitName, number> = { ...ACCESS_EXECUTION_LIMIT_CLAMPS }
+  const maximums = ACCESS_EXECUTION_LIMIT_CLAMPS
   for (const key of Object.keys(ACCESS_EXECUTION_LIMIT_CLAMPS) as Array<
     keyof AccessExecutionLimits
   >) {
@@ -221,84 +183,38 @@ export class AccessExecutionBudget {
   readonly deadline: number
   readonly signal: AbortSignal
   readonly limits: AccessExecutionLimits
-  readonly teamGfsMembershipAdmissionLimit: number | null
   private closed = false
-  private readonly localCounters: Map<AccessBudgetCounterKind, BudgetCounter> | null
-  private readonly reservedFromParent: AccessBudgetReservation
-  private readonly reservationParentCounters: Map<AccessBudgetCounterKind, BudgetCounter> | null
   private timer?: ReturnType<typeof setTimeout>
-  private parentSignal?: AbortSignal
-  private parentAbortListener?: () => void
 
   private constructor(
     private readonly shared: SharedAccessBudgetState,
-    limits: AccessExecutionLimits,
-    localCounters: Map<AccessBudgetCounterKind, BudgetCounter> | null,
-    reservedFromParent: AccessBudgetReservation,
-    reservationParentCounters: Map<AccessBudgetCounterKind, BudgetCounter> | null,
-    teamGfsMembershipAdmissionLimit: number | null
+    limits: AccessExecutionLimits
   ) {
     this.deadline = shared.deadline
     this.signal = shared.controller.signal
     this.limits = limits
-    this.localCounters = localCounters
-    this.reservedFromParent = reservedFromParent
-    this.reservationParentCounters = reservationParentCounters
-    this.teamGfsMembershipAdmissionLimit = teamGfsMembershipAdmissionLimit
   }
 
   static create(
-    kind: AccessExecutionKind,
+    _kind: AccessExecutionKind,
     options: {
       limits?: Partial<AccessExecutionLimits>
-      teamGfsMembershipAdmissionLimit?: number
       now?: number
-      parentSignal?: AbortSignal
     } = {}
   ): AccessExecutionBudget {
-    const limits = resolveAccessExecutionLimits(options.limits, kind)
-    const teamGfsMembershipAdmissionLimit =
-      options.teamGfsMembershipAdmissionLimit === undefined
-        ? null
-        : options.teamGfsMembershipAdmissionLimit
-    if (
-      teamGfsMembershipAdmissionLimit !== null &&
-      (!Number.isSafeInteger(teamGfsMembershipAdmissionLimit) ||
-        teamGfsMembershipAdmissionLimit < 1)
-    ) {
-      throw new AccessBudgetConfigurationError(
-        'objects',
-        'team GFS membership admission must be a positive safe integer'
-      )
-    }
+    const limits = resolveAccessExecutionLimits(options.limits)
     const controller = new AbortController()
     const now = options.now ?? Date.now()
-    const deadlineMs = kind === 'action' ? limits.actionDeadlineMs : limits.catalogDeadlineMs
+    const deadlineMs = limits.actionDeadlineMs
     const shared: SharedAccessBudgetState = {
       counters: createCounters(limits),
       semaphore: new AccessSemaphore(limits.producerConcurrency),
       controller,
       deadline: now + deadlineMs,
     }
-    const budget = new AccessExecutionBudget(
-      shared,
-      limits,
-      null,
-      {},
-      null,
-      teamGfsMembershipAdmissionLimit
-    )
+    const budget = new AccessExecutionBudget(shared, limits)
     budget.timer = setTimeout(() => controller.abort('deadline'), deadlineMs)
     budget.timer.unref?.()
-    if (options.parentSignal) {
-      if (options.parentSignal.aborted) controller.abort('cancelled')
-      else {
-        const onParentAbort = () => controller.abort('cancelled')
-        budget.parentSignal = options.parentSignal
-        budget.parentAbortListener = onParentAbort
-        options.parentSignal.addEventListener('abort', onParentAbort, { once: true })
-      }
-    }
     return budget
   }
 
@@ -354,61 +270,6 @@ export class AccessExecutionBudget {
     this.charge({ kind: 'decodedBytes', amount: bytes, authorityRequired })
   }
 
-  assertRelationshipDepth(depth: number, authorityRequired = false): void {
-    if (!Number.isSafeInteger(depth) || depth < 0 || depth > this.limits.relationshipDepth) {
-      throw new AccessBudgetExceededError('relationshipDepth', authorityRequired)
-    }
-  }
-
-  assertPageSize(pageSize: number): void {
-    if (!positiveSafeInteger(pageSize) || pageSize > this.limits.publicPageSize) {
-      throw new AccessBudgetConfigurationError('publicPageSize', 'request exceeds the page clamp')
-    }
-  }
-
-  assertCursorBytes(bytes: number): void {
-    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.limits.cursorBytes) {
-      throw new AccessBudgetConfigurationError('cursorBytes', 'request exceeds the cursor clamp')
-    }
-  }
-
-  child(reservation: AccessBudgetReservation): AccessExecutionBudget {
-    this.assertActive()
-    const local = new Map<AccessBudgetCounterKind, BudgetCounter>()
-    const reserved: Partial<Record<AccessBudgetCounterKind, number>> = {}
-    try {
-      for (const kind of COUNTER_KINDS) {
-        const amount = reservation[kind] ?? 0
-        if (!Number.isSafeInteger(amount) || amount < 0) {
-          throw new AccessBudgetConfigurationError(kind, 'reservation must be a safe integer')
-        }
-        if (amount === 0) {
-          local.set(kind, new BudgetCounter(0))
-          continue
-        }
-        const parentCounter = this.counter(kind)
-        if (!parentCounter.take(amount)) throw new AccessBudgetExceededError(kind, true)
-        reserved[kind] = amount
-        local.set(kind, new BudgetCounter(amount))
-      }
-    } catch (error) {
-      for (const [kind, amount] of Object.entries(reserved) as Array<
-        [AccessBudgetCounterKind, number]
-      >) {
-        this.counter(kind).giveBack(amount)
-      }
-      throw error
-    }
-    return new AccessExecutionBudget(
-      this.shared,
-      this.limits,
-      local,
-      reserved,
-      this.localCounters ?? this.shared.counters,
-      this.teamGfsMembershipAdmissionLimit
-    )
-  }
-
   async runProducer<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
     this.charge({ kind: 'producerCalls' })
     return this.runBoundedWork(work)
@@ -433,22 +294,8 @@ export class AccessExecutionBudget {
   close(): void {
     if (this.closed) return
     this.closed = true
-    if (!this.localCounters) {
-      if (this.timer) clearTimeout(this.timer)
-      if (this.parentSignal && this.parentAbortListener) {
-        this.parentSignal.removeEventListener('abort', this.parentAbortListener)
-        this.parentSignal = undefined
-        this.parentAbortListener = undefined
-      }
-      this.shared.controller.abort('closed')
-      return
-    }
-    for (const kind of COUNTER_KINDS) {
-      const unused = this.localCounters.get(kind)?.remaining() ?? 0
-      if (unused > 0 && (this.reservedFromParent[kind] ?? 0) > 0) {
-        this.reservationParentCounters?.get(kind)?.giveBack(unused)
-      }
-    }
+    if (this.timer) clearTimeout(this.timer)
+    this.shared.controller.abort('closed')
   }
 
   remaining(kind: AccessBudgetCounterKind): number {
@@ -456,7 +303,7 @@ export class AccessExecutionBudget {
   }
 
   private counter(kind: AccessBudgetCounterKind): BudgetCounter {
-    const value = (this.localCounters ?? this.shared.counters).get(kind)
+    const value = this.shared.counters.get(kind)
     if (!value) throw new AccessBudgetConfigurationError(kind, 'counter is not configured')
     return value
   }

@@ -1,17 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
-import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { loadPrincipalAuthoritySnapshot } from '../src/services/access/principalAuthoritySnapshot.js'
-import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 
 const userId = '10000000-0000-4000-8000-000000000001'
 const sid = '20000000-0000-4000-8000-000000000002'
 const currentJti = '30000000-0000-4000-8000-000000000003'
-const resource = canonicalResourceIdentity({
-  environmentId: canonicalEnvironmentId(),
-  type: 'host',
-  logicalId: 'default/chatllm',
-})
 
 type StoredSession = Readonly<{
   version: number
@@ -36,7 +29,7 @@ async function snapshot(
   const query = vi.fn(async (sql: string, values: unknown[]) => {
     const representationJti = values[3]
     const requestedVersion = values[4]
-    const logicalCheckpoint = values[8] === true
+    const logicalCheckpoint = values[5] === true
     const sessionLive =
       requestedVersion === stored.version &&
       !stored.revoked &&
@@ -47,13 +40,14 @@ async function snapshot(
     expect(sql).toContain('s.idle_expires_at > NOW()')
     expect(sql).toContain('s.absolute_expires_at > NOW()')
     expect(sql).toContain('s.session_version = $5')
-    expect(sql).toContain('$9::boolean')
+    expect(sql).toContain('$6::boolean')
+    // M-22: the snapshot reads no revision counter table.
+    expect(sql).not.toContain('authorization_')
+    expect(values).toHaveLength(6)
     return {
       rows: [
         {
           user_id: userId,
-          user_revision: '1',
-          resource_revision: '1',
           session_live: sessionLive,
           session_revision: `${stored.version}:${stored.currentJti}`,
           memberships: [],
@@ -68,7 +62,6 @@ async function snapshot(
       db: { query } as never,
       budget,
       session,
-      resource,
     })
     return { result, values: query.mock.calls[0][1] as unknown[] }
   } finally {
@@ -102,7 +95,7 @@ describe('logical-session checkpoint authority', () => {
   ] as const)('denies a %s logical session', async (_label, stored) => {
     const { result, values } = await snapshot(stored, logical())
     expect(result?.sessionLive).toBe(false)
-    expect(values[8]).toBe(true)
+    expect(values[5]).toBe(true)
     expect(values[3]).toBeNull()
   })
 
@@ -128,7 +121,7 @@ describe('logical-session checkpoint authority', () => {
       sessionVersion: live.version,
     })
     expect(wrong.result?.sessionLive).toBe(false)
-    expect(wrong.values[8]).toBe(false)
+    expect(wrong.values[5]).toBe(false)
     expect(wrong.values[3]).not.toBeNull()
 
     const current = await snapshot(live, {
