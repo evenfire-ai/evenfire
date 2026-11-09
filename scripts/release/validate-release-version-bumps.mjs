@@ -159,9 +159,16 @@ for (const project of allServices ? SERVICES : SERVICES.filter(s => s.inReleaseM
   }
 }
 
+// A failure quotes versions from package.json. The runner reads every output line that starts
+// with :: as a workflow command, so a newline in a version could start a command of its own.
+// These are the characters the runner decodes in a command's message.
+function annotationMessage(text) {
+  return text.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')
+}
+
 if (failures.length) {
   for (const failure of failures) {
-    console.error(`::error::${failure}`)
+    console.error(`::error::${annotationMessage(failure)}`)
   }
   process.exit(1)
 }

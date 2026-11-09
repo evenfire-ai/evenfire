@@ -165,6 +165,19 @@ commit_all 'move off a version this check cannot order'
 expect_run 'a version moving off an unorderable one is refused' 1 \
   '::error::cannot order control-api/package.json: v0.2.0 to 0.2.1' --previous "$checkpoint" --all-services
 
+# A version is quoted in the annotation as one message: a newline in it cannot start a second
+# workflow command.
+new_fixture hostile-version control-api
+checkpoint="$(git rev-parse HEAD)"
+echo two >control-api/src/code.ts
+node -e 'require("fs").writeFileSync("control-api/package.json", JSON.stringify({ name: "control-api", version: "1.0.1\n::warning title=injected::pwn" }) + "\n")'
+commit_all 'a version with a newline'
+expect_run 'a newline in a version stays inside the annotation' 1 \
+  '::error::cannot order control-api/package.json: 0.1.9 to 1.0.1%0A::warning title=injected::pwn' \
+  --previous "$checkpoint" --all-services
+commands="$(node scripts/release/validate-release-version-bumps.mjs --previous "$checkpoint" --all-services 2>&1 | grep -c '^::' || true)"
+if [ "$commands" -eq 1 ]; then pass; else fail "a hostile version printed $commands workflow commands, want 1"; fi
+
 # A service the base does not have has no version to collide with, so one pull request can add
 # it and list it. mcp-proxy stands for the new root: the validator's copy lists it.
 new_fixture new-service control-api
@@ -565,5 +578,5 @@ else
 fi
 
 printf 'validate-release-version-bumps: %d checks, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
-[ "$TESTS_RUN" -eq 317 ] || { echo "FAIL: expected 317 checks, ran $TESTS_RUN" >&2; exit 1; }
+[ "$TESTS_RUN" -eq 319 ] || { echo "FAIL: expected 319 checks, ran $TESTS_RUN" >&2; exit 1; }
 [ "$TESTS_FAILED" -eq 0 ]
