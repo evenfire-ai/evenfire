@@ -548,7 +548,10 @@ if depth="$(RUBYOPT=--disable=gems ruby -ryaml -e '
   # The ruleset requires this job by this exact name.
   abort("job name changed: #{job["name"]}") unless job["name"] == "Repo hygiene (no internal working artifacts)"
   # Exactly these keys: if, needs, continue-on-error or strategy could skip or soften the job.
-  abort("the job has other keys: #{job.keys}") unless job.keys.sort == %w[name runs-on steps]
+  # permissions and timeout-minutes may be added: they can take rights away or end the job red,
+  # never turn it green.
+  hardening = %w[permissions timeout-minutes]
+  abort("the job has other keys: #{job.keys}") unless (job.keys - hardening).sort == %w[name runs-on steps]
   steps = job.fetch("steps")
   gate = steps.index { |s| s["run"] == check }
   pin = steps.index { |s| s["run"] == own_test }
@@ -558,12 +561,12 @@ if depth="$(RUBYOPT=--disable=gems ruby -ryaml -e '
   [gate, pin, node].each { |i| abort("step #{i} runs on: #{steps[i]["if"]}") unless steps[i]["if"] == wanted }
   # Exactly these keys: continue-on-error, shell, env or working-directory could soften them.
   [gate, pin].each { |i| abort("step #{i} has other keys: #{steps[i].keys}") unless steps[i].keys.sort == %w[if name run] }
-  # One checkout, first, setting only the depth: a ref moves HEAD off the merge result, so HEAD^1
-  # stops being the base and a collision with it goes green.
+  # One checkout, first, setting the depth and at most persist-credentials: a ref moves HEAD off
+  # the merge result, so HEAD^1 stops being the base and a collision with it goes green.
   checkouts = steps.select { |s| s["uses"].to_s.start_with?("actions/checkout@") }
   abort("want one checkout, as the first step: #{checkouts}") unless checkouts == [steps.first]
   with = steps.first.fetch("with")
-  abort("the checkout sets other keys: #{with.keys}") unless with.keys == ["fetch-depth"]
+  abort("the checkout sets other keys: #{with.keys}") unless (with.keys - ["persist-credentials"]) == ["fetch-depth"]
   depth = with.fetch("fetch-depth")
   abort("fetch-depth #{depth}: the clone below needs a positive integer") unless depth.is_a?(Integer) && depth > 0
   puts depth
