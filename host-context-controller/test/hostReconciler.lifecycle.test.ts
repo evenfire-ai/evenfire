@@ -457,6 +457,18 @@ function persistHostDeployment(appsApi: MockAppsApi, host: HostCRD, initial: k8s
   const replace = appsApi.replaceNamespacedDeployment.getMockImplementation()!
   appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
     if (request.name !== host.name) return replace(request)
+    if (request.dryRun === 'All') {
+      // A dry-run stores nothing: return the body with the live identity.
+      return {
+        ...structuredClone(request.body),
+        metadata: {
+          ...structuredClone(request.body.metadata),
+          uid: live.metadata!.uid,
+          resourceVersion: live.metadata!.resourceVersion,
+          generation: live.metadata!.generation,
+        },
+      }
+    }
     expect(request.body.metadata.resourceVersion).toBe(live.metadata!.resourceVersion)
     live = structuredClone(request.body)
     return live
@@ -548,6 +560,13 @@ describe('HostReconciler resource rollout bootstrap', () => {
   const SECRET_REVISION = 'clerum.io/runtime-token-secret-revision'
   const APPLIED_REVISION = 'clerum.io/runtime-token-revision'
   const ROLLOUT = 'clerum.io/runtime-token-rollout-required'
+  // A pod-template field the API server adds on every write (a mutating
+  // admission webhook on the Deployment), which the normalizer does not know.
+  const ADMITTED_TOLERATION: k8s.V1Toleration = {
+    key: 'admission.example.io/injected',
+    operator: 'Exists',
+    effect: 'NoSchedule',
+  }
   const fixtures: HostReconciler[] = []
 
   afterEach(() => {
@@ -662,6 +681,8 @@ describe('HostReconciler resource rollout bootstrap', () => {
     let secretVersion = 0
     let deploymentVersion = 0
     let templateChanges = 0
+    let dryRuns = 0
+    let admissionToleration = false
     let replacementFailures: number[] = []
     let secretConflict = false
     const readSecret = coreApi.readNamespacedSecret.getMockImplementation()!
@@ -740,6 +761,16 @@ describe('HostReconciler resource rollout bootstrap', () => {
           }
         }
       }
+      if (admissionToleration) {
+        // The webhook runs on real and dry-run writes alike.
+        const podSpec = result.spec!.template.spec!
+        if (!podSpec.tolerations?.some(t => isDeepStrictEqual(t, ADMITTED_TOLERATION))) {
+          podSpec.tolerations = [
+            ...(podSpec.tolerations ?? []),
+            structuredClone(ADMITTED_TOLERATION),
+          ]
+        }
+      }
       return result
     }
     appsApi.readNamespacedDeployment.mockImplementation(async request => {
@@ -766,6 +797,27 @@ describe('HostReconciler resource rollout bootstrap', () => {
     appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
       const { body } = request
       if (request.name !== host.name) return replaceDeployment(request)
+      if (request.dryRun === 'All') {
+        // Server-side dry-run: admission and defaulting run, nothing is stored.
+        // It never stores the object, records an event, counts a template
+        // change or consumes a scripted replacement failure.
+        if (!deployment) throw { code: 404 }
+        if (
+          body.metadata?.resourceVersion !== undefined &&
+          body.metadata.resourceVersion !== deployment.metadata?.resourceVersion
+        )
+          throw { code: 409 }
+        dryRuns++
+        const admitted = persistDeployment(body)
+        admitted.metadata = {
+          ...admitted.metadata,
+          uid: deployment.metadata!.uid,
+          resourceVersion: deployment.metadata!.resourceVersion,
+          generation: deployment.metadata!.generation,
+        }
+        admitted.status = structuredClone(deployment.status)
+        return structuredClone(admitted)
+      }
       if (!deployment || body.metadata?.resourceVersion !== deployment.metadata?.resourceVersion)
         throw { code: 409 }
       const failure = replacementFailures.shift()
@@ -836,6 +888,10 @@ describe('HostReconciler resource rollout bootstrap', () => {
         cacheSynced = value
       },
       templateChanges: () => templateChanges,
+      dryRuns: () => dryRuns,
+      admitToleration: () => {
+        admissionToleration = true
+      },
       recreateDeployment: () => {
         deployment!.metadata!.uid = 'recreated-runtime-deployment-uid'
         deployment!.metadata!.resourceVersion = String(++deploymentVersion)
@@ -1079,8 +1135,10 @@ describe('HostReconciler resource rollout bootstrap', () => {
         ([request]) => (request as { name?: string }).name === fixture.host.name
       ).length
 
+    const initialDesktopImage = config.desktopImage
     afterEach(() => {
       config.hostImage = initialHostImage
+      config.desktopImage = initialDesktopImage
       // Drop one-shot rejections a test did not consume; the outer hook then
       // restores the default issuer.
       issue.mockReset()
@@ -1097,17 +1155,25 @@ describe('HostReconciler resource rollout bootstrap', () => {
       pvcName: 'sfs-a-pvc',
       mountPath: '/mnt/sfs-a',
     }
-    type HostShape = { mounts?: ResolvedSfsMount[]; grok?: boolean }
+    type HostShape = {
+      mounts?: ResolvedSfsMount[]
+      grok?: boolean
+      stateless?: boolean
+      desktop?: boolean
+    }
     const HOST_SHAPES: Array<[string, HostShape]> = [
       ['a bare Host', {}],
       ['a Host with a context mount', { mounts: [SFS_A] }],
       ['a Host with Grok execution', { grok: true }],
+      ['a stateless Host', { stateless: true }],
+      ['a desktop Host', { desktop: true }],
     ]
     // Shape witness: the stored Deployment really carries the shape under
     // test. A fixture that fails closed (for example a mis-wired allowlist,
     // which derives no Grok scope) would otherwise make a case bare.
     const expectHostShape = (deployment: k8s.V1Deployment, shape: HostShape) => {
-      const container = deployment.spec!.template.spec!.containers.find(c => c.name === 'mcp-host')!
+      const podSpec = deployment.spec!.template.spec!
+      const container = podSpec.containers.find(c => c.name === 'mcp-host')!
       const mountPaths = (container.volumeMounts ?? []).map(mount => mount.mountPath)
       if (shape.mounts) {
         for (const mount of shape.mounts) expect(mountPaths).toContain(mount.mountPath)
@@ -1117,6 +1183,14 @@ describe('HostReconciler resource rollout bootstrap', () => {
       expect((container.env ?? []).filter(env => env.name === GROK_FLAG_ENV)).toEqual(
         shape.grok ? [{ name: GROK_FLAG_ENV, value: 'true' }] : []
       )
+      // Only a stateless Host renders the interactive priority class.
+      expect(podSpec.priorityClassName).toBe(
+        shape.stateless ? 'clerum-interactive-host' : undefined
+      )
+      // Only a desktop Host exposes the desktop port.
+      expect((container.ports ?? []).filter(port => port.name === 'desktop')).toHaveLength(
+        shape.desktop ? 1 : 0
+      )
     }
 
     it.each(HOST_SHAPES)(
@@ -1125,13 +1199,17 @@ describe('HostReconciler resource rollout bootstrap', () => {
         const fixture = await runtime(shape)
         expectHostShape(fixture.deployment(), shape)
         const consumedRevision = fixture.secret().metadata!.annotations![SECRET_REVISION]
-        config.hostImage = NEW_IMAGE
+        // A desktop Host runs the desktop image.
+        if (shape.desktop) config.desktopImage = NEW_IMAGE
+        else config.hostImage = NEW_IMAGE
 
         await fixture.reconcile()
 
         // The new pod reads fresh material: the Secret is replaced before the
         // template that points at it.
         expect(issue).toHaveBeenCalledOnce()
+        // The local comparison differs, so the API server was asked.
+        expect(fixture.dryRuns()).toBe(3)
         expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
         const prepared = fixture.secret().metadata!.annotations![SECRET_REVISION]
         expect(prepared).not.toBe(consumedRevision)
@@ -1150,6 +1228,8 @@ describe('HostReconciler resource rollout bootstrap', () => {
         }
         expect(issue).toHaveBeenCalledOnce()
         expect(fixture.templateChanges()).toBe(1)
+        // An equal template needs no dry-run on the settle passes.
+        expect(fixture.dryRuns()).toBe(3)
         // Witness: the new pod consumed the prepared material.
         expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
       }
@@ -1164,7 +1244,131 @@ describe('HostReconciler resource rollout bootstrap', () => {
       expect(deploymentReads(fixture)).toBeGreaterThan(reads)
       expect(issue).not.toHaveBeenCalled()
       expect(fixture.events).toEqual([])
+      // The local comparison settles it: no dry-run.
+      expect(fixture.dryRuns()).toBe(0)
     })
+
+    const dryRunRequests = (fixture: Awaited<ReturnType<typeof runtime>>) =>
+      fixture.appsApi.replaceNamespacedDeployment.mock.calls
+        .map(([request]) => request as k8s.AppsV1ApiReplaceNamespacedDeploymentRequest)
+        .filter(request => request.name === fixture.host.name && request.dryRun === 'All')
+    const replaceEvents = (fixture: Awaited<ReturnType<typeof runtime>>) =>
+      fixture.events.filter(event => event === 'replace-deployment').length
+
+    it('does not mint for a pod-template field the API server adds on every write', async () => {
+      const fixture = await runtime()
+      fixture.admitToleration()
+      // The live template carries the field, as the API server stored it.
+      const live = fixture.deployment()
+      live.spec!.template.spec!.tolerations = [
+        ...(live.spec!.template.spec!.tolerations ?? []),
+        structuredClone(ADMITTED_TOLERATION),
+      ]
+      fixture.advance()
+      const revision = live.spec!.template.metadata!.annotations![APPLIED_REVISION]
+
+      for (let pass = 0; pass < 4; pass++) {
+        const dryRuns = fixture.dryRuns()
+        const reads = deploymentReads(fixture)
+        const writes = replaceEvents(fixture)
+        await fixture.reconcile()
+        expect(issue).not.toHaveBeenCalled()
+        expect(fixture.templateChanges()).toBe(0)
+        // Witnesses: the predicate asked the API server at token provisioning,
+        // the mutation read and the write gate, and the pass reached the write
+        // (the no-op replace the local comparison cannot avoid).
+        expect(fixture.dryRuns() - dryRuns).toBe(3)
+        expect(deploymentReads(fixture) - reads).toBe(3)
+        expect(replaceEvents(fixture) - writes).toBe(1)
+        fixture.advance()
+      }
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        revision
+      )
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+      expect(fixture.deployment().spec!.template.spec!.tolerations).toContainEqual(
+        ADMITTED_TOLERATION
+      )
+    })
+
+    it('does not mint for a server-added field next to a live-only pod-template annotation', async () => {
+      const RESTARTED_AT = 'kubectl.kubernetes.io/restartedAt'
+      const restartedAt = '2026-07-03T00:00:00Z'
+      const fixture = await runtime()
+      fixture.admitToleration()
+      const live = fixture.deployment()
+      live.spec!.template.spec!.tolerations = [
+        ...(live.spec!.template.spec!.tolerations ?? []),
+        structuredClone(ADMITTED_TOLERATION),
+      ]
+      live.spec!.template.metadata!.annotations = {
+        ...live.spec!.template.metadata!.annotations,
+        [RESTARTED_AT]: restartedAt,
+      }
+      fixture.advance()
+
+      for (let pass = 0; pass < 4; pass++) {
+        const dryRuns = fixture.dryRuns()
+        await fixture.reconcile()
+        expect(issue).not.toHaveBeenCalled()
+        expect(fixture.templateChanges()).toBe(0)
+        // Witness: the decision went through the dry-run, whose body must carry
+        // the live annotation the real write keeps.
+        expect(fixture.dryRuns()).toBeGreaterThan(dryRuns)
+        fixture.advance()
+      }
+      expect(fixture.deployment().spec!.template.metadata!.annotations![RESTARTED_AT]).toBe(
+        restartedAt
+      )
+    })
+
+    it('sends the dry-run with the observed token revision and no resourceVersion', async () => {
+      const fixture = await runtime()
+      const observedRevision =
+        fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]
+      const before = dryRunRequests(fixture).length
+      config.hostImage = NEW_IMAGE
+
+      await fixture.reconcile()
+
+      // Witness: the pass minted and wrote the new image.
+      expect(issue).toHaveBeenCalledOnce()
+      expect(image(fixture.deployment())).toBe(NEW_IMAGE)
+      const requests = dryRunRequests(fixture).slice(before)
+      expect(requests.length).toBeGreaterThan(0)
+      for (const request of requests) {
+        expect(request.dryRun).toBe('All')
+        expect(request.namespace).toBe(fixture.host.namespace)
+        expect(request.body.spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+          observedRevision
+        )
+        expect(request.body.metadata!.resourceVersion).toBeUndefined()
+      }
+    })
+
+    it('fails token provisioning without a mint or a write when the dry-run fails', async () => {
+      const fixture = await runtime()
+      config.hostImage = NEW_IMAGE
+      const replace = fixture.appsApi.replaceNamespacedDeployment.getMockImplementation()!
+      fixture.appsApi.replaceNamespacedDeployment.mockImplementation(async request =>
+        request.dryRun === 'All' ? Promise.reject({ code: 500 }) : replace(request)
+      )
+      const before = dryRunRequests(fixture).length
+
+      await expect(fixture.reconcile()).rejects.toThrow(
+        `Failed to ensure mcp-host-runtime-token Secret for host "${fixture.host.name}" after 3 attempts`
+      )
+
+      // Witness: one dry-run per provisioning attempt; no mint, Secret or
+      // Deployment write followed.
+      expect(dryRunRequests(fixture).length - before).toBe(3)
+      expect(issue).not.toHaveBeenCalled()
+      expect(fixture.events).toEqual([])
+      expect(image(fixture.deployment())).toBe(initialHostImage)
+      expect(fixture.reconciler.getStatus(fixture.host.name)).toMatchObject({
+        message: 'mcpHost runtime token provisioning failed',
+      })
+    }, 30_000)
 
     it('does not count a replica-only difference as a template change', async () => {
       const fixture = await runtime()
@@ -5588,9 +5792,10 @@ describe('HostReconciler storage layout — upgrade from a v0.11.0 Deployment', 
 
       await reconciler.reconcile(host)
 
+      // Dry-run replaces store nothing; count only the real writes.
       const replacements = () =>
         appsApi.replaceNamespacedDeployment.mock.calls.filter(
-          ([request]) => request.name === host.name
+          ([request]) => request.name === host.name && request.dryRun !== 'All'
         )
       expect(replacements()).toHaveLength(1)
       const replaced = live()

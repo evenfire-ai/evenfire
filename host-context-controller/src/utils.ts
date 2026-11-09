@@ -528,7 +528,10 @@ function normalizeNetworkPolicyForComparison(policy: k8s.V1NetworkPolicy): unkno
  * any real change for any consumer. Anything outside that form — unconditional
  * deletes, value normalisation, per-writer branches — can hide changes and is
  * forbidden. Keep this allowlist conservative: an unknown admission mutation
- * must compare as drift rather than be silently ignored.
+ * must compare as drift rather than be silently ignored. The Host runtime
+ * mint gate (`templateWillChange` in hostReconciler.ts) does not rely on this
+ * list alone: when the comparison reports a pod-template change, it asks the
+ * API server with a dry-run replace which template the write would store.
  *
  * Pod-template annotations are merged by preserveDeploymentAnnotations before
  * this comparison. Labels, finalizers, and ownerReferences are compared in

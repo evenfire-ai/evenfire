@@ -535,7 +535,7 @@ type BootstrapOptions = {
   forceFreshForDeploymentChange?: boolean
   targetSuspended?: boolean
   /** True when writing the desired Deployment would change this observed pod template. */
-  prepareForTemplateChange?: (deployment: k8s.V1Deployment) => boolean
+  prepareForTemplateChange?: (deployment: k8s.V1Deployment) => Promise<boolean>
   refreshGfsOnly?: boolean
   preserveDeploymentTemplateOnWake?: boolean
 }
@@ -1601,19 +1601,30 @@ export class HostReconciler {
    * normalizer the Deployment write uses. The observed token revision is kept,
    * so a token rotation alone is not a template change.
    *
+   * The local comparison cannot see fields the API server adds on every write
+   * (a newer Kubernetes default, a mutating admission webhook on the
+   * Deployment): they would report a change, and a mint, on every pass. So
+   * when it finds a difference, the API server is asked, with a dry-run
+   * replace of the body the write would send, which template it would store;
+   * only a difference from the observed template counts. The dry-run omits
+   * resourceVersion: it persists nothing, and a stale version would fail it
+   * with a 409 no caller retries. A failed dry-run throws: the pass fails
+   * before the Deployment write, and during token provisioning before the
+   * mint (a mint made earlier in the pass is reused on the next one).
+   *
    * Known gap (accepted): HCC never writes `paused`, so its write unpauses a
    * Deployment someone paused by hand. A template edit held by that pause, in
    * a pod-template annotation HCC keeps from the live object, is invisible
    * here and rolls out on the consumed material. Nothing in this repository
    * pauses a Host Deployment.
    */
-  private templateWillChange(
+  private async templateWillChange(
     observed: k8s.V1Deployment,
     host: HostCRD,
     mounts: ResolvedSfsMount[],
     lifecycle: EffectiveHostLifecycle,
     grokExecutionEnabled: boolean
-  ): boolean {
+  ): Promise<boolean> {
     const desired = this.buildDeployment(
       host,
       mounts,
@@ -1621,23 +1632,37 @@ export class HostReconciler {
       lifecycle,
       grokExecutionEnabled
     )
-    // The API server stores quantities in canonical form (1024Mi as 1Gi). Equal
-    // amounts start no new pod, so they need no new credentials; every other
-    // field, and any other resources key, stays an exact comparison.
+    const template = (deployment: k8s.V1Deployment): string =>
+      JSON.stringify(
+        (normalizeDeploymentForComparison(deployment) as k8s.V1Deployment).spec?.template
+      )
+    // Cheap pre-filter on a copy. The API server stores quantities in canonical
+    // form (1024Mi as 1Gi). Equal amounts start no new pod, so they need no new
+    // credentials and no dry-run; every other field, and any other resources
+    // key, stays an exact comparison.
+    const local = structuredClone(desired)
     if (HostReconciler.deploymentResourcesMatchHost(observed, host)) {
       const live = observed.spec?.template.spec?.containers.find(c => c.name === 'mcp-host')
-      const want = desired.spec!.template.spec!.containers.find(c => c.name === 'mcp-host')!
+      const want = local.spec!.template.spec!.containers.find(c => c.name === 'mcp-host')!
       want.resources = {
         ...want.resources,
         requests: structuredClone(live?.resources?.requests),
         limits: structuredClone(live?.resources?.limits),
       }
     }
-    const template = (deployment: k8s.V1Deployment): string =>
-      JSON.stringify(
-        (normalizeDeploymentForComparison(deployment) as k8s.V1Deployment).spec?.template
-      )
-    return template(preserveHostDeploymentAnnotations(desired, observed)) !== template(observed)
+    if (template(preserveHostDeploymentAnnotations(local, observed)) === template(observed)) {
+      return false
+    }
+    const admitted = await this.appsApi.replaceNamespacedDeployment({
+      namespace: host.namespace,
+      name: host.name,
+      body: preserveHostDeploymentAnnotations(desired, observed),
+      dryRun: 'All',
+    })
+    if (!admitted?.spec?.template) {
+      throw new Error(`Deployment dry-run replace for Host "${host.name}" returned no pod template`)
+    }
+    return template(admitted) !== template(observed)
   }
 
   private static deploymentReady(deployment: k8s.V1Deployment | null): boolean {
@@ -2396,7 +2421,7 @@ export class HostReconciler {
           !!options.prepareForTemplateChange &&
           HostReconciler.deploymentBelongsToHost(deployment, host) &&
           (deployment.spec?.replicas ?? 1) > 0 &&
-          options.prepareForTemplateChange(deployment)
+          (await options.prepareForTemplateChange(deployment))
         const bootstrapApplied =
           !!existing &&
           !!existingRevision &&
@@ -4322,7 +4347,13 @@ export class HostReconciler {
         (observedDeployment.spec?.replicas ?? 1) > 0 &&
         effective?.state === 'active' &&
         state?.freshBootstrapPrepared !== true &&
-        this.templateWillChange(observedDeployment, host, mounts, effective, grokExecutionEnabled)
+        (await this.templateWillChange(
+          observedDeployment,
+          host,
+          mounts,
+          effective,
+          grokExecutionEnabled
+        ))
       ) {
         // The new pod would read a refresh token the running pod has consumed.
         // Readiness cannot gate a repair that is needed for scheduling, so
@@ -5720,15 +5751,15 @@ export class HostReconciler {
     // delivering fresh material in the same pass.
     const templateChangeFor =
       (effective: EffectiveHostLifecycle) =>
-      (observed: k8s.V1Deployment): boolean =>
+      async (observed: k8s.V1Deployment): Promise<boolean> =>
         effective.state === 'active' &&
-        this.templateWillChange(
+        (await this.templateWillChange(
           observed,
           host,
           mounts,
           effective,
           this.hostDerivesGrokExecution(host)
-        )
+        ))
 
     // Bootstrap captures the scope contract used for issuance. The Deployment
     // guard below compares that contract with the live channel cache after this
@@ -5838,7 +5869,7 @@ export class HostReconciler {
           !!observed &&
           HostReconciler.deploymentBelongsToHost(observed, host) &&
           (observed.spec?.replicas ?? 1) > 0 &&
-          templateChangeFor(beforeScope)(observed)
+          (await templateChangeFor(beforeScope)(observed))
         if (deploymentIdentityChanged || observedTemplateTransition) {
           // A CAS retry or existence read can reveal a new UID or template drift.
           // Prepare against this observation before rebuilding the Pod template;
