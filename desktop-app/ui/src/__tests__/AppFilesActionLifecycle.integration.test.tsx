@@ -23,7 +23,6 @@ import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
   newChatTab,
-  openAppTab,
   openChatTab,
   openFilesTab,
   openPreviewTab,
