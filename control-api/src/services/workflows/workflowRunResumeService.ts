@@ -175,39 +175,52 @@ async function lockResumeAuthorityLineage(input: {
     throw new WorkflowRunResumeError(403, 'workflow_run_path_mismatch')
   }
 
-  const grant =
-    binding.pathKind === 'direct'
-      ? await runAccessDatabaseQuery(
-          input.db,
-          input.budget,
-          `SELECT user_id
-             FROM user_workflow_triggers
-            WHERE user_id = $1
-              AND recipe_namespace = $2
-              AND recipe_name = $3
-            FOR SHARE`,
-          [binding.userId, input.run.recipe_namespace, input.run.recipe_name]
-        )
-      : await runAccessDatabaseQuery(
-          input.db,
-          input.budget,
-          `SELECT twt.team_id
-             FROM team_workflow_triggers twt
-             JOIN team_members member
-               ON member.team_id = twt.team_id
-              AND member.user_id = $1
-              AND member.status = 'active'
-            WHERE twt.team_id = $2
-              AND twt.recipe_namespace = $3
-              AND twt.recipe_name = $4
-            FOR SHARE OF twt, member`,
-          [
-            binding.userId,
-            binding.effectiveTeamId,
-            input.run.recipe_namespace,
-            input.run.recipe_name,
-          ]
-        )
+  if (binding.pathKind === 'direct') {
+    const grant = await runAccessDatabaseQuery(
+      input.db,
+      input.budget,
+      `SELECT user_id
+         FROM user_workflow_triggers
+        WHERE user_id = $1
+          AND recipe_namespace = $2
+          AND recipe_name = $3
+        FOR SHARE`,
+      [binding.userId, input.run.recipe_namespace, input.run.recipe_name]
+    )
+    if (grant.rows.length !== 1) {
+      throw new WorkflowRunResumeError(403, 'workflow_run_path_mismatch')
+    }
+    return
+  }
+
+  // Membership first, in its own statement, then the team grant: the global
+  // lock order the approval decision and the trigger row check also use, so a
+  // team-delete cascade cannot form a cycle with this resume.
+  const membership = await runAccessDatabaseQuery(
+    input.db,
+    input.budget,
+    `SELECT member.role
+       FROM team_members member
+      WHERE member.team_id = $1
+        AND member.user_id = $2
+        AND member.status = 'active'
+      FOR SHARE`,
+    [binding.effectiveTeamId, binding.userId]
+  )
+  if (membership.rows.length !== 1) {
+    throw new WorkflowRunResumeError(403, 'workflow_run_path_mismatch')
+  }
+  const grant = await runAccessDatabaseQuery(
+    input.db,
+    input.budget,
+    `SELECT twt.team_id
+       FROM team_workflow_triggers twt
+      WHERE twt.team_id = $1
+        AND twt.recipe_namespace = $2
+        AND twt.recipe_name = $3
+      FOR SHARE`,
+    [binding.effectiveTeamId, input.run.recipe_namespace, input.run.recipe_name]
+  )
   if (grant.rows.length !== 1) {
     throw new WorkflowRunResumeError(403, 'workflow_run_path_mismatch')
   }

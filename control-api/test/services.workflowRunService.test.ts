@@ -91,6 +91,7 @@ describe('services/workflowRunService.createApprovedRun', () => {
     query
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ id: input.approval_request_id }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
       .mockResolvedValueOnce({ rows: [inserted], rowCount: 1 })
@@ -99,10 +100,15 @@ describe('services/workflowRunService.createApprovedRun', () => {
     const result = await createApprovedRun(input)
 
     expect(result.created).toBe(true)
-    expect(query.mock.calls[2][0]).toContain('pg_advisory_xact_lock')
-    expect(query.mock.calls[3][0]).toContain('FOR UPDATE')
-    expect(query.mock.calls[4][0]).toContain('INSERT INTO workflow_runs')
-    expect(query.mock.calls[4][1]).toContain('11111111-1111-4111-8111-111111111111')
+    // The approval row is locked before the run key (the decision's order).
+    expect(query.mock.calls[2][0]).toContain(
+      'SELECT id FROM workflow_approval_requests WHERE id = $1 FOR UPDATE'
+    )
+    expect(query.mock.calls[2][1]).toEqual([input.approval_request_id])
+    expect(query.mock.calls[3][0]).toContain('pg_advisory_xact_lock')
+    expect(query.mock.calls[4][0]).toContain('FOR UPDATE')
+    expect(query.mock.calls[5][0]).toContain('INSERT INTO workflow_runs')
+    expect(query.mock.calls[5][1]).toContain('11111111-1111-4111-8111-111111111111')
     expect(mockedConsumeApprovalForTrigger).toHaveBeenCalledWith(
       {
         approvalRequestId: input.approval_request_id,
@@ -114,7 +120,7 @@ describe('services/workflowRunService.createApprovedRun', () => {
       expect.objectContaining({ query })
     )
     expect(mockedConsumeApprovalForTrigger.mock.invocationCallOrder[0]).toBeLessThan(
-      query.mock.invocationCallOrder[4]
+      query.mock.invocationCallOrder[5]
     )
     expect(release).toHaveBeenCalled()
   })
@@ -132,6 +138,7 @@ describe('services/workflowRunService.createApprovedRun', () => {
     query
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ id: input.approval_request_id }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [existing], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: null })
@@ -159,6 +166,7 @@ describe('services/workflowRunService.createApprovedRun', () => {
     query
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ id: input.approval_request_id }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({ rows: [existing], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: null })
@@ -172,6 +180,7 @@ describe('services/workflowRunService.createApprovedRun', () => {
     query
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ id: input.approval_request_id }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({
         rows: [
@@ -198,6 +207,7 @@ describe('services/workflowRunService.createApprovedRun', () => {
     query
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ id: input.approval_request_id }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({
         rows: [
@@ -224,6 +234,7 @@ describe('services/workflowRunService.createApprovedRun', () => {
     query
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ id: input.approval_request_id }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
       .mockResolvedValueOnce({ rows: [], rowCount: null })
@@ -269,6 +280,7 @@ describe('services/workflowRunService.createApprovedRun', () => {
     query
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({ rows: [userRunIntent], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: input.approval_request_id }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [existing], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: null })

@@ -26,6 +26,7 @@ const fakeClient = vi.hoisted(() => ({
       if (sql.includes('SELECT id FROM workflow_approval_requests')) return 'existing-approval'
       if (sql.includes('SELECT u.lifecycle_state')) return 'session'
       if (sql.includes('FROM user_workflow_triggers')) return 'direct-grant'
+      if (sql.includes('FROM team_members')) return 'team-membership'
       if (sql.includes('FROM team_workflow_triggers')) return 'team-grant'
       if (sql.includes('fence_time')) return 'clock'
       if (sql.includes('INSERT INTO workflow_authority_bindings')) return 'insert-binding'
@@ -118,16 +119,8 @@ function currentRows(): Record<string, unknown[]> {
     'direct-grant': [
       { user_id: userId, recipe_namespace: recipeNamespace, recipe_name: recipeName },
     ],
-    'team-grant': [
-      {
-        team_id: teamId,
-        recipe_namespace: recipeNamespace,
-        recipe_name: recipeName,
-        role: 'member',
-        status: 'active',
-        updated_at: '2026-11-08T00:00:00.000Z',
-      },
-    ],
+    'team-membership': [{ role: 'member' }],
+    'team-grant': [{ team_id: teamId }],
     clock: [{ delegationCurrent: true, idleSessionCurrent: true, absoluteSessionCurrent: true }],
     'insert-binding': [{ id: 'binding-1' }],
     'insert-run': [{ run_id: 'run-1', initiating_authority_binding_id: 'binding-1' }],
@@ -204,9 +197,50 @@ describe('workflow trigger row check (T-W1)', () => {
     expect(writes()).toEqual([])
   })
 
+  it('locks the active team membership before the team grant on the team path', async () => {
+    const result = await createRun({
+      ...runInput,
+      authority: authority('team'),
+      validateCurrentInTransaction: rowCheck,
+    })
+
+    expect(result).toMatchObject({ created: true, row: { run_id: 'run-1' } })
+    expect(state.log).toEqual([
+      'BEGIN',
+      'advisory-lock',
+      'existing-run',
+      'session',
+      'team-membership',
+      'team-grant',
+      'clock',
+      'insert-binding',
+      'insert-run',
+      'COMMIT',
+    ])
+  })
+
   it('rejects an inactive team membership with 409 access_path_stale and writes nothing', async () => {
-    // The team grant joins only the active membership row, so an inactive
-    // membership returns no row.
+    // The membership statement selects only the active row, so an inactive
+    // membership returns no row and the grant is never read.
+    state.rows['team-membership'] = []
+
+    await expect(
+      createRun({
+        ...runInput,
+        authority: authority('team'),
+        validateCurrentInTransaction: rowCheck,
+      })
+    ).rejects.toMatchObject({ status: 409, code: 'access_path_stale' })
+
+    // Witness: the membership read ran once inside the transaction.
+    expect(state.log.filter(entry => entry === 'team-membership')).toHaveLength(1)
+    expect(state.log).not.toContain('team-grant')
+    expect(state.log).not.toContain('direct-grant')
+    expect(state.log.at(-1)).toBe('ROLLBACK')
+    expect(writes()).toEqual([])
+  })
+
+  it('rejects a deleted team grant after the membership read with 409 access_path_stale', async () => {
     state.rows['team-grant'] = []
 
     await expect(
@@ -217,9 +251,15 @@ describe('workflow trigger row check (T-W1)', () => {
       })
     ).rejects.toMatchObject({ status: 409, code: 'access_path_stale' })
 
-    expect(state.log.filter(entry => entry === 'team-grant')).toHaveLength(1)
-    expect(state.log).not.toContain('direct-grant')
-    expect(state.log.at(-1)).toBe('ROLLBACK')
+    expect(state.log).toEqual([
+      'BEGIN',
+      'advisory-lock',
+      'existing-run',
+      'session',
+      'team-membership',
+      'team-grant',
+      'ROLLBACK',
+    ])
     expect(writes()).toEqual([])
   })
 

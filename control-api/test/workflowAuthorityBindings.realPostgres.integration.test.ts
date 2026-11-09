@@ -16,10 +16,12 @@ import {
 } from '../src/services/auth/userSessionService.js'
 import { adminDeleteTeam } from '../src/services/directory/teams.js'
 import {
+  ApprovalTriggerRunIdempotencyConflictError,
   WorkflowApprovalAuthorityStaleError,
   recordDecision,
 } from '../src/services/userApprovalRequestService.js'
 import {
+  WorkflowRunIdempotencyConflictError,
   type WorkflowTriggerAuthorityValidator,
   computeWorkflowRunPayloadHash,
   createApprovedRun,
@@ -34,6 +36,7 @@ import {
   requireCurrentWorkflowTriggerAuthority,
   workflowAuthorityBindingFromClaims,
 } from '../src/services/workflows/workflowAuthorityBindingService.js'
+import { resumeWorkflowRun } from '../src/services/workflows/workflowRunResumeService.js'
 import { createWorkflowTriggerApprovalRequest } from '../src/services/workflows/workflowTriggerApprovalService.js'
 import {
   issueUserDelegationV2,
@@ -419,6 +422,288 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     expect(approval.kind).toBe('approval')
     if (approval.kind !== 'approval') throw new Error('expected approval request')
     return approval.approvalRequestId
+  }
+
+  /** `createDecisionApproval` for a team target, with no requester in the payload. */
+  async function createTeamDecisionApproval(
+    recipeName: string,
+    teamId: string,
+    runIntent: {
+      actorType: 'user'
+      actorId: string
+      teamId: string | null
+      usageTeamId: string | null
+    } = { actorType: 'user', actorId: userId, teamId: null, usageTeamId: null }
+  ) {
+    const triggerAuthority = await authority({
+      resourceLogicalId: `sandbox-recipes/${recipeName}`,
+      target: Object.freeze({ recipeNamespace: 'sandbox-recipes', recipeName }),
+    })
+    const approval = await createWorkflowTriggerApprovalRequest({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName,
+      callerKey: 'external-rest-api',
+      targetTeamId: teamId,
+      payload: { message: 'Approve the team workflow trigger' },
+      idempotencyKey: `approval-${randomUUID()}`,
+      runIntent: {
+        ...runIntent,
+        triggerSource: 'onDemand',
+        ttlSecondsAfterFinished: defaultTtlSecondsAfterFinished,
+      },
+      authority: triggerAuthority,
+      validateCurrentInTransaction: rowCheck,
+    })
+    expect(approval.kind).toBe('approval')
+    if (approval.kind !== 'approval') throw new Error('expected team approval request')
+    return approval.approvalRequestId
+  }
+
+  /** `createDecisionApproval` with a fixed idempotency key and caller key. */
+  async function createDecisionApprovalWithKey(
+    recipeName: string,
+    idempotencyKey: string,
+    callerKey: string
+  ) {
+    const triggerAuthority = await authority({
+      resourceLogicalId: `sandbox-recipes/${recipeName}`,
+      target: Object.freeze({ recipeNamespace: 'sandbox-recipes', recipeName }),
+    })
+    const approval = await createWorkflowTriggerApprovalRequest({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName,
+      callerKey,
+      targetUserId: userId,
+      payload: { message: 'Approve the keyed workflow trigger' },
+      idempotencyKey,
+      runIntent: {
+        actorType: 'user',
+        actorId: userId,
+        teamId: null,
+        usageTeamId: null,
+        triggerSource: 'onDemand',
+        ttlSecondsAfterFinished: defaultTtlSecondsAfterFinished,
+      },
+      authority: triggerAuthority,
+      validateCurrentInTransaction: rowCheck,
+    })
+    expect(approval.kind).toBe('approval')
+    if (approval.kind !== 'approval') throw new Error('expected keyed approval request')
+    return approval.approvalRequestId
+  }
+
+  type SharedSession = Readonly<{ sid: string; sessionVersion: number; jti: string }>
+
+  /** One session that several delegations of a case share. */
+  async function sharedSession(): Promise<SharedSession> {
+    const issued = await createUserSession({
+      userId,
+      email: `${userId}@example.test`,
+      authenticationMethods: ['password'],
+    })
+    return Object.freeze({
+      sid: issued.identity.sid,
+      sessionVersion: issued.identity.sessionVersion,
+      jti: issued.identity.jti,
+    })
+  }
+
+  /** `authority()` for `workflow.trigger` on the given session; seeds the direct grant. */
+  async function triggerAuthorityOn(
+    session: SharedSession,
+    recipeName: string
+  ): Promise<WorkflowAuthorityBinding> {
+    await grantTrigger(recipeName)
+    const resource = canonicalResourceIdentity({
+      environmentId: canonicalEnvironmentId(),
+      type: 'workflow_recipe',
+      logicalId: `sandbox-recipes/${recipeName}`,
+    })
+    const prepared = prepareActionOperationTarget({
+      operationId: 'workflow.trigger',
+      resource,
+      operationTarget: Object.freeze({ recipeNamespace: 'sandbox-recipes', recipeName }),
+    })
+    const claims = verifyUserDelegationV2(
+      issueUserDelegationV2({
+        principal: { userId, sid: session.sid, sessionVersion: session.sessionVersion },
+        operationIds: ['workflow.trigger'],
+        resource,
+        preparedTargets: { 'workflow.trigger': prepared },
+        accessPathId: `ap1_${'a'.repeat(43)}`,
+        authorizationRevision: `ar1_${'b'.repeat(43)}`,
+        behaviorBindingHash: `bh2_${'c'.repeat(43)}`,
+        pathKind: 'direct',
+        effectiveTeamId: null,
+      })
+    )
+    if (!claims) throw new Error('real producer failed to verify its shared-session trigger')
+    return workflowAuthorityBindingFromClaims(claims)
+  }
+
+  /** `liveDecisionAuthority` on the given session. */
+  async function decisionAuthorityOn(
+    session: SharedSession,
+    approvalRequestId: string,
+    decision: 'approve' | 'deny'
+  ): Promise<WorkflowAuthorityBinding> {
+    const approval = await databasePool.query<{
+      recipe_namespace: string
+      recipe_name: string
+    }>(
+      `SELECT recipe_namespace, recipe_name
+         FROM workflow_approval_requests
+        WHERE id = $1`,
+      [approvalRequestId]
+    )
+    const recipeNamespace = approval.rows[0]?.recipe_namespace
+    const recipeName = approval.rows[0]?.recipe_name
+    if (!recipeNamespace || !recipeName) throw new Error('approval recipe was not found')
+    await databasePool.query(
+      `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)
+       ON CONFLICT DO NOTHING`,
+      [userId, recipeNamespace, recipeName]
+    )
+    const resource = canonicalResourceIdentity({
+      environmentId: canonicalEnvironmentId(),
+      type: 'workflow_approval',
+      logicalId: approvalRequestId,
+    })
+    const authorized = await authorizeActionV2({
+      session: {
+        contract: 'v2',
+        userId,
+        sid: session.sid,
+        jti: session.jti,
+        sessionVersion: session.sessionVersion,
+      },
+      requested: { version: 2 },
+      operationId: 'workflow.approval.decide',
+      resource,
+      operationTarget: Object.freeze({ approvalId: approvalRequestId, decision }),
+      allocateChatMessageId: false,
+    })
+    expect(authorized.status).toBe('allowed')
+    if (authorized.status !== 'allowed')
+      throw new Error('expected shared-session approval authority')
+    const claims = verifyUserDelegationV2(
+      issueUserDelegationV2({
+        principal: { userId, sid: session.sid, sessionVersion: session.sessionVersion },
+        operationIds: ['workflow.approval.decide'],
+        resource,
+        preparedTargets: {
+          'workflow.approval.decide': {
+            target: authorized.context.target,
+            targetHash: authorized.context.targetHash,
+          },
+        },
+        accessPathId: authorized.context.accessPathId,
+        authorizationRevision: authorized.context.authorizationRevision,
+        behaviorBindingHash: authorized.context.behaviorBindingHash,
+        pathKind: authorized.context.pathKind,
+        effectiveTeamId: authorized.context.effectiveTeamId,
+      })
+    )
+    if (!claims) throw new Error('shared-session approval delegation failed verification')
+    return workflowAuthorityBindingFromClaims(claims)
+  }
+
+  /** A direct-path resume delegation for `runId` on the given session. */
+  function resumeAuthorityOn(session: SharedSession, runId: string): WorkflowAuthorityBinding {
+    const resource = canonicalResourceIdentity({
+      environmentId: canonicalEnvironmentId(),
+      type: 'workflow_run',
+      logicalId: runId,
+    })
+    const prepared = prepareActionOperationTarget({
+      operationId: 'workflow.run.manage',
+      resource,
+      operationTarget: Object.freeze({ runId, action: 'resume' }),
+    })
+    const claims = verifyUserDelegationV2(
+      issueUserDelegationV2({
+        principal: { userId, sid: session.sid, sessionVersion: session.sessionVersion },
+        operationIds: ['workflow.run.manage'],
+        resource,
+        preparedTargets: { 'workflow.run.manage': prepared },
+        accessPathId: `ap1_${'d'.repeat(43)}`,
+        authorizationRevision: `ar1_${'e'.repeat(43)}`,
+        behaviorBindingHash: `bh2_${'f'.repeat(43)}`,
+        pathKind: 'direct',
+        effectiveTeamId: null,
+      })
+    )
+    if (!claims) throw new Error('real producer failed to verify its resume delegation')
+    return workflowAuthorityBindingFromClaims(claims)
+  }
+
+  /**
+   * Waits until backend `pid` is blocked on a heavyweight lock. Fails when the
+   * side call settles first, since then it never waited, or on timeout.
+   */
+  async function awaitBackendLock(
+    pid: number,
+    side: { settled: () => boolean; neverWaited: string }
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 1000; attempt += 1) {
+      const observed = await databasePool.query<{ wait_event_type: string | null }>(
+        `SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1`,
+        [pid]
+      )
+      if (observed.rows[0]?.wait_event_type === 'Lock') return
+      if (side.settled()) throw new Error(side.neverWaited)
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    throw new Error(`backend ${pid} never waited on a lock`)
+  }
+
+  type SideOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown }
+
+  /**
+   * Starts a side call without awaiting it. The outcome never rejects, so a
+   * failure is asserted on rather than reported as an unhandled rejection.
+   */
+  function startSideCall<T>(call: () => Promise<T>): {
+    outcome: Promise<SideOutcome<T>>
+    settled: () => boolean
+  } {
+    let done = false
+    const outcome = call().then(
+      value => {
+        done = true
+        return { ok: true as const, value }
+      },
+      (error: unknown) => {
+        done = true
+        return { ok: false as const, error }
+      }
+    )
+    return { outcome, settled: () => done }
+  }
+
+  /** The next core-pool connection reports its backend pid before it is used. */
+  function captureNextBackendPid(): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+      corePoolConnectSpy.mockImplementationOnce((async () => {
+        const client = await databasePool.connect()
+        try {
+          const result = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+          resolve(result.rows[0]!.pid)
+        } catch (error) {
+          client.release()
+          reject(error)
+          throw error
+        }
+        return client
+      }) as typeof pool.connect)
+    })
+  }
+
+  function postgresCode(value: unknown): string | null {
+    if (!value || typeof value !== 'object') return null
+    const code = (value as { code?: unknown }).code
+    return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : null
   }
 
   it('persists one immutable trigger binding and links an idempotent run transactionally', async () => {
@@ -1646,5 +1931,570 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         transitionId: 'workflow.approval.decide->workflow.approval.consume',
       })
     ).rejects.toMatchObject({ code: '23514' })
+  })
+
+  async function seedApprovalTeam(recipeName: string, label: string): Promise<string> {
+    const teamId = randomUUID()
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, $2)`, [
+      teamId,
+      `${label} ${teamId}`,
+    ])
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [teamId, userId]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_recipe_allowed_teams(recipe_namespace, recipe_name, team_id)
+       VALUES ('sandbox-recipes', $1, $2)`,
+      [recipeName, teamId]
+    )
+    return teamId
+  }
+
+  async function approvalState(approvalRequestId: string) {
+    const rows = await databasePool.query<{
+      status: string
+      decision_authority_binding_id: string | null
+      run_count: string
+    }>(
+      `SELECT war.status,
+              war.decision_authority_binding_id,
+              (SELECT COUNT(*) FROM workflow_runs wr
+                WHERE wr.approval_request_id = war.id)::text AS run_count
+         FROM workflow_approval_requests war
+        WHERE war.id = $1`,
+      [approvalRequestId]
+    )
+    return rows.rows
+  }
+
+  it('rejects a team-path approval decision whose membership is revoked before the final fence', async () => {
+    const recipeName = `team-membership-race-${randomUUID()}`
+    const teamId = await seedApprovalTeam(recipeName, 'Decision Membership Team')
+    const controlId = await createTeamDecisionApproval(recipeName, teamId)
+    const raceId = await createTeamDecisionApproval(recipeName, teamId)
+
+    // Positive control: the team path is live and an untouched decision commits.
+    const controlAuthority = await liveDecisionAuthority({
+      approvalRequestId: controlId,
+      decision: 'deny',
+    })
+    expect(controlAuthority.binding.pathKind).toBe('team')
+    expect(controlAuthority.binding.effectiveTeamId).toBe(teamId)
+    const controlBudget = AccessExecutionBudget.create('action')
+    try {
+      await expect(
+        recordDecision(
+          controlId,
+          'deny',
+          { userId, teamId },
+          undefined,
+          undefined,
+          undefined,
+          controlAuthority,
+          decisionReauthorizer(controlAuthority, controlBudget)
+        )
+      ).resolves.toEqual({ ok: true })
+    } finally {
+      controlBudget.close()
+    }
+
+    const raceAuthority = await liveDecisionAuthority({
+      approvalRequestId: raceId,
+      decision: 'deny',
+    })
+    expect(raceAuthority.binding.pathKind).toBe('team')
+    expect(raceAuthority.binding.effectiveTeamId).toBe(teamId)
+    let hookRan = false
+    const raceBudget = AccessExecutionBudget.create('action')
+    try {
+      await expect(
+        recordDecision(
+          raceId,
+          'deny',
+          { userId, teamId },
+          undefined,
+          undefined,
+          undefined,
+          raceAuthority,
+          decisionReauthorizer(raceAuthority, raceBudget, {
+            beforeFinalFence: async () => {
+              await databasePool.query(
+                `UPDATE team_members
+                    SET status = 'deleted', updated_at = NOW()
+                  WHERE team_id = $1 AND user_id = $2`,
+                [teamId, userId]
+              )
+              hookRan = true
+            },
+          })
+        )
+      ).rejects.toBeInstanceOf(WorkflowApprovalAuthorityStaleError)
+    } finally {
+      raceBudget.close()
+    }
+    expect(hookRan).toBe(true)
+    await expect(approvalState(raceId)).resolves.toEqual([
+      { status: 'pending', decision_authority_binding_id: null, run_count: '0' },
+    ])
+  })
+
+  it('rejects a team-path approve whose team trigger grant is revoked before consumption', async () => {
+    const recipeName = `team-consume-race-${randomUUID()}`
+    const teamId = await seedApprovalTeam(recipeName, 'Consume Grant Team')
+    await databasePool.query(
+      `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, 'sandbox-recipes', $2)`,
+      [teamId, recipeName]
+    )
+    const runIntent = { actorType: 'user' as const, actorId: userId, teamId, usageTeamId: teamId }
+    const controlId = await createTeamDecisionApproval(recipeName, teamId, runIntent)
+    const raceId = await createTeamDecisionApproval(recipeName, teamId, runIntent)
+
+    // Positive control: an untouched team approve consumes and creates one run.
+    const controlAuthority = await liveDecisionAuthority({
+      approvalRequestId: controlId,
+      decision: 'approve',
+    })
+    expect(controlAuthority.binding.pathKind).toBe('team')
+    const controlBudget = AccessExecutionBudget.create('action')
+    try {
+      await expect(
+        recordDecision(
+          controlId,
+          'approve',
+          { userId, teamId },
+          undefined,
+          undefined,
+          undefined,
+          controlAuthority,
+          decisionReauthorizer(controlAuthority, controlBudget)
+        )
+      ).resolves.toMatchObject({ ok: true, workflowRun: { created: true } })
+    } finally {
+      controlBudget.close()
+    }
+    await expect(approvalState(controlId)).resolves.toEqual([
+      expect.objectContaining({ status: 'consumed', run_count: '1' }),
+    ])
+
+    const raceAuthority = await liveDecisionAuthority({
+      approvalRequestId: raceId,
+      decision: 'approve',
+    })
+    let hookRan = false
+    const raceBudget = AccessExecutionBudget.create('action')
+    try {
+      await expect(
+        recordDecision(
+          raceId,
+          'approve',
+          { userId, teamId },
+          undefined,
+          undefined,
+          undefined,
+          raceAuthority,
+          decisionReauthorizer(raceAuthority, raceBudget, {
+            beforeFinalFence: async () => {
+              await databasePool.query(
+                `DELETE FROM team_workflow_triggers
+                  WHERE team_id = $1 AND recipe_namespace = 'sandbox-recipes' AND recipe_name = $2`,
+                [teamId, recipeName]
+              )
+              hookRan = true
+            },
+          })
+        )
+      ).rejects.toBeInstanceOf(WorkflowApprovalAuthorityStaleError)
+    } finally {
+      raceBudget.close()
+    }
+    expect(hookRan).toBe(true)
+    await expect(approvalState(raceId)).resolves.toEqual([
+      { status: 'pending', decision_authority_binding_id: null, run_count: '0' },
+    ])
+  })
+
+  it('createApprovedRun consumes only grants that survive to commit', async () => {
+    const recipeName = `consume-grant-lock-${randomUUID()}`
+    const idempotencyKey = `consume-grant-lock-${randomUUID()}`
+    const callerKey = 'mcp-host-control'
+    await databasePool.query(
+      `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+       VALUES ($1, 'sandbox-recipes', $2)
+       ON CONFLICT DO NOTHING`,
+      [userId, recipeName]
+    )
+    const inputs = { topic: 'grant lock' }
+    const approval = await createWorkflowTriggerApprovalRequest({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName,
+      callerKey,
+      targetUserId: userId,
+      payload: { message: 'Approve the grant-lock workflow trigger' },
+      idempotencyKey,
+      runIntent: {
+        actorType: 'user',
+        actorId: userId,
+        teamId: null,
+        usageTeamId: null,
+        triggerSource: 'onDemand',
+        inputs,
+      },
+    })
+    expect(approval.kind).toBe('approval')
+    if (approval.kind !== 'approval') throw new Error('expected approval request')
+    await databasePool.query(
+      `DELETE FROM workflow_approval_trigger_run_intents WHERE approval_request_id = $1`,
+      [approval.approvalRequestId]
+    )
+    await expect(
+      recordDecision(approval.approvalRequestId, 'approve', { userId })
+    ).resolves.toMatchObject({ ok: true })
+
+    const runInput = {
+      recipe_namespace: 'sandbox-recipes',
+      recipe_name: recipeName,
+      actor_type: 'user' as const,
+      actor_id: userId,
+      idempotency_key: idempotencyKey,
+      trigger_source: 'onDemand',
+      inputs,
+      ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+      approval_request_id: approval.approvalRequestId,
+      idempotency_payload_hash: computeWorkflowRunPayloadHash({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName,
+        actorType: 'user',
+        actorId: userId,
+        idempotencyKey,
+        triggerSource: 'onDemand',
+        approvalRequestId: approval.approvalRequestId,
+        callerKey,
+        inputs,
+      }),
+      approval_caller_key: callerKey,
+      correlation_id: idempotencyKey,
+    }
+
+    const revoker = await databasePool.connect()
+    let lockObserved = false
+    let side: ReturnType<typeof startSideCall<Awaited<ReturnType<typeof createApprovedRun>>>>
+    try {
+      await revoker.query('BEGIN')
+      await revoker.query(
+        `DELETE FROM user_workflow_triggers
+          WHERE user_id = $1 AND recipe_namespace = 'sandbox-recipes' AND recipe_name = $2`,
+        [userId, recipeName]
+      )
+      const pid = captureNextBackendPid()
+      side = startSideCall(() => createApprovedRun(runInput))
+      await awaitBackendLock(await pid, {
+        settled: side.settled,
+        neverWaited: 'createApprovedRun did not wait on the grant lock',
+      })
+      lockObserved = true
+      await revoker.query('COMMIT')
+    } catch (error) {
+      await revoker.query('ROLLBACK')
+      throw error
+    } finally {
+      revoker.release()
+    }
+    const outcome = await side.outcome
+
+    expect(lockObserved).toBe(true)
+    expect(outcome.ok).toBe(false)
+    expect(outcome.ok ? null : outcome.error).toMatchObject({
+      name: 'ApprovalConsumeError',
+      code: 'approval_trigger_grant_missing',
+    })
+    await expect(approvalState(approval.approvalRequestId)).resolves.toEqual([
+      expect.objectContaining({ status: 'approved', run_count: '0' }),
+    ])
+    await expect(
+      databasePool.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM workflow_runs
+          WHERE recipe_namespace = 'sandbox-recipes' AND recipe_name = $1 AND idempotency_key = $2`,
+        [recipeName, idempotencyKey]
+      )
+    ).resolves.toMatchObject({ rows: [{ count: '0' }] })
+  })
+
+  it('serializes an approve decision and createApprovedRun on the approval row before the run key', async () => {
+    const recipeName = `approved-run-order-${randomUUID()}`
+    const idempotencyKey = `approved-run-order-${randomUUID()}`
+    const callerKey = 'mcp-host-control'
+    await grantTrigger(recipeName)
+    const approvalRequestId = await createDecisionApprovalWithKey(
+      recipeName,
+      idempotencyKey,
+      callerKey
+    )
+    const decisionAuthority = await decisionAuthorityOn(
+      await sharedSession(),
+      approvalRequestId,
+      'approve'
+    )
+    const intent = await databasePool.query<{ idempotency_payload_hash: string }>(
+      `SELECT idempotency_payload_hash
+         FROM workflow_approval_trigger_run_intents
+        WHERE approval_request_id = $1`,
+      [approvalRequestId]
+    )
+    expect(intent.rows).toHaveLength(1)
+    const runInput = {
+      recipe_namespace: 'sandbox-recipes',
+      recipe_name: recipeName,
+      actor_type: 'user' as const,
+      actor_id: userId,
+      idempotency_key: idempotencyKey,
+      trigger_source: 'onDemand',
+      ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+      approval_request_id: approvalRequestId,
+      idempotency_payload_hash: intent.rows[0]!.idempotency_payload_hash,
+      approval_caller_key: callerKey,
+      correlation_id: idempotencyKey,
+    }
+
+    // Pause the decision right after it locks the approval row, start
+    // createApprovedRun on its own connection, and resume once it is blocked.
+    const approvalLock = /FROM workflow_approval_requests\s+WHERE id = \$1\s+FOR UPDATE/
+    let pausePending = true
+    let lockObserved = false
+    const sideRef: {
+      current: ReturnType<
+        typeof startSideCall<Awaited<ReturnType<typeof createApprovedRun>>>
+      > | null
+    } = { current: null }
+    const pauseAfterApprovalLock = async () => {
+      const pid = captureNextBackendPid()
+      const side = startSideCall(() => createApprovedRun(runInput))
+      sideRef.current = side
+      await awaitBackendLock(await pid, {
+        settled: side.settled,
+        neverWaited: 'createApprovedRun did not wait behind the decision',
+      })
+      lockObserved = true
+    }
+    corePoolConnectSpy.mockImplementation((async () => {
+      const client = await databasePool.connect()
+      return new Proxy(client, {
+        get(target, property) {
+          if (property === 'query') {
+            return async (text: unknown, values?: unknown) => {
+              const query = target.query as (text: unknown, values?: unknown) => Promise<unknown>
+              const result = await query.call(target, text, values)
+              if (pausePending && typeof text === 'string' && approvalLock.test(text)) {
+                pausePending = false
+                await pauseAfterApprovalLock()
+              }
+              return result
+            }
+          }
+          const value = Reflect.get(target, property, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    }) as typeof pool.connect)
+
+    const budget = AccessExecutionBudget.create('action')
+    let decisionResult: Awaited<ReturnType<typeof recordDecision>> | null = null
+    let decisionError: unknown = null
+    try {
+      decisionResult = await recordDecision(
+        approvalRequestId,
+        'approve',
+        { userId },
+        undefined,
+        undefined,
+        undefined,
+        decisionAuthority,
+        decisionReauthorizer(decisionAuthority, budget)
+      )
+    } catch (error) {
+      decisionError = error
+    } finally {
+      budget.close()
+      corePoolConnectSpy.mockImplementation((() => databasePool.connect()) as typeof pool.connect)
+    }
+    const outcome = sideRef.current ? await sideRef.current.outcome : null
+
+    expect(postgresCode(decisionError)).not.toBe('40P01')
+    expect(outcome && !outcome.ok ? postgresCode(outcome.error) : null).not.toBe('40P01')
+    expect(decisionError).toBeNull()
+    expect(lockObserved).toBe(true)
+    expect(decisionResult).toMatchObject({ ok: true, workflowRun: { created: true } })
+    expect(outcome).toMatchObject({ ok: true, value: { created: false } })
+    const decisionRun =
+      decisionResult && decisionResult.ok && 'workflowRun' in decisionResult
+        ? decisionResult.workflowRun?.row.run_id
+        : undefined
+    expect(outcome?.ok ? outcome.value.row.run_id : null).toBe(decisionRun)
+    await expect(
+      databasePool.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM workflow_runs
+          WHERE recipe_namespace = 'sandbox-recipes' AND recipe_name = $1 AND idempotency_key = $2`,
+        [recipeName, idempotencyKey]
+      )
+    ).resolves.toMatchObject({ rows: [{ count: '1' }] })
+  })
+
+  it("serializes an approve decision and a same-session trigger with the approval's key", async () => {
+    const recipeName = `decision-trigger-order-${randomUUID()}`
+    const idempotencyKey = `decision-trigger-order-${randomUUID()}`
+    const session = await sharedSession()
+    const approvalRequestId = await createDecisionApprovalWithKey(
+      recipeName,
+      idempotencyKey,
+      'external-rest-api'
+    )
+    const decisionAuthority = await decisionAuthorityOn(session, approvalRequestId, 'approve')
+    const trigger = await triggerAuthorityOn(session, recipeName)
+
+    let lockObserved = false
+    const sideRef: {
+      current: ReturnType<typeof startSideCall<Awaited<ReturnType<typeof createRun>>>> | null
+    } = { current: null }
+    const budget = AccessExecutionBudget.create('action')
+    let decisionResult: Awaited<ReturnType<typeof recordDecision>> | null = null
+    let decisionError: unknown = null
+    try {
+      decisionResult = await recordDecision(
+        approvalRequestId,
+        'approve',
+        { userId },
+        undefined,
+        undefined,
+        undefined,
+        decisionAuthority,
+        decisionReauthorizer(decisionAuthority, budget, {
+          afterSessionLock: async () => {
+            const pid = captureNextBackendPid()
+            const side = startSideCall(() =>
+              createRun({
+                recipe_namespace: 'sandbox-recipes',
+                recipe_name: recipeName,
+                actor_type: 'user',
+                actor_id: userId,
+                idempotency_key: idempotencyKey,
+                trigger_source: 'onDemand',
+                ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+                authority: trigger,
+                validateCurrentInTransaction: rowCheck,
+              })
+            )
+            sideRef.current = side
+            await awaitBackendLock(await pid, {
+              settled: side.settled,
+              neverWaited: 'createRun did not wait behind the decision',
+            })
+            lockObserved = true
+          },
+        })
+      )
+    } catch (error) {
+      decisionError = error
+    } finally {
+      budget.close()
+    }
+    const outcome = sideRef.current ? await sideRef.current.outcome : null
+
+    expect(postgresCode(decisionError)).not.toBe('40P01')
+    expect(outcome && !outcome.ok ? postgresCode(outcome.error) : null).not.toBe('40P01')
+    expect(decisionError).toBeNull()
+    expect(lockObserved).toBe(true)
+    expect(decisionResult).toMatchObject({ ok: true, workflowRun: { created: true } })
+    expect(outcome?.ok).toBe(false)
+    expect(outcome && !outcome.ok ? outcome.error : null).toBeInstanceOf(
+      WorkflowRunIdempotencyConflictError
+    )
+  })
+
+  it("serializes an approve decision and a same-session resume of the run with the approval's key", async () => {
+    const recipeName = `decision-resume-order-${randomUUID()}`
+    const idempotencyKey = `decision-resume-order-${randomUUID()}`
+    const session = await sharedSession()
+    const trigger = await triggerAuthorityOn(session, recipeName)
+    const created = await createRun({
+      recipe_namespace: 'sandbox-recipes',
+      recipe_name: recipeName,
+      actor_type: 'user',
+      actor_id: userId,
+      idempotency_key: idempotencyKey,
+      trigger_source: 'onDemand',
+      ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+      authority: trigger,
+      validateCurrentInTransaction: rowCheck,
+    })
+    expect(created.created).toBe(true)
+    const runId = created.row.run_id
+    await databasePool.query(
+      `UPDATE workflow_runs SET phase = 'AuthorizationPaused' WHERE run_id = $1`,
+      [runId]
+    )
+    const resume = resumeAuthorityOn(session, runId)
+    const approvalRequestId = await createDecisionApprovalWithKey(
+      recipeName,
+      idempotencyKey,
+      'external-rest-api'
+    )
+    const decisionAuthority = await decisionAuthorityOn(session, approvalRequestId, 'approve')
+
+    let lockObserved = false
+    const sideRef: {
+      current: ReturnType<
+        typeof startSideCall<Awaited<ReturnType<typeof resumeWorkflowRun>>>
+      > | null
+    } = { current: null }
+    const budget = AccessExecutionBudget.create('action')
+    let decisionError: unknown = null
+    try {
+      await recordDecision(
+        approvalRequestId,
+        'approve',
+        { userId },
+        undefined,
+        undefined,
+        undefined,
+        decisionAuthority,
+        decisionReauthorizer(decisionAuthority, budget, {
+          afterSessionLock: async () => {
+            const pid = captureNextBackendPid()
+            const side = startSideCall(() =>
+              resumeWorkflowRun({
+                runId,
+                recipeNamespace: 'sandbox-recipes',
+                recipeName,
+                authority: resume,
+              })
+            )
+            sideRef.current = side
+            await awaitBackendLock(await pid, {
+              settled: side.settled,
+              neverWaited: 'resumeWorkflowRun did not wait behind the decision',
+            })
+            lockObserved = true
+          },
+        })
+      )
+    } catch (error) {
+      decisionError = error
+    } finally {
+      budget.close()
+    }
+    const outcome = sideRef.current ? await sideRef.current.outcome : null
+
+    expect(postgresCode(decisionError)).not.toBe('40P01')
+    expect(outcome && !outcome.ok ? postgresCode(outcome.error) : null).not.toBe('40P01')
+    expect(lockObserved).toBe(true)
+    // The run under the approval's key belongs to no approval, so the decision
+    // stops on the idempotency conflict and leaves the approval pending.
+    expect(decisionError).toBeInstanceOf(ApprovalTriggerRunIdempotencyConflictError)
+    await expect(approvalState(approvalRequestId)).resolves.toEqual([
+      { status: 'pending', decision_authority_binding_id: null, run_count: '0' },
+    ])
+    expect(outcome).toMatchObject({ ok: true, value: { run_id: runId, phase: 'Pending' } })
   })
 })

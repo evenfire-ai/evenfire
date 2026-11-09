@@ -342,6 +342,15 @@ export async function createApprovedRun(input: CreateApprovedRunInput): Promise<
     await client.query('BEGIN')
     const runInput = await resolveApprovedRunInputFromIntent(client, input)
 
+    // The approval row comes before the run key, the order an approve decision
+    // uses (approval row → run key → run row), so this path and the decision
+    // cannot each hold one lock and wait on the other's. A missing row is left
+    // to the idempotent-run branch or the consume below, as before; the
+    // consume's own `FOR UPDATE OF war` is then re-entrant.
+    await client.query(`SELECT id FROM workflow_approval_requests WHERE id = $1 FOR UPDATE`, [
+      runInput.approval_request_id,
+    ])
+
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
       `workflow_run:${runInput.recipe_namespace}:${runInput.recipe_name}:${runInput.idempotency_key}`,
     ])

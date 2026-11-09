@@ -21,6 +21,7 @@ const fakeClient = vi.hoisted(() => ({
       if (sql.includes('FOR UPDATE OF run')) return 'lock-run'
       if (sql.includes('FROM users user_row')) return 'lineage-session'
       if (sql.includes('FROM user_workflow_triggers')) return 'lineage-direct-grant'
+      if (sql.includes('FROM team_members')) return 'lineage-team-membership'
       if (sql.includes('FROM team_workflow_triggers')) return 'lineage-team-grant'
       if (sql.includes('INSERT INTO workflow_authority_bindings')) return 'insert-binding'
       if (sql.includes('SET source_expires_at = LEAST')) return 'bound-expiry'
@@ -60,8 +61,9 @@ const sid = '22222222-2222-4222-8222-222222222222'
 const runId = '55555555-5555-4555-8555-555555555555'
 const recipeNamespace = 'sandbox-recipes'
 const recipeName = 'resume-me'
+const teamId = '44444444-4444-4444-8444-444444444444'
 
-function resumeAuthority(): WorkflowAuthorityBinding {
+function resumeAuthority(pathKind: 'direct' | 'team' = 'direct'): WorkflowAuthorityBinding {
   const target = { runId, action: 'resume' }
   return workflowAuthorityBindingFromClaims({
     typ: 'user_delegation',
@@ -86,9 +88,26 @@ function resumeAuthority(): WorkflowAuthorityBinding {
     accessPathId: `ap1_${'b'.repeat(43)}`,
     authorizationRevision: `ar1_${'c'.repeat(43)}`,
     behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
-    pathKind: 'direct',
-    effectiveTeamId: null,
+    pathKind,
+    effectiveTeamId: pathKind === 'team' ? teamId : null,
   } as never)
+}
+
+/** The paused run as a team path initiated it, with its team attribution. */
+function teamPathRows(): Record<string, unknown[]> {
+  const rows = pausedRunRows()
+  rows['lock-run'] = [
+    {
+      ...(rows['lock-run']?.[0] as Record<string, unknown>),
+      team_id: teamId,
+      usage_team_id: teamId,
+      initiating_path_kind: 'team',
+      initiating_effective_team_id: teamId,
+    },
+  ]
+  rows['lineage-team-membership'] = [{ role: 'member' }]
+  rows['lineage-team-grant'] = [{ team_id: teamId }]
+  return rows
 }
 
 function pausedRunRows(): Record<string, unknown[]> {
@@ -185,5 +204,47 @@ describe('workflow run resume service (T-W3)', () => {
     expect(state.log).not.toContain('insert-binding')
     expect(state.log.at(-1)).toBe('ROLLBACK')
     expect(state.authorize).toHaveBeenCalledTimes(0)
+  })
+
+  it('locks the team membership before the team grant on a team-path resume', async () => {
+    state.rows = teamPathRows()
+
+    const row = await resumeWorkflowRun({
+      runId,
+      recipeNamespace,
+      recipeName,
+      authority: resumeAuthority('team'),
+    })
+
+    expect(row).toMatchObject({ run_id: runId, phase: 'Running' })
+    expect(state.log).toEqual([
+      'BEGIN',
+      'statement-timeout',
+      'lock-run',
+      'lineage-session',
+      'lineage-team-membership',
+      'lineage-team-grant',
+      'insert-binding',
+      'bound-expiry',
+      'resume-run',
+      'COMMIT',
+    ])
+    expect(state.authorize).toHaveBeenCalledTimes(0)
+  })
+
+  it('rejects a team-path resume whose membership is no longer active, before the grant read', async () => {
+    state.rows = teamPathRows()
+    state.rows['lineage-team-membership'] = []
+
+    await expect(
+      resumeWorkflowRun({ runId, recipeNamespace, recipeName, authority: resumeAuthority('team') })
+    ).rejects.toMatchObject({ status: 403, code: 'workflow_run_path_mismatch' })
+
+    // Witness: the membership read ran once inside the transaction.
+    expect(state.log.filter(entry => entry === 'lineage-team-membership')).toHaveLength(1)
+    expect(state.log).not.toContain('lineage-team-grant')
+    expect(state.log).not.toContain('insert-binding')
+    expect(state.log).not.toContain('resume-run')
+    expect(state.log.at(-1)).toBe('ROLLBACK')
   })
 })

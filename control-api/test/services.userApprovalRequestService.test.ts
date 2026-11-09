@@ -843,6 +843,9 @@ describe('userApprovalRequestService', () => {
           rows: [{ status: 'pending', isExpired: false }],
           rowCount: 1,
         } as any)
+        // Approve reads the run intent before the authority locks; a legacy
+        // approval has none, so no run key is taken.
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
 
@@ -850,6 +853,9 @@ describe('userApprovalRequestService', () => {
 
       const result = await recordDecision('id-1', 'approve', { userId: 'u1' })
       expect(result).toMatchObject({ ok: true })
+      expect(String(mockDb.query.mock.calls[1]?.[0])).toContain(
+        'FROM workflow_approval_trigger_run_intents'
+      )
     })
 
     it('does not record a team workflow decision from a different requester', async () => {
@@ -876,6 +882,7 @@ describe('userApprovalRequestService', () => {
         ],
         rowCount: 1,
       } as any)
+      mockDb.query.mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
 
       mockedWithTransaction.mockImplementationOnce(async (work: any) => work(mockDb))
 
@@ -885,7 +892,12 @@ describe('userApprovalRequestService', () => {
       })
 
       expect(result).toEqual({ ok: false, error: 'approval_requester_mismatch' })
-      expect(mockDb.query).toHaveBeenCalledTimes(1)
+      // The approval lock and the approve path's run-intent read; nothing is
+      // written.
+      expect(mockDb.query).toHaveBeenCalledTimes(2)
+      expect(String(mockDb.query.mock.calls[1]?.[0])).toContain(
+        'FROM workflow_approval_trigger_run_intents'
+      )
     })
 
     it('fails closed on unavailable v2 authority before opening the final transaction', async () => {
@@ -957,6 +969,10 @@ describe('userApprovalRequestService', () => {
             events.push('transaction-config')
             return { rows: [], rowCount: 0 }
           }
+          if (sql.includes('FROM workflow_approval_trigger_run_intents')) {
+            events.push('run-intent')
+            return { rows: [], rowCount: 0 }
+          }
           events.push('approval-lock')
           return {
             rows: [
@@ -1007,6 +1023,7 @@ describe('userApprovalRequestService', () => {
         'phase-one-authority',
         'transaction-config',
         'approval-lock',
+        'run-intent',
         'final-authority',
       ])
       expect(String(mockDb.query.mock.calls[1]?.[0])).toContain('FOR UPDATE')
@@ -1097,34 +1114,39 @@ describe('userApprovalRequestService', () => {
         created_at: '2026-04-20T10:05:00.000Z',
         updated_at: '2026-04-20T10:05:00.000Z',
       }
+      const runIntent = {
+        rows: [
+          {
+            recipeNamespace: 'ns',
+            recipeName: 'recipe',
+            callerKey: 'external-rest-api:user:u1:team:t1',
+            actorType: 'user',
+            actorId: '00000000-0000-4000-8000-000000000001',
+            teamId: null,
+            usageTeamId: null,
+            triggerSource: 'onDemand',
+            idempotencyKey: 'idem-1',
+            inputs: {},
+            intermediateParameters: null,
+            outputOverrides: null,
+            maxDurationSeconds: 60,
+            ttlSecondsAfterFinished: 3600,
+            idempotencyPayloadHash: 'hash-1',
+          },
+        ],
+        rowCount: 1,
+      }
       mockDb.query
         .mockResolvedValueOnce({
           rows: [{ status: 'pending', isExpired: false }],
           rowCount: 1,
         } as any)
+        // Early run-key lock: intent, advisory key, run row.
+        .mockResolvedValueOnce(runIntent as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              recipeNamespace: 'ns',
-              recipeName: 'recipe',
-              callerKey: 'external-rest-api:user:u1:team:t1',
-              actorType: 'user',
-              actorId: '00000000-0000-4000-8000-000000000001',
-              teamId: null,
-              usageTeamId: null,
-              triggerSource: 'onDemand',
-              idempotencyKey: 'idem-1',
-              inputs: {},
-              intermediateParameters: null,
-              outputOverrides: null,
-              maxDurationSeconds: 60,
-              ttlSecondsAfterFinished: 3600,
-              idempotencyPayloadHash: 'hash-1',
-            },
-          ],
-          rowCount: 1,
-        } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
+        .mockResolvedValueOnce(runIntent as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
         .mockResolvedValueOnce({
@@ -1146,6 +1168,8 @@ describe('userApprovalRequestService', () => {
           ],
           rowCount: 1,
         } as any)
+        // Consume grant lock, then the deciding grant read.
+        .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [{ teamId: null }], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [runRow], rowCount: 1 } as any)
@@ -1157,6 +1181,14 @@ describe('userApprovalRequestService', () => {
         ok: true,
         workflowRun: { row: expect.objectContaining({ run_id: 'run-1' }), created: true },
       })
+      // The run key is taken before the decision UPDATE and again,
+      // re-entrantly, before the consume.
+      const statements = mockDb.query.mock.calls.map(call => String(call[0]))
+      const advisory = statements.flatMap((sql, index) =>
+        sql.includes('pg_advisory_xact_lock') ? [index] : []
+      )
+      expect(advisory).toEqual([2, 6])
+      expect(statements[4]).toContain('UPDATE workflow_approval_requests')
       expect(mockDb.query).toHaveBeenCalledWith(
         expect.stringContaining('UPDATE workflow_approval_requests war'),
         ['id-1', 'ns', 'recipe', 'external-rest-api:user:u1:team:t1']
@@ -1197,12 +1229,14 @@ describe('userApprovalRequestService', () => {
         ],
         rowCount: 1,
       } as any)
+      mockDb.query.mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
       mockedWithTransaction.mockImplementationOnce(async (work: any) => work(mockDb))
 
       await expect(recordDecision('id-1', 'approve', { userId: 'u1' })).rejects.toThrow(
         'A v2 workflow approval requires exact decision authority'
       )
-      expect(mockDb.query).toHaveBeenCalledTimes(1)
+      // The approval lock and the approve path's run-intent read only.
+      expect(mockDb.query).toHaveBeenCalledTimes(2)
     })
 
     it('rejects non-pending request', async () => {
@@ -1469,7 +1503,11 @@ describe('userApprovalRequestService', () => {
           ],
           rowCount: 1,
         } as any)
+        // Membership, allowance and trigger-grant locks, none still present.
         .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
+        // The team grant read, then the active-membership fallback.
         .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
 
@@ -1513,6 +1551,7 @@ describe('userApprovalRequestService', () => {
       mockDb.query
         .mockResolvedValueOnce({ rows: [approvalRow()], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
         .mockResolvedValueOnce({
           rows: [{ teamId: '11111111-1111-4111-8111-111111111111' }],
           rowCount: 1,
@@ -1539,7 +1578,8 @@ describe('userApprovalRequestService', () => {
       expect(selectSql).toContain('LEFT JOIN workflow_approval_trigger_intents')
       expect(selectSql).toContain('FOR UPDATE OF war')
       expect(selectSql).toContain('war.payload')
-      const updateSql = mockDb.query.mock.calls[2]?.[0] as string
+      expect(String(mockDb.query.mock.calls[1]?.[0])).toContain('FOR SHARE')
+      const updateSql = mockDb.query.mock.calls[3]?.[0] as string
       expect(updateSql).toContain('workflow_approval_trigger_intents')
       expect(updateSql).toContain('user_workflow_triggers trigger_uwt')
       expect(updateSql).toContain('war.target_user_id::text = war.decided_by_user_id')
@@ -1556,6 +1596,7 @@ describe('userApprovalRequestService', () => {
       const mockDb = { query: vi.fn() }
       mockDb.query
         .mockResolvedValueOnce({ rows: [approvalRow()], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
 
@@ -1587,6 +1628,10 @@ describe('userApprovalRequestService', () => {
           ],
           rowCount: 1,
         } as any)
+        // Membership, allowance and trigger-grant locks.
+        .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [{ teamGranted: true }], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [{ teamId: 'team-1' }], rowCount: 1 } as any)
 
@@ -1603,7 +1648,7 @@ describe('userApprovalRequestService', () => {
         )
       ).resolves.toEqual({ teamId: 'team-1' })
 
-      expect(mockDb.query.mock.calls[1]?.[1]).toEqual(['user-1', 'team-1', 'ns', 'recipe'])
+      expect(mockDb.query.mock.calls[4]?.[1]).toEqual(['user-1', 'team-1', 'ns', 'recipe'])
     })
 
     it('rejects target-team approvals when another user decides a requester-bound workflow', async () => {
@@ -1645,7 +1690,12 @@ describe('userApprovalRequestService', () => {
         )
       ).rejects.toMatchObject({ code: 'approval_requester_mismatch' })
 
-      expect(mockDb.query).toHaveBeenCalledTimes(1)
+      // The approval row and the three grant locks ran; no grant read and no
+      // consuming UPDATE followed.
+      expect(mockDb.query).toHaveBeenCalledTimes(4)
+      expect(
+        mockDb.query.mock.calls.slice(1).every(call => String(call[0]).includes('FOR SHARE'))
+      ).toBe(true)
     })
 
     it('allows parent-scoped approval rows to authorize child workflow targets via typed intent', async () => {
@@ -1663,6 +1713,7 @@ describe('userApprovalRequestService', () => {
           ],
           rowCount: 1,
         } as any)
+        .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [{ teamId: null }], rowCount: 1 } as any)
 

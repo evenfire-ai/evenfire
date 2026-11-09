@@ -742,15 +742,9 @@ function approvalDecisionSnapshotMatches(
   )
 }
 
-async function createWorkflowRunForApprovedTriggerIntent(
-  params: {
-    approvalRequestId: string
-    correlationId?: string | null
-  },
-  db: DbClient
-): Promise<{ row: WorkflowRunRow; created: boolean } | null> {
-  const intent = await db.query(
-    `SELECT war.id AS "approvalRequestId",
+// The typed run intent is an immutable FK child of the approval row, so both
+// readers below see the same intent while the decision holds that row.
+const APPROVED_TRIGGER_RUN_INTENT_QUERY = `SELECT war.id AS "approvalRequestId",
             wati.trigger_namespace AS "recipeNamespace",
             wati.trigger_name AS "recipeName",
             wati.trigger_caller_key AS "callerKey",
@@ -772,34 +766,78 @@ async function createWorkflowRunForApprovedTriggerIntent(
          ON wati.approval_request_id = watri.approval_request_id
        JOIN workflow_approval_requests war
          ON war.id = watri.approval_request_id
-      WHERE watri.approval_request_id = $1`,
-    [params.approvalRequestId]
-  )
+      WHERE watri.approval_request_id = $1`
 
+type ApprovedTriggerRunIntentRow = {
+  recipeNamespace: string
+  recipeName: string
+  callerKey: string
+  actorType: WorkflowRunActorType
+  actorId: string | null
+  teamId: string | null
+  usageTeamId: string | null
+  triggerSource: 'onDemand' | 'schedule' | 'autonomous'
+  idempotencyKey: string
+  inputs: Record<string, unknown> | null
+  intermediateParameters: Record<string, unknown> | null
+  outputOverrides: Record<string, unknown> | null
+  maxDurationSeconds: number | null
+  ttlSecondsAfterFinished: number | null
+  idempotencyPayloadHash: string
+  authorityBindingId: string | null
+}
+
+function approvedTriggerRunKey(row: ApprovedTriggerRunIntentRow): string {
+  return `workflow_run:${row.recipeNamespace}:${row.recipeName}:${row.idempotencyKey}`
+}
+
+/**
+ * Takes the approved run's idempotency key and run row before the decision's
+ * authority locks, so an approve decision follows the global lock order:
+ * approval row → `workflow_run:` key → run row → users → session → membership
+ * → grant rows. `createRun`, `createApprovedRun` and resume take subsets of
+ * that order, so none of them can wait on the decision while holding a lock it
+ * needs next. Returns null for a legacy approval without a typed run intent,
+ * which takes no run lock. The caller already holds the approval row.
+ */
+async function lockApprovedRunKey(db: DbClient, approvalRequestId: string): Promise<string | null> {
+  const intent = await db.query(APPROVED_TRIGGER_RUN_INTENT_QUERY, [approvalRequestId])
   if ((intent.rowCount ?? 0) === 0) return null
+  const row = intent.rows[0] as ApprovedTriggerRunIntentRow
+  const runKey = approvedTriggerRunKey(row)
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [runKey])
+  await db.query(
+    `SELECT run_id FROM workflow_runs
+      WHERE recipe_namespace = $1
+        AND recipe_name = $2
+        AND idempotency_key = $3
+      FOR UPDATE`,
+    [row.recipeNamespace, row.recipeName, row.idempotencyKey]
+  )
+  return runKey
+}
 
-  const row = intent.rows[0] as {
-    recipeNamespace: string
-    recipeName: string
-    callerKey: string
-    actorType: WorkflowRunActorType
-    actorId: string | null
-    teamId: string | null
-    usageTeamId: string | null
-    triggerSource: 'onDemand' | 'schedule' | 'autonomous'
-    idempotencyKey: string
-    inputs: Record<string, unknown> | null
-    intermediateParameters: Record<string, unknown> | null
-    outputOverrides: Record<string, unknown> | null
-    maxDurationSeconds: number | null
-    ttlSecondsAfterFinished: number | null
-    idempotencyPayloadHash: string
-    authorityBindingId: string | null
+async function createWorkflowRunForApprovedTriggerIntent(
+  params: {
+    approvalRequestId: string
+    correlationId?: string | null
+    /** The key `lockApprovedRunKey` locked earlier in this transaction. */
+    expectedRunKey: string | null
+  },
+  db: DbClient
+): Promise<{ row: WorkflowRunRow; created: boolean } | null> {
+  const intent = await db.query(APPROVED_TRIGGER_RUN_INTENT_QUERY, [params.approvalRequestId])
+  const row = (intent.rowCount ?? 0) === 0 ? null : (intent.rows[0] as ApprovedTriggerRunIntentRow)
+  // The intent is immutable, so a different key here is a code fault: the
+  // decision would hold a run lock other than the one it is about to use.
+  if ((row ? approvedTriggerRunKey(row) : null) !== params.expectedRunKey) {
+    throw new Error('workflow_approval_run_key_changed')
   }
+  if (!row) return null
 
-  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
-    `workflow_run:${row.recipeNamespace}:${row.recipeName}:${row.idempotencyKey}`,
-  ])
+  // Re-entrant: `lockApprovedRunKey` took this key and row lock in the same
+  // transaction, so neither statement waits.
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [approvedTriggerRunKey(row)])
 
   const existing = await db.query(
     `SELECT * FROM workflow_runs
@@ -970,6 +1008,10 @@ export async function recordDecision(
       throw new WorkflowApprovalAuthorityStaleError()
     }
 
+    // Approve takes the run key and run row now, before the authority locks
+    // below (users, session, membership, grant rows): see `lockApprovedRunKey`.
+    const approvedRunKey = decision === 'approve' ? await lockApprovedRunKey(db, id) : null
+
     if (reauthorize && currentAuthority && authorizedSnapshot && !authorizedSnapshot.isExpired) {
       const finalAuthority = await reauthorize.validateCurrentInTransaction(db)
       if (!finalAuthority || finalAuthority.bindingHash !== currentAuthority.bindingHash) {
@@ -1036,7 +1078,11 @@ export async function recordDecision(
     const workflowRun =
       decision === 'approve'
         ? await createWorkflowRunForApprovedTriggerIntent(
-            { approvalRequestId: id, correlationId: audit?.correlationId ?? null },
+            {
+              approvalRequestId: id,
+              correlationId: audit?.correlationId ?? null,
+              expectedRunKey: approvedRunKey,
+            },
             db
           )
         : null
@@ -1202,6 +1248,72 @@ export async function cancelRequest(
   })
 }
 
+/**
+ * Locks, `FOR SHARE`, the membership and grant rows the consume depends on,
+ * after the approval row and before the reads that decide it. Membership comes
+ * before the grant rows (the global lock order). These statements only lock:
+ * the existing checks below keep deciding, with their existing codes, and once
+ * the locks are held their reads cannot be invalidated before `COMMIT`.
+ * Under repeatable read (inside an approve decision) a row changed after the
+ * snapshot raises 40001 here, which `recordDecision` maps to a stale-authority
+ * rejection. Under read committed (`createApprovedRun`) a row deleted by a
+ * concurrent writer is waited for and then skipped, so the checks below see it
+ * missing.
+ */
+async function lockApprovalConsumeGrantRows(
+  dbTx: DbClient,
+  input: {
+    decidedByUserId: string
+    targetUserId: string | null
+    targetTeamId: string | null
+    approvalRecipeNamespace: string
+    approvalRecipeName: string
+    triggerRecipeNamespace: string
+    triggerRecipeName: string
+  }
+): Promise<void> {
+  if (input.targetUserId) {
+    await dbTx.query(
+      `SELECT recipe_namespace, recipe_name
+         FROM user_workflow_triggers
+        WHERE user_id = $1
+          AND (recipe_namespace, recipe_name) IN (($2, $3), ($4, $5))
+        ORDER BY recipe_namespace, recipe_name
+          FOR SHARE`,
+      [
+        input.decidedByUserId,
+        input.approvalRecipeNamespace,
+        input.approvalRecipeName,
+        input.triggerRecipeNamespace,
+        input.triggerRecipeName,
+      ]
+    )
+    return
+  }
+  if (!input.targetTeamId) return
+  await dbTx.query(
+    `SELECT 1
+       FROM team_members
+      WHERE team_id = $1 AND user_id = $2 AND status = 'active'
+        FOR SHARE`,
+    [input.targetTeamId, input.decidedByUserId]
+  )
+  await dbTx.query(
+    `SELECT 1
+       FROM workflow_recipe_allowed_teams
+      WHERE team_id = $1 AND recipe_namespace = $2 AND recipe_name = $3
+        FOR SHARE`,
+    [input.targetTeamId, input.approvalRecipeNamespace, input.approvalRecipeName]
+  )
+  await dbTx.query(
+    `SELECT 1
+       FROM team_workflow_triggers
+      WHERE team_id = $1 AND recipe_namespace = $2 AND recipe_name = $3
+        FOR SHARE`,
+    [input.targetTeamId, input.triggerRecipeNamespace, input.triggerRecipeName]
+  )
+}
+
 export async function consumeApprovalForTrigger(
   params: {
     approvalRequestId: string
@@ -1317,6 +1429,16 @@ export async function consumeApprovalForTrigger(
       row.status
     )
   }
+
+  await lockApprovalConsumeGrantRows(dbTx, {
+    decidedByUserId,
+    targetUserId: row.targetUserId ?? null,
+    targetTeamId: row.targetTeamId ?? null,
+    approvalRecipeNamespace: row.recipeNamespace,
+    approvalRecipeName: row.recipeName,
+    triggerRecipeNamespace: params.recipeNamespace,
+    triggerRecipeName: params.recipeName,
+  })
 
   let resolvedGrant: WorkflowTriggerGrantResult
   if (row.targetUserId) {

@@ -407,6 +407,7 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
             ? {
                 query: (async (text: string, values?: unknown[]) => {
                   if (/JOIN external_user_sessions s/.test(text)) reads.push('session')
+                  if (/FROM team_members/.test(text)) reads.push('membership')
                   if (/FROM (user|team)_workflow_triggers/.test(text)) reads.push('grant')
                   return db.query(text, values)
                 }) as typeof db.query,
@@ -1102,7 +1103,7 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
              SELECT 1 FROM pg_stat_activity
               WHERE datname = $1
                 AND wait_event_type = 'Lock'
-                AND position('FOR SHARE OF twt, member' in query) > 0
+                AND position('FROM team_workflow_triggers twt' in query) > 0
            ) AS waiting`,
           [database]
         )
@@ -1536,7 +1537,9 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         )
       },
       expected: { status: 409, code: 'access_path_stale' },
-      reads: ['session', 'grant'],
+      // The membership is locked in its own statement before the team grant,
+      // so the check stops at the membership and never reads the grant.
+      reads: ['session', 'membership'],
     },
     {
       label: 'the session is revoked',

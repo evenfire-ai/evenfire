@@ -212,11 +212,95 @@ export async function requireWorkflowActionAuthority(input: {
   return workflowAuthorityBindingFromClaims(claims)
 }
 
+type BoundAccessPath = Readonly<{ kind: 'direct' }> | Readonly<{ kind: 'team'; teamId: string }>
+
+/**
+ * The path shape a signed binding names: direct with no effective team, or
+ * team with one. Any other shape is a malformed delegation.
+ */
+function boundAccessPath(binding: AuthorityBindingV2): BoundAccessPath {
+  if (binding.pathKind === 'direct' && binding.effectiveTeamId === null) {
+    return { kind: 'direct' }
+  }
+  if (binding.pathKind === 'team' && binding.effectiveTeamId) {
+    return { kind: 'team', teamId: binding.effectiveTeamId }
+  }
+  throw new WorkflowAuthorityError(400, 'invalid_action_delegation')
+}
+
+/** A bound row that is missing, or no longer current, makes the path stale. */
+function requireOneBoundRow(result: { rowCount: number | null }): void {
+  if ((result.rowCount ?? 0) !== 1) {
+    throw new WorkflowAuthorityError(409, 'access_path_stale')
+  }
+}
+
+/**
+ * Locks, `FOR SHARE`, the rows the approval decision's selected path depends
+ * on: the direct trigger grant, or the active team membership and then the
+ * team's approval allowance. The recipe and target come from the approval row
+ * the caller already holds `FOR UPDATE`. Membership is locked in its own
+ * statement before any grant row of the same team, so the order holds whatever
+ * order a team-delete cascade reaches `team_members`,
+ * `workflow_recipe_allowed_teams` and `team_workflow_triggers` in.
+ */
+async function lockApprovalDecisionPath(db: DbClient, binding: AuthorityBindingV2): Promise<void> {
+  const path = boundAccessPath(binding)
+  const approvalId = binding.resource.logicalId
+  if (path.kind === 'direct') {
+    requireOneBoundRow(
+      await db.query(
+        `SELECT uwt.user_id
+           FROM workflow_approval_requests war
+           JOIN user_workflow_triggers uwt
+             ON uwt.user_id = $1
+            AND uwt.recipe_namespace = war.recipe_namespace
+            AND uwt.recipe_name = war.recipe_name
+          WHERE war.id = $2::uuid AND war.target_user_id = $1
+            FOR SHARE OF uwt`,
+        [binding.userId, approvalId]
+      )
+    )
+    return
+  }
+  requireOneBoundRow(
+    await db.query(
+      `SELECT tm.role
+         FROM workflow_approval_requests war
+         JOIN team_members tm
+           ON tm.team_id = war.target_team_id AND tm.user_id = $1 AND tm.status = 'active'
+        WHERE war.id = $2::uuid AND war.target_team_id = $3
+          FOR SHARE OF tm`,
+      [binding.userId, approvalId, path.teamId]
+    )
+  )
+  requireOneBoundRow(
+    await db.query(
+      `SELECT wat.team_id
+         FROM workflow_approval_requests war
+         JOIN workflow_recipe_allowed_teams wat
+           ON wat.team_id = war.target_team_id
+          AND wat.recipe_namespace = war.recipe_namespace
+          AND wat.recipe_name = war.recipe_name
+        WHERE war.id = $1::uuid AND war.target_team_id = $2
+          FOR SHARE OF wat`,
+      [approvalId, path.teamId]
+    )
+  )
+}
+
 /**
  * Reuses the canonical action authorizer on the caller's repeatable-read write
- * transaction, then takes the user row before the session row and locks the
- * session. `users` comes first so a decision serialises behind
- * `revokeAllUserSessions`, which locks the same two tables in that order.
+ * transaction, then locks in the global order: the user row `FOR SHARE`, the
+ * session `FOR UPDATE`, then the rows the selected path is bound to `FOR SHARE`
+ * (the direct trigger grant, or the active team membership before the team's
+ * approval allowance). `users` comes before the session so a decision
+ * serialises behind `revokeAllUserSessions`, which locks the same two tables in
+ * that order. The bound-row lock replaces the removed revision counters: a
+ * grant or membership changed after this transaction's snapshot raises 40001
+ * at that lock, which `recordDecision` maps to a stale-authority rejection, and
+ * once the lock is held a revocation waits for this decision to commit. A
+ * missing bound row answers 409 `access_path_stale`.
  * It performs no connection acquisition or external destination lookup while
  * the caller holds the approval row lock.
  */
@@ -321,6 +405,9 @@ export async function requireCurrentWorkflowApprovalAuthority(input: {
     }
     throw error
   }
+  // Outside the conversion above on purpose: a 40001 here reaches
+  // `recordDecision` raw and becomes `WorkflowApprovalAuthorityStaleError`.
+  await lockApprovalDecisionPath(input.db, binding)
   const currentTime = await input.db.query(
     `SELECT clock_timestamp() < to_timestamp($1) AS "delegationCurrent",
             ($2::timestamptz IS NULL OR clock_timestamp() < $2::timestamptz) AS "pathCurrent"`,
@@ -396,29 +483,36 @@ export async function requireCurrentWorkflowTriggerAuthority(input: {
     throw new WorkflowAuthorityError(401, 'invalid_session')
   }
 
-  let grant
-  if (binding.pathKind === 'direct' && binding.effectiveTeamId === null) {
-    grant = await input.db.query(
-      `SELECT user_id, recipe_namespace, recipe_name
-         FROM user_workflow_triggers
-        WHERE user_id = $1 AND recipe_namespace = $2 AND recipe_name = $3 FOR SHARE`,
-      [binding.userId, recipeNamespace, recipeName]
-    )
-  } else if (binding.pathKind === 'team' && binding.effectiveTeamId) {
-    grant = await input.db.query(
-      `SELECT twt.team_id, twt.recipe_namespace, twt.recipe_name, tm.role, tm.status,
-              tm.updated_at
-         FROM team_workflow_triggers twt
-         JOIN team_members tm ON tm.team_id = twt.team_id AND tm.user_id = $1
-        WHERE twt.team_id = $2 AND twt.recipe_namespace = $3 AND twt.recipe_name = $4
-          AND tm.status = 'active' FOR SHARE`,
-      [binding.userId, binding.effectiveTeamId, recipeNamespace, recipeName]
+  const path = boundAccessPath(binding)
+  if (path.kind === 'direct') {
+    requireOneBoundRow(
+      await input.db.query(
+        `SELECT user_id, recipe_namespace, recipe_name
+           FROM user_workflow_triggers
+          WHERE user_id = $1 AND recipe_namespace = $2 AND recipe_name = $3 FOR SHARE`,
+        [binding.userId, recipeNamespace, recipeName]
+      )
     )
   } else {
-    throw new WorkflowAuthorityError(400, 'invalid_action_delegation')
-  }
-  if ((grant.rowCount ?? 0) !== 1) {
-    throw new WorkflowAuthorityError(409, 'access_path_stale')
+    // Membership first, in its own statement, then the team grant: the same
+    // order the approval decision and resume use (see
+    // `lockApprovalDecisionPath`).
+    requireOneBoundRow(
+      await input.db.query(
+        `SELECT role
+           FROM team_members
+          WHERE team_id = $2 AND user_id = $1 AND status = 'active' FOR SHARE`,
+        [binding.userId, path.teamId]
+      )
+    )
+    requireOneBoundRow(
+      await input.db.query(
+        `SELECT team_id
+           FROM team_workflow_triggers
+          WHERE team_id = $1 AND recipe_namespace = $2 AND recipe_name = $3 FOR SHARE`,
+        [path.teamId, recipeNamespace, recipeName]
+      )
+    )
   }
 
   const currentTime = await input.db.query(
