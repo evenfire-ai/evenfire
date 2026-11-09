@@ -129,6 +129,29 @@ describe('workflow authority binding ingress', () => {
     ).rejects.toMatchObject({ status: 400, code: 'invalid_action_delegation' })
   })
 
+  // Merge plan v2 §10 M3: the route's own revision compare stays as a second
+  // check behind the authorizer's (T-Q2 covers the authorizer's 409).
+  it('rejects an allowed checkpoint whose authorization revision is not the delegated one', async () => {
+    mocks.checkpoint.mockResolvedValueOnce({
+      ...allowedCheckpoint(),
+      authorizationRevision: `ar1_${'e'.repeat(43)}`,
+    })
+
+    await expect(
+      requireWorkflowActionAuthority({
+        req: request(),
+        caller: caller as never,
+        operationId: 'workflow.trigger',
+        resourceType: 'workflow_recipe',
+        resourceLogicalId: 'sandbox-recipes/demo',
+        target,
+        gateway: {} as never,
+      })
+    ).rejects.toMatchObject({ status: 400, code: 'invalid_action_delegation' })
+    // Witness: the rejection came after the live checkpoint answered.
+    expect(mocks.checkpoint).toHaveBeenCalledTimes(1)
+  })
+
   it('verifies exact user/session/operation/target authority and checkpoints it live', async () => {
     const authority = await requireWorkflowActionAuthority({
       req: request(),

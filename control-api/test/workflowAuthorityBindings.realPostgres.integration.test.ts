@@ -20,6 +20,7 @@ import {
   recordDecision,
 } from '../src/services/userApprovalRequestService.js'
 import {
+  type WorkflowTriggerAuthorityValidator,
   computeWorkflowRunPayloadHash,
   createApprovedRun,
   createRun,
@@ -28,7 +29,6 @@ import { deriveApprovalConsumeAuthority } from '../src/services/workflows/workfl
 import {
   type WorkflowAuthorityBinding,
   WorkflowAuthorityError,
-  captureWorkflowTriggerAuthorityFence,
   persistWorkflowAuthorityBinding,
   requireCurrentWorkflowApprovalAuthority,
   requireCurrentWorkflowTriggerAuthority,
@@ -138,6 +138,12 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     const operationId = input?.operationId ?? 'workflow.trigger'
     const target =
       input?.target ?? Object.freeze({ recipeNamespace: 'sandbox-recipes', recipeName: 'demo' })
+    if (operationId === 'workflow.trigger') {
+      // The trigger row check re-reads the grant row of the signed path inside
+      // the insert transaction, so the path this delegation names must exist.
+      const recipe = target as Readonly<{ recipeNamespace: string; recipeName: string }>
+      await grantTrigger(recipe.recipeName, input?.effectiveTeamId)
+    }
     const resource = canonicalResourceIdentity({
       environmentId: canonicalEnvironmentId(),
       type: input?.resourceType ?? 'workflow_recipe',
@@ -247,32 +253,32 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     return workflowAuthorityBindingFromClaims(claims)
   }
 
-  async function currentTriggerAuthority(
-    recipeName: string,
-    effectiveTeamId?: string
-  ): Promise<WorkflowAuthorityBinding> {
-    const environmentId = canonicalEnvironmentId()
-    await databasePool.query(
-      `INSERT INTO operational_catalog_source_state(
-         environment_id, source_family, generation, resource_version, status, last_success_at
-       ) VALUES ($1, 'workflow_recipe', 1, '1', 'current', clock_timestamp())
-       ON CONFLICT (environment_id, source_family) DO NOTHING`,
-      [environmentId]
-    )
-    await databasePool.query(
-      `INSERT INTO operational_resource_index(
-         environment_id, resource_type, logical_id, source_family, source_generation,
-         provider_uid, provider_resource_version, display_name, enabled, content_bytes
-       ) VALUES ($1, 'workflow_recipe', $2, 'workflow_recipe', 1, $3, '1', $2, TRUE, 64)
-       ON CONFLICT (environment_id, resource_type, logical_id) DO NOTHING`,
-      [environmentId, `sandbox-recipes/${recipeName}`, `workflow-recipe:${recipeName}`]
-    )
+  async function grantTrigger(recipeName: string, effectiveTeamId?: string): Promise<void> {
+    if (effectiveTeamId) {
+      await databasePool.query(
+        `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+         VALUES ($1, 'sandbox-recipes', $2)
+         ON CONFLICT DO NOTHING`,
+        [effectiveTeamId, recipeName]
+      )
+      return
+    }
     await databasePool.query(
       `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
        VALUES ($1, 'sandbox-recipes', $2)
        ON CONFLICT DO NOTHING`,
       [userId, recipeName]
     )
+  }
+
+  /** The trigger route's row check, as `trigger.routes.ts` wires it. */
+  const rowCheck: WorkflowTriggerAuthorityValidator = (db, current) =>
+    requireCurrentWorkflowTriggerAuthority({ db, authority: current })
+
+  async function currentTriggerAuthority(
+    recipeName: string,
+    effectiveTeamId?: string
+  ): Promise<WorkflowAuthorityBinding> {
     const target = Object.freeze({ recipeNamespace: 'sandbox-recipes', recipeName })
     return authority({
       operationId: 'workflow.trigger',
@@ -304,30 +310,23 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     }
   }
 
-  function triggerReauthorizer(
+  /**
+   * The trigger row check inside the insert transaction. `beforeRowCheck` runs
+   * in that transaction, after the route's single authorization and before
+   * the bound rows are re-read, so a revocation it commits from another
+   * connection is the race the row check exists to catch.
+   */
+  function triggerRowCheck(
     initial: WorkflowAuthorityBinding,
-    budget: AccessExecutionBudget,
-    afterPhaseOne?: () => Promise<void>,
+    beforeRowCheck?: () => Promise<void>,
     observedRoles?: string[]
-  ) {
-    let phaseOneFence: Awaited<ReturnType<typeof captureWorkflowTriggerAuthorityFence>> | null =
-      null
+  ): { validateCurrentInTransaction: WorkflowTriggerAuthorityValidator } {
     return {
-      reauthorize: async () => {
-        const before = await captureWorkflowTriggerAuthorityFence({ authority: initial })
-        const current = initial
-        const after = await captureWorkflowTriggerAuthorityFence({ authority: current })
-        expect(after).toEqual(before)
-        phaseOneFence = after
-        await afterPhaseOne?.()
-        return current
-      },
-      validateCurrentInTransaction: (db: Parameters<typeof createRun>[1]) => {
-        if (!phaseOneFence) throw new Error('test phase-one trigger fence missing')
+      validateCurrentInTransaction: async db => {
+        await beforeRowCheck?.()
         return requireCurrentWorkflowTriggerAuthority({
-          db: observedRoles ? recordingRoleDb(db!, observedRoles) : db!,
+          db: observedRoles ? recordingRoleDb(db, observedRoles) : db,
           authority: initial,
-          expectedFence: phaseOneFence,
         })
       },
     }
@@ -415,6 +414,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         ttlSecondsAfterFinished: defaultTtlSecondsAfterFinished,
       },
       authority: triggerAuthority,
+      validateCurrentInTransaction: rowCheck,
     })
     expect(approval.kind).toBe('approval')
     if (approval.kind !== 'approval') throw new Error('expected approval request')
@@ -432,6 +432,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       trigger_source: 'onDemand' as const,
       ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
       authority: currentAuthority,
+      validateCurrentInTransaction: rowCheck,
     }
 
     const [first, second] = await Promise.all([createRun(input), createRun(input)])
@@ -547,8 +548,6 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     const runAuthority = await currentTriggerAuthority('pool-one-run')
     const approvalAuthority = await currentTriggerAuthority('pool-one-approval')
     const limitedPool = new Pool({ connectionString, max: 1 })
-    const runBudget = AccessExecutionBudget.create('action')
-    const approvalBudget = AccessExecutionBudget.create('action')
     corePoolConnectSpy.mockImplementation((() => limitedPool.connect()) as typeof pool.connect)
     try {
       const run = await createRun({
@@ -560,7 +559,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         trigger_source: 'onDemand',
         ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
         authority: runAuthority,
-        ...triggerReauthorizer(runAuthority, runBudget),
+        ...triggerRowCheck(runAuthority),
       })
       expect(run.created).toBe(true)
 
@@ -577,92 +576,22 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
           triggerSource: 'onDemand',
         },
         authority: approvalAuthority,
-        ...triggerReauthorizer(approvalAuthority, approvalBudget),
+        ...triggerRowCheck(approvalAuthority),
       })
       expect(approval.kind).toBe('approval')
       expect(limitedPool.waitingCount).toBe(0)
     } finally {
-      runBudget.close()
-      approvalBudget.close()
       corePoolConnectSpy.mockImplementation((() => databasePool.connect()) as typeof pool.connect)
       await endPoolAndWaitForClients(limitedPool)
     }
   })
 
-  it('serializes reauthorized trigger runs to one idempotent winner', async () => {
-    const recipeName = 'reauthorized-concurrency'
+  it('serializes row-checked V2 trigger runs to one idempotent winner', async () => {
+    const recipeName = 'row-checked-concurrency'
     const currentAuthority = await currentTriggerAuthority(recipeName)
-    const idempotencyKey = `reauthorized-${randomUUID()}`
-    const budgets = Array.from({ length: 6 }, () => AccessExecutionBudget.create('action'))
-    try {
-      const results = await Promise.all(
-        budgets.map(budget =>
-          createRun({
-            recipe_namespace: 'sandbox-recipes',
-            recipe_name: recipeName,
-            actor_type: 'user',
-            actor_id: userId,
-            idempotency_key: idempotencyKey,
-            trigger_source: 'onDemand',
-            ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
-            authority: currentAuthority,
-            ...triggerReauthorizer(currentAuthority, budget),
-          })
-        )
-      )
-      expect(new Set(results.map(result => result.row.run_id))).toHaveLength(1)
-      expect(results.filter(result => result.created)).toHaveLength(1)
-      expect(results.filter(result => !result.created)).toHaveLength(5)
-    } finally {
-      budgets.forEach(budget => budget.close())
-    }
-  })
-
-  it('serializes reauthorized trigger approvals to one idempotent winner', async () => {
-    const recipeName = 'reauthorized-approval-concurrency'
-    const currentAuthority = await currentTriggerAuthority(recipeName)
-    const idempotencyKey = `reauthorized-approval-${randomUUID()}`
-    const budgets = Array.from({ length: 6 }, () => AccessExecutionBudget.create('action'))
-    try {
-      const results = await Promise.all(
-        budgets.map(budget =>
-          createWorkflowTriggerApprovalRequest({
-            recipeNamespace: 'sandbox-recipes',
-            recipeName,
-            callerKey: 'external-rest-api',
-            targetUserId: userId,
-            payload: { message: 'Approve concurrent workflow trigger' },
-            idempotencyKey,
-            runIntent: {
-              actorType: 'user',
-              actorId: userId,
-              triggerSource: 'onDemand',
-            },
-            authority: currentAuthority,
-            ...triggerReauthorizer(currentAuthority, budget),
-          })
-        )
-      )
-      expect(results.every(result => result.kind === 'approval')).toBe(true)
-      expect(new Set(results.map(result => result.approvalRequestId))).toHaveLength(1)
-      expect(results.filter(result => result.kind === 'approval' && !result.existing)).toHaveLength(
-        1
-      )
-      expect(results.filter(result => result.kind === 'approval' && result.existing)).toHaveLength(
-        5
-      )
-    } finally {
-      budgets.forEach(budget => budget.close())
-    }
-  })
-
-  it('rejects a trigger grant revision race and allows a fresh caller retry', async () => {
-    const recipeName = 'trigger-revision-race'
-    const staleAuthority = await currentTriggerAuthority(recipeName)
-    const idempotencyKey = `revision-race-${randomUUID()}`
-    const staleBudget = AccessExecutionBudget.create('action')
-    try {
-      await expect(
+    const idempotencyKey = `row-checked-${randomUUID()}`
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
         createRun({
           recipe_namespace: 'sandbox-recipes',
           recipe_name: recipeName,
@@ -671,19 +600,72 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
           idempotency_key: idempotencyKey,
           trigger_source: 'onDemand',
           ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
-          authority: staleAuthority,
-          ...triggerReauthorizer(staleAuthority, staleBudget, async () => {
-            await databasePool.query(
-              `DELETE FROM user_workflow_triggers
-                WHERE user_id = $1 AND recipe_namespace = 'sandbox-recipes' AND recipe_name = $2`,
-              [userId, recipeName]
-            )
-          }),
+          authority: currentAuthority,
+          ...triggerRowCheck(currentAuthority),
         })
-      ).rejects.toMatchObject({ code: 'access_path_stale' })
-    } finally {
-      staleBudget.close()
-    }
+      )
+    )
+    expect(new Set(results.map(result => result.row.run_id))).toHaveLength(1)
+    expect(results.filter(result => result.created)).toHaveLength(1)
+    expect(results.filter(result => !result.created)).toHaveLength(5)
+  })
+
+  it('serializes row-checked V2 trigger approvals to one idempotent winner', async () => {
+    const recipeName = 'row-checked-approval-concurrency'
+    const currentAuthority = await currentTriggerAuthority(recipeName)
+    const idempotencyKey = `row-checked-approval-${randomUUID()}`
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        createWorkflowTriggerApprovalRequest({
+          recipeNamespace: 'sandbox-recipes',
+          recipeName,
+          callerKey: 'external-rest-api',
+          targetUserId: userId,
+          payload: { message: 'Approve concurrent workflow trigger' },
+          idempotencyKey,
+          runIntent: {
+            actorType: 'user',
+            actorId: userId,
+            triggerSource: 'onDemand',
+          },
+          authority: currentAuthority,
+          ...triggerRowCheck(currentAuthority),
+        })
+      )
+    )
+    expect(results.every(result => result.kind === 'approval')).toBe(true)
+    expect(new Set(results.map(result => result.approvalRequestId))).toHaveLength(1)
+    expect(results.filter(result => result.kind === 'approval' && !result.existing)).toHaveLength(1)
+    expect(results.filter(result => result.kind === 'approval' && result.existing)).toHaveLength(5)
+  })
+
+  it('rejects a trigger grant revision race and allows a fresh caller retry', async () => {
+    const recipeName = 'trigger-revision-race'
+    const staleAuthority = await currentTriggerAuthority(recipeName)
+    const idempotencyKey = `revision-race-${randomUUID()}`
+    let revoked = 0
+    await expect(
+      createRun({
+        recipe_namespace: 'sandbox-recipes',
+        recipe_name: recipeName,
+        actor_type: 'user',
+        actor_id: userId,
+        idempotency_key: idempotencyKey,
+        trigger_source: 'onDemand',
+        ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+        authority: staleAuthority,
+        ...triggerRowCheck(staleAuthority, async () => {
+          const deleted = await databasePool.query(
+            `DELETE FROM user_workflow_triggers
+              WHERE user_id = $1 AND recipe_namespace = 'sandbox-recipes' AND recipe_name = $2`,
+            [userId, recipeName]
+          )
+          revoked += deleted.rowCount ?? 0
+        }),
+      })
+    ).rejects.toMatchObject({ status: 409, code: 'access_path_stale' })
+    // Witness: the revocation ran inside the insert transaction, before the row check.
+    expect(revoked).toBe(1)
     const missing = await databasePool.query(
       `SELECT run_id FROM workflow_runs
         WHERE recipe_namespace = 'sandbox-recipes' AND recipe_name = $1 AND idempotency_key = $2`,
@@ -692,23 +674,18 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     expect(missing.rowCount).toBe(0)
 
     const freshAuthority = await currentTriggerAuthority(recipeName)
-    const freshBudget = AccessExecutionBudget.create('action')
-    try {
-      const retried = await createRun({
-        recipe_namespace: 'sandbox-recipes',
-        recipe_name: recipeName,
-        actor_type: 'user',
-        actor_id: userId,
-        idempotency_key: idempotencyKey,
-        trigger_source: 'onDemand',
-        ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
-        authority: freshAuthority,
-        ...triggerReauthorizer(freshAuthority, freshBudget),
-      })
-      expect(retried.created).toBe(true)
-    } finally {
-      freshBudget.close()
-    }
+    const retried = await createRun({
+      recipe_namespace: 'sandbox-recipes',
+      recipe_name: recipeName,
+      actor_type: 'user',
+      actor_id: userId,
+      idempotency_key: idempotencyKey,
+      trigger_source: 'onDemand',
+      ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+      authority: freshAuthority,
+      ...triggerRowCheck(freshAuthority),
+    })
+    expect(retried.created).toBe(true)
   })
 
   it('rejects a session that expires during the final trigger authority fence', async () => {
@@ -721,9 +698,9 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       [triggerAuthority.binding.sid]
     )
     const idempotencyKey = `session-expiry-${randomUUID()}`
-    const budget = AccessExecutionBudget.create('action')
     const processTime = Date.now()
     const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(processTime)
+    let waited = false
     try {
       await expect(
         createRun({
@@ -735,15 +712,16 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
           trigger_source: 'onDemand',
           ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
           authority: triggerAuthority,
-          ...triggerReauthorizer(triggerAuthority, budget, async () => {
+          ...triggerRowCheck(triggerAuthority, async () => {
             await new Promise(resolve => setTimeout(resolve, 1_000))
+            waited = true
           }),
         })
       ).rejects.toMatchObject({ status: 409, code: 'access_path_stale' })
     } finally {
       dateNowSpy.mockRestore()
-      budget.close()
     }
+    expect(waited).toBe(true)
 
     const persisted = await databasePool.query(
       `SELECT run_id FROM workflow_runs
@@ -752,46 +730,6 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       [recipeName, idempotencyKey]
     )
     expect(persisted.rowCount).toBe(0)
-  })
-
-  it('rejects an operational recipe snapshot race before creating a trigger run', async () => {
-    const recipeName = 'trigger-resource-race'
-    const staleAuthority = await currentTriggerAuthority(recipeName)
-    const idempotencyKey = `resource-race-${randomUUID()}`
-    const staleBudget = AccessExecutionBudget.create('action')
-    try {
-      await expect(
-        createRun({
-          recipe_namespace: 'sandbox-recipes',
-          recipe_name: recipeName,
-          actor_type: 'user',
-          actor_id: userId,
-          idempotency_key: idempotencyKey,
-          trigger_source: 'onDemand',
-          ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
-          authority: staleAuthority,
-          ...triggerReauthorizer(staleAuthority, staleBudget, async () => {
-            await databasePool.query(
-              `UPDATE operational_resource_index
-                  SET provider_resource_version = '2'
-                WHERE environment_id = $1 AND resource_type = 'workflow_recipe'
-                  AND logical_id = $2`,
-              [canonicalEnvironmentId(), `sandbox-recipes/${recipeName}`]
-            )
-          }),
-        })
-      ).rejects.toMatchObject({ code: 'access_path_stale' })
-    } finally {
-      staleBudget.close()
-    }
-    await expect(
-      databasePool.query(
-        `SELECT run_id FROM workflow_runs
-          WHERE recipe_namespace = 'sandbox-recipes' AND recipe_name = $1
-            AND idempotency_key = $2`,
-        [recipeName, idempotencyKey]
-      )
-    ).resolves.toMatchObject({ rowCount: 0 })
   })
 
   it('preserves legacy runs without inventing workflow authority', async () => {
@@ -878,6 +816,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         ...base,
         idempotencyKey: legacyFirstKey,
         authority: currentAuthority,
+        validateCurrentInTransaction: rowCheck,
       })
     ).resolves.toMatchObject({ kind: 'mismatch' })
 
@@ -887,6 +826,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         ...base,
         idempotencyKey: v2FirstKey,
         authority: currentAuthority,
+        validateCurrentInTransaction: rowCheck,
       })
     ).resolves.toMatchObject({ kind: 'approval' })
     await expect(
@@ -947,10 +887,12 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     const first = await createWorkflowTriggerApprovalRequest({
       ...request,
       authority: firstAuthority,
+      validateCurrentInTransaction: rowCheck,
     })
     const retried = await createWorkflowTriggerApprovalRequest({
       ...request,
       authority: refreshedAuthority,
+      validateCurrentInTransaction: rowCheck,
     })
 
     expect(first).toMatchObject({ kind: 'approval' })
@@ -987,6 +929,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       createWorkflowTriggerApprovalRequest({
         ...request,
         authority: workflowAuthorityBindingFromClaims(changedPathClaims),
+        validateCurrentInTransaction: rowCheck,
       })
     ).resolves.toMatchObject({ kind: 'mismatch', reason: 'payload_hash_mismatch' })
   })
@@ -1007,12 +950,22 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       createRun({ ...base, idempotency_key: legacyFirstKey }, databasePool)
     ).resolves.toMatchObject({ created: true })
     await expect(
-      createRun({ ...base, idempotency_key: legacyFirstKey, authority: currentAuthority })
+      createRun({
+        ...base,
+        idempotency_key: legacyFirstKey,
+        authority: currentAuthority,
+        validateCurrentInTransaction: rowCheck,
+      })
     ).rejects.toThrow('Idempotency-Key was reused with a different workflow trigger payload')
 
     const v2FirstKey = `run-v2-first-${randomUUID()}`
     await expect(
-      createRun({ ...base, idempotency_key: v2FirstKey, authority: currentAuthority })
+      createRun({
+        ...base,
+        idempotency_key: v2FirstKey,
+        authority: currentAuthority,
+        validateCurrentInTransaction: rowCheck,
+      })
     ).resolves.toMatchObject({ created: true })
     await expect(createRun({ ...base, idempotency_key: v2FirstKey }, databasePool)).rejects.toThrow(
       'Idempotency-Key was reused with a different workflow trigger payload'
@@ -1030,6 +983,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       trigger_source: 'onDemand',
       ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
       authority: currentAuthority,
+      validateCurrentInTransaction: rowCheck,
     })
     await expect(
       revokeUserSession(userId, currentAuthority.binding.sid, 'workflow-binding-lifecycle')
@@ -1071,6 +1025,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       trigger_source: 'onDemand',
       ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
       authority: teamAuthority,
+      validateCurrentInTransaction: rowCheck,
     })
     await databasePool.query(`DELETE FROM team_members WHERE team_id = $1`, [teamId])
     await expect(adminDeleteTeam(teamId)).resolves.toEqual({ ok: true, id: teamId })
@@ -1225,7 +1180,6 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       void client.query('SET ROLE control_api_runtime')
     })
     corePoolConnectSpy.mockImplementation((() => runtimePool.connect()) as typeof pool.connect)
-    const triggerBudget = AccessExecutionBudget.create('action')
     const approveBudget = AccessExecutionBudget.create('action')
     const denyBudget = AccessExecutionBudget.create('action')
     try {
@@ -1240,7 +1194,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         trigger_source: 'onDemand',
         ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
         authority: teamAuthority,
-        ...triggerReauthorizer(teamAuthority, triggerBudget, undefined, observedRoles.trigger),
+        ...triggerRowCheck(teamAuthority, undefined, observedRoles.trigger),
       })
       expect(created.created).toBe(true)
       const runRows = await databasePool.query<{ initiating_authority_binding_id: string | null }>(
@@ -1338,7 +1292,6 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       )
       expect(deniedRows.rows).toEqual([{ status: 'pending', decision_authority_binding_id: null }])
     } finally {
-      triggerBudget.close()
       approveBudget.close()
       denyBudget.close()
       corePoolConnectSpy.mockImplementation((() => databasePool.connect()) as typeof pool.connect)
@@ -1542,6 +1495,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         ttlSecondsAfterFinished: defaultTtlSecondsAfterFinished,
       },
       authority: triggerAuthority,
+      validateCurrentInTransaction: rowCheck,
     })
     expect(approval.kind).toBe('approval')
     if (approval.kind !== 'approval') throw new Error('expected approval request')
@@ -1644,6 +1598,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         ttlSecondsAfterFinished: defaultTtlSecondsAfterFinished,
       },
       authority: triggerAuthority,
+      validateCurrentInTransaction: rowCheck,
     })
     expect(approval.kind).toBe('approval')
     if (approval.kind !== 'approval') throw new Error('expected approval request')

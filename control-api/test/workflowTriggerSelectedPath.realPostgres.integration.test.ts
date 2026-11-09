@@ -3,7 +3,7 @@ import express from 'express'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import type { Server } from 'node:http'
-import { Pool, type PoolClient } from 'pg'
+import { Pool } from 'pg'
 import type { ActionAuthorityCheckpointRequestV2 } from '@clerum/action-context-contracts'
 import { StepCoordinator, WorkflowAuthorizationPausedError } from '@clerum/workflow-runtime-core'
 import { createDbRunProcessor } from '../../workflow-recipes/src/reconciler/dbRunProcessor.js'
@@ -11,32 +11,26 @@ import { createWorkflowRunAuthorityCheckpointer } from '../../workflow-recipes/s
 import { createWorkflowEndpointHandlers } from '../../workflow-recipes/src/workflow/restEndpoints.js'
 import { runWorkflowRuntime } from '../../workflow-recipes/src/workflow/sdkRuntime.js'
 import { config } from '../src/config.js'
-import { type DbClient, initDb, pool } from '../src/db.js'
+import { initDb, pool } from '../src/db.js'
 import { K8sGateway } from '../src/k8s.js'
 import type { ExternalAuthedRequest } from '../src/middleware/externalSessionAuth.js'
 import { createInternalActionAuthorityCheckpointRouter } from '../src/routes/internal/actionAuthorityCheckpoint.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
-import { OperationalAccessIndex } from '../src/services/access/operationalAccessIndex.js'
-import {
-  OperationalAccessIndexer,
-  operationalSourceSpecs,
-} from '../src/services/access/operationalAccessIndexer.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import {
-  loadOperationalResourceGraph,
+  loadLiveOperationalResourceGraph,
   selectOperationalPathGraph,
 } from '../src/services/access/operationalAccessReader.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
+import { resolveEffectiveUserAccessPolicy } from '../src/services/access/userAccessRuntimePolicy.js'
 import {
   type ExternalSessionAuthorityContext,
-  authenticateExternalUserSessionIdentity,
+  authenticateExternalUserSession,
 } from '../src/services/auth/externalSessionAuthentication.js'
-import { createUserSession } from '../src/services/auth/userSessionService.js'
+import { createUserSession, revokeUserSession } from '../src/services/auth/userSessionService.js'
 import {
-  WorkflowAuthorityError,
-  captureWorkflowTriggerAuthorityFence,
   requireCurrentWorkflowTriggerAuthority,
   requireWorkflowActionAuthority,
 } from '../src/services/workflows/workflowAuthorityBindingService.js'
@@ -50,6 +44,21 @@ import {
 } from '../src/utils/auth/userDelegationV2Token.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { TemporaryKubernetesApi } from './helpers/temporaryKubernetesApi.js'
+
+// M-39: the internal checkpoint route answers 409 while the action context is
+// off. This V2 run lifecycle mounts that route, so it runs with the action
+// context on; only the actionContextV2 flag is overridden, everything else is
+// the real resolved policy.
+vi.mock('../src/services/access/userAccessRuntimePolicy.js', async importOriginal => {
+  const actual =
+    await importOriginal<typeof import('../src/services/access/userAccessRuntimePolicy.js')>()
+  return {
+    ...actual,
+    resolveEffectiveUserAccessPolicy: async (
+      ...args: Parameters<typeof actual.resolveEffectiveUserAccessPolicy>
+    ) => ({ ...(await actual.resolveEffectiveUserAccessPolicy(...args)), actionContextV2: true }),
+  }
+})
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -69,23 +78,6 @@ function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
 
-function transaction(databasePool: Pool) {
-  return async <T>(work: (db: DbClient) => Promise<T>): Promise<T> => {
-    const client = (await databasePool.connect()) as PoolClient
-    try {
-      await client.query('BEGIN')
-      const result = await work(client)
-      await client.query('COMMIT')
-      return result
-    } catch (error) {
-      await client.query('ROLLBACK')
-      throw error
-    } finally {
-      client.release()
-    }
-  }
-}
-
 describeRealPostgres('workflow trigger selected-path attribution on real PostgreSQL', () => {
   const database = `control_api_workflow_selected_path_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
@@ -102,7 +94,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
   let adminPool: Pool
   let databasePool: Pool
   let gateway: K8sGateway
-  let accessIndexer: OperationalAccessIndexer
   let corePoolConnectSpy: ReturnType<typeof vi.spyOn>
   let corePoolQuerySpy: ReturnType<typeof vi.spyOn>
   let checkpointServer: Server | null = null
@@ -210,13 +201,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       if (priorKubeconfig === undefined) delete process.env.KUBECONFIG
       else process.env.KUBECONFIG = priorKubeconfig
     }
-
-    const index = new OperationalAccessIndex(databasePool, transaction(databasePool))
-    accessIndexer = new OperationalAccessIndexer(gateway, index, {
-      environmentId: canonicalEnvironmentId(),
-      behaviorFingerprintKey: config.sessionJwtPrivateKey,
-    })
-    for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
   })
 
   afterAll(async () => {
@@ -260,17 +244,21 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       })
     }
     vi.unstubAllEnvs()
-    if (!databasePool || !accessIndexer) return
+    if (!databasePool) return
     await databasePool.query(
       `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
        VALUES ($1, $2, $3)
        ON CONFLICT (team_id, recipe_namespace, recipe_name) DO NOTHING`,
       [teamId, config.sandboxNamespace, teamOnlyRecipe]
     )
-    for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
   })
 
-  async function produceSelectedAuthority(recipeName: string, pathKind: 'direct' | 'team') {
+  /** The delegation a client holds after `POST /external/rpc/delegations`. */
+  async function issueSelectedDelegation(
+    recipeName: string,
+    pathKind: 'direct' | 'team',
+    signed: { authorizationRevision?: string } = {}
+  ) {
     const issued = await createUserSession(
       {
         userId,
@@ -279,7 +267,13 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       },
       { db: databasePool as never }
     )
-    const identity = await authenticateExternalUserSessionIdentity(issued.token)
+    // The sole external-user authentication boundary, with the resolved
+    // policy accepting V2 sessions: session acceptance is not this suite's
+    // subject, the selected path is.
+    const identity = await authenticateExternalUserSession(issued.token, {
+      purpose: 'protected',
+      policy: { ...(await resolveEffectiveUserAccessPolicy()), acceptV2: true },
+    })
     expect(identity.status).toBe('authenticated')
     if (identity.status !== 'authenticated' || identity.contract !== 'v2') {
       throw new Error('real v2 session producer did not authenticate')
@@ -292,39 +286,33 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       logicalId: `${config.sandboxNamespace}/${recipeName}`,
     })
     const target = Object.freeze({ recipeNamespace: config.sandboxNamespace, recipeName })
-    const resolved = await authorizeActionV2(
-      {
-        session: identity.authorityContext as ExternalSessionAuthorityContext,
-        requested: { version: 2 },
-        operationId: 'workflow.trigger',
-        resource,
-        operationTarget: target,
-        allocateChatMessageId: false,
-        gateway,
-      },
-      { authorizationOptions: { transaction: transaction(databasePool) } }
-    )
+    const resolved = await authorizeActionV2({
+      session: identity.authorityContext as ExternalSessionAuthorityContext,
+      requested: { version: 2 },
+      operationId: 'workflow.trigger',
+      resource,
+      operationTarget: target,
+      allocateChatMessageId: false,
+      gateway,
+    })
 
     let selected = resolved.status === 'allowed' ? resolved.context : null
     if (resolved.status === 'access_path_required') {
       const candidate = resolved.paths.find(path => path.kind === pathKind)
       if (!candidate) throw new Error(`live resolver did not produce ${pathKind} path`)
-      const explicitlySelected = await authorizeActionV2(
-        {
-          session: identity.authorityContext as ExternalSessionAuthorityContext,
-          requested: {
-            version: 2,
-            requestedAccessPathId: candidate.id,
-            expectedAuthorizationRevision: candidate.authorizationRevision,
-          },
-          operationId: 'workflow.trigger',
-          resource,
-          operationTarget: target,
-          allocateChatMessageId: false,
-          gateway,
+      const explicitlySelected = await authorizeActionV2({
+        session: identity.authorityContext as ExternalSessionAuthorityContext,
+        requested: {
+          version: 2,
+          requestedAccessPathId: candidate.id,
+          expectedAuthorizationRevision: candidate.authorizationRevision,
         },
-        { authorizationOptions: { transaction: transaction(databasePool) } }
-      )
+        operationId: 'workflow.trigger',
+        resource,
+        operationTarget: target,
+        allocateChatMessageId: false,
+        gateway,
+      })
       if (explicitlySelected.status !== 'allowed') {
         throw new Error(`live selected-path producer returned ${explicitlySelected.status}`)
       }
@@ -350,7 +338,7 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       resource,
       preparedTargets: { 'workflow.trigger': preparedTarget },
       accessPathId: selected.accessPathId,
-      authorizationRevision: selected.authorizationRevision,
+      authorizationRevision: signed.authorizationRevision ?? selected.authorizationRevision,
       behaviorBindingHash: selected.behaviorBindingHash,
       pathKind: selected.pathKind,
       effectiveTeamId: selected.effectiveTeamId,
@@ -365,7 +353,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
     }
     const req = {
       rawHeaders: [WORKFLOW_ACTION_DELEGATION_HEADER, token],
-      accessExecutionBudget: AccessExecutionBudget.create('action'),
       correlationId: randomUUID(),
     } as unknown as ExternalAuthedRequest
     const authorityInput = {
@@ -377,44 +364,55 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       target,
       gateway,
     }
-    const authority = await requireWorkflowActionAuthority(authorityInput)
-    if (!authority) throw new Error('v2 trigger producer did not require its signed authority')
-    return { authority, authorityInput, caller, req }
+    return { authorityInput, caller, req }
   }
 
-  async function runSelectedTrigger(recipeName: string, pathKind: 'direct' | 'team') {
+  /** The trigger route's single authority checkpoint on a freshly issued delegation. */
+  async function produceSelectedAuthority(recipeName: string, pathKind: 'direct' | 'team') {
+    const issued = await issueSelectedDelegation(recipeName, pathKind)
+    const authority = await requireWorkflowActionAuthority(issued.authorityInput)
+    if (!authority) throw new Error('v2 trigger producer did not require its signed authority')
+    return { authority, ...issued }
+  }
+
+  /**
+   * As the trigger route: one authority checkpoint (produceSelectedAuthority),
+   * then the insert transaction re-checks only the bound rows (WF-10/15).
+   * `beforeRowCheck` runs inside that transaction, after the checkpoint and
+   * before the row check; `rowCheckReads` records which bound rows it read.
+   */
+  async function runSelectedTrigger(
+    recipeName: string,
+    pathKind: 'direct' | 'team',
+    hooks: {
+      idempotencyKey?: string
+      beforeRowCheck?: (authority: WorkflowAuthorityBinding) => Promise<void>
+      rowCheckReads?: string[]
+    } = {}
+  ) {
     const produced = await produceSelectedAuthority(recipeName, pathKind)
-    let phaseOneFence: Awaited<ReturnType<typeof captureWorkflowTriggerAuthorityFence>> | null =
-      null
-    const reauthorize = async (): Promise<WorkflowAuthorityBinding | null> => {
-      if (!produced.authority) return null
-      const before = await captureWorkflowTriggerAuthorityFence({ authority: produced.authority })
-      const current = await requireWorkflowActionAuthority(produced.authorityInput)
-      if (!current || current.bindingHash !== produced.authority.bindingHash) {
-        throw new WorkflowAuthorityError(409, 'access_path_stale')
-      }
-      const after = await captureWorkflowTriggerAuthorityFence({ authority: current })
-      if (before.fingerprint !== after.fingerprint) {
-        throw new WorkflowAuthorityError(409, 'access_path_stale')
-      }
-      phaseOneFence = after
-      return current
-    }
     const result = await triggerWorkflow({
       gateway,
       caller: produced.caller,
       recipeNamespace: config.sandboxNamespace,
       recipeName,
       body: {},
-      idempotencyKey: `selected-path-${randomUUID()}`,
+      idempotencyKey: hooks.idempotencyKey ?? `selected-path-${randomUUID()}`,
       authority: produced.authority,
-      reauthorize,
-      validateCurrentInTransaction: (db, authority) => {
-        if (!phaseOneFence) throw new WorkflowAuthorityError(409, 'access_path_stale')
+      validateCurrentInTransaction: async (db, authority) => {
+        await hooks.beforeRowCheck?.(authority)
+        const reads = hooks.rowCheckReads
         return requireCurrentWorkflowTriggerAuthority({
-          db,
+          db: reads
+            ? {
+                query: (async (text: string, values?: unknown[]) => {
+                  if (/JOIN external_user_sessions s/.test(text)) reads.push('session')
+                  if (/FROM (user|team)_workflow_triggers/.test(text)) reads.push('grant')
+                  return db.query(text, values)
+                }) as typeof db.query,
+              }
+            : db,
           authority,
-          expectedFence: phaseOneFence,
         })
       },
     })
@@ -432,38 +430,32 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       logicalId: input.runId,
     })
     const target = Object.freeze({ runId: input.runId, action: 'resume' as const })
-    const resolved = await authorizeActionV2(
-      {
+    const resolved = await authorizeActionV2({
+      session: input.caller.session as ExternalSessionAuthorityContext,
+      requested: { version: 2 },
+      operationId: 'workflow.run.manage',
+      resource,
+      operationTarget: target,
+      allocateChatMessageId: false,
+      gateway,
+    })
+    let selected = resolved.status === 'allowed' ? resolved.context : null
+    if (resolved.status === 'access_path_required') {
+      const candidate = resolved.paths.find(path => path.kind === input.pathKind)
+      if (!candidate) throw new Error(`run action producer did not produce ${input.pathKind} path`)
+      const explicit = await authorizeActionV2({
         session: input.caller.session as ExternalSessionAuthorityContext,
-        requested: { version: 2 },
+        requested: {
+          version: 2,
+          requestedAccessPathId: candidate.id,
+          expectedAuthorizationRevision: candidate.authorizationRevision,
+        },
         operationId: 'workflow.run.manage',
         resource,
         operationTarget: target,
         allocateChatMessageId: false,
         gateway,
-      },
-      { authorizationOptions: { transaction: transaction(databasePool) } }
-    )
-    let selected = resolved.status === 'allowed' ? resolved.context : null
-    if (resolved.status === 'access_path_required') {
-      const candidate = resolved.paths.find(path => path.kind === input.pathKind)
-      if (!candidate) throw new Error(`run action producer did not produce ${input.pathKind} path`)
-      const explicit = await authorizeActionV2(
-        {
-          session: input.caller.session as ExternalSessionAuthorityContext,
-          requested: {
-            version: 2,
-            requestedAccessPathId: candidate.id,
-            expectedAuthorizationRevision: candidate.authorizationRevision,
-          },
-          operationId: 'workflow.run.manage',
-          resource,
-          operationTarget: target,
-          allocateChatMessageId: false,
-          gateway,
-        },
-        { authorizationOptions: { transaction: transaction(databasePool) } }
-      )
+      })
       if (explicit.status !== 'allowed') {
         throw new Error(`selected run action authority returned ${explicit.status}`)
       }
@@ -496,7 +488,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
     const authority = await requireWorkflowActionAuthority({
       req: {
         rawHeaders: [WORKFLOW_ACTION_DELEGATION_HEADER, token],
-        accessExecutionBudget: AccessExecutionBudget.create('action'),
         correlationId: randomUUID(),
       } as unknown as ExternalAuthedRequest,
       caller: input.caller,
@@ -607,24 +598,21 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       undefined,
       { dbRunProcessor: processor }
     )
-    const currentAction = await authorizeActionV2(
-      {
-        session: {
-          contract: 'v2',
-          authorityMode: 'logical_session_checkpoint',
-          userId,
-          sid: produced.authority.binding.sid,
-          sessionVersion: produced.authority.binding.sessionVersion,
-        },
-        requested: { version: 2 },
-        operationId: 'workflow.trigger',
-        resource: produced.authority.binding.resource as never,
-        operationTarget: produced.authority.binding.target,
-        allocateChatMessageId: false,
-        gateway,
+    const currentAction = await authorizeActionV2({
+      session: {
+        contract: 'v2',
+        authorityMode: 'logical_session_checkpoint',
+        userId,
+        sid: produced.authority.binding.sid,
+        sessionVersion: produced.authority.binding.sessionVersion,
       },
-      { authorizationOptions: { transaction: transaction(databasePool) } }
-    )
+      requested: { version: 2 },
+      operationId: 'workflow.trigger',
+      resource: produced.authority.binding.resource as never,
+      operationTarget: produced.authority.binding.target,
+      allocateChatMessageId: false,
+      gateway,
+    })
     const currentActionSummary =
       currentAction.status === 'allowed'
         ? {
@@ -691,7 +679,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
               WHERE team_id = $1 AND recipe_namespace = $2 AND recipe_name = $3`,
             [teamId, config.sandboxNamespace, bothGrantRecipe]
           )
-          for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
           return { stepId, status: 'completed', output: 'first-effect' }
         }
         effects.second += 1
@@ -782,7 +769,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
          ON CONFLICT (team_id, recipe_namespace, recipe_name) DO NOTHING`,
         [teamId, config.sandboxNamespace, bothGrantRecipe]
       )
-      for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
 
       const otherSession = await produceSelectedAuthority(bothGrantRecipe, 'team')
       const wrongSessionAuthority = await produceRunResumeAuthority({
@@ -796,7 +782,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
           recipeNamespace: config.sandboxNamespace,
           recipeName: bothGrantRecipe,
           authority: wrongSessionAuthority,
-          gateway,
           db: databasePool,
         })
       ).rejects.toMatchObject({ code: 'workflow_run_path_mismatch' })
@@ -815,7 +800,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         recipeNamespace: config.sandboxNamespace,
         recipeName: bothGrantRecipe,
         authority: resumeAuthority,
-        gateway,
         db: databasePool,
       })
       resumed = true
@@ -977,7 +961,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
            ON CONFLICT (team_id, recipe_namespace, recipe_name) DO NOTHING`,
           [teamId, config.sandboxNamespace, bothGrantRecipe]
         )
-        for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
         try {
           const current = await databasePool.query(
             `SELECT phase FROM workflow_runs WHERE run_id = $1`,
@@ -994,7 +977,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
               recipeNamespace: config.sandboxNamespace,
               recipeName: bothGrantRecipe,
               authority: cleanupAuthority,
-              gateway,
               db: databasePool,
             })
           }
@@ -1056,7 +1038,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         recipeNamespace: config.sandboxNamespace,
         recipeName: teamOnlyRecipe,
         authority: resumeAuthority,
-        gateway,
         db: databasePool,
       })
     ).rejects.toMatchObject({ code: 'workflow_run_path_mismatch' })
@@ -1110,7 +1091,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         recipeNamespace: config.sandboxNamespace,
         recipeName: teamOnlyRecipe,
         authority: resumeAuthority,
-        gateway,
         db: databasePool,
       })
       void resume.catch(() => undefined)
@@ -1206,18 +1186,24 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         ...existingContext,
         spec: { ...existingContext.spec, mcpServers: serverNames },
       })
-      for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
 
       const recipeLogicalId = `${config.sandboxNamespace}/${teamOnlyRecipe}`
       const graphBudget = AccessExecutionBudget.create('action')
-      const producerGraph = await loadOperationalResourceGraph({
-        db: databasePool,
-        budget: graphBudget,
-        environmentId: canonicalEnvironmentId(),
-        resourceType: 'workflow_recipe',
-        logicalId: recipeLogicalId,
-      })
-      graphBudget.close()
+      let producerGraph: Awaited<ReturnType<typeof loadLiveOperationalResourceGraph>>
+      try {
+        producerGraph = await loadLiveOperationalResourceGraph({
+          gateway,
+          budget: graphBudget,
+          resource: canonicalResourceIdentity({
+            environmentId: canonicalEnvironmentId(),
+            type: 'workflow_recipe',
+            logicalId: recipeLogicalId,
+          }),
+          operationClass: 'full',
+        })
+      } finally {
+        graphBudget.close()
+      }
       expect(producerGraph.status).toBe('current')
       if (producerGraph.status !== 'current') return
       const selectedGraph = selectOperationalPathGraph({ graph: producerGraph })
@@ -1235,18 +1221,15 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         logicalId: result.row.run_id,
       })
       const beforeGets = kubernetesApi.requests.length
-      const runAuthority = await authorizeActionV2(
-        {
-          session: caller.session as ExternalSessionAuthorityContext,
-          requested: { version: 2 },
-          operationId: 'workflow.run.manage',
-          resource: runResource,
-          operationTarget: { runId: result.row.run_id, action: 'resume' },
-          allocateChatMessageId: false,
-          gateway,
-        },
-        { authorizationOptions: { transaction: transaction(databasePool) } }
-      )
+      const runAuthority = await authorizeActionV2({
+        session: caller.session as ExternalSessionAuthorityContext,
+        requested: { version: 2 },
+        operationId: 'workflow.run.manage',
+        resource: runResource,
+        operationTarget: { runId: result.row.run_id, action: 'resume' },
+        allocateChatMessageId: false,
+        gateway,
+      })
       expect(runAuthority.status, JSON.stringify(runAuthority)).toBe('allowed')
       if (runAuthority.status !== 'allowed') return
       expect(
@@ -1260,26 +1243,35 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
           runAuthority.context.behavior.audit,
         ].every(dimension => dimension.state === 'known')
       ).toBe(true)
-      const exactGets = kubernetesApi.requests
-        .slice(beforeGets)
-        .filter(item => item.method === 'GET' && item.name !== null)
-      expect(exactGets).toHaveLength(2)
-      expect(new Set(exactGets.map(item => item.plural))).toEqual(
-        new Set(['workflowrecipes', 'contexts'])
+      // K1 reads the run's recipe graph live (root GET, Contexts LIST, then
+      // the MCP servers LIST its Context reaches); K2 then GETs only the
+      // resume closure, the recipe and its Context, never the MCP servers.
+      const describeRequest = (item: (typeof kubernetesApi.requests)[number]) =>
+        item.name === null ? `LIST ${item.plural}` : `GET ${item.plural}/${item.name}`
+      const resumeRequests = kubernetesApi.requests.slice(beforeGets).map(describeRequest)
+      expect([...resumeRequests].sort()).toEqual(
+        [
+          `GET workflowrecipes/${teamOnlyRecipe}`,
+          'LIST contexts',
+          'LIST mcpservers',
+          `GET workflowrecipes/${teamOnlyRecipe}`,
+          `GET contexts/${contextName}`,
+        ].sort()
       )
-      expect(new Set(exactGets.map(item => item.name))).toEqual(
-        new Set([teamOnlyRecipe, contextName])
+      expect(new Set(resumeRequests.slice(-2))).toEqual(
+        new Set([`GET workflowrecipes/${teamOnlyRecipe}`, `GET contexts/${contextName}`])
       )
 
-      await databasePool.query(
-        `UPDATE operational_catalog_source_state
-            SET status = 'unavailable', safe_error_code = 'r68_test_fixture'
-          WHERE environment_id = $1 AND source_family = 'workflow_recipe'`,
-        [canonicalEnvironmentId()]
-      )
-      const beforeUnavailableResumeGets = kubernetesApi.requests.length
-      const unavailableResume = await authorizeActionV2(
-        {
+      // Kubernetes unavailable while K1 lists Contexts: the resume fails
+      // closed before any exact GET of the closure.
+      const listResourcePage = vi
+        .spyOn(gateway, 'listResourcePage')
+        .mockRejectedValueOnce(new Error('kubernetes_unavailable_fixture'))
+      const beforeUnavailableResume = kubernetesApi.requests.length
+      let unavailableResume: Awaited<ReturnType<typeof authorizeActionV2>>
+      let listCalls: unknown[][]
+      try {
+        unavailableResume = await authorizeActionV2({
           session: caller.session as ExternalSessionAuthorityContext,
           requested: { version: 2 },
           operationId: 'workflow.run.manage',
@@ -1287,21 +1279,33 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
           operationTarget: { runId: result.row.run_id, action: 'resume' },
           allocateChatMessageId: false,
           gateway,
-        },
-        { authorizationOptions: { transaction: transaction(databasePool) } }
-      )
+        })
+        listCalls = listResourcePage.mock.calls.map(call => [...call])
+      } finally {
+        listResourcePage.mockRestore()
+      }
       expect(unavailableResume.status).toBe('authority_unavailable')
-      expect(
-        kubernetesApi.requests
-          .slice(beforeUnavailableResumeGets)
-          .filter(item => item.method === 'GET' && item.name !== null)
-      ).toHaveLength(0)
+      // Witness: the resolver reached K1 and the failing LIST was issued.
+      expect(listCalls).toEqual([
+        [
+          'contexts',
+          config.contextsNamespace,
+          expect.objectContaining({ limit: expect.any(Number) }),
+        ],
+      ])
+      const unavailableGets = kubernetesApi.requests
+        .slice(beforeUnavailableResume)
+        .filter(item => item.name !== null)
+        .map(describeRequest)
+      expect(unavailableGets.every(item => item === `GET workflowrecipes/${teamOnlyRecipe}`)).toBe(
+        true
+      )
+      expect(unavailableGets.length).toBeLessThanOrEqual(1)
     } finally {
       kubernetesApi.put('contexts', config.contextsNamespace, originalContext)
       for (const name of serverNames) {
         kubernetesApi.delete('mcpservers', config.mcpServersNamespace, name)
       }
-      for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
     }
   })
 
@@ -1383,6 +1387,8 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
           body: {},
           idempotencyKey: `selected-path-invalid-${randomUUID()}`,
           authority: invalidAuthority,
+          validateCurrentInTransaction: (db, authority) =>
+            requireCurrentWorkflowTriggerAuthority({ db, authority }),
         })
       ).rejects.toMatchObject({
         status: 403,
@@ -1433,5 +1439,154 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       },
     ])
     expect(authority.binding.pathKind).toBe('team')
+  })
+
+  // T-Q2 (merge plan v2 §5.2, §10 M3): a Kubernetes fact of the recipe changes
+  // between delegation issuance and the trigger route's single checkpoint.
+  it('rejects a trigger whose recipe changed after its delegation was issued', async () => {
+    const issued = await issueSelectedDelegation(teamOnlyRecipe, 'team')
+    const original = (await gateway.getResource(
+      'workflowrecipes',
+      teamOnlyRecipe,
+      config.sandboxNamespace
+    )) as { metadata: Record<string, unknown>; spec: Record<string, unknown> }
+    const before = structuredClone(original)
+    try {
+      kubernetesApi.put('workflowrecipes', config.sandboxNamespace, {
+        ...original,
+        metadata: { ...original.metadata, resourceVersion: '2', generation: 2 },
+        spec: { ...original.spec, description: 'changed after the delegation was issued' },
+      })
+      const beforeCheckpoint = kubernetesApi.requests.length
+      await expect(requireWorkflowActionAuthority(issued.authorityInput)).rejects.toMatchObject({
+        status: 409,
+        code: 'access_path_stale',
+      })
+      // Witness: the checkpoint read the changed recipe live.
+      expect(
+        kubernetesApi.requests
+          .slice(beforeCheckpoint)
+          .some(item => item.plural === 'workflowrecipes' && item.name === teamOnlyRecipe)
+      ).toBe(true)
+    } finally {
+      kubernetesApi.put('workflowrecipes', config.sandboxNamespace, before)
+    }
+    // The same delegation shape issued against the restored recipe passes.
+    const fresh = await issueSelectedDelegation(teamOnlyRecipe, 'team')
+    await expect(requireWorkflowActionAuthority(fresh.authorityInput)).resolves.toMatchObject({
+      binding: expect.objectContaining({ pathKind: 'team', effectiveTeamId: teamId }),
+    })
+  })
+
+  // T-Q2 companion: the selected path id embeds its authorization revision
+  // (accessPath.ts buildAccessPath), so a changed fact already fails the path
+  // lookup. The authorizer's own revision compare is what rejects a delegation
+  // whose path is current but whose signed revision is not.
+  it('rejects a delegation whose signed revision does not match its current path', async () => {
+    const forged = await issueSelectedDelegation(teamOnlyRecipe, 'team', {
+      authorizationRevision: `ar1_${'x'.repeat(43)}`,
+    })
+    const beforeCheckpoint = kubernetesApi.requests.length
+    await expect(requireWorkflowActionAuthority(forged.authorityInput)).rejects.toMatchObject({
+      status: 409,
+      code: 'access_path_stale',
+    })
+    // Witness: the checkpoint resolved the path live before comparing.
+    expect(kubernetesApi.requests.length).toBeGreaterThan(beforeCheckpoint)
+  })
+
+  // T-Q3 (merge plan v2 §5.2, §4.3, §10 L3): a Postgres revocation committed
+  // between the route's authorization and the insert reaches the row check.
+  it.each([
+    {
+      label: 'the direct grant row is deleted',
+      recipe: () => bothGrantRecipe,
+      pathKind: 'direct' as const,
+      revoke: async (_authority: WorkflowAuthorityBinding) => {
+        await databasePool.query(
+          `DELETE FROM user_workflow_triggers
+            WHERE user_id = $1 AND recipe_namespace = $2 AND recipe_name = $3`,
+          [userId, config.sandboxNamespace, bothGrantRecipe]
+        )
+      },
+      restore: async () => {
+        await databasePool.query(
+          `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+           VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+          [userId, config.sandboxNamespace, bothGrantRecipe]
+        )
+      },
+      expected: { status: 409, code: 'access_path_stale' },
+      reads: ['session', 'grant'],
+    },
+    {
+      label: 'the team membership is deleted',
+      recipe: () => teamOnlyRecipe,
+      pathKind: 'team' as const,
+      revoke: async (_authority: WorkflowAuthorityBinding) => {
+        await databasePool.query(
+          `UPDATE team_members SET status = 'deleted' WHERE team_id = $1 AND user_id = $2`,
+          [teamId, userId]
+        )
+      },
+      restore: async () => {
+        await databasePool.query(
+          `UPDATE team_members SET status = 'active' WHERE team_id = $1 AND user_id = $2`,
+          [teamId, userId]
+        )
+      },
+      expected: { status: 409, code: 'access_path_stale' },
+      reads: ['session', 'grant'],
+    },
+    {
+      label: 'the session is revoked',
+      recipe: () => teamOnlyRecipe,
+      pathKind: 'team' as const,
+      revoke: async (authority: WorkflowAuthorityBinding) => {
+        await expect(
+          revokeUserSession(userId, authority.binding.sid, 'row-check-window')
+        ).resolves.toBe(true)
+      },
+      restore: async () => undefined,
+      expected: { status: 401, code: 'invalid_session' },
+      reads: ['session'],
+    },
+  ])('rejects the insert when $label inside the window', async input => {
+    const recipeName = input.recipe()
+    const idempotencyKey = `row-check-window-${randomUUID()}`
+    const rowCheckReads: string[] = []
+    let delegationJti: string | null = null
+    let revoked = false
+    try {
+      await expect(
+        runSelectedTrigger(recipeName, input.pathKind, {
+          idempotencyKey,
+          rowCheckReads,
+          beforeRowCheck: async authority => {
+            delegationJti = authority.binding.delegationJti
+            await input.revoke(authority)
+            revoked = true
+          },
+        })
+      ).rejects.toMatchObject(input.expected)
+    } finally {
+      await input.restore()
+    }
+    expect(revoked).toBe(true)
+    expect(delegationJti).toEqual(expect.any(String))
+    // Witness: the row check ran once inside the insert transaction and
+    // stopped at the revoked row.
+    expect(rowCheckReads).toEqual(input.reads)
+    const runs = await databasePool.query(
+      `SELECT run_id FROM workflow_runs
+        WHERE recipe_namespace = $1 AND recipe_name = $2 AND idempotency_key = $3`,
+      [config.sandboxNamespace, recipeName, idempotencyKey]
+    )
+    expect(runs.rowCount).toBe(0)
+    const bindings = await databasePool.query(
+      `SELECT id FROM workflow_authority_bindings WHERE delegation_jti = $1`,
+      [delegationJti]
+    )
+    expect(bindings.rowCount).toBe(0)
   })
 })
