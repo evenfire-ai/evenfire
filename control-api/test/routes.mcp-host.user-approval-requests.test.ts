@@ -318,6 +318,7 @@ describe('User Approval Request Routes', () => {
           'host_mismatch',
           'lineage_without_audience',
           'race_lost',
+          'caller_gone',
         ]
         const out: Record<string, number> = {}
         for (const label of labels) out[label] = await refreshCount(label)

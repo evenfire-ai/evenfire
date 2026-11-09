@@ -200,6 +200,8 @@ export const oauthBrokerJwtIssueTotal = getOrCreateCounter({
 //   lineage_without_audience — hosts-namespace standalone chain without HCC audience
 //   race_lost                — jti consumed concurrently between verify and consume
 //                              (not the re-issue `revoked`, which also covers replay)
+//   caller_gone              — caller closed the connection before the consume
+//                              (gateway read timeout; jti not consumed, no answer)
 // Rate-limited requests never reach the handler and are not counted here.
 export const mcpHostJwtRefreshTotal = getOrCreateCounter({
   name: 'workflow_auth_refresh_total',

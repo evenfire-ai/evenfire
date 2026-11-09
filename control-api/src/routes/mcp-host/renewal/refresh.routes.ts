@@ -47,6 +47,7 @@ export function createMcpHostRefreshRoutes(gateway: RenewalHostGateway): Router 
           | 'host_mismatch'
           | 'lineage_without_audience'
           | 'race_lost'
+          | 'caller_gone'
         let resultLabel: ResultLabel = 'failed'
         try {
           const token = extractBearerToken(req)
@@ -92,6 +93,17 @@ export function createMcpHostRefreshRoutes(gateway: RenewalHostGateway): Router 
               'auth denied'
             )
             return res.status(401).json({ error: 'Unauthorized' })
+          }
+
+          // The gateway answers 504 after its read timeout and closes this connection.
+          // A token consumed after that is lost with the answer: leave it for the retry.
+          if (res.closed) {
+            resultLabel = 'caller_gone'
+            req.log?.warn(
+              { event: 'refresh_caller_gone', route: 'workflow_auth_refresh' },
+              'caller closed the connection; refresh token left unconsumed'
+            )
+            return
           }
 
           const consumed = await consumeRefreshJti(claims.jti, claims.exp)
