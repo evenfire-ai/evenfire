@@ -16,8 +16,14 @@ const logger = vi.hoisted(() => {
 })
 vi.mock('../src/observability/logger.js', () => logger)
 
-const { DB_WAIT_DEADLINE_MS, DB_WAIT_INTERVAL_MS, corePoolBudget, pool, waitForDbConnection } =
-  await import('../src/db.js')
+const {
+  DB_WAIT_DEADLINE_MS,
+  DB_WAIT_INTERVAL_MS,
+  DB_WAIT_QUERY_TIMEOUT_MS,
+  corePoolBudget,
+  pool,
+  waitForDbConnection,
+} = await import('../src/db.js')
 
 function codeError(code: string, message = `synthetic ${code}`): Error {
   return Object.assign(new Error(message), { code })
@@ -156,7 +162,7 @@ describe('waitForDbConnection defaults', () => {
     vi.restoreAllMocks()
   })
 
-  it('probes the core pool with SELECT 1 every 2 s and gives up at 90 s', async () => {
+  it('probes the core pool with a 2 s SELECT 1 every 2 s and gives up at 90 s', async () => {
     const query = vi.spyOn(pool, 'query').mockRejectedValue(codeError('ECONNREFUSED'))
     let settled = false
     const result = waitForDbConnection({ ensureActive: () => undefined }).finally(() => {
@@ -169,7 +175,10 @@ describe('waitForDbConnection defaults', () => {
     // Probes at 0, 2, ..., 88 s: still waiting before the deadline.
     expect(settled).toBe(false)
     expect(query).toHaveBeenCalledTimes(45)
-    expect(query).toHaveBeenNthCalledWith(1, 'SELECT 1')
+    expect(query).toHaveBeenNthCalledWith(1, { text: 'SELECT 1', query_timeout: 2000 })
+    // pg writes the query callback onto the config object, so each probe gets its own.
+    expect(query.mock.calls[1]?.[0]).toEqual({ text: 'SELECT 1', query_timeout: 2000 })
+    expect(query.mock.calls[1]?.[0]).not.toBe(query.mock.calls[0]?.[0])
 
     await vi.advanceTimersByTimeAsync(2_000)
     // The probe at 90 s is at the deadline and throws.
@@ -180,7 +189,7 @@ describe('waitForDbConnection defaults', () => {
 })
 
 describe('control-api startupProbe budget', () => {
-  it('covers the boot wait, one connection timeout and the boot work around it', () => {
+  it('covers the boot wait, one connection timeout, one query timeout and the boot work around it', () => {
     const docs = parseAllDocuments(
       readFileSync(
         new URL('../../deploy/base/control-plane/control-api.yaml', import.meta.url),
@@ -203,6 +212,7 @@ describe('control-api startupProbe budget', () => {
       DB_WAIT_DEADLINE_MS +
         DB_WAIT_INTERVAL_MS +
         corePoolBudget().connectionTimeoutMillis +
+        DB_WAIT_QUERY_TIMEOUT_MS +
         bootWorkMs
     )
   })

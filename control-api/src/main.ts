@@ -385,9 +385,10 @@ async function main(): Promise<void> {
 
   // Hosted member-registration self-enrollment (spec §8.4): degrade, never
   // block. Fire-and-forget, and only AFTER the listener is up — the startupProbe
-  // (control-api.yaml: 40 x 3s = 120s) already spends most of its budget on the
-  // database wait above, and liveness (initialDelaySeconds=8, periodSeconds=12,
-  // failureThreshold=3 ≈ 32s) takes over once it passes; a silently dropped hub
+  // (control-api.yaml: earliest restart 39 x 3s = 117s after start) already
+  // spends most of its budget on the database wait above, and liveness
+  // (initialDelaySeconds=8, periodSeconds=12, failureThreshold=3 ≈ 32s) takes
+  // over once it passes; a silently dropped hub
   // (egress firewall / default-deny NetworkPolicy) can burn up to 20s on its
   // own. Nothing is gained by awaiting it here: the hook never
   // rejects, every send re-attempts enrollment on demand via ensureEnrollment,

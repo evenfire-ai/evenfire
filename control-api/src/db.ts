@@ -1,4 +1,4 @@
-import { type Client, Pool, type PoolClient } from 'pg'
+import { type Client, Pool, type PoolClient, type QueryConfig } from 'pg'
 import {
   type BoundedPoolBudget,
   type PoolConstructor,
@@ -6982,6 +6982,7 @@ const DB_WAIT_RETRY_CODES = new Set([
 const DB_WAIT_RETRY_MESSAGES = new Map([
   ['Connection terminated due to connection timeout', 'connection_timeout'], // pg-pool
   ['Connection terminated unexpectedly', 'connection_terminated'], // pg: the server closed the socket
+  ['Query read timeout', 'query_timeout'], // pg: no answer within the probe's query_timeout
 ])
 
 /** Default bound of the boot wait. The control-api startupProbe budget must cover it. */
@@ -6992,6 +6993,13 @@ export const DB_WAIT_DEADLINE_MS = 90_000
  * interval after the deadline.
  */
 export const DB_WAIT_INTERVAL_MS = 2_000
+/**
+ * Bound of one boot-wait probe once it has a connection. The pool's
+ * connectionTimeoutMillis ends when the server is ready for queries, so a
+ * server that accepts the handshake and then never answers would otherwise
+ * hold the probe until the startupProbe kills the container.
+ */
+export const DB_WAIT_QUERY_TIMEOUT_MS = 2_000
 
 export type WaitForDbConnectionOptions = {
   ensureActive: () => void
@@ -7013,12 +7021,20 @@ function dbWaitRetryCode(error: unknown): string | null {
  * Wait, within a bound, until Postgres accepts a connection. Boot calls this
  * before `assertDbReady` so a Postgres that is moving to another node does not
  * turn into a crash loop. Past the deadline the last error is thrown and boot
- * fails as before. The warning carries only the error code, never the message,
+ * fails as before. Each probe is bounded by `DB_WAIT_QUERY_TIMEOUT_MS` once
+ * connected. The warning carries only the error code, never the message,
  * which can include the connection string.
  */
 export async function waitForDbConnection({
   ensureActive,
-  probe = () => pool.query('SELECT 1'),
+  // A new config object per call: pg writes the query callback onto it.
+  probe = () => {
+    const probeQuery: QueryConfig & { query_timeout: number } = {
+      text: 'SELECT 1',
+      query_timeout: DB_WAIT_QUERY_TIMEOUT_MS,
+    }
+    return pool.query(probeQuery)
+  },
   now = Date.now,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
   deadlineMs = DB_WAIT_DEADLINE_MS,
