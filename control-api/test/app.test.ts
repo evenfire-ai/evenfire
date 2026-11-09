@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
+import { readFileSync } from 'node:fs'
 import request from 'supertest'
+import { parseAllDocuments } from 'yaml'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { pool } from '../src/db.js'
@@ -55,6 +57,41 @@ describe('app router wiring', () => {
     })
 
     await request(app).get('/does-not-exist').expect(404)
+  })
+
+  it('serves every probe target of the control-api Deployment on its listener port, without auth', async () => {
+    const readManifest = (path: string) =>
+      parseAllDocuments(
+        readFileSync(new URL(`../../deploy/base/control-plane/${path}`, import.meta.url), 'utf8')
+      ).map(doc => doc.toJS())
+    const deployment = readManifest('control-api.yaml').find(doc => doc?.kind === 'Deployment')
+    const container = deployment.spec.template.spec.containers.find(
+      (c: { name: string }) => c.name === 'control-api'
+    )
+    const configMap = readManifest('configmaps.yaml').find(
+      doc => doc?.kind === 'ConfigMap' && doc.metadata?.name === 'control-api-config'
+    )
+    // The port the app listens on: config.port reads CONTROL_API_PORT, which the
+    // Deployment gets from this ConfigMap through envFrom.
+    const listenerPort = Number(configMap.data.CONTROL_API_PORT)
+    expect(listenerPort).toBeGreaterThan(0)
+
+    type HttpGetProbe = { httpGet?: { path: string; port: string | number; scheme: string } }
+    const probes = (['startupProbe', 'livenessProbe', 'readinessProbe'] as const).map(
+      name => [name, container[name] as HttpGetProbe | undefined] as const
+    )
+    expect(probes.every(([, probe]) => probe?.httpGet)).toBe(true)
+
+    const app = createApp(new MockGateway('mcp-server') as never)
+    for (const [name, probe] of probes) {
+      const httpGet = probe!.httpGet!
+      expect(httpGet.scheme, name).toBe('HTTP')
+      const port = container.ports.find((p: { name?: string }) => p.name === httpGet.port)
+      expect(port, `${name} port ${String(httpGet.port)}`).toBeDefined()
+      expect(port.containerPort, name).toBe(listenerPort)
+      // No cookie or bearer: the kubelet sends neither.
+      await request(app).get(httpGet.path).expect(200)
+    }
   })
 
   it('accepts JSON bodies above the former 1 MiB parser limit', async () => {

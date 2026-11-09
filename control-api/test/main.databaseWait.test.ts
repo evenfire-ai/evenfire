@@ -153,9 +153,10 @@ describe('control-api boot: database wait', () => {
     expect(db.waitForDbConnection.mock.invocationCallOrder[0]).toBeLessThan(
       db.assertDbReady.mock.invocationCallOrder[0]
     )
-    // The wait is tied to shutdown: main passes its startup guard.
-    const [options] = db.waitForDbConnection.mock.calls[0] as [{ ensureActive: () => void }]
-    expect(options.ensureActive).toEqual(expect.any(Function))
+    // Boot passes its startup guard and no deadline or interval, so the defaults
+    // pinned in db.waitForConnection.test.ts, and the startupProbe budget computed
+    // from them, are what boot uses. An override must come with a budget change.
+    expect(db.waitForDbConnection).toHaveBeenCalledWith({ ensureActive: expect.any(Function) })
     expect((startupFailed()[0][0] as { err: unknown }).err).toBe(sentinel)
     // The existing fatal path still ends the process with exit code 1.
     await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(1))
@@ -163,16 +164,30 @@ describe('control-api boot: database wait', () => {
 
   it('does not report a startup failure when SIGTERM arrives during the wait', async () => {
     let failWait: (error: Error) => void = () => undefined
-    db.waitForDbConnection.mockImplementation(
-      () => new Promise((_resolve, reject) => (failWait = reject))
-    )
+    let captured: { ensureActive: () => void } | undefined
+    db.waitForDbConnection.mockImplementation((options: { ensureActive: () => void }) => {
+      captured = options
+      return new Promise((_resolve, reject) => (failWait = reject))
+    })
 
     await import('../src/main.js')
     // Witness: boot reached the wait.
     await vi.waitFor(() => expect(db.waitForDbConnection).toHaveBeenCalledTimes(1))
+    const guard = captured!
+    // main's own guard lets the wait run before shutdown is requested.
+    expect(() => guard.ensureActive()).not.toThrow()
 
     process.emit('SIGTERM')
-    failWait(new Error('Control API startup interrupted by shutdown'))
+    // After SIGTERM the same guard stops the wait: the error comes from main,
+    // not from this test.
+    let interrupted: unknown
+    try {
+      guard.ensureActive()
+    } catch (error) {
+      interrupted = error
+    }
+    expect(interrupted).toEqual(new Error('Control API startup interrupted by shutdown'))
+    failWait(interrupted as Error)
     await vi.waitFor(() => expect(exitSpy).toHaveBeenCalled())
 
     expect(startupFailed()).toHaveLength(0)
